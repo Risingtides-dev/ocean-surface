@@ -1,50 +1,92 @@
-# Ocean Surface — read this first
+# Ocean Surface Agent Guide
 
-**This repo is one half of a two-repo system. The other half is `ocean-os`.**
+Ocean Surface is the product-surface repo. It contains the GPUI desktop app,
+Leptos web/PWA, Chrome extension surface, local proxy, voice UI, and canvas
+experiments.
 
-| Repo | What it is | Where |
-|---|---|---|
-| **ocean-surface** (you are here) | The **client face**: one Rust + Leptos app shipped as browser PWA + voice (later Tauri native macOS/iOS). A thin steering shell. | `../ocean-surface` |
-| **ocean-os** | The **runtime + daemon + TUI**. Owns the agent loop, tools, provider calls, **sessions**, permissions, events. The brain this repo talks to. | `../ocean-os` (also cloned locally) |
+The sibling repo `../ocean-os` owns runtime authority: daemon, agent loop,
+tools, providers, permissions, projects, workspaces, sessions, and events.
 
-This repo holds **no agent logic, no provider credentials, no sessions.** It is a face over `ocean-daemon` (which lives in `ocean-os`). If something about agent behavior, sessions, or tools is broken, the cause is very often **over in `ocean-os`**, not here — go read `../ocean-os` before concluding the bug is surface-side.
+Do not put provider calls, agent reasoning, session storage, permission policy,
+or tool execution authority in this repo. Surface code should render state,
+collect intent, attach to sessions, and call the daemon.
 
-## How it talks to the daemon
+## Current Build Focus
 
+The active native app is:
+
+```sh
+cargo run -p ocean-gui --bin ocean-gui
 ```
-POST {daemon}/v1/agent/turns    { prompt, cwd, session_id? }
-GET  {daemon}/v1/agent/events   (SSE stream of AgentTurnEvent)
-POST {daemon}/v1/component/event { session_id, component_id, event }
+
+The GPUI app is the native desktop surface. It is not a Tauri wrapper and it is
+not a Papyrus note app. Old Papyrus/vault/editor work may be reused only as
+local UI/editor source material.
+
+The important GPUI direction is the real collaboration surface:
+
+- GPUI native chrome and agent transcript.
+- wry-hosted tldraw canvas pane for the multiplayer canvas.
+- LiveKit Rust client for audio/video/data/RPC participation.
+- Ocean daemon as the session/runtime authority.
+- Canvas ledger/state injected into turns as surface context.
+
+Use `docs/OCEAN_GPUI_CANVAS_LIVEKIT_SPEC.md` as the GPUI collaboration anchor.
+
+## Session Contract
+
+The ecosystem invariant is:
+
+```text
+Project -> Workspace -> Session -> Turns -> Events
+Surface -> Session
 ```
 
-Daemon URL defaults to `http://127.0.0.1:4780` (override `OCEAN_DAEMON_URL`). The daemon must be running — start it in `../ocean-os`: `cargo run -p ocean-daemon --release`.
+First-party surfaces must create or choose a session before posting a turn:
 
-**Sessions live in the daemon, not here.** This surface only carries a `session_id` string: it adopts the id from the daemon's `SessionCreated` SSE event and replays it on every turn. So "lost session / chat reset mid-conversation" is almost always a **daemon-side** session bug in `ocean-os` (`crates/ocean-agent`), and it hits the TUI too — not a surface bug.
+```text
+POST /v1/agent/sessions
+GET  /v1/agent/events?session_id=<id>
+POST /v1/agent/turns { session_id, prompt, cwd, project_id?, client_type }
+```
 
-## Workspace
+Rules:
+
+- Never open a product transcript on the global `/v1/agent/events` stream.
+- Never adopt the active session from `SessionCreated` or `TurnStarted` on a
+  global stream.
+- Cross-surface sharing is explicit: two surfaces attach to the same
+  `session_id`.
+- Different sessions on different surfaces must not blend, switch each other,
+  or race to become the active transcript.
+- `client_type` only describes the surface medium (`surface-gpui`,
+  `surface-web`, `surface-extension`). It is not a session id or workspace id.
+
+## Workspace Map
 
 | Path | Role |
 |---|---|
-| `crates/ocean-surface-ui/` | Leptos UI (CSR/WASM). Same code runs in browser and Tauri WebView. Session/transcript rendering: `src/daemon.rs`, `src/transcript.rs`, `src/components.rs` |
-| `crates/ocean-surface-proxy/` | axum service: holds the xAI key for STT/TTS, serves the WASM bundle |
-| `crates/ocean-surface-app/` | Tauri shell (Phase 4, not yet added) |
-| `legacy-voice/` | Reference JS voice client; deleted once ported |
+| `crates/ocean-gui/` | GPUI native desktop app and tldraw canvas host |
+| `crates/ocean-gui/canvas-web/` | web bundle loaded into the GPUI canvas webview |
+| `crates/ocean-surface-ui/` | Leptos WASM web/PWA/extension UI |
+| `crates/ocean-surface-proxy/` | axum proxy for web bundle, STT/TTS, config, daemon reverse proxy |
+| `extension/` | Chrome extension wrapper around the Leptos surface |
+| `legacy-voice/` | reference voice code only; do not build new architecture here |
 
-## Build / run
+## Build / Check
 
-The UI crate is **wasm-only** — `cargo build` (no `-p`) builds only the native proxy by design. To build the UI:
-
-```bash
-cargo build -p ocean-surface-ui --target wasm32-unknown-unknown
-./run-surface.sh        # builds wasm + serves UI and xAI proxy on :8790
-./smoke.sh              # health + chat round-trip + voice; 5/5 green = all paths work
-trunk serve --open      # live-reload dev (UI only; voice needs run-surface.sh)
+```sh
+cargo check -p ocean-gui
+cargo test -p ocean-gui
+cargo check -p ocean-surface-ui --target wasm32-unknown-unknown
+cargo check -p ocean-surface-proxy
 ```
 
-## Don't kill a running daemon
+For local web/proxy work:
 
-The daemon (in `ocean-os`) is often live while the operator works. **Do not restart or kill it** unless told to — a surprise restart drops the in-flight session.
+```sh
+./run-surface.sh
+trunk serve --open
+```
 
-## More context
-
-See `README.md` for the full dev loop, auth resolution order, and roadmap.
+The daemon must be running from `../ocean-os` for live agent behavior.
