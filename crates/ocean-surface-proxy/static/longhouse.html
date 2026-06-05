@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>Ocean — Longhouse Deck (Game Boy)</title>
 <style>
-  :root{ --dmg-darkest:#0f380f; --dmg-dark:#306230; --dmg-light:#8bac0f; --dmg-lightest:#9bbc0f; }
+  :root{ --dmg-darkest:#06111d; --dmg-dark:#0a3a5e; --dmg-light:#1d9bf0; --dmg-lightest:#7fe7c8; }
   *{box-sizing:border-box}
   html,body{margin:0;height:100%;background:#081008;overflow:hidden;
     font-family:ui-monospace,"SFMono-Regular",Menlo,Consolas,monospace;
@@ -28,7 +28,7 @@
     text-shadow:0 1px 0 #c7d3b6;opacity:.85;font-family:Georgia,"Times New Roman",serif;}
   #brand b{color:#7a3a6a}
   /* Lightweight status line over everything, in case canvas fails. */
-  #boot{position:fixed;top:8px;left:10px;color:#8bac0f;font-size:11px;opacity:.65;
+  #boot{position:fixed;top:8px;left:10px;color:#1d9bf0;font-size:11px;opacity:.65;
     pointer-events:none;z-index:50;white-space:pre}
   /* Mobile: let the screen fill more. */
   @media (max-width:520px){ #screen{padding:8px 8px 14px} #bezel{padding:6px} }
@@ -73,8 +73,8 @@ const setBoot = (t) => { boot.textContent = t; };
 const GBW = 320, GBH = 288;
 
 /* ---- DMG 4-colour palette (darkest -> lightest) ------------------------- */
-const DMG = { darkest:0x0f380f, dark:0x306230, light:0x8bac0f, lightest:0x9bbc0f };
-const DMG_HEX = ['#0f380f','#306230','#8bac0f','#9bbc0f'];
+const DMG = { darkest:0x06111d, dark:0x0a3a5e, light:0x1d9bf0, lightest:0x7fe7c8 };
+const DMG_HEX = ['#06111d','#0a3a5e','#1d9bf0','#7fe7c8'];
 
 /* ===========================================================================
  * 1) DMG PALETTE-QUANTIZATION POST-FX PIPELINE
@@ -90,10 +90,10 @@ uniform sampler2D uMainSampler;
 varying vec2 outTexCoord;
 
 // the four DMG greens, darkest -> lightest, in linear-ish 0..1 RGB
-const vec3 C0 = vec3(0.0588, 0.2196, 0.0588); // #0f380f
-const vec3 C1 = vec3(0.1882, 0.3843, 0.1882); // #306230
-const vec3 C2 = vec3(0.5451, 0.6745, 0.0588); // #8bac0f
-const vec3 C3 = vec3(0.6078, 0.7373, 0.0588); // #9bbc0f
+const vec3 C0 = vec3(0.024, 0.067, 0.114); // #06111d abyss
+const vec3 C1 = vec3(0.039, 0.227, 0.369); // #0a3a5e deep
+const vec3 C2 = vec3(0.114, 0.608, 0.941); // #1d9bf0 ocean
+const vec3 C3 = vec3(0.498, 0.906, 0.784); // #7fe7c8 mint
 
 // 4x4 Bayer ordered-dither matrix, normalised to roughly -0.5..0.5
 float bayer(vec2 p){
