@@ -257,10 +257,11 @@ impl SurfaceLiveKitState {
         ])
     }
 
-    /// Build the compact LiveKit room metadata, sourcing `active_canvas_id` and
-    /// `canvas_revision` from the native [`CanvasLedger`] when one is present
-    /// (gpui_masterbuild.md §11 + §14 Slice 10, the deferred-from-Slice-6
-    /// `canvas_revision` hook).
+    /// Build the compact LiveKit room metadata. `active_canvas_id` always tracks
+    /// the operator's currently selected pane ([`SurfaceState::active_canvas_id`]);
+    /// `canvas_revision` is sourced from the native [`CanvasLedger`] only when the
+    /// selected pane IS that native canvas (gpui_masterbuild.md §11 + §14 Slice 10,
+    /// the deferred-from-Slice-6 `canvas_revision` hook).
     ///
     /// Hard rule (§11): this payload carries **compact pointers only** —
     /// `{session_id, surface_id, active_canvas_id, canvas_revision}` plus media
@@ -282,13 +283,23 @@ impl SurfaceLiveKitState {
             .map(SurfaceCanvasRoomMetadata::from)
             .collect();
 
-        // Prefer the native CanvasLedger as the source of truth for the active
-        // canvas pointer + revision; fall back to the legacy SurfaceState only
-        // when no native ledger is mounted yet.
-        let (active_canvas_id, canvas_revision) = match native_ledger {
-            Some(ledger) => (Some(ledger.canvas_id.to_string()), Some(ledger.revision)),
-            None => (surface.active_canvas_id().map(str::to_string), None),
-        };
+        // The active canvas pointer ALWAYS follows the operator's currently
+        // selected pane (`SurfaceState::active_canvas_id()`). A background native
+        // CanvasLedger must NOT override which canvas the operator is viewing:
+        // opening a canvas pane mounts a native ledger (e.g. canvas:main) but
+        // selecting a different pane only updates `surface`, leaving that ledger
+        // in place. Publishing the ledger's id unconditionally would mis-sync
+        // collaborators onto a canvas the operator has already switched away from.
+        //
+        // `canvas_revision` is the native ledger's revision ONLY when the
+        // selected/active pane IS that native canvas; otherwise it is omitted —
+        // a revision is meaningless for a pointer that doesn't reference the
+        // native ledger.
+        let active_canvas_id = surface.active_canvas_id().map(str::to_string);
+        let canvas_revision = native_ledger.and_then(|ledger| {
+            (active_canvas_id.as_deref() == Some(ledger.canvas_id.as_str()))
+                .then_some(ledger.revision)
+        });
 
         SurfaceRoomMetadata {
             version: ROOM_METADATA_VERSION,
@@ -308,8 +319,9 @@ impl SurfaceLiveKitState {
     }
 
     /// JSON encoding of [`Self::room_metadata_for`] — the compact metadata
-    /// published to the LiveKit room, with the active canvas pointer + revision
-    /// sourced from the native [`CanvasLedger`] when present.
+    /// published to the LiveKit room. The active canvas pointer follows the
+    /// selected pane; the revision is attached only when that pane is the native
+    /// [`CanvasLedger`]'s canvas.
     pub fn room_metadata_for_json(
         &self,
         surface: &SurfaceState,
@@ -382,6 +394,16 @@ mod tests {
 
     /// Build a native ledger that has had `n` components upserted, so its
     /// `revision` is non-zero. Mirrors the agent patch hot path.
+    fn main_pane_id_for(surface: &SurfaceState, canvas_id: &str) -> String {
+        surface
+            .turn_context()
+            .panes
+            .into_iter()
+            .find(|pane| pane.canvas_id.as_deref() == Some(canvas_id))
+            .map(|pane| pane.pane_id)
+            .unwrap_or_else(|| panic!("no pane hosts {canvas_id}"))
+    }
+
     fn native_ledger_with_components(canvas_id: &str, n: usize) -> CanvasLedger {
         let mut ledger = CanvasLedger::new(canvas_id, "surface:main", CanvasMode::Freeform);
         for i in 0..n {
@@ -599,6 +621,55 @@ mod tests {
         assert!(
             meta_after.canvas_revision > meta_before.canvas_revision,
             "a patch event must advance the published canvas_revision"
+        );
+    }
+
+    #[test]
+    fn active_canvas_follows_selected_pane_not_background_native_ledger() {
+        // Regression (OCEAN-172 / Codex P2): a native ledger for canvas:main can
+        // linger after the operator opens + selects a different pane. The published
+        // active_canvas_id MUST follow the operator's selected pane, and the
+        // ledger's revision MUST NOT be attached when the operator is no longer
+        // viewing the native canvas — otherwise collaborators mis-sync onto a
+        // canvas the operator already switched away from.
+        let mut surface = SurfaceState::default();
+        assert_eq!(surface.active_canvas_id(), Some("canvas:main"));
+
+        // Open a second pane on a different canvas and select it (open_canvas_pane
+        // makes the new pane active).
+        let other_canvas = surface.open_canvas_pane("Storyboard", SurfaceMode::Storyboard);
+        assert_ne!(other_canvas, "canvas:main");
+        assert_eq!(surface.active_canvas_id(), Some(other_canvas.as_str()));
+
+        // A native ledger for canvas:main is still mounted in the background.
+        let ledger = native_ledger_with_components("canvas:main", 3);
+
+        let metadata =
+            SurfaceLiveKitState::default().room_metadata_for(&surface, Some(&ledger), Some("agent-1"));
+
+        assert_eq!(
+            metadata.active_canvas_id.as_deref(),
+            Some(other_canvas.as_str()),
+            "active_canvas_id must be the selected pane, not the background native ledger"
+        );
+        assert_eq!(
+            metadata.canvas_revision, None,
+            "canvas_revision must be omitted when the active pane is not the native ledger's canvas"
+        );
+
+        // And when the operator switches BACK to canvas:main, the revision attaches.
+        // Find the pane that hosts canvas:main and select it explicitly.
+        let main_pane_id = main_pane_id_for(&surface, "canvas:main");
+        assert!(surface.set_active_pane(&main_pane_id));
+        assert_eq!(surface.active_canvas_id(), Some("canvas:main"));
+
+        let metadata_back =
+            SurfaceLiveKitState::default().room_metadata_for(&surface, Some(&ledger), Some("agent-1"));
+        assert_eq!(metadata_back.active_canvas_id.as_deref(), Some("canvas:main"));
+        assert_eq!(
+            metadata_back.canvas_revision,
+            Some(3),
+            "revision attaches once the operator is viewing the native canvas again"
         );
     }
 
