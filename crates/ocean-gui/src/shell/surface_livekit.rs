@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::canvas::CanvasLedger;
 use super::daemon::{LiveKitTokenRequest, LiveKitTokenResponse};
 use super::surface::{DEFAULT_LIVEKIT_ROOM_ID, SurfaceCanvasContext, SurfaceMode, SurfaceState};
 
@@ -256,19 +257,38 @@ impl SurfaceLiveKitState {
         ])
     }
 
+    /// Build the compact LiveKit room metadata, sourcing `active_canvas_id` and
+    /// `canvas_revision` from the native [`CanvasLedger`] when one is present
+    /// (gpui_masterbuild.md §11 + §14 Slice 10, the deferred-from-Slice-6
+    /// `canvas_revision` hook).
+    ///
+    /// Hard rule (§11): this payload carries **compact pointers only** —
+    /// `{session_id, surface_id, active_canvas_id, canvas_revision}` plus media
+    /// intent and per-canvas summary counts. The full canvas document (component
+    /// content, ports, edges, patch log, CRDT) is **never** synced through
+    /// LiveKit metadata. The native ledger is read only for its `canvas_id` and
+    /// `revision`; none of its component bodies cross the wire here.
     #[must_use]
-    pub fn room_metadata(
+    pub fn room_metadata_for(
         &self,
         surface: &SurfaceState,
+        native_ledger: Option<&CanvasLedger>,
         agent_session_id: Option<&str>,
     ) -> SurfaceRoomMetadata {
         let context = surface.turn_context();
-        let active_canvas_id = surface.active_canvas_id().map(str::to_string);
         let canvases = context
             .canvases
             .iter()
             .map(SurfaceCanvasRoomMetadata::from)
             .collect();
+
+        // Prefer the native CanvasLedger as the source of truth for the active
+        // canvas pointer + revision; fall back to the legacy SurfaceState only
+        // when no native ledger is mounted yet.
+        let (active_canvas_id, canvas_revision) = match native_ledger {
+            Some(ledger) => (Some(ledger.canvas_id.to_string()), Some(ledger.revision)),
+            None => (surface.active_canvas_id().map(str::to_string), None),
+        };
 
         SurfaceRoomMetadata {
             version: ROOM_METADATA_VERSION,
@@ -278,6 +298,7 @@ impl SurfaceLiveKitState {
             agent_session_id: agent_session_id.map(str::to_string),
             active_pane_id: context.active_pane_id,
             active_canvas_id,
+            canvas_revision,
             media: SurfaceMediaMetadata {
                 mic_enabled: self.mic_enabled,
                 camera_enabled: self.camera_enabled,
@@ -286,12 +307,16 @@ impl SurfaceLiveKitState {
         }
     }
 
-    pub fn room_metadata_json(
+    /// JSON encoding of [`Self::room_metadata_for`] — the compact metadata
+    /// published to the LiveKit room, with the active canvas pointer + revision
+    /// sourced from the native [`CanvasLedger`] when present.
+    pub fn room_metadata_for_json(
         &self,
         surface: &SurfaceState,
+        native_ledger: Option<&CanvasLedger>,
         agent_session_id: Option<&str>,
     ) -> Result<String, serde_json::Error> {
-        serde_json::to_string(&self.room_metadata(surface, agent_session_id))
+        serde_json::to_string(&self.room_metadata_for(surface, native_ledger, agent_session_id))
     }
 }
 
@@ -306,6 +331,12 @@ pub struct SurfaceRoomMetadata {
     pub active_pane_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_canvas_id: Option<String>,
+    /// Revision counter of the active native [`CanvasLedger`] — the compact
+    /// pointer collaborators use to detect that the active canvas advanced
+    /// (§11). `None` when no native ledger is mounted. This is a single integer:
+    /// the full canvas document is never carried here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canvas_revision: Option<u64>,
     pub media: SurfaceMediaMetadata,
     pub canvases: Vec<SurfaceCanvasRoomMetadata>,
 }
@@ -342,7 +373,38 @@ impl From<&SurfaceCanvasContext> for SurfaceCanvasRoomMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shell::canvas::{
+        ActorRef, CanvasComponentPatch, CanvasId, CanvasLedger, CanvasMode, ComponentId, Rect,
+        SurfacePatch,
+    };
     use crate::shell::surface::{LedgerComponent, SurfaceMode};
+    use serde_json::Value;
+
+    /// Build a native ledger that has had `n` components upserted, so its
+    /// `revision` is non-zero. Mirrors the agent patch hot path.
+    fn native_ledger_with_components(canvas_id: &str, n: usize) -> CanvasLedger {
+        let mut ledger = CanvasLedger::new(canvas_id, "surface:main", CanvasMode::Freeform);
+        for i in 0..n {
+            ledger.apply_patch(
+                SurfacePatch::UpsertComponent {
+                    component: CanvasComponentPatch {
+                        id: ComponentId::new(format!("comp-{i}")),
+                        kind: "brief_card".to_string(),
+                        rect: Some(Rect::new(40.0, 40.0, 240.0, 160.0)),
+                        z_index: None,
+                        content: serde_json::json!({
+                            "title": format!("Secret brief {i}"),
+                            "body": "long confidential canvas document body that must not leak",
+                        }),
+                        metadata: Value::Null,
+                    },
+                },
+                ActorRef::agent(Some("sage".into())),
+                1_000 + i as i64,
+            );
+        }
+        ledger
+    }
 
     #[test]
     fn token_request_uses_surface_participant_and_publish_permissions() {
@@ -455,8 +517,11 @@ mod tests {
             LedgerComponent::markdown_card("frame-1", 80.0, 80.0, "Opening frame"),
         );
 
-        let metadata =
-            SurfaceLiveKitState::default().room_metadata(&surface, Some("agent-session-1"));
+        let metadata = SurfaceLiveKitState::default().room_metadata_for(
+            &surface,
+            None,
+            Some("agent-session-1"),
+        );
 
         assert_eq!(metadata.version, 1);
         assert_eq!(metadata.surface_session_id, "surface:main");
@@ -475,6 +540,113 @@ mod tests {
         assert!(metadata.canvases.iter().any(|canvas| {
             canvas.canvas_id == storyboard_canvas && canvas.mode == SurfaceMode::Storyboard
         }));
+    }
+
+    #[test]
+    fn room_metadata_sources_active_canvas_and_revision_from_native_ledger() {
+        // Native ledger is the source of truth for the active canvas pointer +
+        // revision (§14 Slice 10, the deferred-from-Slice-6 canvas_revision hook).
+        let surface = SurfaceState::default();
+        let ledger = native_ledger_with_components("canvas:main", 3);
+        assert_eq!(ledger.revision, 3, "three upserts bump the ledger to rev 3");
+
+        let metadata = SurfaceLiveKitState::default().room_metadata_for(
+            &surface,
+            Some(&ledger),
+            Some("agent-session-1"),
+        );
+
+        assert_eq!(metadata.active_canvas_id.as_deref(), Some("canvas:main"));
+        assert_eq!(
+            metadata.canvas_revision,
+            Some(3),
+            "canvas_revision must come from the native ledger, not the legacy surface"
+        );
+    }
+
+    #[test]
+    fn room_metadata_without_native_ledger_falls_back_and_omits_revision() {
+        // No native ledger mounted yet → legacy SurfaceState active canvas, and
+        // no canvas_revision is emitted (skipped, not zero).
+        let surface = SurfaceState::default();
+
+        let metadata =
+            SurfaceLiveKitState::default().room_metadata_for(&surface, None, Some("agent-1"));
+
+        assert_eq!(metadata.canvas_revision, None);
+        let json = serde_json::to_string(&metadata).expect("metadata serializes");
+        assert!(
+            !json.contains("canvas_revision"),
+            "canvas_revision is skipped when absent: {json}"
+        );
+    }
+
+    #[test]
+    fn patch_advancing_ledger_yields_updated_compact_revision() {
+        // Simulate the apply_surface_patch_event hot path: a patch advances the
+        // native ledger revision, and the next compact metadata reflects it.
+        let surface = SurfaceState::default();
+        let state = SurfaceLiveKitState::default();
+
+        let before = native_ledger_with_components("canvas:main", 1);
+        let after = native_ledger_with_components("canvas:main", 2);
+
+        let meta_before = state.room_metadata_for(&surface, Some(&before), None);
+        let meta_after = state.room_metadata_for(&surface, Some(&after), None);
+
+        assert_eq!(meta_before.canvas_revision, Some(1));
+        assert_eq!(meta_after.canvas_revision, Some(2));
+        assert!(
+            meta_after.canvas_revision > meta_before.canvas_revision,
+            "a patch event must advance the published canvas_revision"
+        );
+    }
+
+    #[test]
+    fn room_metadata_is_compact_and_never_carries_the_full_canvas_document() {
+        // §11 hard rule: LiveKit metadata carries compact pointers only. The
+        // native ledger holds confidential component bodies + a patch log; none
+        // of that may appear in the published metadata JSON.
+        let surface = SurfaceState::default();
+        let ledger = native_ledger_with_components("canvas:main", 4);
+
+        // Sanity: the full ledger DOES contain the heavy fields we must exclude.
+        let full_ledger_json = serde_json::to_string(&ledger).expect("ledger serializes");
+        assert!(full_ledger_json.contains("Secret brief"));
+        assert!(full_ledger_json.contains("patch_log"));
+
+        let metadata = SurfaceLiveKitState::default().room_metadata_for(
+            &surface,
+            Some(&ledger),
+            Some("agent-1"),
+        );
+        let json = state_metadata_json(&metadata);
+
+        // Compact pointers ARE present.
+        assert!(json.contains("\"active_canvas_id\":\"canvas:main\""));
+        assert!(json.contains("\"canvas_revision\":4"));
+
+        // The full canvas document is NEVER present.
+        assert!(
+            !json.contains("Secret brief"),
+            "component content must not leak into LiveKit metadata: {json}"
+        );
+        assert!(
+            !json.contains("confidential canvas document body"),
+            "component body must not leak into LiveKit metadata: {json}"
+        );
+        assert!(
+            !json.contains("patch_log"),
+            "patch log must not leak into LiveKit metadata: {json}"
+        );
+        assert!(
+            !json.contains("created_by") && !json.contains("updated_at_ms"),
+            "per-component provenance must not leak into LiveKit metadata: {json}"
+        );
+    }
+
+    fn state_metadata_json(metadata: &SurfaceRoomMetadata) -> String {
+        serde_json::to_string(metadata).expect("metadata serializes")
     }
 
     #[test]
