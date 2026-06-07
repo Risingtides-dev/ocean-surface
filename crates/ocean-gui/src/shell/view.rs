@@ -22,7 +22,8 @@ use image::{Frame, RgbaImage};
 use super::agent::{AgentBlock, AgentEvent, AgentRole, AgentState, AgentTurn, ToolStatus};
 use super::canvas::{
     prompt_with_canvas_context, ActorRef as CanvasActorRef, CanvasId, CanvasLedger, CanvasMode,
-    CanvasStore, LedgerSink, LedgerSource, OceanCanvasView, SurfacePatchEnvelope,
+    CanvasStore, LedgerSink, LedgerSource, OceanCanvasView, Rect, SurfacePatchEnvelope,
+    FIT_PADDING,
 };
 use super::commands::{CommandSpec, ShellCommand, filtered_commands};
 use super::daemon::{
@@ -5060,6 +5061,12 @@ impl OceanGuiShell {
         // viewport (the user's camera lives only in `interaction.viewport`). We
         // only adopt the ledger viewport when the agent explicitly requested it.
         let batch_sets_viewport = batch_carries_set_viewport(&patches);
+        // OCEAN-196: a `Focus(Canvas)` op is an explicit "fit the camera to all
+        // content" request — gated identically to `SetViewport` so it only moves
+        // the camera when the agent actually asked. `ledger.rs` records that
+        // FocusTarget::Canvas fit-to-content "is a viewport concern handled by the
+        // renderer"; this is where the renderer honors it.
+        let batch_fits_canvas = batch_carries_focus_canvas(&patches);
 
         let Some(ledger) =
             apply_patches_to_ledger(self.canvas_ledger(), session_id, canvas_id, patches)
@@ -5077,6 +5084,17 @@ impl OceanGuiShell {
             let agent_viewport = ledger.viewport;
             self.canvas_view.update(cx, |view, _cx| {
                 view.interaction_mut().viewport = agent_viewport;
+            });
+        }
+
+        // A `Focus(Canvas)` re-fits the camera to frame every component's bounding
+        // box into the current view bounds (with padding). Same intentional-adopt
+        // gating as SetViewport: only on a batch that carries the op. The fit math
+        // lives in the view (it knows its painted size); an empty canvas no-ops.
+        if batch_fits_canvas {
+            let rects: Vec<Rect> = ledger.components.values().map(|c| c.rect).collect();
+            self.canvas_view.update(cx, |view, _cx| {
+                view.interaction_mut().fit_to_content(&rects, FIT_PADDING);
             });
         }
 
@@ -8044,6 +8062,27 @@ fn batch_carries_set_viewport(patches: &[SurfacePatchEnvelope]) -> bool {
         .any(|env| matches!(env.patch, SurfacePatch::SetViewport { .. }))
 }
 
+/// Whether a batch of incoming patches contains an explicit `Focus(Canvas)` op —
+/// i.e. the agent asked to fit the camera to all content this batch (OCEAN-196).
+///
+/// A `Focus { target: Canvas }` is an explicit "move the camera (fit to content)"
+/// just like `SetViewport`, so it gates the same intentional viewport adoption in
+/// [`OceanGuiShell::apply_surface_patch_event`]: only a batch that carries it
+/// re-fits the camera, leaving the user's own pan/zoom untouched on unrelated
+/// batches. `Focus(Component)`/`Focus(Edge)` are selection ops, not camera ops,
+/// so they do NOT match. Pure + window-free so the gate is assertable headlessly.
+fn batch_carries_focus_canvas(patches: &[SurfacePatchEnvelope]) -> bool {
+    use super::canvas::{FocusTarget, SurfacePatch};
+    patches.iter().any(|env| {
+        matches!(
+            env.patch,
+            SurfacePatch::Focus {
+                target: FocusTarget::Canvas
+            }
+        )
+    })
+}
+
 fn ocean_now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -9177,6 +9216,120 @@ mod tests {
             view.interaction().viewport,
             agent_viewport,
             "a SetViewport batch must move the camera to the agent's viewport"
+        );
+    }
+
+    // ---- OCEAN-196: Focus(Canvas) fit-to-content gate ----------------------
+
+    /// A `surface_patch` Focus(Canvas) envelope — the agent asking to fit the
+    /// camera to all content.
+    fn focus_canvas_envelope() -> SurfacePatchEnvelope {
+        use super::super::canvas::FocusTarget;
+        SurfacePatchEnvelope {
+            patch_id: PatchId::new("p-focus"),
+            session_id: "sess-1".to_string(),
+            surface_id: SurfaceId::new("gpui:local"),
+            canvas_id: CanvasId::new("canvas:main"),
+            actor: CanvasActorRef::agent(Some("sage".to_string())),
+            created_at_ms: 0,
+            patch: SurfacePatch::Focus { target: FocusTarget::Canvas },
+        }
+    }
+
+    #[test]
+    fn batch_with_a_focus_canvas_is_detected() {
+        // A batch carrying Focus(Canvas) (even alongside other ops) must be
+        // recognized so the shell re-fits the camera — same intentional adoption
+        // as SetViewport.
+        let batch = vec![upsert_envelope("a", "card a"), focus_canvas_envelope()];
+        assert!(
+            batch_carries_focus_canvas(&batch),
+            "a batch containing Focus(Canvas) must be detected so the camera fits"
+        );
+    }
+
+    #[test]
+    fn non_focus_batch_and_focus_component_are_not_detected() {
+        use super::super::canvas::FocusTarget;
+        // Plain upserts: no fit.
+        assert!(!batch_carries_focus_canvas(&[upsert_envelope("a", "a")]));
+        assert!(!batch_carries_focus_canvas(&[]));
+
+        // Focus(Component) is a SELECTION op, not a camera op — it must NOT trigger
+        // a fit (only Focus(Canvas) does).
+        let focus_component = SurfacePatchEnvelope {
+            patch_id: PatchId::new("p-fc"),
+            session_id: "sess-1".to_string(),
+            surface_id: SurfaceId::new("gpui:local"),
+            canvas_id: CanvasId::new("canvas:main"),
+            actor: CanvasActorRef::agent(Some("sage".to_string())),
+            created_at_ms: 0,
+            patch: SurfacePatch::Focus {
+                target: FocusTarget::Component { component_id: ComponentId::new("a") },
+            },
+        };
+        assert!(
+            !batch_carries_focus_canvas(&[focus_component]),
+            "Focus(Component) is a selection op, not a fit-to-content camera op"
+        );
+    }
+
+    #[test]
+    fn focus_canvas_batch_fits_the_camera_to_content_end_to_end() {
+        use super::super::canvas::{CanvasLedger, CanvasMode, OceanCanvasView, Vec2, Viewport};
+
+        // Build a ledger with two spread-out components and a view that has been
+        // "painted" (so it knows its size), then model the shell's gated fit.
+        let mut ledger = CanvasLedger::new("canvas:main", "sess-1", CanvasMode::Freeform);
+        ledger.apply_patch(
+            SurfacePatch::UpsertComponent {
+                component: CanvasComponentPatch {
+                    id: ComponentId::new("a"),
+                    kind: "card".to_string(),
+                    rect: Some(Rect::new(0.0, 0.0, 100.0, 100.0)),
+                    z_index: None,
+                    content: serde_json::Value::Null,
+                    metadata: serde_json::Value::Null,
+                },
+            },
+            CanvasActorRef::system(),
+            0,
+        );
+        ledger.apply_patch(
+            SurfacePatch::UpsertComponent {
+                component: CanvasComponentPatch {
+                    id: ComponentId::new("b"),
+                    kind: "card".to_string(),
+                    rect: Some(Rect::new(900.0, 700.0, 100.0, 100.0)),
+                    z_index: None,
+                    content: serde_json::Value::Null,
+                    metadata: serde_json::Value::Null,
+                },
+            },
+            CanvasActorRef::system(),
+            0,
+        );
+
+        let user_viewport = Viewport { x: 5000.0, y: 5000.0, zoom: 3.0 };
+        let mut view = OceanCanvasView::from_ledger(ledger.clone());
+        view.interaction_mut().viewport = user_viewport;
+        view.interaction_mut().last_view_size = Some(Vec2::new(800.0, 600.0));
+
+        // A Focus(Canvas) batch arrives -> the gate fires and the shell re-fits.
+        let batch = vec![focus_canvas_envelope()];
+        assert!(batch_carries_focus_canvas(&batch));
+        let rects: Vec<Rect> = ledger.components.values().map(|c| c.rect).collect();
+        view.interaction_mut().fit_to_content(&rects, FIT_PADDING);
+
+        // The camera moved off the user's stale viewport to frame the content.
+        assert_ne!(
+            view.interaction().viewport,
+            user_viewport,
+            "Focus(Canvas) must re-fit the camera to content"
+        );
+        assert!(
+            view.interaction().viewport.zoom >= 0.2 && view.interaction().viewport.zoom <= 4.0,
+            "fitted zoom stays in the sane range"
         );
     }
 
