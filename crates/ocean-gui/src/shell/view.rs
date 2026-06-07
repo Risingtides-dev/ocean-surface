@@ -22,7 +22,7 @@ use image::{Frame, RgbaImage};
 use super::agent::{AgentBlock, AgentEvent, AgentRole, AgentState, AgentTurn, ToolStatus};
 use super::canvas::{
     prompt_with_canvas_context, ActorRef as CanvasActorRef, CanvasId, CanvasLedger, CanvasMode,
-    CanvasStore, LedgerSource, OceanCanvasView, SurfacePatchEnvelope,
+    CanvasStore, LedgerSink, LedgerSource, OceanCanvasView, SurfacePatchEnvelope,
 };
 use super::commands::{CommandSpec, ShellCommand, filtered_commands};
 use super::daemon::{
@@ -344,10 +344,29 @@ impl OceanGuiShell {
         // `set_canvas_ledger`. One cell, single source of truth (Slice 4/6).
         let canvas_ledger: Arc<Mutex<Option<CanvasLedger>>> = Arc::new(Mutex::new(None));
         let canvas_view = {
-            let cell = Arc::clone(&canvas_ledger);
+            let read_cell = Arc::clone(&canvas_ledger);
             let source: LedgerSource =
-                Arc::new(move || cell.lock().ok().and_then(|g| g.clone()));
-            cx.new(|_| OceanCanvasView::new(source))
+                Arc::new(move || read_cell.lock().ok().and_then(|g| g.clone()));
+
+            // Write-back sink: user interactions (e.g. a selecting click) apply a
+            // patch to the SAME shared ledger cell the source reads, so the
+            // selection reaches the next turn's `compact_context()` — closing the
+            // human→agent loop (OCEAN-186). Applying through `apply_patch` keeps
+            // the ledger authoritative and bumps its revision consistently.
+            let write_cell = Arc::clone(&canvas_ledger);
+            let sink: LedgerSink = Arc::new(move |patch, actor| {
+                if let Ok(mut guard) = write_cell.lock() {
+                    if let Some(ledger) = guard.as_mut() {
+                        ledger.apply_patch(patch, actor, ocean_now_ms());
+                    }
+                }
+            });
+
+            cx.new(|_| {
+                let mut view = OceanCanvasView::new(source);
+                view.set_sink(sink);
+                view
+            })
         };
 
         let mut shell = Self {
@@ -5038,6 +5057,18 @@ impl OceanGuiShell {
             return;
         };
 
+        // OCEAN-186: an agent-applied `SetViewport` only moves `ledger.viewport`;
+        // the renderer reads the view-local `interaction.viewport` (which the
+        // user's own pan/zoom updates directly). Adopt the ledger viewport into
+        // the view at the moment the patch batch lands so an agent SetViewport
+        // actually moves the camera. We do this only on patch-apply — not every
+        // frame — so it never fights an in-progress user pan/zoom; the user owns
+        // the viewport between agent patches.
+        let agent_viewport = ledger.viewport;
+        self.canvas_view.update(cx, |view, _cx| {
+            view.interaction_mut().viewport = agent_viewport;
+        });
+
         self.set_canvas_ledger(Some(ledger));
 
         // §16 hot path: the canvas is its own GPUI entity reading the shared
@@ -7982,6 +8013,18 @@ fn surface_render_target(use_tldraw: bool) -> SurfaceRenderTarget {
 /// Kept as a free function over the already-folded prompt so the single-source
 /// guarantee is assertable window-free. `native_ledger` is the active native
 /// canvas (or `None` when there isn't one yet).
+/// Current wall-clock time in milliseconds since the Unix epoch, used to stamp
+/// locally-originated canvas patches (e.g. a user-selection `Select` applied
+/// through the view's [`LedgerSink`]). Falls back to `0` if the clock is before
+/// the epoch — a stamp value, not a correctness invariant.
+fn ocean_now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 fn build_submit_prompt(prompt: &str, native_ledger: Option<&CanvasLedger>) -> String {
     // The native canvas is the one and only turn-context source. No tab gate and
     // no legacy `prompt_with_surface_context` call: the SurfaceLedger block must
