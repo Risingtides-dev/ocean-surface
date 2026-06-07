@@ -912,8 +912,9 @@ impl Daemon {
         }
     }
 
-    /// A dummy daemon that does nothing. Useful for component previews
-    /// and the gauntlet — component interactions will no-op gracefully.
+    /// A dummy daemon that does nothing. Useful for component previews and
+    /// tests — component interactions will no-op gracefully.
+    #[allow(dead_code)]
     pub fn dummy() -> Self {
         Self {
             url: RwSignal::new("http://127.0.0.1:4780".into()),
@@ -1789,7 +1790,10 @@ impl Daemon {
     }
 
     /// Hot-swap the daemon's model. Optimistically updates the local `model`
-    /// signal, POSTs the change, then re-reads to confirm.
+    /// signal, POSTs the change, then re-reads to confirm. Retained as a daemon
+    /// capability (global mid-session model swap via /v1/model) even though the
+    /// header picker that called it was removed in OCEAN-202.
+    #[allow(dead_code)]
     pub fn set_model(&self, id: String) {
         let url = self.url.get_untracked();
         let model = self.model;
