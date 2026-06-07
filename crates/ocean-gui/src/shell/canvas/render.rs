@@ -20,8 +20,9 @@
 //! can own the canvas state and hand the view a borrow each frame.
 
 use gpui::{
-    div, px, Context, Hsla, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, ParentElement, Render, ScrollWheelEvent, Styled, Window,
+    canvas, div, point, px, App, Bounds, Context, Hsla, InteractiveElement, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, PathBuilder, Pixels, Render,
+    ScrollWheelEvent, Styled, Window,
 };
 use serde_json::Value;
 
@@ -185,6 +186,23 @@ pub fn edge_route(from: &Rect, to: &Rect, route: EdgeRoute) -> Vec<Vec2> {
             vec![a, mid, b]
         }
     }
+}
+
+/// The exact ordered point sequence the renderer strokes for an edge — the
+/// polyline handed to the path builder as `move_to(points[0])` then
+/// `line_to(..)` through the rest. It is just [`edge_route`], named separately
+/// because it is the **drawing-level** contract: the stroke must pass through
+/// every one of these points, so the last point is guaranteed to be the target
+/// endpoint.
+///
+/// This exists to lock the invariant Codex caught (OCEAN-192): the earlier
+/// renderer collapsed each segment to a single-axis bar, so a diagonal segment's
+/// drawn stroke stopped at `(to.x, from.y)` and never reached `(to.x, to.y)`.
+/// Stroking the polyline directly (diagonals included) means the drawn path's
+/// final point equals the routed endpoint by construction — which this helper
+/// makes testable without a window.
+pub fn edge_draw_path(from: &Rect, to: &Rect, route: EdgeRoute) -> Vec<Vec2> {
+    edge_route(from, to, route)
 }
 
 /// The point at which to anchor an edge's label: the midpoint **along** the
@@ -723,17 +741,17 @@ impl OceanCanvasView {
 
     /// Build the drawable element for one [`CanvasEdge`] between two components.
     ///
-    /// GPUI 0.2 has no first-class line primitive in this crate's element set, so
-    /// each segment of the edge's routed polyline (from [`edge_route`], honoring
-    /// [`EdgeRoute`]) is drawn as a thin bar across that segment's bounding box.
-    /// The stroke color/width come from [`edge_style_for_kind`] so a flow arrow, a
+    /// The edge's routed polyline ([`edge_draw_path`], honoring [`EdgeRoute`]) is
+    /// stroked as a single GPUI path via [`gpui::canvas`] + [`PathBuilder`] +
+    /// `window.paint_path` — so a **diagonal** straight/bezier segment between
+    /// non-axis-aligned components reaches its true endpoint instead of being
+    /// collapsed to a horizontal/vertical bar (OCEAN-192, Codex P2). Orthogonal
+    /// routes still render axis-aligned, because their polyline legs already are.
+    ///
+    /// Stroke color/width come from [`edge_style_for_kind`] so a flow arrow, a
     /// dependency link, and a loose reference read distinctly. If the edge carries
     /// a `label`, it is drawn at the polyline midpoint ([`edge_label_anchor`])
     /// using the same mono text idiom as component chips.
-    ///
-    /// (A true path/bezier stroke is a later refinement; the geometry it needs —
-    /// the routed points and the label anchor — is already provided by the pure
-    /// helpers and is what this element consumes.)
     fn render_edge(
         &self,
         edge: &CanvasEdge,
@@ -743,33 +761,47 @@ impl OceanCanvasView {
     ) -> impl IntoElement {
         let (color, stroke) = edge_style_for_kind(&edge.kind);
         let stroke_px = transform.scale(stroke).max(1.0);
-        let points = edge_route(from_rect, to_rect, edge.route);
+        // Widget-relative screen points (origin = canvas widget top-left). The
+        // paint callback shifts these by the element's absolute bounds origin.
+        let screen_points: Vec<Vec2> = edge_draw_path(from_rect, to_rect, edge.route)
+            .into_iter()
+            .map(|p| transform.canvas_to_screen(p))
+            .collect();
 
         let mut layer = div().absolute().top_0().left_0().right_0().bottom_0();
 
-        // One bar per segment of the routed polyline.
-        for seg in points.windows(2) {
-            let a = transform.canvas_to_screen(seg[0]);
-            let b = transform.canvas_to_screen(seg[1]);
-            let left = a.x.min(b.x);
-            let top = a.y.min(b.y);
-            let horizontal = (a.y - b.y).abs() <= (a.x - b.x).abs();
-            // For a near-horizontal segment draw a full-width bottom rule; for a
-            // near-vertical one draw a full-height left rule. This keeps each
-            // segment a crisp 1-axis stroke rather than a filled bounding box.
-            let mut bar = div().absolute().left(px(left)).top(px(top));
-            if horizontal {
-                let w = (a.x - b.x).abs().max(1.0);
-                bar = bar.w(px(w)).h(px(stroke_px)).bg(color);
-            } else {
-                let h = (a.y - b.y).abs().max(1.0);
-                bar = bar.w(px(stroke_px)).h(px(h)).bg(color);
-            }
-            layer = layer.child(bar);
-        }
+        // Stroke the polyline directly (diagonals included) in a canvas paint
+        // pass. paint_path takes window-absolute coordinates, so add the element
+        // bounds origin to each widget-relative point.
+        layer = layer.child(
+            canvas(
+                move |_bounds, _window, _cx| {},
+                move |bounds: Bounds<Pixels>, _state, window: &mut Window, _cx: &mut App| {
+                    if screen_points.len() < 2 {
+                        return;
+                    }
+                    let origin = bounds.origin;
+                    let mut builder = PathBuilder::stroke(px(stroke_px));
+                    let to_window = |p: &Vec2| point(px(p.x) + origin.x, px(p.y) + origin.y);
+                    builder.move_to(to_window(&screen_points[0]));
+                    for p in &screen_points[1..] {
+                        builder.line_to(to_window(p));
+                    }
+                    if let Ok(path) = builder.build() {
+                        window.paint_path(path, color);
+                    }
+                },
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .bottom_0(),
+        );
 
         // Label at the polyline midpoint.
         if let Some(label) = edge.label.as_ref().filter(|s| !s.is_empty()) {
+            let points = edge_draw_path(from_rect, to_rect, edge.route);
             let anchor = transform.canvas_to_screen(edge_label_anchor(&points));
             layer = layer.child(
                 div()
@@ -1096,6 +1128,65 @@ mod tests {
         let pts = edge_route(&from, &to, EdgeRoute::Bezier);
         let (a, b) = edge_endpoints(&from, &to);
         assert_eq!(pts, vec![a, Vec2::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0), b]);
+    }
+
+    #[test]
+    fn edge_draw_path_reaches_the_endpoint_for_a_diagonal_straight_route() {
+        // OCEAN-192 (Codex P2): the bug was the *drawing* step collapsing a
+        // diagonal segment to one axis, so a straight edge between non-aligned
+        // components stopped at (to.x, from.y) instead of (to.x, to.y). The
+        // drawn polyline must pass through — and END at — the real endpoint.
+        //
+        // `from` right-anchor is (100,50); `to` is lower-right so its closest
+        // anchor is its left-midpoint (300,200) — a genuinely diagonal segment.
+        let from = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let to = Rect::new(300.0, 150.0, 100.0, 100.0);
+        let (a, b) = edge_endpoints(&from, &to);
+        assert_eq!(a, Vec2::new(100.0, 50.0));
+        assert_eq!(b, Vec2::new(300.0, 200.0), "target is diagonally offset");
+
+        let path = edge_draw_path(&from, &to, EdgeRoute::Straight);
+        // The stroked polyline must start at the source and END at the target —
+        // both x AND y of the final point match, not a collapsed (300,50).
+        assert_eq!(*path.first().unwrap(), a, "stroke starts at the source anchor");
+        let last = *path.last().unwrap();
+        assert_eq!(last, b, "stroke reaches the real endpoint, not a collapsed axis");
+        assert!(
+            (last.y - a.y).abs() > f32::EPSILON,
+            "diagonal: the y-delta is preserved end-to-end (regression guard)"
+        );
+    }
+
+    #[test]
+    fn edge_draw_path_orthogonal_stays_axis_aligned_and_reaches_endpoint() {
+        // Orthogonal routes must keep rendering axis-aligned (each leg horizontal
+        // or vertical) AND still terminate at the true endpoint.
+        let from = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let to = Rect::new(300.0, 300.0, 100.0, 100.0);
+        let (a, b) = edge_endpoints(&from, &to);
+        let path = edge_draw_path(&from, &to, EdgeRoute::Orthogonal);
+        assert_eq!(*path.first().unwrap(), a);
+        assert_eq!(*path.last().unwrap(), b, "orthogonal route still reaches the endpoint");
+        // Every consecutive leg is axis-aligned (shares an x or a y).
+        for w in path.windows(2) {
+            let axis_aligned =
+                (w[0].x - w[1].x).abs() < 1e-3 || (w[0].y - w[1].y).abs() < 1e-3;
+            assert!(axis_aligned, "orthogonal legs must stay axis-aligned: {:?}", w);
+        }
+    }
+
+    #[test]
+    fn edge_draw_path_matches_edge_route() {
+        // The drawing contract is exactly the route geometry — no collapse.
+        let from = Rect::new(10.0, 20.0, 80.0, 40.0);
+        let to = Rect::new(400.0, 260.0, 60.0, 60.0);
+        for route in [EdgeRoute::Straight, EdgeRoute::Orthogonal, EdgeRoute::Bezier] {
+            assert_eq!(
+                edge_draw_path(&from, &to, route),
+                edge_route(&from, &to, route),
+                "{route:?}: drawn path is the routed polyline"
+            );
+        }
     }
 
     #[test]
