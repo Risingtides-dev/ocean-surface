@@ -5051,23 +5051,34 @@ impl OceanGuiShell {
         patches: Vec<SurfacePatchEnvelope>,
         cx: &mut Context<Self>,
     ) {
+        // OCEAN-186: detect whether THIS batch actually asked to move the camera
+        // (an explicit `SetViewport` op) BEFORE the patches are consumed by
+        // `apply_patches_to_ledger`. The viewport adoption below must be gated on
+        // this: an ordinary batch (UpsertComponent, MoveComponent, …) leaves
+        // `ledger.viewport` at its prior/default value, so blindly copying it into
+        // the view would SNAP the user's pan/zoom back to that stale ledger
+        // viewport (the user's camera lives only in `interaction.viewport`). We
+        // only adopt the ledger viewport when the agent explicitly requested it.
+        let batch_sets_viewport = batch_carries_set_viewport(&patches);
+
         let Some(ledger) =
             apply_patches_to_ledger(self.canvas_ledger(), session_id, canvas_id, patches)
         else {
             return;
         };
 
-        // OCEAN-186: an agent-applied `SetViewport` only moves `ledger.viewport`;
-        // the renderer reads the view-local `interaction.viewport` (which the
-        // user's own pan/zoom updates directly). Adopt the ledger viewport into
-        // the view at the moment the patch batch lands so an agent SetViewport
-        // actually moves the camera. We do this only on patch-apply — not every
-        // frame — so it never fights an in-progress user pan/zoom; the user owns
-        // the viewport between agent patches.
-        let agent_viewport = ledger.viewport;
-        self.canvas_view.update(cx, |view, _cx| {
-            view.interaction_mut().viewport = agent_viewport;
-        });
+        // An agent-applied `SetViewport` only moves `ledger.viewport`; the
+        // renderer reads the view-local `interaction.viewport` (which the user's
+        // own pan/zoom updates directly). Adopt the ledger viewport into the view
+        // at the moment a viewport-carrying batch lands so an agent SetViewport
+        // actually moves the camera — but only then, so a non-viewport batch
+        // leaves the user's pan/zoom untouched.
+        if batch_sets_viewport {
+            let agent_viewport = ledger.viewport;
+            self.canvas_view.update(cx, |view, _cx| {
+                view.interaction_mut().viewport = agent_viewport;
+            });
+        }
 
         self.set_canvas_ledger(Some(ledger));
 
@@ -8017,6 +8028,22 @@ fn surface_render_target(use_tldraw: bool) -> SurfaceRenderTarget {
 /// locally-originated canvas patches (e.g. a user-selection `Select` applied
 /// through the view's [`LedgerSink`]). Falls back to `0` if the clock is before
 /// the epoch — a stamp value, not a correctness invariant.
+/// Whether a batch of incoming patches contains an explicit `SetViewport` op —
+/// i.e. the agent asked to move the camera this batch (OCEAN-186).
+///
+/// This gates viewport adoption in [`OceanGuiShell::apply_surface_patch_event`]:
+/// only a batch that actually carries a `SetViewport` should overwrite the
+/// view's `interaction.viewport`. Without the gate, an ordinary batch (which
+/// leaves `ledger.viewport` at its prior/default value) would snap the user's
+/// own pan/zoom back to that stale viewport. Pure + window-free so the gate is
+/// assertable headlessly.
+fn batch_carries_set_viewport(patches: &[SurfacePatchEnvelope]) -> bool {
+    use super::canvas::SurfacePatch;
+    patches
+        .iter()
+        .any(|env| matches!(env.patch, SurfacePatch::SetViewport { .. }))
+}
+
 fn ocean_now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -9058,6 +9085,99 @@ mod tests {
                 },
             },
         }
+    }
+
+    /// A `surface_patch` SetViewport envelope, as the daemon would emit it when
+    /// the agent moves the camera.
+    fn set_viewport_envelope(viewport: super::super::canvas::Viewport) -> SurfacePatchEnvelope {
+        SurfacePatchEnvelope {
+            patch_id: PatchId::new("p-vp"),
+            session_id: "sess-1".to_string(),
+            surface_id: SurfaceId::new("gpui:local"),
+            canvas_id: CanvasId::new("canvas:main"),
+            actor: CanvasActorRef::agent(Some("sage".to_string())),
+            created_at_ms: 0,
+            patch: SurfacePatch::SetViewport { viewport },
+        }
+    }
+
+    // ---- OCEAN-186 Bug 2: viewport adoption is gated to SetViewport batches ---
+
+    #[test]
+    fn batch_with_a_set_viewport_is_detected() {
+        use super::super::canvas::Viewport;
+        // A batch that carries a SetViewport op (even alongside other ops) must be
+        // recognized so the shell adopts the agent viewport into the view.
+        let batch = vec![
+            upsert_envelope("a", "card a"),
+            set_viewport_envelope(Viewport { x: 120.0, y: 80.0, zoom: 2.5 }),
+        ];
+        assert!(
+            batch_carries_set_viewport(&batch),
+            "a batch containing SetViewport must be detected so the camera adopts it"
+        );
+    }
+
+    #[test]
+    fn non_viewport_batch_is_not_detected_so_user_pan_is_preserved() {
+        // REGRESSION (Codex P2 on #46): a batch with ONLY non-viewport ops must NOT
+        // be treated as a viewport change. Otherwise the shell would copy the
+        // stale/default ledger.viewport into the view and snap the user's pan/zoom
+        // back. The gate must report `false` for such a batch so
+        // `apply_surface_patch_event` leaves `interaction.viewport` untouched.
+        let batch = vec![
+            upsert_envelope("a", "card a"),
+            upsert_envelope("b", "card b"),
+        ];
+        assert!(
+            !batch_carries_set_viewport(&batch),
+            "a non-viewport batch must not trigger viewport adoption — the user's pan/zoom must be preserved"
+        );
+
+        // An empty batch likewise carries no viewport change.
+        assert!(!batch_carries_set_viewport(&[]));
+    }
+
+    #[test]
+    fn non_viewport_batch_leaves_user_viewport_unchanged_end_to_end() {
+        use super::super::canvas::{CanvasLedger, CanvasMode, OceanCanvasView, Viewport};
+
+        // Model the exact shell decision: the user has panned/zoomed (state lives
+        // only in interaction.viewport), then an agent sends a non-viewport batch.
+        let user_viewport = Viewport { x: 333.0, y: 222.0, zoom: 1.75 };
+        let mut view = OceanCanvasView::from_ledger(
+            CanvasLedger::new("canvas:main", "sess-1", CanvasMode::Freeform),
+        );
+        view.interaction_mut().viewport = user_viewport;
+
+        // A non-viewport batch arrives. The shell's gate says "don't adopt".
+        let non_viewport_batch = vec![upsert_envelope("a", "card a")];
+        let adopt = batch_carries_set_viewport(&non_viewport_batch);
+        assert!(!adopt, "non-viewport batch must not adopt the ledger viewport");
+
+        // Because the gate is false, the shell skips the copy — the user's camera
+        // is preserved verbatim.
+        if adopt {
+            // (Never taken in this test; mirrors the shell's gated copy.)
+            view.interaction_mut().viewport = Viewport::default();
+        }
+        assert_eq!(
+            view.interaction().viewport,
+            user_viewport,
+            "the user's pan/zoom must survive a non-viewport agent batch"
+        );
+
+        // And a SetViewport batch IS adopted (the camera moves).
+        let agent_viewport = Viewport { x: 10.0, y: 20.0, zoom: 0.5 };
+        let viewport_batch = vec![set_viewport_envelope(agent_viewport)];
+        if batch_carries_set_viewport(&viewport_batch) {
+            view.interaction_mut().viewport = agent_viewport;
+        }
+        assert_eq!(
+            view.interaction().viewport,
+            agent_viewport,
+            "a SetViewport batch must move the camera to the agent's viewport"
+        );
     }
 
     #[test]
