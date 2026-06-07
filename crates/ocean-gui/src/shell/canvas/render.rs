@@ -505,6 +505,28 @@ pub fn drag_targets(hit: Option<&ComponentId>, selection: &[ComponentId]) -> Vec
     }
 }
 
+/// Whether a press should arm a drag, given the hit component and the
+/// **post-press** selection (the set [`press_selection`] resolved). A drag is
+/// only armed when the press landed on a component that **remains selected**
+/// after the press.
+///
+/// This guards the deselect-then-drift bug (OCEAN-194, Codex P2 on #48): a
+/// Ctrl/Cmd-click that toggles the hit *off* removes it from the post-press
+/// selection. Without this guard `drag_targets` would fall back to "just the
+/// hit" and a >`DRAG_THRESHOLD_PX` drift would emit a `MoveComponent` for the
+/// component the user just deselected. A toggle-off press is a pure deselect —
+/// no drag.
+///
+/// When this returns `true` the hit is guaranteed to be in `post_press_selection`,
+/// so [`drag_targets`] resolves to the correct set (the whole selection,
+/// including the hit).
+pub fn should_arm_drag(hit: Option<&ComponentId>, post_press_selection: &[ComponentId]) -> bool {
+    match hit {
+        None => false,
+        Some(id) => post_press_selection.iter().any(|c| c == id),
+    }
+}
+
 // ===========================================================================
 // OceanCanvasView (GPUI view)
 // ===========================================================================
@@ -1206,11 +1228,14 @@ impl OceanCanvasView {
             }
 
             // Arm a drag over the resolved selection (so dragging one of a
-            // multi-selection moves the whole set). Capture each target's rect at
-            // press time as the anchor for the preview + final MoveComponent.
-            let targets = drag_targets(hit.as_ref(), &next);
-            if !targets.is_empty() {
-                let moving = targets
+            // multi-selection moves the whole set) — but ONLY if the hit remains
+            // selected after the press (`should_arm_drag`). A Ctrl/Cmd-click that
+            // toggled the hit *off* must not arm a drag, or a >threshold drift
+            // would move the component the user just deselected (OCEAN-194 P2).
+            // Capture each target's rect at press time as the anchor for the
+            // preview + final MoveComponent.
+            if should_arm_drag(hit.as_ref(), &next) {
+                let moving = drag_targets(hit.as_ref(), &next)
                     .into_iter()
                     .filter_map(|id| ledger.components.get(&id).map(|c| (id, c.rect)))
                     .collect::<Vec<_>>();
@@ -1221,6 +1246,8 @@ impl OceanCanvasView {
                         moving,
                         crossed: false,
                     });
+                } else {
+                    self.interaction.drag = None;
                 }
             } else {
                 self.interaction.drag = None;
@@ -1939,6 +1966,47 @@ mod tests {
         assert_eq!(drag_targets(None, &sel), Vec::<ComponentId>::new());
     }
 
+    #[test]
+    fn should_arm_drag_only_when_the_hit_survives_the_press() {
+        // OCEAN-194 P2 regression: a Toggle press that DESELECTED the hit must
+        // NOT arm a drag, or a >threshold drift would move the just-deselected
+        // component. `post` is the post-press selection.
+
+        // Toggle-OFF: hit was selected, press removed it -> NOT in post -> no arm.
+        let post_after_toggle_off = next_selection(&[cid("a"), cid("b")], Some(&cid("a")), SelectMode::Toggle);
+        assert_eq!(post_after_toggle_off, vec![cid("b")], "toggle removed the hit");
+        assert!(
+            !should_arm_drag(Some(&cid("a")), &post_after_toggle_off),
+            "a toggle-off press must not arm a drag for the deselected component"
+        );
+
+        // Toggle-ON a non-member: hit ends up selected -> arm.
+        let post_after_toggle_on = next_selection(&[cid("a")], Some(&cid("b")), SelectMode::Toggle);
+        assert_eq!(post_after_toggle_on, vec![cid("a"), cid("b")]);
+        assert!(
+            should_arm_drag(Some(&cid("b")), &post_after_toggle_on),
+            "toggling a component ON leaves it selected, so a drag arms"
+        );
+
+        // Plain press on a member (preserved set): hit stays selected -> arm,
+        // and drag_targets returns the whole group.
+        let post_member = press_selection(&[cid("a"), cid("b")], Some(&cid("a")), SelectMode::Replace);
+        assert_eq!(post_member, vec![cid("a"), cid("b")]);
+        assert!(should_arm_drag(Some(&cid("a")), &post_member));
+        assert_eq!(
+            drag_targets(Some(&cid("a")), &post_member),
+            vec![cid("a"), cid("b")],
+            "armed drag of a member moves the whole group"
+        );
+
+        // Shift-extend: the hit is added and stays selected -> arm with the hit.
+        let post_extend = next_selection(&[cid("a")], Some(&cid("b")), SelectMode::Extend);
+        assert!(should_arm_drag(Some(&cid("b")), &post_extend));
+
+        // Empty hit (press on blank canvas) never arms.
+        assert!(!should_arm_drag(None, &[cid("a")]));
+    }
+
     // ---- drag geometry (OCEAN-194) -----------------------------------------
 
     #[test]
@@ -2084,5 +2152,37 @@ mod tests {
         assert_eq!((a.rect.x, a.rect.y), (40.0, 40.0), "a click must not move the component");
         // But it did select it.
         assert_eq!(led.selection.component_ids, vec![cid("a")]);
+    }
+
+    #[test]
+    fn a_toggle_off_press_with_drift_does_not_move_the_deselected_component() {
+        // OCEAN-194 P2 (Codex on #48), end-to-end: Ctrl/Cmd-click an
+        // already-selected component to deselect it, then drift past the
+        // threshold before release. The deselected component must NOT receive a
+        // MoveComponent — the press armed no drag.
+        let mut l = ledger();
+        l.apply_patch(upsert("a", "card", Rect::new(0.0, 0.0, 100.0, 100.0), Value::Null), ActorRef::system(), 0);
+        // Pre-select it.
+        l.apply_patch(SurfacePatch::Select { ids: vec![cid("a")] }, ActorRef::system(), 0);
+        let (mut view, cell) = view_over_shared_cell(l);
+
+        // Toggle-off press on a (it was selected) then drift 30px.
+        view.on_left_down(10.0, 10.0, SelectMode::Toggle);
+        view.on_drag_move(40.0, 40.0); // +30,+30: would cross the threshold
+        view.on_left_up(40.0, 40.0);
+
+        let g = cell.lock().unwrap();
+        let led = g.as_ref().unwrap();
+        let a = led.component(&cid("a")).unwrap();
+        assert_eq!(
+            (a.rect.x, a.rect.y),
+            (0.0, 0.0),
+            "the just-deselected component must not drift/move"
+        );
+        // And it was deselected.
+        assert!(
+            led.selection.component_ids.is_empty(),
+            "toggle-off cleared the selection"
+        );
     }
 }
