@@ -5052,21 +5052,16 @@ impl OceanGuiShell {
         patches: Vec<SurfacePatchEnvelope>,
         cx: &mut Context<Self>,
     ) {
-        // OCEAN-186: detect whether THIS batch actually asked to move the camera
-        // (an explicit `SetViewport` op) BEFORE the patches are consumed by
-        // `apply_patches_to_ledger`. The viewport adoption below must be gated on
-        // this: an ordinary batch (UpsertComponent, MoveComponent, …) leaves
-        // `ledger.viewport` at its prior/default value, so blindly copying it into
-        // the view would SNAP the user's pan/zoom back to that stale ledger
-        // viewport (the user's camera lives only in `interaction.viewport`). We
-        // only adopt the ledger viewport when the agent explicitly requested it.
-        let batch_sets_viewport = batch_carries_set_viewport(&patches);
-        // OCEAN-196: a `Focus(Canvas)` op is an explicit "fit the camera to all
-        // content" request — gated identically to `SetViewport` so it only moves
-        // the camera when the agent actually asked. `ledger.rs` records that
-        // FocusTarget::Canvas fit-to-content "is a viewport concern handled by the
-        // renderer"; this is where the renderer honors it.
-        let batch_fits_canvas = batch_carries_focus_canvas(&patches);
+        // OCEAN-186/OCEAN-196: capture the batch's FINAL camera intent BEFORE the
+        // patches are consumed by `apply_patches_to_ledger`. The ledger replays the
+        // batch sequentially, so it ends in the state of the LAST camera op; the
+        // view's camera must match that, not the result of applying every camera op
+        // in a fixed order. `None` means an ordinary batch (UpsertComponent,
+        // MoveComponent, …) that carries no camera op — those leave
+        // `ledger.viewport` at its prior/default value, so we must NOT touch the
+        // view camera (the user's pan/zoom lives only in `interaction.viewport` and
+        // would otherwise snap back to the stale ledger viewport).
+        let camera_op = last_camera_op(&patches);
 
         let Some(ledger) =
             apply_patches_to_ledger(self.canvas_ledger(), session_id, canvas_id, patches)
@@ -5074,28 +5069,30 @@ impl OceanGuiShell {
             return;
         };
 
-        // An agent-applied `SetViewport` only moves `ledger.viewport`; the
-        // renderer reads the view-local `interaction.viewport` (which the user's
-        // own pan/zoom updates directly). Adopt the ledger viewport into the view
-        // at the moment a viewport-carrying batch lands so an agent SetViewport
-        // actually moves the camera — but only then, so a non-viewport batch
-        // leaves the user's pan/zoom untouched.
-        if batch_sets_viewport {
-            let agent_viewport = ledger.viewport;
-            self.canvas_view.update(cx, |view, _cx| {
-                view.interaction_mut().viewport = agent_viewport;
-            });
-        }
-
-        // A `Focus(Canvas)` re-fits the camera to frame every component's bounding
-        // box into the current view bounds (with padding). Same intentional-adopt
-        // gating as SetViewport: only on a batch that carries the op. The fit math
-        // lives in the view (it knows its painted size); an empty canvas no-ops.
-        if batch_fits_canvas {
-            let rects: Vec<Rect> = ledger.components.values().map(|c| c.rect).collect();
-            self.canvas_view.update(cx, |view, _cx| {
-                view.interaction_mut().fit_to_content(&rects, FIT_PADDING);
-            });
+        // Apply ONLY the batch's last camera-affecting op, mirroring the ledger's
+        // sequential replay. A non-camera batch (`None`) leaves the user's pan/zoom
+        // untouched. Both effects target the view-local `interaction.viewport`; the
+        // renderer reads that, while the user's own pan/zoom updates it directly.
+        match camera_op {
+            // An agent `SetViewport` only moves `ledger.viewport`; adopt it into
+            // the view so the camera actually moves.
+            Some(CameraOp::SetViewport) => {
+                let agent_viewport = ledger.viewport;
+                self.canvas_view.update(cx, |view, _cx| {
+                    view.interaction_mut().viewport = agent_viewport;
+                });
+            }
+            // A `Focus(Canvas)` re-fits the camera to frame every component's
+            // bounding box into the current view bounds (with padding). The fit
+            // math lives in the view (it knows its painted size); an empty canvas
+            // no-ops.
+            Some(CameraOp::FitCanvas) => {
+                let rects: Vec<Rect> = ledger.components.values().map(|c| c.rect).collect();
+                self.canvas_view.update(cx, |view, _cx| {
+                    view.interaction_mut().fit_to_content(&rects, FIT_PADDING);
+                });
+            }
+            None => {}
         }
 
         self.set_canvas_ledger(Some(ledger));
@@ -8047,39 +8044,40 @@ fn surface_render_target(use_tldraw: bool) -> SurfaceRenderTarget {
 /// through the view's [`LedgerSink`]). Falls back to `0` if the clock is before
 /// the epoch — a stamp value, not a correctness invariant.
 /// Whether a batch of incoming patches contains an explicit `SetViewport` op —
-/// i.e. the agent asked to move the camera this batch (OCEAN-186).
-///
-/// This gates viewport adoption in [`OceanGuiShell::apply_surface_patch_event`]:
-/// only a batch that actually carries a `SetViewport` should overwrite the
-/// view's `interaction.viewport`. Without the gate, an ordinary batch (which
-/// leaves `ledger.viewport` at its prior/default value) would snap the user's
-/// own pan/zoom back to that stale viewport. Pure + window-free so the gate is
-/// assertable headlessly.
-fn batch_carries_set_viewport(patches: &[SurfacePatchEnvelope]) -> bool {
-    use super::canvas::SurfacePatch;
-    patches
-        .iter()
-        .any(|env| matches!(env.patch, SurfacePatch::SetViewport { .. }))
+/// The two camera-affecting patch kinds a batch can carry: an explicit
+/// `SetViewport` (adopt the ledger viewport) or a `Focus(Canvas)` (fit the camera
+/// to all content). Used by [`last_camera_op`] to pick the batch's final camera
+/// intent (OCEAN-196).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CameraOp {
+    /// Adopt `ledger.viewport` (an explicit `SetViewport`).
+    SetViewport,
+    /// Fit the camera to all content (a `Focus { target: Canvas }`).
+    FitCanvas,
 }
 
-/// Whether a batch of incoming patches contains an explicit `Focus(Canvas)` op —
-/// i.e. the agent asked to fit the camera to all content this batch (OCEAN-196).
+/// The LAST camera-affecting op in batch order, or `None` if the batch carries no
+/// camera op (OCEAN-196).
 ///
-/// A `Focus { target: Canvas }` is an explicit "move the camera (fit to content)"
-/// just like `SetViewport`, so it gates the same intentional viewport adoption in
-/// [`OceanGuiShell::apply_surface_patch_event`]: only a batch that carries it
-/// re-fits the camera, leaving the user's own pan/zoom untouched on unrelated
-/// batches. `Focus(Component)`/`Focus(Edge)` are selection ops, not camera ops,
-/// so they do NOT match. Pure + window-free so the gate is assertable headlessly.
-fn batch_carries_focus_canvas(patches: &[SurfacePatchEnvelope]) -> bool {
+/// A daemon batch is replayed through the ledger sequentially, so the ledger ends
+/// in the state of the batch's *final* op. The view's camera must agree: applying
+/// *both* a `SetViewport`-adopt and a `Focus(Canvas)`-fit in a fixed order (the
+/// previous two-independent-`if` shape) let an earlier op override the batch's
+/// actual final intent — e.g. `[Focus(Canvas), SetViewport{v}]` ends at `v` in the
+/// ledger but would get re-fitted in the view. Walking the batch in reverse and
+/// honoring only the last camera op keeps the view's camera consistent with the
+/// ledger's sequential replay.
+///
+/// `Focus(Component)`/`Focus(Edge)` are selection ops, not camera ops, so they do
+/// NOT match. Pure + window-free so the choice is assertable headlessly.
+fn last_camera_op(patches: &[SurfacePatchEnvelope]) -> Option<CameraOp> {
     use super::canvas::{FocusTarget, SurfacePatch};
-    patches.iter().any(|env| {
-        matches!(
-            env.patch,
-            SurfacePatch::Focus {
-                target: FocusTarget::Canvas
-            }
-        )
+    patches.iter().rev().find_map(|env| match &env.patch {
+        SurfacePatch::SetViewport { .. } => Some(CameraOp::SetViewport),
+        SurfacePatch::Focus {
+            target: FocusTarget::Canvas,
+        } => Some(CameraOp::FitCanvas),
+        _ => None,
     })
 }
 
@@ -9151,8 +9149,9 @@ mod tests {
             upsert_envelope("a", "card a"),
             set_viewport_envelope(Viewport { x: 120.0, y: 80.0, zoom: 2.5 }),
         ];
-        assert!(
-            batch_carries_set_viewport(&batch),
+        assert_eq!(
+            last_camera_op(&batch),
+            Some(CameraOp::SetViewport),
             "a batch containing SetViewport must be detected so the camera adopts it"
         );
     }
@@ -9168,13 +9167,14 @@ mod tests {
             upsert_envelope("a", "card a"),
             upsert_envelope("b", "card b"),
         ];
-        assert!(
-            !batch_carries_set_viewport(&batch),
+        assert_eq!(
+            last_camera_op(&batch),
+            None,
             "a non-viewport batch must not trigger viewport adoption — the user's pan/zoom must be preserved"
         );
 
-        // An empty batch likewise carries no viewport change.
-        assert!(!batch_carries_set_viewport(&[]));
+        // An empty batch likewise carries no camera op.
+        assert_eq!(last_camera_op(&[]), None);
     }
 
     #[test]
@@ -9189,14 +9189,14 @@ mod tests {
         );
         view.interaction_mut().viewport = user_viewport;
 
-        // A non-viewport batch arrives. The shell's gate says "don't adopt".
+        // A non-viewport batch arrives. The shell's gate says "no camera op".
         let non_viewport_batch = vec![upsert_envelope("a", "card a")];
-        let adopt = batch_carries_set_viewport(&non_viewport_batch);
-        assert!(!adopt, "non-viewport batch must not adopt the ledger viewport");
+        let camera_op = last_camera_op(&non_viewport_batch);
+        assert_eq!(camera_op, None, "non-viewport batch must not adopt the ledger viewport");
 
-        // Because the gate is false, the shell skips the copy — the user's camera
-        // is preserved verbatim.
-        if adopt {
+        // Because there's no camera op, the shell skips the copy — the user's
+        // camera is preserved verbatim.
+        if camera_op == Some(CameraOp::SetViewport) {
             // (Never taken in this test; mirrors the shell's gated copy.)
             view.interaction_mut().viewport = Viewport::default();
         }
@@ -9209,7 +9209,7 @@ mod tests {
         // And a SetViewport batch IS adopted (the camera moves).
         let agent_viewport = Viewport { x: 10.0, y: 20.0, zoom: 0.5 };
         let viewport_batch = vec![set_viewport_envelope(agent_viewport)];
-        if batch_carries_set_viewport(&viewport_batch) {
+        if last_camera_op(&viewport_batch) == Some(CameraOp::SetViewport) {
             view.interaction_mut().viewport = agent_viewport;
         }
         assert_eq!(
@@ -9242,8 +9242,9 @@ mod tests {
         // recognized so the shell re-fits the camera — same intentional adoption
         // as SetViewport.
         let batch = vec![upsert_envelope("a", "card a"), focus_canvas_envelope()];
-        assert!(
-            batch_carries_focus_canvas(&batch),
+        assert_eq!(
+            last_camera_op(&batch),
+            Some(CameraOp::FitCanvas),
             "a batch containing Focus(Canvas) must be detected so the camera fits"
         );
     }
@@ -9252,8 +9253,8 @@ mod tests {
     fn non_focus_batch_and_focus_component_are_not_detected() {
         use super::super::canvas::FocusTarget;
         // Plain upserts: no fit.
-        assert!(!batch_carries_focus_canvas(&[upsert_envelope("a", "a")]));
-        assert!(!batch_carries_focus_canvas(&[]));
+        assert_eq!(last_camera_op(&[upsert_envelope("a", "a")]), None);
+        assert_eq!(last_camera_op(&[]), None);
 
         // Focus(Component) is a SELECTION op, not a camera op — it must NOT trigger
         // a fit (only Focus(Canvas) does).
@@ -9268,8 +9269,9 @@ mod tests {
                 target: FocusTarget::Component { component_id: ComponentId::new("a") },
             },
         };
-        assert!(
-            !batch_carries_focus_canvas(&[focus_component]),
+        assert_eq!(
+            last_camera_op(&[focus_component]),
+            None,
             "Focus(Component) is a selection op, not a fit-to-content camera op"
         );
     }
@@ -9317,7 +9319,7 @@ mod tests {
 
         // A Focus(Canvas) batch arrives -> the gate fires and the shell re-fits.
         let batch = vec![focus_canvas_envelope()];
-        assert!(batch_carries_focus_canvas(&batch));
+        assert_eq!(last_camera_op(&batch), Some(CameraOp::FitCanvas));
         let rects: Vec<Rect> = ledger.components.values().map(|c| c.rect).collect();
         view.interaction_mut().fit_to_content(&rects, FIT_PADDING);
 
@@ -9330,6 +9332,90 @@ mod tests {
         assert!(
             view.interaction().viewport.zoom >= 0.2 && view.interaction().viewport.zoom <= 4.0,
             "fitted zoom stays in the sane range"
+        );
+    }
+
+    // ---- OCEAN-196 (Codex P2 on #50): the LAST camera op in batch order wins ---
+
+    #[test]
+    fn batch_ending_in_set_viewport_adopts_the_explicit_viewport_not_the_fit() {
+        use super::super::canvas::Viewport;
+        // REGRESSION (Codex P2 on #50): the ledger replays a batch sequentially, so
+        // `[Focus(Canvas), SetViewport{v}]` ends at the EXPLICIT viewport `v`. The
+        // old two-independent-`if` shape applied the SetViewport-adopt AND THEN the
+        // Focus(Canvas)-fit unconditionally, overriding the batch's final intent.
+        // `last_camera_op` must pick the LAST camera op = SetViewport.
+        let explicit = Viewport { x: 42.0, y: 24.0, zoom: 1.25 };
+        let batch = vec![
+            focus_canvas_envelope(),
+            set_viewport_envelope(explicit),
+        ];
+        assert_eq!(
+            last_camera_op(&batch),
+            Some(CameraOp::SetViewport),
+            "a batch ending in SetViewport must adopt the explicit viewport, not be overridden by an earlier Focus(Canvas) fit"
+        );
+    }
+
+    #[test]
+    fn batch_ending_in_focus_canvas_fits_even_after_an_earlier_set_viewport() {
+        use super::super::canvas::Viewport;
+        // The mirror case: `[SetViewport{v}, Focus(Canvas)]` ends at the FIT, since
+        // Focus(Canvas) is the batch's last camera op. (This case happened to be
+        // correct under the old fixed order by luck; here it's correct by rule.)
+        let batch = vec![
+            set_viewport_envelope(Viewport { x: 42.0, y: 24.0, zoom: 1.25 }),
+            focus_canvas_envelope(),
+        ];
+        assert_eq!(
+            last_camera_op(&batch),
+            Some(CameraOp::FitCanvas),
+            "a batch ending in Focus(Canvas) must fit-to-content — the last camera op wins"
+        );
+    }
+
+    #[test]
+    fn batch_ending_in_set_viewport_moves_camera_to_explicit_viewport_end_to_end() {
+        use super::super::canvas::{CanvasLedger, CanvasMode, OceanCanvasView, Vec2, Viewport};
+
+        // End-to-end model of the shell's gated apply for `[Focus(Canvas),
+        // SetViewport{v}]`: the camera must land on `v`, NOT a fit of the content.
+        let mut ledger = CanvasLedger::new("canvas:main", "sess-1", CanvasMode::Freeform);
+        ledger.apply_patch(
+            SurfacePatch::UpsertComponent {
+                component: CanvasComponentPatch {
+                    id: ComponentId::new("a"),
+                    kind: "card".to_string(),
+                    rect: Some(Rect::new(0.0, 0.0, 100.0, 100.0)),
+                    z_index: None,
+                    content: serde_json::Value::Null,
+                    metadata: serde_json::Value::Null,
+                },
+            },
+            CanvasActorRef::system(),
+            0,
+        );
+        let mut view = OceanCanvasView::from_ledger(ledger.clone());
+        view.interaction_mut().last_view_size = Some(Vec2::new(800.0, 600.0));
+
+        let explicit = Viewport { x: 42.0, y: 24.0, zoom: 1.25 };
+        // The batch ends in SetViewport, so the shell adopts the ledger viewport
+        // (which the SetViewport op set) rather than fitting.
+        let batch = vec![focus_canvas_envelope(), set_viewport_envelope(explicit)];
+        match last_camera_op(&batch) {
+            Some(CameraOp::SetViewport) => {
+                view.interaction_mut().viewport = explicit;
+            }
+            Some(CameraOp::FitCanvas) => {
+                let rects: Vec<Rect> = ledger.components.values().map(|c| c.rect).collect();
+                view.interaction_mut().fit_to_content(&rects, FIT_PADDING);
+            }
+            None => {}
+        }
+        assert_eq!(
+            view.interaction().viewport,
+            explicit,
+            "the camera must end at the batch's explicit final SetViewport, not a content fit"
         );
     }
 
