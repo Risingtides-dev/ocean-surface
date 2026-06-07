@@ -11,7 +11,7 @@ use leptos::prelude::*;
 #[component]
 pub fn WaveLogo() -> impl IntoView {
     view! {
-        <svg class="icon icon--wave" viewBox="0 0 24 24" width="1em" height="1em"
+        <svg class="icon icon--stroke icon--wave" viewBox="0 0 24 24" width="1em" height="1em"
              fill="none" stroke="currentColor" stroke-width="2"
              stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M2 16c2 0 2.8-2 5-2s3 2 5 2 2.8-2 5-2 3 2 5 2" />
@@ -26,7 +26,7 @@ pub fn WaveLogo() -> impl IntoView {
 #[component]
 pub fn Menu() -> impl IntoView {
     view! {
-        <svg class="icon" viewBox="0 0 24 24" width="1em" height="1em"
+        <svg class="icon icon--stroke" viewBox="0 0 24 24" width="1em" height="1em"
              fill="none" stroke="currentColor" stroke-width="2"
              stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <line x1="3" y1="6" x2="21" y2="6" />
@@ -40,7 +40,7 @@ pub fn Menu() -> impl IntoView {
 #[component]
 pub fn Council() -> impl IntoView {
     view! {
-        <svg class="icon" viewBox="0 0 24 24" width="1em" height="1em"
+        <svg class="icon icon--stroke" viewBox="0 0 24 24" width="1em" height="1em"
              fill="none" stroke="currentColor" stroke-width="2"
              stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M3 9l9-5 9 5" />
@@ -58,7 +58,7 @@ pub fn Council() -> impl IntoView {
 #[component]
 pub fn Groups() -> impl IntoView {
     view! {
-        <svg class="icon" viewBox="0 0 24 24" width="1em" height="1em"
+        <svg class="icon icon--stroke" viewBox="0 0 24 24" width="1em" height="1em"
              fill="none" stroke="currentColor" stroke-width="2"
              stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M16 19v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
@@ -73,7 +73,7 @@ pub fn Groups() -> impl IntoView {
 #[component]
 pub fn Capture() -> impl IntoView {
     view! {
-        <svg class="icon" viewBox="0 0 24 24" width="1em" height="1em"
+        <svg class="icon icon--stroke" viewBox="0 0 24 24" width="1em" height="1em"
              fill="none" stroke="currentColor" stroke-width="2"
              stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />

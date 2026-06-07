@@ -98,11 +98,30 @@ body {
   line-height: 1;
 }
 
-/* Inline SVG icons inherit text color + size (1em). */
+/* Inline SVG icons inherit text color + size (1em). The default treatment is
+   FILLED (the game-icons set: SoundOn/SoundOff/Amplitude) — they need
+   `fill: currentColor` to be visible at all. */
 .icon {
   display: inline-block;
   vertical-align: middle;
   fill: currentColor;
+}
+/* Stroke (line) icons — WaveLogo, Menu, Council, Groups, Capture. Their SVGs
+   carry `fill="none" stroke="currentColor"` as presentation attributes, but a
+   class selector (`.icon`, specificity 0-1-0) outranks a presentation attribute
+   (0-0-0), so the global `.icon { fill: currentColor }` above would otherwise
+   FILL them — collapsing each line drawing into a solid blob. This rule uses a
+   two-class selector (`.icon.icon--stroke`, specificity 0-2-0) so it
+   deterministically beats `.icon` regardless of source order, restoring the
+   intended outline rendering. `fill: none` cascades to the child paths/lines
+   (which set no fill of their own); `stroke` + `stroke-width` are restated so
+   the look never depends on the SVG attributes surviving. (OCEAN-202) */
+.icon.icon--stroke {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 .ocean-brand__name {
   font-weight: 600; letter-spacing: 0.02em;
