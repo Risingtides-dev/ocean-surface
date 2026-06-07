@@ -1208,7 +1208,15 @@ impl Daemon {
                     title: title_hint.as_deref(),
                     workspace_root: &cwd,
                     project_id: project.as_deref(),
-                    client_type: Some(client_type),
+                    // A session's `client_type` is the stable surface MEDIUM
+                    // (surface-web / surface-extension), per the AGENTS.md session
+                    // contract — never the per-turn routing tag. Even when the
+                    // first interaction on a fresh surface is a voice transcript
+                    // (so the threaded `client_type` is "leo-voice"), the session
+                    // itself is still a web/extension surface; voice is a mode OF
+                    // it, not its own surface. Only the AgentTurnRequest below
+                    // carries the per-turn `client_type` (leo-voice for voice).
+                    client_type: Some(surface_client_type()),
                 };
                 let create_url = format!("{}/v1/agent/sessions", url.trim_end_matches('/'));
                 let res = Request::post(&create_url)
@@ -2914,5 +2922,33 @@ mod tests {
         };
         let v: Value = serde_json::from_str(&serde_json::to_string(&body).unwrap()).unwrap();
         assert_eq!(v["client_type"], "surface-web");
+    }
+
+    #[test]
+    fn voice_first_session_create_uses_surface_identity_not_leo_voice() {
+        // Codex P2 regression on #45 (OCEAN-181). When the FIRST interaction on a
+        // fresh surface is a voice transcript, the per-turn tag threaded through
+        // dispatch is "leo-voice" — but the SESSION-CREATE body must still carry
+        // the stable surface MEDIUM (surface-web / surface-extension), per the
+        // AGENTS.md session contract. A session's client_type is a surface
+        // identity, not a per-turn routing tag; voice is a mode OF the web /
+        // extension surface, not its own surface. dispatch_prompt builds this
+        // body with surface_client_type() (web literal off-wasm), NOT the
+        // threaded client_type. Lock that: even on a voice-first session create,
+        // the wire client_type must NOT be leo-voice.
+        let body = AgentSessionCreateRequest {
+            title: Some("hey there"),
+            workspace_root: "/",
+            project_id: None,
+            // Mirrors the session-create call site: surface_client_type() — which
+            // off-wasm is surface-web — regardless of the (voice) turn tag.
+            client_type: Some("surface-web"),
+        };
+        let v: Value = serde_json::from_str(&serde_json::to_string(&body).unwrap()).unwrap();
+        assert_eq!(v["client_type"], "surface-web");
+        assert_ne!(
+            v["client_type"], "leo-voice",
+            "session client_type must be the surface medium, never the per-turn voice tag",
+        );
     }
 }
