@@ -26,7 +26,7 @@ use gpui::{
 use serde_json::Value;
 
 use super::hit_test::{hit_test, paint_order, Vec2, ViewportTransform};
-use super::ledger::{CanvasComponent, CanvasLedger, ComponentKind};
+use super::ledger::{CanvasComponent, CanvasEdge, CanvasLedger, ComponentKind, EdgeKind, EdgeRoute};
 use super::patch::{ActorRef, ComponentId, EdgeId, Rect, SurfacePatch, Viewport};
 use super::templates::{NodeStatus, TemplateContent};
 use crate::shell::theme;
@@ -140,6 +140,86 @@ pub fn edge_endpoints(from: &Rect, to: &Rect) -> (Vec2, Vec2) {
         }
     }
     best
+}
+
+/// The drawable style for an [`EdgeKind`]: stroke color and thickness in canvas
+/// units. Distinct kinds read differently so a dependency link, a workflow flow
+/// arrow, and a loose reference are visually separable. `Other(_)` (any
+/// agent-supplied kind outside the known set) falls back to the muted reference
+/// style. Pure data — `Hsla` carries no window dependency.
+pub fn edge_style_for_kind(kind: &EdgeKind) -> (Hsla, f32) {
+    match kind {
+        // Flow (workflow arrows): the accent, drawn boldest — it's the spine of
+        // a pipeline and should read first.
+        EdgeKind::Flow => (theme::accent(), 2.0),
+        // Dependency: a firm but secondary link.
+        EdgeKind::Dependency => (theme::accent_dark(), 1.5),
+        // Reference / anything unknown: a quiet hairline.
+        EdgeKind::Reference | EdgeKind::Other(_) => (theme::muted(), 1.0),
+    }
+}
+
+/// The polyline an edge follows between two component rects, in **canvas** space,
+/// honoring its [`EdgeRoute`]. Always returns at least the two endpoints; routes
+/// that bend insert waypoints between them:
+///
+/// - [`EdgeRoute::Straight`] → `[from, to]` (a single segment).
+/// - [`EdgeRoute::Orthogonal`] → `[from, elbow, to]` — an L-shaped right-angle
+///   route whose elbow turns the corner at `(to.x, from.y)`.
+/// - [`EdgeRoute::Bezier`] → `[from, mid, to]` — the endpoints plus the sampled
+///   curve midpoint, enough for the (line-segment) renderer to read a bowed path
+///   and to place the label at the true visual middle.
+///
+/// The renderer draws this as a connected polyline; the geometry is the testable
+/// contract `render_edge` consumes.
+pub fn edge_route(from: &Rect, to: &Rect, route: EdgeRoute) -> Vec<Vec2> {
+    let (a, b) = edge_endpoints(from, to);
+    match route {
+        EdgeRoute::Straight => vec![a, b],
+        EdgeRoute::Orthogonal => {
+            let elbow = Vec2::new(b.x, a.y);
+            vec![a, elbow, b]
+        }
+        EdgeRoute::Bezier => {
+            let mid = Vec2::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+            vec![a, mid, b]
+        }
+    }
+}
+
+/// The point at which to anchor an edge's label: the midpoint **along** the
+/// routed polyline (by cumulative segment length), so the label sits on the
+/// drawn path rather than on the straight-line average of the endpoints. Returns
+/// `(0,0)` for an empty input (no points to place against).
+pub fn edge_label_anchor(points: &[Vec2]) -> Vec2 {
+    match points {
+        [] => Vec2::new(0.0, 0.0),
+        [only] => *only,
+        _ => {
+            // Total path length, then walk to the half-length point.
+            let seg_len = |p: Vec2, q: Vec2| ((p.x - q.x).powi(2) + (p.y - q.y).powi(2)).sqrt();
+            let total: f32 = points.windows(2).map(|w| seg_len(w[0], w[1])).sum();
+            if total <= f32::EPSILON {
+                return points[0];
+            }
+            let target = total / 2.0;
+            let mut walked = 0.0;
+            for w in points.windows(2) {
+                let (p, q) = (w[0], w[1]);
+                let len = seg_len(p, q);
+                if walked + len >= target {
+                    let t = if len > f32::EPSILON {
+                        (target - walked) / len
+                    } else {
+                        0.0
+                    };
+                    return Vec2::new(p.x + (q.x - p.x) * t, p.y + (q.y - p.y) * t);
+                }
+                walked += len;
+            }
+            *points.last().unwrap()
+        }
+    }
 }
 
 /// Canvas-space offsets of the vertical grid lines visible across a viewport of
@@ -641,33 +721,75 @@ impl OceanCanvasView {
         out
     }
 
-    /// Build a thin element standing in for an edge between two components. GPUI
-    /// 0.2 has no first-class line primitive in this crate's element set, so an
-    /// edge is drawn as a 1px-tall accent bar spanning the bounding box between
-    /// its endpoints — enough to read connectivity natively. (A proper
-    /// path/bezier renderer is a later refinement; the geometry it needs is
-    /// already provided by [`edge_endpoints`].)
+    /// Build the drawable element for one [`CanvasEdge`] between two components.
+    ///
+    /// GPUI 0.2 has no first-class line primitive in this crate's element set, so
+    /// each segment of the edge's routed polyline (from [`edge_route`], honoring
+    /// [`EdgeRoute`]) is drawn as a thin bar across that segment's bounding box.
+    /// The stroke color/width come from [`edge_style_for_kind`] so a flow arrow, a
+    /// dependency link, and a loose reference read distinctly. If the edge carries
+    /// a `label`, it is drawn at the polyline midpoint ([`edge_label_anchor`])
+    /// using the same mono text idiom as component chips.
+    ///
+    /// (A true path/bezier stroke is a later refinement; the geometry it needs —
+    /// the routed points and the label anchor — is already provided by the pure
+    /// helpers and is what this element consumes.)
     fn render_edge(
         &self,
+        edge: &CanvasEdge,
         from_rect: &Rect,
         to_rect: &Rect,
         transform: &ViewportTransform,
     ) -> impl IntoElement {
-        let (a_canvas, b_canvas) = edge_endpoints(from_rect, to_rect);
-        let a = transform.canvas_to_screen(a_canvas);
-        let b = transform.canvas_to_screen(b_canvas);
-        let left = a.x.min(b.x);
-        let top = a.y.min(b.y);
-        let w = (a.x - b.x).abs().max(1.0);
-        let h = (a.y - b.y).abs().max(1.0);
-        div()
-            .absolute()
-            .left(px(left))
-            .top(px(top))
-            .w(px(w))
-            .h(px(h))
-            .border_b(px(1.5))
-            .border_color(theme::accent())
+        let (color, stroke) = edge_style_for_kind(&edge.kind);
+        let stroke_px = transform.scale(stroke).max(1.0);
+        let points = edge_route(from_rect, to_rect, edge.route);
+
+        let mut layer = div().absolute().top_0().left_0().right_0().bottom_0();
+
+        // One bar per segment of the routed polyline.
+        for seg in points.windows(2) {
+            let a = transform.canvas_to_screen(seg[0]);
+            let b = transform.canvas_to_screen(seg[1]);
+            let left = a.x.min(b.x);
+            let top = a.y.min(b.y);
+            let horizontal = (a.y - b.y).abs() <= (a.x - b.x).abs();
+            // For a near-horizontal segment draw a full-width bottom rule; for a
+            // near-vertical one draw a full-height left rule. This keeps each
+            // segment a crisp 1-axis stroke rather than a filled bounding box.
+            let mut bar = div().absolute().left(px(left)).top(px(top));
+            if horizontal {
+                let w = (a.x - b.x).abs().max(1.0);
+                bar = bar.w(px(w)).h(px(stroke_px)).bg(color);
+            } else {
+                let h = (a.y - b.y).abs().max(1.0);
+                bar = bar.w(px(stroke_px)).h(px(h)).bg(color);
+            }
+            layer = layer.child(bar);
+        }
+
+        // Label at the polyline midpoint.
+        if let Some(label) = edge.label.as_ref().filter(|s| !s.is_empty()) {
+            let anchor = transform.canvas_to_screen(edge_label_anchor(&points));
+            layer = layer.child(
+                div()
+                    .absolute()
+                    // Nudge the label up off the line so the stroke doesn't bisect
+                    // the text; left is anchored at the midpoint.
+                    .left(px(anchor.x))
+                    .top(px(anchor.y - transform.scale(12.0).max(8.0)))
+                    .px(px(transform.scale(4.0).max(1.0)))
+                    .bg(theme::background())
+                    .font_family(theme::MONO_FONT)
+                    .text_size(px(transform.scale(10.0).max(6.0)))
+                    .text_color(color)
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(label.clone()),
+            );
+        }
+
+        layer
     }
 }
 
@@ -721,7 +843,8 @@ impl Render for OceanCanvasView {
                     ledger.components.get(&edge.from.component_id),
                     ledger.components.get(&edge.to.component_id),
                 ) {
-                    edge_layer = edge_layer.child(self.render_edge(&from.rect, &to.rect, &transform));
+                    edge_layer =
+                        edge_layer.child(self.render_edge(edge, &from.rect, &to.rect, &transform));
                 }
             }
             root = root.child(edge_layer);
@@ -943,6 +1066,72 @@ mod tests {
     }
 
     #[test]
+    fn edge_route_straight_is_just_the_endpoints() {
+        let from = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let to = Rect::new(300.0, 0.0, 100.0, 100.0);
+        let pts = edge_route(&from, &to, EdgeRoute::Straight);
+        assert_eq!(pts, vec![Vec2::new(100.0, 50.0), Vec2::new(300.0, 50.0)]);
+    }
+
+    #[test]
+    fn edge_route_orthogonal_turns_at_an_elbow() {
+        // `from` upper-left, `to` lower-right: the L-route elbows at (to.x, from.y).
+        let from = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let to = Rect::new(300.0, 300.0, 100.0, 100.0);
+        let pts = edge_route(&from, &to, EdgeRoute::Orthogonal);
+        let (a, b) = edge_endpoints(&from, &to);
+        assert_eq!(pts.len(), 3, "orthogonal route is from -> elbow -> to");
+        assert_eq!(pts[0], a);
+        assert_eq!(pts[1], Vec2::new(b.x, a.y), "elbow turns the corner");
+        assert_eq!(pts[2], b);
+        // The two segments are axis-aligned (one horizontal, one vertical).
+        assert!((pts[0].y - pts[1].y).abs() < 1e-3, "first leg is horizontal");
+        assert!((pts[1].x - pts[2].x).abs() < 1e-3, "second leg is vertical");
+    }
+
+    #[test]
+    fn edge_route_bezier_carries_the_midpoint() {
+        let from = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let to = Rect::new(300.0, 0.0, 100.0, 100.0);
+        let pts = edge_route(&from, &to, EdgeRoute::Bezier);
+        let (a, b) = edge_endpoints(&from, &to);
+        assert_eq!(pts, vec![a, Vec2::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0), b]);
+    }
+
+    #[test]
+    fn edge_label_anchor_is_the_path_midpoint() {
+        // Straight horizontal: midpoint sits halfway along.
+        let mid = edge_label_anchor(&[Vec2::new(100.0, 50.0), Vec2::new(300.0, 50.0)]);
+        assert_eq!(mid, Vec2::new(200.0, 50.0));
+
+        // L-route 100 across then 100 down: half-length (100) lands at the elbow.
+        let l = edge_label_anchor(&[
+            Vec2::new(0.0, 0.0),
+            Vec2::new(100.0, 0.0),
+            Vec2::new(100.0, 100.0),
+        ]);
+        assert_eq!(l, Vec2::new(100.0, 0.0), "half the L-length is the elbow");
+
+        // Degenerate inputs don't panic.
+        assert_eq!(edge_label_anchor(&[]), Vec2::new(0.0, 0.0));
+        assert_eq!(edge_label_anchor(&[Vec2::new(7.0, 9.0)]), Vec2::new(7.0, 9.0));
+    }
+
+    #[test]
+    fn edge_style_distinguishes_kinds() {
+        let (flow_c, flow_w) = edge_style_for_kind(&EdgeKind::Flow);
+        let (dep_c, _) = edge_style_for_kind(&EdgeKind::Dependency);
+        let (ref_c, ref_w) = edge_style_for_kind(&EdgeKind::Reference);
+        // Flow reads boldest, reference thinnest.
+        assert!(flow_w > ref_w, "flow stroke wider than reference");
+        assert_ne!(flow_c, ref_c, "flow and reference are different colors");
+        assert_ne!(flow_c, dep_c, "flow and dependency are different colors");
+        // An unknown agent-supplied kind falls back to the reference style.
+        let (other_c, other_w) = edge_style_for_kind(&EdgeKind::Other("custom".into()));
+        assert_eq!((other_c, other_w), (ref_c, ref_w));
+    }
+
+    #[test]
     fn grid_offsets_are_aligned_and_cover_the_span() {
         let pan = 10.0;
         let span = 100.0;
@@ -1156,7 +1345,7 @@ mod tests {
                     from: Endpoint { component_id: ComponentId::new("a"), port: None },
                     to: Endpoint { component_id: ComponentId::new("b"), port: None },
                     kind: Some("flow".into()),
-                    label: None,
+                    label: Some("approves".into()),
                     metadata: Value::Null,
                 },
             },
@@ -1167,9 +1356,24 @@ mod tests {
         let edge = l.edges.values().next().unwrap();
         let from = &l.components.get(&edge.from.component_id).unwrap().rect;
         let to = &l.components.get(&edge.to.component_id).unwrap().rect;
+
+        // Endpoints the helpers resolve.
         let (a, b) = edge_endpoints(from, to);
         assert_eq!(a, Vec2::new(100.0, 50.0));
         assert_eq!(b, Vec2::new(300.0, 50.0));
+
+        // The full path `render_edge` consumes: the routed polyline (a straight
+        // edge by default) plus the styled stroke and the midpoint label anchor.
+        let route = edge_route(from, to, edge.route);
+        assert_eq!(route, vec![a, b], "default route is the straight segment");
+        let (color, width) = edge_style_for_kind(&edge.kind);
+        assert_eq!((color, width), edge_style_for_kind(&EdgeKind::Flow));
+        assert_eq!(
+            edge_label_anchor(&route),
+            Vec2::new(200.0, 50.0),
+            "label sits at the segment midpoint"
+        );
+        assert_eq!(edge.label.as_deref(), Some("approves"));
     }
 
     // ---- template content (Slice 8) ----------------------------------------
