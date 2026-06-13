@@ -112,7 +112,8 @@ fn FloatStream(turns: RwSignal<Vec<Turn>>) -> impl IntoView {
     let on_scroll = move |_: Event| {
         if let Some(el) = stream.get() {
             let el: &web_sys::Element = el.as_ref();
-            let dist = el.scroll_height() as f64 - el.scroll_top() as f64 - el.client_height() as f64;
+            let dist =
+                el.scroll_height() as f64 - el.scroll_top() as f64 - el.client_height() as f64;
             pinned.set(dist <= STICK);
             apply_depth(el);
         }
@@ -271,8 +272,8 @@ fn apply_depth(stream_el: &web_sys::Element) {
     };
     let _corridor = corridor;
     let stream_rect = stream_el.get_bounding_client_rect();
-    let fade_end = stream_rect.top() + stream_rect.height() as f64 * 0.42;
-    let fade_start = stream_rect.top() + stream_rect.height() as f64 * 0.08;
+    let fade_end = stream_rect.top() + stream_rect.height() * 0.42;
+    let fade_start = stream_rect.top() + stream_rect.height() * 0.08;
     let span = fade_end - fade_start;
     if span <= 0.0 {
         return;
@@ -306,9 +307,9 @@ fn apply_depth(stream_el: &web_sys::Element) {
             let opacity = 1.0 - t * t * 0.8;
             let blur = t * 2.0;
 
-            let _ = el.style()
-                .set_property("opacity", &format!("{opacity:.3}"));
-            let _ = el.style()
+            let _ = el.style().set_property("opacity", &format!("{opacity:.3}"));
+            let _ = el
+                .style()
                 .set_property("transform", &format!("scale({scale:.3})"));
             let filter = if blur > 0.15 {
                 format!("blur({blur:.1}px)")
