@@ -1240,12 +1240,11 @@ mod tests {
         CurrentModel, DaemonHealth, HealthResponse, LiveKitTokenRequest, LiveKitTokenResponse,
         ModelInfo, ModelsResponse, NativeDaemonState, PermissionDecisionRequest, Room,
         RoomGetResponse, RoomJoinRequest, RoomMessageKind, RoomParticipantKind,
-        RoomPostMessageRequest, RoomTriggerPolicy, RoomsListResponse, TurnImage,
-        agent_events_url, agent_session_create_url, agent_turns_url, component_event_url,
-        control_events_url, health_url, livekit_token_url, model_url, models_url,
-        permission_decision_url, permissions_url, read_sse_events, request_cancel_url,
-        room_messages_url, room_participant_url, room_participants_url, room_transcript_url,
-        room_url, rooms_url,
+        RoomPostMessageRequest, RoomTriggerPolicy, RoomsListResponse, TurnImage, agent_events_url,
+        agent_session_create_url, agent_turns_url, component_event_url, control_events_url,
+        health_url, livekit_token_url, model_url, models_url, permission_decision_url,
+        permissions_url, read_sse_events, request_cancel_url, room_messages_url,
+        room_participant_url, room_participants_url, room_transcript_url, room_url, rooms_url,
     };
 
     #[test]
