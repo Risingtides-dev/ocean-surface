@@ -245,24 +245,37 @@ pub struct PermissionDecisionRequest {
     pub permission_id: String,
     #[serde(flatten)]
     pub decision: PermissionDecision,
+    /// The per-turn secret originally sent on the turn submission
+    /// (OCEAN-185 / OCEAN-314). The daemon constant-time-compares this
+    /// against the token bound to the gated turn; a missing or wrong token
+    /// returns 403. Must match the `decision_token` in the corresponding
+    /// `AgentTurnRequest`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision_token: Option<String>,
 }
 
 impl PermissionDecisionRequest {
     #[must_use]
-    pub fn allow(permission_id: impl Into<String>) -> Self {
+    pub fn allow(permission_id: impl Into<String>, decision_token: Option<String>) -> Self {
         Self {
             permission_id: permission_id.into(),
             decision: PermissionDecision::Allow,
+            decision_token,
         }
     }
 
     #[must_use]
-    pub fn deny(permission_id: impl Into<String>, reason: impl Into<String>) -> Self {
+    pub fn deny(
+        permission_id: impl Into<String>,
+        reason: impl Into<String>,
+        decision_token: Option<String>,
+    ) -> Self {
         Self {
             permission_id: permission_id.into(),
             decision: PermissionDecision::Deny {
                 reason: Some(reason.into()),
             },
+            decision_token,
         }
     }
 }
@@ -1112,6 +1125,14 @@ pub struct AgentTurnRequest {
     /// `model_id: Option<String>`. Not yet exposed in the GPUI shell.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
+    /// Per-turn secret binding the permission gate to this submitter
+    /// (OCEAN-185 / OCEAN-314). Minted client-side and sent on the turn; the
+    /// same value must be replayed on every `/v1/permissions/{id}/decision`
+    /// POST for this turn or the daemon returns 403. `None` leaves the gate
+    /// unbound (legacy behaviour — any caller can approve), so clients MUST
+    /// populate this field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision_token: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
