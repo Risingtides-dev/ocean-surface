@@ -1351,9 +1351,12 @@ mod tests {
         // entirely so a pre-OCEAN-185 daemon sees no unexpected field.
         let allow = serde_json::to_value(PermissionDecisionRequest::allow("perm-1", None))
             .expect("allow should serialize");
-        let deny =
-            serde_json::to_value(PermissionDecisionRequest::deny("perm-2", "not this one", None))
-                .expect("deny should serialize");
+        let deny = serde_json::to_value(PermissionDecisionRequest::deny(
+            "perm-2",
+            "not this one",
+            None,
+        ))
+        .expect("deny should serialize");
 
         assert_eq!(
             allow,
@@ -1783,7 +1786,10 @@ mod tests {
 
         assert!(response.ok);
         assert_eq!(response.transcript.len(), 2);
-        assert_eq!(response.transcript[0].kind, RoomMessageKind::ParticipantJoined);
+        assert_eq!(
+            response.transcript[0].kind,
+            RoomMessageKind::ParticipantJoined
+        );
         assert!(response.transcript[0].kind.is_system());
         assert_eq!(response.transcript[1].kind, RoomMessageKind::Message);
         assert!(!response.transcript[1].kind.is_system());
