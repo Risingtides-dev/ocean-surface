@@ -183,12 +183,13 @@ impl CanvasStore {
     /// base already exists — stale, pre-created by another user with a permissive
     /// mode, or planted as a symlink — we must NOT blindly write into it.
     ///
-    /// So we **validate or repair, else refuse** (see [`prepare_private_root`]):
-    /// a self-owned dir with loose mode is chmod-ed to 0700 and used; a symlink, a
-    /// foreign-owned dir, or one we can't lock down yields
-    /// [`CanvasStoreError::MissingHome`] so the caller drops to a non-persisting
-    /// (in-memory) ledger — the session still works, but canvas state is never
-    /// written into a non-private root.
+    /// So we **only accept a fully-trusted root, else refuse** (see
+    /// [`prepare_private_root`]): a freshly-created 0700 dir, or a pre-existing one
+    /// that is already a real, self-owned, exactly-0700 directory. A symlink, a
+    /// foreign-owned dir, or a loose-mode pre-existing dir (which may already hold
+    /// attacker-planted children) yields [`CanvasStoreError::MissingHome`] so the
+    /// caller drops to a non-persisting (in-memory) ledger — the session still
+    /// works, but canvas state is never written into a non-private root.
     pub fn for_session_fallback(
         session_id: &str,
         canvas_id: &CanvasId,
@@ -516,20 +517,29 @@ fn fallback_base_name() -> String {
     }
 }
 
-/// Prepare `root` as a private, self-owned directory before any sensitive canvas
-/// file lands inside it, refusing rather than writing into an unsafe one
+/// Prepare `root` as a fully-trusted private directory before any sensitive
+/// canvas file lands inside it, refusing rather than writing into an unsafe one
 /// (OCEAN-381 review — `/tmp` pre-creation/symlink hardening).
 ///
-/// On unix:
-/// - **Absent:** create it 0700 (owner-only rwx). A `create` race with another
-///   process is fine — we fall through to re-stat and validate the result.
-/// - **Present:** `symlink_metadata` (does NOT follow links) it and require:
-///   it is a real directory (a symlink is rejected outright — the classic attack
-///   is to plant `root` as a symlink into a dir the attacker controls), and it is
-///   owned by the current uid. If it's self-owned but its mode has any group/other
-///   bits, chmod it back to 0700 and use it. If it's a symlink, owned by another
-///   uid, or can't be locked down, return [`CanvasStoreError::MissingHome`] so the
-///   caller drops to a non-persisting ledger instead of writing into it.
+/// We only accept a root we can FULLY trust, and never try to *repair* a
+/// previously-dirty one:
+/// - **We just created it** (the `create` call returned `Ok`, not
+///   `AlreadyExists`): it's pristine — 0700, owned by us, no pre-existing
+///   children. Trust it.
+/// - **It already existed:** `symlink_metadata` (does NOT follow links) it and
+///   require all of: a real directory (a symlink is rejected — the classic attack
+///   plants `root` as a link into an attacker-controlled dir), owned by the
+///   current uid, AND mode already EXACTLY 0700.
+/// - **Anything else** — we couldn't create it, it's a symlink/file, foreign-owned,
+///   or self-owned but loose-mode — return [`CanvasStoreError::MissingHome`] so the
+///   caller drops to a non-persisting (in-memory) ledger.
+///
+/// We deliberately do NOT chmod a loose-mode existing root back to 0700 and reuse
+/// it: between its (insecure) creation and now, another local user could have
+/// planted a child (e.g. a `<session>` symlink) that `create_dir_all` would later
+/// follow, leaking canvas state outside the private tree. Tightening the parent's
+/// mode can't retroactively trust those children. Refusing the whole root kills
+/// that vector without per-child validation.
 ///
 /// On non-unix the ownership/mode model doesn't apply; just ensure the dir exists.
 #[cfg(unix)]
@@ -538,29 +548,29 @@ fn prepare_private_root(root: &Path) -> Result<(), CanvasStoreError> {
 
     let missing_home = || CanvasStoreError::MissingHome;
 
-    // Create it 0700 if absent. AlreadyExists is fine (we validate below); a race
-    // where another process created it is also fine for the same reason.
-    if let Err(err) = fs::DirBuilder::new().mode(0o700).create(root)
-        && err.kind() != std::io::ErrorKind::AlreadyExists
-    {
-        return Err(missing_home());
+    // Try to create it 0700. If this succeeds, WE made it: pristine and trusted.
+    match fs::DirBuilder::new().mode(0o700).create(root) {
+        Ok(()) => return Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Fall through to validate the pre-existing root.
+        }
+        Err(_) => return Err(missing_home()),
     }
 
-    // Re-stat WITHOUT following symlinks: a planted symlink must not pass as a dir.
+    // Pre-existing root: trust it only if it is a real dir, self-owned, and
+    // ALREADY exactly 0700. Never repair-and-reuse — its children can't be trusted.
+    // symlink_metadata does NOT follow links, so a planted symlink fails is_dir.
     let meta = fs::symlink_metadata(root).map_err(|_| missing_home())?;
     if !meta.file_type().is_dir() {
-        // Symlink, file, fifo, … — never write canvas state through it.
         return Err(missing_home());
     }
-    // Must be owned by us; a foreign-owned dir could be attacker-controlled.
     // SAFETY: getuid is always-successful and thread-safe per POSIX.
     let current_uid = unsafe { libc::getuid() };
     if meta.uid() != current_uid {
         return Err(missing_home());
     }
-    // Self-owned: enforce 0700, repairing a loose mode in place.
     if meta.permissions().mode() & 0o777 != 0o700 {
-        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).map_err(|_| missing_home())?;
+        return Err(missing_home());
     }
     Ok(())
 }
@@ -967,33 +977,54 @@ mod tests {
     }
 
     /// OCEAN-381 review (P2, `/tmp` pre-creation hardening): a pre-existing,
-    /// permissive (0777) fallback root that is SELF-OWNED must be repaired to 0700
-    /// and used — never persisted into while still world-writable.
+    /// permissive (0777) fallback root must be REFUSED, not repaired-and-reused —
+    /// between its insecure creation and now another local user could have planted
+    /// a child (e.g. a `<session>` symlink) that later writes would follow, so the
+    /// whole root is untrustworthy. We must drop to a non-persisting ledger and
+    /// never chmod-then-write into it.
     #[cfg(unix)]
     #[test]
-    fn permissive_existing_root_is_repaired_to_0700_before_use() {
+    fn permissive_existing_root_is_refused_not_reused() {
         use std::os::unix::fs::PermissionsExt;
 
-        // Pre-create the root 0777, simulating a permissive/foreign-looking root
-        // (self-owned in-test, so the repair branch — not the refuse branch —
-        // applies; foreign ownership can't be simulated without root).
+        // Pre-create the root 0777, simulating a permissive root left by something
+        // other than this fresh-create path (self-owned in-test; foreign ownership
+        // can't be simulated without root, but takes the same refuse branch).
         let root = temp_root("permissive-root");
         fs::create_dir_all(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o777)).unwrap();
+
+        let err = prepare_private_root(&root)
+            .expect_err("a pre-existing loose-mode root must be refused, not reused");
+        assert_eq!(err, CanvasStoreError::MissingHome);
+
+        // And it must NOT have been silently chmod-ed (no repair-and-reuse) — the
+        // refusal is total; we never touched the dirty root's mode.
         assert_eq!(
             fs::metadata(&root).unwrap().permissions().mode() & 0o777,
             0o777,
-            "precondition: root starts world-writable"
+            "refused root must be left untouched, never repaired in place"
         );
+        let _ = fs::remove_dir_all(&root);
+    }
 
-        prepare_private_root(&root).expect("self-owned root must be repaired, not refused");
+    /// A pre-existing root that is ALREADY exactly 0700 and self-owned is the one
+    /// legitimate reuse case (e.g. a reload within the same session) — it must be
+    /// accepted so persistence survives the reload.
+    #[cfg(unix)]
+    #[test]
+    fn preexisting_self_owned_0700_root_is_accepted() {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
-        // It must have been chmod-ed to 0700 BEFORE any content could be written.
+        let root = temp_root("clean-0700-root");
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        // Sanity: it pre-exists at exactly 0700 before we re-prepare it.
         assert_eq!(
             fs::metadata(&root).unwrap().permissions().mode() & 0o777,
-            0o700,
-            "permissive root must be locked to 0700, never left at 0777"
+            0o700
         );
+
+        prepare_private_root(&root).expect("a clean pre-existing 0700 root must be accepted");
         let _ = fs::remove_dir_all(&root);
     }
 
