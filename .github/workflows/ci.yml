@@ -156,3 +156,11 @@ jobs:
       # clippy warning (style or correctness, any target incl. tests) fails CI.
       - name: Clippy (ocean-gui, -D warnings)
         run: cargo clippy -p ocean-gui --all-targets -- -D warnings
+
+      # Test gate (OCEAN-379): the lib tests are pure logic (shell model,
+      # canvas persistence, workspace, watcher) — they need no GPU/display and
+      # run in well under a second headless, so the same job that already
+      # compiles ocean-gui can cheaply run them. `--lib` deliberately excludes
+      # any GPU/render-dependent integration tests from the headless gate.
+      - name: Test (ocean-gui, lib only)
+        run: cargo test -p ocean-gui --lib
