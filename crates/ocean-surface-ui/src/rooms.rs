@@ -322,7 +322,7 @@ impl Rooms {
     }
 
     fn base(&self) -> String {
-        self.url.get_untracked().trim_end_matches('/').to_string()
+        rooms_base(&self.url.get_untracked())
     }
 
     /// Whether the current identity is in the open room's roster.
@@ -341,6 +341,10 @@ impl Rooms {
         let status = self.status;
         spawn_local(async move {
             let get_url = format!("{base}/v1/rooms/persistent");
+            // Logged so a live tester can confirm the fetch actually fires and
+            // see the exact origin it targets — the chat/session path resolves
+            // the same base, so a "no requests" symptom shows up here vs there.
+            log::debug!("rooms: GET {get_url}");
             match Request::get(&get_url).send().await {
                 Ok(resp) => match resp.json::<RoomsListResponse>().await {
                     Ok(r) if r.ok => list.set(r.rooms),
@@ -379,6 +383,7 @@ impl Rooms {
                 trigger_policy: policy,
             };
             let post_url = format!("{base}/v1/rooms/persistent");
+            log::debug!("rooms: POST {post_url} key={key}");
             let res = Request::post(&post_url)
                 .header("content-type", "application/json")
                 .json(&body);
@@ -799,6 +804,22 @@ fn mint_suffix() -> String {
 }
 
 /// Derive a url/key-safe slug from a room name (lowercase alnum + `-`).
+/// Resolve the daemon base URL the rooms panel issues requests against, from the
+/// live `Daemon::url` signal value. This is the SAME signal the working chat /
+/// session path reads ([`crate::daemon::Daemon::url`]), so rooms targets the
+/// exact origin bootstrap resolved: on an https deploy it is `""` (relative
+/// `/v1/rooms/persistent`, reverse-proxied same-origin); on http LAN/localhost it
+/// is `http://{host}:4780`.
+///
+/// An empty base is INTENTIONAL on https (relative + reverse-proxied), not a bug:
+/// `format!("{base}/v1/rooms/persistent")` then yields a valid relative path the
+/// service worker passes straight through (it bypasses `/v1/*`). Pulled out as a
+/// pure fn so the URL it produces is unit-testable off-target — the request layer
+/// itself only runs under wasm.
+fn rooms_base(url: &str) -> String {
+    url.trim_end_matches('/').to_string()
+}
+
 fn slugify(name: &str) -> String {
     let mut out = String::new();
     let mut prev_dash = false;
@@ -853,6 +874,34 @@ mod tests {
     fn short_time_trims_iso_to_minute() {
         assert_eq!(short_time("2026-06-05T12:34:56.789Z"), "2026-06-05 12:34");
         assert_eq!(short_time(""), "");
+    }
+
+    #[test]
+    fn rooms_base_resolves_like_the_chat_path() {
+        // https deploy: bootstrap stores "" → relative, same-origin, proxied.
+        // This is the working chat/session base too; the request URL must be the
+        // valid relative path the proxy reverse-proxies (and the SW passes
+        // through), NOT a dropped/empty request.
+        assert_eq!(rooms_base(""), "");
+        assert_eq!(
+            format!("{}/v1/rooms/persistent", rooms_base("")),
+            "/v1/rooms/persistent"
+        );
+
+        // http LAN/localhost: an absolute loopback/LAN base, trailing slash
+        // trimmed so we never double up the separator.
+        assert_eq!(
+            rooms_base("http://127.0.0.1:4780"),
+            "http://127.0.0.1:4780"
+        );
+        assert_eq!(
+            rooms_base("http://127.0.0.1:4780/"),
+            "http://127.0.0.1:4780"
+        );
+        assert_eq!(
+            format!("{}/v1/rooms/persistent", rooms_base("http://127.0.0.1:4780/")),
+            "http://127.0.0.1:4780/v1/rooms/persistent"
+        );
     }
 }
 
