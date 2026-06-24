@@ -21,8 +21,9 @@ use image::{Frame, RgbaImage};
 
 use super::agent::{AgentBlock, AgentEvent, AgentRole, AgentState, AgentTurn, ToolStatus};
 use super::canvas::{
-    CanvasId, CanvasLedger, CanvasLedgerSet, CanvasMode, CanvasStore, FIT_PADDING, LedgerSink,
-    LedgerSource, OceanCanvasView, Rect, SurfacePatchEnvelope, prompt_with_canvas_context,
+    CanvasId, CanvasLedger, CanvasLedgerSet, CanvasMode, CanvasStore, CanvasStoreError,
+    FIT_PADDING, LedgerSink, LedgerSource, OceanCanvasView, Rect, SurfacePatchEnvelope,
+    prompt_with_canvas_context,
 };
 use super::commands::{CommandSpec, ShellCommand, filtered_commands};
 use super::daemon::{
@@ -8657,9 +8658,22 @@ fn apply_patches_to_ledger(
     canvas_id: CanvasId,
     patches: Vec<SurfacePatchEnvelope>,
 ) -> Option<CanvasLedger> {
-    // OCEAN-167 / §12: persist to the real `~/.ocean` local-first store. Resolves
-    // to `None` (persistence disabled) only when no home dir is available.
-    let store = CanvasStore::for_session(&session_id, &canvas_id);
+    // OCEAN-167 / §12: persist to the real `~/.ocean` local-first store.
+    // OCEAN-381: distinguish "no home dir" (headless/CI) from a real I/O error.
+    // On a missing home, fall back to a session-scoped temp store so revisions
+    // still survive within the session instead of silently vanishing on restart;
+    // on an I/O error, log it and run without disk persistence (the live ledger
+    // is unaffected).
+    let store = match CanvasStore::for_session(&session_id, &canvas_id) {
+        Ok(store) => Some(store),
+        Err(CanvasStoreError::MissingHome) => {
+            Some(CanvasStore::for_session_fallback(&session_id, &canvas_id))
+        }
+        Err(err @ CanvasStoreError::Io { .. }) => {
+            eprintln!("[canvas-persist] warning: disk persistence disabled: {err}");
+            None
+        }
+    };
     apply_patches_to_ledger_with_store(existing, session_id, canvas_id, patches, store.as_ref())
 }
 

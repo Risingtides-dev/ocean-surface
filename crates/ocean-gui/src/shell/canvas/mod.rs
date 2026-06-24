@@ -65,7 +65,7 @@ pub use patch::{
     LayoutTarget, MergeDecision, PatchId, Rect, SurfaceId, SurfacePatch, SurfacePatchEnvelope,
     Viewport,
 };
-pub use persistence::{CanvasStore, SNAPSHOT_EVERY_N_PATCHES};
+pub use persistence::{CanvasStore, CanvasStoreError, SNAPSHOT_EVERY_N_PATCHES};
 pub use render::{
     CanvasInteraction, CanvasKeyAction, ComponentStyle, FIT_PADDING, GRID_SIZE, LedgerSink,
     LedgerSource, NUDGE_STEP, NUDGE_STEP_COARSE, OceanCanvasView, OutlineState, PORT_RADIUS,

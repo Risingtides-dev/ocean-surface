@@ -62,6 +62,46 @@ use super::patch::{CanvasId, LamportClock, SurfacePatchEnvelope};
 /// the whole snapshot on every keystroke.
 pub const SNAPSHOT_EVERY_N_PATCHES: u64 = 16;
 
+/// Why [`CanvasStore::for_session`] could not place the store under the real home.
+///
+/// Splitting the failure modes lets the caller tell "this box has no home dir"
+/// (expected on headless/CI/containerized hosts — recover with a fallback) apart
+/// from a genuine I/O problem touching the home tree (worth surfacing as-is).
+/// Before OCEAN-381 both collapsed into a bare `None` and canvases on a headless
+/// box silently lost every revision on restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CanvasStoreError {
+    /// No home directory could be resolved (`HOME` unset/empty). Persistence to
+    /// `~/.ocean` is impossible; the caller should fall back to a session-scoped
+    /// temp store ([`CanvasStore::for_session_fallback`]) so revisions still
+    /// survive within the running session.
+    MissingHome,
+    /// A home dir resolved but the canvas directory under it could not be
+    /// prepared (permissions, read-only mount, …). The path that failed and the
+    /// underlying error kind are carried for logging.
+    Io {
+        /// The canvas directory we tried to create.
+        path: PathBuf,
+        /// The kind of the underlying I/O error.
+        kind: std::io::ErrorKind,
+    },
+}
+
+impl std::fmt::Display for CanvasStoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CanvasStoreError::MissingHome => {
+                write!(f, "no home directory available for canvas persistence")
+            }
+            CanvasStoreError::Io { path, kind } => {
+                write!(f, "cannot prepare canvas dir {} ({kind:?})", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for CanvasStoreError {}
+
 /// Filesystem layout resolver for one canvas's persisted state.
 ///
 /// All paths derive from a `root` (normally `~/.ocean`), the session id, and the
@@ -91,12 +131,53 @@ impl CanvasStore {
 
     /// Build a store under the real home dir: `~/.ocean/surfaces/...`.
     ///
-    /// Returns `None` if no home directory can be resolved (then persistence is
-    /// silently disabled rather than writing to a surprising location). Follows
-    /// the existing `HOME`-env convention used elsewhere in this crate.
-    pub fn for_session(session_id: &str, canvas_id: &CanvasId) -> Option<Self> {
-        let home = ocean_root()?;
-        Some(Self::with_root(home, session_id, canvas_id))
+    /// Returns a typed [`CanvasStoreError`] instead of a bare `None` so the caller
+    /// can tell the two failure modes apart (OCEAN-381):
+    /// - [`CanvasStoreError::MissingHome`] — no home dir resolved (headless/CI).
+    ///   The caller should fall back to [`CanvasStore::for_session_fallback`].
+    /// - [`CanvasStoreError::Io`] — a home dir resolved but its canvas directory
+    ///   could not be prepared. The caller logs it and proceeds without disk
+    ///   persistence (the live ledger is unaffected).
+    ///
+    /// Eagerly creates the canvas directory so an I/O problem surfaces here, at
+    /// creation, rather than being swallowed per-write by the best-effort
+    /// [`Self::persist`]. Follows the existing `HOME`-env convention.
+    pub fn for_session(session_id: &str, canvas_id: &CanvasId) -> Result<Self, CanvasStoreError> {
+        Self::from_home(ocean_root(), session_id, canvas_id)
+    }
+
+    /// Inner of [`Self::for_session`] parameterized on the already-resolved
+    /// ocean root, so the home-missing vs. I/O-error branch can be tested without
+    /// mutating the process-global `HOME` env var (which races parallel tests).
+    fn from_home(
+        home: Option<PathBuf>,
+        session_id: &str,
+        canvas_id: &CanvasId,
+    ) -> Result<Self, CanvasStoreError> {
+        let home = home.ok_or(CanvasStoreError::MissingHome)?;
+        let store = Self::with_root(home, session_id, canvas_id);
+        store.ensure_dir().map_err(|err| CanvasStoreError::Io {
+            path: store.canvas_dir.clone(),
+            kind: err.kind(),
+        })?;
+        Ok(store)
+    }
+
+    /// Session-scoped fallback store under the system temp dir, used when no home
+    /// dir is available ([`CanvasStoreError::MissingHome`]).
+    ///
+    /// The root is **deterministic** for a given `session_id` — keyed on the
+    /// sanitized session id, not on a per-call random suffix — so a later reload
+    /// in the same session (constructing a fresh fallback for the same session)
+    /// resolves to the same files and replays the revisions written earlier.
+    /// Persistence is therefore session-durable on headless boxes even though it
+    /// does not survive a temp-dir wipe across reboots, which is exactly the
+    /// degradation the canvas can tolerate (vs. the prior silent total loss).
+    pub fn for_session_fallback(session_id: &str, canvas_id: &CanvasId) -> Self {
+        let root = std::env::temp_dir()
+            .join("ocean-canvas-fallback")
+            .join(sanitize_segment(session_id));
+        Self::with_root(root, session_id, canvas_id)
     }
 
     /// `<canvas_id>.json` — the full-ledger snapshot.
@@ -698,6 +779,56 @@ mod tests {
             "the boundary patch must survive a crash before the snapshot write"
         );
         assert_eq!(recovered, ledger, "full state recovered identically");
+    }
+
+    /// OCEAN-381: with no home dir, `from_home` reports the missing-home path as a
+    /// typed error (not a bare `None` lumped together with I/O failures), and the
+    /// session-scoped fallback store persists revisions that survive a simulated
+    /// reload within the session — instead of the prior silent total loss on a
+    /// headless/CI box.
+    #[test]
+    fn missing_home_yields_typed_error_and_fallback_persists() {
+        let canvas_id = CanvasId::new("canvas:main");
+
+        // No home resolved → MissingHome, distinct from an I/O error.
+        let err = CanvasStore::from_home(None, "sess:1", &canvas_id)
+            .expect_err("no home dir must be a typed error, not Ok");
+        assert_eq!(err, CanvasStoreError::MissingHome);
+
+        // The fallback is what the caller reaches for on MissingHome. Use a unique
+        // session id so the deterministic temp path is isolated from other tests,
+        // and clean it up afterwards.
+        let session_id = format!("fallback-test-{}-{:p}", std::process::id(), &canvas_id);
+        let fallback = CanvasStore::for_session_fallback(&session_id, &canvas_id);
+
+        // "Process 1": apply + persist a patch through the fallback store.
+        let mut ledger =
+            CanvasLedger::new(canvas_id.clone(), session_id.clone(), CanvasMode::Freeform);
+        apply_and_persist(&fallback, &mut ledger, "headless-card");
+        assert!(
+            fallback.snapshot_path().exists(),
+            "fallback store must write to the temp dir"
+        );
+
+        // "Process 2" (simulated reload): a FRESH fallback for the SAME session id
+        // must resolve to the same files and replay the revision written above —
+        // proving the patch survived the reload via the fallback, not vanished.
+        let reloaded_store = CanvasStore::for_session_fallback(&session_id, &canvas_id);
+        let reloaded = reloaded_store
+            .load()
+            .expect("fallback must reload the persisted ledger within the session");
+        assert_eq!(reloaded.revision, ledger.revision);
+        assert!(
+            reloaded
+                .component(&ComponentId::new("headless-card"))
+                .is_some(),
+            "the patch written before reload must survive via the fallback store"
+        );
+
+        // Clean up the deterministic fallback root we created.
+        if let Some(session_dir) = fallback.canvas_dir.parent().and_then(Path::parent) {
+            let _ = fs::remove_dir_all(session_dir);
+        }
     }
 
     #[test]
