@@ -21,8 +21,9 @@ use image::{Frame, RgbaImage};
 
 use super::agent::{AgentBlock, AgentEvent, AgentRole, AgentState, AgentTurn, ToolStatus};
 use super::canvas::{
-    CanvasId, CanvasLedger, CanvasLedgerSet, CanvasMode, CanvasStore, FIT_PADDING, LedgerSink,
-    LedgerSource, OceanCanvasView, Rect, SurfacePatchEnvelope, prompt_with_canvas_context,
+    CanvasId, CanvasLedger, CanvasLedgerSet, CanvasMode, CanvasStore, CanvasStoreError,
+    FIT_PADDING, LedgerSink, LedgerSource, OceanCanvasView, Rect, SurfacePatchEnvelope,
+    prompt_with_canvas_context,
 };
 use super::commands::{CommandSpec, ShellCommand, filtered_commands};
 use super::daemon::{
@@ -8657,9 +8658,35 @@ fn apply_patches_to_ledger(
     canvas_id: CanvasId,
     patches: Vec<SurfacePatchEnvelope>,
 ) -> Option<CanvasLedger> {
-    // OCEAN-167 / §12: persist to the real `~/.ocean` local-first store. Resolves
-    // to `None` (persistence disabled) only when no home dir is available.
-    let store = CanvasStore::for_session(&session_id, &canvas_id);
+    // OCEAN-167 / §12: persist to the real `~/.ocean` local-first store.
+    // OCEAN-381: distinguish "no home dir" (headless/CI) from a real I/O error.
+    // On a missing home, fall back to a session-scoped temp store so revisions
+    // still survive within the session instead of silently vanishing on restart;
+    // on an I/O error, log it and run without disk persistence (the live ledger
+    // is unaffected).
+    let store = match CanvasStore::for_session(&session_id, &canvas_id) {
+        Ok(store) => Some(store),
+        Err(CanvasStoreError::MissingHome) => {
+            // OCEAN-381 review: the fallback now validates the temp-dir root and
+            // REFUSES (MissingHome) if it can't guarantee a private, self-owned
+            // 0700 dir — a symlink or foreign-owned `/tmp` root. In that case run
+            // without disk persistence rather than writing canvas state into an
+            // attacker-or-other-controlled directory.
+            match CanvasStore::for_session_fallback(&session_id, &canvas_id) {
+                Ok(store) => Some(store),
+                Err(_) => {
+                    eprintln!(
+                        "[canvas-persist] warning: no private fallback dir; disk persistence disabled"
+                    );
+                    None
+                }
+            }
+        }
+        Err(err @ CanvasStoreError::Io { .. }) => {
+            eprintln!("[canvas-persist] warning: disk persistence disabled: {err}");
+            None
+        }
+    };
     apply_patches_to_ledger_with_store(existing, session_id, canvas_id, patches, store.as_ref())
 }
 

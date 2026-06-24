@@ -6084,6 +6084,7 @@ dependencies = [
  "gpui",
  "image",
  "indexmap",
+ "libc",
  "livekit",
  "notify",
  "reqwest",

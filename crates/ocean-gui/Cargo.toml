@@ -48,3 +48,7 @@ livekit = ["dep:livekit", "dep:futures-util"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 wry = { version = "0.55.1", default-features = false }
+
+[target.'cfg(unix)'.dependencies]
+# getuid() for the per-user-private temp-dir fallback canvas store (OCEAN-381).
+libc = "0.2"
