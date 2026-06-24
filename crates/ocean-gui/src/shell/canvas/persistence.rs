@@ -173,10 +173,21 @@ impl CanvasStore {
     /// Persistence is therefore session-durable on headless boxes even though it
     /// does not survive a temp-dir wipe across reboots, which is exactly the
     /// degradation the canvas can tolerate (vs. the prior silent total loss).
+    ///
+    /// Privacy (OCEAN-381 review): the headless/CI/container hosts this path
+    /// targets are often shared multi-user Unix boxes, and the system temp dir is
+    /// world-readable. So the per-user base (`ocean-canvas-fallback-<uid>`) is
+    /// created **0700** before any canvas content is written — other local users
+    /// can neither traverse in nor read the session's snapshots/logs (the files
+    /// underneath inherit protection from the locked-down root). Best-effort: if
+    /// the eager 0700 create fails we still return the store so `persist`'s own
+    /// `create_dir_all` runs — persistence works, just without the hardened perms.
     pub fn for_session_fallback(session_id: &str, canvas_id: &CanvasId) -> Self {
-        let root = std::env::temp_dir()
-            .join("ocean-canvas-fallback")
-            .join(sanitize_segment(session_id));
+        let base = std::env::temp_dir().join(fallback_base_name());
+        // Lock the per-user base down to 0700 up front, before with_root's canvas
+        // dir (and its files) land underneath it.
+        create_private_dir(&base);
+        let root = base.join(sanitize_segment(session_id));
         Self::with_root(root, session_id, canvas_id)
     }
 
@@ -476,6 +487,43 @@ fn revision_from_patch_id(patch_id: &str) -> Option<u64> {
 fn ocean_root() -> Option<PathBuf> {
     let home = std::env::var_os("HOME").filter(|h| !h.is_empty())?;
     Some(PathBuf::from(home).join(".ocean"))
+}
+
+/// Name of the per-user base dir for the temp-dir fallback store. On unix it is
+/// suffixed with the real uid so each user gets their own private tree under the
+/// shared system temp dir (`ocean-canvas-fallback-501`); elsewhere it's a plain
+/// fixed name (those platforms don't expose the same world-readable temp dir).
+fn fallback_base_name() -> String {
+    #[cfg(unix)]
+    {
+        // SAFETY: getuid is always-successful and thread-safe per POSIX.
+        let uid = unsafe { libc::getuid() };
+        format!("ocean-canvas-fallback-{uid}")
+    }
+    #[cfg(not(unix))]
+    {
+        "ocean-canvas-fallback".to_string()
+    }
+}
+
+/// Create `dir` (recursively) as a private directory before any sensitive file
+/// lands inside it. On unix that means mode 0700 (owner-only rwx), so on a shared
+/// host other local users can neither list nor traverse into the fallback tree.
+/// Best-effort: failures are swallowed (the caller's later `create_dir_all` will
+/// still make the dir, just without the hardened mode).
+fn create_private_dir(dir: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let _ = fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = fs::create_dir_all(dir);
+    }
 }
 
 /// Make an id safe to use as a single path segment: replace anything that isn't
@@ -825,10 +873,56 @@ mod tests {
             "the patch written before reload must survive via the fallback store"
         );
 
-        // Clean up the deterministic fallback root we created.
-        if let Some(session_dir) = fallback.canvas_dir.parent().and_then(Path::parent) {
-            let _ = fs::remove_dir_all(session_dir);
-        }
+        // Clean up only OUR session subtree (<base>/<session>), never the shared
+        // per-user <base> — other tests run their own sessions under it in
+        // parallel, and wiping the base would race them.
+        let base = std::env::temp_dir().join(fallback_base_name());
+        let _ = fs::remove_dir_all(base.join(sanitize_segment(&session_id)));
+    }
+
+    /// OCEAN-381 review (P2): the temp-dir fallback base must be created 0700 so a
+    /// session's canvas snapshots/logs aren't readable/listable by other local
+    /// users on a shared headless/CI host. Exercises `create_private_dir` directly
+    /// against a unique path so it doesn't race the shared per-user base that the
+    /// other fallback test writes into concurrently.
+    #[cfg(unix)]
+    #[test]
+    fn fallback_base_dir_is_private_0700() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_root("private-base").join("nested");
+        // Recursive create must apply 0700 to the dirs it makes.
+        create_private_dir(&dir);
+
+        let mode = fs::metadata(&dir)
+            .expect("private dir must be created")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "fallback base dir must be private (0700), got {mode:o}"
+        );
+
+        let _ = fs::remove_dir_all(dir.parent().unwrap());
+
+        // And the real fallback constructor must eagerly create the per-user base
+        // (`<temp>/ocean-canvas-fallback-<uid>`) at 0700 — that's the dir the whole
+        // session tree lives under and inherits protection from.
+        let canvas_id = CanvasId::new("canvas:main");
+        let session_id = format!("perm-test-{}-{:p}", std::process::id(), &canvas_id);
+        let _ = CanvasStore::for_session_fallback(&session_id, &canvas_id);
+        let base = std::env::temp_dir().join(fallback_base_name());
+        let base_mode = fs::metadata(&base)
+            .expect("fallback base dir created eagerly")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(base_mode, 0o700, "real fallback base must be 0700");
+
+        // Clean only our session subtree, never the shared per-user base (other
+        // tests run their own sessions under it concurrently).
+        let _ = fs::remove_dir_all(base.join(sanitize_segment(&session_id)));
     }
 
     #[test]
