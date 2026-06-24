@@ -37,6 +37,25 @@
 //! - **Per-session clear.** [`clear`](Self::clear) drops every canvas and the
 //!   active pointer; the shell calls it on a session switch so canvases from a
 //!   prior session don't bleed into the next (the exact gap OCEAN-257 flagged).
+//!
+//! # The operator-selected pin (OCEAN-380)
+//!
+//! "Active" alone is not enough to protect the operator's choice. Every incoming
+//! agent patch routes through the shell as `put` + [`set_active`](Self::set_active)
+//! on the *patched* canvas, so the canvas the agent just drew to becomes active —
+//! that's deliberate (the agent's work comes to the foreground). But it means the
+//! canvas the **operator** explicitly selected (a tab-strip click) loses `active`
+//! the instant the agent touches a different canvas. If the operator then idles
+//! while the agent keeps minting/patching other canvases, the operator's selection
+//! is just another LRU candidate and can be evicted out from under them; on
+//! re-selection it reloads from disk and may diverge from server-queued patches.
+//!
+//! So the set tracks a second pointer — the **operator-selected** canvas
+//! ([`select`](Self::select)) — and exempts it from eviction alongside `active`.
+//! The shell sets it only on an explicit operator selection, never on an agent
+//! patch, so the operator's chosen canvas survives any amount of background agent
+//! churn. With both pinned, the cap is a soft floor of "active + selected + up to
+//! N−2 others".
 
 use indexmap::IndexMap;
 
@@ -69,6 +88,13 @@ pub struct CanvasLedgerSet {
     ///
     /// [`set_active`]: Self::set_active
     active: Option<CanvasId>,
+    /// The canvas the **operator** explicitly selected (OCEAN-380), distinct from
+    /// `active`. Agent patches reassign `active` to whatever they touch, so this is
+    /// the only pointer that reliably tracks the operator's own choice. It is
+    /// exempted from eviction alongside `active` so background agent churn can't
+    /// evict the canvas the operator is sitting on. `None` until the operator picks
+    /// one; cleared if its canvas is removed by [`clear`](Self::clear).
+    selected: Option<CanvasId>,
 }
 
 impl CanvasLedgerSet {
@@ -146,13 +172,33 @@ impl CanvasLedgerSet {
         }
     }
 
-    /// Drop every canvas and the active pointer (OCEAN-278). The shell calls this
-    /// on a session switch so canvases from a prior session don't linger into the
-    /// next — the gap OCEAN-257 flagged. After this the set is exactly as it was
-    /// at construction.
+    /// Record the canvas the **operator** explicitly selected (OCEAN-380), and make
+    /// it active. Unlike [`set_active`](Self::set_active) — which the patch path
+    /// also calls for the agent-patched canvas — this is invoked *only* on an
+    /// operator action (a tab-strip click), so the `selected` pointer reliably
+    /// tracks the operator's own choice even as agent patches keep reassigning
+    /// `active`. The selected canvas is then exempt from eviction. No-op if the
+    /// canvas isn't present, so the pointer never dangles.
+    pub fn select(&mut self, canvas_id: &CanvasId) {
+        if self.canvases.contains_key(canvas_id) {
+            self.selected = Some(canvas_id.clone());
+            self.set_active(canvas_id);
+        }
+    }
+
+    /// The operator-selected canvas id, if the operator has selected one.
+    pub fn selected_id(&self) -> Option<&CanvasId> {
+        self.selected.as_ref()
+    }
+
+    /// Drop every canvas and both pointers (OCEAN-278). The shell calls this on a
+    /// session switch so canvases from a prior session don't linger into the next —
+    /// the gap OCEAN-257 flagged. After this the set is exactly as it was at
+    /// construction.
     pub fn clear(&mut self) {
         self.canvases.clear();
         self.active = None;
+        self.selected = None;
     }
 
     /// Move `canvas_id` to the most-recently-used end of the order. Caller ensures
@@ -167,25 +213,28 @@ impl CanvasLedgerSet {
     }
 
     /// Evict least-recently-used canvases until at most [`MAX_CANVASES`] remain.
-    /// The active canvas is never evicted: candidates are scanned from the LRU
-    /// (front) end and the active id is skipped, so over-cap pressure falls on the
-    /// stalest *non-active* canvas. With the active canvas always kept, the set can
-    /// momentarily hold the cap exactly; it never exceeds it after a `put`.
+    /// The active canvas and the operator-selected canvas (OCEAN-380) are never
+    /// evicted: candidates are scanned from the LRU (front) end and both pinned ids
+    /// are skipped, so over-cap pressure falls on the stalest canvas that is neither
+    /// shown nor operator-selected. With those always kept, the set can momentarily
+    /// hold the cap exactly; it never exceeds it after a `put`.
     fn evict_over_cap(&mut self) {
         while self.canvases.len() > MAX_CANVASES {
-            // Find the least-recently-used canvas that isn't active. Scanning from
-            // the front (LRU) yields the stalest eligible victim first.
+            // Find the least-recently-used canvas that is neither active nor
+            // operator-selected. Scanning from the front (LRU) yields the stalest
+            // eligible victim first.
             let victim = self
                 .canvases
                 .keys()
-                .find(|id| Some(*id) != self.active.as_ref())
+                .find(|id| Some(*id) != self.active.as_ref() && Some(*id) != self.selected.as_ref())
                 .cloned();
             match victim {
                 Some(id) => {
                     self.canvases.shift_remove(&id);
                 }
-                // Every remaining canvas is the active one (cap == 0, degenerate):
-                // nothing safe to evict, so stop rather than drop what's on screen.
+                // Every remaining canvas is pinned (active and/or selected), e.g. a
+                // degenerate cap: nothing safe to evict, so stop rather than drop
+                // what's on screen or what the operator chose.
                 None => break,
             }
         }
@@ -375,12 +424,104 @@ mod tests {
         );
     }
 
+    // ----- Operator-selected pin survives agent churn (OCEAN-380) ----------
+
+    #[test]
+    fn operator_selected_canvas_survives_agent_patching_other_canvases() {
+        // The exact OCEAN-380 scenario: the operator selects a canvas, then idles
+        // while the agent keeps patching *other* canvases. Each agent patch routes
+        // as put + set_active on the patched canvas (so `active` is reassigned away
+        // from the operator's choice), and there are far more than the cap of them.
+        // The operator-selected canvas must NOT be evicted.
+        let mut set = CanvasLedgerSet::new();
+
+        // Seed enough canvases that the selected one is genuinely the stalest by
+        // recency once the agent moves on — and well past the cap (33+ total).
+        for n in 0..(MAX_CANVASES + 1) {
+            set.put(ledger_with(&nth_canvas(n), "c"));
+        }
+
+        // Operator explicitly selects a NON-default canvas (not canvas:0, the first
+        // / originally-active one). This is the tab-strip-click path.
+        let chosen = CanvasId::new(nth_canvas(3));
+        set.select(&chosen);
+        assert_eq!(set.selected_id(), Some(&chosen));
+        assert_eq!(
+            set.active_id(),
+            Some(&chosen),
+            "select also makes it active"
+        );
+
+        // Agent now patches many *other* canvases — far past the eviction window.
+        // Each `set_active` hijacks `active` to the patched canvas, so the only
+        // thing protecting the operator's choice is the `selected` pin.
+        for n in (MAX_CANVASES + 1)..(MAX_CANVASES * 3) {
+            let other = nth_canvas(n);
+            set.put(ledger_with(&other, "c"));
+            set.set_active(&CanvasId::new(other)); // mirror the shell's patch path
+            assert!(
+                set.get(&chosen).is_some(),
+                "operator-selected canvas:3 must never be evicted (agent patch {n})",
+            );
+        }
+
+        // Still present after all the churn, still the operator's selection, and
+        // can be re-activated without a disk reload (it's in memory).
+        assert!(set.get(&chosen).is_some());
+        assert_eq!(set.selected_id(), Some(&chosen));
+        assert_eq!(set.len(), MAX_CANVASES);
+    }
+
+    #[test]
+    fn both_active_and_selected_are_exempt_when_they_differ() {
+        // After an agent patch, `active` (agent's canvas) and `selected` (operator's
+        // canvas) point at different canvases. Both must survive eviction.
+        let mut set = CanvasLedgerSet::new();
+        for n in 0..MAX_CANVASES {
+            set.put(ledger_with(&nth_canvas(n), "c"));
+        }
+        let operator_pick = CanvasId::new(nth_canvas(2));
+        set.select(&operator_pick);
+
+        // Agent patches a fresh canvas → it becomes active; operator_pick keeps the
+        // selected pin. Pushing this over the cap forces an eviction.
+        let agent_canvas = CanvasId::new(nth_canvas(MAX_CANVASES));
+        set.put(ledger_with(&nth_canvas(MAX_CANVASES), "c"));
+        set.set_active(&agent_canvas);
+
+        assert_eq!(set.active_id(), Some(&agent_canvas));
+        assert_eq!(set.selected_id(), Some(&operator_pick));
+        assert!(
+            set.get(&agent_canvas).is_some(),
+            "the active (agent-patched) canvas is kept",
+        );
+        assert!(
+            set.get(&operator_pick).is_some(),
+            "the operator-selected canvas is kept even though it isn't active",
+        );
+        assert_eq!(set.len(), MAX_CANVASES);
+    }
+
+    #[test]
+    fn select_is_a_noop_for_an_absent_canvas() {
+        let mut set = CanvasLedgerSet::new();
+        set.put(ledger_with("canvas:a", "a1"));
+        set.select(&CanvasId::new("canvas:ghost"));
+        assert!(
+            set.selected_id().is_none(),
+            "selecting an absent canvas does not set the pin",
+        );
+        // A real selection records the pin.
+        set.select(&CanvasId::new("canvas:a"));
+        assert_eq!(set.selected_id(), Some(&CanvasId::new("canvas:a")));
+    }
+
     #[test]
     fn clear_drops_every_canvas_and_the_active_pointer() {
         let mut set = CanvasLedgerSet::new();
         set.put(ledger_with("canvas:a", "a1"));
         set.put(ledger_with("canvas:b", "b1"));
-        set.set_active(&CanvasId::new("canvas:b"));
+        set.select(&CanvasId::new("canvas:b"));
         assert_eq!(set.len(), 2);
 
         set.clear();
@@ -389,6 +530,10 @@ mod tests {
         assert_eq!(set.len(), 0);
         assert!(set.active_id().is_none(), "clear drops the active pointer");
         assert!(set.active().is_none());
+        assert!(
+            set.selected_id().is_none(),
+            "clear drops the operator-selected pointer too",
+        );
 
         // The set is reusable after a clear: the next canvas becomes active again,
         // exactly as on a fresh set (models a new session starting).
