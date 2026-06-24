@@ -101,6 +101,90 @@ function isImmutableAsset(url) {
   return /-[0-9a-f]{8,}(?:_bg)?\.(?:js|wasm|css)$/i.test(url.pathname);
 }
 
+function isWasm(url) {
+  return /\.wasm$/i.test(url.pathname);
+}
+
+// A valid WebAssembly module begins with the 4-byte magic "\0asm"
+// (0x00 0x61 0x73 0x6D), immediately followed by a 4-byte version. This is the
+// SAME guard run-surface.sh applies to dist/*_bg.wasm at build time (OCEAN-121);
+// here we apply it at RUNTIME to CACHED bytes so a once-corrupt wasm that got
+// pinned in the cache (OCEAN-122 — all-zero bytes from a failed wasm-opt) can
+// never be served again.
+//
+// Pure, side-effect-free, and exported below so it can be unit-tested in node.
+// `buffer` is an ArrayBuffer (or any TypedArray-able). Returns true only when
+// the first 4 bytes are exactly the wasm magic word; false for short or
+// all-zero / otherwise-corrupt buffers.
+const WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d];
+function hasWasmMagic(buffer) {
+  if (!buffer) return false;
+  const bytes = new Uint8Array(buffer);
+  if (bytes.length < WASM_MAGIC.length) return false;
+  for (let i = 0; i < WASM_MAGIC.length; i++) {
+    if (bytes[i] !== WASM_MAGIC[i]) return false;
+  }
+  return true;
+}
+
+// Read a Response's first bytes and confirm the wasm magic WITHOUT consuming the
+// body we hand back to the page: we always validate against a clone. Returns the
+// boolean result; never throws (a body that can't be read is treated as corrupt
+// so we fail safe to a network refetch).
+async function responseHasWasmMagic(resp) {
+  if (!resp) return false;
+  try {
+    const buf = await resp.clone().arrayBuffer();
+    return hasWasmMagic(buf);
+  } catch (_) {
+    return false;
+  }
+}
+
+// Tell every controlled client that a cached asset failed its integrity check
+// and was busted + refetched. The page can surface a minimal "reload" affordance
+// so the user recovers without opening devtools to hand-clear caches.
+async function notifyIntegrityFailure(detail) {
+  try {
+    const clientList = await self.clients.matchAll({ type: 'window' });
+    for (const client of clientList) {
+      client.postMessage({ type: 'SW_INTEGRITY_FAILURE', ...detail });
+    }
+  } catch (_) {}
+}
+
+// Serve a hashed wasm asset with a runtime integrity gate. Cache-first for
+// SPEED, but the cached bytes are validated against the wasm magic word before
+// they're served; a corrupt cached entry is busted and refetched from the
+// network (and the fresh good copy is re-cached) instead of being served. This
+// is the OCEAN-122 fix: a once-pinned all-zero wasm can no longer brick the page
+// across reloads/rebuilds.
+async function serveWasm(request) {
+  const cache = await caches.open(CACHE);
+  const hit = await cache.match(request);
+
+  if (hit) {
+    if (await responseHasWasmMagic(hit)) {
+      // Good cached bytes — serve fast, exactly like any immutable asset.
+      return hit;
+    }
+    // Corrupt cached wasm (e.g. all-zero from a failed build that got cached).
+    // Evict it and fall through to a fresh network fetch so we never serve
+    // known-dead bytes. Tell clients so they can offer a hard refresh.
+    await cache.delete(request).catch(() => {});
+    notifyIntegrityFailure({ url: request.url, reason: 'corrupt-cached-wasm' });
+  }
+
+  // Cache miss, or we just busted a corrupt entry: fetch fresh. Validate the
+  // network bytes too — only cache a copy that actually carries the wasm magic,
+  // so we never re-pin a corrupt response served by a broken proxy/build.
+  const resp = await fetch(request);
+  if (resp && resp.ok && (await responseHasWasmMagic(resp))) {
+    cache.put(request, resp.clone()).catch(() => {});
+  }
+  return resp;
+}
+
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
 
@@ -158,8 +242,17 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Hashed, immutable assets: cache-first for speed, fall through to the
-  // network (and populate the cache) on a miss. Safe because the URL is
+  // Hashed wasm: cache-first for speed, but VALIDATE the cached bytes against
+  // the wasm magic word before serving (OCEAN-122). A corrupt cached wasm is
+  // busted + refetched instead of served, so a once-pinned all-zero module can't
+  // brick the page across reloads. Handled before the generic immutable branch.
+  if (isImmutableAsset(url) && isWasm(url)) {
+    event.respondWith(serveWasm(event.request));
+    return;
+  }
+
+  // Other hashed, immutable assets (js/css): cache-first for speed, fall through
+  // to the network (and populate the cache) on a miss. Safe because the URL is
   // content-addressed — a new build ships a NEW filename, so there is no stale
   // version to serve.
   if (isImmutableAsset(url)) {
@@ -193,3 +286,9 @@ self.addEventListener('fetch', (event) => {
       .catch(() => caches.match(event.request))
   );
 });
+
+// Export the pure integrity helper for unit testing under node. Guarded so it's
+// a no-op in the service-worker runtime (no CommonJS `module` there).
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { hasWasmMagic };
+}

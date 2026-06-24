@@ -584,11 +584,45 @@
           if (hadController) reloadOnce();
         });
 
+        // Minimal in-app recovery affordance (OCEAN-122). If the SW already had
+        // to serve the page once before we get here, a banner is harmless; this
+        // only fires when the worker busts a corrupt cached wasm, which is rare.
+        let integrityBannerShown = false;
+        const showIntegrityBanner = () => {
+          if (integrityBannerShown) return;
+          integrityBannerShown = true;
+          const bar = document.createElement('div');
+          bar.setAttribute('role', 'alert');
+          bar.style.cssText =
+            'position:fixed;left:0;right:0;bottom:0;z-index:2147483647;' +
+            'background:#0b2030;color:#cfe;font:14px system-ui;padding:12px 16px;' +
+            'display:flex;gap:12px;align-items:center;justify-content:center;' +
+            'box-shadow:0 -2px 12px rgba(0,0,0,.4)';
+          const msg = document.createElement('span');
+          msg.textContent =
+            'A cached file was corrupt and has been refreshed. Reload to recover.';
+          const btn = document.createElement('button');
+          btn.textContent = 'Hard refresh';
+          btn.style.cssText =
+            'background:#1c7ed6;color:#fff;border:0;border-radius:6px;' +
+            'padding:6px 14px;font:inherit;cursor:pointer';
+          btn.addEventListener('click', () => window.location.reload());
+          bar.appendChild(msg);
+          bar.appendChild(btn);
+          (document.body || document.documentElement).appendChild(bar);
+        };
+
         // Explicit signal from the activated worker (covers cases where
         // controllerchange is suppressed, e.g. some PWA launch contexts).
         navigator.serviceWorker.addEventListener('message', (event) => {
-          if (event.data && event.data.type === 'SW_ACTIVATED' && hadController) {
+          if (!event.data) return;
+          if (event.data.type === 'SW_ACTIVATED' && hadController) {
             reloadOnce();
+          } else if (event.data.type === 'SW_INTEGRITY_FAILURE') {
+            // The SW busted a corrupt cached wasm and refetched a good copy. The
+            // current page may still be running on the bad module, so prompt a
+            // hard refresh rather than reloading out from under the user.
+            showIntegrityBanner();
           }
         });
 
