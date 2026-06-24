@@ -3215,6 +3215,29 @@ fn browser_context_guidance() -> Option<Vec<String>> {
     (!lines.is_empty()).then_some(lines)
 }
 
+/// Ensure exactly one tab is flagged active when the loader snapshot carried no
+/// per-tab `active` boolean (an older `sidepanel.js`, OCEAN-377 P2). The current
+/// loader publishes Chrome's own per-tab flag, which is authoritative and may
+/// legitimately mark zero tabs (the active tab was filtered out, e.g. the
+/// extension's own page) — so when `snapshot_has_active_flag` is true we leave
+/// the parsed flags untouched. Only on the flagless fallback do we flag the
+/// FIRST tab whose URL matches the active-tab URL, never every duplicate, so a
+/// window with several same-URL tabs still resolves to a single "this tab".
+fn flag_active_tab_fallback(
+    tabs: &mut [BrowserTab],
+    snapshot_has_active_flag: bool,
+    active_tab_url: Option<&str>,
+) {
+    if snapshot_has_active_flag {
+        return;
+    }
+    if let Some(active_url) = active_tab_url {
+        if let Some(first) = tabs.iter_mut().find(|t| t.url == active_url) {
+            first.active = true;
+        }
+    }
+}
+
 /// Structured browser state for the turn (OCEAN-377), the counterpart of
 /// [`browser_context_guidance`]. Reads the same loader-published globals —
 /// `window.__ocean_active_tab` (`{url, title}`) and `window.__ocean_open_tabs`
@@ -3257,9 +3280,20 @@ fn browser_client_context(client_type: &str) -> Option<ClientContext> {
     };
 
     // Open-tab list (OCEAN-92): the current window's tabs, capped, with the
-    // extension's own pages filtered out. `active` is keyed off the active-tab
-    // url we resolved above so the daemon can identify the foregrounded tab.
-    let mut tabs = Vec::new();
+    // extension's own pages filtered out. The loader publishes Chrome's own
+    // per-tab `active` boolean on each entry (`sidepanel.js`: `active:
+    // !!t.active`); we trust THAT flag so the daemon can resolve "this tab" even
+    // when several tabs share a URL — a URL match would flag every duplicate
+    // (OCEAN-377 P2). We only fall back to a single-tab URL match below if the
+    // snapshot carries no per-tab flag at all.
+    let read_bool = |obj: &wasm_bindgen::JsValue, key: &str| -> Option<bool> {
+        js_sys::Reflect::get(obj, &wasm_bindgen::JsValue::from_str(key))
+            .ok()
+            .filter(|v| !v.is_undefined() && !v.is_null())
+            .and_then(|v| v.as_bool())
+    };
+    let mut tabs: Vec<BrowserTab> = Vec::new();
+    let mut snapshot_has_active_flag = false;
     if let Ok(tabs_val) = js_sys::Reflect::get(
         &window,
         &wasm_bindgen::JsValue::from_str("__ocean_open_tabs"),
@@ -3276,7 +3310,15 @@ fn browser_client_context(client_type: &str) -> Option<ClientContext> {
             if url.starts_with("chrome-extension://") {
                 continue;
             }
-            let active = active_tab_url.as_deref() == Some(url.as_str());
+            // Prefer the snapshot's real per-tab flag; default false when the
+            // entry omits it (handled by the URL fallback after the loop).
+            let active = match read_bool(&tab, "active") {
+                Some(flag) => {
+                    snapshot_has_active_flag = true;
+                    flag
+                }
+                None => false,
+            };
             tabs.push(BrowserTab {
                 title: read(&tab, "title").unwrap_or_default(),
                 url,
@@ -3284,6 +3326,13 @@ fn browser_client_context(client_type: &str) -> Option<ClientContext> {
             });
         }
     }
+
+    // Fallback for an older loader snapshot with no per-tab `active` flag.
+    flag_active_tab_fallback(
+        &mut tabs,
+        snapshot_has_active_flag,
+        active_tab_url.as_deref(),
+    );
 
     // Nothing usable → omit the field entirely (keeps the wire shape unchanged).
     if active_tab_url.is_none() && tabs.is_empty() {
@@ -4101,6 +4150,69 @@ mod tests {
         // No stray fields leak onto the wire context objects.
         assert_eq!(ctx.as_object().unwrap().len(), 2); // client_type + browser
         assert_eq!(tabs[0].as_object().unwrap().len(), 3); // url + title + active
+    }
+
+    #[test]
+    fn duplicate_url_tabs_keep_only_the_truly_active_one_flagged() {
+        // OCEAN-377 P2: when the loader carries Chrome's own per-tab `active`
+        // flag (snapshot_has_active_flag = true), we trust it verbatim. Two tabs
+        // share a URL but only the genuinely-active one is flagged — a URL match
+        // would (incorrectly) light up both.
+        let mut tabs = vec![
+            BrowserTab {
+                url: "https://example.com/dup".into(),
+                title: "First copy".into(),
+                active: false,
+            },
+            BrowserTab {
+                url: "https://example.com/dup".into(),
+                title: "Second copy (focused)".into(),
+                active: true,
+            },
+        ];
+        flag_active_tab_fallback(&mut tabs, true, Some("https://example.com/dup"));
+        assert!(
+            !tabs[0].active,
+            "the non-focused duplicate must stay inactive"
+        );
+        assert!(
+            tabs[1].active,
+            "only the truly-active duplicate stays flagged"
+        );
+        assert_eq!(
+            tabs.iter().filter(|t| t.active).count(),
+            1,
+            "exactly one tab is active even when URLs collide"
+        );
+    }
+
+    #[test]
+    fn flagless_snapshot_falls_back_to_a_single_url_match() {
+        // OCEAN-377 P2 fallback: an older loader publishes no per-tab `active`
+        // flag (snapshot_has_active_flag = false). We flag exactly ONE tab — the
+        // first URL match against the active-tab URL — not every duplicate.
+        let mut tabs = vec![
+            BrowserTab {
+                url: "https://example.com/dup".into(),
+                title: "First copy".into(),
+                active: false,
+            },
+            BrowserTab {
+                url: "https://example.com/dup".into(),
+                title: "Second copy".into(),
+                active: false,
+            },
+            BrowserTab {
+                url: "https://example.com/other".into(),
+                title: "Other".into(),
+                active: false,
+            },
+        ];
+        flag_active_tab_fallback(&mut tabs, false, Some("https://example.com/dup"));
+        assert!(tabs[0].active, "first URL match is flagged");
+        assert!(!tabs[1].active, "the second duplicate is NOT flagged");
+        assert!(!tabs[2].active);
+        assert_eq!(tabs.iter().filter(|t| t.active).count(), 1);
     }
 
     #[test]
