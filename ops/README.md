@@ -1,6 +1,6 @@
 # Ocean Surface — Ops
 
-## ocean-surface-proxy is supervised by launchd (OCEAN-161)
+## ocean-surface-proxy is supervised by launchd (OCEAN-161 / OCEAN-385)
 
 The **surface proxy** (`crates/ocean-surface-proxy`, built to
 `target/release/ocean-surface-proxy`) serves the compiled PWA bundle from `dist/`
@@ -37,12 +37,19 @@ login (`RunAtLoad`).
 ### Install / enable supervision
 
 ```bash
+# Stage only — builds + copies the plist, then PRINTS the launchctl commands:
 ops/install-surface-proxy.sh
+
+# Or actually start supervision now (touches the live launchd domain):
+ops/install-surface-proxy.sh --bootstrap
 ```
 
-This builds the proxy (release), ensures a valid `dist/` bundle exists, copies the
-plist into `~/Library/LaunchAgents/`, then bootstraps + enables + kickstarts the
-job. Idempotent — safe to re-run after a pull/rebuild. (Equivalent manual steps:
+By default the script is **scripts-only**: it builds the proxy (release, **from
+main** — warns if you're on a feature branch), ensures a valid `dist/` bundle
+exists, copies the plist into `~/Library/LaunchAgents/`, and then **prints** the
+`launchctl bootstrap/enable/kickstart` commands for you to run. The live bootstrap
+is **opt-in** via `--bootstrap` so a routine re-run never restarts the service out
+from under you. Idempotent — safe to re-run after a pull/rebuild. (Equivalent manual steps:
 `cp deploy/dev.risingtides.ocean-surface-proxy.plist ~/Library/LaunchAgents/` then
 `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.risingtides.ocean-surface-proxy.plist`
 and `launchctl enable gui/$(id -u)/dev.risingtides.ocean-surface-proxy`.)
