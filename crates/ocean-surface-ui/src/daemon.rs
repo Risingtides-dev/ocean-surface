@@ -3054,8 +3054,13 @@ fn turns_from_session_transcript(
     let mut turns = Vec::new();
     for entry in entries {
         // A component_render/unmount result carries a non-empty summary text, so
-        // route on the tool name BEFORE the empty-text skip below.
-        if entry.role == "tool" {
+        // route on the tool name BEFORE the empty-text skip below. Only replay a
+        // SUCCESSFUL result, though: an errored component_render never rendered
+        // live (and an errored component_unmount never removed anything), so
+        // re-applying its saved args would mount a phantom component (or wrongly
+        // drop one) on reconnect. For a failed result we fall through and let it
+        // hydrate as the failed ToolCall block the live session showed.
+        if entry.role == "tool" && !entry.is_error.unwrap_or(false) {
             if let Some(component) = entry
                 .tool_call_id
                 .as_deref()
@@ -3916,6 +3921,55 @@ mod tests {
         // The surviving assistant text turn stays.
         assert_eq!(turns.len(), 1);
         assert!(matches!(turns[0].blocks[0], Block::Text(_)));
+    }
+
+    /// Codex P2: an ERRORED component_render never rendered live, so reconnect
+    /// must NOT replay it as a phantom component — the failed call stays
+    /// represented as the ToolCall block the live session showed.
+    #[test]
+    fn errored_component_render_is_not_replayed() {
+        let transcript = vec![
+            assistant_text("trying to render"),
+            SessionTranscriptEntry {
+                role: "tool".into(),
+                text: "component render failed".into(),
+                tool_call_id: Some("c-1".into()),
+                tool_name: Some("component_render".into()),
+                is_error: Some(true),
+            },
+        ];
+        let tool_context = vec![render_call(
+            "c-1",
+            serde_json::json!({ "id": "map-1", "kind": "map", "props": {} }),
+        )];
+
+        let turns = turns_from_session_transcript(transcript, &tool_context);
+
+        // No phantom component mounted from the failed call.
+        assert!(
+            !turns
+                .iter()
+                .flat_map(|t| &t.blocks)
+                .any(|b| matches!(b, Block::Component { .. })),
+            "errored component_render must not mount a phantom component"
+        );
+        // The failed call stays visible as an (expanded) ToolCall, as it was live.
+        let tool_call = turns
+            .iter()
+            .flat_map(|t| &t.blocks)
+            .find_map(|b| match b {
+                Block::ToolCall {
+                    name,
+                    status,
+                    expanded,
+                    ..
+                } => Some((name.clone(), *status, *expanded)),
+                _ => None,
+            })
+            .expect("failed component_render must remain a ToolCall block");
+        assert_eq!(tool_call.0, "component_render");
+        assert_eq!(tool_call.1, ToolStatus::Err);
+        assert!(tool_call.2, "failed tool call auto-expands");
     }
 
     #[test]
