@@ -149,7 +149,8 @@ impl CanvasStore {
 
         // A boundary crossing snapshots + truncates; otherwise just append.
         // revision == 0 means nothing was applied yet — nothing to do.
-        let at_boundary = ledger.revision > 0 && ledger.revision % SNAPSHOT_EVERY_N_PATCHES == 0;
+        let at_boundary =
+            ledger.revision > 0 && ledger.revision.is_multiple_of(SNAPSHOT_EVERY_N_PATCHES);
 
         if at_boundary {
             // Crash-safety contract: the durable on-disk state (snapshot + log)
@@ -374,10 +375,10 @@ impl CanvasStore {
 fn replay_newer(ledger: &mut CanvasLedger, entries: Vec<SurfacePatchEnvelope>) {
     for env in entries {
         // Skip anything the current ledger state already includes.
-        if let Some(rev) = revision_from_patch_id(env.patch_id.as_str()) {
-            if rev <= ledger.revision {
-                continue;
-            }
+        if let Some(rev) = revision_from_patch_id(env.patch_id.as_str())
+            && rev <= ledger.revision
+        {
+            continue;
         }
         ledger.apply_remote_patch(env);
     }

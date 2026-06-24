@@ -473,8 +473,7 @@ impl From<&SurfaceCanvasContext> for SurfaceCanvasRoomMetadata {
 mod tests {
     use super::*;
     use crate::shell::canvas::{
-        ActorRef, CanvasComponentPatch, CanvasId, CanvasLedger, CanvasMode, ComponentId, Rect,
-        SurfacePatch,
+        ActorRef, CanvasComponentPatch, CanvasLedger, CanvasMode, ComponentId, Rect, SurfacePatch,
     };
     use crate::shell::surface::{LedgerComponent, SurfaceMode};
     use serde_json::Value;

@@ -294,18 +294,18 @@ mod tests {
             set.put(ledger_with(&nth_canvas(n), "c"));
         }
         // canvas:0 is active; canvas:1 is now the least-recently-used non-active.
-        assert_eq!(set.active_id(), Some(&CanvasId::new(&nth_canvas(0))));
+        assert_eq!(set.active_id(), Some(&CanvasId::new(nth_canvas(0))));
 
         // One more canvas tips us over the cap → the LRU (canvas:1) is evicted.
         set.put(ledger_with(&nth_canvas(MAX_CANVASES), "c"));
 
         assert_eq!(set.len(), MAX_CANVASES);
         assert!(
-            set.get(&CanvasId::new(&nth_canvas(1))).is_none(),
+            set.get(&CanvasId::new(nth_canvas(1))).is_none(),
             "the least-recently-used canvas (canvas:1) was evicted",
         );
         assert!(
-            set.get(&CanvasId::new(&nth_canvas(MAX_CANVASES))).is_some(),
+            set.get(&CanvasId::new(nth_canvas(MAX_CANVASES))).is_some(),
             "the just-inserted canvas is retained",
         );
     }
@@ -318,17 +318,17 @@ mod tests {
         for n in 0..MAX_CANVASES {
             set.put(ledger_with(&nth_canvas(n), "c"));
         }
-        assert_eq!(set.active_id(), Some(&CanvasId::new(&nth_canvas(0))));
+        assert_eq!(set.active_id(), Some(&CanvasId::new(nth_canvas(0))));
 
         // Push many more canvases; the active canvas:0 must remain throughout.
         for n in MAX_CANVASES..(MAX_CANVASES * 2) {
             set.put(ledger_with(&nth_canvas(n), "c"));
             assert!(
-                set.get(&CanvasId::new(&nth_canvas(0))).is_some(),
+                set.get(&CanvasId::new(nth_canvas(0))).is_some(),
                 "active canvas:0 must never be evicted (insert {n})",
             );
         }
-        assert_eq!(set.active_id(), Some(&CanvasId::new(&nth_canvas(0))));
+        assert_eq!(set.active_id(), Some(&CanvasId::new(nth_canvas(0))));
     }
 
     #[test]
@@ -339,17 +339,17 @@ mod tests {
         }
         // Make an old canvas active: canvas:2 was stale, now it's both active and
         // most-recently-used, so it must not be the eviction victim.
-        set.set_active(&CanvasId::new(&nth_canvas(2)));
+        set.set_active(&CanvasId::new(nth_canvas(2)));
 
         set.put(ledger_with(&nth_canvas(MAX_CANVASES), "c"));
         assert!(
-            set.get(&CanvasId::new(&nth_canvas(2))).is_some(),
+            set.get(&CanvasId::new(nth_canvas(2))).is_some(),
             "the freshly-activated canvas:2 survives — recency was refreshed",
         );
         // The evicted one is the stalest non-active: canvas:0 (the original first,
         // never re-touched, and no longer active).
         assert!(
-            set.get(&CanvasId::new(&nth_canvas(0))).is_none(),
+            set.get(&CanvasId::new(nth_canvas(0))).is_none(),
             "the stalest non-active canvas (canvas:0) was evicted instead",
         );
     }
@@ -366,11 +366,11 @@ mod tests {
         set.put(ledger_with(&nth_canvas(MAX_CANVASES), "c"));
 
         assert!(
-            set.get(&CanvasId::new(&nth_canvas(1))).is_some(),
+            set.get(&CanvasId::new(nth_canvas(1))).is_some(),
             "canvas:1 was touched, so it is no longer the LRU victim",
         );
         assert!(
-            set.get(&CanvasId::new(&nth_canvas(2))).is_none(),
+            set.get(&CanvasId::new(nth_canvas(2))).is_none(),
             "canvas:2 (now the stalest non-active) was evicted",
         );
     }

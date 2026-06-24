@@ -490,10 +490,9 @@ fn tool_block_mut<'a>(
             status,
             ..
         } = block
+            && id == call_id
         {
-            if id == call_id {
-                return Some((output, status));
-            }
+            return Some((output, status));
         }
     }
     None
@@ -510,15 +509,14 @@ fn replace_component(
             if let AgentBlock::Component {
                 component_id: id, ..
             } = block
+                && id == component_id
             {
-                if id == component_id {
-                    *block = AgentBlock::Component {
-                        component_id: component_id.to_string(),
-                        kind: kind.to_string(),
-                        props: props.clone(),
-                    };
-                    return true;
-                }
+                *block = AgentBlock::Component {
+                    component_id: component_id.to_string(),
+                    kind: kind.to_string(),
+                    props: props.clone(),
+                };
+                return true;
             }
         }
     }
@@ -550,8 +548,10 @@ mod tests {
 
     #[test]
     fn reducer_streams_assistant_text_for_existing_session() {
-        let mut state = AgentState::default();
-        state.session_id = Some("s1".to_string());
+        let mut state = AgentState {
+            session_id: Some("s1".to_string()),
+            ..Default::default()
+        };
         state.apply_event(AgentEvent::SessionCreated {
             session_id: "s1".to_string(),
             title: "Ocean".to_string(),
@@ -619,9 +619,11 @@ mod tests {
 
     #[test]
     fn reducer_finishes_turn_and_records_tokens() {
-        let mut state = AgentState::default();
-        state.streaming = true;
-        state.active_turn_id = Some("t1".to_string());
+        let mut state = AgentState {
+            streaming: true,
+            active_turn_id: Some("t1".to_string()),
+            ..Default::default()
+        };
 
         state.apply_event(AgentEvent::TurnFinished {
             session_id: "s1".to_string(),

@@ -345,13 +345,12 @@ impl OceanGuiApp {
                     self.run_demo_command();
                 }
 
-                if ui.button("Open workspace").clicked() {
-                    if let Some(folder) = rfd::FileDialog::new()
+                if ui.button("Open workspace").clicked()
+                    && let Some(folder) = rfd::FileDialog::new()
                         .set_directory(self.workspace.root())
                         .pick_folder()
-                    {
-                        self.set_workspace(folder);
-                    }
+                {
+                    self.set_workspace(folder);
                 }
 
                 if ui.button("Refresh").clicked() {
