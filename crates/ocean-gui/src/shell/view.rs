@@ -491,12 +491,23 @@ impl OceanGuiShell {
     /// Captures any in-cell edits to the current canvas first, re-points the set's
     /// active canvas, then republishes it to the shared cell and repaints. A no-op
     /// when `canvas_id` is already active or isn't present.
+    ///
+    /// This is an explicit operator selection, so it goes through
+    /// [`CanvasLedgerSet::select`] (not bare `set_active`): that records the
+    /// operator-selected canvas, which is exempt from LRU eviction even after a
+    /// background agent patch reassigns `active` to a different canvas (OCEAN-380).
     fn switch_active_canvas(&mut self, canvas_id: &CanvasId, cx: &mut Context<Self>) {
-        if self.canvas_ledgers.active_id() == Some(canvas_id) {
+        // Already shown *and* already the operator's selection: nothing to do. (If
+        // it's active but not yet selected — e.g. an agent patch brought it to the
+        // foreground and the operator now clicks its tab — fall through so `select`
+        // records the operator-selected pin.)
+        if self.canvas_ledgers.active_id() == Some(canvas_id)
+            && self.canvas_ledgers.selected_id() == Some(canvas_id)
+        {
             return;
         }
         self.sync_active_canvas_into_set();
-        self.canvas_ledgers.set_active(canvas_id);
+        self.canvas_ledgers.select(canvas_id);
         self.publish_active_canvas_to_cell();
         self.request_canvas_repaint(cx);
     }
