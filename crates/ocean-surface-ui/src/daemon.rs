@@ -3301,7 +3301,11 @@ mod tests {
             props: serde_json::Value::Null,
         });
 
-        assert_eq!(turns.len(), 1, "card folds into the active turn, no new turn");
+        assert_eq!(
+            turns.len(),
+            1,
+            "card folds into the active turn, no new turn"
+        );
         assert_eq!(turns[0].turn_id.as_deref(), Some("t1"));
         assert_eq!(turns[0].blocks.len(), 2, "text + component in one turn");
 
