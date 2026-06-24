@@ -2556,8 +2556,9 @@ fn apply_event(
                         }
                     }
                 }
-                // Append as a new assistant block (creates a turn if needed).
-                let turn = ensure_assistant_turn(t, "component-render");
+                // Attach to the CURRENT assistant turn (component events carry no
+                // turn_id), not a fresh synthetic turn each time.
+                let turn = ensure_component_turn(t);
                 turn.blocks.push(Block::Component {
                     component_id: component_id.clone(),
                     kind: kind.clone(),
@@ -2940,6 +2941,21 @@ fn ensure_assistant_turn<'a>(turns: &'a mut Vec<Turn>, turn_id: &str) -> &'a mut
     turns.last_mut().unwrap()
 }
 
+/// Attach a component render to the CURRENT assistant turn. `ComponentRender`
+/// events carry no `turn_id`, so they must fold into whatever assistant turn is
+/// active (the text the agent just streamed) rather than minting a fresh turn
+/// every time — otherwise each card splinters one logical turn across the
+/// transcript and the next text delta orphans the component. Falls back to a
+/// synthetic turn only when there is no assistant turn to attach to (e.g. a
+/// component emitted before any assistant text).
+fn ensure_component_turn(turns: &mut Vec<Turn>) -> &mut Turn {
+    let attach_to_last = matches!(turns.last(), Some(t) if t.role == Role::Assistant);
+    if !attach_to_last {
+        turns.push(Turn::assistant("component-render".to_string()));
+    }
+    turns.last_mut().unwrap()
+}
+
 /// Returns true if `event_id` has already been applied, otherwise records it.
 ///
 /// The daemon sends stable SSE `id:` values for `AgentTurnEvent`s. Browser
@@ -3269,6 +3285,36 @@ mod tests {
             tool_name: Some("read_file".into()),
             is_error: Some(is_error),
         }
+    }
+
+    #[test]
+    fn component_render_attaches_to_active_turn_not_a_new_one() {
+        // The agent streamed text on turn "t1", then renders a card. The card
+        // must fold into t1, not splinter into a separate synthetic turn.
+        let mut turns = vec![Turn::assistant("t1".to_string())];
+        turns[0].blocks.push(Block::Text("hello".into()));
+
+        let turn = ensure_component_turn(&mut turns);
+        turn.blocks.push(Block::Component {
+            component_id: "c1".into(),
+            kind: "card".into(),
+            props: serde_json::Value::Null,
+        });
+
+        assert_eq!(turns.len(), 1, "card folds into the active turn, no new turn");
+        assert_eq!(turns[0].turn_id.as_deref(), Some("t1"));
+        assert_eq!(turns[0].blocks.len(), 2, "text + component in one turn");
+
+        // A second card on the same turn still does not create a new turn.
+        ensure_component_turn(&mut turns);
+        assert_eq!(turns.len(), 1);
+
+        // Fallback: with no assistant turn to attach to (last is a user turn),
+        // a synthetic assistant turn is created so the card has a home.
+        let mut empty = vec![Turn::user("hi")];
+        ensure_component_turn(&mut empty);
+        assert_eq!(empty.len(), 2);
+        assert_eq!(empty[1].role, Role::Assistant);
     }
 
     #[test]
