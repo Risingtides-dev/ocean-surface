@@ -1225,7 +1225,20 @@ where
         return Ok(());
     }
 
-    let event = serde_json::from_str::<T>(data).map_err(|error| error.to_string())?;
+    // A single malformed / truncated / wrong-typed `data:` frame must NOT kill
+    // the whole SSE stream: the native listener is spawned once with no
+    // reconnect loop, so propagating this error silently freezes the desktop
+    // app's live agent + permission stream until a manual restart. Skip the bad
+    // frame and keep the stream alive — same resilience the WASM client already
+    // has (`let Ok(evt) = serde_json::from_str(..) else { continue }`).
+    let event = match serde_json::from_str::<T>(data) {
+        Ok(event) => event,
+        Err(error) => {
+            eprintln!("[ocean-gui] skipping unparseable SSE frame: {error}");
+            data.clear();
+            return Ok(());
+        }
+    };
     data.clear();
     on_event(event)
 }
@@ -1520,6 +1533,29 @@ mod tests {
                 delta: "hi".to_string()
             }
         );
+    }
+
+    #[test]
+    fn sse_reader_survives_a_malformed_frame() {
+        // A garbage frame between two good ones must be skipped, not abort the
+        // stream — regression for the native GUI freezing on one bad frame.
+        let input = concat!(
+            "data: {\"type\":\"assistant_text_delta\",\"session_id\":\"s1\",\"turn_id\":\"t1\",\"delta\":\"a\"}\n",
+            "\n",
+            "data: {not valid json at all\n",
+            "\n",
+            "data: {\"type\":\"assistant_text_delta\",\"session_id\":\"s1\",\"turn_id\":\"t1\",\"delta\":\"b\"}\n",
+            "\n"
+        );
+        let (sender, receiver) = mpsc::channel();
+
+        read_sse_events(Cursor::new(input), |event: AgentEvent| {
+            sender.send(event).map_err(|error| error.to_string())
+        })
+        .expect("stream must complete despite a bad frame");
+
+        let got: Vec<AgentEvent> = receiver.try_iter().collect();
+        assert_eq!(got.len(), 2, "both good frames delivered, bad one skipped");
     }
 
     #[test]
