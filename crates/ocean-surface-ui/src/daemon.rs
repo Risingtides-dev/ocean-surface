@@ -1149,6 +1149,15 @@ struct SessionDetail {
     cwd: Option<String>,
     #[serde(default)]
     transcript: Vec<SessionTranscriptEntry>,
+    /// Per-message tool-call/result context the daemon derives alongside the
+    /// transcript. We read it to recover `component_render` props on reconnect:
+    /// `ComponentRender` is an SSE-only side-channel event that is never folded
+    /// into a transcript text entry, but the assistant tool-call that produced it
+    /// IS persisted here with its full `arguments` (id/kind/props). Replaying
+    /// those lets rendered components survive a mid-turn SSE reconnect instead of
+    /// vanishing (OCEAN-382).
+    #[serde(default)]
+    tool_context: Vec<SessionToolContext>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1156,10 +1165,29 @@ struct SessionTranscriptEntry {
     role: String,
     #[serde(default)]
     text: String,
+    /// Correlates a `tool` transcript entry with its originating `call` in
+    /// `tool_context` (so a `component_render` result can be matched to the
+    /// tool-call args carrying its props). `None` for non-tool entries.
+    #[serde(default)]
+    tool_call_id: Option<String>,
     #[serde(default)]
     tool_name: Option<String>,
     #[serde(default)]
     is_error: Option<bool>,
+}
+
+/// Tool-call / tool-result context for a persisted message, mirroring the
+/// daemon's `SessionToolContext`. We only need the `call` entries' `arguments`
+/// (which carry `component_render` props) for replay, but decode the full shape
+/// for forward-compatibility.
+#[derive(Debug, Clone, Deserialize)]
+struct SessionToolContext {
+    /// `"call"` or `"result"`.
+    kind: String,
+    tool_call_id: String,
+    tool_name: String,
+    #[serde(default)]
+    arguments: Option<serde_json::Value>,
 }
 
 impl Daemon {
@@ -2257,7 +2285,10 @@ impl Daemon {
                         if !detail.model.is_empty() {
                             model.set(Some(detail.model));
                         }
-                        turns.set(turns_from_session_transcript(detail.transcript));
+                        turns.set(turns_from_session_transcript(
+                            detail.transcript,
+                            &detail.tool_context,
+                        ));
                         status.set("session loaded".into());
                     }
                     Ok(r) => {
@@ -2992,13 +3023,54 @@ async fn rehydrate_transcript(
         model.set(Some(detail.model));
     }
     // Replace the (possibly truncated) live transcript with the daemon's
-    // authoritative snapshot, which includes anything missed during the gap.
-    turns.set(turns_from_session_transcript(detail.transcript));
+    // authoritative snapshot, which includes anything missed during the gap —
+    // including ComponentRender frames recovered from persisted tool-call args
+    // (OCEAN-382), so rendered components re-render instead of vanishing.
+    turns.set(turns_from_session_transcript(
+        detail.transcript,
+        &detail.tool_context,
+    ));
 }
 
-fn turns_from_session_transcript(entries: Vec<SessionTranscriptEntry>) -> Vec<Turn> {
+fn turns_from_session_transcript(
+    entries: Vec<SessionTranscriptEntry>,
+    tool_context: &[SessionToolContext],
+) -> Vec<Turn> {
+    // Index `component_render` tool-CALL args by tool_call_id so a `component_render`
+    // tool-RESULT entry in the transcript can recover its props. The transcript
+    // text for these results is only the daemon's summary ("rendered component
+    // 'x'…") — the actual id/kind/props live solely in the call arguments
+    // (OCEAN-382). We also note `component_unmount` calls so a persisted unmount
+    // removes the component on replay, mirroring the live SSE reducer.
+    let render_calls: std::collections::HashMap<&str, &SessionToolContext> = tool_context
+        .iter()
+        .filter(|c| {
+            c.kind == "call"
+                && (c.tool_name == "component_render" || c.tool_name == "component_unmount")
+        })
+        .map(|c| (c.tool_call_id.as_str(), c))
+        .collect();
+
     let mut turns = Vec::new();
     for entry in entries {
+        // A component_render/unmount result carries a non-empty summary text, so
+        // route on the tool name BEFORE the empty-text skip below. Only replay a
+        // SUCCESSFUL result, though: an errored component_render never rendered
+        // live (and an errored component_unmount never removed anything), so
+        // re-applying its saved args would mount a phantom component (or wrongly
+        // drop one) on reconnect. For a failed result we fall through and let it
+        // hydrate as the failed ToolCall block the live session showed.
+        if entry.role == "tool" && !entry.is_error.unwrap_or(false) {
+            if let Some(component) = entry
+                .tool_call_id
+                .as_deref()
+                .and_then(|id| render_calls.get(id))
+            {
+                replay_component_call(&mut turns, component);
+                continue;
+            }
+        }
+
         if entry.text.trim().is_empty() && entry.tool_name.is_none() {
             continue;
         }
@@ -3042,6 +3114,83 @@ fn turns_from_session_transcript(entries: Vec<SessionTranscriptEntry>) -> Vec<Tu
         }
     }
     turns
+}
+
+/// Fold a persisted `component_render` / `component_unmount` tool call back into
+/// the rebuilt transcript, reproducing what the live SSE reducer in
+/// [`apply_event`] does for `ComponentRender` / `ComponentUnmount`. This is how a
+/// rendered component (map, table, workflow card) survives a mid-turn SSE
+/// reconnect: its props are read from the call's persisted `arguments` rather
+/// than from a live frame that was dropped during the gap (OCEAN-382).
+fn replay_component_call(turns: &mut Vec<Turn>, call: &SessionToolContext) {
+    let args = call.arguments.as_ref();
+    let Some(component_id) = args
+        .and_then(|a| a.get("id"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    else {
+        return;
+    };
+
+    if call.tool_name == "component_unmount" {
+        for turn in turns.iter_mut() {
+            turn.blocks.retain(|block| match block {
+                Block::Component {
+                    component_id: id, ..
+                } => id != &component_id,
+                _ => true,
+            });
+        }
+        turns.retain(|turn| !turn.blocks.is_empty());
+        return;
+    }
+
+    // component_render. `props` defaults to null when absent so a malformed call
+    // still renders an (empty) component rather than disappearing silently.
+    let kind = args
+        .and_then(|a| a.get("kind"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let props = args
+        .and_then(|a| a.get("props"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let replace = args
+        .and_then(|a| a.get("replace"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // replace:true overwrites the existing block with the same id in place,
+    // matching the live reducer. A render of an id already present (without
+    // replace) still updates it on replay — re-running the original event stream
+    // could only have produced one live block per id anyway.
+    if replace {
+        for turn in turns.iter_mut() {
+            for block in turn.blocks.iter_mut() {
+                if let Block::Component {
+                    component_id: id, ..
+                } = block
+                {
+                    if id == &component_id {
+                        *block = Block::Component {
+                            component_id: component_id.clone(),
+                            kind: kind.clone(),
+                            props: props.clone(),
+                        };
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    let turn = ensure_component_turn(turns);
+    turn.blocks.push(Block::Component {
+        component_id,
+        kind,
+        props,
+    });
 }
 
 fn ensure_assistant_turn<'a>(turns: &'a mut Vec<Turn>, turn_id: &str) -> &'a mut Turn {
@@ -3543,6 +3692,7 @@ mod tests {
         SessionTranscriptEntry {
             role: "tool".into(),
             text: "boom".into(),
+            tool_call_id: None,
             tool_name: Some("read_file".into()),
             is_error: Some(is_error),
         }
@@ -3584,7 +3734,7 @@ mod tests {
 
     #[test]
     fn failed_tool_call_hydrates_expanded() {
-        let turns = turns_from_session_transcript(vec![tool_entry(true)]);
+        let turns = turns_from_session_transcript(vec![tool_entry(true)], &[]);
         let block = &turns[0].blocks[0];
         match block {
             Block::ToolCall {
@@ -3599,7 +3749,7 @@ mod tests {
 
     #[test]
     fn successful_tool_call_hydrates_collapsed() {
-        let turns = turns_from_session_transcript(vec![tool_entry(false)]);
+        let turns = turns_from_session_transcript(vec![tool_entry(false)], &[]);
         let block = &turns[0].blocks[0];
         match block {
             Block::ToolCall {
@@ -3610,6 +3760,216 @@ mod tests {
             }
             other => panic!("expected ToolCall, got {other:?}"),
         }
+    }
+
+    /// Helpers to build the persisted shapes a reconnect replay reads.
+    fn assistant_text(text: &str) -> SessionTranscriptEntry {
+        SessionTranscriptEntry {
+            role: "assistant".into(),
+            text: text.into(),
+            tool_call_id: None,
+            tool_name: None,
+            is_error: None,
+        }
+    }
+
+    fn component_result(call_id: &str) -> SessionTranscriptEntry {
+        // The daemon persists a component_render tool RESULT as a `tool` entry
+        // whose text is only the summary; props live in the matching call.
+        SessionTranscriptEntry {
+            role: "tool".into(),
+            text: format!("rendered component via {call_id}"),
+            tool_call_id: Some(call_id.into()),
+            tool_name: Some("component_render".into()),
+            is_error: Some(false),
+        }
+    }
+
+    fn render_call(call_id: &str, args: serde_json::Value) -> SessionToolContext {
+        SessionToolContext {
+            kind: "call".into(),
+            tool_call_id: call_id.into(),
+            tool_name: "component_render".into(),
+            arguments: Some(args),
+        }
+    }
+
+    /// OCEAN-382: a ComponentRender emitted live is SSE-only and never lands in
+    /// the transcript text. On reconnect the rebuild must recover the component
+    /// from the persisted tool-call args (id/kind/props) so maps/cards re-render
+    /// instead of vanishing — and the summary tool-result must NOT show up as a
+    /// raw ToolCall block.
+    #[test]
+    fn component_render_replays_from_tool_context_on_reconnect() {
+        let transcript = vec![assistant_text("here is the map"), component_result("c-1")];
+        let tool_context = vec![render_call(
+            "c-1",
+            serde_json::json!({
+                "id": "map-1",
+                "kind": "map",
+                "props": { "center": { "lat": 1.0, "lng": 2.0 } }
+            }),
+        )];
+
+        let turns = turns_from_session_transcript(transcript, &tool_context);
+
+        // Text + component fold into the one assistant turn (no synthetic split).
+        assert_eq!(turns.len(), 1, "component attaches to the text turn");
+        assert_eq!(
+            turns[0].blocks.len(),
+            2,
+            "text + component, no ToolCall block"
+        );
+        match &turns[0].blocks[1] {
+            Block::Component {
+                component_id,
+                kind,
+                props,
+            } => {
+                assert_eq!(component_id, "map-1");
+                assert_eq!(kind, "map");
+                assert_eq!(props["center"]["lat"], 1.0);
+            }
+            other => panic!("expected replayed Component block, got {other:?}"),
+        }
+        // No ToolCall block should leak from the component_render summary result.
+        assert!(
+            !turns
+                .iter()
+                .flat_map(|t| &t.blocks)
+                .any(|b| matches!(b, Block::ToolCall { .. })),
+            "component_render result must not render as a raw tool call"
+        );
+    }
+
+    /// replace:true overwrites the existing component in place rather than
+    /// appending a duplicate — mirroring the live SSE reducer.
+    #[test]
+    fn component_replace_overwrites_in_place_on_replay() {
+        let transcript = vec![
+            assistant_text("rendering"),
+            component_result("c-1"),
+            component_result("c-2"),
+        ];
+        let tool_context = vec![
+            render_call(
+                "c-1",
+                serde_json::json!({ "id": "prog", "kind": "progress", "props": { "value": 0.2 } }),
+            ),
+            render_call(
+                "c-2",
+                serde_json::json!({
+                    "id": "prog", "kind": "progress",
+                    "props": { "value": 0.9 }, "replace": true
+                }),
+            ),
+        ];
+
+        let turns = turns_from_session_transcript(transcript, &tool_context);
+        let components: Vec<_> = turns
+            .iter()
+            .flat_map(|t| &t.blocks)
+            .filter_map(|b| match b {
+                Block::Component {
+                    component_id,
+                    props,
+                    ..
+                } => Some((component_id.clone(), props.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(components.len(), 1, "replace must not duplicate the id");
+        assert_eq!(components[0].0, "prog");
+        assert_eq!(components[0].1["value"], 0.9, "latest props win");
+    }
+
+    /// A persisted component_unmount removes the component on replay.
+    #[test]
+    fn component_unmount_removes_on_replay() {
+        let transcript = vec![
+            assistant_text("show then hide"),
+            component_result("c-1"),
+            SessionTranscriptEntry {
+                role: "tool".into(),
+                text: "unmounted component 'x'".into(),
+                tool_call_id: Some("c-2".into()),
+                tool_name: Some("component_unmount".into()),
+                is_error: Some(false),
+            },
+        ];
+        let tool_context = vec![
+            render_call(
+                "c-1",
+                serde_json::json!({ "id": "x", "kind": "callout", "props": {} }),
+            ),
+            SessionToolContext {
+                kind: "call".into(),
+                tool_call_id: "c-2".into(),
+                tool_name: "component_unmount".into(),
+                arguments: Some(serde_json::json!({ "id": "x" })),
+            },
+        ];
+
+        let turns = turns_from_session_transcript(transcript, &tool_context);
+        assert!(
+            !turns
+                .iter()
+                .flat_map(|t| &t.blocks)
+                .any(|b| matches!(b, Block::Component { .. })),
+            "unmounted component must not survive replay"
+        );
+        // The surviving assistant text turn stays.
+        assert_eq!(turns.len(), 1);
+        assert!(matches!(turns[0].blocks[0], Block::Text(_)));
+    }
+
+    /// Codex P2: an ERRORED component_render never rendered live, so reconnect
+    /// must NOT replay it as a phantom component — the failed call stays
+    /// represented as the ToolCall block the live session showed.
+    #[test]
+    fn errored_component_render_is_not_replayed() {
+        let transcript = vec![
+            assistant_text("trying to render"),
+            SessionTranscriptEntry {
+                role: "tool".into(),
+                text: "component render failed".into(),
+                tool_call_id: Some("c-1".into()),
+                tool_name: Some("component_render".into()),
+                is_error: Some(true),
+            },
+        ];
+        let tool_context = vec![render_call(
+            "c-1",
+            serde_json::json!({ "id": "map-1", "kind": "map", "props": {} }),
+        )];
+
+        let turns = turns_from_session_transcript(transcript, &tool_context);
+
+        // No phantom component mounted from the failed call.
+        assert!(
+            !turns
+                .iter()
+                .flat_map(|t| &t.blocks)
+                .any(|b| matches!(b, Block::Component { .. })),
+            "errored component_render must not mount a phantom component"
+        );
+        // The failed call stays visible as an (expanded) ToolCall, as it was live.
+        let tool_call = turns
+            .iter()
+            .flat_map(|t| &t.blocks)
+            .find_map(|b| match b {
+                Block::ToolCall {
+                    name,
+                    status,
+                    expanded,
+                    ..
+                } => Some((name.clone(), *status, *expanded)),
+                _ => None,
+            })
+            .expect("failed component_render must remain a ToolCall block");
+        assert_eq!(tool_call.0, "component_render");
+        assert_eq!(tool_call.1, ToolStatus::Err);
+        assert!(tool_call.2, "failed tool call auto-expands");
     }
 
     #[test]
