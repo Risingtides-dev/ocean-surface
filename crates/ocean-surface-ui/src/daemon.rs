@@ -887,6 +887,16 @@ struct AgentTurnRequest<'a> {
     /// field) stay back-compatible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     client_context: Option<ClientContext>,
+    /// Named folder-as-agent to run this turn (OCEAN-378). Mirrors the daemon's
+    /// `AgentTurnRequest::agent: Option<String>`: when set, the daemon resolves
+    /// `<agents_root>/<agent>/instructions.md` and composes it as the turn's
+    /// system prompt, overriding the surface profile (see
+    /// `ocean-os/docs/specs/folder-as-agent.md`). `None` (the default, and every
+    /// turn today — no UI selector ships yet) keeps the surface-profile behavior,
+    /// so the wire shape is byte-for-byte unchanged and older daemons that ignore
+    /// the field stay back-compatible. Discover names via `GET /v1/agents`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1050,6 +1060,15 @@ pub struct Daemon {
     /// daemon default. Persisted in localStorage. Drawn from the same `models`
     /// catalogue fetched from `GET /v1/models`.
     pub model_override: RwSignal<Option<String>>,
+    /// Named folder-as-agent for the NEXT turn (OCEAN-378). Rides on
+    /// `AgentTurnRequest::agent` so the turn runs under
+    /// `<agents_root>/<agent>/instructions.md` as a system-prompt override,
+    /// without mutating any global daemon state. `None` (the default) leaves the
+    /// surface-profile behavior untouched. No composer selector ships yet — this
+    /// signal exists so a future dropdown (fed by `GET /v1/agents`) can set it via
+    /// [`set_agent`]; until then every turn sends `None` and the wire shape is
+    /// unchanged. Not persisted: a named agent is a deliberate per-turn choice.
+    pub agent_override: RwSignal<Option<String>>,
     /// Images staged for the NEXT turn (OCEAN-138). A captured visible tab (or a
     /// picked image) lands here and rides along on the next `send_prompt` as
     /// `AgentTurnRequest::images`, then is drained. Empty = no attachment, so the
@@ -1178,6 +1197,9 @@ impl Daemon {
             // the choices survive a reload (like `project`).
             thinking_level: RwSignal::new(load_persisted_thinking_level()),
             model_override: RwSignal::new(load_persisted_model_override()),
+            // Not persisted: a named folder-as-agent is a deliberate per-turn
+            // choice, not a sticky preference. Starts `None` (surface profile).
+            agent_override: RwSignal::new(None),
             pending_images: RwSignal::new(Vec::new()),
             canvas_patches: RwSignal::new(Vec::new()),
             active_decision_token: RwSignal::new(None),
@@ -1217,6 +1239,7 @@ impl Daemon {
             pending_permissions: RwSignal::new(Vec::new()),
             thinking_level: RwSignal::new(None),
             model_override: RwSignal::new(None),
+            agent_override: RwSignal::new(None),
             pending_images: RwSignal::new(Vec::new()),
             canvas_patches: RwSignal::new(Vec::new()),
             active_decision_token: RwSignal::new(None),
@@ -1772,6 +1795,9 @@ impl Daemon {
         // which omits the field and leaves the daemon's global defaults in force.
         let thinking_level = self.thinking_level.get_untracked();
         let model_override = self.model_override.get_untracked();
+        // Named folder-as-agent for this turn (OCEAN-378). `None` until a future
+        // composer selector sets it via `set_agent`; rides on the request below.
+        let agent_override = self.agent_override.get_untracked();
         // Images staged for this turn (OCEAN-138). Read untracked at dispatch
         // time; an empty vec serializes as no `images` field. They are cleared
         // only after the turn POST succeeds (below), so a failed send keeps the
@@ -1911,6 +1937,11 @@ impl Daemon {
                 // so `decide_permission` replays the same token.
                 decision_token: Some(&decision_token),
                 client_context,
+                // Folder-as-agent override (OCEAN-378). `None` today (no selector
+                // ships yet), so the daemon keeps the surface-profile system
+                // prompt and the wire shape is unchanged; a value flows straight
+                // through to `<agents_root>/<agent>/instructions.md` once set.
+                agent: agent_override.as_deref(),
             };
             let post_url = format!("{}/v1/agent/turns", url.trim_end_matches('/'));
             let res = Request::post(&post_url)
@@ -2111,6 +2142,19 @@ impl Daemon {
             Some(id) => persist_model_override(&id),
             None => clear_persisted_model_override(),
         }
+    }
+
+    /// Select the per-turn folder-as-agent (OCEAN-378). Purely client-side: the
+    /// name rides on the next turn's `AgentTurnRequest::agent`, so the daemon
+    /// composes `<agents_root>/<agent>/instructions.md` as that turn's system
+    /// prompt without touching any global state. Pass `None` to clear and fall
+    /// back to the surface profile. Not persisted — a named agent is a deliberate
+    /// per-turn choice, not a sticky preference. No composer control calls this
+    /// yet (UI exposure via `GET /v1/agents` is out of scope for OCEAN-378); the
+    /// setter exists so a future selector can wire straight into the turn path.
+    #[allow(dead_code)]
+    pub fn set_agent(&self, agent: Option<String>) {
+        self.agent_override.set(agent);
     }
 
     /// Hot-swap the daemon's model. Optimistically updates the local `model`
@@ -3865,10 +3909,62 @@ mod tests {
             images: None,
             decision_token: None,
             client_context: None,
+            agent: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         assert!(!json.contains("thinking_level"));
         assert!(!json.contains("model_id"));
+        // OCEAN-378: no agent selected → the field is skipped entirely, so the
+        // daemon's `agent: Option<String>` stays `None` and the surface profile
+        // is unchanged (back-compat: wire shape byte-for-byte the same).
+        assert!(!json.contains("agent"));
+    }
+
+    #[test]
+    fn turn_request_emits_agent_when_set() {
+        // OCEAN-378: a selected folder-as-agent serializes as the bare `agent`
+        // key the daemon's `AgentTurnRequest::agent` deserializes, so the turn
+        // runs under `<agents_root>/<agent>/instructions.md`.
+        let body = AgentTurnRequest {
+            prompt: "hi",
+            cwd: "/",
+            session_id: Some("s1"),
+            project_id: None,
+            client_type: None,
+            guidance: None,
+            room_id: None,
+            thinking_level: None,
+            model_id: None,
+            images: None,
+            decision_token: None,
+            client_context: None,
+            agent: Some("foo"),
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(json.contains(r#""agent":"foo""#));
+    }
+
+    #[test]
+    fn turn_request_omits_agent_when_none() {
+        // Back-compat guard: with `agent: None` the key is absent, so an older
+        // daemon (which never saw the field) deserializes the payload unchanged.
+        let body = AgentTurnRequest {
+            prompt: "hi",
+            cwd: "/",
+            session_id: Some("s1"),
+            project_id: None,
+            client_type: None,
+            guidance: None,
+            room_id: None,
+            thinking_level: None,
+            model_id: None,
+            images: None,
+            decision_token: None,
+            client_context: None,
+            agent: None,
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(!json.contains("agent"));
     }
 
     #[test]
@@ -3886,6 +3982,7 @@ mod tests {
             images: None,
             decision_token: None,
             client_context: None,
+            agent: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         assert!(json.contains(r#""thinking_level":"high""#));
@@ -3910,6 +4007,7 @@ mod tests {
             images: None,
             decision_token: None,
             client_context: None,
+            agent: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         assert!(!json.contains("images"));
@@ -3936,6 +4034,7 @@ mod tests {
             }]),
             decision_token: None,
             client_context: None,
+            agent: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         // Round-trip through serde_json::Value to assert structure exactly.
@@ -4004,6 +4103,7 @@ mod tests {
             images: None,
             decision_token: None,
             client_context: None,
+            agent: None,
         };
         let v: Value = serde_json::from_str(&serde_json::to_string(&body).unwrap()).unwrap();
         assert_eq!(v["client_type"], "leo-voice");
@@ -4029,6 +4129,7 @@ mod tests {
             images: None,
             decision_token: None,
             client_context: None,
+            agent: None,
         };
         let v: Value = serde_json::from_str(&serde_json::to_string(&body).unwrap()).unwrap();
         assert_eq!(v["client_type"], "surface-web");
@@ -4080,6 +4181,7 @@ mod tests {
             images: None,
             decision_token: Some(&token),
             client_context: None,
+            agent: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         assert!(
@@ -4103,6 +4205,7 @@ mod tests {
             images: None,
             decision_token: None,
             client_context: None,
+            agent: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         assert!(
@@ -4155,6 +4258,7 @@ mod tests {
                     ],
                 }),
             }),
+            agent: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         let v: Value = serde_json::from_str(&json).unwrap();
