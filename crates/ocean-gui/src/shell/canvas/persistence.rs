@@ -174,21 +174,31 @@ impl CanvasStore {
     /// does not survive a temp-dir wipe across reboots, which is exactly the
     /// degradation the canvas can tolerate (vs. the prior silent total loss).
     ///
-    /// Privacy (OCEAN-381 review): the headless/CI/container hosts this path
-    /// targets are often shared multi-user Unix boxes, and the system temp dir is
-    /// world-readable. So the per-user base (`ocean-canvas-fallback-<uid>`) is
-    /// created **0700** before any canvas content is written — other local users
-    /// can neither traverse in nor read the session's snapshots/logs (the files
-    /// underneath inherit protection from the locked-down root). Best-effort: if
-    /// the eager 0700 create fails we still return the store so `persist`'s own
-    /// `create_dir_all` runs — persistence works, just without the hardened perms.
-    pub fn for_session_fallback(session_id: &str, canvas_id: &CanvasId) -> Self {
+    /// Privacy + integrity (OCEAN-381 review): the headless/CI/container hosts
+    /// this path targets are often shared multi-user Unix boxes, and the system
+    /// temp dir is world-readable. The per-user base (`ocean-canvas-fallback-<uid>`)
+    /// must therefore be a real, self-owned, **0700** directory before any canvas
+    /// content lands under it (files inherit traversal protection from the locked
+    /// root). The danger is a classic `/tmp` pre-creation/symlink attack: if the
+    /// base already exists — stale, pre-created by another user with a permissive
+    /// mode, or planted as a symlink — we must NOT blindly write into it.
+    ///
+    /// So we **validate or repair, else refuse** (see [`prepare_private_root`]):
+    /// a self-owned dir with loose mode is chmod-ed to 0700 and used; a symlink, a
+    /// foreign-owned dir, or one we can't lock down yields
+    /// [`CanvasStoreError::MissingHome`] so the caller drops to a non-persisting
+    /// (in-memory) ledger — the session still works, but canvas state is never
+    /// written into a non-private root.
+    pub fn for_session_fallback(
+        session_id: &str,
+        canvas_id: &CanvasId,
+    ) -> Result<Self, CanvasStoreError> {
         let base = std::env::temp_dir().join(fallback_base_name());
-        // Lock the per-user base down to 0700 up front, before with_root's canvas
-        // dir (and its files) land underneath it.
-        create_private_dir(&base);
+        // Lock the per-user base down to a private, self-owned 0700 dir up front,
+        // before with_root's canvas dir (and its files) land underneath it.
+        prepare_private_root(&base)?;
         let root = base.join(sanitize_segment(session_id));
-        Self::with_root(root, session_id, canvas_id)
+        Ok(Self::with_root(root, session_id, canvas_id))
     }
 
     /// `<canvas_id>.json` — the full-ledger snapshot.
@@ -506,24 +516,62 @@ fn fallback_base_name() -> String {
     }
 }
 
-/// Create `dir` (recursively) as a private directory before any sensitive file
-/// lands inside it. On unix that means mode 0700 (owner-only rwx), so on a shared
-/// host other local users can neither list nor traverse into the fallback tree.
-/// Best-effort: failures are swallowed (the caller's later `create_dir_all` will
-/// still make the dir, just without the hardened mode).
-fn create_private_dir(dir: &Path) {
-    #[cfg(unix)]
+/// Prepare `root` as a private, self-owned directory before any sensitive canvas
+/// file lands inside it, refusing rather than writing into an unsafe one
+/// (OCEAN-381 review — `/tmp` pre-creation/symlink hardening).
+///
+/// On unix:
+/// - **Absent:** create it 0700 (owner-only rwx). A `create` race with another
+///   process is fine — we fall through to re-stat and validate the result.
+/// - **Present:** `symlink_metadata` (does NOT follow links) it and require:
+///   it is a real directory (a symlink is rejected outright — the classic attack
+///   is to plant `root` as a symlink into a dir the attacker controls), and it is
+///   owned by the current uid. If it's self-owned but its mode has any group/other
+///   bits, chmod it back to 0700 and use it. If it's a symlink, owned by another
+///   uid, or can't be locked down, return [`CanvasStoreError::MissingHome`] so the
+///   caller drops to a non-persisting ledger instead of writing into it.
+///
+/// On non-unix the ownership/mode model doesn't apply; just ensure the dir exists.
+#[cfg(unix)]
+fn prepare_private_root(root: &Path) -> Result<(), CanvasStoreError> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+    let missing_home = || CanvasStoreError::MissingHome;
+
+    // Create it 0700 if absent. AlreadyExists is fine (we validate below); a race
+    // where another process created it is also fine for the same reason.
+    if let Err(err) = fs::DirBuilder::new().mode(0o700).create(root)
+        && err.kind() != std::io::ErrorKind::AlreadyExists
     {
-        use std::os::unix::fs::DirBuilderExt;
-        let _ = fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir);
+        return Err(missing_home());
     }
-    #[cfg(not(unix))]
-    {
-        let _ = fs::create_dir_all(dir);
+
+    // Re-stat WITHOUT following symlinks: a planted symlink must not pass as a dir.
+    let meta = fs::symlink_metadata(root).map_err(|_| missing_home())?;
+    if !meta.file_type().is_dir() {
+        // Symlink, file, fifo, … — never write canvas state through it.
+        return Err(missing_home());
     }
+    // Must be owned by us; a foreign-owned dir could be attacker-controlled.
+    // SAFETY: getuid is always-successful and thread-safe per POSIX.
+    let current_uid = unsafe { libc::getuid() };
+    if meta.uid() != current_uid {
+        return Err(missing_home());
+    }
+    // Self-owned: enforce 0700, repairing a loose mode in place.
+    if meta.permissions().mode() & 0o777 != 0o700 {
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).map_err(|_| missing_home())?;
+    }
+    Ok(())
+}
+
+/// Non-unix: no ownership/mode model — just ensure the dir exists.
+#[cfg(not(unix))]
+fn prepare_private_root(root: &Path) -> Result<(), CanvasStoreError> {
+    fs::create_dir_all(root).map_err(|err| CanvasStoreError::Io {
+        path: root.to_path_buf(),
+        kind: err.kind(),
+    })
 }
 
 /// Make an id safe to use as a single path segment: replace anything that isn't
@@ -847,7 +895,8 @@ mod tests {
         // session id so the deterministic temp path is isolated from other tests,
         // and clean it up afterwards.
         let session_id = format!("fallback-test-{}-{:p}", std::process::id(), &canvas_id);
-        let fallback = CanvasStore::for_session_fallback(&session_id, &canvas_id);
+        let fallback = CanvasStore::for_session_fallback(&session_id, &canvas_id)
+            .expect("self-owned private fallback root must be accepted");
 
         // "Process 1": apply + persist a patch through the fallback store.
         let mut ledger =
@@ -861,7 +910,8 @@ mod tests {
         // "Process 2" (simulated reload): a FRESH fallback for the SAME session id
         // must resolve to the same files and replay the revision written above —
         // proving the patch survived the reload via the fallback, not vanished.
-        let reloaded_store = CanvasStore::for_session_fallback(&session_id, &canvas_id);
+        let reloaded_store = CanvasStore::for_session_fallback(&session_id, &canvas_id)
+            .expect("reopening the same private fallback root must be accepted");
         let reloaded = reloaded_store
             .load()
             .expect("fallback must reload the persisted ledger within the session");
@@ -880,38 +930,32 @@ mod tests {
         let _ = fs::remove_dir_all(base.join(sanitize_segment(&session_id)));
     }
 
-    /// OCEAN-381 review (P2): the temp-dir fallback base must be created 0700 so a
-    /// session's canvas snapshots/logs aren't readable/listable by other local
-    /// users on a shared headless/CI host. Exercises `create_private_dir` directly
-    /// against a unique path so it doesn't race the shared per-user base that the
-    /// other fallback test writes into concurrently.
+    /// OCEAN-381 review (P2): `prepare_private_root` must yield a self-owned 0700
+    /// dir so a session's canvas snapshots/logs aren't readable by other local
+    /// users on a shared host. Covers the absent (create 0700) and the real
+    /// fallback-constructor paths against unique roots so it doesn't race the
+    /// shared per-user base.
     #[cfg(unix)]
     #[test]
     fn fallback_base_dir_is_private_0700() {
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = temp_root("private-base").join("nested");
-        // Recursive create must apply 0700 to the dirs it makes.
-        create_private_dir(&dir);
-
+        // Absent → created 0700.
+        let dir = temp_root("private-base");
+        prepare_private_root(&dir).expect("absent root must be created");
         let mode = fs::metadata(&dir)
             .expect("private dir must be created")
             .permissions()
             .mode()
             & 0o777;
-        assert_eq!(
-            mode, 0o700,
-            "fallback base dir must be private (0700), got {mode:o}"
-        );
+        assert_eq!(mode, 0o700, "created root must be 0700, got {mode:o}");
+        let _ = fs::remove_dir_all(&dir);
 
-        let _ = fs::remove_dir_all(dir.parent().unwrap());
-
-        // And the real fallback constructor must eagerly create the per-user base
-        // (`<temp>/ocean-canvas-fallback-<uid>`) at 0700 — that's the dir the whole
-        // session tree lives under and inherits protection from.
+        // The real fallback constructor's per-user base is 0700.
         let canvas_id = CanvasId::new("canvas:main");
         let session_id = format!("perm-test-{}-{:p}", std::process::id(), &canvas_id);
-        let _ = CanvasStore::for_session_fallback(&session_id, &canvas_id);
+        CanvasStore::for_session_fallback(&session_id, &canvas_id)
+            .expect("self-owned base must be accepted");
         let base = std::env::temp_dir().join(fallback_base_name());
         let base_mode = fs::metadata(&base)
             .expect("fallback base dir created eagerly")
@@ -919,10 +963,59 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(base_mode, 0o700, "real fallback base must be 0700");
-
-        // Clean only our session subtree, never the shared per-user base (other
-        // tests run their own sessions under it concurrently).
         let _ = fs::remove_dir_all(base.join(sanitize_segment(&session_id)));
+    }
+
+    /// OCEAN-381 review (P2, `/tmp` pre-creation hardening): a pre-existing,
+    /// permissive (0777) fallback root that is SELF-OWNED must be repaired to 0700
+    /// and used — never persisted into while still world-writable.
+    #[cfg(unix)]
+    #[test]
+    fn permissive_existing_root_is_repaired_to_0700_before_use() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Pre-create the root 0777, simulating a permissive/foreign-looking root
+        // (self-owned in-test, so the repair branch — not the refuse branch —
+        // applies; foreign ownership can't be simulated without root).
+        let root = temp_root("permissive-root");
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(
+            fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o777,
+            "precondition: root starts world-writable"
+        );
+
+        prepare_private_root(&root).expect("self-owned root must be repaired, not refused");
+
+        // It must have been chmod-ed to 0700 BEFORE any content could be written.
+        assert_eq!(
+            fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "permissive root must be locked to 0700, never left at 0777"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// OCEAN-381 review (P2, symlink hardening): if the fallback root is a planted
+    /// SYMLINK (the classic `/tmp` attack — redirect writes into an attacker dir),
+    /// preparation must REFUSE so the caller drops to a non-persisting ledger
+    /// instead of writing canvas state through the link.
+    #[cfg(unix)]
+    #[test]
+    fn symlink_root_is_refused_not_followed() {
+        // A real target dir the symlink points at, plus the symlink that stands in
+        // for the fallback root.
+        let target = temp_root("symlink-target");
+        fs::create_dir_all(&target).unwrap();
+        let link = temp_root("symlink-root");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let err = prepare_private_root(&link).expect_err("a symlink root must be refused");
+        assert_eq!(err, CanvasStoreError::MissingHome);
+
+        let _ = fs::remove_file(&link);
+        let _ = fs::remove_dir_all(&target);
     }
 
     #[test]

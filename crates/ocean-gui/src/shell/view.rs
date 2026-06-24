@@ -8667,7 +8667,20 @@ fn apply_patches_to_ledger(
     let store = match CanvasStore::for_session(&session_id, &canvas_id) {
         Ok(store) => Some(store),
         Err(CanvasStoreError::MissingHome) => {
-            Some(CanvasStore::for_session_fallback(&session_id, &canvas_id))
+            // OCEAN-381 review: the fallback now validates the temp-dir root and
+            // REFUSES (MissingHome) if it can't guarantee a private, self-owned
+            // 0700 dir — a symlink or foreign-owned `/tmp` root. In that case run
+            // without disk persistence rather than writing canvas state into an
+            // attacker-or-other-controlled directory.
+            match CanvasStore::for_session_fallback(&session_id, &canvas_id) {
+                Ok(store) => Some(store),
+                Err(_) => {
+                    eprintln!(
+                        "[canvas-persist] warning: no private fallback dir; disk persistence disabled"
+                    );
+                    None
+                }
+            }
         }
         Err(err @ CanvasStoreError::Io { .. }) => {
             eprintln!("[canvas-persist] warning: disk persistence disabled: {err}");
