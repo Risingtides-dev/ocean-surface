@@ -448,13 +448,12 @@ pub fn press_selection(
     hit: Option<&ComponentId>,
     mode: SelectMode,
 ) -> Vec<ComponentId> {
-    if mode == SelectMode::Replace {
-        if let Some(id) = hit {
-            if current.iter().any(|c| c == id) {
-                // Member of a multi-selection: preserve the set so it can drag.
-                return current.to_vec();
-            }
-        }
+    if mode == SelectMode::Replace
+        && let Some(id) = hit
+        && current.iter().any(|c| c == id)
+    {
+        // Member of a multi-selection: preserve the set so it can drag.
+        return current.to_vec();
     }
     next_selection(current, hit, mode)
 }
@@ -898,12 +897,12 @@ impl OceanCanvasView {
         // this gesture, draw it at base + the accumulated canvas offset. The
         // ledger rect is untouched until mouse-up (the preview is purely visual).
         let mut canvas_rect = component.rect;
-        if let Some(drag) = self.interaction.drag.as_ref() {
-            if drag.moving.iter().any(|(id, _)| id == &component.id) {
-                let off = drag.canvas_offset(transform.zoom());
-                canvas_rect.x += off.x;
-                canvas_rect.y += off.y;
-            }
+        if let Some(drag) = self.interaction.drag.as_ref()
+            && drag.moving.iter().any(|(id, _)| id == &component.id)
+        {
+            let off = drag.canvas_offset(transform.zoom());
+            canvas_rect.x += off.x;
+            canvas_rect.y += off.y;
         }
         let screen = transform.canvas_rect_to_screen(canvas_rect);
         let style = style_for_kind(component.kind);
@@ -2208,10 +2207,10 @@ mod tests {
             std::sync::Arc::new(move || read.lock().ok().and_then(|g| g.clone()));
         let write = std::sync::Arc::clone(&cell);
         let sink: LedgerSink = std::sync::Arc::new(move |patch, actor| {
-            if let Ok(mut g) = write.lock() {
-                if let Some(l) = g.as_mut() {
-                    l.apply_patch(patch, actor, 0);
-                }
+            if let Ok(mut g) = write.lock()
+                && let Some(l) = g.as_mut()
+            {
+                l.apply_patch(patch, actor, 0);
             }
         });
         let mut view = OceanCanvasView::new(source);
@@ -2410,7 +2409,8 @@ mod tests {
 
     #[test]
     fn each_template_resolves_its_matching_content_variant() {
-        let cases: &[(&str, fn(&TemplateContent) -> bool)] = &[
+        type VariantCase = (&'static str, fn(&TemplateContent) -> bool);
+        let cases: &[VariantCase] = &[
             ("brief_card", |c| matches!(c, TemplateContent::Brief { .. })),
             ("workflow_node", |c| {
                 matches!(c, TemplateContent::WorkflowNode { .. })

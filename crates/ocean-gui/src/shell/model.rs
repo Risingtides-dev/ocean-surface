@@ -442,7 +442,7 @@ impl ShellState {
             return;
         };
 
-        match self.workspace.write_file(&path, &self.document.text()) {
+        match self.workspace.write_file(&path, self.document.text()) {
             Ok(()) => {
                 self.document.mark_saved();
                 for tab in &mut self.tabs {
@@ -2044,7 +2044,7 @@ mod tests {
         let mut state = ShellState::seed_with_root(root);
 
         fs::write(&path, "# Changed").expect("external write");
-        state.apply_external_vault_change(&[path.clone()]);
+        state.apply_external_vault_change(std::slice::from_ref(&path));
 
         assert_eq!(state.document_text(), "# Changed");
         assert!(state.status_message.contains("Reloaded"));
@@ -2060,7 +2060,7 @@ mod tests {
         state.insert_text("\nlocal");
 
         fs::write(&path, "# Changed").expect("external write");
-        state.apply_external_vault_change(&[path.clone()]);
+        state.apply_external_vault_change(std::slice::from_ref(&path));
 
         assert_eq!(state.document_text(), "# Draft\nlocal");
         assert!(state.status_message.contains("External change"));

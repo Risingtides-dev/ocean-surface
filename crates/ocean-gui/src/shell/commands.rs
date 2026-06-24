@@ -121,9 +121,7 @@ fn subsequence_score(label: &str, query: &str) -> Option<(usize, usize)> {
     let mut label_chars = label.char_indices();
 
     for needle in query.chars() {
-        let Some((index, _)) = label_chars.find(|(_, candidate)| *candidate == needle) else {
-            return None;
-        };
+        let (index, _) = label_chars.find(|(_, candidate)| *candidate == needle)?;
         start.get_or_insert(index);
         end = index;
     }

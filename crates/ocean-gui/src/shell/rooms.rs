@@ -486,9 +486,11 @@ mod tests {
 
     #[test]
     fn begin_open_bumps_generation_and_clears_prior_room() {
-        let mut state = RoomsState::default();
-        state.open_room = Some(room("old", vec![]));
-        state.transcript = vec![message(1, "stale")];
+        let mut state = RoomsState {
+            open_room: Some(room("old", vec![])),
+            transcript: vec![message(1, "stale")],
+            ..Default::default()
+        };
 
         let gen_id = state.begin_open("new".to_string());
 
@@ -575,8 +577,10 @@ mod tests {
 
     #[test]
     fn can_send_requires_open_room_and_nonblank_draft() {
-        let mut state = RoomsState::default();
-        state.composer_draft = "hello".to_string();
+        let mut state = RoomsState {
+            composer_draft: "hello".to_string(),
+            ..Default::default()
+        };
         assert!(!state.can_send()); // no open room
 
         state.open_key = Some("map-fix".to_string());
@@ -619,22 +623,26 @@ mod tests {
 
     #[test]
     fn collect_trigger_policy_none_when_all_off_and_no_cron() {
-        let mut state = RoomsState::default();
         // Default has on_mention=true; turn everything off → None.
-        state.policy_on_mention = false;
-        state.policy_on_thread_reply = false;
-        state.policy_on_component_event = false;
-        state.policy_on_schedule_draft = "   ".to_string();
+        let state = RoomsState {
+            policy_on_mention: false,
+            policy_on_thread_reply: false,
+            policy_on_component_event: false,
+            policy_on_schedule_draft: "   ".to_string(),
+            ..Default::default()
+        };
         assert_eq!(state.collect_trigger_policy(), None);
     }
 
     #[test]
     fn collect_trigger_policy_builds_from_toggles_and_cron() {
-        let mut state = RoomsState::default();
-        state.policy_on_mention = true;
-        state.policy_on_thread_reply = true;
-        state.policy_on_component_event = false;
-        state.policy_on_schedule_draft = "  0 9 * * *  ".to_string();
+        let state = RoomsState {
+            policy_on_mention: true,
+            policy_on_thread_reply: true,
+            policy_on_component_event: false,
+            policy_on_schedule_draft: "  0 9 * * *  ".to_string(),
+            ..Default::default()
+        };
         let policy = state.collect_trigger_policy().expect("policy expected");
         assert!(policy.on_mention);
         assert!(policy.on_thread_reply);
@@ -665,8 +673,10 @@ mod tests {
 
     #[test]
     fn can_add_agent_requires_open_room_and_nonblank_id() {
-        let mut state = RoomsState::default();
-        state.agent_id_draft = "flux".to_string();
+        let mut state = RoomsState {
+            agent_id_draft: "flux".to_string(),
+            ..Default::default()
+        };
         assert!(!state.can_add_agent()); // no open room
 
         state.open_key = Some("map-fix".to_string());

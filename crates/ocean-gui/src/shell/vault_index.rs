@@ -200,9 +200,7 @@ pub fn wikilink_at_column(line: &str, column: usize) -> Option<String> {
     while let Some(relative_start) = line[search_start..].find("[[") {
         let start_byte = search_start + relative_start;
         let body_start = start_byte + 2;
-        let Some(relative_end) = line[body_start..].find("]]") else {
-            return None;
-        };
+        let relative_end = line[body_start..].find("]]")?;
         let end_byte = body_start + relative_end + 2;
         let start_column = line[..start_byte].chars().count();
         let end_column = line[..end_byte].chars().count();

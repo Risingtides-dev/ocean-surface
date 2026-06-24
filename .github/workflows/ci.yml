@@ -128,8 +128,10 @@ jobs:
             libx11-xcb-dev libxcb1-dev \
             libgtk-3-dev libglib2.0-dev libzstd-dev
 
-      - name: Install Rust toolchain (stable)
+      - name: Install Rust toolchain (stable + clippy)
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
@@ -147,3 +149,10 @@ jobs:
       # This keeps the native voice/video path under CI now that it is opt-in.
       - name: Check (ocean-gui, --features livekit — native webrtc)
         run: cargo check -p ocean-gui --features livekit
+
+      # Clippy gate (OCEAN-376): ocean-gui is heavy enough to live in its own
+      # job, but it still earns the same -D warnings bar as the rest of the
+      # workspace (mirrors the `check` job's proxy/ui clippy lanes). Any new
+      # clippy warning (style or correctness, any target incl. tests) fails CI.
+      - name: Clippy (ocean-gui, -D warnings)
+        run: cargo clippy -p ocean-gui --all-targets -- -D warnings

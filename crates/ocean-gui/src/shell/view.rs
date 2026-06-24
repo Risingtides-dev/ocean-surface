@@ -375,10 +375,10 @@ impl OceanGuiShell {
             // the ledger authoritative and bumps its revision consistently.
             let write_cell = Arc::clone(&canvas_ledger);
             let sink: LedgerSink = Arc::new(move |patch, actor| {
-                if let Ok(mut guard) = write_cell.lock() {
-                    if let Some(ledger) = guard.as_mut() {
-                        ledger.apply_patch(patch, actor, ocean_now_ms());
-                    }
+                if let Ok(mut guard) = write_cell.lock()
+                    && let Some(ledger) = guard.as_mut()
+                {
+                    ledger.apply_patch(patch, actor, ocean_now_ms());
                 }
             });
 
@@ -2701,6 +2701,7 @@ impl OceanGuiShell {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn collapsible_agent_block(
         &self,
         id: impl Into<ElementId>,
@@ -5120,10 +5121,10 @@ impl OceanGuiShell {
 
             // Only surface an error if we're still the active listener; a
             // superseded thread exiting is expected, not a failure to show.
-            if let Err(error) = result {
-                if active_generation.load(Ordering::SeqCst) == generation {
-                    let _ = sender.send(AgentStreamMessage::Error(error));
-                }
+            if let Err(error) = result
+                && active_generation.load(Ordering::SeqCst) == generation
+            {
+                let _ = sender.send(AgentStreamMessage::Error(error));
             }
         });
 
@@ -5734,10 +5735,10 @@ impl OceanGuiShell {
         match message {
             AgentProjectsMessage::Refreshed(Ok(response)) => {
                 // Drop a stale selection that no longer exists in the catalogue.
-                if let Some(sel) = &self.current_project {
-                    if !response.projects.iter().any(|p| &p.id == sel) {
-                        self.current_project = None;
-                    }
+                if let Some(sel) = &self.current_project
+                    && !response.projects.iter().any(|p| &p.id == sel)
+                {
+                    self.current_project = None;
                 }
                 self.project_catalog = response.projects;
             }
@@ -5770,18 +5771,18 @@ impl OceanGuiShell {
         match message {
             AgentModelsMessage::Refreshed(Ok(response)) => {
                 self.model_catalog = response.models;
-                if let Some(current) = response.current {
-                    if !current.model.is_empty() {
-                        self.agent.model = Some(current.model);
-                    }
+                if let Some(current) = response.current
+                    && !current.model.is_empty()
+                {
+                    self.agent.model = Some(current.model);
                 }
             }
             AgentModelsMessage::Swapped(Ok(response)) => {
                 self.model_catalog = response.models;
-                if let Some(current) = response.current {
-                    if !current.model.is_empty() {
-                        self.agent.model = Some(current.model);
-                    }
+                if let Some(current) = response.current
+                    && !current.model.is_empty()
+                {
+                    self.agent.model = Some(current.model);
                 }
                 if !self.agent.streaming {
                     self.agent.status = "model ready".to_string();
@@ -9248,10 +9249,10 @@ fn render_props_text(props: &serde_json::Value) -> Option<String> {
         for key in [
             "text", "markdown", "title", "label", "body", "content", "heading", "summary",
         ] {
-            if let Some(text) = object.get(key).and_then(serde_json::Value::as_str) {
-                if !text.trim().is_empty() {
-                    return Some(text.to_string());
-                }
+            if let Some(text) = object.get(key).and_then(serde_json::Value::as_str)
+                && !text.trim().is_empty()
+            {
+                return Some(text.to_string());
             }
         }
         return None;
@@ -9411,9 +9412,11 @@ mod tests {
 
     #[test]
     fn toolbar_labels_prefer_catalogue_and_titles() {
-        let mut agent = AgentState::default();
-        agent.model = Some("gpt-5.5".to_string());
-        agent.session_title = "Daily Room".to_string();
+        let agent = AgentState {
+            model: Some("gpt-5.5".to_string()),
+            session_title: "Daily Room".to_string(),
+            ..Default::default()
+        };
 
         assert_eq!(
             current_model_toolbar_label(
