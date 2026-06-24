@@ -1869,7 +1869,16 @@ impl Daemon {
             // the daemon now consumes `client_context.browser` directly, so we
             // ship the same active-tab/open-tab snapshot in the structured shape.
             // `None` off the extension, leaving the wire shape unchanged there.
-            let client_context = browser_client_context(client_type);
+            //
+            // Key it on the SURFACE identity (`surface-extension`/`surface-web`),
+            // NOT the flat turn `client_type`: a voice turn from the side panel
+            // threads `VOICE_CLIENT_TYPE` ("leo-voice", a *routing* tag) as the
+            // flat type, but the daemon's `apply_browser_context()` only treats
+            // the context as a browser surface when its `client_type` is a
+            // surface identity. Tagging it "leo-voice" would make the daemon
+            // ignore the snapshot. Flat type stays the routing tag (unchanged);
+            // the context carries the surface identity (OCEAN-377 P2).
+            let client_context = browser_client_context(surface_client_type());
             let body = AgentTurnRequest {
                 prompt: &prompt,
                 cwd: &cwd,
@@ -3334,13 +3343,26 @@ fn browser_client_context(client_type: &str) -> Option<ClientContext> {
         active_tab_url.as_deref(),
     );
 
-    // Nothing usable → omit the field entirely (keeps the wire shape unchanged).
+    assemble_client_context(client_type, active_tab_url, active_tab_title, tabs)
+}
+
+/// Pack the parsed browser snapshot into a `ClientContext`, or `None` when
+/// there's nothing usable (so the turn omits the field and the wire shape is
+/// unchanged). `surface_client_type` is the SURFACE identity
+/// (`surface-extension`/`surface-web`) — NOT the flat turn routing tag — so the
+/// context the daemon's `apply_browser_context()` keys on is always recognized
+/// as a browser surface, even for voice turns tagged `leo-voice` (OCEAN-377 P2).
+fn assemble_client_context(
+    surface_client_type: &str,
+    active_tab_url: Option<String>,
+    active_tab_title: Option<String>,
+    tabs: Vec<BrowserTab>,
+) -> Option<ClientContext> {
     if active_tab_url.is_none() && tabs.is_empty() {
         return None;
     }
-
     Some(ClientContext {
-        client_type: client_type.to_string(),
+        client_type: surface_client_type.to_string(),
         browser: Some(BrowserContext {
             active_tab_url,
             active_tab_title,
@@ -4213,6 +4235,39 @@ mod tests {
         assert!(!tabs[1].active, "the second duplicate is NOT flagged");
         assert!(!tabs[2].active);
         assert_eq!(tabs.iter().filter(|t| t.active).count(), 1);
+    }
+
+    #[test]
+    fn voice_turn_browser_context_carries_surface_identity_not_routing_tag() {
+        // OCEAN-377 P2: a voice turn threads the routing tag `leo-voice` as the
+        // FLAT turn client_type, but the browser context the daemon keys on must
+        // carry the SURFACE identity (surface-extension), or
+        // apply_browser_context() won't recognize it as a browser surface and
+        // drops the snapshot. The call site passes surface_client_type() (not the
+        // flat routing tag) into the assembler, which is what this asserts: the
+        // context's client_type is whatever surface identity we hand it,
+        // regardless of any voice routing.
+        let ctx = assemble_client_context(
+            "surface-extension",
+            Some("https://example.com/a".into()),
+            Some("Page A".into()),
+            vec![BrowserTab {
+                url: "https://example.com/a".into(),
+                title: "Page A".into(),
+                active: true,
+            }],
+        )
+        .expect("browser state present → context built");
+        assert_eq!(
+            ctx.client_type, "surface-extension",
+            "client_context.client_type must be the surface identity, never the \
+             voice routing tag `leo-voice`"
+        );
+        assert_ne!(ctx.client_type, VOICE_CLIENT_TYPE);
+
+        // And the assembler omits the context entirely when there's no browser
+        // state, so non-extension/voice-only turns leave the wire shape unchanged.
+        assert!(assemble_client_context(VOICE_CLIENT_TYPE, None, None, vec![]).is_none());
     }
 
     #[test]
