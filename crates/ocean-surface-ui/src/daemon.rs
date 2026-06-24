@@ -786,6 +786,52 @@ pub struct TurnImage {
     pub data: String,
 }
 
+/// A single open tab as the surface sees it. Mirrors the daemon's
+/// `ocean_agent_sdk::BrowserTab` wire shape (`{url, title, active}`) so the
+/// structured `client_context.browser.tabs` round-trips exactly. The surface
+/// has no dep on `ocean-agent-sdk` (it's a wasm CSR crate), so the DTO is
+/// re-declared locally — the serde field names/types are the contract.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct BrowserTab {
+    url: String,
+    title: String,
+    /// True for the tab the surface considers active/foregrounded. Always
+    /// emitted (the SDK's `BrowserTab::active` is `#[serde(default)]`, so a
+    /// flat `false` is the correct, lossless default for non-active tabs).
+    active: bool,
+}
+
+/// Active-tab / open-tab browser state attached to a turn (OCEAN-40 / OCEAN-377).
+/// Mirrors the daemon's `ocean_agent_sdk::BrowserContext`. Every field is
+/// additive + optional so an empty context serializes to `{}` and older
+/// daemons ignore it.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
+struct BrowserContext {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_tab_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_tab_title: Option<String>,
+    /// The current window's open-tab list. Empty/omitted when the surface only
+    /// knows its own active tab. Matches the SDK's `Vec<BrowserTab>` with
+    /// `skip_serializing_if = "Vec::is_empty"`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tabs: Vec<BrowserTab>,
+}
+
+/// Per-turn client/browser context (OCEAN-40 / OCEAN-377). Mirrors the daemon's
+/// `ocean_agent_sdk::ClientContext`. Lets the in-browser surface ship its live
+/// active-tab / open-tab state structurally (alongside, not replacing, the
+/// freeform `guidance` lines) so the agent can resolve "this tab" without a
+/// round-trip. `None` on the detached web app and any non-extension surface.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
+struct ClientContext {
+    /// The client surface kind. Mirrors the flat `AgentTurnRequest::client_type`
+    /// (kept for back-compat) so the context object is self-describing.
+    client_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    browser: Option<BrowserContext>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct AgentTurnRequest<'a> {
     prompt: &'a str,
@@ -832,6 +878,15 @@ struct AgentTurnRequest<'a> {
     /// the daemon returns 403. `None` leaves the gate unbound (legacy path).
     #[serde(skip_serializing_if = "Option::is_none")]
     decision_token: Option<&'a str>,
+    /// Phase-2 structured client/browser context (OCEAN-40 / OCEAN-377). For the
+    /// Chrome side panel this carries the same active-tab + open-tab snapshot we
+    /// already emit as freeform `guidance` lines, but in the structured shape the
+    /// daemon now consumes (`ocean_agent_sdk::ClientContext`). `None` on the
+    /// detached web app and any non-extension surface, so the wire shape is
+    /// byte-for-byte unchanged there and older daemons (which ignore an unknown
+    /// field) stay back-compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    client_context: Option<ClientContext>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1810,6 +1865,20 @@ impl Daemon {
             // a user-initiated turn — never a passive scrape (OCEAN-70). On the
             // detached web app this is always `None`.
             let active_tab_guidance = browser_context_guidance();
+            // Structured counterpart of the freeform guidance above (OCEAN-377):
+            // the daemon now consumes `client_context.browser` directly, so we
+            // ship the same active-tab/open-tab snapshot in the structured shape.
+            // `None` off the extension, leaving the wire shape unchanged there.
+            //
+            // Key it on the SURFACE identity (`surface-extension`/`surface-web`),
+            // NOT the flat turn `client_type`: a voice turn from the side panel
+            // threads `VOICE_CLIENT_TYPE` ("leo-voice", a *routing* tag) as the
+            // flat type, but the daemon's `apply_browser_context()` only treats
+            // the context as a browser surface when its `client_type` is a
+            // surface identity. Tagging it "leo-voice" would make the daemon
+            // ignore the snapshot. Flat type stays the routing tag (unchanged);
+            // the context carries the surface identity (OCEAN-377 P2).
+            let client_context = browser_client_context(surface_client_type());
             let body = AgentTurnRequest {
                 prompt: &prompt,
                 cwd: &cwd,
@@ -1841,6 +1910,7 @@ impl Daemon {
                 // per `dispatch_prompt` call and stored in the daemon signal
                 // so `decide_permission` replays the same token.
                 decision_token: Some(&decision_token),
+                client_context,
             };
             let post_url = format!("{}/v1/agent/turns", url.trim_end_matches('/'));
             let res = Request::post(&post_url)
@@ -3154,6 +3224,153 @@ fn browser_context_guidance() -> Option<Vec<String>> {
     (!lines.is_empty()).then_some(lines)
 }
 
+/// Ensure exactly one tab is flagged active when the loader snapshot carried no
+/// per-tab `active` boolean (an older `sidepanel.js`, OCEAN-377 P2). The current
+/// loader publishes Chrome's own per-tab flag, which is authoritative and may
+/// legitimately mark zero tabs (the active tab was filtered out, e.g. the
+/// extension's own page) — so when `snapshot_has_active_flag` is true we leave
+/// the parsed flags untouched. Only on the flagless fallback do we flag the
+/// FIRST tab whose URL matches the active-tab URL, never every duplicate, so a
+/// window with several same-URL tabs still resolves to a single "this tab".
+fn flag_active_tab_fallback(
+    tabs: &mut [BrowserTab],
+    snapshot_has_active_flag: bool,
+    active_tab_url: Option<&str>,
+) {
+    if snapshot_has_active_flag {
+        return;
+    }
+    if let Some(active_url) = active_tab_url {
+        if let Some(first) = tabs.iter_mut().find(|t| t.url == active_url) {
+            first.active = true;
+        }
+    }
+}
+
+/// Structured browser state for the turn (OCEAN-377), the counterpart of
+/// [`browser_context_guidance`]. Reads the same loader-published globals —
+/// `window.__ocean_active_tab` (`{url, title}`) and `window.__ocean_open_tabs`
+/// (`[{url, title}, …]`, OCEAN-92) — and packs them into the daemon's
+/// `ClientContext` wire shape. Same guard rails as the guidance path: only the
+/// Chrome extension, only the user's already-open tabs, never the extension's
+/// own panel/new-tab pages. Returns `None` (so `client_context` is omitted) on
+/// non-extension surfaces or when no browser state is available.
+fn browser_client_context(client_type: &str) -> Option<ClientContext> {
+    if !running_as_extension() {
+        return None;
+    }
+    let window = web_sys::window()?;
+    let read = |obj: &wasm_bindgen::JsValue, key: &str| -> Option<String> {
+        js_sys::Reflect::get(obj, &wasm_bindgen::JsValue::from_str(key))
+            .ok()
+            .and_then(|v| v.as_string())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+
+    // Active tab (OCEAN-70): skip the extension's own panel + empty new-tab.
+    let (active_tab_url, active_tab_title) = {
+        let tab = js_sys::Reflect::get(
+            &window,
+            &wasm_bindgen::JsValue::from_str("__ocean_active_tab"),
+        )
+        .ok()
+        .filter(|t| t.is_object());
+        match tab.as_ref().and_then(|t| read(t, "url")) {
+            Some(url)
+                if !url.starts_with("chrome-extension://")
+                    && !url.starts_with("chrome://newtab") =>
+            {
+                let title = tab.as_ref().and_then(|t| read(t, "title"));
+                (Some(url), title)
+            }
+            _ => (None, None),
+        }
+    };
+
+    // Open-tab list (OCEAN-92): the current window's tabs, capped, with the
+    // extension's own pages filtered out. The loader publishes Chrome's own
+    // per-tab `active` boolean on each entry (`sidepanel.js`: `active:
+    // !!t.active`); we trust THAT flag so the daemon can resolve "this tab" even
+    // when several tabs share a URL — a URL match would flag every duplicate
+    // (OCEAN-377 P2). We only fall back to a single-tab URL match below if the
+    // snapshot carries no per-tab flag at all.
+    let read_bool = |obj: &wasm_bindgen::JsValue, key: &str| -> Option<bool> {
+        js_sys::Reflect::get(obj, &wasm_bindgen::JsValue::from_str(key))
+            .ok()
+            .filter(|v| !v.is_undefined() && !v.is_null())
+            .and_then(|v| v.as_bool())
+    };
+    let mut tabs: Vec<BrowserTab> = Vec::new();
+    let mut snapshot_has_active_flag = false;
+    if let Ok(tabs_val) = js_sys::Reflect::get(
+        &window,
+        &wasm_bindgen::JsValue::from_str("__ocean_open_tabs"),
+    ) {
+        let arr = js_sys::Array::from(&tabs_val);
+        for i in 0..arr.length().min(MAX_OPEN_TABS_GUIDANCE as u32) {
+            let tab = arr.get(i);
+            if !tab.is_object() {
+                continue;
+            }
+            let Some(url) = read(&tab, "url") else {
+                continue;
+            };
+            if url.starts_with("chrome-extension://") {
+                continue;
+            }
+            // Prefer the snapshot's real per-tab flag; default false when the
+            // entry omits it (handled by the URL fallback after the loop).
+            let active = match read_bool(&tab, "active") {
+                Some(flag) => {
+                    snapshot_has_active_flag = true;
+                    flag
+                }
+                None => false,
+            };
+            tabs.push(BrowserTab {
+                title: read(&tab, "title").unwrap_or_default(),
+                url,
+                active,
+            });
+        }
+    }
+
+    // Fallback for an older loader snapshot with no per-tab `active` flag.
+    flag_active_tab_fallback(
+        &mut tabs,
+        snapshot_has_active_flag,
+        active_tab_url.as_deref(),
+    );
+
+    assemble_client_context(client_type, active_tab_url, active_tab_title, tabs)
+}
+
+/// Pack the parsed browser snapshot into a `ClientContext`, or `None` when
+/// there's nothing usable (so the turn omits the field and the wire shape is
+/// unchanged). `surface_client_type` is the SURFACE identity
+/// (`surface-extension`/`surface-web`) — NOT the flat turn routing tag — so the
+/// context the daemon's `apply_browser_context()` keys on is always recognized
+/// as a browser surface, even for voice turns tagged `leo-voice` (OCEAN-377 P2).
+fn assemble_client_context(
+    surface_client_type: &str,
+    active_tab_url: Option<String>,
+    active_tab_title: Option<String>,
+    tabs: Vec<BrowserTab>,
+) -> Option<ClientContext> {
+    if active_tab_url.is_none() && tabs.is_empty() {
+        return None;
+    }
+    Some(ClientContext {
+        client_type: surface_client_type.to_string(),
+        browser: Some(BrowserContext {
+            active_tab_url,
+            active_tab_title,
+            tabs,
+        }),
+    })
+}
+
 fn session_title_hint(prompt: &str) -> Option<String> {
     let title = prompt.trim().chars().take(60).collect::<String>();
     (!title.is_empty()).then_some(title)
@@ -3647,6 +3864,7 @@ mod tests {
             model_id: None,
             images: None,
             decision_token: None,
+            client_context: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         assert!(!json.contains("thinking_level"));
@@ -3667,6 +3885,7 @@ mod tests {
             model_id: Some("claude-opus-4-8"),
             images: None,
             decision_token: None,
+            client_context: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         assert!(json.contains(r#""thinking_level":"high""#));
@@ -3690,6 +3909,7 @@ mod tests {
             model_id: None,
             images: None,
             decision_token: None,
+            client_context: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         assert!(!json.contains("images"));
@@ -3715,6 +3935,7 @@ mod tests {
                 data: "data:image/png;base64,AAAA".into(),
             }]),
             decision_token: None,
+            client_context: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         // Round-trip through serde_json::Value to assert structure exactly.
@@ -3782,6 +4003,7 @@ mod tests {
             model_id: None,
             images: None,
             decision_token: None,
+            client_context: None,
         };
         let v: Value = serde_json::from_str(&serde_json::to_string(&body).unwrap()).unwrap();
         assert_eq!(v["client_type"], "leo-voice");
@@ -3806,6 +4028,7 @@ mod tests {
             model_id: None,
             images: None,
             decision_token: None,
+            client_context: None,
         };
         let v: Value = serde_json::from_str(&serde_json::to_string(&body).unwrap()).unwrap();
         assert_eq!(v["client_type"], "surface-web");
@@ -3856,6 +4079,7 @@ mod tests {
             model_id: None,
             images: None,
             decision_token: Some(&token),
+            client_context: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         assert!(
@@ -3878,12 +4102,172 @@ mod tests {
             model_id: None,
             images: None,
             decision_token: None,
+            client_context: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         assert!(
             !json.contains("decision_token"),
             "decision_token must be absent from the wire when None (legacy compat)"
         );
+        // OCEAN-377: with no browser state, client_context is omitted entirely
+        // so the wire shape is byte-for-byte unchanged for non-extension turns.
+        assert!(
+            !json.contains("client_context"),
+            "client_context must be absent from the wire when None"
+        );
+    }
+
+    #[test]
+    fn turn_request_emits_client_context_in_daemon_wire_shape() {
+        // OCEAN-377: a populated client_context serializes to the EXACT shape the
+        // daemon's `ocean_agent_sdk::ClientContext` deserializes —
+        // `{client_type, browser: {active_tab_url, active_tab_title, tabs:
+        // [{url, title, active}]}}` — so the agent sees the structured browser
+        // state, not just the freeform guidance lines.
+        let body = AgentTurnRequest {
+            prompt: "what's on this page?",
+            cwd: "/",
+            session_id: Some("s1"),
+            project_id: None,
+            client_type: Some("surface-extension"),
+            guidance: None,
+            room_id: None,
+            thinking_level: None,
+            model_id: None,
+            images: None,
+            decision_token: None,
+            client_context: Some(ClientContext {
+                client_type: "surface-extension".into(),
+                browser: Some(BrowserContext {
+                    active_tab_url: Some("https://example.com/a".into()),
+                    active_tab_title: Some("Page A".into()),
+                    tabs: vec![
+                        BrowserTab {
+                            url: "https://example.com/a".into(),
+                            title: "Page A".into(),
+                            active: true,
+                        },
+                        BrowserTab {
+                            url: "https://example.com/b".into(),
+                            title: "Page B".into(),
+                            active: false,
+                        },
+                    ],
+                }),
+            }),
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        let v: Value = serde_json::from_str(&json).unwrap();
+        let ctx = &v["client_context"];
+        assert_eq!(ctx["client_type"], "surface-extension");
+        let browser = &ctx["browser"];
+        assert_eq!(browser["active_tab_url"], "https://example.com/a");
+        assert_eq!(browser["active_tab_title"], "Page A");
+        let tabs = browser["tabs"].as_array().unwrap();
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(tabs[0]["url"], "https://example.com/a");
+        assert_eq!(tabs[0]["title"], "Page A");
+        assert_eq!(tabs[0]["active"], true);
+        assert_eq!(tabs[1]["active"], false);
+        // No stray fields leak onto the wire context objects.
+        assert_eq!(ctx.as_object().unwrap().len(), 2); // client_type + browser
+        assert_eq!(tabs[0].as_object().unwrap().len(), 3); // url + title + active
+    }
+
+    #[test]
+    fn duplicate_url_tabs_keep_only_the_truly_active_one_flagged() {
+        // OCEAN-377 P2: when the loader carries Chrome's own per-tab `active`
+        // flag (snapshot_has_active_flag = true), we trust it verbatim. Two tabs
+        // share a URL but only the genuinely-active one is flagged — a URL match
+        // would (incorrectly) light up both.
+        let mut tabs = vec![
+            BrowserTab {
+                url: "https://example.com/dup".into(),
+                title: "First copy".into(),
+                active: false,
+            },
+            BrowserTab {
+                url: "https://example.com/dup".into(),
+                title: "Second copy (focused)".into(),
+                active: true,
+            },
+        ];
+        flag_active_tab_fallback(&mut tabs, true, Some("https://example.com/dup"));
+        assert!(
+            !tabs[0].active,
+            "the non-focused duplicate must stay inactive"
+        );
+        assert!(
+            tabs[1].active,
+            "only the truly-active duplicate stays flagged"
+        );
+        assert_eq!(
+            tabs.iter().filter(|t| t.active).count(),
+            1,
+            "exactly one tab is active even when URLs collide"
+        );
+    }
+
+    #[test]
+    fn flagless_snapshot_falls_back_to_a_single_url_match() {
+        // OCEAN-377 P2 fallback: an older loader publishes no per-tab `active`
+        // flag (snapshot_has_active_flag = false). We flag exactly ONE tab — the
+        // first URL match against the active-tab URL — not every duplicate.
+        let mut tabs = vec![
+            BrowserTab {
+                url: "https://example.com/dup".into(),
+                title: "First copy".into(),
+                active: false,
+            },
+            BrowserTab {
+                url: "https://example.com/dup".into(),
+                title: "Second copy".into(),
+                active: false,
+            },
+            BrowserTab {
+                url: "https://example.com/other".into(),
+                title: "Other".into(),
+                active: false,
+            },
+        ];
+        flag_active_tab_fallback(&mut tabs, false, Some("https://example.com/dup"));
+        assert!(tabs[0].active, "first URL match is flagged");
+        assert!(!tabs[1].active, "the second duplicate is NOT flagged");
+        assert!(!tabs[2].active);
+        assert_eq!(tabs.iter().filter(|t| t.active).count(), 1);
+    }
+
+    #[test]
+    fn voice_turn_browser_context_carries_surface_identity_not_routing_tag() {
+        // OCEAN-377 P2: a voice turn threads the routing tag `leo-voice` as the
+        // FLAT turn client_type, but the browser context the daemon keys on must
+        // carry the SURFACE identity (surface-extension), or
+        // apply_browser_context() won't recognize it as a browser surface and
+        // drops the snapshot. The call site passes surface_client_type() (not the
+        // flat routing tag) into the assembler, which is what this asserts: the
+        // context's client_type is whatever surface identity we hand it,
+        // regardless of any voice routing.
+        let ctx = assemble_client_context(
+            "surface-extension",
+            Some("https://example.com/a".into()),
+            Some("Page A".into()),
+            vec![BrowserTab {
+                url: "https://example.com/a".into(),
+                title: "Page A".into(),
+                active: true,
+            }],
+        )
+        .expect("browser state present → context built");
+        assert_eq!(
+            ctx.client_type, "surface-extension",
+            "client_context.client_type must be the surface identity, never the \
+             voice routing tag `leo-voice`"
+        );
+        assert_ne!(ctx.client_type, VOICE_CLIENT_TYPE);
+
+        // And the assembler omits the context entirely when there's no browser
+        // state, so non-extension/voice-only turns leave the wire shape unchanged.
+        assert!(assemble_client_context(VOICE_CLIENT_TYPE, None, None, vec![]).is_none());
     }
 
     #[test]
