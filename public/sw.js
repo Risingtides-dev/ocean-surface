@@ -175,10 +175,20 @@ async function serveWasm(request) {
     notifyIntegrityFailure({ url: request.url, reason: 'corrupt-cached-wasm' });
   }
 
-  // Cache miss, or we just busted a corrupt entry: fetch fresh. Validate the
-  // network bytes too — only cache a copy that actually carries the wasm magic,
-  // so we never re-pin a corrupt response served by a broken proxy/build.
-  const resp = await fetch(request);
+  // Cache miss, or we just busted a corrupt entry: fetch fresh — but BYPASS the
+  // browser's HTTP disk cache with `cache: 'reload'`. The proxy serves wasm with
+  // `Cache-Control: public, max-age=31536000, immutable`
+  // (crates/ocean-surface-proxy/src/main.rs), so a plain `fetch(request)` would
+  // be free to return the SAME corrupt all-zero bytes straight from the HTTP
+  // cache — a layer SEPARATE from the Cache API we just evicted — and we'd hand
+  // the page dead bytes on every reload. `reload` forces a network round-trip
+  // (revalidating/replacing the HTTP-cache entry) so we actually get fresh bytes,
+  // while still populating the HTTP cache with the good copy for next time
+  // ('no-store' would skip the network cache entirely; we want it warmed).
+  const resp = await fetch(request, { cache: 'reload' });
+  // Validate the network bytes too — only cache a copy that actually carries the
+  // wasm magic, so we never re-pin a corrupt response served by a broken
+  // proxy/build into the Cache API.
   if (resp && resp.ok && (await responseHasWasmMagic(resp))) {
     cache.put(request, resp.clone()).catch(() => {});
   }
