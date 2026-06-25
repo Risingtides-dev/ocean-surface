@@ -1,0 +1,246 @@
+{
+  "name": "ocean-surface",
+  "displayName": "Ocean",
+  "description": "Ocean agent surface for VS Code and Cursor — full ACP client with IDE context, filesystem, and terminal integration via ocean-acp.",
+  "version": "0.1.3",
+  "publisher": "risingtides",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Risingtides-dev/ocean-surface.git",
+    "directory": "vscode-extension"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["AI", "Chat"],
+  "keywords": ["ocean", "acp", "agent", "cursor", "ai"],
+  "activationEvents": [
+    "onView:ocean.chat",
+    "onView:ocean.panelChat",
+    "onView:ocean.auxChat",
+    "onWebviewPanel:ocean.chatEditor",
+    "onCommand:ocean.openSidebar",
+    "onCommand:ocean.openPanel",
+    "onCommand:ocean.openAuxiliary",
+    "onCommand:ocean.openEditor",
+    "onCommand:ocean.connect",
+    "onCommand:ocean.newSession",
+    "onCommand:ocean.sendSelection",
+    "onCommand:ocean.inlineAssist",
+    "onCommand:ocean.cancelTurn",
+    "onCommand:ocean.disconnect"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ocean",
+          "title": "Ocean",
+          "icon": "media/wave.svg"
+        }
+      ],
+      "panel": [
+        {
+          "id": "oceanPanel",
+          "title": "Ocean",
+          "icon": "media/wave.svg"
+        }
+      ],
+      "auxiliarybar": [
+        {
+          "id": "oceanAux",
+          "title": "Ocean",
+          "icon": "media/wave.svg"
+        }
+      ]
+    },
+    "views": {
+      "ocean": [
+        {
+          "id": "ocean.chat",
+          "name": "Chat",
+          "type": "webview"
+        }
+      ],
+      "oceanPanel": [
+        {
+          "id": "ocean.panelChat",
+          "name": "Chat",
+          "type": "webview"
+        }
+      ],
+      "oceanAux": [
+        {
+          "id": "ocean.auxChat",
+          "name": "Chat",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "ocean.openSidebar",
+        "title": "Ocean: Open in Sidebar",
+        "icon": "$(layout-sidebar-left)"
+      },
+      {
+        "command": "ocean.openPanel",
+        "title": "Ocean: Open in Bottom Panel",
+        "icon": "$(layout-panel)"
+      },
+      {
+        "command": "ocean.openAuxiliary",
+        "title": "Ocean: Open in Secondary Sidebar",
+        "icon": "$(layout-sidebar-right)"
+      },
+      {
+        "command": "ocean.openEditor",
+        "title": "Ocean: Open in Editor",
+        "icon": "$(layout)"
+      },
+      {
+        "command": "ocean.connect",
+        "title": "Ocean: Connect",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "ocean.newSession",
+        "title": "Ocean: New Session",
+        "icon": "$(add)"
+      },
+      {
+        "command": "ocean.sendSelection",
+        "title": "Ocean: Ask About Selection"
+      },
+      {
+        "command": "ocean.inlineAssist",
+        "title": "Ocean: Inline Assist",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "ocean.cancelTurn",
+        "title": "Ocean: Cancel Turn",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "ocean.disconnect",
+        "title": "Ocean: Disconnect",
+        "icon": "$(debug-disconnect)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "ocean.openEditor",
+          "when": "view == ocean.chat || view == ocean.panelChat || view == ocean.auxChat",
+          "group": "navigation@0"
+        },
+        {
+          "command": "ocean.openPanel",
+          "when": "view == ocean.chat || view == ocean.auxChat",
+          "group": "navigation@0"
+        },
+        {
+          "command": "ocean.openAuxiliary",
+          "when": "view == ocean.chat || view == ocean.panelChat",
+          "group": "navigation@0"
+        },
+        {
+          "command": "ocean.newSession",
+          "when": "(view == ocean.chat || view == ocean.panelChat || view == ocean.auxChat) && ocean.connected",
+          "group": "navigation@1"
+        },
+        {
+          "command": "ocean.cancelTurn",
+          "when": "(view == ocean.chat || view == ocean.panelChat || view == ocean.auxChat) && ocean.turnInProgress",
+          "group": "navigation@2"
+        },
+        {
+          "command": "ocean.connect",
+          "when": "(view == ocean.chat || view == ocean.panelChat || view == ocean.auxChat) && !ocean.connected",
+          "group": "navigation@1"
+        },
+        {
+          "command": "ocean.disconnect",
+          "when": "(view == ocean.chat || view == ocean.panelChat || view == ocean.auxChat) && ocean.connected",
+          "group": "navigation@3"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "ocean.inlineAssist",
+          "when": "editorTextFocus",
+          "group": "ocean@1"
+        },
+        {
+          "command": "ocean.sendSelection",
+          "when": "editorHasSelection",
+          "group": "ocean@2"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "ocean.inlineAssist",
+        "key": "cmd+shift+i",
+        "mac": "cmd+shift+i",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "ocean.sendSelection",
+        "key": "cmd+shift+o",
+        "mac": "cmd+shift+o",
+        "when": "editorHasSelection"
+      }
+    ],
+    "configuration": {
+      "title": "Ocean",
+      "properties": {
+        "ocean.acp.path": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the ocean-acp binary. Empty auto-detects from PATH or ../ocean-os/target/release/ocean-acp."
+        },
+        "ocean.daemon.url": {
+          "type": "string",
+          "default": "http://127.0.0.1:4780",
+          "description": "Ocean daemon base URL (passed to ocean-acp via --daemon-url)."
+        },
+        "ocean.autoApprovePermissions": {
+          "type": "string",
+          "enum": ["ask", "allowAll"],
+          "default": "ask",
+          "description": "How tool permission requests from the agent are handled."
+        },
+        "ocean.injectEditorContext": {
+          "type": "boolean",
+          "default": true,
+          "description": "Prepend active file, selection, diagnostics, and open tabs to each prompt."
+        },
+        "ocean.logTraffic": {
+          "type": "boolean",
+          "default": false,
+          "description": "Log ACP JSON-RPC traffic to the Ocean output channel."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "package": "node esbuild.mjs --production",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^0.21.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.5.0"
+  }
+}
