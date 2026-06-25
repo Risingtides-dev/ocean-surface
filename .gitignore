@@ -33,3 +33,10 @@ crates/ocean-gui/canvas-web/dist/
 .playwright-mcp/
 tool-group-collapsed.png
 extension/dist/
+
+# VS Code/Cursor extension local/build artifacts
+.cursor/
+vscode-extension/.vscode/
+vscode-extension/node_modules/
+vscode-extension/dist/
+vscode-extension/*.vsix
