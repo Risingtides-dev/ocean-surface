@@ -40,7 +40,7 @@ Then in Cursor/VS Code:
 
 | Setting | Default | Description |
 |---|---|---|
-| `ocean.acp.path` | auto-detect | Path to `ocean-acp` binary |
+| `ocean.acp.path` | auto-detect | Path to `ocean-acp` binary. Auto-detect checks `~/.cargo/bin`, `~/dev/ocean-os`, `~/ocean-os`, `~/ocean-os-repo`, and sibling repo paths. |
 | `ocean.daemon.url` | `http://127.0.0.1:4780` | Daemon URL passed to the bridge |
 | `ocean.injectEditorContext` | `true` | Prepend IDE context to prompts |
 | `ocean.autoApprovePermissions` | `ask` | `ask` or `allowAll` |
@@ -48,7 +48,10 @@ Then in Cursor/VS Code:
 
 ## Usage
 
-1. Open the **Ocean** activity bar icon → **Chat**
+1. Click the **Ocean** status bar item to open Ocean in an editor tab, or use
+   the command palette for **Ocean: Open in Sidebar**, **Ocean: Open in Bottom
+   Panel**, or **Ocean: Open in Editor**. The sidebar view also has **Editor**
+   and **Panel** buttons in its header.
 2. Click **Connect** (or it connects on first message)
 3. Chat — editor context is injected automatically
 4. Right-click selected code → **Ocean: Ask About Selection** (⌘⇧O on Mac)

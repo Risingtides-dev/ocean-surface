@@ -71,6 +71,7 @@ Rules:
 | `crates/ocean-surface-ui/` | Leptos WASM web/PWA/extension UI |
 | `crates/ocean-surface-proxy/` | axum proxy for web bundle, STT/TTS, config, daemon reverse proxy |
 | `extension/` | Chrome extension wrapper around the Leptos surface |
+| `vscode-extension/` | Cursor/VS Code ACP client surface with sidebar, bottom-panel, editor-tab, and status-bar launch modes |
 | `legacy-voice/` | reference voice code only; do not build new architecture here |
 
 ## Build / Check

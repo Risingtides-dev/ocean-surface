@@ -230,6 +230,8 @@ function resolveOceanAcpPath(): string {
 
   const candidates = [
     join(homedir(), ".cargo", "bin", "ocean-acp"),
+    join(homedir(), "dev", "ocean-os", "target", "release", "ocean-acp"),
+    join(homedir(), "dev", "ocean-os", "target", "debug", "ocean-acp"),
     join(homedir(), "ocean-os", "target", "release", "ocean-acp"),
     join(homedir(), "ocean-os", "target", "debug", "ocean-acp"),
     join(homedir(), "ocean-os-repo", "target", "release", "ocean-acp"),

@@ -16,13 +16,12 @@
   "categories": ["AI", "Chat"],
   "keywords": ["ocean", "acp", "agent", "cursor", "ai"],
   "activationEvents": [
+    "onStartupFinished",
     "onView:ocean.chat",
     "onView:ocean.panelChat",
-    "onView:ocean.auxChat",
     "onWebviewPanel:ocean.chatEditor",
     "onCommand:ocean.openSidebar",
     "onCommand:ocean.openPanel",
-    "onCommand:ocean.openAuxiliary",
     "onCommand:ocean.openEditor",
     "onCommand:ocean.connect",
     "onCommand:ocean.newSession",
@@ -47,13 +46,6 @@
           "title": "Ocean",
           "icon": "media/wave.svg"
         }
-      ],
-      "auxiliarybar": [
-        {
-          "id": "oceanAux",
-          "title": "Ocean",
-          "icon": "media/wave.svg"
-        }
       ]
     },
     "views": {
@@ -70,13 +62,6 @@
           "name": "Chat",
           "type": "webview"
         }
-      ],
-      "oceanAux": [
-        {
-          "id": "ocean.auxChat",
-          "name": "Chat",
-          "type": "webview"
-        }
       ]
     },
     "commands": [
@@ -89,11 +74,6 @@
         "command": "ocean.openPanel",
         "title": "Ocean: Open in Bottom Panel",
         "icon": "$(layout-panel)"
-      },
-      {
-        "command": "ocean.openAuxiliary",
-        "title": "Ocean: Open in Secondary Sidebar",
-        "icon": "$(layout-sidebar-right)"
       },
       {
         "command": "ocean.openEditor",
@@ -134,37 +114,32 @@
       "view/title": [
         {
           "command": "ocean.openEditor",
-          "when": "view == ocean.chat || view == ocean.panelChat || view == ocean.auxChat",
-          "group": "navigation@0"
-        },
-        {
-          "command": "ocean.openPanel",
-          "when": "view == ocean.chat || view == ocean.auxChat",
-          "group": "navigation@0"
-        },
-        {
-          "command": "ocean.openAuxiliary",
           "when": "view == ocean.chat || view == ocean.panelChat",
           "group": "navigation@0"
         },
         {
+          "command": "ocean.openPanel",
+          "when": "view == ocean.chat",
+          "group": "navigation@0"
+        },
+        {
           "command": "ocean.newSession",
-          "when": "(view == ocean.chat || view == ocean.panelChat || view == ocean.auxChat) && ocean.connected",
+          "when": "(view == ocean.chat || view == ocean.panelChat) && ocean.connected",
           "group": "navigation@1"
         },
         {
           "command": "ocean.cancelTurn",
-          "when": "(view == ocean.chat || view == ocean.panelChat || view == ocean.auxChat) && ocean.turnInProgress",
+          "when": "(view == ocean.chat || view == ocean.panelChat) && ocean.turnInProgress",
           "group": "navigation@2"
         },
         {
           "command": "ocean.connect",
-          "when": "(view == ocean.chat || view == ocean.panelChat || view == ocean.auxChat) && !ocean.connected",
+          "when": "(view == ocean.chat || view == ocean.panelChat) && !ocean.connected",
           "group": "navigation@1"
         },
         {
           "command": "ocean.disconnect",
-          "when": "(view == ocean.chat || view == ocean.panelChat || view == ocean.auxChat) && ocean.connected",
+          "when": "(view == ocean.chat || view == ocean.panelChat) && ocean.connected",
           "group": "navigation@3"
         }
       ],

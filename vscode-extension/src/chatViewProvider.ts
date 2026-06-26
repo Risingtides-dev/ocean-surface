@@ -25,7 +25,6 @@ interface InlineAssistChoice extends vscode.QuickPickItem {
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly primaryViewType = "ocean.chat";
   public static readonly panelViewType = "ocean.panelChat";
-  public static readonly auxiliaryViewType = "ocean.auxChat";
   public static readonly editorViewType = "ocean.chatEditor";
 
   private editorPanel: vscode.WebviewPanel | undefined;
@@ -275,6 +274,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       case "newSession":
         await this.newSession();
         break;
+      case "openEditor":
+        this.openEditorPanel(vscode.ViewColumn.Active);
+        break;
+      case "openPanel":
+        await vscode.commands.executeCommand("workbench.view.extension.oceanPanel");
+        break;
       case "cancel":
         await this.cancelTurn();
         break;
@@ -519,7 +524,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       </div>
     </div>
     <div class="top-actions">
-      <button type="button" id="connect" class="secondary" title="Connect to Ocean">Connect</button>
+      <button type="button" id="openEditor" class="ghost" title="Open Ocean in an editor tab">Editor</button>
+      <button type="button" id="openPanel" class="ghost" title="Open Ocean in the bottom panel">Panel</button>
+      <button type="button" id="connect" title="Connect to Ocean">Connect</button>
       <button type="button" id="newSession" class="ghost" title="Start a new Ocean session">New</button>
     </div>
   </header>

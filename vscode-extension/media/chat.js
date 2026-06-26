@@ -8,6 +8,8 @@
   const newSessionButton = document.getElementById("newSession");
   const inlineAssistButton = document.getElementById("inlineAssist");
   const cancelButton = document.getElementById("cancel");
+  const openEditorButton = document.getElementById("openEditor");
+  const openPanelButton = document.getElementById("openPanel");
   const statusEl = document.getElementById("status");
 
   const roleLabels = {
@@ -20,7 +22,7 @@
   function renderConnectionState(state) {
     const connected = Boolean(state.connected);
     const turnInProgress = Boolean(state.turnInProgress);
-    connectButton.textContent = connected ? "Live" : "Link";
+    connectButton.textContent = connected ? "Live" : "Connect";
     connectButton.disabled = connected || turnInProgress;
     newSessionButton.disabled = !connected || turnInProgress;
     inlineAssistButton.disabled = turnInProgress;
@@ -172,6 +174,14 @@
 
   inlineAssistButton.addEventListener("click", () => {
     vscode.postMessage({ type: "inlineAssist" });
+  });
+
+  openEditorButton.addEventListener("click", () => {
+    vscode.postMessage({ type: "openEditor" });
+  });
+
+  openPanelButton.addEventListener("click", () => {
+    vscode.postMessage({ type: "openPanel" });
   });
 
   cancelButton.addEventListener("click", () => {

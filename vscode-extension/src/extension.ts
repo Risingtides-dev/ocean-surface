@@ -3,12 +3,23 @@ import { ChatViewProvider } from "./chatViewProvider";
 import { log } from "./logger";
 
 let chatProvider: ChatViewProvider | undefined;
+let statusBarItem: vscode.StatusBarItem | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   log("Ocean extension activating");
 
   chatProvider = new ChatViewProvider(context.extensionUri);
+  statusBarItem = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Left,
+    95,
+  );
+  statusBarItem.text = "$(comment-discussion) Ocean";
+  statusBarItem.tooltip = "Open Ocean in an editor tab";
+  statusBarItem.command = "ocean.openEditor";
+  statusBarItem.show();
+
   context.subscriptions.push(
+    statusBarItem,
     vscode.window.registerWebviewViewProvider(
       ChatViewProvider.primaryViewType,
       chatProvider,
@@ -16,11 +27,6 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.window.registerWebviewViewProvider(
       ChatViewProvider.panelViewType,
-      chatProvider,
-      { webviewOptions: { retainContextWhenHidden: true } },
-    ),
-    vscode.window.registerWebviewViewProvider(
-      ChatViewProvider.auxiliaryViewType,
       chatProvider,
       { webviewOptions: { retainContextWhenHidden: true } },
     ),
@@ -32,9 +38,6 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand("ocean.openPanel", async () => {
       await focusView(ChatViewProvider.panelViewType, "oceanPanel");
-    }),
-    vscode.commands.registerCommand("ocean.openAuxiliary", async () => {
-      await focusView(ChatViewProvider.auxiliaryViewType, "oceanAux");
     }),
     vscode.commands.registerCommand("ocean.openEditor", () => {
       chatProvider?.openEditorPanel();
@@ -66,6 +69,7 @@ export function activate(context: vscode.ExtensionContext): void {
 export function deactivate(): void {
   chatProvider?.dispose();
   chatProvider = undefined;
+  statusBarItem = undefined;
 }
 
 async function focusView(viewId: string, containerId: string): Promise<void> {

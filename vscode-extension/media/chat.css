@@ -6,16 +6,37 @@
   --ocean-blue: #2f6fbd;
   --ocean-brass: #b9832f;
   --ocean-ink: #18324a;
+  --kami-brand: #1b365d;
+  --kami-brand-light: #2d5a8a;
+  --kami-brand-tint: #eef2f7;
+  --kami-ivory: #faf9f5;
+  --kami-warm-sand: #e8e6dc;
+  --kami-dark-warm: #3d3d3a;
+  --kami-ring-warm: #d8d2c2;
   --ocean-paper: color-mix(in srgb, var(--vscode-sideBar-background, var(--vscode-editor-background)) 88%, #f3ead7);
   --ocean-panel: color-mix(in srgb, var(--vscode-input-background) 88%, var(--ocean-paper));
   --ocean-border: color-mix(in srgb, var(--vscode-sideBar-border, var(--vscode-panel-border)) 70%, var(--ocean-blue));
   --ocean-muted: var(--vscode-descriptionForeground);
+  --button-primary-bg: var(--kami-brand);
+  --button-primary-fg: var(--kami-ivory);
+  --button-primary-hover: var(--kami-brand-light);
+  --button-secondary-bg: var(--kami-warm-sand);
+  --button-secondary-fg: var(--kami-dark-warm);
+  --button-ghost-bg: transparent;
+  --button-ghost-fg: var(--kami-brand);
+  --button-ring: var(--kami-ring-warm);
+  --button-ring-strong: var(--kami-brand);
 }
 
 body.vscode-dark {
   --ocean-paper: color-mix(in srgb, var(--vscode-sideBar-background, var(--vscode-editor-background)) 92%, #1d2530);
   --ocean-panel: color-mix(in srgb, var(--vscode-input-background) 86%, #111923);
   --ocean-border: color-mix(in srgb, var(--vscode-sideBar-border, var(--vscode-panel-border)) 70%, #436f9e);
+  --kami-brand-tint: color-mix(in srgb, var(--kami-brand) 36%, #141413);
+  --button-secondary-bg: #30302e;
+  --button-secondary-fg: var(--kami-ivory);
+  --button-ghost-fg: #d6e1ee;
+  --button-ring: #504e49;
 }
 
 body {
@@ -102,6 +123,8 @@ body {
 
 .top-actions {
   flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 #messages {
@@ -300,57 +323,140 @@ body.vscode-dark .msg.assistant {
 
 .actions {
   justify-content: space-between;
+  flex-wrap: wrap;
 }
 
 button {
-  min-height: 28px;
-  padding: 5px 10px;
-  border: 1px solid transparent;
-  border-radius: 5px;
-  color: var(--vscode-button-foreground);
-  background: var(--vscode-button-background);
+  appearance: none;
+  min-height: 32px;
+  min-width: 68px;
+  padding: 7px 14px;
+  border: 1.5px solid var(--button-primary-bg);
+  border-radius: 999px;
+  color: var(--button-primary-fg);
+  background: var(--button-primary-bg);
   cursor: pointer;
-  font: inherit;
+  font-family: var(--vscode-font-family);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
   line-height: 1.2;
   white-space: nowrap;
+  box-shadow: 0 0 0 1px transparent;
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    color 160ms ease,
+    opacity 160ms ease,
+    transform 160ms ease;
 }
 
-button:hover {
-  background: var(--vscode-button-hoverBackground);
+button:hover:not(:disabled) {
+  background: var(--button-primary-hover);
+  border-color: var(--button-primary-hover);
+  box-shadow: 0 0 0 1px var(--button-ring-strong);
+  transform: translateY(-1px);
+}
+
+button:active:not(:disabled) {
+  transform: translateY(0);
 }
 
 button:focus-visible {
-  outline: 1px solid var(--vscode-focusBorder, var(--ocean-blue));
-  outline-offset: 2px;
+  outline: 0;
+  box-shadow:
+    0 0 0 1px var(--button-ring-strong),
+    0 0 0 3px color-mix(in srgb, var(--button-ring-strong) 22%, transparent);
 }
 
+button.secondary {
+  border-color: var(--button-secondary-bg);
+  color: var(--button-secondary-fg);
+  background: var(--button-secondary-bg);
+}
+
+button.secondary:hover:not(:disabled) {
+  border-color: var(--button-ring);
+  color: var(--button-secondary-fg);
+  background: color-mix(in srgb, var(--button-secondary-bg) 86%, var(--kami-ivory));
+  box-shadow: 0 0 0 1px var(--button-ring);
+}
+
+button.ghost {
+  border-color: var(--button-ring);
+  color: var(--button-ghost-fg);
+  background: var(--button-ghost-bg);
+}
+
+button.ghost:hover:not(:disabled) {
+  border-color: var(--button-ring-strong);
+  color: var(--button-ghost-fg);
+  background: var(--kami-brand-tint);
+  box-shadow: 0 0 0 1px var(--button-ring-strong);
+}
+
+.top-actions button {
+  min-width: 62px;
+  min-height: 30px;
+  padding: 6px 12px;
+  font-size: 11px;
+}
+
+.actions button {
+  min-width: 76px;
+}
+
+#cancel {
+  min-width: 62px;
+}
+
+button[disabled],
 button:disabled {
   cursor: default;
-  opacity: 0.52;
+  opacity: 0.48;
+  transform: none;
+  box-shadow: none;
 }
 
+button[disabled]:hover,
 button:disabled:hover {
-  background: var(--vscode-button-background);
+  color: var(--button-primary-fg);
+  background: var(--button-primary-bg);
+  border-color: var(--button-primary-bg);
 }
 
-button.secondary,
-button.ghost {
-  color: var(--vscode-button-secondaryForeground);
-  background: var(--vscode-button-secondaryBackground);
-}
-
-button.secondary:hover,
-button.ghost:hover {
-  background: var(--vscode-button-secondaryHoverBackground);
-}
-
-button.ghost {
-  border-color: var(--ocean-border);
-}
-
-button.ghost:disabled:hover,
 button.secondary:disabled:hover {
-  background: var(--vscode-button-secondaryBackground);
+  color: var(--button-secondary-fg);
+  background: var(--button-secondary-bg);
+  border-color: var(--button-secondary-bg);
+}
+
+button.ghost:disabled:hover {
+  color: var(--button-ghost-fg);
+  background: var(--button-ghost-bg);
+  border-color: var(--button-ring);
+}
+
+#connect:disabled {
+  opacity: 0.82;
+  color: var(--kami-brand);
+  background: var(--kami-brand-tint);
+  border-color: var(--kami-brand-tint);
+}
+
+body.vscode-dark #connect:disabled {
+  color: var(--kami-ivory);
+}
+
+#connect:disabled:hover {
+  color: var(--kami-brand);
+  background: var(--kami-brand-tint);
+  border-color: var(--kami-brand-tint);
+}
+
+body.vscode-dark #connect:disabled:hover {
+  color: var(--kami-ivory);
 }
 
 @media (max-width: 260px) {
@@ -366,7 +472,8 @@ button.secondary:disabled:hover {
   }
 
   button {
-    padding-inline: 8px;
+    min-width: auto;
+    padding-inline: 10px;
   }
 }
 
