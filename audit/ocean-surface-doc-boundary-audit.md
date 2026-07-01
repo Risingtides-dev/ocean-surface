@@ -1,5 +1,7 @@
 # Ocean Surface documentation boundary audit
 
+2026-07-01: F-03/F-04 wording remediated (transitional framing); structural fix tracked as orchestration-plan Wave B4.
+
 Scope: documentation/config audit only. I inspected the top-level README/CLAUDE/AGENTS/handoff, `docs/`, extension manifest/docs, visible Markdown files, and Cargo/TOML crate maps. No source/docs were edited; this file is the only audit artifact.
 
 Intended boundary under audit:

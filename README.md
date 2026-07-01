@@ -13,9 +13,11 @@ Cross-repo routing and ownership map: [`docs/OCEAN_PROJECT_MAP.md`](docs/OCEAN_P
 | Chrome extension | `extension/` wrapper | browser-side panel with explicit `surface-extension` context |
 | Web proxy | `cargo run -p ocean-surface-proxy` | serves web bundle, config, STT/TTS, and daemon reverse proxy |
 
-All targets are thin clients over `ocean-daemon`. None hold agent logic,
-provider credentials, or session authority. They speak the daemon's product
-agent API:
+All targets are thin clients over `ocean-daemon`. None hold agent logic or
+session authority, and none hold provider credentials — with one transitional
+exception: `ocean-surface-proxy` still holds the xAI STT/TTS key until
+provider-backed voice moves to daemon-owned endpoints in `ocean-os` (see
+"Auth — preconfigured" below). They speak the daemon's product agent API:
 
 ```
 POST /v1/agent/sessions
@@ -84,7 +86,7 @@ permission requests, completion). Surfaces must subscribe scoped to their own
 | `crates/ocean-gui/`             | GPUI native desktop app and tldraw canvas host.                      |
 | `crates/ocean-gui/canvas-web/`  | tldraw/web bundle loaded by the GPUI canvas host.                    |
 | `crates/ocean-surface-ui/`      | Leptos UI (CSR/WASM) for web/PWA/extension.                          |
-| `crates/ocean-surface-proxy/`   | axum service: holds xAI key for STT/TTS, serves the WASM bundle.     |
+| `crates/ocean-surface-proxy/`   | axum service: holds xAI key for STT/TTS (transitional — moving to `ocean-os`), serves the WASM bundle. |
 | `extension/`                    | Chrome extension wrapper around the Leptos surface.                  |
 | `legacy-voice/`                 | Reference: the JS voice client (PR #22). Deleted once ported.        |
 
@@ -137,7 +139,10 @@ both.
 
 ## Auth — preconfigured
 
-The proxy holds the xAI key server-side (the browser never sees it) and resolves it in order:
+The proxy holds the xAI key server-side (the browser never sees it). This is
+transitional — provider credentials are moving to `ocean-os` (daemon-owned
+voice endpoints); the proxy keeps them only until that migration lands. Until
+then it resolves the key in order:
 
 1. env `XAI_API_KEY`
 2. `~/.config/ocean-surface/xai.key` (override: `OCEAN_SURFACE_KEY_FILE`) — set once, every launch picks it up
@@ -152,7 +157,9 @@ The proxy holds the xAI key server-side (the browser never sees it) and resolves
 - In progress: GPUI native app, explicit session scoping, tldraw canvas host,
   canvas ledger, LiveKit presence controls.
 - Next: reliable GPUI canvas IPC, tldraw render commands, LiveKit mic/camera
-  participation, and surface-state injection into agent turns.
+  participation, surface-state injection into agent turns, and moving
+  provider-backed STT/TTS to daemon-owned voice endpoints in `ocean-os`
+  (retiring the proxy's transitional xAI key handling).
 
 ## Provenance
 

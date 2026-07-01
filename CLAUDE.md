@@ -69,9 +69,14 @@ Rules:
 | `crates/ocean-gui/` | GPUI native desktop app and tldraw canvas host |
 | `crates/ocean-gui/canvas-web/` | web bundle loaded into the GPUI canvas webview |
 | `crates/ocean-surface-ui/` | Leptos WASM web/PWA/extension UI |
-| `crates/ocean-surface-proxy/` | axum proxy for web bundle, STT/TTS, config, daemon reverse proxy |
+| `crates/ocean-surface-proxy/` | axum proxy for web bundle, STT/TTS (transitional), config, daemon reverse proxy |
 | `extension/` | Chrome extension wrapper around the Leptos surface |
 | `legacy-voice/` | reference voice code only; do not build new architecture here |
+
+The proxy's xAI STT/TTS key handling is transitional — provider credentials
+are moving to `ocean-os` (daemon-owned voice endpoints); the proxy keeps them
+only until that migration lands. Do not extend it with new provider
+credentials or provider calls.
 
 ## Build / Check
 
