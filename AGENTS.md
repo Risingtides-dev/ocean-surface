@@ -6,6 +6,7 @@ experiments.
 
 The sibling repo `../ocean-os` owns runtime authority: daemon, agent loop,
 tools, providers, permissions, projects, workspaces, sessions, and events.
+Cross-repo routing and ownership map: `docs/OCEAN_PROJECT_MAP.md`.
 
 Do not put provider calls, agent reasoning, session storage, permission policy,
 or tool execution authority in this repo. Surface code should render state,
@@ -91,3 +92,19 @@ trunk serve --open
 ```
 
 The daemon must be running from `../ocean-os` for live agent behavior.
+
+## Cursor / VS Code Extension UI Contract
+
+- Keep `vscode-extension/` transcript-first: do not add command decks, fake
+  logos, sparkle/AI ornament, or rows of location/action buttons unless the
+  operator explicitly asks for that UI.
+- The operator did not request a new control-heavy UI for the extension; when
+  repairing it, preserve a minimal chat surface and expose extra actions
+  through Cursor commands/status entry points instead of visible button sprawl.
+- If applying Kami to the extension, use it as restraint only: warm neutrals,
+  sparse ink-blue accents, clean type hierarchy, and no copied document or
+  landing-page chrome.
+- For richer agent-thread affordances, use the installed Codex/ChatGPT
+  extension as a product reference for patterns such as compact composers,
+  inline tool activity, and file/diff rows. Do not copy proprietary source or
+  styling verbatim; adapt the interaction pattern with Ocean-owned code.

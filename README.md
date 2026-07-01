@@ -4,6 +4,8 @@ The client face of [Ocean OS](https://github.com/Risingtides-dev/ocean-os).
 This repo holds the GPUI desktop app, Leptos web/PWA, Chrome extension surface,
 local proxy, voice UI, and canvas work.
 
+Cross-repo routing and ownership map: [`docs/OCEAN_PROJECT_MAP.md`](docs/OCEAN_PROJECT_MAP.md).
+
 | Target | How | Why |
 |---|---|---|
 | GPUI desktop | `cargo run -p ocean-gui --bin ocean-gui` | native desktop collaboration surface, agent transcript, tldraw canvas host, LiveKit controls |
