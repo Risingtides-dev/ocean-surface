@@ -714,3 +714,30 @@ package`, `npx @vscode/vsce package --no-dependencies`, forced Cursor install,
 installed version check, installed payload search for output file-ref rendering
 and styling, README payload check, VSIX artifact check, and `git diff --check`.
 _________________________________________________________________________________
+
+time:      [05:37pm] [07-01-26]
+agent:     [claude] [fable 5]
+type:      [workflow]
+area:      [infra]
+
+Phase-0 stabilization pass on ocean-surface. Pushed the pending main commit
+(b7eaca1, Ocean Cursor extension install/UI improvements), then opened PR #96
+(feat/vscode-extension-polish-0143) carrying the ~6.5k-line 0.1.4→0.1.42
+vscode-extension polish loop — session persistence via globalState + ACP
+session/load, composer @-mentions, slash workflows, diagnostics Quick Fix
+actions, and workspace-changes context — flagged as needing Codex/opus review
+before merge (feature gate), not merged. Landed a docs/chore commit directly on
+main for the cross-repo OCEAN_PROJECT_MAP, this events.md ledger itself, and the
+extension check-in script. Inspected the one stash on
+fix/ocean-161-supervise-surface-proxy and found its actual content (a
+daemon_url_from_env refactor + a floating-widget corridor UI mode) already
+superseded by equivalent-or-newer code on main — dropped it. Triaged 20
+pre-existing branches (15 remote + 13 local, minus main/worktree-checked-out
+refs) for provable-shipped status via merge-base-aware, squash-merge-safe file
+diffing; deleted 8 that were byte-identical to main (or literal ancestors), and
+boarded the remaining 12 survivors — 11 of which carry a merged GitHub PR
+whose "differing" files are just later unrelated churn on shared files
+(daemon.rs, ci.yml), and 1 (fix/ocean-125-rooms-base-wiring, PR #84) with
+genuinely unshipped work still open. Full triage at
+ocean-discovery/08-branch-triage-ocean-surface.md.
+_________________________________________________________________________________
