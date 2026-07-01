@@ -762,3 +762,29 @@ against extending the proxy with new provider credentials. Appended a
 remediation line at the top of the audit file pointing the structural fix to
 Wave B4. Committed directly to main (cd84efb) and pushed.
 _________________________________________________________________________________
+
+time:      [7:37pm] [07-01-26]
+agent:     [claude] [fable 5]
+worktree:  [main]
+type:      [review]
+area:      [infra]
+
+Lane G1 leak-closure prep for the Basic-auth credential removed at HEAD by
+3d69cb5. Verified rotation status by SHA-256 comparison only (no secret values
+handled in the open): verdict AUTH-OFF — no live password is in play. The
+LaunchAgent plist is not installed, the repo plist/launcher/install scripts set
+no creds, tools.env has no OCEAN_SURFACE_* keys, nothing listens on 8790/8791,
+the public tunnel hostname serves 502 (cloudflared up, proxy down), no stale
+release binary exists, and the leaked literal is absent from every live file.
+Measured scrub blast radius: the literal sits in 4 commits (introduced 5a6c402
+2026-05-30 in the proxy main.rs, carried by 10e58d5 and 7106948 in main.rs +
+handoff.md, removed by 3d69cb5); a git-filter-repo scrub would rewrite 136 of
+151 main commits and touch 12+ origin branches — and the repo is PUBLIC, so
+the literal remains fetchable from history until scrubbed + GitHub-GC'd. Wrote
+the private runbook ~/.config/ocean-surface/ops-runbook.md (mode 600, not in
+git) holding the live topology moved out of handoff.md, the rotation verdict
+with hashes, and the exact filter-repo procedure — prepared only, NOT
+executed; the force-push is an operator decision. Sanitized handoff.md on main
+(72a9363) to point at the runbook instead of exposing tunnel hostname, port
+map, and ops procedures.
+_________________________________________________________________________________
