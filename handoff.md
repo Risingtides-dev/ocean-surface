@@ -27,13 +27,7 @@ daemon. Clients are disposable; sessions live in the daemon only. They talk over
 `POST /v1/agent/turns` + `GET /v1/agent/events` (SSE) + `/v1/model[s]` + `/v1/requests/{id}/cancel`.
 
 ## Current run state (as of this handoff)
-- **Live stack** (public, behind Cloudflare tunnel `ocean.agentsworld.org`):
-  - daemon on `127.0.0.1:4780`, currently model **gpt-5.5 (Codex/OAuth)**
-  - proxy on `0.0.0.0:8790`, **HTTP Basic auth ON** (creds in `OCEAN_SURFACE_USER` / `OCEAN_SURFACE_PASS`)
-  - tunnel: cloudflared config `~/.cloudflared/config.yml`, hostname `ocean.agentsworld.org` → `:8790`
-- **Isolated TEST stack** (for dev, never tunneled): daemon `4781` (own config dir `/tmp/ocean-test`), proxy `8791` **auth OFF**. Use this for browser testing so you never touch the live one.
-- Restart pattern (load keys first): `set -a; source ~/.config/ocean-rs/tools.env; set +a` then launch.
-- **Do not** broad-`pkill ocean-surface-proxy` — it kills BOTH proxies. Target by port: `kill $(lsof -nP -iTCP:8791 -sTCP:LISTEN -t)`.
+Live topology + ops procedures: local runbook at `~/.config/ocean-surface/ops-runbook.md` (private, not in git).
 
 ## Credentials
 All agent/tool keys are in **`~/.config/ocean-rs/tools.env`** (mode 600, gitignored): Google Maps + API, Brave Search, Linear, Replicate, Slack bot+channel, Cloudflare. Provider model keys (DeepSeek, Codex OAuth, Kimi) are in **`~/.config/ocean-rs/auth.json`**. ⚠️ **DeepSeek balance is exhausted** (402 Insufficient Balance) — that's why we run gpt-5.5/Kimi. Top up or stay off DeepSeek.
