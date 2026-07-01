@@ -8,13 +8,20 @@ import {
   ndJsonStream,
   PROTOCOL_VERSION,
   type InitializeResponse,
+  type ListSessionsResponse,
+  type LoadSessionResponse,
   type NewSessionResponse,
   type PromptResponse,
+  type SessionModeState,
   type Stream,
+  type TerminalOutputResponse,
 } from "@agentclientprotocol/sdk";
 import * as vscode from "vscode";
 import { OceanAcpClient, type SessionUpdateListener } from "./acpClient";
-import { FileSystemHandler } from "./handlers/filesystem";
+import {
+  FileSystemHandler,
+  type AppliedFileEditListener,
+} from "./handlers/filesystem";
 import { TerminalHandler } from "./handlers/terminal";
 import { PermissionHandler } from "./handlers/permissions";
 import { log, logError, logTraffic } from "./logger";
@@ -23,20 +30,41 @@ import { version as extensionVersion } from "../package.json";
 
 export type ConnectionStateListener = (connected: boolean) => void;
 
+export interface OceanModelOption {
+  id: string;
+  name: string;
+  description?: string | null;
+}
+
+export interface OceanSettingsSnapshot {
+  daemonUrl: string;
+  acpPath: string;
+  resolvedAcpPath: string;
+  autoApprovePermissions: string;
+  injectEditorContext: boolean;
+  logTraffic: boolean;
+  thinkingLevel: string;
+}
+
 export class OceanConnection {
   private process: ChildProcess | null = null;
   private connection: ClientSideConnection | null = null;
   private client: OceanAcpClient | null = null;
   private initResponse: InitializeResponse | null = null;
   private sessionId: string | null = null;
-  private readonly fsHandler = new FileSystemHandler();
+  private currentModeId: string | null = null;
+  private availableModes: OceanModelOption[] = [];
+  private readonly fsHandler: FileSystemHandler;
   private readonly terminalHandler = new TerminalHandler();
   private readonly permissionHandler = new PermissionHandler();
 
   constructor(
     private readonly onSessionUpdate: SessionUpdateListener,
     private readonly onConnectionStateChange?: ConnectionStateListener,
-  ) {}
+    onAppliedFileEdit?: AppliedFileEditListener,
+  ) {
+    this.fsHandler = new FileSystemHandler(onAppliedFileEdit);
+  }
 
   get connected(): boolean {
     return this.connection !== null;
@@ -48,6 +76,35 @@ export class OceanConnection {
 
   get agentInfo(): InitializeResponse["agentInfo"] | undefined {
     return this.initResponse?.agentInfo;
+  }
+
+  get currentModelId(): string | null {
+    return this.currentModeId;
+  }
+
+  get modelOptions(): OceanModelOption[] {
+    return this.availableModes;
+  }
+
+  get supportsLoadSession(): boolean {
+    return Boolean(this.initResponse?.agentCapabilities?.loadSession);
+  }
+
+  get supportsListSessions(): boolean {
+    return Boolean(this.initResponse?.agentCapabilities?.sessionCapabilities?.list);
+  }
+
+  get settings(): OceanSettingsSnapshot {
+    const config = vscode.workspace.getConfiguration("ocean");
+    return {
+      daemonUrl: config.get<string>("daemon.url", "http://127.0.0.1:4780"),
+      acpPath: config.get<string>("acp.path", ""),
+      resolvedAcpPath: safeResolveOceanAcpPath(),
+      autoApprovePermissions: config.get<string>("autoApprovePermissions", "ask"),
+      injectEditorContext: config.get<boolean>("injectEditorContext", true),
+      logTraffic: config.get<boolean>("logTraffic", false),
+      thinkingLevel: config.get<string>("thinkingLevel", ""),
+    };
   }
 
   async connect(): Promise<void> {
@@ -130,8 +187,58 @@ export class OceanConnection {
     const cwd = workspaceRoot();
     const response = await this.connection.newSession({ cwd, mcpServers: [] });
     this.sessionId = response.sessionId;
+    this.captureModeState(response.modes);
     log(`New session: ${this.sessionId} (cwd=${cwd})`);
     return response;
+  }
+
+  async loadSession(sessionId: string): Promise<LoadSessionResponse> {
+    if (!this.connection) {
+      throw new Error("Not connected");
+    }
+    const trimmed = sessionId.trim();
+    if (!trimmed) {
+      throw new Error("Missing session id");
+    }
+    const cwd = workspaceRoot();
+    this.sessionId = trimmed;
+    const response = await this.connection.loadSession({
+      sessionId: trimmed,
+      cwd,
+      mcpServers: [],
+    });
+    this.captureModeState(response.modes);
+    log(`Loaded session: ${this.sessionId} (cwd=${cwd})`);
+    this.onConnectionStateChange?.(this.connected);
+    return response;
+  }
+
+  async listSessions(cursor?: string | null): Promise<ListSessionsResponse> {
+    if (!this.connection) {
+      throw new Error("Not connected");
+    }
+    return this.connection.listSessions({
+      cwd: workspaceRoot(),
+      cursor: cursor ?? null,
+    });
+  }
+
+  async setModel(modelId: string): Promise<void> {
+    const trimmed = modelId.trim();
+    if (!this.connection || !this.sessionId || !trimmed) {
+      throw new Error("No active session");
+    }
+    await this.connection.setSessionMode({
+      sessionId: this.sessionId,
+      modeId: trimmed,
+    });
+    this.currentModeId = trimmed;
+    this.onConnectionStateChange?.(this.connected);
+  }
+
+  setCurrentMode(modeId: string): void {
+    this.currentModeId = modeId;
+    this.onConnectionStateChange?.(this.connected);
   }
 
   async prompt(text: string): Promise<PromptResponse> {
@@ -140,8 +247,12 @@ export class OceanConnection {
     }
     await vscode.commands.executeCommand("setContext", "ocean.turnInProgress", true);
     try {
+      const thinkingLevel = this.settings.thinkingLevel.trim();
       return await this.connection.prompt({
         sessionId: this.sessionId,
+        _meta: thinkingLevel
+          ? { ocean: { thinking_level: thinkingLevel } }
+          : undefined,
         prompt: [{ type: "text", text }],
       });
     } finally {
@@ -156,10 +267,16 @@ export class OceanConnection {
     await this.connection.cancel({ sessionId: this.sessionId });
   }
 
+  terminalSnapshot(terminalId: string): TerminalOutputResponse | null {
+    return this.terminalHandler.snapshot(terminalId);
+  }
+
   disconnect(): void {
     this.connection = null;
     this.sessionId = null;
     this.initResponse = null;
+    this.currentModeId = null;
+    this.availableModes = [];
     this.terminalHandler.dispose();
     if (this.process) {
       this.process.kill();
@@ -199,6 +316,20 @@ export class OceanConnection {
     return { writable: sendTap.writable, readable: recvTap.readable };
   }
 
+  private captureModeState(modes: SessionModeState | null | undefined): void {
+    if (!modes) {
+      this.currentModeId = null;
+      this.availableModes = [];
+      return;
+    }
+    this.currentModeId = modes.currentModeId;
+    this.availableModes = modes.availableModes.map((mode) => ({
+      id: mode.id,
+      name: mode.name,
+      description: mode.description,
+    }));
+  }
+
   private async ensureDaemonHealthy(): Promise<void> {
     const config = vscode.workspace.getConfiguration("ocean");
     const daemonUrl = config.get<string>("daemon.url", "http://127.0.0.1:4780");
@@ -218,6 +349,14 @@ export class OceanConnection {
       }
       throw new Error(`${message} (${String(error)})`);
     }
+  }
+}
+
+function safeResolveOceanAcpPath(): string {
+  try {
+    return resolveOceanAcpPath();
+  } catch {
+    return "not found";
   }
 }
 

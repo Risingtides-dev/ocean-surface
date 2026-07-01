@@ -111,10 +111,10 @@ export class TerminalHandler {
     return { terminalId };
   }
 
-  async terminalOutput(params: TerminalOutputRequest): Promise<TerminalOutputResponse> {
-    const managed = this.terminals.get(params.terminalId);
+  snapshot(terminalId: string): TerminalOutputResponse | null {
+    const managed = this.terminals.get(terminalId);
     if (!managed) {
-      throw new Error(`Terminal not found: ${params.terminalId}`);
+      return null;
     }
     const response: TerminalOutputResponse = {
       output: managed.output,
@@ -125,6 +125,14 @@ export class TerminalHandler {
         exitCode: managed.exitCode,
         signal: managed.exitSignal,
       };
+    }
+    return response;
+  }
+
+  async terminalOutput(params: TerminalOutputRequest): Promise<TerminalOutputResponse> {
+    const response = this.snapshot(params.terminalId);
+    if (!response) {
+      throw new Error(`Terminal not found: ${params.terminalId}`);
     }
     return response;
   }

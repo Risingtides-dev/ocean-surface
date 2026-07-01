@@ -7,8 +7,20 @@ import type {
 } from "@agentclientprotocol/sdk";
 import { log, logError } from "../logger";
 
+export interface AppliedFileEdit {
+  path: string;
+  oldText: string | null;
+  newText: string;
+  created: boolean;
+  saved: boolean;
+}
+
+export type AppliedFileEditListener = (edit: AppliedFileEdit) => void;
+
 /** ACP filesystem ops via VS Code — includes unsaved buffer content. */
 export class FileSystemHandler {
+  constructor(private readonly onAppliedEdit?: AppliedFileEditListener) {}
+
   async readTextFile(params: ReadTextFileRequest): Promise<ReadTextFileResponse> {
     log(`readTextFile: ${params.path}`);
     try {
@@ -50,8 +62,10 @@ export class FileSystemHandler {
         (doc) => doc.uri.fsPath === uri.fsPath,
       );
       let doc: vscode.TextDocument;
+      let oldText: string | null = null;
 
       if (openDoc) {
+        oldText = openDoc.getText();
         const edit = new vscode.WorkspaceEdit();
         edit.replace(uri, fullDocumentRange(openDoc), params.content);
         const applied = await vscode.workspace.applyEdit(edit);
@@ -61,6 +75,7 @@ export class FileSystemHandler {
         await openDoc.save();
         doc = openDoc;
       } else {
+        oldText = await readExistingText(uri);
         await vscode.workspace.fs.writeFile(
           uri,
           Buffer.from(params.content, "utf-8"),
@@ -72,11 +87,27 @@ export class FileSystemHandler {
         preview: true,
         preserveFocus: true,
       });
+      this.onAppliedEdit?.({
+        path: uri.fsPath,
+        oldText,
+        newText: params.content,
+        created: oldText === null,
+        saved: true,
+      });
       return {};
     } catch (error) {
       logError(`writeTextFile failed: ${params.path}`, error);
       throw error;
     }
+  }
+}
+
+async function readExistingText(uri: vscode.Uri): Promise<string | null> {
+  try {
+    const raw = await vscode.workspace.fs.readFile(uri);
+    return Buffer.from(raw).toString("utf-8");
+  } catch {
+    return null;
   }
 }
 
