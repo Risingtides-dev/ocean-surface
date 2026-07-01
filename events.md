@@ -741,3 +741,24 @@ whose "differing" files are just later unrelated churn on shared files
 genuinely unshipped work still open. Full triage at
 ocean-discovery/08-branch-triage-ocean-surface.md.
 _________________________________________________________________________________
+
+time:      [07:31pm] [07-01-26]
+agent:     [claude] [fable 5]
+worktree:  [main]
+type:      [docs]
+area:      [docs]
+
+Lane G5 doc-truth pass (F-03/F-04). Fixed the provider-credential contradiction
+flagged in audit/ocean-surface-doc-boundary-audit.md: README claimed surfaces
+"hold no agent logic, provider credentials, or sessions" while README's
+workspace/auth sections and AGENTS.md/CLAUDE.md described ocean-surface-proxy
+holding the xAI STT/TTS key server-side. Wording-only edits (no code): the
+proxy's key handling is now explicitly framed as transitional — provider
+credentials are moving to ocean-os (daemon-owned voice endpoints) and the proxy
+keeps them only until that migration lands (orchestration-plan Wave B4) — in
+README's thin-client claim, workspace table, Auth section, and roadmap, plus
+the workspace-map rows and a shared note in AGENTS.md and CLAUDE.md warning
+against extending the proxy with new provider credentials. Appended a
+remediation line at the top of the audit file pointing the structural fix to
+Wave B4. Committed directly to main (cd84efb) and pushed.
+_________________________________________________________________________________
