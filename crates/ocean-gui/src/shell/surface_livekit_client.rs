@@ -166,6 +166,18 @@ pub enum SurfaceLiveKitClientEvent {
         room: String,
         participants: Vec<SurfaceLiveKitParticipant>,
     },
+    /// Canvas co-editing data packet received on `ocean.canvas.v1`.
+    CanvasData {
+        room: String,
+        participant_identity: String,
+        payload: Vec<u8>,
+    },
+    /// A canvas data publish failed (packet dropped; convergence recovers via
+    /// snapshots).
+    CanvasDataFailed {
+        room: String,
+        error: String,
+    },
     Disconnected {
         room: String,
         reason: String,
@@ -179,6 +191,12 @@ pub enum SurfaceLiveKitClientEvent {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum SurfaceLiveKitClientCommand {
     UpdateSurface(SurfaceLiveKitSurfaceUpdate),
+    /// Broadcast a canvas co-editing data packet on `ocean.canvas.v1`. Empty
+    /// `destination_identities` = broadcast to all participants.
+    PublishCanvasData {
+        payload: Vec<u8>,
+        destination_identities: Vec<String>,
+    },
     Disconnect,
 }
 
@@ -187,7 +205,12 @@ pub(super) enum SurfaceLiveKitClientCommand {
 #[cfg_attr(not(any(feature = "livekit", test)), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum SurfaceLiveKitClientAction {
-    UpdateSurface(SurfaceLiveKitSurfaceUpdate),
+    UpdateSurface {
+        update: SurfaceLiveKitSurfaceUpdate,
+        /// Canvas data commands drained while coalescing, preserved in enqueue
+        /// order so the session publishes them after applying the surface update.
+        canvas_data: Vec<SurfaceLiveKitClientCommand>,
+    },
     Disconnect,
     Closed,
 }
@@ -209,6 +232,22 @@ impl SurfaceLiveKitClientHandle {
     ) -> Result<(), SurfaceLiveKitCommandError> {
         self.sender
             .try_send(SurfaceLiveKitClientCommand::UpdateSurface(update))
+            .map_err(SurfaceLiveKitCommandError::from)
+    }
+
+    /// Enqueue a canvas co-editing data packet for the session thread to publish
+    /// on `ocean.canvas.v1`. A full queue or a closed session yields an `Err`
+    /// the caller ignores (a dropped patch is recovered by a later snapshot).
+    pub fn try_publish_canvas_data(
+        &self,
+        payload: Vec<u8>,
+        destination_identities: Vec<String>,
+    ) -> Result<(), SurfaceLiveKitCommandError> {
+        self.sender
+            .try_send(SurfaceLiveKitClientCommand::PublishCanvasData {
+                payload,
+                destination_identities,
+            })
             .map_err(SurfaceLiveKitCommandError::from)
     }
 
@@ -301,16 +340,22 @@ pub(super) fn coalesce_surface_update(
     commands: &mut ClientCommandReceiver<SurfaceLiveKitClientCommand>,
     mut update: SurfaceLiveKitSurfaceUpdate,
 ) -> SurfaceLiveKitClientAction {
+    let mut canvas_data = Vec::new();
     loop {
         match commands.try_recv() {
             Ok(SurfaceLiveKitClientCommand::UpdateSurface(next_update)) => {
                 update = next_update;
             }
+            Ok(command @ SurfaceLiveKitClientCommand::PublishCanvasData { .. }) => {
+                // A canvas packet never coalesces away — preserve it in enqueue
+                // order so the session publishes it after the surface update.
+                canvas_data.push(command);
+            }
             Ok(SurfaceLiveKitClientCommand::Disconnect) => {
                 return SurfaceLiveKitClientAction::Disconnect;
             }
             Err(TryRecvError::Empty) => {
-                return SurfaceLiveKitClientAction::UpdateSurface(update);
+                return SurfaceLiveKitClientAction::UpdateSurface { update, canvas_data };
             }
             Err(TryRecvError::Disconnected) => {
                 return SurfaceLiveKitClientAction::Closed;
@@ -428,18 +473,19 @@ mod tests {
             .try_send(SurfaceLiveKitClientCommand::UpdateSurface(third))
             .expect("third update should enqueue");
 
-        assert_eq!(
+        assert!(matches!(
             coalesce_surface_update(&mut receiver, first),
-            SurfaceLiveKitClientAction::UpdateSurface(SurfaceLiveKitSurfaceUpdate {
-                room_metadata: r#"{"surface_session_id":"surface:third"}"#.to_string(),
-                participant_attributes: BTreeMap::from([
-                    ("ocean.client".to_string(), "ocean-gui".to_string()),
-                    ("ocean.surface_id".to_string(), "gpui:local".to_string()),
-                ]),
-                mic_enabled: false,
-                camera_enabled: false,
-            })
-        );
+            SurfaceLiveKitClientAction::UpdateSurface {
+                update: SurfaceLiveKitSurfaceUpdate {
+                    room_metadata,
+                    mic_enabled: false,
+                    camera_enabled: false,
+                    ..
+                },
+                canvas_data,
+            } if room_metadata == r#"{"surface_session_id":"surface:third"}"#
+                   && canvas_data.is_empty()
+        ));
     }
 
     #[test]
@@ -459,5 +505,45 @@ mod tests {
             coalesce_surface_update(&mut receiver, first),
             SurfaceLiveKitClientAction::Disconnect
         );
+    }
+    #[test]
+    fn coalesce_preserves_queued_canvas_data_in_order() {
+        let (sender, mut receiver) = mpsc::channel(8);
+        let first = valid_join_request().initial_update;
+        let mut second = first.clone();
+        second.room_metadata = r#"{"surface_session_id":"surface:second"}"#.to_string();
+        let mut third = first.clone();
+        third.room_metadata = r#"{"surface_session_id":"surface:third"}"#.to_string();
+        let p1 = SurfaceLiveKitClientCommand::PublishCanvasData {
+            payload: vec![1, 2, 3],
+            destination_identities: vec![],
+        };
+        let p2 = SurfaceLiveKitClientCommand::PublishCanvasData {
+            payload: vec![4, 5, 6],
+            destination_identities: vec!["bob".to_string()],
+        };
+
+        sender
+            .try_send(SurfaceLiveKitClientCommand::UpdateSurface(second))
+            .unwrap();
+        sender.try_send(p1.clone()).unwrap();
+        sender
+            .try_send(SurfaceLiveKitClientCommand::UpdateSurface(third))
+            .unwrap();
+        sender.try_send(p2.clone()).unwrap();
+
+        match coalesce_surface_update(&mut receiver, first) {
+            SurfaceLiveKitClientAction::UpdateSurface { update, canvas_data } => {
+                assert_eq!(
+                    update.room_metadata,
+                    r#"{"surface_session_id":"surface:third"}"#
+                );
+                assert_eq!(
+                    canvas_data, vec![p1, p2],
+                    "canvas packets are carried through in enqueue order"
+                );
+            }
+            other => panic!("expected UpdateSurface action, got {other:?}"),
+        }
     }
 }

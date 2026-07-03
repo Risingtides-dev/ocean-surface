@@ -1,6 +1,7 @@
 mod agent;
 mod assets;
 mod canvas;
+mod canvas_sync;
 mod commands;
 mod daemon;
 mod editor_buffer;

@@ -243,6 +243,28 @@ impl CanvasStore {
         }
     }
 
+    /// Unconditionally write a fresh full snapshot of `ledger` (and restart the
+    /// log beneath it). Used by canvas co-editing when a peer's bulk snapshot
+    /// merges state into the ledger — there's no newly-applied patch batch, but
+    /// the merged result must still reach disk so it survives a restart.
+    /// `persist(&ledger, &[])` would no-op once a snapshot already exists, so
+    /// this forces the write. Best-effort, like [`persist`](Self::persist).
+    pub fn persist_snapshot(&self, ledger: &CanvasLedger) {
+        if let Err(err) = self.persist_snapshot_inner(ledger) {
+            eprintln!(
+                "[canvas-persist] warning: failed to snapshot canvas {} (session {}): {err}",
+                ledger.canvas_id, ledger.session_id
+            );
+        }
+    }
+
+    fn persist_snapshot_inner(&self, ledger: &CanvasLedger) -> std::io::Result<()> {
+        self.ensure_dir()?;
+        self.write_snapshot(ledger)?;
+        self.truncate_log()?;
+        Ok(())
+    }
+
     fn persist_inner(
         &self,
         ledger: &CanvasLedger,

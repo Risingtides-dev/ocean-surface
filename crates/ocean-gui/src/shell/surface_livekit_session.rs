@@ -22,8 +22,8 @@ use std::thread;
 use futures_util::StreamExt;
 use livekit::options::TrackPublishOptions;
 use livekit::prelude::{
-    LocalAudioTrack, LocalParticipant, LocalTrack, LocalTrackPublication, LocalVideoTrack,
-    PlatformAudio, RemoteTrack, RtcAudioSource, TrackSource,
+    DataPacket, LocalAudioTrack, LocalParticipant, LocalTrack, LocalTrackPublication,
+    LocalVideoTrack, ParticipantIdentity, PlatformAudio, RemoteTrack, RtcAudioSource, TrackSource,
 };
 use livekit::webrtc::video_source::native::NativeVideoSource;
 use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
@@ -40,6 +40,7 @@ use super::surface_livekit_client::{
     validate_surface_update,
 };
 use super::surface_livekit_video::decode_bgra;
+use super::canvas_sync::CANVAS_SYNC_TOPIC;
 
 pub fn spawn_surface_livekit_client(
     request: SurfaceLiveKitJoinRequest,
@@ -212,8 +213,8 @@ async fn join_surface_livekit_room(
             command = commands.recv() => {
                 match command {
                     Some(SurfaceLiveKitClientCommand::UpdateSurface(update)) => {
-                        let update = match coalesce_surface_update(&mut commands, update) {
-                            SurfaceLiveKitClientAction::UpdateSurface(update) => update,
+                        let (update, canvas_data) = match coalesce_surface_update(&mut commands, update) {
+                            SurfaceLiveKitClientAction::UpdateSurface { update, canvas_data } => (update, canvas_data),
                             SurfaceLiveKitClientAction::Disconnect => {
                                 disconnect_surface_room(
                                     &room,
@@ -300,6 +301,37 @@ async fn join_surface_livekit_room(
                                 },
                             );
                         }
+                        // Publish any canvas co-editing data packets coalesced alongside
+                        // this surface update, in the order they were enqueued.
+                        for command in canvas_data {
+                            if let SurfaceLiveKitClientCommand::PublishCanvasData {
+                                payload,
+                                destination_identities,
+                            } = command
+                            {
+                                publish_canvas_data(
+                                    &local_participant,
+                                    payload,
+                                    destination_identities,
+                                    &sender,
+                                    &room_id,
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                    Some(SurfaceLiveKitClientCommand::PublishCanvasData {
+                        payload,
+                        destination_identities,
+                    }) => {
+                        publish_canvas_data(
+                            &local_participant,
+                            payload,
+                            destination_identities,
+                            &sender,
+                            &room_id,
+                        )
+                        .await;
                     }
                     Some(SurfaceLiveKitClientCommand::Disconnect) => {
                         disconnect_surface_room(
@@ -463,6 +495,38 @@ async fn publish_surface_update(
         .await
         .map_err(|error| format!("failed to publish LiveKit attributes: {error}"))?;
     Ok(())
+}
+
+/// Publish one canvas co-editing data packet on [`CANVAS_SYNC_TOPIC`]. An empty
+/// `destination_identities` broadcasts to all participants; a non-empty list
+/// targets specific peers (snapshot request/response). A publish failure is
+/// reported as `CanvasDataFailed`; the convergence layer recovers via snapshots,
+/// so no retry is attempted here.
+async fn publish_canvas_data(
+    local_participant: &LocalParticipant,
+    payload: Vec<u8>,
+    destination_identities: Vec<String>,
+    sender: &Sender<SurfaceLiveKitClientEvent>,
+    room_id: &str,
+) {
+    let packet = DataPacket {
+        payload,
+        topic: Some(CANVAS_SYNC_TOPIC.to_string()),
+        reliable: true,
+        destination_identities: destination_identities
+            .into_iter()
+            .map(ParticipantIdentity)
+            .collect(),
+    };
+    if let Err(error) = local_participant.publish_data(packet).await {
+        send_client_event(
+            sender,
+            SurfaceLiveKitClientEvent::CanvasDataFailed {
+                room: room_id.to_string(),
+                error: error.to_string(),
+            },
+        );
+    }
 }
 
 async fn reconcile_microphone(
@@ -666,6 +730,26 @@ fn handle_room_event(
         | RoomEvent::ParticipantMetadataChanged { .. }
         | RoomEvent::ParticipantAttributesChanged { .. } => {
             publish_roster(room, sender, room_id);
+        }
+        // A canvas co-editing packet on our topic: hand the raw payload to the
+        // shell (it decodes + routes the CanvasSyncMessage). Not terminal.
+        RoomEvent::DataReceived {
+            payload,
+            topic,
+            participant,
+            ..
+        } if topic.as_deref() == Some(CANVAS_SYNC_TOPIC) => {
+            let participant_identity = participant
+                .map(|remote| remote.identity().0)
+                .unwrap_or_default();
+            send_client_event(
+                sender,
+                SurfaceLiveKitClientEvent::CanvasData {
+                    room: room_id.to_string(),
+                    participant_identity,
+                    payload: (*payload).clone(),
+                },
+            );
         }
         RoomEvent::Disconnected { reason } => {
             send_client_event(

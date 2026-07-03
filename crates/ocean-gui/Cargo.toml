@@ -13,6 +13,7 @@ path = "src/bin/ocean_gui.rs"
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 eframe = "0.29"
 gpui = "0.2.2"
 indexmap = { version = "2", features = ["serde"] }

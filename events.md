@@ -788,3 +788,12 @@ executed; the force-push is an operator decision. Sanitized handoff.md on main
 (72a9363) to point at the runbook instead of exposing tunnel hostname, port
 map, and ops procedures.
 _________________________________________________________________________________
+
+time:      [06:16pm] [07-03-26]
+agent:     [claude] [glm-5.2]
+worktree:  main
+type:      [feature-request]
+area:      [frontend]
+
+Native CanvasLedger realtime co-editing over LiveKit data channels on topic `ocean.canvas.v1` now lands so the GPUI multiplayer canvas is no longer tldraw-first. Convergent merge OCEAN-270 owns convergence while LiveKit data packets act only as a transient courier, with the ledger and local persistence remaining the source of truth. Late joiners catch up through targeted chunked snapshots, tldraw is demoted to the optional sketch/import adapter, `canvas_sync.rs` owns the wire protocol, and `CanvasLedger::merge_snapshot` handles bulk-state late-join merges.
+_________________________________________________________________________________

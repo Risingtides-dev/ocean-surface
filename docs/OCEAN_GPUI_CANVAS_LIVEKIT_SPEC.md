@@ -26,25 +26,30 @@ Do not collapse these into one transport.
 
 ### 1. Canvas Plane
 
-Use tldraw for the multiplayer canvas.
+Use the native `CanvasLedger` for the multiplayer canvas.
 
-- tldraw document state is its own CRDT/sync domain.
-- Humans manipulate the canvas directly.
-- Agents render through structured canvas commands that become tldraw shapes.
+- Humans manipulate the GPUI canvas directly.
+- Agents render through structured canvas commands that become ledger patches.
+- Convergence is owned by the OCEAN-270 merge state (`LamportClock`,
+  `ComponentVersion`, `CanvasMergeState`), not by LiveKit or tldraw.
+- Eligible `SurfacePatchEnvelope`s are encoded by
+  `crates/ocean-gui/src/shell/canvas_sync.rs` and broadcast as reliable LiveKit
+  data packets on topic `ocean.canvas.v1`.
+- Late joiners request a targeted chunked snapshot, reassemble it, and merge the
+  bulk state through `CanvasLedger::merge_snapshot`.
+- tldraw remains the optional demoted sketch/import adapter from OCEAN-168, not
+  the multiplayer source of truth.
 - The canvas state is not stored as daemon-global chat state.
 
-Initial host path:
+Current host path:
 
 ```text
 GPUI native app
-  -> wry webview region
-  -> crates/ocean-gui/canvas-web
-  -> tldraw editor/runtime
+  -> native canvas renderer
+  -> CanvasLedger
+  -> canvas_sync.rs
+  -> LiveKit reliable data packets
 ```
-
-The wry pane must have a dedicated non-overlapped region. GPUI chrome should
-not rely on floating over the webview because native webviews render as child
-layers above GPU UI.
 
 ### 2. Transport + Presence Plane
 
@@ -149,8 +154,8 @@ human speaks/types/clicks
   -> POST /v1/agent/turns
   -> daemon streams AgentTurnEvents
   -> agent emits render commands / component events
-  -> GPUI applies commands to ledger + tldraw
-  -> all canvas participants converge through tldraw sync
+  -> GPUI applies commands to the native canvas ledger
+  -> all canvas participants converge through OCEAN-270 merge state plus LiveKit reliable data packets on `ocean.canvas.v1`; late joiners catch up through chunked snapshots
 ```
 
 The agent should not emit arbitrary web code. It should emit trusted structured
@@ -170,16 +175,20 @@ The app owns final rendering.
 
 ## Write Paths
 
-Two acceptable write paths:
+All writes enter the native ledger first:
 
-1. GPUI-to-webview IPC: Rust receives daemon events, sends structured commands
-   into the tldraw webview, and JS calls tldraw editor APIs.
-2. Headless tldraw writer sidecar: a small TypeScript process connects to the
-   tldraw sync room and applies render commands directly.
+1. Human canvas gestures enter through the GPUI `LedgerSink`, become versioned
+   `SurfacePatchEnvelope`s, and are broadcast over the LiveKit data channel when
+   sync-eligible.
+2. Agent render events arrive from the daemon SSE stream, apply to the same
+   ledger, and are re-broadcast by the receiving surface so peers attached to
+   other sessions still converge.
+3. Remote LiveKit packets are decoded by `canvas_sync.rs` and applied to the
+   named canvas ledger; full-state catch-up uses chunked snapshots merged by
+   `CanvasLedger::merge_snapshot`.
 
-Start with path 1 because it is simpler for the local GPUI prototype. Move to a
-headless writer if agent rendering should continue when the visible GPUI pane
-is detached or slow.
+The ledger rides with the canvas/document state and local persistence. The daemon
+does not become a canvas relay, renderer, or table of CRDT state.
 
 ## Layout / Multiplexing
 
@@ -198,9 +207,9 @@ the full active surface topology, not just "the pane the user is in."
 
 1. Keep session scoping correct: no global SSE, no session adoption.
 2. Stabilize GPUI chrome and transcript rendering.
-3. Make the canvas webview load reliably from `crates/ocean-gui/canvas-web`.
-4. Wire GPUI <-> canvas-web IPC for ledger load/update events.
-5. Add a minimal tldraw shape render command.
+3. Stabilize the native GPUI canvas renderer and `CanvasLedger` write boundary.
+4. Wire LiveKit data-channel patch broadcast/receive through `canvas_sync.rs`.
+5. Add targeted chunked snapshots for late joiner convergence.
 6. Feed ledger summary into `surface-gpui` turn context.
 7. Add LiveKit join/presence controls with mic/camera toggles.
 8. Use LiveKit metadata/attributes for compact surface/session presence.
@@ -210,7 +219,7 @@ the full active surface topology, not just "the pane the user is in."
 
 - Do not implement this from old TUI room docs.
 - Do not introduce "pods" or separate agent mesh concepts in the GUI.
-- Do not store canvas CRDT state in LiveKit.
+- Do not store canvas state in LiveKit — data packets are a transient courier; the ledger + local persistence remain the source of truth.
 - Do not make the daemon the canvas renderer.
 - Do not rely on GPUI overlays above the webview.
 - Do not let global SSE pick the active session for a surface.

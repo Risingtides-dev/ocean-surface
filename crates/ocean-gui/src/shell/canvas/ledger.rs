@@ -358,6 +358,61 @@ impl CanvasLedger {
         touched
     }
 
+    /// Merge a peer's full-ledger snapshot into this one, component-by-component
+    /// through the convergent merge (OCEAN-270). Local newer edits survive; peer
+    /// newer state lands. Returns the touched [`ComponentId`]s (empty = nothing
+    /// changed).
+    ///
+    /// This is the **late-joiner bulk-state path**: instead of replaying every
+    /// patch a fresh replica never received, a peer hands its serialized ledger
+    /// and the receiver folds each component through the same per-component
+    /// merge decision the live path uses:
+    /// - a versioned component wins iff its version supersedes the local one
+    ///   (the local clock observes the remote rev so the next local tick outruns
+    ///   it);
+    /// - an unversioned component (pre-versioning legacy data) inserts **only
+    ///   when absent**, so a versioned local edit is never clobbered;
+    /// - edges insert-if-absent (edge deletes ride live `Disconnect` patches,
+    ///   not snapshots).
+    ///
+    /// `selection`/`viewport`/`mode`/`metadata`/`session_id`/`canvas_id`/
+    /// `patch_log` are deliberately untouched — a snapshot import is bulk
+    /// component state, not a log entry.
+    pub fn merge_snapshot(&mut self, remote: &CanvasLedger) -> Vec<ComponentId> {
+        let mut touched = Vec::new();
+        for (id, remote_component) in &remote.components {
+            match remote.merge_state.version(id) {
+                Some(v) => {
+                    self.clock.observe(v.rev);
+                    match self.merge_state.merge(id, v.clone()) {
+                        MergeDecision::Applied => {
+                            self.components.insert(id.clone(), remote_component.clone());
+                            touched.push(id.clone());
+                        }
+                        MergeDecision::Superseded => {} // local is newer; keep it.
+                    }
+                }
+                None => {
+                    // Component predates versioning: insert only when absent so
+                    // a versioned local edit is never clobbered. Do not touch
+                    // merge_state — there is no version to record.
+                    if !self.components.contains_key(id) {
+                        self.components.insert(id.clone(), remote_component.clone());
+                        touched.push(id.clone());
+                    }
+                }
+            }
+        }
+        for (edge_id, remote_edge) in &remote.edges {
+            if !self.edges.contains_key(edge_id) {
+                self.edges.insert(edge_id.clone(), remote_edge.clone());
+            }
+        }
+        if !touched.is_empty() {
+            self.revision += 1;
+        }
+        touched
+    }
     fn apply_inner(
         &mut self,
         patch: &SurfacePatch,
@@ -1301,5 +1356,220 @@ mod tests {
             1,
         );
         assert!(l.patch_log.last().unwrap().version.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // merge_snapshot — the late-joiner bulk-state merge (canvas co-editing).
+    // Same convergent guarantee as the live path, but over a whole ledger.
+    // -----------------------------------------------------------------------
+
+    /// A versioned upsert envelope as if it arrived from another replica,
+    /// placing `id` at `(x, 0)`. `actor` is `"{kind}:{id}"`.
+    fn versioned_upsert_env(
+        id: &str,
+        x: f32,
+        rev: u64,
+        kind: &str,
+        actor_id: &str,
+    ) -> SurfacePatchEnvelope {
+        SurfacePatchEnvelope {
+            patch_id: PatchId::new(format!("up:{id}@{rev}")),
+            session_id: "s".to_string(),
+            surface_id: SurfaceId::new("gpui:local"),
+            canvas_id: CanvasId::new("canvas:main"),
+            actor: ActorRef {
+                kind: kind.to_string(),
+                id: Some(actor_id.to_string()),
+                label: None,
+            },
+            created_at_ms: 0,
+            patch: SurfacePatch::UpsertComponent {
+                component: CanvasComponentPatch {
+                    id: ComponentId::new(id),
+                    kind: "card".to_string(),
+                    rect: Some(Rect::new(x, 0.0, 10.0, 10.0)),
+                    z_index: None,
+                    content: json!({}),
+                    metadata: Value::Null,
+                },
+            },
+            version: Some(ComponentVersion::new(
+                rev,
+                ActorId::new(format!("{kind}:{actor_id}")),
+            )),
+        }
+    }
+
+    #[test]
+    fn merge_snapshot_remote_newer_component_replaces_local() {
+        let mut local = ledger();
+        seed_component(&mut local, "c1"); // c1 at rev 0, x = 0.
+        let mut remote = ledger();
+        remote.apply_remote_patch(versioned_upsert_env("c1", 999.0, 5, "agent", "sage"));
+
+        let touched = local.merge_snapshot(&remote);
+
+        assert_eq!(touched, vec![ComponentId::new("c1")]);
+        assert_eq!(
+            local.component(&ComponentId::new("c1")).unwrap().rect.x,
+            999.0,
+            "remote newer state replaces local",
+        );
+        assert_eq!(
+            local.merge_state.version(&ComponentId::new("c1")),
+            remote.merge_state.version(&ComponentId::new("c1")),
+            "winning version advances to the remote rev",
+        );
+    }
+
+    #[test]
+    fn merge_snapshot_local_newer_survives_remote() {
+        let mut local = ledger();
+        local.apply_remote_patch(versioned_upsert_env("c1", 42.0, 9, "human", "operator"));
+        let mut remote = ledger();
+        remote.apply_remote_patch(versioned_upsert_env("c1", 1.0, 5, "agent", "sage"));
+
+        let touched = local.merge_snapshot(&remote);
+
+        assert!(touched.is_empty(), "a lower-rev remote snapshot is superseded");
+        assert_eq!(
+            local.component(&ComponentId::new("c1")).unwrap().rect.x,
+            42.0,
+            "the newer local state survives",
+        );
+    }
+
+    #[test]
+    fn merge_snapshot_unversioned_remote_inserts_only_when_absent() {
+        // Build a remote carrying an unversioned component (clears merge_state
+        // so the component genuinely predates versioning).
+        let mut remote = ledger();
+        remote.apply_patch(
+            upsert("lonely", Some(Rect::new(5.0, 5.0, 10.0, 10.0))),
+            ActorRef::system(),
+            0,
+        );
+        remote.merge_state = CanvasMergeState::new();
+
+        // Absent locally → inserts.
+        let mut local_absent = ledger();
+        let touched = local_absent.merge_snapshot(&remote);
+        assert_eq!(touched, vec![ComponentId::new("lonely")]);
+        assert!(local_absent
+            .component(&ComponentId::new("lonely"))
+            .is_some());
+
+        // Present locally (versioned) → skipped, local keeps its own state and
+        // version.
+        let mut local_present = ledger();
+        local_present.apply_remote_patch(versioned_upsert_env(
+            "lonely",
+            77.0,
+            3,
+            "human",
+            "operator",
+        ));
+        let local_version = local_present
+            .merge_state
+            .version(&ComponentId::new("lonely"))
+            .cloned();
+        let touched = local_present.merge_snapshot(&remote);
+        assert!(
+            touched.is_empty(),
+            "unversioned remote does not clobber a versioned local"
+        );
+        assert_eq!(
+            local_present
+                .component(&ComponentId::new("lonely"))
+                .unwrap()
+                .rect.x,
+            77.0,
+        );
+        assert_eq!(
+            local_present.merge_state.version(&ComponentId::new("lonely")),
+            local_version.as_ref(),
+        );
+    }
+
+    #[test]
+    fn merge_snapshot_edges_insert_if_absent() {
+        let mut remote = ledger();
+        seed_component(&mut remote, "a");
+        seed_component(&mut remote, "b");
+        remote.apply_patch(
+            SurfacePatch::Connect {
+                edge: CanvasEdgePatch {
+                    id: EdgeId::new("e1"),
+                    from: Endpoint {
+                        component_id: ComponentId::new("a"),
+                        port: None,
+                    },
+                    to: Endpoint {
+                        component_id: ComponentId::new("b"),
+                        port: None,
+                    },
+                    kind: None,
+                    label: None,
+                    metadata: Value::Null,
+                },
+            },
+            ActorRef::system(),
+            0,
+        );
+
+        let mut local = ledger();
+        seed_component(&mut local, "a");
+        seed_component(&mut local, "b");
+        assert!(local.edges.is_empty());
+
+        local.merge_snapshot(&remote);
+        assert!(
+            local.edges.contains_key(&EdgeId::new("e1")),
+            "missing edge is pulled in from the snapshot"
+        );
+
+        // Idempotent: a second snapshot does not duplicate the edge.
+        let edges_before = local.edges.len();
+        local.merge_snapshot(&remote);
+        assert_eq!(local.edges.len(), edges_before);
+    }
+
+    #[test]
+    fn merge_snapshot_is_commutative_between_divergent_replicas() {
+        // Two divergent replicas: each owns a component the other lacks, and
+        // both edit `shared` at different revs.
+        let mut a = ledger();
+        a.apply_remote_patch(versioned_upsert_env("only-a", 1.0, 3, "human", "alice"));
+        a.apply_remote_patch(versioned_upsert_env("shared", 10.0, 2, "human", "alice"));
+        let mut b = ledger();
+        b.apply_remote_patch(versioned_upsert_env("only-b", 2.0, 4, "human", "bob"));
+        b.apply_remote_patch(versioned_upsert_env("shared", 20.0, 5, "human", "bob"));
+
+        let mut a_prime = a.clone();
+        a_prime.merge_snapshot(&b);
+        let mut b_prime = b.clone();
+        b_prime.merge_snapshot(&a);
+
+        // Both end with the same component set.
+        let mut ka: Vec<&ComponentId> = a_prime.components.keys().collect();
+        let mut kb: Vec<&ComponentId> = b_prime.components.keys().collect();
+        ka.sort();
+        kb.sort();
+        assert_eq!(ka, kb, "both replicas converge on the same components");
+
+        // The contended `shared` resolves to the higher-rev writer (bob, rev 5)
+        // on both, regardless of merge order.
+        assert_eq!(
+            a_prime.component(&ComponentId::new("shared")).unwrap().rect.x,
+            20.0,
+        );
+        assert_eq!(
+            b_prime.component(&ComponentId::new("shared")).unwrap().rect.x,
+            20.0,
+        );
+        assert_eq!(
+            a_prime.merge_state.version(&ComponentId::new("shared")),
+            b_prime.merge_state.version(&ComponentId::new("shared")),
+        );
     }
 }

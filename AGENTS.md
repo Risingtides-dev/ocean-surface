@@ -27,7 +27,7 @@ local UI/editor source material.
 The important GPUI direction is the real collaboration surface:
 
 - GPUI native chrome and agent transcript.
-- wry-hosted tldraw canvas pane for the multiplayer canvas.
+- native CanvasLedger canvas with LiveKit data-channel co-editing; tldraw stays an optional sketch/import adapter.
 - LiveKit Rust client for audio/video/data/RPC participation.
 - Ocean daemon as the session/runtime authority.
 - Canvas ledger/state injected into turns as surface context.
