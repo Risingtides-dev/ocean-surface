@@ -143,6 +143,18 @@ interactive elements. Never remove focus affordance without replacing it.
 Scrollbars: keep the existing thin overlay treatment, thumb
 `rgba(255,255,255,0.12)`, hover `rgba(255,255,255,0.22)`. No accent scrollbars.
 
+Failure surfaces:
+- Status chip (`.ocean-status`): one short line, state-label register
+  (`turn failed: <concise reason>`), NEVER raw payloads/JSON/multi-line text;
+  source normalizes before set — CSS ellipsis is only a guard.
+- Full error payloads go to the console log and (when a turn/tool errored)
+  render as expanded Err tool blocks in the transcript — the transcript is the
+  detail carrier, the chip is the signal.
+- Failed user turns must never dangle silently: the failure must be visible in
+  status AND recoverable (input preserved, resend possible).
+- Errors follow voice rules: explain what went wrong in the interface voice,
+  never vague, no apology.
+
 ## 4. Layout
 
 - Shell: `max-width: var(--shell-max)` desktop, full-bleed below 960px.

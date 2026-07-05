@@ -255,10 +255,10 @@
   border-color: var(--border-strong);
 }
 
-.rooms-panel__create-input:focus,
-.rooms-policy__cron:focus,
-.rooms-addagent__input:focus,
-.rooms-composer__input:focus {
+.rooms-panel__create-input:focus:not(:disabled),
+.rooms-policy__cron:focus:not(:disabled),
+.rooms-addagent__input:focus:not(:disabled),
+.rooms-composer__input:focus:not(:disabled) {
   outline: none;
   border-color: var(--accent);
   box-shadow: var(--focus-ring);

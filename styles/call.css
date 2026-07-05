@@ -891,8 +891,8 @@
   border-color: var(--border-strong);
 }
 
-.ocean-place-call__input:focus,
-.ocean-place-call__input:focus-visible {
+.ocean-place-call__input:focus:not(:disabled),
+.ocean-place-call__input:focus-visible:not(:disabled) {
   border-color: var(--accent);
   box-shadow: var(--focus-ring);
   outline: none;

@@ -34,6 +34,7 @@ pub fn App() -> impl IntoView {
     // Daemon holds only Copy signal handles, so cloning per-closure is cheap
     // and avoids fighting the borrow checker over a single moved value.
     let status = daemon.status;
+    let status_detail = daemon.status_detail;
     let turns = daemon.turns;
     let streaming = daemon.streaming;
     let voice_ready = daemon.voice_ready;
@@ -327,7 +328,22 @@ pub fn App() -> impl IntoView {
                             </span>
                         </div>
                     </Show>
-                    <div class="ocean-status">{move || status.get()}</div>
+                    // Tooltip carries the full raw payload, but only while the
+                    // displayed status is the exact string stored alongside it —
+                    // any later status.set (error or benign) drops the tooltip
+                    // instead of leaking a stale payload.
+                    <div
+                        class="ocean-status"
+                        title=move || {
+                            status_detail
+                                .get()
+                                .filter(|(s, _)| *s == status.get())
+                                .map(|(_, detail)| detail)
+                                .unwrap_or_default()
+                        }
+                    >
+                        {move || status.get()}
+                    </div>
                     // Secondary actions live behind one overflow control:
                     // council deck, rooms, voice mute, extension tab capture.
                     // Death-by-buttons is a design defect; the header keeps

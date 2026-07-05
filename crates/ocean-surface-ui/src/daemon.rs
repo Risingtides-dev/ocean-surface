@@ -982,6 +982,11 @@ pub struct Daemon {
     pub streaming: RwSignal<bool>,
     pub session_id: RwSignal<Option<String>>,
     pub status: RwSignal<String>,
+    /// `(concise status, full raw error payload)` for the header status chip's
+    /// `title` tooltip. The visible chip stays concise; transcript Err blocks
+    /// carry the same detail inline (design doc §3 Failure surfaces). The view
+    /// shows the tooltip only while `status` equals the stored concise string.
+    pub status_detail: RwSignal<Option<(String, String)>>,
     pub cwd: RwSignal<String>,
     /// Whether the proxy reports a usable xAI key (voice STT/TTS available).
     /// Rendered independently of the SSE `status` string so it isn't clobbered
@@ -1198,6 +1203,7 @@ impl Daemon {
             streaming: RwSignal::new(false),
             session_id: RwSignal::new(None),
             status: RwSignal::new("disconnected".into()),
+            status_detail: RwSignal::new(None),
             cwd: RwSignal::new(default_cwd()),
             voice_ready: RwSignal::new(false),
             maps_key: RwSignal::new(String::new()),
@@ -1244,6 +1250,7 @@ impl Daemon {
             streaming: RwSignal::new(false),
             session_id: RwSignal::new(None),
             status: RwSignal::new("dummy".into()),
+            status_detail: RwSignal::new(None),
             cwd: RwSignal::new("/".into()),
             voice_ready: RwSignal::new(false),
             maps_key: RwSignal::new(String::new()),
@@ -1348,6 +1355,7 @@ impl Daemon {
         let streaming = self.streaming;
         let session_id = self.session_id;
         let status = self.status;
+        let status_detail = self.status_detail;
         let sse_generation = self.sse_generation;
         let last_turn_tokens = self.last_turn_tokens;
         let session_tokens = self.session_tokens;
@@ -1438,12 +1446,15 @@ impl Daemon {
                 let mut es = match EventSource::new(&events_url) {
                     Ok(es) => es,
                     Err(err) => {
-                        status.set(format!("sse connect error: {err}"));
+                        let raw = err.to_string();
+                        log::error!("sse connect error: {raw}");
+                        status.set(format!("sse connect error: {}", concise_error(&raw)));
                         gloo_timers::future::TimeoutFuture::new(2_000).await;
                         continue;
                     }
                 };
                 status.set("connected".into());
+                status_detail.set(None);
                 // Mark that we have opened the stream at least once for this
                 // generation. From here on, any loop re-entry is a reconnect and
                 // triggers the re-hydrate/stuck-streaming recovery at the top.
@@ -1469,7 +1480,8 @@ impl Daemon {
                     }
                 }
                 if let Some(err) = sub_err {
-                    status.set(err);
+                    log::error!("{err}");
+                    status.set(concise_error(&err));
                     gloo_timers::future::TimeoutFuture::new(2_000).await;
                     continue;
                 }
@@ -1537,6 +1549,7 @@ impl Daemon {
                         session_id,
                         streaming,
                         status,
+                        status_detail,
                         last_turn_tokens,
                         session_tokens,
                         model,
@@ -1686,7 +1699,9 @@ impl Daemon {
             let res = match res {
                 Ok(req) => req.send().await,
                 Err(err) => {
-                    status.set(format!("permission encode error: {err}"));
+                    let raw = err.to_string();
+                    log::error!("permission encode error: {raw}");
+                    status.set(format!("permission encode error: {}", concise_error(&raw)));
                     clear_pending_deciding(pending, &permission_id);
                     return;
                 }
@@ -1702,11 +1717,14 @@ impl Daemon {
                 }
                 Ok(resp) => {
                     let text = resp.text().await.unwrap_or_default();
-                    status.set(format!("permission decision failed: {text}"));
+                    log::error!("permission decision failed: {text}");
+                    status.set(format!("permission decision failed: {}", concise_error(&text)));
                     clear_pending_deciding(pending, &permission_id);
                 }
                 Err(err) => {
-                    status.set(format!("permission post error: {err}"));
+                    let raw = err.to_string();
+                    log::error!("permission post error: {raw}");
+                    status.set(format!("permission post error: {}", concise_error(&raw)));
                     clear_pending_deciding(pending, &permission_id);
                 }
             }
@@ -1818,6 +1836,7 @@ impl Daemon {
         };
         let streaming = self.streaming;
         let status = self.status;
+        let status_detail = self.status_detail;
         // Per-turn overrides (OCEAN-79). Captured untracked so the async block
         // sends whatever was selected at dispatch time. Both default to `None`,
         // which omits the field and leaves the daemon's global defaults in force.
@@ -1863,7 +1882,9 @@ impl Daemon {
                 let res = match res {
                     Ok(req) => req.send().await,
                     Err(err) => {
-                        status.set(format!("session encode error: {err}"));
+                        let raw = err.to_string();
+                        log::error!("session encode error: {raw}");
+                        status.set(format!("session encode error: {}", concise_error(&raw)));
                         streaming.set(false);
                         return;
                     }
@@ -1892,19 +1913,22 @@ impl Daemon {
                             daemon.dispatch_prompt(prompt, is_retry, client_type);
                         }
                         Ok(r) => {
-                            status.set(format!(
-                                "session create failed: {}",
-                                r.error.unwrap_or_else(|| "unknown error".into())
-                            ));
+                            let raw = r.error.unwrap_or_else(|| "unknown error".into());
+                            log::error!("session create failed: {raw}");
+                            status.set(format!("session create failed: {}", concise_error(&raw)));
                             streaming.set(false);
                         }
                         Err(err) => {
-                            status.set(format!("session decode error: {err}"));
+                            let raw = err.to_string();
+                            log::error!("session decode error: {raw}");
+                            status.set(format!("session decode error: {}", concise_error(&raw)));
                             streaming.set(false);
                         }
                     },
                     Err(err) => {
-                        status.set(format!("session post error: {err}"));
+                        let raw = err.to_string();
+                        log::error!("session post error: {raw}");
+                        status.set(format!("session post error: {}", concise_error(&raw)));
                         streaming.set(false);
                     }
                 }
@@ -1978,7 +2002,9 @@ impl Daemon {
             let res = match res {
                 Ok(req) => req.send().await,
                 Err(err) => {
-                    status.set(format!("encode error: {err}"));
+                    let raw = err.to_string();
+                    log::error!("encode error: {raw}");
+                    status.set(format!("encode error: {}", concise_error(&raw)));
                     streaming.set(false);
                     daemon.awaiting_session_adoption.set(false);
                     return;
@@ -2015,18 +2041,53 @@ impl Daemon {
                             daemon.dispatch_prompt(prompt, true, client_type);
                             return;
                         }
-                        status.set(format!("turn failed: {err}"));
+                        surface_turn_failure(
+                            daemon.turns,
+                            status,
+                            status_detail,
+                            &r.turn_id,
+                            "turn failed",
+                            &err,
+                        );
                         streaming.set(false);
                         daemon.awaiting_session_adoption.set(false);
                     }
                     Err(err) => {
-                        status.set(format!("decode error: {err}"));
+                        let raw = err.to_string();
+                        let turn_id = daemon.active_turn_id.get_untracked().unwrap_or_else(|| {
+                            format!(
+                                "dispatch-error-{}",
+                                daemon.turns.get_untracked().len()
+                            )
+                        });
+                        surface_turn_failure(
+                            daemon.turns,
+                            status,
+                            status_detail,
+                            &turn_id,
+                            "decode error",
+                            &raw,
+                        );
                         streaming.set(false);
                         daemon.awaiting_session_adoption.set(false);
                     }
                 },
                 Err(err) => {
-                    status.set(format!("post error: {err}"));
+                    let raw = err.to_string();
+                    let turn_id = daemon.active_turn_id.get_untracked().unwrap_or_else(|| {
+                            format!(
+                                "dispatch-error-{}",
+                                daemon.turns.get_untracked().len()
+                            )
+                        });
+                    surface_turn_failure(
+                        daemon.turns,
+                        status,
+                        status_detail,
+                        &turn_id,
+                        "post error",
+                        &raw,
+                    );
                     streaming.set(false);
                     daemon.awaiting_session_adoption.set(false);
                 }
@@ -2208,9 +2269,17 @@ impl Daemon {
                         // Confirm the authoritative selection.
                         daemon.fetch_models();
                     }
-                    Err(err) => status.set(format!("model swap error: {err}")),
+                    Err(err) => {
+                        let raw = err.to_string();
+                        log::error!("model swap error: {raw}");
+                        status.set(format!("model swap error: {}", concise_error(&raw)));
+                    }
                 },
-                Err(err) => status.set(format!("model encode error: {err}")),
+                Err(err) => {
+                    let raw = err.to_string();
+                    log::error!("model encode error: {raw}");
+                    status.set(format!("model encode error: {}", concise_error(&raw)));
+                }
             }
         });
     }
@@ -2232,7 +2301,11 @@ impl Daemon {
                     // arrives; flip it now too so the UI reacts immediately.
                     streaming.set(false);
                 }
-                Err(err) => status.set(format!("halt error: {err}")),
+                Err(err) => {
+                    let raw = err.to_string();
+                    log::error!("halt error: {raw}");
+                    status.set(format!("halt error: {}", concise_error(&raw)));
+                }
             }
         });
     }
@@ -2292,14 +2365,21 @@ impl Daemon {
                         status.set("session loaded".into());
                     }
                     Ok(r) => {
-                        status.set(format!(
-                            "session load failed: {}",
-                            r.error.unwrap_or_else(|| "unknown error".into())
-                        ));
+                        let raw = r.error.unwrap_or_else(|| "unknown error".into());
+                        log::error!("session load failed: {raw}");
+                        status.set(format!("session load failed: {}", concise_error(&raw)));
                     }
-                    Err(err) => status.set(format!("session decode error: {err}")),
+                    Err(err) => {
+                        let raw = err.to_string();
+                        log::error!("session decode error: {raw}");
+                        status.set(format!("session decode error: {}", concise_error(&raw)));
+                    }
                 },
-                Err(err) => status.set(format!("session fetch error: {err}")),
+                Err(err) => {
+                    let raw = err.to_string();
+                    log::error!("session fetch error: {raw}");
+                    status.set(format!("session fetch error: {}", concise_error(&raw)));
+                }
             }
         });
     }
@@ -2364,7 +2444,9 @@ impl Daemon {
             let res = match res {
                 Ok(req) => req.send().await,
                 Err(err) => {
-                    status.set(format!("session encode error: {err}"));
+                    let raw = err.to_string();
+                    log::error!("session encode error: {raw}");
+                    status.set(format!("session encode error: {}", concise_error(&raw)));
                     return;
                 }
             };
@@ -2395,14 +2477,21 @@ impl Daemon {
                         daemon.fetch_sessions();
                     }
                     Ok(r) => {
-                        status.set(format!(
-                            "session create failed: {}",
-                            r.error.unwrap_or_else(|| "unknown error".into())
-                        ));
+                        let raw = r.error.unwrap_or_else(|| "unknown error".into());
+                        log::error!("session create failed: {raw}");
+                        status.set(format!("session create failed: {}", concise_error(&raw)));
                     }
-                    Err(err) => status.set(format!("session decode error: {err}")),
+                    Err(err) => {
+                        let raw = err.to_string();
+                        log::error!("session decode error: {raw}");
+                        status.set(format!("session decode error: {}", concise_error(&raw)));
+                    }
                 },
-                Err(err) => status.set(format!("session post error: {err}")),
+                Err(err) => {
+                    let raw = err.to_string();
+                    log::error!("session post error: {raw}");
+                    status.set(format!("session post error: {}", concise_error(&raw)));
+                }
             }
         });
     }
@@ -2439,7 +2528,12 @@ impl Daemon {
             let res = match res {
                 Ok(req) => req.send().await,
                 Err(err) => {
-                    status.set(format!("component event encode error: {err}"));
+                    let raw = err.to_string();
+                    log::error!("component event encode error: {raw}");
+                    status.set(format!(
+                        "component event encode error: {}",
+                        concise_error(&raw)
+                    ));
                     return;
                 }
             };
@@ -2447,11 +2541,20 @@ impl Daemon {
                 Ok(resp) => {
                     if !resp.ok() {
                         let text = resp.text().await.unwrap_or_default();
-                        status.set(format!("component event error: {text}"));
+                        log::error!("component event error: {text}");
+                        status.set(format!(
+                            "component event error: {}",
+                            concise_error(&text)
+                        ));
                     }
                 }
                 Err(err) => {
-                    status.set(format!("component event post error: {err}"));
+                    let raw = err.to_string();
+                    log::error!("component event post error: {raw}");
+                    status.set(format!(
+                        "component event post error: {}",
+                        concise_error(&raw)
+                    ));
                 }
             }
         });
@@ -2468,6 +2571,7 @@ fn apply_event(
     session_id: RwSignal<Option<String>>,
     streaming: RwSignal<bool>,
     status: RwSignal<String>,
+    status_detail: RwSignal<Option<(String, String)>>,
     last_turn_tokens: RwSignal<Option<TokenStats>>,
     session_tokens: RwSignal<TokenStats>,
     model: RwSignal<Option<String>>,
@@ -2632,6 +2736,7 @@ fn apply_event(
             });
         }
         AgentEvent::TurnFinished {
+            turn_id,
             status: turn_status,
             error,
             output_tokens,
@@ -2650,12 +2755,21 @@ fn apply_event(
             // GPUI shell, which puts the error in its status line (OCEAN-100).
             // Daemon `AgentTurnStatus` is one of completed/failed/cancelled.
             if let Some(err) = error {
-                status.set(format!("turn error: {err}"));
+                surface_turn_failure(
+                    turns,
+                    status,
+                    status_detail,
+                    &turn_id,
+                    "turn failed",
+                    &err,
+                );
             } else if turn_status != "completed" {
                 // A non-success status with no error string (e.g. "cancelled").
+                status_detail.set(None);
                 status.set(format!("turn {turn_status}"));
             } else {
                 status.set("connected".into());
+                status_detail.set(None);
             }
             // Record this turn's usage (real provider numbers when present) and
             // fold it into the running session total.
@@ -2948,6 +3062,114 @@ fn summarize_args(args: &Value) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
+    }
+}
+
+
+/// Append an expanded error tool block to the transcript for a failed turn.
+/// Attaches to the existing assistant turn for `turn_id` when present.
+fn append_turn_error(turns: RwSignal<Vec<Turn>>, turn_id: &str, raw_err: &str) {
+    let err = raw_err.to_string();
+    turns.update(|t| {
+        let turn = ensure_assistant_turn(t, turn_id);
+        if let Some(Block::ToolCall {
+            output,
+            status: ToolStatus::Err,
+            expanded,
+            ..
+        }) = turn
+            .blocks
+            .iter_mut()
+            .find(|b| matches!(b, Block::ToolCall { name, .. } if name == "assistant_error"))
+        {
+            *output = err;
+            *expanded = true;
+            return;
+        }
+        turn.blocks.push(Block::ToolCall {
+            call_id: format!("turn-error-{turn_id}"),
+            name: "assistant_error".into(),
+            args_preview: String::new(),
+            output: err,
+            status: ToolStatus::Err,
+            expanded: true,
+        });
+    });
+}
+
+/// Concise header chip + tooltip detail + transcript Err block for turn failures.
+///
+/// The detail is stored PAIRED with the exact concise status string it belongs
+/// to; the view only shows the tooltip while the displayed status equals the
+/// stored one, so any later `status.set` (error or benign) that bypasses this
+/// helper invalidates the tooltip instead of leaking a stale payload.
+fn surface_turn_failure(
+    turns: RwSignal<Vec<Turn>>,
+    status: RwSignal<String>,
+    status_detail: RwSignal<Option<(String, String)>>,
+    turn_id: &str,
+    prefix: &str,
+    raw: &str,
+) {
+    log::error!("{prefix}: {raw}");
+    let concise = format!("{prefix}: {}", concise_error(raw));
+    status.set(concise.clone());
+    status_detail.set(Some((concise, raw.to_string())));
+    append_turn_error(turns, turn_id, raw);
+}
+
+/// Collapse a raw error payload into one short *reason* for the header status
+/// chip, returning ONLY the reason — call sites re-apply the status prefix
+/// (e.g. `format!("turn failed: {}", concise_error(&raw))`).
+///
+/// Provider failures arrive as a multi-line blob with a JSON payload embedded
+/// in prose, e.g.
+///   `provider error: provider returned an error (status 401):
+///    { "error": { "message": "Provided authentication token is expired..." } }`
+/// The chip's register is `turn failed: <concise reason>` (design doc §3), so
+/// the provider plumbing must NOT eat the ~120-char budget — we extract the
+/// JSON `error.message` as the reason. With no JSON we take the first line.
+/// The full raw payload is logged via `log::error!` at each call site and
+/// rendered as an Err block in the transcript; this helper only shapes the
+/// chip text: (1) extract `error.message` if a JSON object is embedded, else
+/// the first line; (2) collapse whitespace; (3) hard-cap at ~120 chars with a
+/// trailing ellipsis.
+fn concise_error(err: &str) -> String {
+    // (1) Lift the provider message out of an embedded JSON object. The blob is
+    //     wrapped in prose like `... (status 401): { "error": { ... } }`, so
+    //     parse the substring from the first '{' to the last '}' and read
+    //     `error.message` (falling back to a top-level `message`).
+    let extracted: Option<String> = (|| {
+        let start = err.find('{')?;
+        let end = err.rfind('}')?;
+        if end <= start {
+            return None;
+        }
+        let value = serde_json::from_str::<Value>(&err[start..=end]).ok()?;
+        value
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .or_else(|| value.get("message"))
+            .and_then(|m| m.as_str())
+            .map(str::to_string)
+    })();
+
+    // No JSON → take the first line of the raw payload as the reason.
+    let first = extracted
+        .as_deref()
+        .unwrap_or_else(|| err.lines().next().unwrap_or(""))
+        .trim_end();
+
+    // (2) Collapse whitespace runs to single spaces.
+    let collapsed: String = first.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    // (3) Hard-cap at ~120 chars with a trailing ellipsis character.
+    const CAP: usize = 120;
+    if collapsed.chars().count() > CAP {
+        let body: String = collapsed.chars().take(CAP).collect();
+        format!("{body}…")
+    } else {
+        collapsed
     }
 }
 

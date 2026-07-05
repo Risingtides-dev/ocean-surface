@@ -242,7 +242,7 @@ self.addEventListener('fetch', (event) => {
           new Response(
             '<!doctype html><meta charset=utf-8>' +
               '<title>Ocean</title>' +
-              '<body style="background:#06111d;color:#cfe;font:16px system-ui;' +
+              '<body style="background:#060606;color:#B8C0CC;font:16px system-ui;' +
               'display:grid;place-items:center;height:100vh;margin:0">' +
               'Reconnecting…<script>setTimeout(()=>location.reload(),2500)</script>',
             { headers: { 'Content-Type': 'text/html; charset=utf-8' } }
