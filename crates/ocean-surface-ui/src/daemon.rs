@@ -1121,13 +1121,32 @@ impl TokenStats {
     }
 }
 
-/// Summary of a session, matching the daemon's AgentSessionSummary.
+/// Minimal project reference the daemon attaches to a session once it serves
+/// session→project ownership (OCEAN-228). Absent on today's list payload, so
+/// grouping falls back to `workspace_root`/`cwd` matching against the catalogue.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OwningProjectRef {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// Summary of a session, matching the daemon's AgentSessionSummary. `cwd`,
+/// `workspace_root`, and `owning_project` are all `#[serde(default)]` — a
+/// current daemon serves only `cwd`, and the sessions panel groups on whatever
+/// project signal is present (owning_project first, else root match).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSummary {
     pub id: String,
     pub title: String,
     #[serde(default)]
     pub cwd: String,
+    #[serde(default)]
+    pub workspace_root: Option<String>,
+    #[serde(default)]
+    pub owning_project: Option<OwningProjectRef>,
+    #[serde(default)]
+    pub git_branch: Option<String>,
     #[serde(default)]
     pub turn_count: u32,
     #[serde(default)]
@@ -2316,11 +2335,19 @@ impl Daemon {
     /// replay, so switching sessions must explicitly hydrate from the daemon.
     pub fn switch_session(&self, id: String, title: String) {
         self.turns.set(Vec::new());
+        self.streaming.set(false);
+        self.active_turn_id.set(None);
+        self.browser_active.set(false);
+        self.browser_last_action.set(None);
         self.canvas_patches.set(Vec::new());
+        self.pending_images.set(Vec::new());
+        self.pending_permissions.set(Vec::new());
+        self.active_decision_token.set(None);
         self.session_id.set(Some(id.clone()));
         self.awaiting_session_adoption.set(false);
         self.session_title.set(title);
         self.status.set("loading session…".into());
+        self.status_detail.set(None);
         self.reset_token_stats();
         self.load_session_snapshot(id);
         self.connect();
@@ -2388,113 +2415,27 @@ impl Daemon {
     /// `session_id` as `None` so the next prompt lazily creates a session
     /// (see `dispatch_prompt`).
     ///
-    /// This preserves the default single-session flow — a user who never opens
-    /// the session UI still gets a session created on their first message. Kept
-    /// as a public reset primitive even though the UI's "New Session" control
-    /// now prefers the eager [`create_session`].
-    #[allow(dead_code)]
+    /// This preserves the default single-session flow: a user who never opens
+    /// the session UI still gets a session created on their first message.
     pub fn new_session(&self) {
         self.turns.set(Vec::new());
+        self.streaming.set(false);
+        self.active_turn_id.set(None);
+        self.browser_active.set(false);
+        self.browser_last_action.set(None);
         self.canvas_patches.set(Vec::new());
+        self.pending_images.set(Vec::new());
+        self.pending_permissions.set(Vec::new());
+        self.active_decision_token.set(None);
         self.session_id.set(None);
         self.awaiting_session_adoption.set(false);
         self.session_title.set(String::new());
         self.status.set("new session".into());
+        self.status_detail.set(None);
         self.reset_token_stats();
         self.connect();
     }
 
-    /// Eagerly create a new session on the daemon and switch to it.
-    ///
-    /// Unlike [`new_session`], this POSTs `/v1/agent/sessions` right away
-    /// (workspace_root from the current cwd / selected project), then switches
-    /// the active session to the returned `session_id` — clearing the transcript,
-    /// re-scoping the SSE stream via `connect()`, and refreshing the session list.
-    /// Used by the "New Session" control so the user gets a live, switchable
-    /// session immediately instead of waiting for their first prompt.
-    pub fn create_session(&self) {
-        let url = self.url.get_untracked();
-        let project = self.project.get_untracked();
-        // Mirror dispatch_prompt's cwd rule: with a project selected, send an
-        // empty workspace_root so the daemon binds to the project's root;
-        // otherwise anchor to the configured cwd.
-        let workspace_root = if project.is_some() {
-            String::new()
-        } else {
-            self.cwd.get_untracked()
-        };
-        let status = self.status;
-        let daemon = self.clone();
-
-        // Optimistically clear the surface so the user sees a fresh session
-        // while the POST is in flight; the returned id wires up the live stream.
-        self.status.set("creating session…".into());
-
-        spawn_local(async move {
-            let body = AgentSessionCreateRequest {
-                title: None,
-                workspace_root: &workspace_root,
-                project_id: project.as_deref(),
-                client_type: Some(surface_client_type()),
-            };
-            let create_url = format!("{}/v1/agent/sessions", url.trim_end_matches('/'));
-            let res = Request::post(&create_url)
-                .header("content-type", "application/json")
-                .json(&body);
-            let res = match res {
-                Ok(req) => req.send().await,
-                Err(err) => {
-                    let raw = err.to_string();
-                    log::error!("session encode error: {raw}");
-                    status.set(format!("session encode error: {}", concise_error(&raw)));
-                    return;
-                }
-            };
-            match res {
-                Ok(resp) => match resp.json::<AgentSessionCreateResponse>().await {
-                    Ok(r) if r.ok => {
-                        let Some(new_session_id) = r.session_id else {
-                            status.set("session create failed: missing session id".into());
-                            return;
-                        };
-                        // Switch to the new session: reset transcript + tokens,
-                        // adopt the id, and re-scope SSE to it via connect().
-                        daemon.turns.set(Vec::new());
-                        daemon.canvas_patches.set(Vec::new());
-                        daemon.session_id.set(Some(new_session_id));
-                        daemon.awaiting_session_adoption.set(false);
-                        daemon
-                            .session_title
-                            .set(r.title.filter(|t| !t.trim().is_empty()).unwrap_or_default());
-                        if let Some(root) = r.workspace_root.or(r.cwd) {
-                            if !root.is_empty() {
-                                daemon.cwd.set(root);
-                            }
-                        }
-                        daemon.reset_token_stats();
-                        daemon.status.set("session ready".into());
-                        daemon.connect();
-                        daemon.fetch_sessions();
-                    }
-                    Ok(r) => {
-                        let raw = r.error.unwrap_or_else(|| "unknown error".into());
-                        log::error!("session create failed: {raw}");
-                        status.set(format!("session create failed: {}", concise_error(&raw)));
-                    }
-                    Err(err) => {
-                        let raw = err.to_string();
-                        log::error!("session decode error: {raw}");
-                        status.set(format!("session decode error: {}", concise_error(&raw)));
-                    }
-                },
-                Err(err) => {
-                    let raw = err.to_string();
-                    log::error!("session post error: {raw}");
-                    status.set(format!("session post error: {}", concise_error(&raw)));
-                }
-            }
-        });
-    }
 
     /// Clear per-turn and session token counters (on session change).
     fn reset_token_stats(&self) {

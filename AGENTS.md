@@ -81,6 +81,15 @@ Rules:
 - `client_type` only describes the surface medium (`surface-gpui`,
   `surface-web`, `surface-extension`). It is not a session id or workspace id.
 
+Web surface session UI:
+
+- The sessions panel is project-first: prefer daemon-provided `owning_project`,
+  fall back to exact `workspace_root`/`cwd` matches against the project catalog,
+  and put everything else in an explicit `Other` bucket.
+- `New Session` is lazy on the web surface. It resets local transcript/turn
+  state and waits for the first prompt to POST a daemon session; do not re-add
+  eager session creation that litters 0-turn drafts.
+
 ## Workspace Map
 
 | Path | Role |
