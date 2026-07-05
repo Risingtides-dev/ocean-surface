@@ -10,7 +10,6 @@ use serde_json::{json, Value};
 use wasm_bindgen::prelude::*;
 
 use crate::daemon::Daemon;
-use crate::model::{Block, Role, ToolStatus, Turn};
 
 #[wasm_bindgen]
 extern "C" {
@@ -1119,113 +1118,6 @@ fn ConfirmView(component_id: String, kind_props: Value, daemon: Daemon) -> impl 
                     on:click=move |_| send_yes(true)>{confirm_label}</button>
             </div>
         </div>
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tool Drawer — concealed strip that drops down to show recent tool activity
-// ---------------------------------------------------------------------------
-
-/// A tiny concealed drawer pinned to the bottom of the transcript. Shows a
-/// small `▸` arrow tab; when clicked it slides open to reveal compact chips
-/// for every tool call and thinking block in the current turn.
-///
-/// Props:
-/// - `turns`: the turns signal (reads the latest assistant turn's blocks)
-/// - `open`: RwSignal<bool> controlling open/closed state
-#[component]
-pub fn ToolDrawer(turns: RwSignal<Vec<Turn>>, open: RwSignal<bool>) -> impl IntoView {
-    // Derive chips from the latest assistant turn's blocks.
-    let chips = move || {
-        turns.with(|t| {
-            let mut out: Vec<(String, String, String)> = Vec::new(); // (icon, label, status)
-            for turn in t.iter().rev() {
-                if turn.role != Role::Assistant {
-                    continue;
-                }
-                for block in &turn.blocks {
-                    match block {
-                        Block::Thinking { content, .. } => {
-                            let chars = content.chars().count();
-                            out.push((
-                                "🧠".into(),
-                                format!("thinking ({chars} chars)"),
-                                "dim".into(),
-                            ));
-                        }
-                        Block::ToolCall {
-                            name,
-                            status,
-                            output,
-                            ..
-                        } => {
-                            let icon = match status {
-                                ToolStatus::Running => "◉",
-                                ToolStatus::Ok => "✓",
-                                ToolStatus::Err => "✗",
-                            };
-                            let status_class = match status {
-                                ToolStatus::Running => "running",
-                                ToolStatus::Ok => "ok",
-                                ToolStatus::Err => "err",
-                            };
-                            let preview: String = output.chars().take(24).collect();
-                            let label = if preview.is_empty() {
-                                name.clone()
-                            } else {
-                                format!("{} ({})", name, preview.trim())
-                            };
-                            out.push((icon.into(), label, status_class.into()));
-                        }
-                        _ => {}
-                    }
-                }
-                // Only the latest turn.
-                if !out.is_empty() {
-                    break;
-                }
-            }
-            out
-        })
-    };
-
-    let arrow = move || if open.get() { "▾" } else { "▸" };
-    let count = move || chips().len();
-    let is_open = move || open.get();
-    let has_chips = move || !chips().is_empty();
-
-    view! {
-        // "tools (0)" is chrome with nothing to say — the strip renders only
-        // once the latest assistant turn actually has tool/thinking activity.
-        <Show when=has_chips>
-        <div class="tool-drawer" class:tool-drawer--open=is_open>
-            <button
-                class="tool-drawer__tab"
-                on:click=move |_| open.update(|v| *v = !*v)
-                title="toggle tool drawer"
-            >
-                <span class="tool-drawer__arrow">{arrow}</span>
-                <span class="tool-drawer__label">"tools"</span>
-                <span class="tool-drawer__count">{move || format!("({})", count())}</span>
-            </button>
-
-            <div class="tool-drawer__body">
-                <Show when=is_open>
-                    <div class="tool-drawer__chips">
-                        {move || chips().into_iter().map(|(icon, label, status_class)| {
-                            let cls = format!("tool-chip tool-chip--{status_class}");
-                            view! {
-                                <span class={cls}>
-                                    <span class="tool-chip__icon">{icon}</span>
-                                    <span class="tool-chip__label">{label}</span>
-                                </span>
-                            }
-                        }).collect::<Vec<_>>()}
-                    </div>
-                </Show>
-            </div>
-        </div>
-        </Show>
     }
 }
 

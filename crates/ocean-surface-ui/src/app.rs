@@ -4,7 +4,7 @@ use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
-use crate::components::{PermissionPrompts, ToolDrawer};
+use crate::components::PermissionPrompts;
 use crate::daemon::{daemon_url_from_env, Daemon};
 use crate::icons::Menu;
 use crate::model::{Block, Role, Turn};
@@ -139,9 +139,6 @@ pub fn App() -> impl IntoView {
     // Wrap submit in a StoredValue so it can be shared across closures
     // without being consumed (the composer's submit handler needs it).
     let submit = StoredValue::new(submit);
-
-    // Tool drawer: concealed strip that drops down to show recent tool calls.
-    let tool_drawer_open = RwSignal::new(false);
 
     // Clone reserved for the SessionsPanel.
     let daemon_for_panel = daemon.clone();
@@ -442,8 +439,6 @@ pub fn App() -> impl IntoView {
                         // SVG edges — instead of a text changelog. The GPUI
                         // native shell renders the full interactive canvas.
                         <crate::canvas::CanvasRender canvas_patches=canvas_patches />
-
-                        <ToolDrawer turns=turns open=tool_drawer_open />
 
                         // Blocking permission prompts sit just above the composer
                         // so a gated mutating turn can't be missed or scrolled past.

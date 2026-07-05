@@ -16,38 +16,36 @@ use crate::daemon::Daemon;
 use crate::markdown::render as render_md;
 use crate::model::{Block, Role, ToolStatus};
 
-/// One renderable item in an assistant turn: either a single block (text,
-/// thinking, component, or a lone tool call) or a run of ≥2 consecutive tool
-/// calls that collapse into one stacked group.
+/// One renderable item in an assistant turn: either a single non-tool block or
+/// the turn's full set of tool calls tucked into one disclosure.
 #[derive(Clone, PartialEq)]
 enum RenderItem {
     Single(usize),
     ToolGroup(Vec<usize>),
 }
 
-/// Collapse consecutive `ToolCall` blocks into `ToolGroup`s; everything else is
-/// a `Single`. A run of exactly one tool call stays a `Single` (no point
-/// wrapping a lone call in a group header).
+/// Collect every `ToolCall` block in the turn into a single `ToolGroup`,
+/// rendered as one collapsible "tools (N)" disclosure positioned where the
+/// first tool call appears. Non-tool blocks (text, thinking, component) stay
+/// `Single`s in their original order. Render-only: never reorders `turn.blocks`.
 fn render_items(blocks: &[Block]) -> Vec<RenderItem> {
     let mut items = Vec::new();
-    let mut run: Vec<usize> = Vec::new();
-    let flush = |run: &mut Vec<usize>, items: &mut Vec<RenderItem>| {
-        match run.len() {
-            0 => {}
-            1 => items.push(RenderItem::Single(run[0])),
-            _ => items.push(RenderItem::ToolGroup(std::mem::take(run))),
-        }
-        run.clear();
-    };
+    let mut tools: Vec<usize> = Vec::new();
+    let mut group_slot: Option<usize> = None;
     for (i, block) in blocks.iter().enumerate() {
         if matches!(block, Block::ToolCall { .. }) {
-            run.push(i);
+            if group_slot.is_none() {
+                group_slot = Some(items.len());
+                items.push(RenderItem::ToolGroup(Vec::new())); // placeholder, filled below
+            }
+            tools.push(i);
         } else {
-            flush(&mut run, &mut items);
             items.push(RenderItem::Single(i));
         }
     }
-    flush(&mut run, &mut items);
+    if let Some(slot) = group_slot {
+        items[slot] = RenderItem::ToolGroup(tools);
+    }
     items
 }
 
@@ -220,11 +218,10 @@ fn AssistantTurn(
                                 <BlockView turn_idx=idx block_idx=block_idx turns=turns daemon=daemon />
                             }
                             .into_any(),
-                            // No group wrapper/pill: consecutive tool calls just
-                            // render as their own bare, individually-expandable
-                            // drawer lines, flush in the turn body.
+                            // One transcript tuck per assistant turn; the rows
+                            // inside stay individually expandable.
                             RenderItem::ToolGroup(block_idxs) => view! {
-                                <ToolGroupBody
+                                <ToolGroup
                                     turn_idx=idx
                                     block_idxs=block_idxs
                                     turns=turns
@@ -240,28 +237,100 @@ fn AssistantTurn(
     }
 }
 
-/// A run of consecutive tool calls, each rendered as its own bare,
-/// individually-expandable drawer line (no group header/pill). Split into its
-/// own component so prop ownership stays clean.
+/// A turn's tool calls, tucked into one collapsible `tools (N)` disclosure.
+/// Collapsed by default so the transcript reads as prose + thinking + one tidy
+/// tools tuck; auto-opens while any contained call errored (failures must stay
+/// visible — the reducer also expands the failed call itself). A manual toggle
+/// overrides the auto rule and sticks. Each row inside stays individually
+/// expandable via `BlockView`.
 #[component]
-fn ToolGroupBody(
+fn ToolGroup(
     turn_idx: usize,
     block_idxs: Vec<usize>,
     turns: RwSignal<Vec<crate::model::Turn>>,
     daemon: Daemon,
 ) -> impl IntoView {
-    view! {
-        <div class="tool-group__body">
-            <For
-                each=move || block_idxs.clone()
-                key=|bi| *bi
-                children=move |bi| {
-                    let daemon = daemon.clone();
-                    view! {
-                        <BlockView turn_idx=turn_idx block_idx=bi turns=turns daemon=daemon />
+    let n = block_idxs.len();
+    let idxs = StoredValue::new(block_idxs);
+    let daemon = StoredValue::new(daemon);
+    // Aggregate status across the contained calls, read reactively.
+    let agg = Signal::derive(move || {
+        turns.with(|t| {
+            let Some(turn) = t.get(turn_idx) else {
+                return ToolStatus::Ok;
+            };
+            let mut any_running = false;
+            for bi in idxs.get_value() {
+                if let Some(Block::ToolCall { status, .. }) = turn.blocks.get(bi) {
+                    match status {
+                        ToolStatus::Err => return ToolStatus::Err,
+                        ToolStatus::Running => any_running = true,
+                        ToolStatus::Ok => {}
                     }
                 }
-            />
+            }
+            if any_running {
+                ToolStatus::Running
+            } else {
+                ToolStatus::Ok
+            }
+        })
+    });
+    // None = follow the auto rule (open iff any error); Some(_) = user's choice.
+    let user_override: RwSignal<Option<bool>> = RwSignal::new(None);
+    let open = Signal::derive(move || {
+        user_override
+            .get()
+            .unwrap_or_else(|| matches!(agg.get(), ToolStatus::Err))
+    });
+    // A freshly-arrived error must re-surface even if the user had collapsed the
+    // group: drop the manual override on the transition into Err (edge-triggered,
+    // so the user can collapse again afterward). Mirrors the reducer expanding
+    // the failed call itself.
+    let prev_err = RwSignal::new(false);
+    Effect::new(move |_| {
+        let is_err = matches!(agg.get(), ToolStatus::Err);
+        if is_err && !prev_err.get_untracked() {
+            user_override.set(None);
+        }
+        prev_err.set(is_err);
+    });
+    let toggle = move |_| user_override.set(Some(!open.get()));
+
+    let status_class = move || match agg.get() {
+        ToolStatus::Running => "is-running",
+        ToolStatus::Ok => "is-ok",
+        ToolStatus::Err => "is-err",
+    };
+    let status_label = move || match agg.get() {
+        ToolStatus::Running => "running",
+        ToolStatus::Ok => "done",
+        ToolStatus::Err => "error",
+    };
+    let glyph = move || if open.get() { "▾" } else { "▸" };
+
+    view! {
+        <div class=move || format!("tool-group {}", status_class()) class:is-open=open>
+            <button class="tool-group__head" on:click=toggle>
+                <span class="tool-group__tick">{glyph}</span>
+                <span class="tool-group__dot"></span>
+                <span class="tool-group__label">{move || format!("tools ({n})")}</span>
+                <span class="tool-group__status">{status_label}</span>
+            </button>
+            <Show when=move || open.get()>
+                <div class="tool-group__body">
+                    <For
+                        each=move || idxs.get_value()
+                        key=|bi| *bi
+                        children=move |bi| {
+                            let daemon = daemon.get_value();
+                            view! {
+                                <BlockView turn_idx=turn_idx block_idx=bi turns=turns daemon=daemon />
+                            }
+                        }
+                    />
+                </div>
+            </Show>
         </div>
     }
 }
