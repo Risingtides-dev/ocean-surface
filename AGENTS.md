@@ -89,6 +89,9 @@ Web surface session UI:
 - `New Session` is lazy on the web surface. It resets local transcript/turn
   state and waits for the first prompt to POST a daemon session; do not re-add
   eager session creation that litters 0-turn drafts.
+- Idle web/extension headers stay single-bar: project/session context may stay
+  visible, but call/join affordances live behind overflow until intentionally
+  opened or actively connected.
 
 ## Workspace Map
 

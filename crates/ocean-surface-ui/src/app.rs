@@ -50,6 +50,7 @@ pub fn App() -> impl IntoView {
     // browser (set from the daemon's `browser_activity` SSE event), with the
     // most recent `browser_*` action shown alongside.
     let browser_active = daemon.browser_active;
+    let livekit_token_path = daemon.livekit_token_path;
     let browser_last_action = daemon.browser_last_action;
     // Canvas patch stream (OCEAN-178): patches the agent applied this session,
     // streamed over the daemon's `surface_patch` SSE event. The GPUI native
@@ -184,6 +185,13 @@ pub fn App() -> impl IntoView {
     // Header overflow menu (<details>): council/rooms/mute/capture live behind
     // one "⋯" affordance instead of a row of buttons. Item clicks close it.
     let more_ref: NodeRef<leptos::html::Details> = NodeRef::new();
+    // Call/collaboration controls are explicit reveals, not permanent top
+    // chrome. The overflow menu opens them; the row below the header exists only
+    // while one is intentionally active.
+    let show_livekit_controls = RwSignal::new(false);
+    let show_phone_dialer = RwSignal::new(false);
+    let daemon_livekit = StoredValue::new(daemon.clone());
+    let daemon_phone_call = StoredValue::new(daemon.clone());
 
     // In the Chrome side panel the cockpit lives in a ~360px-wide column. Tag
     // the root so the shared stylesheet's compact `.ocean-surface--extension`
@@ -341,7 +349,10 @@ pub fn App() -> impl IntoView {
                     // instead of leaking a stale payload.
                     <div
                         class="ocean-status"
-                        class:is-quiet=move || status.get() == "connected"
+                        class:is-quiet=move || matches!(
+                            status.get().as_str(),
+                            "connected" | "new session" | "session loaded"
+                        )
                         aria-label=move || format!("status: {}", status.get())
                         title=move || {
                             status_detail
@@ -364,6 +375,32 @@ pub fn App() -> impl IntoView {
                             "⋯"
                         </summary>
                         <div class="ocean-more__menu" role="menu">
+                            <Show when=move || !livekit_token_path.get().trim().is_empty()>
+                                <button
+                                    class="ocean-more__item"
+                                    type="button"
+                                    role="menuitem"
+                                    on:click=move |_| {
+                                        if let Some(d) = more_ref.get() { let _ = d.remove_attribute("open"); }
+                                        show_phone_dialer.set(false);
+                                        show_livekit_controls.set(true);
+                                    }
+                                >
+                                    "Join room call"
+                                </button>
+                            </Show>
+                            <button
+                                class="ocean-more__item"
+                                type="button"
+                                role="menuitem"
+                                on:click=move |_| {
+                                    if let Some(d) = more_ref.get() { let _ = d.remove_attribute("open"); }
+                                    show_livekit_controls.set(false);
+                                    show_phone_dialer.set(true);
+                                }
+                            >
+                                "Dial phone"
+                            </button>
                             <button
                                 class="ocean-more__item"
                                 type="button"
@@ -419,23 +456,27 @@ pub fn App() -> impl IntoView {
 
             // Chat surface. (The Leptos component "gauntlet" toggle was removed
             // in OCEAN-202 — it was a dev-only component harness, not shipping UI.)
-                        // Quiet utility line: LiveKit presence + the collapsed
-                        // outbound dialer share one right-aligned row instead of
-                        // stacking two full-width bars above the transcript.
-                        <div class="ocean-utility-row">
-                            // LiveKit collaboration presence (OCEAN-83): join/leave,
-                            // mic + camera toggles, live participant roster. Renders
-                            // only when a room is configured for this surface.
-                            <crate::livekit::LiveKitPanel daemon=daemon.clone() />
+            // Call/collaboration utility line. Hidden while idle so the app has
+            // one top chrome bar, not a second row of quiet-but-visible buttons.
+            <Show when=move || (!livekit_token_path.get().trim().is_empty() && show_livekit_controls.get()) || show_phone_dialer.get()>
+                <div class="ocean-utility-row">
+                    // LiveKit collaboration presence (OCEAN-83): revealed from
+                    // the overflow menu, then sticky while connected so mic,
+                    // camera, and leave controls never disappear mid-call.
+                    <crate::livekit::LiveKitPanel
+                        daemon=daemon_livekit.get_value()
+                        open=show_livekit_controls
+                    />
 
-                            // Place-call control (OCEAN-261). The outbound front
-                            // door: collapsed to a ghost trigger until opened; the
-                            // expanded dialer POSTs to `/v1/calls/place`. On success
-                            // the daemon emits `call_started` and the CallPanel
-                            // below takes over; on a 503 it explains that telephony
-                            // (LiveKit + Twilio) isn't configured yet.
-                            <crate::place_call::PlaceCallControl daemon=daemon.clone() />
-                        </div>
+                    // Place-call control (OCEAN-261): revealed from overflow.
+                    // On PSTN success, CallPanel below takes over from the
+                    // daemon's call_started event.
+                    <crate::place_call::PlaceCallControl
+                        daemon=daemon_phone_call.get_value()
+                        open=show_phone_dialer
+                    />
+                </div>
+            </Show>
 
                         // Live call-mode view (OCEAN-CALL). Self-contained: it
                         // subscribes to the daemon's `/v1/events` control stream

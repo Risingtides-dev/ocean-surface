@@ -133,9 +133,9 @@
   white-space: nowrap;
 }
 
-/* Steady state: connection is fine — show just the dot, drop the word. The
-   text returns for connecting / new-session / permission / cancelled / error
-   messages; aria-label keeps the full status for assistive tech. */
+/* Steady/benign states are fine — show just the dot, drop the words. The text
+   returns for connecting / permission / cancelled / error messages; aria-label
+   keeps the full status for assistive tech. */
 .ocean-status.is-quiet .ocean-status__text {
   display: none;
 }

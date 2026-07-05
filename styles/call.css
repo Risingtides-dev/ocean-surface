@@ -111,6 +111,22 @@
   color: var(--fg);
 }
 
+.ocean-livekit__btn--hide {
+  width: var(--ctl-h-sm);
+  padding: 0;
+  background: none;
+  border-color: transparent;
+  color: var(--fg-3);
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.ocean-livekit__btn--hide:hover:not(:disabled) {
+  background: var(--bg-elevated);
+  border-color: transparent;
+  color: var(--fg);
+}
+
 .ocean-livekit__btn--toggle.is-on {
   background: var(--accent-soft);
   border-color: var(--accent);

@@ -113,7 +113,7 @@ fn status_ok(js: &JsValue) -> (bool, Option<String>) {
 /// live participant roster. Renders nothing until the config bootstrap has
 /// supplied a `livekit_token_path` (i.e. a room is configured for this surface).
 #[component]
-pub fn LiveKitPanel(daemon: Daemon) -> impl IntoView {
+pub fn LiveKitPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
     let token_path = daemon.livekit_token_path;
     let room_id = daemon.livekit_room_id;
 
@@ -125,6 +125,15 @@ pub fn LiveKitPanel(daemon: Daemon) -> impl IntoView {
     // True while the SDK is mid-reconnect after a network drop. Drives the
     // "reconnecting…" indicator; cleared when the next roster snapshot lands.
     let reconnecting = RwSignal::new(false);
+    let is_visible = move || {
+        let state = join_state.get();
+        !token_path.get().trim().is_empty()
+            && (open.get()
+                || state == JoinState::Connecting
+                || state == JoinState::Connected
+                || error.get().is_some()
+                || reconnecting.get())
+    };
 
     // Callback the JS bridge invokes with the roster JSON on every
     // participant/track change. Leaked (`into_js_value`) so it stays callable
@@ -181,6 +190,7 @@ pub fn LiveKitPanel(daemon: Daemon) -> impl IntoView {
                 Ok(status) => {
                     let (ok, err) = status_ok(&status);
                     if ok {
+                        open.set(true);
                         join_state.set(JoinState::Connected);
                     } else {
                         join_state.set(JoinState::Disconnected);
@@ -203,6 +213,7 @@ pub fn LiveKitPanel(daemon: Daemon) -> impl IntoView {
             camera_on.set(false);
             reconnecting.set(false);
             participants.set(Vec::new());
+            open.set(false);
         });
     };
 
@@ -230,8 +241,9 @@ pub fn LiveKitPanel(daemon: Daemon) -> impl IntoView {
     };
 
     view! {
-        // Only show the panel when a room is configured for this surface.
-        <Show when=move || !token_path.get().trim().is_empty()>
+        // Only show the panel after the operator asks for call controls, while
+        // connecting/connected, or while an actionable LiveKit error exists.
+        <Show when=is_visible>
             <div class="ocean-livekit">
                 <div class="ocean-livekit__bar">
                     <span class="ocean-livekit__room" title="LiveKit room">
@@ -255,6 +267,19 @@ pub fn LiveKitPanel(daemon: Daemon) -> impl IntoView {
                                         JoinState::Connecting => "joining…",
                                         _ => "join call",
                                     }}
+                                </button>
+                                <button
+                                    class="ocean-livekit__btn ocean-livekit__btn--hide"
+                                    type="button"
+                                    title="Hide call controls"
+                                    aria-label="Hide call controls"
+                                    disabled=move || join_state.get() == JoinState::Connecting
+                                    on:click=move |_| {
+                                        error.set(None);
+                                        open.set(false);
+                                    }
+                                >
+                                    "×"
                                 </button>
                             }
                         }

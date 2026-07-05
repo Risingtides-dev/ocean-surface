@@ -124,15 +124,10 @@ fn looks_like_e164(input: &str) -> Option<String> {
 /// The place-call control. Mount it next to [`crate::call::CallPanel`] — this is
 /// the trigger, that panel is the live view the trigger spawns.
 #[component]
-pub fn PlaceCallControl(daemon: Daemon) -> impl IntoView {
+pub fn PlaceCallControl(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
     // The number being typed. Transient — never persisted (see module docs).
     let number = RwSignal::new(String::new());
     let phase = RwSignal::new(Phase::Idle);
-    // Collapsed by default: an idle full-width dialer row above the transcript
-    // is permanent chrome for a feature used occasionally. The compact trigger
-    // expands to the real dialer; collapsing resets nothing (number/phase are
-    // preserved for the session).
-    let open = RwSignal::new(false);
 
     // True when the current input would pass the E.164 gate. Gates the button so
     // the operator can't fire a doomed request, and shows a quiet hint when the
@@ -181,6 +176,7 @@ pub fn PlaceCallControl(daemon: Daemon) -> impl IntoView {
                                 // SSE subscription. Clear the field and step back.
                                 number.set(String::new());
                                 phase.set(Phase::Idle);
+                                open.set(false);
                             }
                             503 => {
                                 // Telephony not provisioned — render the daemon's
@@ -232,24 +228,7 @@ pub fn PlaceCallControl(daemon: Daemon) -> impl IntoView {
         move || has_input() && !is_valid() && error_msg().is_none() && blocked().is_none();
 
     view! {
-        <Show
-            when=move || open.get()
-            fallback=move || view! {
-                <div class="ocean-place-call ocean-place-call--collapsed">
-                    <button
-                        class="ocean-place-call__trigger"
-                        type="button"
-                        title="Place an outbound phone call"
-                        on:click=move |_| open.set(true)
-                    >
-                        <span class="ocean-place-call__icon" aria-hidden="true">
-                            <Phone />
-                        </span>
-                        "Call"
-                    </button>
-                </div>
-            }
-        >
+        <Show when=move || open.get() fallback=|| ()>
         <section class="ocean-place-call" aria-label="place a call">
             <div class="ocean-place-call__row">
                 <span class="ocean-place-call__icon" aria-hidden="true">

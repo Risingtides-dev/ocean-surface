@@ -7,10 +7,11 @@
   width: 100%;
 }
 
-/* Header wraps instead of forcing horizontal scroll in the side panel. */
+/* Header stays one row in the side panel; context chips truncate before the
+   chrome wraps into a second busy toolbar. */
 .ocean-surface--extension .ocean-header {
-  flex-wrap: wrap;
-  align-items: flex-start;
+  flex-wrap: nowrap;
+  align-items: center;
   gap: 8px;
   padding: 8px 10px;
 }
@@ -27,31 +28,42 @@
 }
 
 .ocean-surface--extension .ocean-header__right {
-  flex: 1 1 220px;
+  flex: 1 1 auto;
   min-width: 0;
-  flex-wrap: wrap;
-  gap: 6px;
+  flex-wrap: nowrap;
+  gap: 4px;
   justify-content: flex-end;
 }
 
 .ocean-surface--extension .ocean-runtime {
-  flex: 1 1 100%;
+  flex: 0 1 auto;
   min-width: 0;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 8px;
+  gap: 6px;
   padding-left: 0;
   box-shadow: none;
 }
 
+.ocean-surface--extension .ocean-runtime .ocean-tokens {
+  display: none;
+}
+
+.ocean-surface--extension .ocean-browser-control {
+  width: var(--ctl-h-sm);
+  padding: 0;
+  justify-content: center;
+}
+
+.ocean-surface--extension .ocean-browser-control__label {
+  display: none;
+}
+
 .ocean-surface--extension .ocean-runtime .ocean-status {
   flex: 0 1 auto;
-  max-width: 100%;
+  max-width: 96px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-
 /* Header controls and per-turn selectors use compact control height. */
 .ocean-surface--extension .ocean-project,
 .ocean-surface--extension .ocean-active-session,
@@ -67,7 +79,10 @@
 }
 
 .ocean-surface--extension .ocean-project,
-.ocean-surface--extension .ocean-active-session,
+.ocean-surface--extension .ocean-active-session {
+  max-width: min(34vw, 132px);
+}
+
 .ocean-surface--extension .ocean-thinking,
 .ocean-surface--extension .ocean-model-override {
   max-width: 46vw;

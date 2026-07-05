@@ -524,10 +524,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       </div>
     </div>
     <div class="top-actions">
-      <button type="button" id="openEditor" class="ghost" title="Open Ocean in an editor tab">Editor</button>
-      <button type="button" id="openPanel" class="ghost" title="Open Ocean in the bottom panel">Panel</button>
       <button type="button" id="connect" title="Connect to Ocean">Connect</button>
-      <button type="button" id="newSession" class="ghost" title="Start a new Ocean session">New</button>
     </div>
   </header>
   <div id="activity" hidden></div>
