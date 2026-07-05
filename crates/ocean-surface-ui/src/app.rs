@@ -264,15 +264,25 @@ pub fn App() -> impl IntoView {
                             <span class="ocean-active-session__cwd">{move || cwd.get()}</span>
                         </button>
                     </Show>
-                    <button
-                        class="ocean-sessions-btn"
-                        type="button"
-                        aria-label="sessions"
-                        title="Sessions"
-                        on:click=move |_| show_sessions.update(|v| *v = !*v)
-                    >
-                        <Menu />
-                    </button>
+                    // Sessions opener. Once a session exists the clickable
+                    // active-session chip above opens the panel, so this hamburger
+                    // shows only in the empty state — no duplicate affordance.
+                    <Show when=move || session_id.get().is_none()>
+                        <button
+                            class="ocean-sessions-btn"
+                            type="button"
+                            aria-label="sessions"
+                            title="Sessions"
+                            on:click=move |_| show_sessions.update(|v| *v = !*v)
+                        >
+                            <Menu />
+                        </button>
+                    </Show>
+                    // Ambient runtime readouts — token usage, the browser-driving
+                    // cue, and connection status — grouped into one demoted cluster
+                    // so they read as secondary telemetry, not equal-weight peers
+                    // to the primary header controls.
+                    <div class="ocean-runtime">
                     // Token usage: session total, with a per-turn + cache
                     // breakdown on hover. Hidden until the first turn finishes.
                     <Show when=has_tokens>
@@ -331,15 +341,19 @@ pub fn App() -> impl IntoView {
                     // instead of leaking a stale payload.
                     <div
                         class="ocean-status"
+                        class:is-quiet=move || status.get() == "connected"
+                        aria-label=move || format!("status: {}", status.get())
                         title=move || {
                             status_detail
                                 .get()
                                 .filter(|(s, _)| *s == status.get())
                                 .map(|(_, detail)| detail)
-                                .unwrap_or_default()
+                                .unwrap_or_else(|| status.get())
                         }
                     >
-                        {move || status.get()}
+                        <span class="ocean-status__dot"></span>
+                        <span class="ocean-status__text">{move || status.get()}</span>
+                    </div>
                     </div>
                     // Secondary actions live behind one overflow control:
                     // council deck, rooms, voice mute, extension tab capture.

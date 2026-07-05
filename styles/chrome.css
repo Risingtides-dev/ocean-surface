@@ -74,17 +74,70 @@
 }
 
 /* Header metadata chips -------------------------------------------------- */
+.ocean-runtime {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding-left: 12px;
+  box-shadow: inset 1px 0 0 var(--border-subtle);
+}
+
+/* Tokens are post-hoc session metadata — the least important cue, so they
+   shrink and truncate first when the row tightens; the live browser + status
+   cues never give up space. */
+.ocean-runtime .ocean-tokens {
+  min-width: 0;
+  flex: 0 1 auto;
+}
+.ocean-runtime .ocean-tokens__io {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ocean-runtime .ocean-browser-control,
+.ocean-runtime .ocean-status {
+  flex: 0 0 auto;
+}
+
 .ocean-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
   color: var(--fg-3);
   font-family: var(--font);
   font-size: 12px;
   font-weight: 400;
   line-height: 1.35;
+}
+
+.ocean-status__dot {
+  display: none;
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: var(--radius-pill);
+  background: var(--ok);
+}
+
+.ocean-status.is-quiet .ocean-status__dot {
+  display: block;
+}
+
+.ocean-status__text {
+  min-width: 0;
   max-width: 360px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Steady state: connection is fine — show just the dot, drop the word. The
+   text returns for connecting / new-session / permission / cancelled / error
+   messages; aria-label keeps the full status for assistive tech. */
+.ocean-status.is-quiet .ocean-status__text {
+  display: none;
 }
 
 /* Browser-control indicator (OCEAN-92): a live "Ocean is driving the browser"
