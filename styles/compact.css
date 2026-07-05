@@ -20,12 +20,6 @@
   min-width: 0;
 }
 
-.ocean-surface--extension .ocean-brand__name {
-  max-width: 108px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
 .ocean-surface--extension .ocean-header__right {
   flex: 1 1 auto;
@@ -65,18 +59,14 @@
   white-space: nowrap;
 }
 /* Header controls and per-turn selectors use compact control height. */
-.ocean-surface--extension .ocean-project,
-.ocean-surface--extension .ocean-active-session,
-.ocean-surface--extension .ocean-sessions-btn,
-.ocean-surface--extension .ocean-council-btn,
-.ocean-surface--extension .ocean-rooms-btn,
-.ocean-surface--extension .ocean-screenshot,
-.ocean-surface--extension .ocean-mute,
-.ocean-surface--extension .ocean-thinking,
-.ocean-surface--extension .ocean-model-override {
-  min-height: var(--ctl-h-sm);
-  height: var(--ctl-h-sm);
-}
+  .ocean-surface--extension .ocean-project,
+  .ocean-surface--extension .ocean-active-session,
+  .ocean-surface--extension .ocean-sessions-btn,
+  .ocean-surface--extension .ocean-thinking,
+  .ocean-surface--extension .ocean-model-override {
+    min-height: var(--ctl-h-sm);
+    height: var(--ctl-h-sm);
+  }
 
 .ocean-surface--extension .ocean-project,
 .ocean-surface--extension .ocean-active-session {
@@ -147,7 +137,153 @@
   height: var(--ctl-h-sm);
 }
 
-/* Wide rich content clips inside the panel instead of widening it. */
+/* ── Normal web surface compact mode (header chips + composer first) ── */
+@media (max-width: 720px) {
+  /* Root: fill viewport, drop the central max-width gutter -------------- */
+  .ocean-surface {
+    max-width: none;
+    width: 100%;
+  }
+
+  /* Header: single row, chips truncate before a 2nd toolbar wraps ----- */
+  .ocean-surface .ocean-header {
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+  }
+
+  .ocean-surface .ocean-brand {
+    min-width: 0;
+  }
+
+  .ocean-surface .ocean-header__right {
+    flex: 1 1 auto;
+    min-width: 0;
+    flex-wrap: nowrap;
+    gap: 4px;
+    justify-content: flex-end;
+  }
+
+  .ocean-surface .ocean-runtime {
+    flex: 0 1 auto;
+    min-width: 0;
+    gap: 6px;
+    padding-left: 0;
+    box-shadow: none;
+  }
+
+  .ocean-surface .ocean-runtime .ocean-tokens {
+    display: none;
+  }
+
+  .ocean-surface .ocean-browser-control {
+    width: var(--ctl-h-sm);
+    padding: 0;
+    justify-content: center;
+  }
+
+  .ocean-surface .ocean-browser-control__label {
+    display: none;
+  }
+
+  .ocean-surface .ocean-runtime .ocean-status {
+    flex: 0 1 auto;
+    max-width: 96px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Controls: compact height, capped chip widths ---------------------- */
+  .ocean-surface .ocean-project,
+  .ocean-surface .ocean-active-session,
+  .ocean-surface .ocean-sessions-btn,
+  .ocean-surface .ocean-thinking,
+  .ocean-surface .ocean-model-override {
+    min-height: var(--ctl-h-sm);
+    height: var(--ctl-h-sm);
+  }
+
+  .ocean-surface .ocean-project,
+  .ocean-surface .ocean-active-session {
+    max-width: min(34vw, 132px);
+  }
+
+  .ocean-surface .ocean-thinking,
+  .ocean-surface .ocean-model-override {
+    max-width: 46vw;
+  }
+
+  .ocean-surface .ocean-active-session__title,
+  .ocean-surface .ocean-active-session__cwd {
+    max-width: 42vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Transcript & canvas: readable gutters ---------------------------- */
+  .ocean-surface .transcript {
+    padding: 10px;
+    gap: 12px;
+  }
+
+  .ocean-surface .block--text {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  .ocean-surface .ocean-canvas {
+    margin: 8px 10px 0;
+  }
+
+  .ocean-surface .ocean-canvas__head,
+  .ocean-surface .ocean-canvas__tabs {
+    padding-right: 10px;
+    padding-left: 10px;
+  }
+
+  /* Composer: tighter padding, smaller orb, no hint ---------------- */
+  .ocean-surface .ocean-composer {
+    padding: 8px 10px 10px;
+    gap: 8px;
+  }
+
+  .ocean-surface .voice-wrap {
+    gap: 6px;
+  }
+
+  .ocean-surface .voice-orb {
+    width: 38px;
+    height: 38px;
+    font-size: 17px;
+  }
+
+  .ocean-surface .voice-hint {
+    display: none;
+  }
+
+  .ocean-surface .ocean-composer__input {
+    min-width: 0;
+  }
+
+  .ocean-surface .ocean-composer__halt,
+  .ocean-surface .ocean-composer__send {
+    min-height: var(--ctl-h-sm);
+    height: var(--ctl-h-sm);
+  }
+
+  /* Rich content: clip instead of widening viewport ------------------ */
+  .ocean-surface pre,
+  .ocean-surface img,
+  .ocean-surface table {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+}
+
+/* Wide rich content clips in the side panel instead of widening it. */
 .ocean-surface--extension pre,
 .ocean-surface--extension img,
 .ocean-surface--extension table {
