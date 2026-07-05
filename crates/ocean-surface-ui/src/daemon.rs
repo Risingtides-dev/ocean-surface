@@ -2771,6 +2771,38 @@ fn apply_event(
                 status.set("connected".into());
                 status_detail.set(None);
             }
+            // Sweep (OCEAN-319, mirrors the TUI): a cancelled/failed turn can
+            // stop mid-tool without ever emitting ToolCallFinished, leaving a
+            // ToolCall stuck in Running — the group's aggregate then shows a
+            // permanent "running" badge on a dead turn. Close this turn's
+            // unclosed tools to Err (cancel arrives as failed, not a distinct
+            // Cancelled). Scoped to the finishing turn: a blanket sweep would
+            // wrongly error a sibling turn's legitimately-running tool. Leave
+            // completed turns alone — a stuck Running there is a dropped event,
+            // a real bug we must not mask.
+            if turn_status != "completed" {
+                turns.update(|t| {
+                    for turn in t.iter_mut() {
+                        if turn.turn_id.as_deref() != Some(turn_id.as_str()) {
+                            continue;
+                        }
+                        for block in turn.blocks.iter_mut() {
+                            if let Block::ToolCall {
+                                status, expanded, ..
+                            } = block
+                            {
+                                if *status == ToolStatus::Running {
+                                    *status = ToolStatus::Err;
+                                    // Match every other error path: open the row
+                                    // so the interrupted call is visible when the
+                                    // group auto-opens on its Err aggregate.
+                                    *expanded = true;
+                                }
+                            }
+                        }
+                    }
+                });
+            }
             // Record this turn's usage (real provider numbers when present) and
             // fold it into the running session total.
             let turn_stats = TokenStats {
@@ -3982,6 +4014,150 @@ mod tests {
             }
             other => panic!("expected ToolCall, got {other:?}"),
         }
+    }
+
+    fn apply_test_event(daemon: &Daemon, event: AgentEvent) {
+        apply_event(
+            &event,
+            daemon.turns,
+            daemon.session_id,
+            daemon.streaming,
+            daemon.status,
+            daemon.status_detail,
+            daemon.last_turn_tokens,
+            daemon.session_tokens,
+            daemon.model,
+            daemon.active_turn_id,
+            daemon.browser_active,
+            daemon.browser_last_action,
+            daemon.canvas_patches,
+            daemon.awaiting_session_adoption,
+            daemon.session_title,
+            daemon.cwd,
+        );
+    }
+
+    fn daemon_with_session(session_id: &str) -> Daemon {
+        let daemon = Daemon::dummy();
+        daemon.session_id.set(Some(session_id.to_string()));
+        daemon
+    }
+
+    fn start_running_tool(daemon: &Daemon, session_id: &str, turn_id: &str, call_id: &str) {
+        apply_test_event(
+            daemon,
+            AgentEvent::ToolCallStarted {
+                session_id: session_id.to_string(),
+                turn_id: turn_id.to_string(),
+                call: ToolCallSummary {
+                    id: call_id.to_string(),
+                    name: "bash".to_string(),
+                    args_json: serde_json::json!({ "command": "sleep 60" }),
+                },
+            },
+        );
+    }
+
+    fn finish_turn(daemon: &Daemon, session_id: &str, turn_id: &str, turn_status: &str) {
+        apply_test_event(
+            daemon,
+            AgentEvent::TurnFinished {
+                session_id: session_id.to_string(),
+                turn_id: turn_id.to_string(),
+                status: turn_status.to_string(),
+                error: None,
+                wall_ms: Some(120),
+                output_tokens: None,
+                input_tokens: None,
+                cache_read_tokens: None,
+                tokens_per_second: None,
+            },
+        );
+    }
+
+    fn tool_state(daemon: &Daemon, turn_id: &str, call_id: &str) -> (ToolStatus, bool) {
+        let turns = daemon.turns.get_untracked();
+        turns
+            .iter()
+            .find(|turn| turn.turn_id.as_deref() == Some(turn_id))
+            .and_then(|turn| {
+                turn.blocks.iter().find_map(|block| match block {
+                    Block::ToolCall {
+                        call_id: id,
+                        status,
+                        expanded,
+                        ..
+                    } if id == call_id => Some((*status, *expanded)),
+                    _ => None,
+                })
+            })
+            .expect("expected ToolCall block for turn")
+    }
+
+    #[test]
+    fn cancelled_turn_closes_running_tool() {
+        let session_id = "session-ocean-319-cancelled";
+        let turn_id = "turn-cancelled";
+        let call_id = "call-cancelled";
+        let daemon = daemon_with_session(session_id);
+
+        start_running_tool(&daemon, session_id, turn_id, call_id);
+        assert_eq!(
+            tool_state(&daemon, turn_id, call_id),
+            (ToolStatus::Running, false),
+            "ToolCallStarted must plant a collapsed Running tool before cancel"
+        );
+
+        finish_turn(&daemon, session_id, turn_id, "cancelled");
+
+        assert_eq!(
+            tool_state(&daemon, turn_id, call_id),
+            (ToolStatus::Err, true),
+            "cancelled TurnFinished must close and expand its still-running tool"
+        );
+    }
+
+    #[test]
+    fn completed_turn_leaves_running_tool_untouched() {
+        let session_id = "session-ocean-319-completed";
+        let turn_id = "turn-completed";
+        let call_id = "call-completed";
+        let daemon = daemon_with_session(session_id);
+
+        start_running_tool(&daemon, session_id, turn_id, call_id);
+        finish_turn(&daemon, session_id, turn_id, "completed");
+
+        assert_eq!(
+            tool_state(&daemon, turn_id, call_id),
+            (ToolStatus::Running, false),
+            "completed TurnFinished must not hide a missing ToolCallFinished bug"
+        );
+    }
+
+    #[test]
+    fn sweep_scoped_to_finishing_turn() {
+        let session_id = "session-ocean-319-scoped";
+        let turn_a = "turn-a";
+        let call_a = "call-a";
+        let turn_b = "turn-b";
+        let call_b = "call-b";
+        let daemon = daemon_with_session(session_id);
+
+        start_running_tool(&daemon, session_id, turn_a, call_a);
+        start_running_tool(&daemon, session_id, turn_b, call_b);
+
+        finish_turn(&daemon, session_id, turn_a, "failed");
+
+        assert_eq!(
+            tool_state(&daemon, turn_a, call_a),
+            (ToolStatus::Err, true),
+            "failed TurnFinished must close only the finishing turn's tool"
+        );
+        assert_eq!(
+            tool_state(&daemon, turn_b, call_b),
+            (ToolStatus::Running, false),
+            "sibling turn's still-running tool must not be swept"
+        );
     }
 
     /// Helpers to build the persisted shapes a reconnect replay reads.
