@@ -1,0 +1,332 @@
+/* ─── Floating chat corridor (ocean-surface-ui/src/widget.rs) ──────────────
+   Activated via ?float=1 or #float on the surface URL.
+   Keep the root/corridor transparent for overlay placement. widget.rs owns the
+   per-message depth effect, so .ocean-float__msg remains a layout-only wrapper.
+   ───────────────────────────────────────────────────────────────────────── */
+
+body.ocean-float-mode {
+  background: transparent;
+  overflow: hidden;
+}
+
+.ocean-float {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 420px;
+  height: 100dvh;
+  margin: 0 auto;
+  background: transparent;
+  color: var(--fg);
+  font-family: var(--font);
+}
+
+/* ── corridor and stream ───────────────────────────────────────────────── */
+
+.ocean-float__corridor {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  padding: 12px 12px 0;
+  overflow: hidden;
+  background: transparent;
+}
+
+.ocean-float__stream {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+}
+
+.ocean-float__stream::-webkit-scrollbar {
+  width: 8px;
+}
+
+.ocean-float__stream::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.ocean-float__stream::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.12);
+  background-clip: padding-box;
+}
+
+.ocean-float__stream::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.22);
+  background-clip: padding-box;
+}
+
+.ocean-float__stream-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 8px;
+}
+
+/* ── message bubbles ──────────────────────────────────────────────────── */
+
+.ocean-float__msg {
+  display: flex;
+}
+
+.ocean-float__msg--user {
+  justify-content: flex-end;
+}
+
+.ocean-float__msg--agent {
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 4px;
+}
+
+.ocean-float__bubble {
+  max-width: 82%;
+  padding: 8px 12px;
+  border-radius: var(--radius-lg);
+  color: var(--fg-2);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.ocean-float__msg--user .ocean-float__bubble {
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  color: var(--fg);
+}
+
+.ocean-float__msg--agent .ocean-float__bubble {
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-raised);
+}
+
+/* ── tool call chips ──────────────────────────────────────────────────── */
+
+.ocean-float__tool {
+  align-self: flex-start;
+  max-width: 90%;
+  margin-left: 4px;
+  padding: 2px 8px;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  background: var(--bg-elevated);
+  color: var(--fg-3);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.ocean-float__tool--running {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.ocean-float__tool--ok {
+  border-color: var(--ok);
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.ocean-float__tool--err {
+  border-color: var(--err);
+  background: var(--err-soft);
+  color: var(--err);
+}
+
+/* ── typing indicator ────────────────────────────────────────────────── */
+
+.ocean-float__typing {
+  padding: 4px 16px;
+}
+
+.ocean-float__typing-bead {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ocean-float__typing-bead i {
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  font-style: normal;
+  animation: ocean-float-bead 1.2s var(--ease) infinite;
+}
+
+.ocean-float__typing-bead i:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.ocean-float__typing-bead i:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes ocean-float-bead {
+  0%, 80%, 100% {
+    opacity: 0.4;
+    transform: scale(0.7);
+  }
+  40% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* ── compact composer ────────────────────────────────────────────────── */
+
+.ocean-float__composer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-raised);
+}
+
+.ocean-float__input {
+  flex: 1;
+  min-width: 0;
+  height: var(--ctl-h);
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  outline: none;
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: var(--ctl-h);
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease),
+    opacity var(--dur-fast) var(--ease);
+}
+
+.ocean-float__input::placeholder {
+  color: var(--fg-3);
+}
+
+.ocean-float__input:hover {
+  border-color: var(--border-strong);
+}
+
+.ocean-float__input:focus,
+.ocean-float__input:focus-visible {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.ocean-float__input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ocean-float__send,
+.ocean-float__halt {
+  appearance: none;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: var(--ctl-h);
+  height: var(--ctl-h);
+  border-radius: var(--radius);
+  font-family: var(--font);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    transform var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    filter var(--dur-fast) var(--ease),
+    opacity var(--dur-fast) var(--ease);
+}
+
+.ocean-float__send {
+  border: none;
+  background: var(--accent);
+  color: var(--fg-on-accent);
+}
+
+.ocean-float__send svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+}
+
+.ocean-float__send:hover {
+  filter: brightness(1.12);
+}
+
+.ocean-float__send:focus-visible,
+.ocean-float__halt:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.ocean-float__send:active,
+.ocean-float__halt:active {
+  transform: scale(0.985);
+}
+
+.ocean-float__send:disabled,
+.ocean-float__halt:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+  filter: none;
+}
+
+.ocean-float__halt {
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--err);
+}
+
+.ocean-float__halt:hover {
+  border-color: var(--err);
+  background: var(--err-soft);
+}
+
+/* ── status bar ──────────────────────────────────────────────────────── */
+
+.ocean-float__status {
+  padding: 4px 12px 8px;
+  color: var(--fg-3);
+  font-family: var(--font);
+  font-size: 11px;
+  line-height: 1.35;
+  text-align: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ocean-float__typing-bead i {
+    animation: none;
+  }
+
+  .ocean-float__input,
+  .ocean-float__send,
+  .ocean-float__halt {
+    transition: none;
+  }
+}

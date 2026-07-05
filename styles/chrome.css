@@ -1,0 +1,502 @@
+/* Header shell ----------------------------------------------------------- */
+.ocean-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  box-sizing: border-box;
+  min-height: 56px;
+  padding: 0 16px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ocean-header__right {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* Brand ------------------------------------------------------------------ */
+.ocean-brand {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+/* The OCEAN wordmark — the TUI splash depth ramp, one solid color per
+   letter (terminal-native; no gradient-clip text). Mono, tracked wide. */
+.ocean-brand__word {
+  display: inline-flex;
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: default;
+}
+.ocean-brand__ch--1 { color: var(--ocean-4); }
+.ocean-brand__ch--2 { color: var(--ocean-5); }
+.ocean-brand__ch--3 { color: var(--ocean-6); }
+.ocean-brand__ch--4 { color: var(--ocean-7); }
+.ocean-brand__ch--5 { color: var(--ocean-8); }
+
+/* Inline SVG icons inherit text color + size (1em). The default treatment is
+   FILLED (the game-icons set: SoundOn/SoundOff/Amplitude) — they need
+   `fill: currentColor` to be visible at all. */
+.icon {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  vertical-align: middle;
+  fill: currentColor;
+}
+
+/* Stroke (line) icons — WaveLogo, Menu, Council, Groups, Capture. Their SVGs
+   carry `fill="none" stroke="currentColor"` as presentation attributes, but a
+   class selector (`.icon`, specificity 0-1-0) outranks a presentation attribute
+   (0-0-0), so the global `.icon { fill: currentColor }` above would otherwise
+   FILL them — collapsing each line drawing into a solid blob. This rule uses a
+   two-class selector (`.icon.icon--stroke`, specificity 0-2-0) so it
+   deterministically beats `.icon` regardless of source order, restoring the
+   intended outline rendering. `fill: none` cascades to the child paths/lines
+   (which set no fill of their own); `stroke` + `stroke-width` are restated so
+   the look never depends on the SVG attributes surviving. (OCEAN-202) */
+.icon.icon--stroke {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Header metadata chips -------------------------------------------------- */
+.ocean-status {
+  min-width: 0;
+  color: var(--fg-3);
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+/* Browser-control indicator (OCEAN-92): a live "Ocean is driving the browser"
+   cue with a pulsing dot, shown only while the daemon's browser_activity stream
+   reports the agent is acting in the browser. */
+.ocean-browser-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  height: var(--ctl-h-sm);
+  padding: 0 10px;
+  color: var(--accent);
+  font-family: var(--font);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  background: var(--accent-soft);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  white-space: nowrap;
+  cursor: default;
+}
+
+.ocean-browser-control__dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  box-shadow: 0 0 0 4px var(--accent-soft);
+  animation: ocean-browser-pulse 1.2s var(--ease) infinite;
+}
+
+.ocean-browser-control__label {
+  color: var(--accent);
+  letter-spacing: 0.02em;
+}
+
+@keyframes ocean-browser-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.82); }
+}
+
+/* Token usage: pure text — a metadata readout, not a control. */
+.ocean-tokens {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg-3);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.ocean-tokens__io {
+  color: var(--fg-2);
+  letter-spacing: 0;
+}
+
+.ocean-tokens__rate {
+  padding-left: 8px;
+  color: var(--fg-3);
+  box-shadow: inset 1px 0 0 var(--border-subtle);
+}
+
+/* Select controls -------------------------------------------------------- */
+/* Turn-control minis: quiet borderless selects on the composer dock's
+   bottom row. Chrome appears on hover/focus only — they're power knobs,
+   not primary affordances. */
+.ocean-turn-controls {
+  grid-area: controls;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ocean-thinking,
+.ocean-model-override,
+.ocean-project {
+  appearance: none;
+  box-sizing: border-box;
+  min-width: 0;
+  color: var(--fg);
+  font-family: var(--font);
+  font-weight: 500;
+  line-height: 1;
+  background-color: var(--bg-raised);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath d='M2 4l3 3 3-3' fill='none' stroke='%23909098' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+}
+
+.ocean-thinking,
+.ocean-model-override {
+  height: var(--ctl-h-sm);
+  max-width: 150px;
+  padding: 0 24px 0 8px;
+  font-size: 11px;
+  color: var(--fg-3);
+  background-color: transparent;
+  background-position: right 6px center;
+  border-color: transparent;
+}
+
+.ocean-project {
+  height: var(--ctl-h-sm);
+  max-width: 200px;
+  padding: 0 30px 0 10px;
+  font-size: 12px;
+}
+
+.ocean-thinking:hover,
+.ocean-model-override:hover {
+  color: var(--fg);
+}
+
+.ocean-thinking:hover,
+.ocean-model-override:hover,
+.ocean-project:hover {
+  background-color: var(--bg-elevated);
+  border-color: var(--border-strong);
+}
+
+.ocean-thinking:focus-visible,
+.ocean-model-override:focus-visible,
+.ocean-project:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.ocean-thinking:active,
+.ocean-model-override:active,
+.ocean-project:active {
+  transform: scale(0.985);
+}
+
+.ocean-thinking:disabled,
+.ocean-model-override:disabled,
+.ocean-project:disabled {
+  color: var(--fg-4);
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.ocean-thinking option,
+.ocean-model-override option,
+.ocean-project option {
+  background: var(--bg-raised);
+  color: var(--fg);
+  font-family: var(--font);
+}
+
+/* Button controls -------------------------------------------------------- */
+.ocean-composer__halt,
+.ocean-sessions-btn,
+.ocean-more__btn,
+.ocean-more__item,
+.ocean-active-session,
+.ocean-council-modal__close {
+  appearance: none;
+  box-sizing: border-box;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+}
+
+.ocean-sessions-btn,
+.ocean-more__btn {
+  display: inline-grid;
+  place-items: center;
+  width: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+  padding: 0;
+  color: var(--fg-3);
+  font-size: 14px;
+  line-height: 1;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.ocean-sessions-btn:hover,
+.ocean-more__btn:hover {
+  color: var(--fg);
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.ocean-sessions-btn:focus-visible,
+.ocean-more__btn:focus-visible,
+.ocean-active-session:focus-visible,
+.ocean-composer__halt:focus-visible,
+.ocean-council-modal__close:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.ocean-sessions-btn:active,
+.ocean-more__btn:active,
+.ocean-active-session:active,
+.ocean-composer__halt:active,
+.ocean-council-modal__close:active {
+  transform: scale(0.985);
+}
+
+.ocean-sessions-btn:disabled,
+.ocean-active-session:disabled,
+.ocean-composer__halt:disabled,
+.ocean-council-modal__close:disabled {
+  color: var(--fg-4);
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+/* Header overflow (<details>): the ONE place secondary actions live.
+   Council, rooms, voice mute, and extension capture are menu rows here —
+   not a strip of header buttons. */
+.ocean-more {
+  position: relative;
+  flex: 0 0 auto;
+}
+.ocean-more__btn {
+  list-style: none;
+  user-select: none;
+  font-size: 16px;
+  letter-spacing: 0.05em;
+}
+.ocean-more__btn::-webkit-details-marker { display: none; }
+.ocean-more[open] .ocean-more__btn {
+  color: var(--fg);
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+.ocean-more__menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  min-width: 176px;
+  padding: 4px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+}
+.ocean-more__item {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--fg-2);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.ocean-more__item:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.ocean-more__item:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.ocean-composer__halt {
+  grid-area: halt;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--ctl-h-sm);
+  padding: 0 12px;
+  color: var(--err);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  background: var(--err-soft);
+  border: none;
+  border-radius: var(--radius);
+  white-space: nowrap;
+}
+
+.ocean-composer__halt:hover {
+  color: var(--err);
+  background: var(--err-soft);
+  border-color: var(--border-strong);
+}
+
+/* Active session chip ---------------------------------------------------- */
+.ocean-active-session {
+  display: inline-flex;
+  flex: 0 1 220px;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 0;
+  min-width: 0;
+  max-width: 220px;
+  height: var(--ctl-h-sm);
+  padding: 1px 10px;
+  text-align: left;
+  color: var(--fg);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.ocean-active-session:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.ocean-active-session__title {
+  max-width: 196px;
+  overflow: hidden;
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ocean-active-session__cwd {
+  max-width: 196px;
+  overflow: hidden;
+  color: var(--fg-3);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Council modal ---------------------------------------------------------- */
+.ocean-council-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.ocean-council-modal__bar {
+  display: flex;
+  flex: 0 0 56px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  box-sizing: border-box;
+  padding: 0 16px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ocean-council-modal__title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ocean-council-modal__close {
+  display: inline-grid;
+  place-items: center;
+  width: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+  padding: 0;
+  color: var(--fg-3);
+  font-size: 14px;
+  line-height: 1;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+}
+
+.ocean-council-modal__close:hover {
+  color: var(--fg);
+  background: var(--bg-elevated);
+}
+
+.ocean-council-modal__frame {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  border: 0;
+  background: var(--bg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ocean-browser-control__dot {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+}

@@ -1,0 +1,327 @@
+/* ─── Composer dock + voice input ───────────────────────────────────────────
+   Visual contract: product-register controls from docs/OCEAN_WEB_SURFACE_DESIGN.md.
+   Rust owns behavior and class names; this file only skins the emitted surface.
+   ───────────────────────────────────────────────────────────────────────── */
+
+/* One dock card: orb | input on top row, minis + actions on the bottom row.
+   The FORM is the framed control (focus ring lives here via :focus-within);
+   the textarea inside is chromeless. DOM order (orb, turn-controls, textarea,
+   halt, send) is grid-placed — no markup reorder needed. */
+.ocean-composer {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  grid-template-areas:
+    "orb input input input"
+    "orb controls halt send";
+  align-items: center;
+  column-gap: 10px;
+  row-gap: 6px;
+  margin: 8px 18px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+}
+.ocean-composer:focus-within {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+/* ── voice orb ─────────────────────────────────────────────────────────── */
+
+.voice-wrap {
+  position: relative;
+  grid-area: orb;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: center;
+  align-self: center;
+}
+
+.voice-orb {
+  appearance: none;
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-elevated);
+  color: var(--fg-3);
+  font: inherit;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: none;
+  transition:
+    transform var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease),
+    opacity var(--dur-fast) var(--ease);
+}
+
+.voice-orb:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.voice-orb:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.voice-orb:active {
+  transform: scale(0.985);
+}
+
+.voice-orb.is-disabled,
+.voice-orb:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.voice-orb__glyph {
+  display: inline-flex;
+  pointer-events: none;
+  color: currentColor;
+}
+
+.voice-orb__glyph .icon,
+.voice-orb__glyph svg {
+  width: 22px;
+  height: 22px;
+}
+
+.voice-orb.is-recording {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--fg-on-accent);
+  box-shadow: var(--glow-brand);
+  animation: voice-pulse 1.35s var(--ease) infinite;
+}
+
+.voice-orb.is-transcribing {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn);
+  animation: voice-transcribe 1.4s var(--ease) infinite;
+}
+
+.voice-orb.is-live {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  --voice-listen-pulse: var(--accent-soft);
+  animation: voice-listen 2.4s var(--ease) infinite;
+}
+
+.voice-orb.is-wake.is-live {
+  border-color: var(--info);
+  background: var(--info-soft);
+  color: var(--info);
+  --voice-listen-pulse: var(--info-soft);
+  animation-duration: 3s;
+}
+
+.voice-orb.is-live.is-capturing {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--fg-on-accent);
+  box-shadow: var(--glow-brand);
+  animation: voice-pulse 1s var(--ease) infinite;
+}
+
+.voice-orb.is-live.is-transcribing {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn);
+  box-shadow: none;
+  animation: voice-transcribe 1.2s var(--ease) infinite;
+}
+
+@keyframes voice-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(0, 215, 215, 0.20), var(--glow-brand);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(0, 215, 215, 0.08), var(--glow-brand);
+  }
+}
+
+@keyframes voice-listen {
+  0%, 100% {
+    box-shadow: 0 0 0 0 var(--voice-listen-pulse);
+  }
+  50% {
+    box-shadow: 0 0 0 5px var(--voice-listen-pulse);
+  }
+}
+
+@keyframes voice-transcribe {
+  0%, 100% {
+    box-shadow: 0 0 0 0 var(--warn-soft);
+  }
+  50% {
+    box-shadow: 0 0 0 5px var(--warn-soft);
+  }
+}
+
+/* ── voice mode chip + hint ───────────────────────────────────────────── */
+
+/* Hidden until the orb is hovered/focused: a floating chip above it. The
+   composer stays one quiet dock; voice power-controls appear on intent. */
+.voice-mode-switch {
+  appearance: none;
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  opacity: 0;
+  pointer-events: none;
+  min-height: var(--ctl-h-sm);
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-md);
+  color: var(--fg-3);
+  font-family: var(--font);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    opacity var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+.voice-wrap:hover .voice-mode-switch,
+.voice-wrap:focus-within .voice-mode-switch {
+  opacity: 1;
+  pointer-events: auto;
+}
+.voice-mode-switch:hover {
+  border-color: var(--border-strong);
+  color: var(--fg);
+}
+.voice-mode-switch:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.voice-mode-switch:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* The orb speaks through color and its tooltip; a permanent caption under
+   it is knob noise. */
+.voice-hint { display: none; }
+
+/* ── text composer ────────────────────────────────────────────────────── */
+
+.ocean-composer__input {
+  grid-area: input;
+  width: 100%;
+  min-height: 40px;
+  max-height: 160px;
+  padding: 8px 4px 0;
+  resize: none;
+  border: none;
+  border-radius: 0;
+  outline: none;
+  background: none;
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.45;
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease),
+    opacity var(--dur-fast) var(--ease);
+}
+
+.ocean-composer__input::placeholder {
+  color: var(--fg-3);
+}
+
+.ocean-composer__input:focus,
+.ocean-composer__input:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+.ocean-composer__input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ocean-composer__send {
+  grid-area: send;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--ctl-h-sm);
+  padding: 0 14px;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--fg-on-accent);
+  font-family: var(--font);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    transform var(--dur-fast) var(--ease),
+    filter var(--dur-fast) var(--ease),
+    opacity var(--dur-fast) var(--ease);
+}
+
+.ocean-composer__send:hover {
+  filter: brightness(1.12);
+}
+
+.ocean-composer__send:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.ocean-composer__send:active {
+  transform: scale(0.985);
+}
+
+.ocean-composer__send:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+  filter: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .voice-orb,
+  .voice-mode-switch,
+  .ocean-composer__input,
+  .ocean-composer__send {
+    transition: none;
+  }
+
+  .voice-orb.is-recording,
+  .voice-orb.is-transcribing,
+  .voice-orb.is-live,
+  .voice-orb.is-live.is-capturing,
+  .voice-orb.is-live.is-transcribing {
+    animation: none;
+  }
+}

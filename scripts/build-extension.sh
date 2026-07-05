@@ -18,7 +18,15 @@ mkdir -p "$DIST"
 # worker, which the extension doesn't use).
 cp dist/ocean-surface-ui.js     "$DIST/ocean-surface-ui.js"
 cp dist/ocean-surface-ui_bg.wasm "$DIST/ocean-surface-ui_bg.wasm"
-cp dist/style.css               "$DIST/style.css"
+
+# Stylesheets: every dist/*.css (tokens/base/chrome/... — sidepanel.html links
+# them by these stable names), plus the vendored fonts tokens.css references
+# relatively (dist/fonts/ must sit beside the CSS inside extension/dist/).
+cp dist/*.css "$DIST/"
+if [ -d dist/fonts ]; then
+  mkdir -p "$DIST/fonts"
+  cp dist/fonts/* "$DIST/fonts/"
+fi
 
 # Carry over any static assets the UI references (icons, etc.).
 for f in dist/*.png dist/*.webmanifest; do

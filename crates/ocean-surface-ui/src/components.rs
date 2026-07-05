@@ -456,14 +456,17 @@ fn ProgressView(kind_props: Value) -> impl IntoView {
                     class:progress-bar__fill=true
                     class:is-indeterminate=indeterminate
                     style=format!("width: {pct}%")
-                >
-                    {if !indeterminate {
-                        view! { <span class="progress-pct">{format!("{pct}%")}</span> }.into_any()
-                    } else {
-                        ().into_any()
-                    }}
-                </div>
+                ></div>
             </div>
+            // Outside .progress-bar: the bar clips (overflow:hidden) so the
+            // sliding indeterminate fill never paints past the pill — a label
+            // inside the 4px fill could never render. CSS right-aligns this
+            // under the bar.
+            {if !indeterminate {
+                view! { <span class="progress-pct">{format!("{pct}%")}</span> }.into_any()
+            } else {
+                ().into_any()
+            }}
         </div>
     }
 }
@@ -1192,6 +1195,9 @@ pub fn ToolDrawer(turns: RwSignal<Vec<Turn>>, open: RwSignal<bool>) -> impl Into
     let has_chips = move || !chips().is_empty();
 
     view! {
+        // "tools (0)" is chrome with nothing to say — the strip renders only
+        // once the latest assistant turn actually has tool/thinking activity.
+        <Show when=has_chips>
         <div class="tool-drawer" class:tool-drawer--open=is_open>
             <button
                 class="tool-drawer__tab"
@@ -1216,12 +1222,10 @@ pub fn ToolDrawer(turns: RwSignal<Vec<Turn>>, open: RwSignal<bool>) -> impl Into
                             }
                         }).collect::<Vec<_>>()}
                     </div>
-                    <Show when=move || !has_chips()>
-                        <div class="tool-drawer__empty">"no tool calls yet"</div>
-                    </Show>
                 </Show>
             </div>
         </div>
+        </Show>
     }
 }
 

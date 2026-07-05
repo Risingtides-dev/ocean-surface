@@ -34,6 +34,24 @@ The important GPUI direction is the real collaboration surface:
 
 Use `docs/OCEAN_GPUI_CANVAS_LIVEKIT_SPEC.md` as the GPUI collaboration anchor.
 
+## Web Surface Design System
+
+All visual work on the Leptos web surface follows
+`docs/OCEAN_WEB_SURFACE_DESIGN.md`. Non-negotiables:
+
+- Identity is the OCEAN depth ramp (the TUI splash banner, deep indigo →
+  bright aqua). No Rising Tides magenta/purple (rejected 2026-07-04), no
+  legacy teal-mint, no gradient-clip text — the ramp paints solid colors on
+  discrete elements (banner rows, wordmark letters).
+- Stylesheets are split per domain under `styles/` (tokens → base → chrome →
+  transcript → components → composer → panels → call → canvas → compact →
+  float, in cascade order). Colors live ONLY in `styles/tokens.css`.
+  `extension/sidepanel.html` and `scripts/build-extension.sh` enumerate the
+  same files — adding a stylesheet touches all three places.
+- Control density is a design defect: conditional rendering over permanent
+  chrome, one header overflow (`⋯`) for secondary actions, ghost triggers for
+  idle features (dialer, join call), reveal-on-intent for power knobs.
+
 ## Session Contract
 
 The ecosystem invariant is:

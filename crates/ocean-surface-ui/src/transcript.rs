@@ -110,7 +110,20 @@ pub fn Transcript(daemon: Daemon) -> impl IntoView {
         <div class="transcript" node_ref=container on:scroll=on_scroll>
             <Show when=is_empty>
                 <div class="transcript__landing">
-                    <div class="transcript__landing-glyph"><crate::icons::WaveLogo /></div>
+                    // The OCEAN banner from the TUI splash (ocean-os
+                    // ocean-tui/src/splash.rs), one solid ramp color per row —
+                    // abyss to sunlit surface. This IS the brand mark; the
+                    // rows are aria-hidden and the h1 stays for readers.
+                    <pre class="transcript__landing-banner" aria-hidden="true">
+                        <span class="transcript__landing-banner-row transcript__landing-banner-row--1">"  d88888b     d8888b   8888888888        d8888 8888b    888 "</span>
+                        <span class="transcript__landing-banner-row transcript__landing-banner-row--2">"d88P   Y88b d88P  Y88b 888              d88888 88888b   888 "</span>
+                        <span class="transcript__landing-banner-row transcript__landing-banner-row--3">"888     888 888    888 888             d88P888 888888b  888 "</span>
+                        <span class="transcript__landing-banner-row transcript__landing-banner-row--4">"888     888 888        8888888        d88P 888 8888Y88b 888 "</span>
+                        <span class="transcript__landing-banner-row transcript__landing-banner-row--5">"888     888 888        888           d88P  888 8888 Y88b888 "</span>
+                        <span class="transcript__landing-banner-row transcript__landing-banner-row--6">"888     888 888    888 888          d88P   888 8888  Y88888 "</span>
+                        <span class="transcript__landing-banner-row transcript__landing-banner-row--7">"Y88b   d88P Y88b  d88P 888         d8888888888 8888   Y8888 "</span>
+                        <span class="transcript__landing-banner-row transcript__landing-banner-row--8">"  Y88888P     Y8888P   8888888888 d88P     888 8888    Y888 "</span>
+                    </pre>
                     <h1 class="transcript__landing-title">"Ocean"</h1>
                     <p class="transcript__landing-lead">
                         "Start typing below to begin a session."

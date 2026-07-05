@@ -1,0 +1,131 @@
+/* Chrome side-panel (MV3) compact layout — structural overrides only.
+   The domain styles own color; this file only tightens geometry in the
+   `.ocean-surface--extension` root emitted by the Leptos app. */
+
+.ocean-surface--extension {
+  max-width: none;
+  width: 100%;
+}
+
+/* Header wraps instead of forcing horizontal scroll in the side panel. */
+.ocean-surface--extension .ocean-header {
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.ocean-surface--extension .ocean-brand {
+  min-width: 0;
+}
+
+.ocean-surface--extension .ocean-brand__name {
+  max-width: 108px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ocean-surface--extension .ocean-header__right {
+  flex: 1 1 220px;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.ocean-surface--extension .ocean-status {
+  flex: 1 1 100%;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Header controls and per-turn selectors use compact control height. */
+.ocean-surface--extension .ocean-project,
+.ocean-surface--extension .ocean-active-session,
+.ocean-surface--extension .ocean-sessions-btn,
+.ocean-surface--extension .ocean-council-btn,
+.ocean-surface--extension .ocean-rooms-btn,
+.ocean-surface--extension .ocean-screenshot,
+.ocean-surface--extension .ocean-mute,
+.ocean-surface--extension .ocean-thinking,
+.ocean-surface--extension .ocean-model-override {
+  min-height: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+}
+
+.ocean-surface--extension .ocean-project,
+.ocean-surface--extension .ocean-active-session,
+.ocean-surface--extension .ocean-thinking,
+.ocean-surface--extension .ocean-model-override {
+  max-width: 46vw;
+}
+
+.ocean-surface--extension .ocean-active-session__title,
+.ocean-surface--extension .ocean-active-session__cwd {
+  max-width: 42vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Transcript and canvas regions keep readable gutters in a narrow column. */
+.ocean-surface--extension .transcript {
+  padding: 10px;
+  gap: 12px;
+}
+
+.ocean-surface--extension .block--text {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.ocean-surface--extension .ocean-canvas {
+  margin: 8px 10px 0;
+}
+
+.ocean-surface--extension .ocean-canvas__head,
+.ocean-surface--extension .ocean-canvas__tabs {
+  padding-right: 10px;
+  padding-left: 10px;
+}
+
+/* Composer compresses without changing the base control recipes. */
+.ocean-surface--extension .ocean-composer {
+  padding: 8px 10px 10px;
+  gap: 8px;
+}
+
+.ocean-surface--extension .voice-wrap {
+  gap: 6px;
+}
+
+.ocean-surface--extension .voice-orb {
+  width: 38px;
+  height: 38px;
+  font-size: 17px;
+}
+
+.ocean-surface--extension .voice-hint {
+  display: none;
+}
+
+.ocean-surface--extension .ocean-composer__input {
+  min-width: 0;
+}
+
+.ocean-surface--extension .ocean-composer__halt,
+.ocean-surface--extension .ocean-composer__send {
+  min-height: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+}
+
+/* Wide rich content clips inside the panel instead of widening it. */
+.ocean-surface--extension pre,
+.ocean-surface--extension img,
+.ocean-surface--extension table {
+  max-width: 100%;
+  overflow-x: auto;
+}

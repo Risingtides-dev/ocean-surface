@@ -721,9 +721,13 @@ pub fn CanvasRender(canvas_patches: RwSignal<Vec<CanvasPatchEntry>>) -> impl Int
         Memo::new(move |_| multi.with(|m| selected.with(|s| m.resolve_active(s.as_deref()))));
 
     view! {
+        // No patches yet → render NOTHING. The canvas region is agent-
+        // administered; a permanent empty "Canvas" band above the composer
+        // reads as dead chrome. It appears the moment the first
+        // `surface_patch` lands (the ledger going non-empty re-runs this Show).
         <Show
             when=move || !multi.with(MultiCanvasLedger::is_empty)
-            fallback=|| view! { <EmptyCanvasHint /> }
+            fallback=|| ()
         >
             {move || {
                 let ids = multi.with(MultiCanvasLedger::canvas_ids);
@@ -824,21 +828,6 @@ fn scene_meta(ledger: &WebCanvasLedger) -> String {
         ledger.components.len(),
         ledger.edges.len(),
     )
-}
-
-/// The empty-state shown once the panel has appeared but no component exists yet
-/// (e.g. only selection/viewport patches have arrived). Keeps the section from
-/// rendering a blank box.
-#[component]
-fn EmptyCanvasHint() -> impl IntoView {
-    view! {
-        <section class="ocean-canvas" aria-label="agent canvas">
-            <header class="ocean-canvas__head">
-                <span class="ocean-canvas__title">"Canvas"</span>
-            </header>
-            <div class="ocean-canvas__empty">"Waiting for the agent to place components…"</div>
-        </section>
-    }
 }
 
 /// Build the scaled scene body (viewport + positioned cards + SVG edges) for one

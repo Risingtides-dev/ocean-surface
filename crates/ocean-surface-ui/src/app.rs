@@ -6,7 +6,7 @@ use wasm_bindgen::JsCast;
 
 use crate::components::{PermissionPrompts, ToolDrawer};
 use crate::daemon::{daemon_url_from_env, Daemon};
-use crate::icons::{Capture, Council, Groups, Menu, SoundOff, SoundOn, WaveLogo};
+use crate::icons::Menu;
 use crate::model::{Block, Role, Turn};
 use crate::rooms::{Rooms, RoomsPanel};
 use crate::sessions::SessionsPanel;
@@ -183,6 +183,9 @@ pub fn App() -> impl IntoView {
     // Screenshot capture button (OCEAN-138): StoredValue (Copy) so the on:click
     // closure can grab the daemon to stage the captured image for the next turn.
     let daemon_capture = StoredValue::new(daemon.clone());
+    // Header overflow menu (<details>): council/rooms/mute/capture live behind
+    // one "⋯" affordance instead of a row of buttons. Item clicks close it.
+    let more_ref: NodeRef<leptos::html::Details> = NodeRef::new();
 
     // In the Chrome side panel the cockpit lives in a ~360px-wide column. Tag
     // the root so the shared stylesheet's compact `.ocean-surface--extension`
@@ -196,9 +199,17 @@ pub fn App() -> impl IntoView {
     view! {
         <main class=root_class>
             <header class="ocean-header">
-                <div class="ocean-brand">
-                    <span class="ocean-brand__logo"><WaveLogo /></span>
-                    <span class="ocean-brand__name">"Ocean"</span>
+                <div class="ocean-brand" aria-label="Ocean">
+                    // The OCEAN wordmark carries the TUI splash depth ramp,
+                    // one solid color per letter (no gradient text) — the same
+                    // xterm ramp the terminal banner paints per line.
+                    <span class="ocean-brand__word" aria-hidden="true">
+                        <span class="ocean-brand__ch ocean-brand__ch--1">"O"</span>
+                        <span class="ocean-brand__ch ocean-brand__ch--2">"C"</span>
+                        <span class="ocean-brand__ch ocean-brand__ch--3">"E"</span>
+                        <span class="ocean-brand__ch ocean-brand__ch--4">"A"</span>
+                        <span class="ocean-brand__ch ocean-brand__ch--5">"N"</span>
+                    </span>
                 </div>
                 <div class="ocean-header__right">
                     // Project picker: selects which project (directory-bound
@@ -264,30 +275,6 @@ pub fn App() -> impl IntoView {
                     >
                         <Menu />
                     </button>
-                    // Council/quorum observability deck (OCEAN-96). Opens the
-                    // Game Boy "longhouse" viewer (served by the proxy at
-                    // /ui/council) in a full-screen modal so the user can watch
-                    // live quorum/council sessions without leaving the cockpit.
-                    <button
-                        class="ocean-council-btn"
-                        type="button"
-                        aria-label="open council deck"
-                        title="Council — quorum observability deck"
-                        on:click=move |_| show_council.set(true)
-                    >
-                        <Council />
-                    </button>
-                    // Persistent Rooms panel (OCEAN-108). Lists/creates/joins
-                    // rooms and shows a room transcript + composer.
-                    <button
-                        class="ocean-rooms-btn"
-                        type="button"
-                        aria-label="rooms"
-                        title="Rooms — persistent collaboration spaces"
-                        on:click=move |_| show_rooms.update(|v| *v = !*v)
-                    >
-                        <Groups />
-                    </button>
                     // Token usage: session total, with a per-turn + cache
                     // breakdown on hover. Hidden until the first turn finishes.
                     <Show when=has_tokens>
@@ -341,56 +328,87 @@ pub fn App() -> impl IntoView {
                         </div>
                     </Show>
                     <div class="ocean-status">{move || status.get()}</div>
-                    // Screenshot capture (OCEAN-92, wired to vision in OCEAN-138):
-                    // only in the Chrome extension side panel, where
-                    // chrome.tabs.captureVisibleTab is reachable. Captures the
-                    // visible tab and stages it on the daemon's pending_images so
-                    // it rides along on the next message as a Content::Image block
-                    // the agent can actually reason over.
-                    <Show when=crate::daemon::running_as_extension>
-                        <button
-                            class="ocean-screenshot"
-                            type="button"
-                            aria-label="capture visible tab"
-                            title="Capture visible tab (attaches it to your next message)"
-                            on:click=move |_| daemon_capture.get_value().capture_and_attach_visible_tab()
-                        >
-                            <Capture />
-                        </button>
-                    </Show>
-                    // Mute toggle only matters when TTS is available.
-                    <Show when=move || voice_ready.get()>
-                        <button
-                            class="ocean-mute"
-                            type="button"
-                            aria-label="toggle speech"
-                            class:is-muted=move || muted.get()
-                            on:click=move |_| muted.update(|m| *m = !*m)
-                        >
-                                {move || if muted.get() {
-                                view! { <SoundOff /> }.into_any()
-                            } else {
-                                view! { <SoundOn /> }.into_any()
-                            }}
-                        </button>
-                    </Show>
+                    // Secondary actions live behind one overflow control:
+                    // council deck, rooms, voice mute, extension tab capture.
+                    // Death-by-buttons is a design defect; the header keeps
+                    // exactly one icon button (sessions) plus this "⋯".
+                    <details class="ocean-more" node_ref=more_ref>
+                        <summary class="ocean-more__btn" aria-label="more actions" title="More">
+                            "⋯"
+                        </summary>
+                        <div class="ocean-more__menu" role="menu">
+                            <button
+                                class="ocean-more__item"
+                                type="button"
+                                role="menuitem"
+                                on:click=move |_| {
+                                    if let Some(d) = more_ref.get() { let _ = d.remove_attribute("open"); }
+                                    show_council.set(true);
+                                }
+                            >
+                                "Council deck"
+                            </button>
+                            <button
+                                class="ocean-more__item"
+                                type="button"
+                                role="menuitem"
+                                on:click=move |_| {
+                                    if let Some(d) = more_ref.get() { let _ = d.remove_attribute("open"); }
+                                    show_rooms.update(|v| *v = !*v);
+                                }
+                            >
+                                "Rooms"
+                            </button>
+                            <Show when=move || voice_ready.get()>
+                                <button
+                                    class="ocean-more__item"
+                                    type="button"
+                                    role="menuitem"
+                                    on:click=move |_| {
+                                        if let Some(d) = more_ref.get() { let _ = d.remove_attribute("open"); }
+                                        muted.update(|m| *m = !*m);
+                                    }
+                                >
+                                    {move || if muted.get() { "Unmute voice" } else { "Mute voice" }}
+                                </button>
+                            </Show>
+                            <Show when=crate::daemon::running_as_extension>
+                                <button
+                                    class="ocean-more__item"
+                                    type="button"
+                                    role="menuitem"
+                                    on:click=move |_| {
+                                        if let Some(d) = more_ref.get() { let _ = d.remove_attribute("open"); }
+                                        daemon_capture.get_value().capture_and_attach_visible_tab();
+                                    }
+                                >
+                                    "Capture tab"
+                                </button>
+                            </Show>
+                        </div>
+                    </details>
                 </div>
             </header>
 
             // Chat surface. (The Leptos component "gauntlet" toggle was removed
             // in OCEAN-202 — it was a dev-only component harness, not shipping UI.)
-                        // LiveKit collaboration presence (OCEAN-83): join/leave,
-                        // mic + camera toggles, live participant roster. Renders
-                        // only when a room is configured for this surface.
-                        <crate::livekit::LiveKitPanel daemon=daemon.clone() />
+                        // Quiet utility line: LiveKit presence + the collapsed
+                        // outbound dialer share one right-aligned row instead of
+                        // stacking two full-width bars above the transcript.
+                        <div class="ocean-utility-row">
+                            // LiveKit collaboration presence (OCEAN-83): join/leave,
+                            // mic + camera toggles, live participant roster. Renders
+                            // only when a room is configured for this surface.
+                            <crate::livekit::LiveKitPanel daemon=daemon.clone() />
 
-                        // Place-call control (OCEAN-261). The outbound front
-                        // door: a phone-number input + Call button that POSTs to
-                        // `/v1/calls/place`. On success the daemon emits
-                        // `call_started` and the CallPanel below takes over; on a
-                        // 503 it explains that telephony (LiveKit + Twilio) isn't
-                        // configured yet, naming the env it needs.
-                        <crate::place_call::PlaceCallControl daemon=daemon.clone() />
+                            // Place-call control (OCEAN-261). The outbound front
+                            // door: collapsed to a ghost trigger until opened; the
+                            // expanded dialer POSTs to `/v1/calls/place`. On success
+                            // the daemon emits `call_started` and the CallPanel
+                            // below takes over; on a 503 it explains that telephony
+                            // (LiveKit + Twilio) isn't configured yet.
+                            <crate::place_call::PlaceCallControl daemon=daemon.clone() />
+                        </div>
 
                         // Live call-mode view (OCEAN-CALL). Self-contained: it
                         // subscribes to the daemon's `/v1/events` control stream
@@ -455,27 +473,41 @@ pub fn App() -> impl IntoView {
                                     // default). These are the exact levels the daemon
                                     // accepts — anything else round-trips to a serde
                                     // error. (OCEAN-202)
-                                    <option prop:value="" prop:selected=move || thinking_level.get().is_none()>
+                                    <option value="" prop:selected=move || thinking_level.get().is_none()>
                                         "think: default"
                                     </option>
-                                    <option prop:value="off" prop:selected=move || thinking_level.get().as_deref() == Some("off")>
+                                    <option value="off" prop:selected=move || thinking_level.get().as_deref() == Some("off")>
                                         "think: off"
                                     </option>
-                                    <option prop:value="minimal" prop:selected=move || thinking_level.get().as_deref() == Some("minimal")>
+                                    <option value="minimal" prop:selected=move || thinking_level.get().as_deref() == Some("minimal")>
                                         "think: minimal"
                                     </option>
-                                    <option prop:value="low" prop:selected=move || thinking_level.get().as_deref() == Some("low")>
+                                    <option value="low" prop:selected=move || thinking_level.get().as_deref() == Some("low")>
                                         "think: low"
                                     </option>
-                                    <option prop:value="medium" prop:selected=move || thinking_level.get().as_deref() == Some("medium")>
+                                    <option value="medium" prop:selected=move || thinking_level.get().as_deref() == Some("medium")>
                                         "think: medium"
                                     </option>
-                                    <option prop:value="high" prop:selected=move || thinking_level.get().as_deref() == Some("high")>
+                                    <option value="high" prop:selected=move || thinking_level.get().as_deref() == Some("high")>
                                         "think: high"
                                     </option>
-                                    <option prop:value="xhigh" prop:selected=move || thinking_level.get().as_deref() == Some("xhigh")>
+                                    <option value="xhigh" prop:selected=move || thinking_level.get().as_deref() == Some("xhigh")>
                                         "think: xhigh"
                                     </option>
+                                    // Unknown persisted value (stale pref, daemon
+                                    // drift): still render it selected — the same
+                                    // guard the model select has. Without this the
+                                    // controlled select desyncs and renders BLANK.
+                                    <Show when=move || {
+                                        matches!(
+                                            thinking_level.get().as_deref(),
+                                            Some(v) if !matches!(v, "off" | "minimal" | "low" | "medium" | "high" | "xhigh")
+                                        )
+                                    }>
+                                        <option prop:value=move || thinking_level.get().unwrap_or_default() prop:selected=true>
+                                            {move || format!("think: {}", thinking_level.get().unwrap_or_default())}
+                                        </option>
+                                    </Show>
                                 </select>
                                 // Per-turn model override (distinct from the
                                 // header picker's global swap). Drawn from the

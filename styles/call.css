@@ -1,0 +1,1043 @@
+/* ── Utility line: LiveKit presence + collapsed dialer ─────────────────── */
+/* One quiet right-aligned row above the transcript instead of stacked
+   full-width bars. Children drop their own outer margins here. */
+.ocean-utility-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  margin: 4px 18px 0;
+}
+.ocean-utility-row > * { margin: 0; }
+/* The expanded dialer takes the full line beneath the triggers. */
+.ocean-utility-row > section.ocean-place-call { flex: 1 1 100%; }
+
+/* ── LiveKit collaboration presence ───────────────────────────────────── */
+.ocean-livekit {
+  min-width: 0;
+}
+
+/* Idle (join button showing, not connected): collapse to a bare ghost
+   trigger — the room label and bar chrome appear only once live. */
+.ocean-livekit:has(.ocean-livekit__btn--join) .ocean-livekit__room {
+  display: none;
+}
+.ocean-livekit:has(.ocean-livekit__btn--join) .ocean-livekit__bar {
+  justify-content: flex-end;
+}
+
+.ocean-livekit__bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ocean-livekit__room {
+  flex: 1 1 180px;
+  min-width: 0;
+  max-width: 40%;
+  margin-right: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--fg-3);
+}
+
+.ocean-livekit__btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--ctl-h-sm);
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    opacity var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.ocean-livekit__btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.ocean-livekit__btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.ocean-livekit__btn:active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+.ocean-livekit__btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* Idle join is a bare ghost trigger, not a chip (pairs with the :has()
+   collapse above — cascade note: this MUST follow the .ocean-livekit__btn
+   base recipe to win its border/background). */
+.ocean-livekit__btn--join {
+  height: var(--ctl-h-sm);
+  padding: 0 10px;
+  background: none;
+  border-color: transparent;
+  color: var(--fg-3);
+  font-size: 12px;
+  font-weight: 500;
+}
+.ocean-livekit__btn--join:hover:not(:disabled) {
+  background: var(--bg-elevated);
+  border-color: transparent;
+  color: var(--fg);
+}
+
+.ocean-livekit__btn--toggle.is-on {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.ocean-livekit__btn--toggle.is-on:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.ocean-livekit__btn--toggle.is-off {
+  background: var(--bg-elevated);
+  border-color: var(--border);
+  color: var(--fg-2);
+}
+
+.ocean-livekit__btn--leave {
+  background: var(--bg-elevated);
+  border-color: var(--border);
+  color: var(--err);
+}
+
+.ocean-livekit__btn--leave:hover:not(:disabled) {
+  background: var(--err-soft);
+  border-color: var(--err);
+  color: var(--err);
+}
+
+.ocean-livekit__error {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  margin-top: 8px;
+  padding: 4px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--err-soft);
+  color: var(--err);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.ocean-livekit__reconnecting {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 8px;
+  padding: 4px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.ocean-livekit__reconnecting-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: var(--warn);
+  flex: 0 0 auto;
+  animation: ocean-livekit-pulse 1.2s var(--ease) infinite;
+}
+
+@keyframes ocean-livekit-pulse {
+  0%, 100% {
+    opacity: 0.38;
+    transform: scale(0.9);
+    box-shadow: 0 0 0 0 rgba(255, 178, 36, 0.28);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+    box-shadow: 0 0 0 5px rgba(255, 178, 36, 0);
+  }
+}
+
+.ocean-livekit__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.ocean-livekit__tile {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  min-height: 86px;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+}
+
+.ocean-livekit__tile.is-speaking {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent), 0 0 12px rgba(0, 215, 215, 0.24);
+}
+
+.ocean-livekit__video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: rgba(0, 0, 0, 0.92);
+}
+
+.ocean-livekit__tile-label {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  z-index: 1;
+  max-width: calc(100% - 12px);
+  padding: 2px 7px;
+  border-radius: var(--radius-pill);
+  background: rgba(0, 0, 0, 0.68);
+  color: var(--fg);
+  font-size: 11px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ocean-livekit__roster {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ocean-livekit__participant {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 28px;
+  padding: 4px 8px;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.ocean-livekit__participant.is-speaking {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.ocean-livekit__participant-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ocean-livekit__participant-state {
+  flex: 0 0 auto;
+  color: var(--fg-3);
+  font-size: 12px;
+}
+
+.ocean-livekit__participant.is-speaking .ocean-livekit__participant-state {
+  color: var(--accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ocean-livekit__reconnecting-dot {
+    animation: none;
+    transform: none;
+  }
+}
+
+/* ── Live call panel ───────────────────────────────────────────────────── */
+.ocean-call {
+  margin: 8px 18px 0;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-sm);
+}
+
+.ocean-call__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ocean-call__live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.ocean-call__live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  animation: ocean-call-live 1.4s var(--ease) infinite;
+}
+
+@keyframes ocean-call-live {
+  0%, 100% {
+    opacity: 0.42;
+    transform: scale(0.92);
+    box-shadow: 0 0 0 0 rgba(0, 215, 215, 0.30);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+    box-shadow: 0 0 0 6px rgba(0, 215, 215, 0);
+  }
+}
+@keyframes ocean-call-phase-pulse {
+  0%, 100% {
+    opacity: 0.42;
+    transform: scale(0.92);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+
+.ocean-call__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.ocean-call__phase {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  min-height: 24px;
+  padding: 3px 9px 3px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+  transition:
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    opacity var(--dur-fast) var(--ease);
+}
+
+.ocean-call__phase-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: currentColor;
+  flex: 0 0 auto;
+}
+
+.ocean-call__phase--connecting {
+  background: var(--warn-soft);
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.ocean-call__phase--connecting .ocean-call__phase-dot {
+  animation: ocean-call-phase-pulse 1.4s var(--ease) infinite;
+}
+
+.ocean-call__phase--listening {
+  background: var(--ok-soft);
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.ocean-call__phase--speaking {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.ocean-call__phase--speaking .ocean-call__phase-dot {
+  animation: ocean-call-live 0.95s var(--ease) infinite;
+}
+
+.ocean-call__phase--interrupted {
+  background: var(--warn-soft);
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.ocean-call__phase--ended {
+  background: var(--bg-elevated);
+  border-color: var(--border-subtle);
+  color: var(--fg-3);
+}
+
+.ocean-call__wake {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: 0 0 auto;
+  min-width: 0;
+  color: var(--fg-3);
+}
+
+.ocean-call__wake-orb {
+  width: 12px;
+  height: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-elevated);
+  flex: 0 0 auto;
+  transition:
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.ocean-call__wake.is-awake {
+  color: var(--accent);
+}
+
+.ocean-call__wake.is-awake .ocean-call__wake-orb {
+  background: var(--accent);
+  border-color: var(--accent);
+  animation: ocean-call-wake 0.9s var(--ease);
+}
+
+@keyframes ocean-call-wake {
+  0% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(0, 215, 215, 0.34);
+  }
+  45% {
+    transform: scale(1.28);
+    box-shadow: 0 0 0 8px rgba(0, 215, 215, 0);
+  }
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(0, 215, 215, 0);
+  }
+}
+
+.ocean-call__wake.is-barge {
+  color: var(--err);
+}
+
+.ocean-call__wake.is-barge .ocean-call__wake-orb {
+  background: var(--err);
+  border-color: var(--err);
+  animation: ocean-call-barge 0.7s var(--ease);
+}
+
+@keyframes ocean-call-barge {
+  0% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(255, 77, 103, 0.40);
+  }
+  45% {
+    transform: scale(1.35);
+    box-shadow: 0 0 0 9px rgba(255, 77, 103, 0);
+  }
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(255, 77, 103, 0);
+  }
+}
+
+.ocean-call__wake-text {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: currentColor;
+  font-size: 11px;
+  font-style: italic;
+  line-height: 1.35;
+}
+
+.ocean-call__barge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 77, 103, 0.30);
+  background: var(--err-soft);
+  color: var(--err);
+  animation: ocean-call-barge-in 0.28s var(--ease);
+}
+
+@keyframes ocean-call-barge-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.ocean-call__barge-pulse {
+  width: 9px;
+  height: 9px;
+  border-radius: var(--radius-pill);
+  background: var(--err);
+  flex: 0 0 auto;
+  animation: ocean-call-barge 0.7s var(--ease);
+}
+
+.ocean-call__barge-text {
+  color: var(--err);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.ocean-call__summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--accent-soft);
+}
+
+.ocean-call__summary--bump {
+  animation: ocean-call-summary-bump 0.6s var(--ease);
+}
+
+@keyframes ocean-call-summary-bump {
+  0% {
+    background: rgba(0, 215, 215, 0.24);
+  }
+  100% {
+    background: var(--accent-soft);
+  }
+}
+
+.ocean-call__summary-label {
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  line-height: 1.3;
+  text-transform: uppercase;
+}
+
+.ocean-call__summary-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--fg);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.ocean-call__tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ocean-call__tasks-label {
+  color: var(--fg-3);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  line-height: 1.3;
+  text-transform: uppercase;
+}
+
+.ocean-call__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ocean-call__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: var(--ctl-h-sm);
+  padding: 4px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  background: var(--bg-elevated);
+  color: var(--fg-2);
+  font-size: 12px;
+  line-height: 1.35;
+  transition:
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.ocean-call__chip:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.ocean-call__chip-glyph {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: currentColor;
+  font-size: 12px;
+}
+
+.ocean-call__chip-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ocean-call__chip-meta {
+  flex: 0 0 auto;
+  color: var(--fg-3);
+  font-size: 11px;
+}
+
+.ocean-call__chip:hover .ocean-call__chip-meta {
+  color: var(--accent);
+}
+
+.ocean-call__transcript {
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--bg-raised);
+}
+
+.ocean-call__waiting {
+  padding: 12px;
+  text-align: center;
+  color: var(--fg-3);
+  font-size: 12px;
+  font-style: italic;
+  line-height: 1.45;
+}
+
+.ocean-call__row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 3px 12px;
+}
+
+.ocean-call__speaker {
+  padding: 0 2px;
+  color: var(--fg-3);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  line-height: 1.3;
+  text-transform: uppercase;
+}
+
+.ocean-call__bubble {
+  max-width: min(82%, 72ch);
+  padding: 7px 11px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius) var(--radius) var(--radius) var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+.ocean-call__text {
+  color: var(--fg);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.ocean-call__row--interim .ocean-call__bubble {
+  border-style: dashed;
+  background: var(--bg-raised);
+}
+
+.ocean-call__row--interim .ocean-call__text {
+  color: var(--fg-3);
+  font-style: italic;
+}
+
+.ocean-call__row--agent {
+  align-items: flex-end;
+}
+
+.ocean-call__row--agent .ocean-call__speaker {
+  color: var(--accent);
+}
+
+.ocean-call__row--agent .ocean-call__bubble {
+  border-color: var(--accent);
+  border-radius: var(--radius) var(--radius) var(--radius-sm) var(--radius);
+  background: var(--accent-soft);
+}
+
+.ocean-call__row--agent .ocean-call__text {
+  color: var(--fg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ocean-call__live-dot,
+  .ocean-call__phase-dot,
+  .ocean-call__wake.is-awake .ocean-call__wake-orb,
+  .ocean-call__wake.is-barge .ocean-call__wake-orb,
+  .ocean-call__barge,
+  .ocean-call__barge-pulse,
+  .ocean-call__summary--bump {
+    animation: none;
+    transform: none;
+  }
+}
+
+/* ── Place-call control ───────────────────────────────────────────────── */
+.ocean-place-call {
+  margin: 8px 18px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-sm);
+}
+
+/* Collapsed state: no card chrome — just a compact ghost trigger aligned
+   right, so the idle dialer never reads as a permanent utility bar. */
+.ocean-place-call--collapsed {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0;
+  border: none;
+  background: none;
+  box-shadow: none;
+}
+
+.ocean-place-call__trigger {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--ctl-h-sm);
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--fg-3);
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.ocean-place-call__trigger .ocean-place-call__icon {
+  width: 16px;
+  height: 16px;
+  background: none;
+  color: inherit;
+}
+.ocean-place-call__trigger:hover {
+  background: var(--bg-elevated);
+  color: var(--fg);
+}
+.ocean-place-call__trigger:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.ocean-place-call__trigger:active {
+  transform: scale(0.985);
+}
+
+/* The "hide dialer" ghost × at the end of the expanded row. */
+.ocean-place-call__hide {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+  border: none;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--fg-3);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.ocean-place-call__hide:hover:not(:disabled) {
+  background: var(--bg-elevated);
+  color: var(--fg);
+}
+.ocean-place-call__hide:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.ocean-place-call__hide:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.ocean-place-call__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ocean-place-call__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: var(--ctl-h);
+  height: var(--ctl-h);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  color: var(--fg-3);
+}
+
+.ocean-place-call__input {
+  appearance: none;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: var(--ctl-h);
+  padding: 0 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: var(--ctl-h);
+  outline: none;
+  transition:
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease),
+    opacity var(--dur-fast) var(--ease);
+}
+
+.ocean-place-call__input::placeholder {
+  color: var(--fg-3);
+}
+
+.ocean-place-call__input:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.ocean-place-call__input:focus,
+.ocean-place-call__input:focus-visible {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+  outline: none;
+}
+
+.ocean-place-call__input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ocean-place-call__btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  height: var(--ctl-h);
+  padding: 0 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    opacity var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.ocean-place-call__btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.ocean-place-call__btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.ocean-place-call__btn:active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+.ocean-place-call:has(.ocean-place-call__dialing) .ocean-place-call__btn {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.ocean-place-call__btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.ocean-place-call__hint {
+  margin: 8px 2px 0;
+  color: var(--fg-3);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.ocean-place-call__dialing {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin: 9px 2px 0;
+  color: var(--accent);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.ocean-place-call__dialing-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  flex: 0 0 auto;
+  animation: ocean-call-live 1.2s var(--ease) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ocean-place-call__dialing-dot {
+    animation: none;
+    transform: none;
+  }
+}
+
+.ocean-place-call__error {
+  display: inline-flex;
+  max-width: 100%;
+  margin: 8px 2px 0;
+  padding: 4px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--err-soft);
+  color: var(--err);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.ocean-place-call__blocked {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--warn);
+  border-radius: var(--radius);
+  background: var(--warn-soft);
+}
+
+.ocean-place-call__blocked-head {
+  margin: 0;
+  color: var(--warn);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.ocean-place-call__blocked-note {
+  margin: 6px 0 0;
+  color: var(--fg-2);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ocean-place-call__env {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ocean-place-call__env-var {
+  padding: 3px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.35;
+}

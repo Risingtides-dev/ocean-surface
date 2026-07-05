@@ -1,0 +1,115 @@
+/* Ocean Surface — design tokens.
+   Single source of visual truth. Ocean's OWN identity: a near-black stage
+   with the OCEAN depth ramp (deep indigo → bright aqua, from the TUI splash
+   banner), Poppins UI type, product register — brand energy only at identity
+   + state moments; everything else restrained. Spec:
+   docs/OCEAN_WEB_SURFACE_DESIGN.md — read it before adding ANY color literal
+   outside this file. */
+
+/* Poppins — vendored woff2 (public/fonts/, copied beside the CSS in dist).
+   Relative url() so the same file works in the web dist root AND the Chrome
+   extension's dist/ (sidepanel.html links dist/tokens.css; fonts are copied
+   to extension/dist/fonts by scripts/build-extension.sh). */
+@font-face {
+  font-family: 'Poppins';
+  src: url('fonts/Poppins-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Poppins';
+  src: url('fonts/Poppins-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Poppins';
+  src: url('fonts/Poppins-SemiBold.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Poppins';
+  src: url('fonts/Poppins-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  /* ── Surfaces ─────────────────────────────────────────────────── */
+  --bg: #060606;            /* page */
+  --bg-raised: #0A0A0A;     /* bars, panels, drawers */
+  --bg-elevated: #141414;   /* cards, inputs, chips, wells */
+  --bg-hover: #1B1C21;      /* hover fill on elevated surfaces */
+  --bg-well: #23252B;       /* data wells: code, diff, transcripts */
+
+  /* ── Text ─────────────────────────────────────────────────────── */
+  --fg: #FAFCFF;            /* headings, primary content */
+  --fg-2: #B8B9BB;          /* body secondary */
+  --fg-3: #909098;          /* labels, metadata */
+  --fg-4: #5A5C63;          /* disabled only */
+
+  /* ── Brand — the OCEAN depth ramp ─────────────────────────────── */
+  /* Source of truth: the TUI splash banner (ocean-os ocean-tui/src/splash.rs),
+     xterm-256 indices 17→19→25→31→38→44→50→87. Abyss to sunlit surface.
+     The ramp paints IDENTITY (wordmark, landing banner, data fills); the
+     interactive accent is the working cyan from its bright end. */
+  --ocean-1: #00005F;
+  --ocean-2: #0000AF;
+  --ocean-3: #005FAF;
+  --ocean-4: #0087AF;
+  --ocean-5: #00AFD7;
+  --ocean-6: #00D7D7;
+  --ocean-7: #00FFD7;
+  --ocean-8: #5FFFFF;
+  --accent: var(--ocean-6);                /* interactive accent on dark */
+  --accent-bright: var(--ocean-7);         /* hot highlight, live moments */
+  --accent-deep: var(--ocean-4);           /* depth tone, gradients only */
+  --fg-on-accent: #03181A;                 /* ink on accent fills */
+  --gradient: linear-gradient(180deg, var(--ocean-6), var(--ocean-4)); /* data fills (charts), never buttons */
+  --accent-soft: rgba(0, 215, 215, 0.12);  /* tinted fills */
+  --accent-ring: rgba(0, 215, 215, 0.45);  /* focus ring */
+
+  /* ── Status ───────────────────────────────────────────────────── */
+  --ok: #1ED760;    --ok-soft: rgba(30, 215, 96, 0.12);
+  --err: #FF4D67;   --err-soft: rgba(255, 77, 103, 0.12);
+  --warn: #FFB224;  --warn-soft: rgba(255, 178, 36, 0.12);
+  --info: #6AA6FF;  --info-soft: rgba(106, 166, 255, 0.12);
+  --running: var(--warn);
+
+  /* ── Borders ──────────────────────────────────────────────────── */
+  --border-subtle: rgba(255, 255, 255, 0.06);
+  --border: rgba(255, 255, 255, 0.10);
+  --border-strong: rgba(255, 255, 255, 0.20);
+
+  /* ── Type ─────────────────────────────────────────────────────── */
+  --font: 'Poppins', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;
+
+  /* ── Radii ────────────────────────────────────────────────────── */
+  --radius-sm: 8px;
+  --radius: 12px;
+  --radius-lg: 16px;
+  --radius-pill: 999px;
+
+  /* ── Shadows / glow ───────────────────────────────────────────── */
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.40);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.55);
+  --shadow-lg: 0 24px 64px rgba(0, 0, 0, 0.65);
+  --glow-brand: 0 0 32px rgba(0, 215, 215, 0.28);
+
+  /* ── Motion ───────────────────────────────────────────────────── */
+  --ease: cubic-bezier(.22, .61, .36, 1);
+  --dur-fast: 160ms;
+  --dur: 240ms;
+
+  /* ── Controls / layout ────────────────────────────────────────── */
+  --ctl-h: 34px;
+  --ctl-h-sm: 28px;
+  --focus-ring: 0 0 0 2px var(--accent-ring);
+  --shell-max: 1120px;
+}

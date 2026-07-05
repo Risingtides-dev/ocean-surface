@@ -1,0 +1,333 @@
+/* Agent canvas (OCEAN-178 → OCEAN-248).
+   Spatial web projection for daemon `surface_patch` events. Rust owns geometry
+   through inline dimensions/positions; this file owns only the visual shell. */
+
+/* Canvas shell ------------------------------------------------------------- */
+.ocean-canvas {
+  margin: 8px 18px 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  overflow: hidden;
+}
+
+.ocean-canvas__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ocean-canvas__title {
+  font-size: 11px;
+  line-height: 1.2;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  color: var(--fg-3);
+}
+
+.ocean-canvas__meta {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.2;
+  color: var(--fg-3);
+}
+
+.ocean-canvas__empty {
+  margin: 12px;
+  padding: 14px 16px;
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  color: var(--fg-3);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* Canvas tabs -------------------------------------------------------------- */
+.ocean-canvas__tabs {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  overflow-x: auto;
+}
+
+.ocean-canvas__tab {
+  appearance: none;
+  min-height: var(--ctl-h-sm);
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--fg-3);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.ocean-canvas__tab:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.ocean-canvas__tab:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.ocean-canvas__tab:active {
+  transform: scale(0.985);
+}
+
+.ocean-canvas__tab:disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.ocean-canvas__tab--active {
+  border-color: var(--border-subtle);
+  background: var(--accent-soft);
+  color: var(--fg);
+}
+
+/* Viewport and scene geometry -------------------------------------------- */
+.ocean-canvas__viewport {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  background-color: var(--bg-raised);
+  background-image: radial-gradient(
+    circle at 1px 1px,
+    var(--border-subtle) 1px,
+    transparent 0
+  );
+  background-size: 22px 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ocean-canvas__scene {
+  position: relative;
+  /* width/height/aspect-ratio are set inline by Rust from canvas-unit bounds.
+     Keep the cap-and-center semantics: the scene scales down without changing
+     the absolute-positioned card coordinate system. */
+  max-width: 100%;
+  max-height: 100%;
+  flex: 0 0 auto;
+}
+
+/* SVG edge layer ---------------------------------------------------------- */
+.ocean-canvas__edges {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.ocean-canvas__edge {
+  fill: none;
+  stroke: var(--fg-3);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.ocean-canvas__edge--flow {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+.ocean-canvas__edge--dependency {
+  stroke: var(--warn);
+  stroke-width: 1.75;
+}
+
+.ocean-canvas__edge--reference {
+  stroke: var(--info);
+  stroke-dasharray: 4 4;
+}
+
+.ocean-canvas__edge-label {
+  fill: var(--fg-3);
+  font-family: var(--mono);
+  font-size: 10px;
+  text-anchor: middle;
+  paint-order: stroke;
+  stroke: var(--bg-elevated);
+  stroke-width: 3px;
+}
+
+/* Positioned canvas cards ------------------------------------------------- */
+.ocean-canvas-card {
+  position: absolute;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  overflow: hidden;
+}
+
+.ocean-canvas-card--card {
+  background: var(--bg-elevated);
+}
+
+.ocean-canvas-card--node {
+  border-color: var(--border);
+  background: var(--accent-soft);
+}
+
+.ocean-canvas-card--container {
+  border-style: dashed;
+  background: var(--bg-raised);
+}
+
+.ocean-canvas-card--stat {
+  justify-content: center;
+  background: var(--bg-well);
+}
+
+.ocean-canvas-card--media {
+  background: var(--bg-raised);
+}
+
+.ocean-canvas-card__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ocean-canvas-card__title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+  font-size: 13px;
+  line-height: 1.3;
+  font-weight: 600;
+}
+
+.ocean-canvas-card__kind {
+  flex: 0 0 auto;
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  background: var(--bg-raised);
+  color: var(--fg-3);
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.ocean-canvas-card__body {
+  overflow: hidden;
+  color: var(--fg-2);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.ocean-canvas-card__sub {
+  overflow: hidden;
+  color: var(--fg-3);
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ocean-canvas-card__stat {
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+.ocean-canvas-card__media {
+  flex: 1 1 auto;
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-well);
+  color: var(--fg-3);
+  font-size: 18px;
+}
+
+/* Workflow status badges -------------------------------------------------- */
+.ocean-canvas-card__badge {
+  align-self: flex-start;
+  padding: 2px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  background: var(--bg-raised);
+  color: var(--fg-3);
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.2;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.ocean-canvas-card__badge--running {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.ocean-canvas-card__badge--ok {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.ocean-canvas-card__badge--error {
+  background: var(--err-soft);
+  color: var(--err);
+}
+
+.ocean-canvas-card__badge--waiting {
+  background: var(--info-soft);
+  color: var(--info);
+}
+
+.ocean-canvas-card__badge--idle {
+  background: var(--bg-raised);
+  color: var(--fg-3);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ocean-canvas__tab {
+    transition: none;
+  }
+
+  .ocean-canvas__tab:active {
+    transform: none;
+  }
+}

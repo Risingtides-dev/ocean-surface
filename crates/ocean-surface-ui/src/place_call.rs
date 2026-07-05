@@ -128,6 +128,11 @@ pub fn PlaceCallControl(daemon: Daemon) -> impl IntoView {
     // The number being typed. Transient — never persisted (see module docs).
     let number = RwSignal::new(String::new());
     let phase = RwSignal::new(Phase::Idle);
+    // Collapsed by default: an idle full-width dialer row above the transcript
+    // is permanent chrome for a feature used occasionally. The compact trigger
+    // expands to the real dialer; collapsing resets nothing (number/phase are
+    // preserved for the session).
+    let open = RwSignal::new(false);
 
     // True when the current input would pass the E.164 gate. Gates the button so
     // the operator can't fire a doomed request, and shows a quiet hint when the
@@ -227,6 +232,24 @@ pub fn PlaceCallControl(daemon: Daemon) -> impl IntoView {
         move || has_input() && !is_valid() && error_msg().is_none() && blocked().is_none();
 
     view! {
+        <Show
+            when=move || open.get()
+            fallback=move || view! {
+                <div class="ocean-place-call ocean-place-call--collapsed">
+                    <button
+                        class="ocean-place-call__trigger"
+                        type="button"
+                        title="Place an outbound phone call"
+                        on:click=move |_| open.set(true)
+                    >
+                        <span class="ocean-place-call__icon" aria-hidden="true">
+                            <Phone />
+                        </span>
+                        "Call"
+                    </button>
+                </div>
+            }
+        >
         <section class="ocean-place-call" aria-label="place a call">
             <div class="ocean-place-call__row">
                 <span class="ocean-place-call__icon" aria-hidden="true">
@@ -268,6 +291,16 @@ pub fn PlaceCallControl(daemon: Daemon) -> impl IntoView {
                     } else {
                         "Call".to_string()
                     }}
+                </button>
+                <button
+                    class="ocean-place-call__hide"
+                    type="button"
+                    title="Hide the dialer"
+                    aria-label="hide the dialer"
+                    prop:disabled=dialing
+                    on:click=move |_| open.set(false)
+                >
+                    "×"
                 </button>
             </div>
 
@@ -342,6 +375,7 @@ pub fn PlaceCallControl(daemon: Daemon) -> impl IntoView {
                 }}
             </Show>
         </section>
+        </Show>
     }
 }
 
