@@ -283,17 +283,34 @@ fn ToolGroup(
             .get()
             .unwrap_or_else(|| matches!(agg.get(), ToolStatus::Err))
     });
-    // A freshly-arrived error must re-surface even if the user had collapsed the
-    // group: drop the manual override on the transition into Err (edge-triggered,
-    // so the user can collapse again afterward). Mirrors the reducer expanding
-    // the failed call itself.
-    let prev_err = RwSignal::new(false);
+    // A newly-arrived failure must re-surface even if the user had collapsed the
+    // group — including a second failure inside an already-errored group. Key the
+    // reset off the count of failed calls, not the aggregate status: whenever that
+    // count rises, drop the manual override so `open` follows the auto rule again
+    // (the user can collapse afterward). Mirrors the reducer expanding each failed
+    // call itself.
+    let err_count = Signal::derive(move || {
+        turns.with(|t| {
+            t.get(turn_idx).map_or(0usize, |turn| {
+                idxs.get_value()
+                    .into_iter()
+                    .filter(|&bi| {
+                        matches!(
+                            turn.blocks.get(bi),
+                            Some(Block::ToolCall { status: ToolStatus::Err, .. })
+                        )
+                    })
+                    .count()
+            })
+        })
+    });
+    let prev_err_count = RwSignal::new(0usize);
     Effect::new(move |_| {
-        let is_err = matches!(agg.get(), ToolStatus::Err);
-        if is_err && !prev_err.get_untracked() {
+        let n = err_count.get();
+        if n > prev_err_count.get_untracked() {
             user_override.set(None);
         }
-        prev_err.set(is_err);
+        prev_err_count.set(n);
     });
     let toggle = move |_| user_override.set(Some(!open.get()));
 

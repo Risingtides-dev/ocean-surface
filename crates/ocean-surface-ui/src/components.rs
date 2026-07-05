@@ -1455,3 +1455,133 @@ pub fn PermissionPrompts(daemon: Daemon) -> impl IntoView {
         </Show>
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn extracted_youtube_id(raw: &str) -> Option<String> {
+        youtube_id(&raw.to_ascii_lowercase(), raw)
+    }
+
+    #[test]
+    fn cell_text_renders_json_scalars_and_current_compound_values() {
+        assert_eq!(cell_text(&json!("ocean")), "ocean");
+        assert_eq!(cell_text(&json!(73)), "73");
+        assert_eq!(cell_text(&json!(true)), "true");
+        assert_eq!(cell_text(&json!(false)), "false");
+        assert_eq!(cell_text(&Value::Null), "");
+        assert_eq!(cell_text(&json!({"a": 1})), r#"{"a":1}"#);
+        assert_eq!(cell_text(&json!([1, "two"])), r#"[1,"two"]"#);
+    }
+
+    #[test]
+    fn sanitize_id_keeps_ascii_id_chars_and_replaces_everything_else() {
+        assert_eq!(sanitize_id("Az-09_ok"), "Az-09_ok");
+
+        let sanitized = sanitize_id("a b<\"/é_x-9");
+
+        assert_eq!(sanitized, "a-b----_x-9");
+        assert!(sanitized
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(![' ', '<', '"', '/', 'é']
+            .iter()
+            .any(|&unsafe_char| sanitized.contains(unsafe_char)));
+    }
+
+    #[test]
+    fn classify_video_returns_youtube_nocookie_iframe_with_start() {
+        match classify_video(
+            "https://www.youtube.com/watch?v=AbC-123_xy&feature=share",
+            42,
+        ) {
+            VideoKind::Iframe(src) => {
+                assert_eq!(
+                    src,
+                    "https://www.youtube-nocookie.com/embed/AbC-123_xy?start=42"
+                );
+            }
+            _ => panic!("expected YouTube iframe"),
+        }
+    }
+
+    #[test]
+    fn classify_video_returns_youtu_be_short_link_as_nocookie_iframe() {
+        match classify_video("https://youtu.be/Short_Id-42?si=share", 0) {
+            VideoKind::Iframe(src) => {
+                assert_eq!(src, "https://www.youtube-nocookie.com/embed/Short_Id-42");
+            }
+            _ => panic!("expected youtu.be iframe"),
+        }
+    }
+
+    #[test]
+    fn classify_video_returns_vimeo_player_iframe() {
+        match classify_video("https://vimeo.com/channels/staffpicks/123456789", 0) {
+            VideoKind::Iframe(src) => {
+                assert_eq!(src, "https://player.vimeo.com/video/123456789");
+            }
+            _ => panic!("expected Vimeo iframe"),
+        }
+    }
+
+    #[test]
+    fn classify_video_preserves_trimmed_direct_media_file_url() {
+        match classify_video("  https://cdn.example.com/video/demo.MP4  ", 0) {
+            VideoKind::File(src) => {
+                assert_eq!(src, "https://cdn.example.com/video/demo.MP4");
+            }
+            _ => panic!("expected direct media file"),
+        }
+    }
+
+    #[test]
+    fn classify_video_returns_social_platform_and_canonical_url() {
+        match classify_video(" https://www.tiktok.com/@ocean/video/123 ", 0) {
+            VideoKind::Social(platform, canon) => {
+                assert_eq!(platform, "tiktok");
+                assert_eq!(canon, "https://www.tiktok.com/@ocean/video/123");
+            }
+            _ => panic!("expected TikTok social embed"),
+        }
+
+        match classify_video("https://www.instagram.com/reel/ABC123/", 0) {
+            VideoKind::Social(platform, canon) => {
+                assert_eq!(platform, "instagram");
+                assert_eq!(canon, "https://www.instagram.com/reel/ABC123/");
+            }
+            _ => panic!("expected Instagram social embed"),
+        }
+    }
+
+    #[test]
+    fn classify_video_returns_unknown_for_non_video_url() {
+        match classify_video(" https://example.com/post ", 0) {
+            VideoKind::Unknown(url) => {
+                assert_eq!(url, "https://example.com/post");
+            }
+            _ => panic!("expected unknown video kind"),
+        }
+    }
+
+    #[test]
+    fn youtube_id_extracts_common_url_shapes() {
+        let cases = [
+            ("https://youtu.be/ShortId_1-2?si=share", Some("ShortId_1-2")),
+            ("https://www.youtube.com/watch?v=WatchId", Some("WatchId")),
+            (
+                "https://www.youtube.com/watch?v=Watch-Id_42&feature=share",
+                Some("Watch-Id_42"),
+            ),
+            ("https://www.youtube.com/embed/Embed_123-xy", Some("Embed_123-xy")),
+            ("https://www.youtube.com/shorts/Shorts_123-xy?feature=share", Some("Shorts_123-xy")),
+            ("https://example.com/watch?v=not-youtube", None),
+        ];
+
+        for (raw, expected) in cases {
+            assert_eq!(extracted_youtube_id(raw).as_deref(), expected, "{raw}");
+        }
+    }
+}
