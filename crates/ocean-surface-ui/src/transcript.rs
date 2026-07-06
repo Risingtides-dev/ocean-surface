@@ -50,7 +50,7 @@ fn render_items(blocks: &[Block]) -> Vec<RenderItem> {
 }
 
 #[component]
-pub fn Transcript(daemon: Daemon) -> impl IntoView {
+pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoView {
     let turns = daemon.turns;
     // Key by turn index. New turns append; existing ones mutate in place and
     // their child views read the signal reactively, so re-keying isn't needed
@@ -123,13 +123,23 @@ pub fn Transcript(daemon: Daemon) -> impl IntoView {
                         <span class="transcript__landing-banner-row transcript__landing-banner-row--8">"  Y88888P     Y8888P   8888888888 d88P     888 8888    Y888 "</span>
                     </pre>
                     <h1 class="transcript__landing-title">"Ocean"</h1>
-                    <p class="transcript__landing-lead">
-                        "Start typing below to begin a session."
-                    </p>
-                    <p class="transcript__landing-hint">
-                        "Your first message starts a new conversation — no project required. "
-                        "Open Sessions to start a project, resume a conversation, or begin a chat."
-                    </p>
+                    <button
+                        class="transcript__sessions-launcher"
+                        on:click=move |_| show_sessions.set(true)
+                    >
+                        <span class="transcript__sessions-launcher-icon" aria-hidden="true">
+                            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                                <rect x="0.5" y="0.5" width="6" height="6" rx="1.5" stroke="currentColor"/>
+                                <rect x="9.5" y="0.5" width="6" height="6" rx="1.5" stroke="currentColor"/>
+                                <rect x="0.5" y="9.5" width="6" height="6" rx="1.5" stroke="currentColor"/>
+                                <rect x="9.5" y="9.5" width="6" height="6" rx="1.5" stroke="currentColor"/>
+                            </svg>
+                        </span>
+                        <span class="transcript__sessions-launcher-text">
+                            <span class="transcript__sessions-launcher-title">"Sessions"</span>
+                            <span class="transcript__sessions-launcher-sub">"Browse conversations"</span>
+                        </span>
+                    </button>
                 </div>
             </Show>
             <For

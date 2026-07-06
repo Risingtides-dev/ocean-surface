@@ -418,7 +418,7 @@ pub fn App() -> impl IntoView {
                         // it collapses again on `call_ended`. Purely additive.
                         <crate::call::CallPanel daemon=daemon.clone() />
 
-                        <Transcript daemon=daemon.clone() />
+                        <Transcript daemon=daemon.clone() show_sessions=show_sessions />
 
                         // Agent canvas (OCEAN-178 → OCEAN-248). Folds the
                         // daemon's `surface_patch` stream into a client-side

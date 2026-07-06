@@ -879,3 +879,11 @@ area:      [frontend]
 
 Locked the web-surface rooms/calls wiring gap. Persistent Rooms now route a successful room Join into the shared LiveKit signals (`livekit_room_id` + per-room `/v1/rooms/{key}/livekit-token`), reveal the existing LiveKit utility row, and let `LiveKitPanel` auto-connect/reconnect through the singleton JS bridge instead of opening a parallel connection. Leave/back clears only the matching routed room, disconnects the bridge, and resets stale panel auto-connect state so rejoining the same room reconnects cleanly. Added regression tests for room token path encoding and route/clear signal behavior. Also fixed the outbound call-agent blocker: the proxy now registers `POST /v1/calls/place` and forwards it transparently to the daemon, with a path regression test. Verification: `cargo test -p ocean-surface-ui` (145 passed), `cargo check -p ocean-surface-ui --target wasm32-unknown-unknown`, `cargo test -p ocean-surface-proxy` (8 passed), `cargo check -p ocean-surface-proxy`, forbidden legacy-color grep clean, and `env -u NO_COLOR ./scripts/build-extension.sh` succeeded.
 _________________________________________________________________________________
+time:      [5:27pm] [07-06-26]
+agent:     [codex] [gpt-5.5]
+worktree:  main
+type:      [refactor]
+area:      [frontend]
+
+Replaced the web-surface empty transcript instructional copy with a small Sessions mini-card below the Ocean landing logo. The card opens the existing Sessions modal, keeping the new/resume/project/create-project flow in one place instead of duplicating menu state or leaving verbose helper text in the empty state. `Transcript` now receives the app's `show_sessions` signal, `app.rs` passes it through, and `styles/transcript.css` adds a quiet centered launcher card using existing Ocean tokens only. Verification: `cargo check -p ocean-surface-ui --target wasm32-unknown-unknown`, `env -u NO_COLOR ./scripts/build-extension.sh`, `env -u NO_COLOR trunk build --release`, and browser smoke confirmed the launcher exists, the old lead/hint copy is gone, and clicking it opens the Sessions modal.
+_________________________________________________________________________________
