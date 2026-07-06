@@ -6,7 +6,6 @@ use wasm_bindgen::JsCast;
 
 use crate::components::PermissionPrompts;
 use crate::daemon::{daemon_url_from_env, Daemon};
-use crate::icons::Menu;
 use crate::model::{Block, Role, Turn};
 use crate::rooms::{Rooms, RoomsPanel};
 use crate::sessions::SessionsPanel;
@@ -44,8 +43,6 @@ pub fn App() -> impl IntoView {
     // its only consumer, the header model picker, was removed in OCEAN-202. The
     // composer's per-turn `model_override` is the surface's model control now.
     let models = daemon.models;
-    let project = daemon.project;
-    let projects = daemon.projects;
     // Browser-control indicator (OCEAN-92): lit while the agent is driving the
     // browser (set from the daemon's `browser_activity` SSE event), with the
     // most recent `browser_*` action shown alongside.
@@ -61,20 +58,6 @@ pub fn App() -> impl IntoView {
     // next turn's request; `None` leaves the daemon defaults untouched.
     let thinking_level = daemon.thinking_level;
     let model_override = daemon.model_override;
-    // Active session identity, shown in the header so the user always knows
-    // which session is live and where it's anchored.
-    let session_id = daemon.session_id;
-    let session_title = daemon.session_title;
-    let cwd = daemon.cwd;
-    let has_session = move || session_id.get().is_some();
-    let active_session_label = move || {
-        let title = session_title.get();
-        if title.trim().is_empty() {
-            "untitled session".to_string()
-        } else {
-            title
-        }
-    };
     // Predicates pulled out of the view! macro: a bare `>` inside an attribute
     // expression would be parsed as the element's closing bracket.
     let has_tokens = move || session_tokens.get().total() > 0;
@@ -167,8 +150,6 @@ pub fn App() -> impl IntoView {
     };
     let on_voice_status = Callback::new(move |msg: String| status.set(msg));
 
-    // Clone for the header project picker's on:change.
-    let daemon_project = daemon.clone();
     // Clones for the composer's per-turn override controls (OCEAN-79). These
     // controls live INSIDE the chat-branch <Show> fallback, which must be `Fn`,
     // so they go through StoredValue (Copy) — a plain clone would be moved out of
@@ -218,74 +199,19 @@ pub fn App() -> impl IntoView {
                     </span>
                 </div>
                 <div class="ocean-header__right">
-                    // Project picker: selects which project (directory-bound
-                    // workspace) turns run in. Purely client-side — the choice
-                    // rides on every turn's project_id so the daemon binds to
-                    // that project's workspace_root instead of its launch dir.
-                    <select
-                        class="ocean-project"
-                        aria-label="project"
-                        title="Project"
-                        prop:value=move || project.get().unwrap_or_default()
-                        on:change=move |ev| {
-                            let id = event_target_value(&ev);
-                            daemon_project.set_project((!id.is_empty()).then_some(id));
-                        }
+                    // Sessions is the single header affordance — opens the
+                    // centered sessions modal (chat / create project / resume).
+                    // No project picker, active-session title, or cwd lives in
+                    // the chrome; all session control moved into the modal.
+                    <button
+                        class="ocean-sessions-trigger"
+                        type="button"
+                        aria-label="sessions"
+                        title="Sessions"
+                        on:click=move |_| show_sessions.update(|v| *v = !*v)
                     >
-                        <option prop:value="" prop:selected=move || project.get().is_none()>
-                            "no project"
-                        </option>
-                        <For
-                            each=move || projects.get()
-                            key=|p| p.id.clone()
-                            children=move |p| {
-                                let id = p.id.clone();
-                                let id_sel = p.id.clone();
-                                let label = if p.name.is_empty() { p.id.clone() } else { p.name.clone() };
-                                view! {
-                                    <option
-                                        prop:value=id.clone()
-                                        prop:selected=move || project.get().as_deref() == Some(id_sel.as_str())
-                                    >
-                                        {label}
-                                    </option>
-                                }
-                            }
-                        />
-                    </select>
-                    // (The redundant top-bar model picker was removed in
-                    // OCEAN-202 — the per-turn model override beside the composer
-                    // is the single model control. A global mid-session hot-swap
-                    // is still reachable via the daemon's /v1/model endpoint.)
-                    // Active session identity — title + workspace anchor. Click
-                    // to open the sessions panel. Hidden until a session exists
-                    // (lazy default flow shows nothing until the first prompt).
-                    <Show when=has_session>
-                        <button
-                            class="ocean-active-session"
-                            type="button"
-                            aria-label="active session"
-                            title=move || format!("Active session — {} · {}", active_session_label(), cwd.get())
-                            on:click=move |_| show_sessions.update(|v| *v = !*v)
-                        >
-                            <span class="ocean-active-session__title">{active_session_label}</span>
-                            <span class="ocean-active-session__cwd">{move || cwd.get()}</span>
-                        </button>
-                    </Show>
-                    // Sessions opener. Once a session exists the clickable
-                    // active-session chip above opens the panel, so this hamburger
-                    // shows only in the empty state — no duplicate affordance.
-                    <Show when=move || session_id.get().is_none()>
-                        <button
-                            class="ocean-sessions-btn"
-                            type="button"
-                            aria-label="sessions"
-                            title="Sessions"
-                            on:click=move |_| show_sessions.update(|v| *v = !*v)
-                        >
-                            <Menu />
-                        </button>
-                    </Show>
+                        "Sessions"
+                    </button>
                     // Ambient runtime readouts — token usage, the browser-driving
                     // cue, and connection status — grouped into one demoted cluster
                     // so they read as secondary telemetry, not equal-weight peers

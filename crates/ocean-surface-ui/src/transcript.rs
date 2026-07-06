@@ -128,7 +128,7 @@ pub fn Transcript(daemon: Daemon) -> impl IntoView {
                     </p>
                     <p class="transcript__landing-hint">
                         "Your first message starts a new conversation — no project required. "
-                        "Pick a project from the header if you want turns to run in a specific workspace."
+                        "Open Sessions to start a project, resume a conversation, or begin a chat."
                     </p>
                 </div>
             </Show>

@@ -59,31 +59,16 @@
   white-space: nowrap;
 }
 /* Header controls and per-turn selectors use compact control height. */
-  .ocean-surface--extension .ocean-project,
-  .ocean-surface--extension .ocean-active-session,
-  .ocean-surface--extension .ocean-sessions-btn,
+  .ocean-surface--extension .ocean-sessions-trigger,
   .ocean-surface--extension .ocean-thinking,
   .ocean-surface--extension .ocean-model-override {
     min-height: var(--ctl-h-sm);
     height: var(--ctl-h-sm);
   }
 
-.ocean-surface--extension .ocean-project,
-.ocean-surface--extension .ocean-active-session {
-  max-width: min(34vw, 132px);
-}
-
 .ocean-surface--extension .ocean-thinking,
 .ocean-surface--extension .ocean-model-override {
   max-width: 46vw;
-}
-
-.ocean-surface--extension .ocean-active-session__title,
-.ocean-surface--extension .ocean-active-session__cwd {
-  max-width: 42vw;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* Transcript and canvas regions keep readable gutters in a narrow column. */
@@ -196,31 +181,16 @@
   }
 
   /* Controls: compact height, capped chip widths ---------------------- */
-  .ocean-surface .ocean-project,
-  .ocean-surface .ocean-active-session,
-  .ocean-surface .ocean-sessions-btn,
+  .ocean-surface .ocean-sessions-trigger,
   .ocean-surface .ocean-thinking,
   .ocean-surface .ocean-model-override {
     min-height: var(--ctl-h-sm);
     height: var(--ctl-h-sm);
   }
 
-  .ocean-surface .ocean-project,
-  .ocean-surface .ocean-active-session {
-    max-width: min(34vw, 132px);
-  }
-
   .ocean-surface .ocean-thinking,
   .ocean-surface .ocean-model-override {
     max-width: 46vw;
-  }
-
-  .ocean-surface .ocean-active-session__title,
-  .ocean-surface .ocean-active-session__cwd {
-    max-width: 42vw;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   /* Transcript & canvas: readable gutters ---------------------------- */

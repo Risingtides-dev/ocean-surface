@@ -27,6 +27,16 @@ use crate::model::{Block, Role, ToolStatus, Turn};
 
 pub const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:4780";
 
+/// The throwaway working directory for a projectless Chat session. Chat is
+/// deliberately NOT a project: it clears the project selection and pins the
+/// next lazy session's cwd to `/tmp` so the agent runs in a real directory
+/// without claiming ownership of one. A project session is the opposite — it
+/// keeps cwd untouched and lets the daemon resolve the project's
+/// `workspace_root` from the selected `project_id`. Keeping this as a named
+/// constant (rather than a bare literal) pins the distinction at the type
+/// level and lets the wire-helper test assert it.
+pub const CHAT_WORKSPACE_ROOT: &str = "/tmp";
+
 /// Shape of the proxy's GET /api/config — the zero-config bootstrap payload.
 #[derive(Debug, Clone, Deserialize)]
 struct ProxyConfig {
@@ -952,6 +962,36 @@ pub struct ProjectInfo {
     pub name: String,
     #[serde(default)]
     pub workspace_root: String,
+}
+
+/// `POST /v1/projects` request body — mirrors `ocean-daemon::CreateProjectRequest`
+/// (`ocean-os/crates/ocean-daemon/src/main.rs`). Field names are snake_case and
+/// travel verbatim (the daemon deserializes plain Rust field names, no rename),
+/// so the wire shape is exactly `{ "name": …, "workspace_root": … }`. The
+/// daemon's optional `config` field is `#[serde(default)]` server-side, so we
+/// OMIT it here and let the daemon apply its empty default — sending a partial
+/// config would be surface-side guesswork the daemon doesn't need. A focused
+/// test pins this exact two-field shape so a rename or leaked field fails the
+/// build, not a silent 400 at create time.
+#[derive(Debug, Clone, Serialize)]
+struct ProjectCreateRequest {
+    name: String,
+    workspace_root: String,
+}
+/// `POST /v1/projects` response body — mirrors `ocean-daemon::ProjectResponse`.
+/// `ok` is the authoritative success flag (the daemon sets it on both the 201
+/// success and the 500 failure paths); `project` is present only on success;
+/// `error` carries the daemon's reason on failure. All three are
+/// `#[serde(default)]` so an unexpected proxy shape degrades to a clean
+/// "project create failed" status instead of a serde panic.
+#[derive(Debug, Clone, Deserialize)]
+struct ProjectCreateResponse {
+    #[serde(default)]
+    ok: bool,
+    #[serde(default)]
+    project: Option<ProjectInfo>,
+    #[serde(default)]
+    error: Option<String>,
 }
 
 // The POST response carries only metadata; reply text/ids arrive via SSE.
@@ -2436,6 +2476,111 @@ impl Daemon {
         self.connect();
     }
 
+
+    /// Select project `id` as the active project, then reset to a lazy new
+    /// session (the session is actually created server-side on the first
+    /// prompt — see [`new_session`]). Runtime authority stays in the daemon:
+    /// the surface only records the selection (persisted via [`set_project`])
+    /// and clears local transcript state. No local `mkdir`, no fake project —
+    /// the project's `workspace_root` is resolved server-side from `id`.
+    pub fn begin_project_session(&self, id: String) {
+        self.set_project(Some(id));
+        self.new_session();
+    }
+
+    /// Start a projectless Chat session: clear the project selection and pin
+    /// the working directory to [`CHAT_WORKSPACE_ROOT`] (`/tmp`), then reset to
+    /// a lazy new session. Chat is never a fake project — clearing `project`
+    /// and setting `cwd` BEFORE the lazy [`new_session`] means the next
+    /// `new_session()` POST carries `/tmp` to the daemon as the session's real
+    /// working directory, with no `project_id` attached. `new_session` does not
+    /// reset `cwd`, so the `/tmp` set here survives into the session.
+    pub fn begin_chat_session(&self) {
+        self.set_project(None);
+        self.cwd.set(CHAT_WORKSPACE_ROOT.to_string());
+        self.new_session();
+    }
+
+    /// Create a real project on the daemon (`POST /v1/projects`) and select it
+    /// for the next session. The daemon is the authority for project state — we
+    /// never `mkdir` or invent a project locally. Empty `name` or
+    /// `workspace_root` (after trimming) is rejected with a status chip instead
+    /// of a POST. On success the returned project is upserted into the
+    /// `projects` catalogue, selected (persisted via [`persist_project`]), and
+    /// the status flips to a concise `project created`. On any failure (encode
+    /// / network / non-`ok` / decode) the status becomes
+    /// `project create failed: <concise reason>` via [`concise_error`].
+    pub fn create_project(&self, name: String, workspace_root: String) {
+        let name = name.trim().to_string();
+        let workspace_root = workspace_root.trim().to_string();
+        if name.is_empty() || workspace_root.is_empty() {
+            self.status
+                .set("project create failed: name and workspace required".into());
+            return;
+        }
+        let url = self.url.get_untracked();
+        let projects = self.projects;
+        let status = self.status;
+        let current = self.project;
+        let body = ProjectCreateRequest {
+            name,
+            workspace_root,
+        };
+        spawn_local(async move {
+            let post_url = format!("{}/v1/projects", url.trim_end_matches('/'));
+            let req = match Request::post(&post_url)
+                .header("content-type", "application/json")
+                .json(&body)
+            {
+                Ok(req) => req,
+                Err(err) => {
+                    let raw = err.to_string();
+                    log::error!("project create encode error: {raw}");
+                    status.set(format!("project create failed: {}", concise_error(&raw)));
+                    return;
+                }
+            };
+            match req.send().await {
+                Ok(resp) => match resp.json::<ProjectCreateResponse>().await {
+                    Ok(r) if r.ok => {
+                        let Some(project) = r.project else {
+                            log::error!("project create returned ok with no project");
+                            status.set("project create failed: no project returned".into());
+                            return;
+                        };
+                        // Upsert so the picker reflects the new project
+                        // without a round-trip refresh: replace an existing id
+                        // in place, else append.
+                        projects.update(|list| {
+                            if let Some(slot) = list.iter_mut().find(|p| p.id == project.id) {
+                                *slot = project.clone();
+                            } else {
+                                list.push(project.clone());
+                            }
+                        });
+                        current.set(Some(project.id.clone()));
+                        persist_project(&project.id);
+                        status.set("project created".into());
+                    }
+                    Ok(r) => {
+                        let raw = r.error.unwrap_or_else(|| "project create rejected".into());
+                        log::error!("project create rejected: {raw}");
+                        status.set(format!("project create failed: {}", concise_error(&raw)));
+                    }
+                    Err(err) => {
+                        let raw = err.to_string();
+                        log::error!("project create decode error: {raw}");
+                        status.set(format!("project create failed: {}", concise_error(&raw)));
+                    }
+                },
+                Err(err) => {
+                    let raw = err.to_string();
+                    log::error!("project create post error: {raw}");
+                    status.set(format!("project create failed: {}", concise_error(&raw)));
+                }
+            }
+        });
+    }
 
     /// Clear per-turn and session token counters (on session change).
     fn reset_token_stats(&self) {
@@ -5100,5 +5245,86 @@ mod tests {
     #[test]
     fn no_host_falls_back_to_loopback_default() {
         assert_eq!(daemon_url_fallback("http:", ""), DEFAULT_DAEMON_URL);
+    }
+
+    #[test]
+    fn project_create_request_serializes_name_and_workspace_root_exactly() {
+        // The daemon's `CreateProjectRequest` deserializes `name` +
+        // `workspace_root` verbatim (plain snake_case Rust field names, no
+        // rename). The surface's mirror MUST serialize exactly those two keys
+        // with those exact values — anything else and the daemon 400s the
+        // create (or worse, silently binds the project to the wrong root). We
+        // send no `config` (the daemon defaults it), so the body must carry
+        // only `name` + `workspace_root`.
+        let req = ProjectCreateRequest {
+            name: "neo".into(),
+            workspace_root: "/srv/neo".into(),
+        };
+        let v = serde_json::to_value(&req).expect("request serializes");
+        let map = v.as_object().expect("request is a JSON object");
+        assert_eq!(map.len(), 2, "only name + workspace_root, no leaked field");
+        assert_eq!(
+            map.get("name").and_then(|x| x.as_str()),
+            Some("neo"),
+            "name round-trips verbatim",
+        );
+        assert_eq!(
+            map.get("workspace_root").and_then(|x| x.as_str()),
+            Some("/srv/neo"),
+            "workspace_root round-trips verbatim",
+        );
+    }
+
+    #[test]
+    fn chat_workspace_root_is_tmp_and_distinct_from_project_sessions() {
+        // Chat is PROJECTLESS: it runs in a throwaway `/tmp` workspace so the
+        // agent has a real cwd without pretending to own a project. A project
+        // session is the opposite — it selects a project and leaves cwd for the
+        // daemon to resolve from the project's workspace_root. The two entry
+        // points must not collapse: if chat ever pinned a project, or a project
+        // session ever pinned `/tmp`, the agent would run in the wrong place.
+        //
+        // We exercise the signal transitions directly rather than calling
+        // `begin_chat_session`/`begin_project_session` because those route
+        // through `set_project` → `persist_project`/`clear_persisted_project`
+        // → `web_sys::window()`, which panics off-wasm. The observable contract
+        // — which signals end up set — is identical: `set_project`'s only extra
+        // effect is localStorage persistence (a wasm-only side effect). A
+        // `Daemon::dummy()` already starts with `project = None`, matching
+        // chat's cleared state, and `new_session` is native-safe (it returns at
+        // the `session_id is None` guard before any web access).
+        assert_eq!(CHAT_WORKSPACE_ROOT, "/tmp");
+
+        // Chat: project cleared, cwd pinned to /tmp, then new_session.
+        let chat = Daemon::dummy();
+        chat.cwd.set(CHAT_WORKSPACE_ROOT.to_string());
+        chat.new_session();
+        assert_eq!(
+            chat.project.get_untracked(),
+            None,
+            "chat is projectless — project stays cleared",
+        );
+        assert_eq!(
+            chat.cwd.get_untracked(),
+            "/tmp",
+            "chat pins cwd to /tmp and new_session preserves it (new_session \
+             does not reset cwd), so the daemon lands the session in /tmp",
+        );
+
+        // Project session: project selected, cwd NOT pinned to /tmp.
+        let proj = Daemon::dummy();
+        proj.project.set(Some("p1".into()));
+        proj.new_session();
+        assert_eq!(
+            proj.project.get_untracked(),
+            Some("p1".to_string()),
+            "project session selects the project id and new_session preserves it",
+        );
+        assert_ne!(
+            proj.cwd.get_untracked(),
+            "/tmp",
+            "project session does NOT pin /tmp — the daemon resolves the \
+             project's real workspace_root server-side from the project_id",
+        );
     }
 }

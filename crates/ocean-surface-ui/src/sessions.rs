@@ -18,6 +18,7 @@
 
 use std::collections::HashSet;
 use leptos::prelude::*;
+use leptos::ev::SubmitEvent;
 use js_sys;
 
 use crate::daemon::{Daemon, ProjectInfo, SessionSummary};
@@ -199,7 +200,7 @@ pub(crate) fn fmt_relative_time(updated_at: &str) -> String {
 // SessionsPanel component
 // ---------------------------------------------------------------------------
 
-/// Sessions panel that slides in from the right when open.
+/// Sessions modal — a centered overlay for chat, project creation, and resuming sessions.
 #[component]
 pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
     let session_list = daemon.session_list;
@@ -279,6 +280,25 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
 
     let is_empty = move || sections().is_empty();
 
+    // Create-project form state (modal-only; posts via daemon.create_project).
+    let create_name = RwSignal::new(String::new());
+    let create_root = RwSignal::new(String::new());
+    let create_can_submit = move || {
+        !create_name.get().trim().is_empty() && !create_root.get().trim().is_empty()
+    };
+    let start_chat = move |_| {
+        daemon.get_value().begin_chat_session();
+        open.set(false);
+    };
+    let create_project = move |ev: SubmitEvent| {
+        ev.prevent_default();
+        let name = create_name.get_untracked();
+        let root = create_root.get_untracked();
+        daemon.get_value().create_project(name, root);
+        create_name.set(String::new());
+        create_root.set(String::new());
+    };
+
     view! {
         <div
             class="sessions-overlay"
@@ -290,7 +310,7 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                 }
             }
         >
-            <div class="sessions-panel">
+            <div class="sessions-panel" role="dialog" aria-modal="true" aria-label="Sessions">
                 <div class="sessions-panel__head">
                     <h2 class="sessions-panel__title">"Sessions"</h2>
                     <button
@@ -304,16 +324,38 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                 </div>
 
                 <div class="sessions-panel__actions">
-                    <button
-                        class="sessions-panel__new-btn"
-                        type="button"
-                        on:click=move |_| {
-                            daemon.get_value().new_session();
-                            open.set(false);
-                        }
-                    >
-                        "+ New Session"
+                    <button class="sessions-panel__new-btn" type="button" on:click=start_chat>
+                        "New chat"
                     </button>
+
+                    <form class="sessions-create" on:submit=create_project>
+                        <div class="sessions-create__inputs">
+                            <input
+                                class="sessions-create__input"
+                                type="text"
+                                placeholder="Project name"
+                                autocomplete="off"
+                                prop:value=move || create_name.get()
+                                on:input=move |ev| create_name.set(event_target_value(&ev))
+                            />
+                            <input
+                                class="sessions-create__input"
+                                type="text"
+                                placeholder="Workspace root"
+                                autocomplete="off"
+                                spellcheck="false"
+                                prop:value=move || create_root.get()
+                                on:input=move |ev| create_root.set(event_target_value(&ev))
+                            />
+                        </div>
+                        <button
+                            class="sessions-create__btn"
+                            type="submit"
+                            disabled=move || !create_can_submit()
+                        >
+                            "Create project"
+                        </button>
+                    </form>
                 </div>
 
                 <div class="sessions-panel__list">
@@ -330,6 +372,7 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                             let glyph_key = skey.clone();
                             let show_key = skey.clone();
                             let click_key = skey.clone();
+                            let new_key = skey.clone();
                             let glyph = move || if is_collapsed(&glyph_key) { "▸" } else { "▾" };
 
                             view! {
@@ -360,6 +403,23 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                         <span class="sessions-group__count">{s_count}</span>
                                     </button>
 
+                                    // ── Per-project new session (real projects only) ──
+                                    <Show when=move || s_is_project>
+                                        <button
+                                            class="sessions-group__new-btn"
+                                            type="button"
+                                            on:click={
+                                                let k = new_key.clone();
+                                                move |_| {
+                                                    daemon.get_value().begin_project_session(k.clone());
+                                                    open.set(false);
+                                                }
+                                            }
+                                        >
+                                            "+ New session"
+                                        </button>
+                                    </Show>
+
                                     // ── Expanded body ───────────────────────
                                     <Show when=move || !is_collapsed(&show_key)>
                                         <div class="sessions-group__body">
@@ -388,14 +448,14 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                                                     {count}
                                                                 </span>
                                                             </div>
-                                                            {rows.into_iter().map(|s| session_row(s, daemon, open, current_id, false).into_any()).collect::<Vec<_>>()}
+                                                            {rows.into_iter().map(|s| session_row(s, daemon, open, current_id).into_any()).collect::<Vec<_>>()}
                                                         </div>
                                                     }.into_any()
                                                 }).collect::<Vec<_>>()
                                             } else {
                                                 // Flat list.
                                                 flattened.clone().into_iter()
-                                                    .map(|s| session_row(s, daemon, open, current_id, !s_is_project).into_any())
+                                                    .map(|s| session_row(s, daemon, open, current_id).into_any())
                                                     .collect::<Vec<_>>()
                                             }}
                                         </div>
@@ -408,7 +468,7 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
 
                 <Show when=is_empty>
                     <div class="sessions-panel__empty">
-                        "No sessions yet. Send a message to start one."
+                        "Pick a project to start a session, create a new project, start a chat, or resume a session below."
                     </div>
                 </Show>
             </div>
@@ -423,7 +483,6 @@ fn session_row(
     daemon: StoredValue<Daemon>,
     panel_open: RwSignal<bool>,
     current_id: RwSignal<Option<String>>,
-    show_path: bool,
 ) -> impl IntoView {
     let session_id = session.id.clone();
     let session_title = if session.title.trim().is_empty() {
@@ -431,8 +490,6 @@ fn session_row(
     } else {
         session.title.clone()
     };
-    let session_path = session.cwd.clone();
-    let show_path = show_path && !session_path.trim().is_empty();
     let turn_label = format!(
         "{} turn{}",
         session.turn_count,
@@ -460,11 +517,6 @@ fn session_row(
                 <span class="sessions-item__time">{rel_time}</span>
                 <span class="sessions-item__turns">{turn_label}</span>
             </div>
-            {if show_path {
-                view! { <div class="sessions-item__path">{session_path}</div> }.into_any()
-            } else {
-                view! { <div class="sessions-item__path sessions-item__path--hidden"></div> }.into_any()
-            }}
         </button>
     }
 }

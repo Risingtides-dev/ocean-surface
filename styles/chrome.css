@@ -220,8 +220,7 @@
 }
 
 .ocean-thinking,
-.ocean-model-override,
-.ocean-project {
+.ocean-model-override {
   appearance: none;
   box-sizing: border-box;
   min-width: 0;
@@ -251,50 +250,38 @@
   border-color: transparent;
 }
 
-.ocean-project {
-  height: var(--ctl-h-sm);
-  max-width: 200px;
-  padding: 0 30px 0 10px;
-  font-size: 12px;
-}
-
 .ocean-thinking:hover,
 .ocean-model-override:hover {
   color: var(--fg);
 }
 
 .ocean-thinking:hover,
-.ocean-model-override:hover,
-.ocean-project:hover {
+.ocean-model-override:hover {
   background-color: var(--bg-elevated);
   border-color: var(--border-strong);
 }
 
 .ocean-thinking:focus-visible,
-.ocean-model-override:focus-visible,
-.ocean-project:focus-visible {
+.ocean-model-override:focus-visible {
   outline: none;
   border-color: var(--accent);
   box-shadow: var(--focus-ring);
 }
 
 .ocean-thinking:active,
-.ocean-model-override:active,
-.ocean-project:active {
+.ocean-model-override:active {
   transform: scale(0.985);
 }
 
 .ocean-thinking:disabled,
-.ocean-model-override:disabled,
-.ocean-project:disabled {
+.ocean-model-override:disabled {
   color: var(--fg-4);
   opacity: 0.45;
   pointer-events: none;
 }
 
 .ocean-thinking option,
-.ocean-model-override option,
-.ocean-project option {
+.ocean-model-override option {
   background: var(--bg-raised);
   color: var(--fg);
   font-family: var(--font);
@@ -302,10 +289,9 @@
 
 /* Button controls -------------------------------------------------------- */
 .ocean-composer__halt,
-.ocean-sessions-btn,
+.ocean-sessions-trigger,
 .ocean-more__btn,
 .ocean-more__item,
-.ocean-active-session,
 .ocean-council-modal__close {
   appearance: none;
   box-sizing: border-box;
@@ -314,7 +300,6 @@
   transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
 }
 
-.ocean-sessions-btn,
 .ocean-more__btn {
   display: inline-grid;
   place-items: center;
@@ -329,16 +314,14 @@
   border-radius: var(--radius);
 }
 
-.ocean-sessions-btn:hover,
 .ocean-more__btn:hover {
   color: var(--fg);
   background: var(--bg-hover);
   border-color: var(--border-strong);
 }
 
-.ocean-sessions-btn:focus-visible,
+.ocean-sessions-trigger:focus-visible,
 .ocean-more__btn:focus-visible,
-.ocean-active-session:focus-visible,
 .ocean-composer__halt:focus-visible,
 .ocean-council-modal__close:focus-visible {
   outline: none;
@@ -346,16 +329,13 @@
   box-shadow: var(--focus-ring);
 }
 
-.ocean-sessions-btn:active,
+.ocean-sessions-trigger:active,
 .ocean-more__btn:active,
-.ocean-active-session:active,
 .ocean-composer__halt:active,
 .ocean-council-modal__close:active {
   transform: scale(0.985);
 }
 
-.ocean-sessions-btn:disabled,
-.ocean-active-session:disabled,
 .ocean-composer__halt:disabled,
 .ocean-council-modal__close:disabled {
   color: var(--fg-4);
@@ -440,52 +420,28 @@
   border-color: var(--border-strong);
 }
 
-/* Active session chip ---------------------------------------------------- */
-.ocean-active-session {
+/* Sessions trigger ------------------------------------------------------- */
+/* The single persistent header affordance — opens the centered sessions
+   modal (chat / create project / resume). A labeled button, not an icon, so
+   it reads as the primary entry point the rest of the chrome orbits. */
+.ocean-sessions-trigger {
   display: inline-flex;
-  flex: 0 1 220px;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: center;
-  gap: 0;
-  min-width: 0;
-  max-width: 220px;
+  align-items: center;
   height: var(--ctl-h-sm);
-  padding: 1px 10px;
-  text-align: left;
+  padding: 0 12px;
   color: var(--fg);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: var(--radius);
 }
 
-.ocean-active-session:hover {
+.ocean-sessions-trigger:hover {
   background: var(--bg-hover);
   border-color: var(--border-strong);
-}
-
-.ocean-active-session__title {
-  max-width: 196px;
-  overflow: hidden;
-  color: var(--fg);
-  font-family: var(--font);
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ocean-active-session__cwd {
-  max-width: 196px;
-  overflow: hidden;
-  color: var(--fg-3);
-  font-family: var(--mono);
-  font-size: 10px;
-  font-weight: 400;
-  line-height: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* Council modal ---------------------------------------------------------- */
