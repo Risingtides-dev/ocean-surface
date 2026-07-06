@@ -887,3 +887,11 @@ area:      [frontend]
 
 Replaced the web-surface empty transcript instructional copy with a small Sessions mini-card below the Ocean landing logo. The card opens the existing Sessions modal, keeping the new/resume/project/create-project flow in one place instead of duplicating menu state or leaving verbose helper text in the empty state. `Transcript` now receives the app's `show_sessions` signal, `app.rs` passes it through, and `styles/transcript.css` adds a quiet centered launcher card using existing Ocean tokens only. Verification: `cargo check -p ocean-surface-ui --target wasm32-unknown-unknown`, `env -u NO_COLOR ./scripts/build-extension.sh`, `env -u NO_COLOR trunk build --release`, and browser smoke confirmed the launcher exists, the old lead/hint copy is gone, and clicking it opens the Sessions modal.
 _________________________________________________________________________________
+time:      [7:35pm] [07-06-26]
+agent:     [codex] [gpt-5.5]
+worktree:  main
+type:      [refactor]
+area:      [design]
+
+Set the web-surface component standard after John flagged the sessions launcher/modal as slopped and the pill-everything look as 2015-core. New rule codified in docs/OCEAN_WEB_SURFACE_DESIGN.md: pill radius is geometry, never chrome — `--radius-pill` only for true circles (status dots, voice orb, progress bars, scrollbar thumbs); the radii scale tightened to 4/6/10 in tokens.css so every button, input, select, menu, card, and modal sharpens in one move. Demoted 19 pill-shaped text chips/tabs/badges across call/canvas/chrome/components/composer/float/panels/transcript CSS to `--radius-sm`. Rebuilt the landing launcher as one quiet secondary control ("Sessions", no icon lockup, no subtitle, no card shadow) and the sessions modal action row (content-width New chat instead of the full-width cyan slab, sans monogram, quiet plain-text empty line). The header overflow menu is documented as the reference component; bans added for pill text controls, full-width accent slabs, and icon+title+subtitle launcher lockups. Verification: wasm cargo check green, `env -u NO_COLOR ./scripts/build-extension.sh` + `trunk build --release` green, forbidden-color grep clean, browser screenshots of landing, sessions modal, and header menu confirm the new standard.
+_________________________________________________________________________________

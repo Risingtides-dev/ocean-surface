@@ -188,7 +188,7 @@
   min-height: var(--ctl-h-sm);
   padding: 0 10px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-sm);
   background: var(--bg-elevated);
   box-shadow: var(--shadow-md);
   color: var(--fg-3);

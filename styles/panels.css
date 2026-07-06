@@ -350,7 +350,7 @@
 }
 
 .sessions-panel__new-btn {
-  width: 100%;
+  align-self: flex-start;
 }
 .sessions-create {
   display: flex;
@@ -492,12 +492,12 @@
   width: 22px;
   height: 22px;
   border: 1px solid var(--border-subtle);
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: var(--accent-soft);
   color: var(--accent);
-  font-family: var(--mono);
+  font-family: var(--font);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 600;
   line-height: 1;
 }
 
@@ -517,11 +517,15 @@
 .sessions-group__count {
   flex: 0 0 auto;
   color: var(--fg-3);
-  font-family: var(--mono);
   font-weight: 500;
 }
 
+.sessions-group__count {
+  font-family: var(--mono);
+}
+
 .sessions-group__glyph {
+  color: var(--fg-4);
   font-size: 10px;
 }
 
@@ -561,7 +565,7 @@
   overflow: hidden;
   padding: 2px 6px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-sm);
   background: var(--bg-elevated);
   color: var(--accent);
   font-family: var(--mono);
@@ -637,10 +641,7 @@
 }
 
 .sessions-panel__empty {
-  margin: 28px 16px;
-  padding: 16px;
-  border-radius: var(--radius-lg);
-  background: var(--bg-elevated);
+  margin: 32px 16px;
   color: var(--fg-3);
   font-size: 13px;
   line-height: 1.55;
@@ -830,7 +831,7 @@
   min-height: 20px;
   padding: 0 8px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-sm);
   background: var(--bg-elevated);
   color: var(--fg-3);
   font-family: var(--mono);
@@ -863,7 +864,7 @@
   padding: 0 10px;
   overflow: hidden;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-sm);
   background: var(--bg-elevated);
   color: var(--fg-2);
   font-size: 12px;
@@ -1010,7 +1011,7 @@
   min-height: 24px;
   padding: 0 9px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-sm);
   background: var(--accent-soft);
   color: var(--accent);
   font-family: var(--mono);

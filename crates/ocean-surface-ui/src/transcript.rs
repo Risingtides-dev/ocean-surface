@@ -127,18 +127,7 @@ pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoVie
                         class="transcript__sessions-launcher"
                         on:click=move |_| show_sessions.set(true)
                     >
-                        <span class="transcript__sessions-launcher-icon" aria-hidden="true">
-                            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                                <rect x="0.5" y="0.5" width="6" height="6" rx="1.5" stroke="currentColor"/>
-                                <rect x="9.5" y="0.5" width="6" height="6" rx="1.5" stroke="currentColor"/>
-                                <rect x="0.5" y="9.5" width="6" height="6" rx="1.5" stroke="currentColor"/>
-                                <rect x="9.5" y="9.5" width="6" height="6" rx="1.5" stroke="currentColor"/>
-                            </svg>
-                        </span>
-                        <span class="transcript__sessions-launcher-text">
-                            <span class="transcript__sessions-launcher-title">"Sessions"</span>
-                            <span class="transcript__sessions-launcher-sub">"Browse conversations"</span>
-                        </span>
+                        "Sessions"
                     </button>
                 </div>
             </Show>

@@ -90,10 +90,10 @@
   --font: 'Poppins', system-ui, -apple-system, 'Segoe UI', sans-serif;
   --mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;
 
-  /* ── Radii ────────────────────────────────────────────────────── */
-  --radius-sm: 8px;
-  --radius: 12px;
-  --radius-lg: 16px;
+  /* ── Radii — pill is geometry, never chrome ───────────────────── */
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-lg: 10px;
   --radius-pill: 999px;
 
   /* ── Shadows / glow ───────────────────────────────────────────── */

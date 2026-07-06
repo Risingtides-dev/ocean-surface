@@ -118,7 +118,7 @@ body.ocean-float-mode {
   padding: 2px 8px;
   overflow: hidden;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-sm);
   background: var(--bg-elevated);
   color: var(--fg-3);
   font-family: var(--mono);

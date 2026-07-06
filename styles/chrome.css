@@ -157,7 +157,7 @@
   line-height: 1;
   background: var(--accent-soft);
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-sm);
   white-space: nowrap;
   cursor: default;
 }

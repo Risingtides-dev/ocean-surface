@@ -50,7 +50,7 @@
   height: 22px;
   padding: 0 8px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-sm);
   background: var(--accent-soft);
   color: var(--accent);
   font-size: 11px;
@@ -217,29 +217,28 @@
 }
 
 .transcript__sessions-launcher {
-  display: flex;
+  appearance: none;
+  display: inline-flex;
   align-items: center;
-  gap: 12px;
-  width: 100%;
-  max-width: 300px;
-  margin: 0 auto;
-  padding: 14px 16px;
+  align-self: center;
+  height: var(--ctl-h);
+  margin-top: 4px;
+  padding: 0 18px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-sm);
+  border-radius: var(--radius);
   color: var(--fg-2);
-  font: inherit;
-  text-align: left;
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
   cursor: pointer;
   user-select: none;
   transition:
     background var(--dur-fast) var(--ease),
     border-color var(--dur-fast) var(--ease),
     color var(--dur-fast) var(--ease),
-    transform var(--dur-fast) var(--ease),
-    box-shadow var(--dur-fast) var(--ease);
-  animation: ocean-perm-in var(--dur-fast) var(--ease);
+    transform var(--dur-fast) var(--ease);
 }
 
 .transcript__sessions-launcher:hover {
@@ -255,38 +254,6 @@
 
 .transcript__sessions-launcher:active {
   transform: scale(0.985);
-}
-
-.transcript__sessions-launcher-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 28px;
-  height: 28px;
-  border-radius: var(--radius);
-  background: var(--accent-soft);
-  color: var(--accent);
-}
-
-.transcript__sessions-launcher-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.transcript__sessions-launcher-title {
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1.25;
-  color: var(--fg);
-}
-
-.transcript__sessions-launcher-sub {
-  font-size: 12px;
-  line-height: 1.3;
-  color: var(--fg-3);
 }
 
 /* ── Turns and prose blocks ──────────────────────────────────────── */
@@ -457,7 +424,7 @@
   min-height: var(--ctl-h-sm);
   padding: 0 10px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--fg-3);
   font: 500 12px/1 var(--font);

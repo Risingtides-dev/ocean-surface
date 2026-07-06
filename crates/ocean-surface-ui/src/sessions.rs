@@ -468,7 +468,7 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
 
                 <Show when=is_empty>
                     <div class="sessions-panel__empty">
-                        "Pick a project to start a session, create a new project, start a chat, or resume a session below."
+                        "No sessions yet — start a chat or create a project."
                     </div>
                 </Show>
             </div>

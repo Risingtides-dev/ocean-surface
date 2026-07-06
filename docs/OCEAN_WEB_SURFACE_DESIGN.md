@@ -81,11 +81,13 @@ Type
 - Uppercase labels: 11px, weight 600, `letter-spacing: 0.08em`, `--fg-3`.
 - Mono is for DATA (paths, ids, tokens, numbers, code), never for UI labels.
 
-Radii
-- `--radius-sm: 8px` small chips, inline pills' inner elements
-- `--radius: 12px` inputs, buttons, list items
-- `--radius-lg: 16px` cards, panels, composer
-- `--radius-pill: 999px` pills, chips, badges, orb
+Radii — pill is GEOMETRY, never chrome
+- `--radius-sm: 4px` chips, badges, tabs, menu items, mono data chips
+- `--radius: 6px` inputs, buttons, selects, list rows, dropdown menus
+- `--radius-lg: 10px` cards, panels, modals, composer dock
+- `--radius-pill: 999px` true circles/capsules ONLY: status dots, the voice
+  orb, progress bars, scrollbar thumbs. Never on a text-bearing control —
+  pill buttons/inputs/chips read 2015-SaaS and are banned (2026-07-06).
 
 Shadows / glow
 - `--shadow-sm: 0 2px 8px rgba(0,0,0,0.40)`
@@ -104,6 +106,11 @@ Controls & layout
 - `--shell-max: 1120px` desktop shell width
 
 ## 3. Control recipes (the ONE vocabulary — every domain uses these verbatim)
+
+The reference component is the header overflow menu (`ocean-more__menu`):
+an elevated panel, hairline border, tight radius, plain text rows — no icons,
+no subtitles, no accent chrome. Every new component must justify any element
+that menu doesn't have (an icon lockup, a subtitle, a fill) before adding it.
 
 Primary button (send, approve, submit, join, create):
 - `background: var(--accent)`, `color: var(--fg-on-accent)` (dark ink — never
@@ -134,7 +141,7 @@ Selects (project picker, thinking, model, form selects):
   `background-image` SVG (stroke `#909098`), `background-position: right 10px center`,
   padding-right 30px. Same height as buttons. Sans font, NOT mono.
 
-Chips/badges: pill radius, `--bg-elevated` + `--border-subtle`, 12px text.
+Chips/badges: `--radius-sm`, `--bg-elevated` + `--border-subtle`, 12px text.
 State chips tint with the matching `*-soft` bg + solid status text.
 
 Focus: `:focus-visible { box-shadow: var(--focus-ring); outline: none; }` on all
@@ -180,13 +187,20 @@ Failure surfaces:
 - No border-radius > 16px on cards/inputs (pills exempt).
 - No glassmorphism as default; `backdrop-filter` only on overlay backdrops.
 - No decorative motion; no page-load choreography.
-- Uniform icon+heading+text card grids and hero-metric lockups: no.
+- Uniform icon+heading+text card grids and hero-metric lockups: no. A launcher
+  or affordance is a labeled control, never an icon+title+subtitle lockup.
+- No pill-shaped text controls: `--radius-pill` is reserved for dots, the orb,
+  progress bars, and scrollbar thumbs.
+- No full-width accent slab buttons; a primary action is content-width at
+  control height, placed where the flow reads.
 
 ## 6. Per-surface notes
 
 - Landing (`transcript__landing`): the OCEAN banner hero — 8 `pre` rows, one
-  ramp color per row, fluid mono sizing; lead in `--fg-2`, hint in `--fg-3`.
-  Title is visually-hidden (screen readers only). No glow bath.
+  ramp color per row, fluid mono sizing. Title is visually-hidden (screen
+  readers only). Below the banner sits ONE quiet secondary control
+  (`transcript__sessions-launcher`, "Sessions") that opens the sessions
+  modal — no icon, no subtitle, no card, no glow bath.
 - Tool drawers: quiet single-line disclosures, mono label, status dot
   (ok/err/running) instead of colored rails.
 - Thinking: italic 13px `--fg-3` with pill toggle; never louder than answers.
