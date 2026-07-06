@@ -109,6 +109,17 @@ fn status_ok(js: &JsValue) -> (bool, Option<String>) {
     (ok, err)
 }
 
+/// Disconnect the singleton LiveKit bridge. Safe to call even when not connected
+/// (the JS bridge is a no-op then). Intended for room leave/close paths that
+/// need to tear down the call without going through LiveKitPanel's leave button
+/// handler. Does NOT reset panel-local signals (join_state, roster, etc.) —
+/// callers relying on those should set them separately or hide the panel.
+pub fn disconnect_livekit_bridge() {
+    spawn_local(async move {
+        let _ = ocean_livekit_disconnect().await;
+    });
+}
+
 /// The collaboration presence panel: Join/Leave, mic + camera toggles, and a
 /// live participant roster. Renders nothing until the config bootstrap has
 /// supplied a `livekit_token_path` (i.e. a room is configured for this surface).
@@ -125,6 +136,10 @@ pub fn LiveKitPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
     // True while the SDK is mid-reconnect after a network drop. Drives the
     // "reconnecting…" indicator; cleared when the next roster snapshot lands.
     let reconnecting = RwSignal::new(false);
+    // Track the last token_path we attempted to auto-connect to. Prevents
+    // infinite retry loops after a failed auto-connect; reset on manual join
+    // click so the user can always retry explicitly.
+    let last_auto_path: RwSignal<Option<String>> = RwSignal::new(None);
     let is_visible = move || {
         let state = join_state.get();
         !token_path.get().trim().is_empty()
@@ -171,6 +186,100 @@ pub fn LiveKitPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
         .into_js_value(),
     );
 
+    // Auto-connect when the panel opens with a non-empty token_path, and
+    // reconnect if the path changes while already connected. Prevents
+    // infinite retry loops by tracking the last attempted path.
+    let auto_connect_join_state = join_state;
+    let auto_connect_roster_cb = roster_cb;
+    let auto_connect_error = error;
+    let auto_connect_mic_on = mic_on;
+    let auto_connect_camera_on = camera_on;
+    let auto_connect_reconnecting = reconnecting;
+    let auto_connect_participants = participants;
+    Effect::new(move |_| {
+        let path = token_path.get();
+        let is_open = open.get();
+        let state = auto_connect_join_state.get();
+
+        if path.trim().is_empty() {
+            if state != JoinState::Disconnected
+                || last_auto_path.get_untracked().is_some()
+                || auto_connect_error.get_untracked().is_some()
+                || auto_connect_mic_on.get_untracked()
+                || auto_connect_camera_on.get_untracked()
+                || auto_connect_reconnecting.get_untracked()
+                || !auto_connect_participants.get_untracked().is_empty()
+            {
+                last_auto_path.set(None);
+                auto_connect_error.set(None);
+                auto_connect_join_state.set(JoinState::Disconnected);
+                auto_connect_mic_on.set(false);
+                auto_connect_camera_on.set(false);
+                auto_connect_reconnecting.set(false);
+                auto_connect_participants.set(Vec::new());
+            }
+            return;
+        }
+
+        if !is_open {
+            return;
+        }
+
+        match state {
+            JoinState::Disconnected => {
+                // Only auto-connect once per distinct path.
+                if last_auto_path.get().as_deref() != Some(&path) {
+                    last_auto_path.set(Some(path.clone()));
+                    auto_connect_error.set(None);
+                    auto_connect_join_state.set(JoinState::Connecting);
+                    let cb = auto_connect_roster_cb.get_value();
+                    let p = path;
+                    spawn_local(async move {
+                        match ocean_livekit_connect(
+                            &p, "web-surface", "web-surface", "Web Surface", &cb,
+                        )
+                        .await
+                        {
+                            Ok(status) => {
+                                let (ok, err) = status_ok(&status);
+                                if ok {
+                                    auto_connect_join_state.set(JoinState::Connected);
+                                } else {
+                                    auto_connect_join_state.set(JoinState::Disconnected);
+                                    auto_connect_error
+                                        .set(err.or_else(|| Some("failed to join".into())));
+                                }
+                            }
+                            Err(_) => {
+                                auto_connect_join_state.set(JoinState::Disconnected);
+                                auto_connect_error
+                                    .set(Some("LiveKit SDK failed to load".into()));
+                            }
+                        }
+                    });
+                }
+            }
+            JoinState::Connected => {
+                // Token path changed underneath — disconnect and let the next
+                // effect run (after join_state→Disconnected) reconnect.
+                if last_auto_path.get().as_deref() != Some(&path) {
+                    last_auto_path.set(None);
+                    spawn_local(async move {
+                        let _ = ocean_livekit_disconnect().await;
+                        auto_connect_join_state.set(JoinState::Disconnected);
+                        auto_connect_mic_on.set(false);
+                        auto_connect_camera_on.set(false);
+                        auto_connect_reconnecting.set(false);
+                        auto_connect_participants.set(Vec::new());
+                    });
+                }
+            }
+            JoinState::Connecting => {
+                // Let the in-flight connect finish; don't interfere.
+            }
+        }
+    });
+
     let join = move |_| {
         if join_state.get() != JoinState::Disconnected {
             return;
@@ -181,6 +290,9 @@ pub fn LiveKitPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
             return;
         }
         error.set(None);
+        // Reset auto-connect tracking so a manual click always retries
+        // after a failed auto-connect.
+        last_auto_path.set(None);
         join_state.set(JoinState::Connecting);
         let cb = roster_cb.get_value();
         spawn_local(async move {
@@ -189,6 +301,7 @@ pub fn LiveKitPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
             {
                 Ok(status) => {
                     let (ok, err) = status_ok(&status);
+                    last_auto_path.set(Some(path.clone()));
                     if ok {
                         open.set(true);
                         join_state.set(JoinState::Connected);
@@ -198,6 +311,7 @@ pub fn LiveKitPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                     }
                 }
                 Err(_) => {
+                    last_auto_path.set(Some(path));
                     join_state.set(JoinState::Disconnected);
                     error.set(Some("LiveKit SDK failed to load".into()));
                 }

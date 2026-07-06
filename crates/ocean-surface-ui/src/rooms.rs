@@ -296,12 +296,25 @@ pub struct Rooms {
     pub identity_id: RwSignal<&'static str>,
     /// This browser's display name.
     pub identity_name: RwSignal<&'static str>,
+    /// The LiveKit room id for the current call (shared with Daemon/LiveKitPanel).
+    pub livekit_room_id: RwSignal<String>,
+    /// The LiveKit token path for the current call (shared with Daemon/LiveKitPanel).
+    pub livekit_token_path: RwSignal<String>,
+    /// Whether the LiveKit controls utility row is visible.
+    pub show_livekit_controls: RwSignal<bool>,
 }
 
 impl Rooms {
     /// Construct a rooms handle that shares the live `Daemon::url` signal, so it
-    /// always targets the origin resolved by bootstrap.
-    pub fn new(daemon: &crate::daemon::Daemon) -> Self {
+    /// always targets the origin resolved by bootstrap. Accepts the shared
+    /// LiveKit signals from the daemon + app shell so room join/leave/close can
+    /// route calls and toggle the utility row.
+    pub fn new(
+        daemon: &crate::daemon::Daemon,
+        livekit_room_id: RwSignal<String>,
+        livekit_token_path: RwSignal<String>,
+        show_livekit_controls: RwSignal<bool>,
+    ) -> Self {
         let identity = RoomIdentity::current();
         // Leak the small, app-lifetime identity strings to obtain `&'static str`
         // signals, so the panel can pass them into request closures without a
@@ -318,6 +331,9 @@ impl Rooms {
             generation: RwSignal::new(0),
             identity_id: RwSignal::new(id_static),
             identity_name: RwSignal::new(name_static),
+            livekit_room_id,
+            livekit_token_path,
+            show_livekit_controls,
         }
     }
 
@@ -452,13 +468,23 @@ impl Rooms {
             }
         });
     }
-
     /// Close the open room and stop its live loops.
     pub fn close_room(&self) {
+        let closing_key = self.open_key.get_untracked();
         self.generation.update(|g| *g = g.wrapping_add(1));
         self.open_key.set(None);
         self.open_room.set(None);
         self.transcript.set(Vec::new());
+        if let Some(key) = &closing_key {
+            if clear_livekit_room_call_if_current(
+                key,
+                &self.livekit_room_id,
+                &self.livekit_token_path,
+            ) {
+                self.show_livekit_controls.set(false);
+                crate::livekit::disconnect_livekit_bridge();
+            }
+        }
     }
 
     /// Join the open room as the current identity
@@ -490,6 +516,12 @@ impl Rooms {
                             status.set("joined".into());
                             me.refresh_open_transcript(&key);
                             me.fetch_rooms();
+                            route_livekit_room_call(
+                                &key,
+                                &me.livekit_room_id,
+                                &me.livekit_token_path,
+                            );
+                            me.show_livekit_controls.set(true);
                         }
                         Ok(r) => status.set(format!(
                             "join failed: {}",
@@ -600,6 +632,14 @@ impl Rooms {
                         status.set("left".into());
                         me.refresh_open_transcript(&key);
                         me.fetch_rooms();
+                        if clear_livekit_room_call_if_current(
+                            &key,
+                            &me.livekit_room_id,
+                            &me.livekit_token_path,
+                        ) {
+                            me.show_livekit_controls.set(false);
+                            crate::livekit::disconnect_livekit_bridge();
+                        }
                     }
                     Ok(r) => status.set(format!(
                         "leave failed: {}",
@@ -816,8 +856,20 @@ fn slugify(name: &str) -> String {
 
 /// Percent-encode a path segment (room keys can contain `-`/`_`/alnum already,
 /// but a defensive encode keeps an unexpected char from breaking the URL).
+/// Pure Rust so tests run on native targets.
 fn encode(s: &str) -> String {
-    js_sys::encode_uri_component(s).into()
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                out.push_str(&format!("%{:02X}", b));
+            }
+        }
+    }
+    out
 }
 
 /// A compact "last activity" label from an ISO-8601 timestamp — just the
@@ -831,9 +883,43 @@ fn short_time(ts: &str) -> String {
     trimmed.chars().take(16).collect()
 }
 
+
+// ---- LiveKit room-call routing helpers ------------------------------------
+
+/// Build the per-room LiveKit token path, percent-encoding the room key
+/// exactly like the proxy: `/v1/rooms/{encoded}/livekit-token`.
+fn livekit_token_path_for_room(key: &str) -> String {
+    format!("/v1/rooms/{}/livekit-token", encode(key))
+}
+
+/// Set the LiveKit room id + token path signals for a room key.
+fn route_livekit_room_call(
+    key: &str,
+    room_id: &RwSignal<String>,
+    token_path: &RwSignal<String>,
+) {
+    room_id.set(key.to_string());
+    token_path.set(livekit_token_path_for_room(key));
+}
+
+/// Clear the LiveKit room id + token path signals only if they match `key`.
+fn clear_livekit_room_call_if_current(
+    key: &str,
+    room_id: &RwSignal<String>,
+    token_path: &RwSignal<String>,
+) -> bool {
+    if room_id.get_untracked() == key {
+        room_id.set(String::new());
+        token_path.set(String::new());
+        true
+    } else {
+        false
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use leptos::prelude::{Get, RwSignal};
 
     #[test]
     fn slugify_lowercases_and_dashes() {
@@ -853,6 +939,48 @@ mod tests {
     fn short_time_trims_iso_to_minute() {
         assert_eq!(short_time("2026-06-05T12:34:56.789Z"), "2026-06-05 12:34");
         assert_eq!(short_time(""), "");
+    }
+
+    #[test]
+    fn livekit_token_path_percent_encodes_room_key_as_one_path_segment() {
+        assert_eq!(
+            livekit_token_path_for_room("project/surface demo"),
+            "/v1/rooms/project%2Fsurface%20demo/livekit-token"
+        );
+    }
+    #[test]
+    fn route_livekit_room_call_sets_room_key_and_token_path_signals() {
+        let room_key: RwSignal<String> = RwSignal::new(String::new());
+        let token_path: RwSignal<String> = RwSignal::new(String::new());
+
+        route_livekit_room_call("my-room", &room_key, &token_path);
+
+        assert_eq!(room_key.get(), "my-room");
+        assert_eq!(token_path.get(), livekit_token_path_for_room("my-room"));
+    }
+
+    #[test]
+    fn clear_livekit_room_call_clears_matching_room() {
+        let room_key: RwSignal<String> = RwSignal::new("room-a".to_string());
+        let token_path: RwSignal<String> =
+            RwSignal::new(livekit_token_path_for_room("room-a"));
+
+        clear_livekit_room_call_if_current("room-a", &room_key, &token_path);
+
+        assert_eq!(room_key.get(), "");
+        assert_eq!(token_path.get(), "");
+    }
+
+    #[test]
+    fn clear_livekit_room_call_preserves_non_matching_room() {
+        let room_key: RwSignal<String> = RwSignal::new("room-a".to_string());
+        let token_path: RwSignal<String> =
+            RwSignal::new(livekit_token_path_for_room("room-a"));
+
+        clear_livekit_room_call_if_current("room-b", &room_key, &token_path);
+
+        assert_eq!(room_key.get(), "room-a");
+        assert_eq!(token_path.get(), livekit_token_path_for_room("room-a"));
     }
 }
 

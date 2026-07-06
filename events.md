@@ -871,3 +871,11 @@ area:      frontend
 
 Reworked the web surface into a Sessions-first flow after John flagged header/path slop and the sidebar sessions drawer. Header chrome now has one persistent Sessions button with no project select, active prompt/title chip, cwd, or raw path; the empty transcript copy points to Sessions instead of a header project picker. Sessions now opens as a centered modal with New chat (projectless `/tmp` workspace), real daemon-backed Create project (`POST /v1/projects`), per-project New session, and grouped resume rows without cwd/path leakage. Verification: focused `cargo test -p ocean-surface-ui -- project_create_request chat_workspace_root`, `cargo check -p ocean-surface-ui --target wasm32-unknown-unknown`, `env -u NO_COLOR trunk build --release`, `git diff --check`, and a 390px browser smoke confirming `OCEAN Sessions ⋯`, centered modal, New chat/Create project inputs, and no visible `/Users` or header project controls.
 _________________________________________________________________________________
+time:      [12:36pm] [07-06-26]
+agent:     [codex] [gpt-5.5]
+worktree:  main
+type:      [feature-request]
+area:      [frontend]
+
+Locked the web-surface rooms/calls wiring gap. Persistent Rooms now route a successful room Join into the shared LiveKit signals (`livekit_room_id` + per-room `/v1/rooms/{key}/livekit-token`), reveal the existing LiveKit utility row, and let `LiveKitPanel` auto-connect/reconnect through the singleton JS bridge instead of opening a parallel connection. Leave/back clears only the matching routed room, disconnects the bridge, and resets stale panel auto-connect state so rejoining the same room reconnects cleanly. Added regression tests for room token path encoding and route/clear signal behavior. Also fixed the outbound call-agent blocker: the proxy now registers `POST /v1/calls/place` and forwards it transparently to the daemon, with a path regression test. Verification: `cargo test -p ocean-surface-ui` (145 passed), `cargo check -p ocean-surface-ui --target wasm32-unknown-unknown`, `cargo test -p ocean-surface-proxy` (8 passed), `cargo check -p ocean-surface-proxy`, forbidden legacy-color grep clean, and `env -u NO_COLOR ./scripts/build-extension.sh` succeeded.
+_________________________________________________________________________________

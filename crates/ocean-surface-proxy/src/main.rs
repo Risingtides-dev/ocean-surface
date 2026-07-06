@@ -42,6 +42,8 @@ const DEFAULT_VOICE_PROFILE: &str = "leo";
 // Override at runtime with GOOGLE_MAPS_API_KEY.
 const DEFAULT_MAPS_KEY: &str = "AIzaSyCmUHR3JD9AZfw9DiRvvSSZsRitdGuunPs";
 
+const CALL_PLACE_DAEMON_PATH: &str = "/v1/calls/place";
+
 /// Shared state: an HTTP client plus the resolved xAI key + voice config.
 struct AppState {
     /// General-purpose client used for the reverse-proxy routes — including the
@@ -273,6 +275,8 @@ async fn main() -> anyhow::Result<()> {
         // remote surface back to the daemon through this origin too, so a phone
         // via the tunnel can drive interactive components (OCEAN-62c).
         .route("/v1/component/event", post(proxy_component_event))
+        // Outbound call placement (POST /v1/calls/place → daemon passthrough).
+        .route("/v1/calls/place", post(proxy_call_place))
         // Longhouse council control (convene / demo) reaches the daemon through
         // this origin, so the Game Boy deck served from dist/ can fire a demo
         // (POST /v1/longhouse/demo) and trigger real councils same-origin.
@@ -830,6 +834,14 @@ async fn proxy_component_event(
     proxy_post_json(&state, "/v1/component/event", body).await
 }
 
+/// Reverse-proxy POST /v1/calls/place (outbound call → daemon).
+async fn proxy_call_place(
+    State(state): State<Arc<AppState>>,
+    body: Bytes,
+) -> impl IntoResponse {
+    proxy_post_json(&state, CALL_PLACE_DAEMON_PATH, body).await
+}
+
 /// Reverse-proxy POST /v1/rooms/{room_id}/livekit-token.
 async fn proxy_livekit_token(
     State(state): State<Arc<AppState>>,
@@ -1270,7 +1282,7 @@ async fn tts(
 mod tests {
     use super::{
         config_payload, is_hashed_asset, livekit_token_daemon_path, percent_encode_path_segment,
-        sse_no_buffer_headers, wasm_headers, AppState, WASM_CACHE_CONTROL,
+        sse_no_buffer_headers, wasm_headers, AppState, CALL_PLACE_DAEMON_PATH, WASM_CACHE_CONTROL,
     };
     use axum::{
         body::Body,
@@ -1379,6 +1391,11 @@ mod tests {
         // Too-short / non-hex tails are not treated as hashed.
         assert!(!is_hashed_asset("/vendor-lib.js"));
         assert!(!is_hashed_asset("/index-1a2b.js"));
+    }
+
+    #[test]
+    fn call_place_proxy_path_matches_daemon_endpoint() {
+        assert_eq!(CALL_PLACE_DAEMON_PATH, "/v1/calls/place");
     }
 
     #[test]

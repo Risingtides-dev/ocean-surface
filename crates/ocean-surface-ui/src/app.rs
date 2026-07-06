@@ -76,9 +76,16 @@ pub fn App() -> impl IntoView {
     // user stays in-app. It connects to the same-origin /v1/agent/events SSE
     // stream on its own, so there's nothing to wire beyond opening the frame.
     let show_council = RwSignal::new(false);
+    // Call controls row — created early so Rooms::new can share the signal.
+    let show_livekit_controls = RwSignal::new(false);
     // Persistent Rooms panel (OCEAN-108). Shares the Daemon's `url` signal so it
     // targets the same origin; opens a right-hand overlay like Sessions.
-    let rooms = Rooms::new(&daemon);
+    let rooms = Rooms::new(
+        &daemon,
+        daemon.livekit_room_id,
+        daemon.livekit_token_path,
+        show_livekit_controls,
+    );
     let show_rooms = RwSignal::new(false);
 
     // TTS: speak the assistant's final text each time a turn finishes
@@ -169,7 +176,6 @@ pub fn App() -> impl IntoView {
     // Call/collaboration controls are explicit reveals, not permanent top
     // chrome. The overflow menu opens them; the row below the header exists only
     // while one is intentionally active.
-    let show_livekit_controls = RwSignal::new(false);
     let show_phone_dialer = RwSignal::new(false);
     let daemon_livekit = StoredValue::new(daemon.clone());
     let daemon_phone_call = StoredValue::new(daemon.clone());
