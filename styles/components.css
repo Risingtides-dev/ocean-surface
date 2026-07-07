@@ -105,6 +105,19 @@
   padding: 0;
 }
 
+/* Compact fallback for components whose backing service isn't configured
+   (e.g. Maps without an API key). Keeps the row readable instead of an
+   empty full-height well. */
+.component-fallback {
+  padding: 10px 12px;
+  color: var(--fg-3);
+  font-size: 12px;
+  font-family: var(--mono);
+  background: var(--bg-well);
+  box-shadow: var(--well);
+  border-radius: 6px;
+}
+
 .ocean-map {
   position: relative;
   width: 100%;

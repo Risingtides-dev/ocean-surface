@@ -110,6 +110,32 @@ pub(crate) fn group_for_panel(
         }
     }
 
+    // Zero-session projects still render as empty groups so a freshly-created
+    // project (no sessions yet) appears in the panel. Append a section for any
+    // project that didn't collect a session above, keyed by the project id so
+    // later sessions merge into it.
+    for p in projects {
+        if sections.iter().any(|sec| sec.key == p.id) {
+            continue;
+        }
+        let label = if p.name.trim().is_empty() {
+            p.workspace_root
+                .rsplit('/')
+                .find(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| p.workspace_root.clone())
+        } else {
+            p.name.clone()
+        };
+        sections.push(ProjectSection {
+            key: p.id.clone(),
+            label,
+            is_project: true,
+            sessions: Vec::new(),
+            worktrees: None,
+        });
+    }
+
     // Sort sessions inside each group: newest first (ISO-8601 lexicographic cmp).
     for sec in &mut sections {
         sec.sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
@@ -155,16 +181,27 @@ pub(crate) fn group_for_panel(
         }
     }
 
-    // Sort sections: project groups by newest session; "Other" always last.
-    sections.sort_by(|a, b| match (a.key == "__other__", b.key == "__other__") {
-        (true, false) => std::cmp::Ordering::Greater,
-        (false, true) => std::cmp::Ordering::Less,
-        _ => b
-            .sessions
-            .first()
-            .map(|s| s.updated_at.as_str())
-            .unwrap_or("")
-            .cmp(a.sessions.first().map(|s| s.updated_at.as_str()).unwrap_or("")),
+    // Sort sections: "Other" always last; session-derived project groups by
+    // newest session (newest first); zero-session projects append after the
+    // session-derived ones, alphabetical by label.
+    sections.sort_by(|a, b| {
+        if a.key == "__other__" && b.key != "__other__" {
+            return std::cmp::Ordering::Greater;
+        }
+        if b.key == "__other__" && a.key != "__other__" {
+            return std::cmp::Ordering::Less;
+        }
+        let a_ts = a.sessions.first().map(|s| s.updated_at.as_str()).unwrap_or("");
+        let b_ts = b.sessions.first().map(|s| s.updated_at.as_str()).unwrap_or("");
+        match (a_ts.is_empty(), b_ts.is_empty()) {
+            (false, false) => b_ts.cmp(a_ts),
+            (true, true) => a
+                .label
+                .to_ascii_lowercase()
+                .cmp(&b.label.to_ascii_lowercase()),
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+        }
     });
 
     sections
@@ -284,6 +321,9 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
     // Create-project form state (modal-only; posts via daemon.create_project).
     let create_name = RwSignal::new(String::new());
     let create_root = RwSignal::new(String::new());
+    // Reveal-on-intent: the create form hides behind a quiet `+ New project`
+    // row until the user asks for it.
+    let show_create = RwSignal::new(false);
     // Breadcrumb directory browser state.
     let breadcrumb_parent = RwSignal::new(String::new());
     let breadcrumb_dirs = RwSignal::new(Vec::<crate::daemon::FsDirEntry>::new());
@@ -332,6 +372,13 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
             });
         }
     });
+    // The reveal row is the default state every time the modal opens — reset
+    // show_create when the panel closes so reopening never shows a stale form.
+    Effect::new(move |_| {
+        if !open.get() {
+            show_create.set(false);
+        }
+    });
 
 
     let create_can_submit = move || {
@@ -346,10 +393,27 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
         let name = create_name.get_untracked();
         let root = create_root.get_untracked();
         daemon.get_value().create_project(name, root);
-        open.set(false);
-        create_name.set(String::new());
-        create_root.set(String::new());
     };
+
+    // Create-project success closes the modal and clears the form; failure
+    // keeps it open with the inline error. Watch the falling edge of the
+    // daemon's pending signal so the close lands only after a real round-trip.
+    let prev_pending: RwSignal<bool> = RwSignal::new(false);
+    Effect::new(move |_| {
+        let pending = daemon.get_value().project_create_pending.get();
+        let was_pending = prev_pending.get_untracked();
+        prev_pending.set(pending);
+        if was_pending && !pending
+            && daemon.get_value().project_create_error.get_untracked().is_none()
+        {
+            open.set(false);
+            create_name.set(String::new());
+            create_root.set(String::new());
+            breadcrumb_parent.set(String::new());
+            breadcrumb_dirs.set(Vec::new());
+            show_create.set(false);
+        }
+    });
 
     view! {
         <div
@@ -380,6 +444,15 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                         "New chat"
                     </button>
 
+                    <button
+                        class="sessions-create__reveal"
+                        type="button"
+                        on:click=move |_| show_create.set(true)
+                    >
+                        "+ New project"
+                    </button>
+
+                    <Show when=move || show_create.get()>
                     <form class="sessions-create" on:submit=create_project>
                         <div class="sessions-create__inputs">
                             <input
@@ -403,12 +476,12 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                             on:input=move |ev| create_root.set(event_target_value(&ev))
                                         />
                                         <button
-                                            class="sessions-create__text-toggle"
+                                            class="sessions-create__mode"
                                             type="button"
                                             title="Browse directories"
                                             on:click=move |_| breadcrumb_text_mode.set(false)
                                         >
-                                            "📁"
+                                            "browse"
                                         </button>
                                     </div>
                                 }.into_any()
@@ -482,12 +555,12 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                             }).collect::<Vec<_>>()}
                                         </div>
                                         <button
-                                            class="sessions-create__text-toggle"
+                                            class="sessions-create__mode"
                                             type="button"
                                             title="Edit path as text"
                                             on:click=move |_| breadcrumb_text_mode.set(true)
                                         >
-                                            "⌨"
+                                            "edit"
                                         </button>
                                         {move || {
                                             let popover_parent = breadcrumb_parent.get();
@@ -497,13 +570,31 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                             let dirs = breadcrumb_dirs.get();
                                             let filter = breadcrumb_filter.get();
                                             let loading = breadcrumb_loading.get();
-                                            let filtered: Vec<crate::daemon::FsDirEntry> = if filter.is_empty() {
-                                                dirs.clone()
-                                            } else {
-                                                dirs.iter()
-                                                    .filter(|d| d.name.to_lowercase().contains(&filter.to_lowercase()))
+                                            let filtered: Vec<crate::daemon::FsDirEntry> = {
+                                                // Drop dotfiles and common build/dep noise so the
+                                                // browser shows real project parents only.
+                                                let clean: Vec<crate::daemon::FsDirEntry> = dirs
+                                                    .iter()
+                                                    .filter(|d| {
+                                                        !(d.name.starts_with('.')
+                                                            || matches!(
+                                                                d.name.as_str(),
+                                                                "__pycache__" | "node_modules" | "target"
+                                                            ))
+                                                    })
                                                     .cloned()
-                                                    .collect()
+                                                    .collect();
+                                                if filter.is_empty() {
+                                                    clean
+                                                } else {
+                                                    clean
+                                                        .iter()
+                                                        .filter(|d| {
+                                                            d.name.to_lowercase().contains(&filter.to_lowercase())
+                                                        })
+                                                        .cloned()
+                                                        .collect()
+                                                }
                                             };
 
                                             view! {
@@ -553,7 +644,6 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                                             let items: Vec<_> = filtered.iter().map(|d| {
                                                                 let name = d.name.clone();
                                                                 let path = d.path.clone();
-                                                                let is_git = d.git;
                                                                 let u = d_url.clone();
                                                                 view! {
                                                                     <button
@@ -579,11 +669,6 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                                                         }
                                                                     >
                                                                         <span class="sessions-create__popover-item-name">{name.clone()}</span>
-                                                                        {if is_git {
-                                                                            view! { <span class="sessions-create__popover-item-git">"git"</span> }.into_any()
-                                                                        } else {
-                                                                            ().into_any()
-                                                                        }}
                                                                     </button>
                                                                 }
                                                             }).collect();
@@ -625,10 +710,21 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                             class="sessions-create__btn"
                             type="submit"
                             disabled=move || !create_can_submit()
+                                || daemon.get_value().project_create_pending.get()
                         >
-                            "Create project"
+                            {move || if daemon.get_value().project_create_pending.get() {
+                                "Creating…"
+                            } else {
+                                "Create project"
+                            }}
                         </button>
+                        <Show when=move || daemon.get_value().project_create_error.get().is_some()>
+                            <div class="sessions-create__error">
+                                {move || daemon.get_value().project_create_error.get().unwrap_or_default()}
+                            </div>
+                        </Show>
                     </form>
+                    </Show>
                 </div>
 
                 <div class="sessions-panel__list">
@@ -866,10 +962,15 @@ mod tests {
 
         let sections = group_for_panel(&sessions, &projects, None);
 
-        assert_eq!(sections.len(), 1);
+        // owning_project wins: the session groups under daemon-owner, NOT under
+        // the catalogue project that shares its root. The orphaned catalogue
+        // project still renders as its own empty section (Step 2.8).
+        assert_eq!(sections.len(), 2);
         assert_eq!(sections[0].key, "daemon-owner");
         assert_eq!(sections[0].label, "Daemon Owner");
         assert_eq!(sections[0].sessions[0].id, "owned-by-daemon");
+        assert_eq!(sections[1].key, "catalogue-root");
+        assert!(sections[1].sessions.is_empty());
     }
 
     #[test]
@@ -945,5 +1046,33 @@ mod tests {
         let alpha_rows: Vec<&str> =
             sections[1].sessions.iter().map(|session| session.id.as_str()).collect();
         assert_eq!(alpha_rows, vec!["alpha-new", "alpha-old"]);
+    }
+    #[test]
+    fn zero_session_projects_render_as_empty_sections_after_populated() {
+        let projects = vec![
+            project("beta", "Beta", "/beta"),
+            project("gamma", "Gamma", "/gamma"),
+            project("blank", "", "/some/blank"),
+        ];
+        let sessions = vec![
+            session("beta-sess", "/beta", Some("/beta"), None, None, 1, "2026-07-05T12:00:00Z"),
+            session("other-sess", "/elsewhere", None, None, None, 1, "2026-07-05T12:05:00Z"),
+        ];
+
+        let sections = group_for_panel(&sessions, &projects, None);
+
+        // Populated (beta) → zero-session projects alphabetical (blank, gamma) → Other last.
+        let keys: Vec<&str> = sections.iter().map(|s| s.key.as_str()).collect();
+        assert_eq!(keys, vec!["beta", "blank", "gamma", "__other__"]);
+
+        // Zero-session project is an is_project section with empty sessions.
+        let blank = sections.iter().find(|s| s.key == "blank").unwrap();
+        assert!(blank.is_project);
+        assert!(blank.sessions.is_empty());
+        // Blank name falls back to the last `/` segment of workspace_root.
+        assert_eq!(blank.label, "blank");
+
+        // A project that already collected a session is not duplicated.
+        assert_eq!(sections.iter().filter(|s| s.key == "beta").count(), 1);
     }
 }

@@ -1287,9 +1287,16 @@ fn MapView(component_id: String, kind_props: Value, daemon: Daemon) -> impl Into
 
     view! {
         <div class="block block--map">
-            <div id=dom_id class="ocean-map">
-                <div class="ocean-map__loading">"loading map…"</div>
-            </div>
+            <Show
+                when=move || !maps_key.get().trim().is_empty()
+                fallback=move || view! {
+                    <div class="component-fallback">"map unavailable — Maps API key not configured"</div>
+                }
+            >
+                <div id={dom_id.clone()} class="ocean-map">
+                    <div class="ocean-map__loading">"loading map…"</div>
+                </div>
+            </Show>
         </div>
     }
 }

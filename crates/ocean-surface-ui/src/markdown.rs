@@ -54,6 +54,17 @@ pub fn render(src: &str) -> String {
     });
     let mut out = String::with_capacity(src.len() * 3 / 2);
     html::push_html(&mut out, parser);
+    // Externalise every real link to a new browser tab so clicking a URL in
+    // the transcript never navigates the SPA away from the conversation.
+    // pulldown-cmark's HTML writer emits plain `<a href>` with no attributes,
+    // so inject target/rel after the fact, then revert sanitised (empty-href)
+    // links so dead links stay inert.
+    out = out
+        .replace("<a href=\"", "<a target=\"_blank\" rel=\"noopener noreferrer\" href=\"");
+    out = out.replace(
+        "<a target=\"_blank\" rel=\"noopener noreferrer\" href=\"\">",
+        "<a href=\"\">",
+    );
     out
 }
 
@@ -217,7 +228,7 @@ mod tests {
         assert!(html.contains("<strong>b</strong>"), "bold should render: {html}");
         assert!(html.contains("<em>e</em>"), "emphasis should render: {html}");
         assert!(
-            html.contains("<a href=\"https://example.com/path?q=1\">safe</a>"),
+            html.contains("<a target=\"_blank\" rel=\"noopener noreferrer\" href=\"https://example.com/path?q=1\">safe</a>"),
             "safe https links should keep their href: {html}"
         );
         assert!(html.contains("<table>"), "tables should render: {html}");

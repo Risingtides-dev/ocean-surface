@@ -73,7 +73,7 @@
 
 /* Transcript and canvas regions keep readable gutters in a narrow column. */
 .ocean-surface--extension .transcript {
-  padding: 10px;
+  padding: 12px 14px;
   gap: 12px;
 }
 
@@ -195,7 +195,7 @@
 
   /* Transcript & canvas: readable gutters ---------------------------- */
   .ocean-surface .transcript {
-    padding: 10px;
+    padding: 12px 14px;
     gap: 12px;
   }
 

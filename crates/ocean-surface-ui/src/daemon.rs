@@ -1177,6 +1177,26 @@ pub struct Daemon {
     /// here so `decide_permission` can retrieve the same value. Cleared when a
     /// new turn begins.
     pub active_decision_token: RwSignal<Option<String>>,
+    /// Raw payloads of council / longhouse events the daemon streams as
+    /// `Extension { extension == "longhouse" }` frames on `/v1/agent/events`,
+    /// oldest first. Captured SCHEMA-FREE in [`Daemon::connect`] *before* the
+    /// session-scope isolation guard, because a council convenes council-wide
+    /// (unscoped) and those frames carry no session id — the hard-isolation
+    /// guard would otherwise drop them before any reducer sees them (they were
+    /// silently lost before the native council surface landed). The surface
+    /// deliberately does NOT model longhouse lineage here — no invented
+    /// parent/child delegation edges; the native council view reduces these raw
+    /// payloads into its own topic/member/mark model. Bounded rolling buffer
+    /// ([`MAX_COUNCIL_EVENTS`]); NOT reset on chat-session switch, since a
+    /// council's state is orthogonal to which chat session is active.
+    pub council_events: RwSignal<Vec<Value>>,
+    /// True while a `create_project` POST is in flight. Drives the Sessions
+    /// panel's Create button label/disabled state and gates the modal close on
+    /// the success edge. Reset to false on every terminal branch.
+    pub project_create_pending: RwSignal<bool>,
+    /// Inline error for the Sessions create form. `Some(msg)` keeps the form
+    /// open with the error rendered under the inputs; `None` otherwise.
+    pub project_create_error: RwSignal<Option<String>>,
 }
 
 /// A selectable model, mirroring the daemon's KnownModel.
@@ -1342,6 +1362,9 @@ impl Daemon {
             pending_images: RwSignal::new(Vec::new()),
             canvas_patches: RwSignal::new(Vec::new()),
             active_decision_token: RwSignal::new(None),
+            council_events: RwSignal::new(Vec::new()),
+            project_create_pending: RwSignal::new(false),
+            project_create_error: RwSignal::new(None),
         }
     }
 
@@ -1383,6 +1406,9 @@ impl Daemon {
             pending_images: RwSignal::new(Vec::new()),
             canvas_patches: RwSignal::new(Vec::new()),
             active_decision_token: RwSignal::new(None),
+            council_events: RwSignal::new(Vec::new()),
+            project_create_pending: RwSignal::new(false),
+            project_create_error: RwSignal::new(None),
         }
     }
 
@@ -1474,6 +1500,7 @@ impl Daemon {
         // restore title/cwd) after a stream gap — see the rehydrate call below.
         let session_title = self.session_title;
         let cwd = self.cwd;
+        let council_events = self.council_events;
 
         let generation = sse_generation.get_untracked().wrapping_add(1);
         sse_generation.set(generation);
@@ -1619,6 +1646,25 @@ impl Daemon {
                         log::warn!("unparseable sse event: {data}");
                         continue;
                     };
+                    // Council / longhouse frames (extension == "longhouse")
+                    // are captured HERE — before the session-scope isolation
+                    // below — because a council convenes council-wide: those
+                    // frames carry no session id and would be dropped by the
+                    // hard-isolation guard, leaving the native council surface
+                    // blind. We keep the raw payload only; the surface does not
+                    // model longhouse lineage (no invented delegation edges).
+                    // Bounded rolling buffer; the view reduces it client-side.
+                    if let AgentEvent::Extension { extension, payload, .. } = &evt {
+                        if extension == "longhouse" {
+                            council_events.update(|events| {
+                                events.push(payload.clone());
+                                let len = events.len();
+                                if len > MAX_COUNCIL_EVENTS {
+                                    events.drain(0..len - MAX_COUNCIL_EVENTS);
+                                }
+                            });
+                        }
+                    }
 
                     // Hard isolation: every renderable product event must carry
                     // exactly the active session id. If a proxy/global stream or
@@ -2547,27 +2593,35 @@ impl Daemon {
         self.new_session();
     }
 
-    /// Create a real project on the daemon (`POST /v1/projects`) and select it
-    /// for the next session. The daemon is the authority for project state — we
-    /// never `mkdir` or invent a project locally. Empty `name` or
-    /// `workspace_root` (after trimming) is rejected with a status chip instead
-    /// of a POST. On success the returned project is upserted into the
-    /// `projects` catalogue, selected (persisted via [`persist_project`]), and
-    /// the status flips to a concise `project created`. On any failure (encode
-    /// / network / non-`ok` / decode) the status becomes
-    /// `project create failed: <concise reason>` via [`concise_error`].
+    /// Create a real project on the daemon (`POST /v1/projects`) and land in a
+    /// fresh session bound to it. The daemon is the authority for project state
+    /// — we never `mkdir` or invent a project locally. Empty `name` or
+    /// `workspace_root` (after trimming) is rejected with an inline error
+    /// ([`project_create_error`]) instead of a POST. While the POST is in flight
+    /// [`project_create_pending`] is true (drives the Create button label). On
+    /// success the returned project is upserted into the `projects` catalogue
+    /// and selected via [`begin_project_session`] (persist + lazy new session),
+    /// and the status flips to a concise `project created`. On any failure the
+    /// status becomes `project create failed: <concise reason>` and the same
+    /// reason lands on [`project_create_error`] so the form stays open with an
+    /// inline error.
     pub fn create_project(&self, name: String, workspace_root: String) {
         let name = name.trim().to_string();
         let workspace_root = workspace_root.trim().to_string();
         if name.is_empty() || workspace_root.is_empty() {
             self.status
                 .set("project create failed: name and workspace required".into());
+            self.project_create_error
+                .set(Some("name and workspace required".into()));
             return;
         }
+        self.project_create_error.set(None);
+        self.project_create_pending.set(true);
         let url = self.url.get_untracked();
         let projects = self.projects;
         let status = self.status;
-        let current = self.project;
+        let pending = self.project_create_pending;
+        let error = self.project_create_error;
         let daemon = self.clone();
         let body = ProjectCreateRequest {
             name,
@@ -2582,8 +2636,11 @@ impl Daemon {
                 Ok(req) => req,
                 Err(err) => {
                     let raw = err.to_string();
+                    let msg = concise_error(&raw);
                     log::error!("project create encode error: {raw}");
-                    status.set(format!("project create failed: {}", concise_error(&raw)));
+                    status.set(format!("project create failed: {msg}"));
+                    error.set(Some(msg));
+                    pending.set(false);
                     return;
                 }
             };
@@ -2593,6 +2650,8 @@ impl Daemon {
                         let Some(project) = r.project else {
                             log::error!("project create returned ok with no project");
                             status.set("project create failed: no project returned".into());
+                            error.set(Some("no project returned".into()));
+                            pending.set(false);
                             return;
                         };
                         // Upsert so the picker reflects the new project
@@ -2605,26 +2664,34 @@ impl Daemon {
                                 list.push(project.clone());
                             }
                         });
-                        current.set(Some(project.id.clone()));
-                        persist_project(&project.id);
                         status.set("project created".into());
-                        daemon.new_session();
+                        daemon.begin_project_session(project.id.clone());
+                        pending.set(false);
                     }
                     Ok(r) => {
                         let raw = r.error.unwrap_or_else(|| "project create rejected".into());
+                        let msg = concise_error(&raw);
                         log::error!("project create rejected: {raw}");
-                        status.set(format!("project create failed: {}", concise_error(&raw)));
+                        status.set(format!("project create failed: {msg}"));
+                        error.set(Some(msg));
+                        pending.set(false);
                     }
                     Err(err) => {
                         let raw = err.to_string();
+                        let msg = concise_error(&raw);
                         log::error!("project create decode error: {raw}");
-                        status.set(format!("project create failed: {}", concise_error(&raw)));
+                        status.set(format!("project create failed: {msg}"));
+                        error.set(Some(msg));
+                        pending.set(false);
                     }
                 },
                 Err(err) => {
                     let raw = err.to_string();
+                    let msg = concise_error(&raw);
                     log::error!("project create post error: {raw}");
-                    status.set(format!("project create failed: {}", concise_error(&raw)));
+                    status.set(format!("project create failed: {msg}"));
+                    error.set(Some(msg));
+                    pending.set(false);
                 }
             }
         });
@@ -3042,9 +3109,12 @@ fn apply_event(
             });
         }
         AgentEvent::Extension { extension, .. } => {
-            // No renderer for extension/council events on this surface yet. Log
-            // and ignore rather than silently drop, so we can see them in the
-            // console while the deck UI is built out (OCEAN-62a).
+            // Longhouse (council) payloads are captured upstream in `connect()`
+            // before session-scope isolation, so they reach `council_events`
+            // regardless of scope. By the time a frame reaches here it has
+            // passed isolation (it was scoped to the active session); extension
+            // events carry no transcript state, so there is nothing to reduce
+            // into turns — log and move on. Other extension kinds are ignored.
             log::debug!("ignoring extension event: {extension}");
         }
         AgentEvent::Other => {
@@ -3167,6 +3237,12 @@ fn mint_decision_token() -> String {
 /// Upper bound on the per-session canvas-patch ledger (OCEAN-178). Oldest
 /// entries are dropped past this so a long, patch-heavy session stays bounded.
 const MAX_CANVAS_PATCHES: usize = 512;
+
+/// Upper bound on the council / longhouse event capture (`council_events`).
+/// Oldest payloads are dropped past this so a long-running council surface
+/// stays bounded. Council frames are small opaque payloads (not full patch
+/// envelopes), so this can sit above the canvas ledger cap.
+const MAX_COUNCIL_EVENTS: usize = 256;
 
 /// A one-line, human-readable summary of a single surface patch op, for the
 /// basic web canvas representation (OCEAN-178). Mirrors the daemon's op names.

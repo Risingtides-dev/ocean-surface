@@ -19,7 +19,7 @@ use crate::model::{Block, Role, ToolStatus};
 /// One renderable item in an assistant turn: a single non-tool/non-thinking
 /// block, the turn's full set of tool calls tucked into one disclosure, or the
 /// turn's full set of thinking segments tucked into one disclosure.
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum RenderItem {
     Single(usize),
     ToolGroup(Vec<usize>),
@@ -286,11 +286,12 @@ fn AssistantTurn(
 }
 
 /// A turn's tool calls, tucked into one collapsible `tools (N)` disclosure.
-/// Collapsed by default so the transcript reads as prose + thinking + one tidy
-/// tools tuck; auto-opens while any contained call errored (failures must stay
-/// visible — the reducer also expands the failed call itself). A manual toggle
-/// overrides the auto rule and sticks. Each row inside stays individually
-/// expandable via `BlockView`.
+/// Collapsed by default and NEVER auto-opens — not when a call errors, not at
+/// turn end. The header carries aggregate state (running/err tint) plus a
+/// lowercase `N failed` count when any call failed; the reducer still expands
+/// each failed call itself, so opening the group lands you on the error body.
+/// Manual toggle is sticky: the user's collapse/expand choice is absolute and
+/// survives later errors. Each row inside stays individually expandable.
 #[component]
 fn ToolGroup(
     turn_idx: usize,
@@ -324,20 +325,14 @@ fn ToolGroup(
             }
         })
     });
-    // None = follow the auto rule (open iff any error); Some(_) = user's choice.
+    // Collapsed by default, always. The group NEVER auto-opens — not on error,
+    // not on turn-end sweeps. `user_override` carries the user's last toggle and
+    // sticks; failures surface through the error-tinted header, the `N failed`
+    // count, and the reducer expanding each failed call itself.
     let user_override: RwSignal<Option<bool>> = RwSignal::new(None);
-    let open = Signal::derive(move || {
-        user_override
-            .get()
-            .unwrap_or_else(|| matches!(agg.get(), ToolStatus::Err))
-    });
-    // A newly-arrived failure must re-surface even if the user had collapsed the
-    // group — including a second failure inside an already-errored group. Key the
-    // reset off the count of failed calls, not the aggregate status: whenever that
-    // count rises, drop the manual override so `open` follows the auto rule again
-    // (the user can collapse afterward). Mirrors the reducer expanding each failed
-    // call itself.
-    let err_count = Signal::derive(move || {
+    let open = Signal::derive(move || user_override.get().unwrap_or(false));
+    // Count of failed calls in the group — drives the header's `N failed` label.
+    let failed_count = Signal::derive(move || {
         turns.with(|t| {
             t.get(turn_idx).map_or(0usize, |turn| {
                 idxs.get_value()
@@ -352,14 +347,6 @@ fn ToolGroup(
             })
         })
     });
-    let prev_err_count = RwSignal::new(0usize);
-    Effect::new(move |_| {
-        let n = err_count.get();
-        if n > prev_err_count.get_untracked() {
-            user_override.set(None);
-        }
-        prev_err_count.set(n);
-    });
     let toggle = move |_| user_override.set(Some(!open.get()));
 
     let status_class = move || match agg.get() {
@@ -368,9 +355,9 @@ fn ToolGroup(
         ToolStatus::Err => "is-err",
     };
     let status_label = move || match agg.get() {
-        ToolStatus::Running => "running",
-        ToolStatus::Ok => "done",
-        ToolStatus::Err => "error",
+        ToolStatus::Running => "running".to_string(),
+        ToolStatus::Ok => String::new(),
+        ToolStatus::Err => format!("{} failed", failed_count.get()),
     };
     let glyph = move || if open.get() { "▾" } else { "▸" };
 
@@ -399,15 +386,14 @@ fn ToolGroup(
         </div>
     }
 }
-/// A turn's thinking segments, tucked into one collapsible `thinking… (N chars)`
+/// A turn's thinking segments, tucked into one collapsible `thinking…`
 /// disclosure positioned where the first thinking segment appears. A turn can
 /// stream many thinking deltas and even interleave them with text/tools;
 /// without this tuck each segment would render its own chip (a "26-chip wall").
-/// All thinking blocks collapse into this single disclosure — a summed,
-/// live-updating char count in the header, and each segment's text as its own
-/// `<pre>` when expanded. Collapsed by default; the toggle sticks. No status
-/// tracking (thinking has no error state). Render-only: never reorders
-/// `turn.blocks`.
+/// All thinking blocks collapse into this single disclosure; each segment's
+/// text renders as its own `<pre>` when expanded. Collapsed by default; the
+/// toggle sticks. The label is a plain `thinking…` — no char counter (that's
+/// debug telemetry, not UI). Render-only: never reorders `turn.blocks`.
 ///
 /// Member indices are DERIVED reactively from `turns`, not snapshotted from the
 /// render-item prop: thinking segments keep appending mid-stream and the parent
@@ -437,26 +423,11 @@ fn ThinkingGroup(
             })
         })
     });
-    // Aggregate char count across every thinking block, recomputed as blocks
-    // append so the header updates live during streaming.
-    let count = Signal::derive(move || {
-        turns.with(|t| {
-            t.get(turn_idx).map_or(0usize, |turn| {
-                turn.blocks
-                    .iter()
-                    .filter_map(|b| match b {
-                        Block::Thinking { content, .. } => Some(content.chars().count()),
-                        _ => None,
-                    })
-                    .sum()
-            })
-        })
-    });
     let glyph = move || if open.get() { "▾" } else { "▸" };
     view! {
         <div class="block block--thinking" class:is-open=open>
             <button class="block__pill" on:click=move |_| open.set(!open.get())>
-                {move || format!("{} thinking… ({} chars)", glyph(), count.get())}
+                {move || format!("{} thinking…", glyph())}
             </button>
             <Show when=move || open.get()>
                 <For
@@ -552,7 +523,7 @@ fn BlockView(
                 };
                 let status_label = match status {
                     ToolStatus::Running => "running",
-                    ToolStatus::Ok => "done",
+                    ToolStatus::Ok => "",
                     ToolStatus::Err => "error",
                 };
                 let glyph = if expanded { "▾" } else { "▸" };
