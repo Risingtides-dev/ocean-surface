@@ -2248,31 +2248,59 @@ impl Daemon {
         let url = self.url.get_untracked();
         let session_list = self.session_list;
         spawn_local(async move {
-            let get_url = format!("{}/v1/agent/sessions", url.trim_end_matches('/'));
-            match Request::get(&get_url).send().await {
-                Ok(resp) => {
-                    #[derive(Deserialize)]
-                    struct SessionsResponse {
-                        ok: bool,
-                        #[serde(default)]
-                        sessions: Vec<SessionSummary>,
-                    }
-                    match resp.json::<SessionsResponse>().await {
+            let base = url.trim_end_matches('/').to_string();
+            // The daemon paginates: each page caps at DEFAULT_LIST_LIMIT (100)
+            // and returns `next_cursor` while `has_more` (OCEAN-250). The panel
+            // groups by project and sessions come back sorted by workspace
+            // root, so a project's sessions can sit ANYWHERE in the list, well
+            // past the first 100 — fetching one page left every deeper-nested
+            // project (OCEAN, ocean-os, …) invisible once the store grew past
+            // ~100 sessions. Request the max page size to keep round-trips low,
+            // then drain the cursor. Bounded at 50 pages so a stuck cursor can
+            // never spin forever.
+            #[derive(Deserialize)]
+            struct SessionsResponse {
+                ok: bool,
+                #[serde(default)]
+                sessions: Vec<SessionSummary>,
+                #[serde(default)]
+                next_cursor: Option<String>,
+                #[serde(default)]
+                has_more: bool,
+            }
+            let mut all: Vec<SessionSummary> = Vec::new();
+            let mut cursor: Option<String> = None;
+            for _ in 0..50 {
+                let mut get_url = format!("{base}/v1/agent/sessions?limit=1000");
+                if let Some(c) = &cursor {
+                    get_url.push_str("&cursor=");
+                    get_url.push_str(c);
+                }
+                match Request::get(&get_url).send().await {
+                    Ok(resp) => match resp.json::<SessionsResponse>().await {
                         Ok(r) if r.ok => {
-                            session_list.set(r.sessions);
+                            all.extend(r.sessions);
+                            match r.next_cursor.filter(|_| r.has_more) {
+                                Some(next) if !next.is_empty() => cursor = Some(next),
+                                _ => break,
+                            }
                         }
-                        Ok(r) => {
-                            log::warn!("sessions fetch not ok: {:?}", r.ok);
+                        Ok(_) => {
+                            log::warn!("sessions fetch not ok");
+                            break;
                         }
                         Err(err) => {
                             log::warn!("sessions decode error: {err}");
+                            break;
                         }
+                    },
+                    Err(err) => {
+                        log::warn!("sessions fetch error: {err}");
+                        break;
                     }
                 }
-                Err(err) => {
-                    log::warn!("sessions fetch error: {err}");
-                }
             }
+            session_list.set(all);
         });
     }
 

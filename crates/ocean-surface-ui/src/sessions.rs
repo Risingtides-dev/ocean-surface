@@ -790,7 +790,25 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                 <div class="sessions-panel__list">
                     <For
                         each=sections
-                        key=|sec| sec.key.clone()
+                        key=|sec| {
+                            // Content-sensitive key. `<For>` never re-runs `children` for a
+                            // key it has already seen, so keying on `sec.key` alone froze
+                            // every section at its first-paint count: the project sections
+                            // render during the empty pre-fetch pass (count 0) and their keys
+                            // persist, so their counts never updated when sessions arrived —
+                            // only the newly-keyed "Other" bucket painted fresh. Folding the
+                            // session count + newest-session signature into the key forces a
+                            // re-render whenever a section's contents change. Collapse state is
+                            // keyed on `sec.key` separately, so it survives.
+                            let head = sec.sessions.first();
+                            format!(
+                                "{}|{}|{}|{}",
+                                sec.key,
+                                sec.sessions.len(),
+                                head.map(|s| s.id.as_str()).unwrap_or(""),
+                                head.map(|s| s.updated_at.as_str()).unwrap_or(""),
+                            )
+                        }
                         children=move |sec: ProjectSection| {
                             let skey = sec.key.clone();
                             let s_is_project = sec.is_project;
