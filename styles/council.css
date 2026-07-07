@@ -1,0 +1,207 @@
+/* Ocean workflow stage — native council/cockpit surface.
+   Serious material workflow graph: goal, operator prompt, Ocean, tools. */
+
+.ocean-council-stage {
+  min-height: min(78vh, 760px);
+  padding: 18px;
+  background: var(--bg-raised);
+  box-shadow: var(--elev-3);
+  border-radius: var(--radius-lg);
+}
+
+.ocean-council-stage__meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.ocean-council-stage__eyebrow,
+.ocean-council-node__label {
+  color: var(--fg-3);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  line-height: 1.35;
+  text-transform: uppercase;
+}
+
+.ocean-council-stage__status {
+  min-width: 0;
+  color: var(--fg-3);
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ocean-council-stage__scene {
+  position: relative;
+  min-height: 660px;
+  overflow: auto;
+  border-radius: var(--radius);
+  background:
+    radial-gradient(circle at top center, color-mix(in srgb, var(--accent) 8%, transparent), transparent 48%),
+    linear-gradient(180deg, var(--bg) 0%, var(--bg-raised) 100%);
+  box-shadow: var(--well-deep);
+}
+
+.ocean-council-stage__edges {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.ocean-council-edge {
+  stroke: var(--border-strong);
+  stroke-width: 1.5;
+}
+
+.ocean-council-edge--live {
+  stroke: var(--accent);
+  stroke-dasharray: 6 8;
+  animation: council-edge-flow 1.8s linear infinite;
+}
+
+.ocean-council-edge--error {
+  stroke: var(--err);
+}
+
+.ocean-council-node {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  box-shadow: var(--elev-2);
+  min-width: 0;
+}
+
+.ocean-council-node__title {
+  color: var(--fg);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.ocean-council-node__meta,
+.ocean-council-node__body {
+  color: var(--fg-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.ocean-council-node__meta {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.ocean-council-node__meta-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ocean-council-node__state-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: currentColor;
+  flex: 0 0 auto;
+}
+
+.ocean-council-node--goal {
+  background: var(--bg-raised);
+  box-shadow: inset 0 1px 0 var(--specular-live), var(--elev-2);
+}
+
+.ocean-council-node--goal .ocean-council-node__title {
+  color: var(--accent-bright);
+}
+
+.ocean-council-node--prompt {
+  background: var(--bg-elevated);
+}
+
+.ocean-council-node--assistant.is-thinking,
+.ocean-council-node--tool.is-running {
+  box-shadow: inset 0 1px 0 var(--specular-live), var(--elev-2), var(--glow-thinking);
+  animation: council-node-breathe 3.2s ease-in-out infinite;
+}
+
+.ocean-council-node--assistant.is-running,
+.ocean-council-node--assistant.is-browser-active {
+  box-shadow: inset 0 1px 0 var(--specular-live), var(--elev-2), var(--glow-live);
+}
+
+.ocean-council-node.is-done {
+  color: var(--ok);
+}
+
+.ocean-council-node.is-error {
+  color: var(--err);
+}
+
+.ocean-council-node.is-thinking,
+.ocean-council-node.is-running,
+.ocean-council-node.is-done,
+.ocean-council-node.is-error {
+  border: none;
+}
+
+.ocean-council-stage__empty {
+  min-height: 520px;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  gap: 8px;
+  padding: 48px 24px;
+}
+
+.ocean-council-stage__empty-title {
+  color: var(--fg);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.ocean-council-stage__empty-body {
+  max-width: 42rem;
+  color: var(--fg-3);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+@keyframes council-node-breathe {
+  0%, 100% { box-shadow: inset 0 1px 0 var(--specular-live), var(--elev-2), var(--glow-thinking); }
+  50% { box-shadow: inset 0 1px 0 var(--specular-live), var(--elev-2), var(--glow-live); }
+}
+
+@keyframes council-edge-flow {
+  from { stroke-dashoffset: 0; }
+  to { stroke-dashoffset: -28; }
+}
+
+@media (max-width: 960px) {
+  .ocean-council-stage {
+    min-height: 70vh;
+    padding: 14px;
+  }
+
+  .ocean-council-stage__scene {
+    min-height: 720px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ocean-council-edge--live,
+  .ocean-council-node--assistant.is-thinking,
+  .ocean-council-node--tool.is-running {
+    animation: none;
+  }
+}

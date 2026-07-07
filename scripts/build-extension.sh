@@ -19,8 +19,8 @@ mkdir -p "$DIST"
 cp dist/ocean-surface-ui.js     "$DIST/ocean-surface-ui.js"
 cp dist/ocean-surface-ui_bg.wasm "$DIST/ocean-surface-ui_bg.wasm"
 
-# Stylesheets: every dist/*.css (tokens/base/chrome/... — sidepanel.html links
-# them by these stable names), plus the vendored fonts tokens.css references
+# Stylesheets: every dist/*.css (tokens/base/chrome/transcript/components/
+# composer/panels/council/call/canvas/compact/float — sidepanel.html links
 # relatively (dist/fonts/ must sit beside the CSS inside extension/dist/).
 cp dist/*.css "$DIST/"
 if [ -d dist/fonts ]; then

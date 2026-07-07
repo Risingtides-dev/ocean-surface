@@ -29,6 +29,7 @@ pub fn App() -> impl IntoView {
 
     let input = RwSignal::new(String::new());
     let textarea_ref: NodeRef<leptos::html::Textarea> = NodeRef::new();
+    let daemon_council = daemon.clone();
 
     // Daemon holds only Copy signal handles, so cloning per-closure is cheap
     // and avoids fighting the borrow checker over a single moved value.
@@ -78,6 +79,7 @@ pub fn App() -> impl IntoView {
     let show_council = RwSignal::new(false);
     // Call controls row — created early so Rooms::new can share the signal.
     let show_livekit_controls = RwSignal::new(false);
+    let show_rooms = RwSignal::new(false);
     // Persistent Rooms panel (OCEAN-108). Shares the Daemon's `url` signal so it
     // targets the same origin; opens a right-hand overlay like Sessions.
     let rooms = Rooms::new(
@@ -85,8 +87,13 @@ pub fn App() -> impl IntoView {
         daemon.livekit_room_id,
         daemon.livekit_token_path,
         show_livekit_controls,
+        show_rooms,
     );
-    let show_rooms = RwSignal::new(false);
+    let in_room_mode = Signal::derive(move || {
+        rooms.open_key.get().is_some()
+            && show_livekit_controls.get()
+            && !livekit_token_path.get().trim().is_empty()
+    });
 
     // TTS: speak the assistant's final text each time a turn finishes
     // (streaming flips true→false). Gated by `muted`. We track the previous
@@ -414,16 +421,8 @@ pub fn App() -> impl IntoView {
             // in OCEAN-202 — it was a dev-only component harness, not shipping UI.)
             // Call/collaboration utility line. Hidden while idle so the app has
             // one top chrome bar, not a second row of quiet-but-visible buttons.
-            <Show when=move || (!livekit_token_path.get().trim().is_empty() && show_livekit_controls.get()) || show_phone_dialer.get()>
+            <Show when=move || show_phone_dialer.get()>
                 <div class="ocean-utility-row">
-                    // LiveKit collaboration presence (OCEAN-83): revealed from
-                    // the overflow menu, then sticky while connected so mic,
-                    // camera, and leave controls never disappear mid-call.
-                    <crate::livekit::LiveKitPanel
-                        daemon=daemon_livekit.get_value()
-                        open=show_livekit_controls
-                    />
-
                     // Place-call control (OCEAN-261): revealed from overflow.
                     // On PSTN success, CallPanel below takes over from the
                     // daemon's call_started event.
@@ -433,6 +432,18 @@ pub fn App() -> impl IntoView {
                     />
                 </div>
             </Show>
+
+            // LiveKit collaboration presence (OCEAN-83): a single mount that
+            // either renders as a compact utility panel or expands into the
+            // full room stage once a room join routes the shared LiveKit
+            // signals. Never double-mount the singleton bridge.
+            <crate::livekit::LiveKitPanel
+                daemon=daemon_livekit.get_value()
+                open=show_livekit_controls
+                stage=in_room_mode
+            />
+
+            <Show when=move || !in_room_mode.get()>
 
                         // Live call-mode view (OCEAN-CALL). Self-contained: it
                         // subscribes to the daemon's `/v1/events` control stream
@@ -624,36 +635,32 @@ pub fn App() -> impl IntoView {
                             </button>
                         </form>
 
+            </Show>
+
             <SessionsPanel daemon=daemon_for_panel open=show_sessions />
 
-            // Persistent Rooms panel (OCEAN-108). Right-hand overlay; lists
-            // rooms, creates/joins/leaves, and shows a room's transcript +
-            // composer with live tailing.
+            // Persistent Rooms panel (OCEAN-108). Lightweight browse/create
+            // overlay only — a successful join closes this panel and promotes
+            // the main surface into room mode.
             <RoomsPanel rooms=rooms open=show_rooms />
 
-            // Council/quorum observability deck (OCEAN-96). Full-screen modal
-            // wrapping the deck in an iframe pointed at the proxy's /ui/council
-            // route. Mounted only while open so the deck's SSE bridge + Phaser
-            // canvas don't run in the background.
+            // Council/quorum observability deck (OCEAN-96). Native workflow
+            // stage now lives inside the surface instead of an iframe.
             <Show when=move || show_council.get()>
-                <div class="ocean-council-modal" role="dialog" aria-label="Council deck">
+                <div class="ocean-council-modal" role="dialog" aria-label="Council stage">
                     <div class="ocean-council-modal__bar">
-                        <span class="ocean-council-modal__title">"Council — quorum observability"</span>
+                        <span class="ocean-council-modal__title">"Council — workflow stage"</span>
                         <button
                             class="ocean-council-modal__close"
                             type="button"
-                            aria-label="close council deck"
+                            aria-label="close council stage"
                             title="Close"
                             on:click=move |_| show_council.set(false)
                         >
                             "✕"
                         </button>
                     </div>
-                    <iframe
-                        class="ocean-council-modal__frame"
-                        src="/ui/council"
-                        title="Council observability deck"
-                    ></iframe>
+                    <crate::council::CouncilStage daemon=daemon_council.clone() />
                 </div>
             </Show>
         </main>

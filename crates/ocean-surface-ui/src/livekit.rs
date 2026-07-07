@@ -124,7 +124,7 @@ pub fn disconnect_livekit_bridge() {
 /// live participant roster. Renders nothing until the config bootstrap has
 /// supplied a `livekit_token_path` (i.e. a room is configured for this surface).
 #[component]
-pub fn LiveKitPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
+pub fn LiveKitPanel(daemon: Daemon, open: RwSignal<bool>, stage: Signal<bool>) -> impl IntoView {
     let token_path = daemon.livekit_token_path;
     let room_id = daemon.livekit_room_id;
 
@@ -354,11 +354,57 @@ pub fn LiveKitPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
         });
     };
 
+
+    let stage_state_class = move || {
+        if error.get().is_some() {
+            "ocean-livekit__stage-state is-error"
+        } else if reconnecting.get() {
+            "ocean-livekit__stage-state is-reconnecting"
+        } else {
+            match join_state.get() {
+                JoinState::Connecting => "ocean-livekit__stage-state is-connecting",
+                JoinState::Connected => "ocean-livekit__stage-state is-live",
+                JoinState::Disconnected => "ocean-livekit__stage-state is-error",
+            }
+        }
+    };
+    let stage_state_label = move || {
+        if error.get().is_some() {
+            "error".to_string()
+        } else if reconnecting.get() {
+            "reconnecting".to_string()
+        } else {
+            match join_state.get() {
+                JoinState::Connecting => "connecting".to_string(),
+                JoinState::Connected => "live".to_string(),
+                JoinState::Disconnected => "idle".to_string(),
+            }
+        }
+    };
+    let stage_name = move || {
+        let r = room_id.get();
+        if r.is_empty() { "room".to_string() } else { r }
+    };
     view! {
         // Only show the panel after the operator asks for call controls, while
         // connecting/connected, or while an actionable LiveKit error exists.
         <Show when=is_visible>
-            <div class="ocean-livekit">
+            <div class=move || {
+                if stage.get() { "ocean-livekit ocean-livekit--stage" } else { "ocean-livekit" }
+            }>
+                <Show when=move || stage.get()>
+                    <div class="ocean-livekit__stage-head">
+                        <span class="ocean-livekit__stage-live">
+                            <span class="ocean-livekit__stage-live-dot"></span>
+                            "room"
+                        </span>
+                        <span class="ocean-livekit__stage-name">{stage_name}</span>
+                        <span class=stage_state_class>
+                            <span class="ocean-livekit__stage-state-dot"></span>
+                            {stage_state_label}
+                        </span>
+                    </div>
+                </Show>
                 <div class="ocean-livekit__bar">
                     <span class="ocean-livekit__room" title="LiveKit room">
                         {move || {

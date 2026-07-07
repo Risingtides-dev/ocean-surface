@@ -710,47 +710,34 @@
   }
 }
 
-/* Active-agent cognition glow — a tool in flight breathes a faint subsurface
-   cyan aura, the "looking down into water" bioluminescence. Gated ONLY on the
-   existing .is-running hook Rust emits on .block--tool / .tool-group
-   (transcript.rs:329,433): there is no per-turn streaming class, so the
-   running tool's disclosure head is the locus of "alive" work. Pulses between
-   --glow-thinking (resting) and --glow-live (peak) — both reserved for
-   cognition/live state; --glow-brand stays orb-only. */
+/* Active-turn cognition glow — the assistant turn actively streaming breathes
+   a faint subsurface cyan aura ("looking down into water" bioluminescence).
+   Gated ONLY on the existing .is-streaming hook Rust emits on the live
+   assistant turn (transcript.rs; reactive on daemon.streaming, removed at
+   turn_finished). Pulses between --glow-thinking (resting) and --glow-live
+   (peak) — both reserved for cognition/live state; --glow-brand stays
+   orb-only. The agent answer stays flush (no radius/card chrome); the per-tool
+   in-flight signal stays the yellow --running dot on the disclosure. */
 @keyframes ocean-thinking-glow {
   0%, 100% { box-shadow: var(--glow-thinking); }
   50%      { box-shadow: var(--glow-live); }
 }
 
-.block--tool.is-running .drawer__head,
-.tool-group.is-running .tool-group__head {
-  animation: ocean-thinking-glow 3.5s ease-in-out infinite;
-}
-
-/* Per-turn live hooks from transcript.rs. `is-streaming` is reactive on the
-   last assistant turn only while daemon.streaming is true; `is-new` is a
-   one-shot mount snapshot for turns created mid-stream, never hydrated
-   history. They let the agent's active thought feel alive without page-load
-   choreography. */
-.turn.is-new {
-  animation: ocean-turn-materialize 140ms var(--ease) both;
-}
-
 .turn--assistant.is-streaming .turn__body {
-  border-radius: var(--radius-lg);
-  box-shadow: var(--glow-thinking);
   animation: ocean-thinking-glow 3.5s ease-in-out infinite;
 }
 
+/* Newly-mounted turns materialize from just below the surface — a short
+   opacity + 2px rise (the rise-from-depth tide). Gated on .turn.is-new,
+   which Rust emits ONLY on turns appended mid-stream; hydrated history never
+   carries it, so this never fires on page-load/restore. */
 @keyframes ocean-turn-materialize {
-  from {
-    opacity: 0;
-    transform: translateY(2px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  from { opacity: 0; transform: translateY(2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.turn.is-new {
+  animation: ocean-turn-materialize var(--dur-fast) var(--ease-tide) both;
 }
 
 
@@ -804,10 +791,5 @@
   .drawer__head,
   .tool-group__head {
     transition: none;
-  }
-
-  .block--tool.is-running .drawer__head,
-  .tool-group.is-running .tool-group__head {
-    animation: none;
   }
 }

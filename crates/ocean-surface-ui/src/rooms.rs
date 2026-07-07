@@ -300,8 +300,10 @@ pub struct Rooms {
     pub livekit_room_id: RwSignal<String>,
     /// The LiveKit token path for the current call (shared with Daemon/LiveKitPanel).
     pub livekit_token_path: RwSignal<String>,
-    /// Whether the LiveKit controls utility row is visible.
+    /// Whether the LiveKit controls utility row / room stage is visible.
     pub show_livekit_controls: RwSignal<bool>,
+    /// Whether the rooms browse panel itself is open.
+    pub panel_open: RwSignal<bool>,
 }
 
 impl Rooms {
@@ -314,6 +316,7 @@ impl Rooms {
         livekit_room_id: RwSignal<String>,
         livekit_token_path: RwSignal<String>,
         show_livekit_controls: RwSignal<bool>,
+        panel_open: RwSignal<bool>,
     ) -> Self {
         let identity = RoomIdentity::current();
         // Leak the small, app-lifetime identity strings to obtain `&'static str`
@@ -334,6 +337,7 @@ impl Rooms {
             livekit_room_id,
             livekit_token_path,
             show_livekit_controls,
+            panel_open,
         }
     }
 
@@ -522,6 +526,7 @@ impl Rooms {
                                 &me.livekit_token_path,
                             );
                             me.show_livekit_controls.set(true);
+                            me.panel_open.set(false);
                         }
                         Ok(r) => status.set(format!(
                             "join failed: {}",

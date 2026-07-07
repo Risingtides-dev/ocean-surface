@@ -273,8 +273,8 @@ fn AssistantTurn(
                             // One thinking disclosure per turn: every thinking
                             // segment collapses into it, with a summed,
                             // live-updating char count.
-                            RenderItem::ThinkingGroup(block_idxs) => view! {
-                                <ThinkingGroup turn_idx=idx block_idxs=block_idxs turns=turns />
+                            RenderItem::ThinkingGroup(_) => view! {
+                                <ThinkingGroup turn_idx=idx turns=turns />
                             }
                             .into_any(),
                         }
@@ -408,26 +408,44 @@ fn ToolGroup(
 /// `<pre>` when expanded. Collapsed by default; the toggle sticks. No status
 /// tracking (thinking has no error state). Render-only: never reorders
 /// `turn.blocks`.
+///
+/// Member indices are DERIVED reactively from `turns`, not snapshotted from the
+/// render-item prop: thinking segments keep appending mid-stream and the parent
+/// `For` retains this component under a stable key, so a snapshot prop would
+/// freeze the group at its first segment and miss every later delta. Scanning
+/// the turn's blocks each update keeps the count and body current forever.
 #[component]
 fn ThinkingGroup(
     turn_idx: usize,
-    block_idxs: Vec<usize>,
     turns: RwSignal<Vec<crate::model::Turn>>,
 ) -> impl IntoView {
-    let idxs = StoredValue::new(block_idxs);
     // Local expand state (collapsed by default). Coalescing many blocks into one
     // disclosure means there's no single model `expanded` field to mirror, so the
     // toggle owns its own state — same shape as `ToolGroup`'s user override.
     let open: RwSignal<bool> = RwSignal::new(false);
-    // Aggregate char count across every thinking block, read reactively so the
-    // header updates live as deltas stream into any segment.
+    // Every thinking block in the turn is a member of this one disclosure. Scan
+    // the blocks on each update so segments arriving AFTER the group was first
+    // rendered are picked up — the count and body stay current as deltas stream.
+    let idxs = Signal::derive(move || {
+        turns.with(|t| {
+            t.get(turn_idx).map_or(Vec::new(), |turn| {
+                turn.blocks
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, b)| matches!(b, Block::Thinking { .. }).then_some(i))
+                    .collect::<Vec<_>>()
+            })
+        })
+    });
+    // Aggregate char count across every thinking block, recomputed as blocks
+    // append so the header updates live during streaming.
     let count = Signal::derive(move || {
         turns.with(|t| {
             t.get(turn_idx).map_or(0usize, |turn| {
-                idxs.get_value()
-                    .into_iter()
-                    .filter_map(|bi| match turn.blocks.get(bi) {
-                        Some(Block::Thinking { content, .. }) => Some(content.chars().count()),
+                turn.blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        Block::Thinking { content, .. } => Some(content.chars().count()),
                         _ => None,
                     })
                     .sum()
@@ -442,7 +460,7 @@ fn ThinkingGroup(
             </button>
             <Show when=move || open.get()>
                 <For
-                    each=move || idxs.get_value()
+                    each=move || idxs.get()
                     key=|bi| *bi
                     children=move |bi| {
                         let content = move || {
