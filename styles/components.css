@@ -38,7 +38,7 @@
 .component-gallery,
 .component-confirm,
 .block--component-unknown {
-  background: var(--bg-elevated);
+  background: var(--sheen), var(--bg-elevated);
   box-shadow: var(--elev-2);
   border-radius: var(--radius-lg);
   box-sizing: border-box;

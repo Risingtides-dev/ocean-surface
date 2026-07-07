@@ -2746,11 +2746,21 @@ impl Daemon {
                 Ok(resp) => {
                     if !resp.ok() {
                         let text = resp.text().await.unwrap_or_default();
-                        log::error!("component event error: {text}");
-                        status.set(format!(
-                            "component event error: {}",
-                            concise_error(&text)
-                        ));
+                        // A wait-miss is a benign race, not an operator-facing
+                        // fault: the agent's `component_wait` already resolved
+                        // (or was never armed) when the click landed — the
+                        // daemon answers 404 "no pending wait for component" /
+                        // 410 "nobody waiting". Surfacing that as a status
+                        // toast made every stray click look like a failure.
+                        if text.contains("no pending wait") || text.contains("nobody waiting") {
+                            log::warn!("component event ignored (no waiter): {text}");
+                        } else {
+                            log::error!("component event error: {text}");
+                            status.set(format!(
+                                "component event error: {}",
+                                concise_error(&text)
+                            ));
+                        }
                     }
                 }
                 Err(err) => {
