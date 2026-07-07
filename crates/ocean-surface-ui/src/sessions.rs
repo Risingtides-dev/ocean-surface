@@ -19,7 +19,6 @@
 use std::collections::HashSet;
 use leptos::prelude::*;
 use leptos::ev::SubmitEvent;
-use js_sys;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::daemon::{Daemon, fetch_fs_dirs, ProjectInfo, SessionSummary};
@@ -434,7 +433,7 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                     }
                                 }
                                 if display_segs.is_empty() {
-                                    let h = if home.is_empty() { "~".to_string() } else { "~".to_string() };
+                                    let h = "~".to_string();
                                     display_segs.push((h.clone(), home.clone()));
                                 }
                                 let d_url = daemon.get_value().url.get_untracked();
@@ -701,7 +700,7 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                                 wts.into_iter().map(|wt: WorktreeGroup| {
                                                     let rows = wt.sessions.clone();
                                                     let count = rows.len();
-                                                    let root_label = wt.root.split('/').last()
+                                                    let root_label = wt.root.split('/').next_back()
                                                         .filter(|s| !s.is_empty())
                                                         .unwrap_or("worktree")
                                                         .to_string();

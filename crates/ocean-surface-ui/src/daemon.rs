@@ -2893,9 +2893,9 @@ fn apply_event(
                     turns,
                     status,
                     status_detail,
-                    &turn_id,
+                    turn_id,
                     "turn failed",
-                    &err,
+                    err,
                 );
             } else if turn_status != "completed" {
                 // A non-success status with no error string (e.g. "cancelled").

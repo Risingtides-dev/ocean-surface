@@ -69,7 +69,7 @@ fn safe_url(dest: CowStr, allow_data: bool) -> CowStr {
         .filter(|c| !c.is_ascii_whitespace() && !c.is_control())
         .collect();
     let lower = cleaned.to_ascii_lowercase();
-    let safe = match lower.find(|c: char| matches!(c, ':' | '/' | '?' | '#')) {
+    let safe = match lower.find([':', '/', '?', '#']) {
         // A ':' before any path/query/fragment delimiter is an explicit scheme;
         // allow only known-inert ones.
         Some(i) if lower.as_bytes()[i] == b':' => {
