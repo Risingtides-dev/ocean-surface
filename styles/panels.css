@@ -592,18 +592,21 @@
   align-items: center;
   gap: 8px;
   color: var(--fg-3);
-  font-family: var(--mono);
-  font-size: 11px;
-  line-height: 1.35;
   white-space: nowrap;
 }
 
 .sessions-item__time {
   flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .sessions-item__turns {
   flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .sessions-panel__empty {
@@ -1182,6 +1185,53 @@
   white-space: nowrap;
 }
 
+
+.sessions-create__use-existing {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 12px;
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--fg-2);
+  font-family: var(--font);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.sessions-create__use-existing:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.sessions-create__use-existing:focus-visible {
+  box-shadow: inset var(--focus-ring);
+}
+
+.sessions-create__use-existing:active {
+  transform: scale(0.985);
+}
+
+.sessions-create__use-existing-path {
+  font-family: var(--mono);
+  color: var(--fg);
+}
+
+.sessions-create__popover-item-chip {
+  flex: 0 0 auto;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-left: 8px;
+  color: var(--fg-3);
+  font-family: var(--mono);
+  font-size: 11px;
+}
 
 .sessions-create__popover-new {
   display: flex;

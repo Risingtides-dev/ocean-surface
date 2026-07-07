@@ -6,10 +6,10 @@
 //! catalogue (`daemon.projects`). Sessions with no matching project fall into
 //! an "Other" bucket.
 //!
-//! Within a project, sessions that span multiple workspace roots are split into
-//! worktree sub-groups (keyed by root, not branch — branch is just a display
-//! chip to handle detached HEAD / duplicate branch names safely). A project
-//! with a single root renders flat.
+//! Within a project, sessions whose workspace root sits under one of the
+//! project's registered worktrees (daemon-enriched `worktrees` on
+//! `ProjectInfo`, component-boundary prefix match) group under that worktree
+//! sub-row; the rest stay in the project's flat list.
 //!
 //! Zero-turn drafts are filtered out unless they're the active session (the
 //! lazy session creation approach no longer POSTs on "New Session" click, so
@@ -22,7 +22,7 @@ use leptos::ev::SubmitEvent;
 use js_sys;
 use wasm_bindgen_futures::spawn_local;
 
-use crate::daemon::{Daemon, fetch_fs_dirs, ProjectInfo, SessionSummary};
+use crate::daemon::{Daemon, fetch_fs_dirs, is_path_prefix, ProjectInfo, SessionSummary};
 
 // ---------------------------------------------------------------------------
 // Pure helpers — unit-testable without WASM
@@ -83,16 +83,16 @@ fn project_create_root(text_mode: bool, parent: &str, root: &str, name: &str) ->
 }
 
 /// One project section in the panel: a project header followed by its sessions,
-/// optionally split into worktree sub-groups when the project spans multiple
-/// workspace roots.
+/// optionally with worktree sub-groups when the daemon reports registered
+/// worktrees for the project.
 #[derive(Clone, Debug)]
 pub(crate) struct ProjectSection {
     pub key: String,
     pub label: String,
     pub is_project: bool,
-    /// Flat session list. Populated only when `worktrees` is None.
+    /// Sessions not bucketed under any worktree (all sessions when `worktrees` is None).
     pub sessions: Vec<SessionSummary>,
-    /// Sub-groups by workspace root, set only when >1 distinct root exists.
+    /// Sub-groups keyed by registered worktree path, set only when >=1 session matched.
     pub worktrees: Option<Vec<WorktreeGroup>>,
 }
 
@@ -185,30 +185,44 @@ pub(crate) fn group_for_panel(
     for sec in &mut sections {
         sec.sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     }
-
-    // Split into worktree sub-groups where a project has >1 distinct root.
+    // Worktree bucketing: second pass inside each project section.
+    // Sessions whose workspace root sits under a project worktree's path
+    // (component-boundary prefix match) group under that sub-row;
+    // remaining sessions stay in the project's main session list.
+    // Zero worktrees → exactly current rendering (no sub-groups).
     for sec in &mut sections {
         if !sec.is_project {
             continue;
         }
-        let mut roots: Vec<WorktreeGroup> = Vec::new();
+        let proj = projects.iter().find(|p| p.id == sec.key);
+        let wts = match proj {
+            Some(p) if !p.worktrees.is_empty() => &p.worktrees,
+            _ => continue,
+        };
+        let mut wt_groups: Vec<WorktreeGroup> = Vec::new();
+        let mut unmatched: Vec<SessionSummary> = Vec::new();
         for s in &sec.sessions {
-            let root = session_root(s).to_string();
-            let branch = s.git_branch.clone();
-            match roots.iter_mut().find(|wt: &&mut WorktreeGroup| wt.root == root) {
-                Some(wt) => wt.sessions.push(s.clone()),
-                None => roots.push(WorktreeGroup {
-                    root,
-                    branch,
-                    sessions: vec![s.clone()],
-                }),
+            let root = session_root(s);
+            let matching = wts.iter().find(|wt| is_path_prefix(&wt.path, root));
+            if let Some(wt) = matching {
+                let branch = wt.branch.clone();
+                match wt_groups.iter_mut().find(|g| g.root == wt.path) {
+                    Some(g) => g.sessions.push(s.clone()),
+                    None => wt_groups.push(WorktreeGroup {
+                        root: wt.path.clone(),
+                        branch,
+                        sessions: vec![s.clone()],
+                    }),
+                }
+            } else {
+                unmatched.push(s.clone());
             }
         }
-        if roots.len() > 1 {
-            for wt in &mut roots {
+        if !wt_groups.is_empty() {
+            for wt in &mut wt_groups {
                 wt.sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
             }
-            roots.sort_by(|a, b| {
+            wt_groups.sort_by(|a, b| {
                 let a_has = a.branch.is_some();
                 let b_has = b.branch.is_some();
                 match (a_has, b_has) {
@@ -222,7 +236,8 @@ pub(crate) fn group_for_panel(
                         .cmp(a.sessions.first().map(|s| s.updated_at.as_str()).unwrap_or("")),
                 }
             });
-            sec.worktrees = Some(roots);
+            sec.worktrees = Some(wt_groups);
+            sec.sessions = unmatched;
         }
     }
 
@@ -376,16 +391,24 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
     let breadcrumb_filter = RwSignal::new(String::new());
     let breadcrumb_text_mode = RwSignal::new(false);
     let breadcrumb_home = RwSignal::new(String::new());
+    // True when the user clicked "Use this folder" — the current breadcrumb
+    // directory is the project root directly (no parent+name slug derivation).
+    let register_existing: RwSignal<bool> = RwSignal::new(false);
     let _popover_highlight = RwSignal::new(0usize);
 
     // Browse mode treats the chosen directory as a PARENT. The actual project
     // root is parent + normalized project-name slug, and the daemon creates
-    // that folder on POST /v1/projects.
+    // that folder on POST /v1/projects.  When `register_existing` is true the
+    // browsed directory IS the project root (no parent+slug derivation).
     Effect::new(move |_| {
         if !breadcrumb_text_mode.get() {
             let parent = breadcrumb_parent.get();
             if !parent.trim().is_empty() {
-                create_root.set(project_root_from_parent(&parent, &create_name.get()));
+                if register_existing.get_untracked() {
+                    create_root.set(parent.clone());
+                } else {
+                    create_root.set(project_root_from_parent(&parent, &create_name.get()));
+                }
             }
         }
     });
@@ -427,18 +450,23 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
     Effect::new(move |_| {
         if !open.get() {
             show_create.set(false);
+            register_existing.set(false);
         }
     });
 
-
-    let create_can_submit = move || {
-        let name = create_name.get();
-        let root = project_create_root(
+    let create_root_value = move || if register_existing.get() {
+        create_root.get()
+    } else {
+        project_create_root(
             breadcrumb_text_mode.get(),
             &breadcrumb_parent.get(),
             &create_root.get(),
-            &name,
-        );
+            &create_name.get(),
+        )
+    };
+    let create_can_submit = move || {
+        let name = create_name.get();
+        let root = create_root_value();
         !name.trim().is_empty() && !root.trim().is_empty()
     };
     let start_chat = move |_| {
@@ -448,12 +476,7 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
     let create_project = move |ev: SubmitEvent| {
         ev.prevent_default();
         let name = create_name.get_untracked();
-        let root = project_create_root(
-            breadcrumb_text_mode.get_untracked(),
-            &breadcrumb_parent.get_untracked(),
-            &create_root.get_untracked(),
-            &name,
-        );
+        let root = create_root_value();
         daemon.get_value().create_project(name, root);
     };
 
@@ -472,6 +495,7 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
             create_name.set(String::new());
             create_root.set(String::new());
             breadcrumb_parent.set(String::new());
+            register_existing.set(false);
             breadcrumb_dirs.set(Vec::new());
             show_create.set(false);
         }
@@ -674,6 +698,33 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                                             }
                                                         }
                                                     />
+                                                    {move || {
+                                                        let parent = breadcrumb_parent.get();
+                                                        if parent.trim().is_empty() {
+                                                            return ().into_any();
+                                                        }
+                                                        let basename = parent.rsplit('/').find(|s| !s.is_empty()).unwrap_or("project").to_string();
+                                                        let bn = basename.clone();
+                                                        let p = parent.clone();
+                                                        view! {
+                                                            <button
+                                                                class="sessions-create__use-existing"
+                                                                type="button"
+                                                                on:click={
+                                                                    let bnc = bn.clone();
+                                                                    let pc = p.clone();
+                                                                    move |_| {
+                                                                        create_name.set(bnc.clone());
+                                                                        create_root.set(pc.clone());
+                                                                        register_existing.set(true);
+                                                                    }
+                                                                }
+                                                            >
+                                                                "Use folder: "
+                                                                <span class="sessions-create__use-existing-path">{basename}</span>
+                                                            </button>
+                                                        }.into_any()
+                                                    }}
                                                     <div class="sessions-create__popover-list">
                                                         {if loading {
                                                             view! { <div class="sessions-create__popover-status">"Loading..."</div> }.into_any()
@@ -705,6 +756,8 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                                             let items: Vec<_> = filtered.iter().map(|d| {
                                                                 let name = d.name.clone();
                                                                 let path = d.path.clone();
+                                                                let repo = d.is_repo;
+                                                                let branch = d.git_branch.clone();
                                                                 let u = d_url.clone();
                                                                 view! {
                                                                     <button
@@ -730,6 +783,11 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                                                         }
                                                                     >
                                                                         <span class="sessions-create__popover-item-name">{name.clone()}</span>
+                                                                        {if repo && branch.is_some() {
+                                                                            view! { <span class="sessions-create__popover-item-chip">{branch.as_deref().unwrap_or("")}</span> }.into_any()
+                                                                        } else {
+                                                                            ().into_any()
+                                                                        }}
                                                                     </button>
                                                                 }
                                                             }).collect();
@@ -871,8 +929,7 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                     <Show when=move || !is_collapsed(&show_key)>
                                         <div class="sessions-group__body">
                                             {if let Some(wts) = worktrees.clone() {
-                                                // Worktree split: render sub-headers.
-                                                wts.into_iter().map(|wt: WorktreeGroup| {
+                                                let mut out: Vec<_> = wts.into_iter().map(|wt: WorktreeGroup| {
                                                     let rows = wt.sessions.clone();
                                                     let count = rows.len();
                                                     let root_label = wt.root.split('/').last()
@@ -898,7 +955,11 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                                             {rows.into_iter().map(|s| session_row(s, daemon, open, current_id).into_any()).collect::<Vec<_>>()}
                                                         </div>
                                                     }.into_any()
-                                                }).collect::<Vec<_>>()
+                                                }).collect();
+                                                // Remaining sessions (not matched to any worktree) shown flat below.
+                                                out.extend(flattened.clone().into_iter()
+                                                    .map(|s| session_row(s, daemon, open, current_id).into_any()));
+                                                out
                                             } else {
                                                 // Flat list.
                                                 flattened.clone().into_iter()
@@ -971,13 +1032,34 @@ fn session_row(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::OwningProjectRef;
+    use crate::daemon::{OwningProjectRef, WorktreeInfo};
 
     fn project(id: &str, name: &str, workspace_root: &str) -> ProjectInfo {
         ProjectInfo {
             id: id.to_string(),
             name: name.to_string(),
             workspace_root: workspace_root.to_string(),
+            git_branch: None,
+            git_dirty: None,
+            worktrees: Vec::new(),
+        }
+    }
+
+    fn project_with_worktrees(
+        id: &str,
+        name: &str,
+        workspace_root: &str,
+        worktrees: &[(&str, Option<&str>)],
+    ) -> ProjectInfo {
+        ProjectInfo {
+            worktrees: worktrees
+                .iter()
+                .map(|(path, branch)| WorktreeInfo {
+                    path: path.to_string(),
+                    branch: branch.map(str::to_string),
+                })
+                .collect(),
+            ..project(id, name, workspace_root)
         }
     }
 
@@ -1071,7 +1153,13 @@ mod tests {
     }
 
     #[test]
-    fn project_with_multiple_roots_splits_into_worktrees_and_preserves_branch_labels() {
+    fn sessions_bucket_under_registered_worktrees_and_unmatched_stay_flat() {
+        let projects = vec![project_with_worktrees(
+            "owned",
+            "Owned",
+            "/repo-main",
+            &[("/repo-feature", Some("feature/redesign"))],
+        )];
         let sessions = vec![
             session(
                 "main-root",
@@ -1091,20 +1179,56 @@ mod tests {
                 1,
                 "2026-07-05T12:01:00Z",
             ),
+            session(
+                "feature-nested",
+                "/repo-feature/crates/x",
+                Some("/repo-feature/crates/x"),
+                Some(owner("owned", "Owned")),
+                None,
+                1,
+                "2026-07-05T12:02:00Z",
+            ),
+            // Component-boundary trap: /repo-featurex is NOT under /repo-feature.
+            session(
+                "boundary-trap",
+                "/repo-featurex",
+                Some("/repo-featurex"),
+                Some(owner("owned", "Owned")),
+                None,
+                1,
+                "2026-07-05T12:03:00Z",
+            ),
         ];
 
-        let sections = group_for_panel(&sessions, &[], None);
+        let sections = group_for_panel(&sessions, &projects, None);
 
         assert_eq!(sections.len(), 1);
-        let worktrees = sections[0].worktrees.as_ref().expect("project should split by root");
-        assert_eq!(worktrees.len(), 2);
-        let main = worktrees.iter().find(|worktree| worktree.root == "/repo-main").unwrap();
-        assert_eq!(main.branch.as_deref(), Some("main"));
-        assert_eq!(main.sessions[0].id, "main-root");
-        let feature =
-            worktrees.iter().find(|worktree| worktree.root == "/repo-feature").unwrap();
+        let sec = &sections[0];
+        let worktrees = sec.worktrees.as_ref().expect("worktree sub-groups expected");
+        assert_eq!(worktrees.len(), 1);
+        let feature = &worktrees[0];
+        assert_eq!(feature.root, "/repo-feature");
         assert_eq!(feature.branch.as_deref(), Some("feature/redesign"));
-        assert_eq!(feature.sessions[0].id, "feature-root");
+        let wt_ids: Vec<&str> = feature.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(wt_ids, vec!["feature-nested", "feature-root"]);
+        // Unmatched sessions stay in the project's flat list, newest first.
+        let flat_ids: Vec<&str> = sec.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(flat_ids, vec!["boundary-trap", "main-root"]);
+    }
+
+    #[test]
+    fn project_without_worktrees_renders_flat_even_with_multiple_roots() {
+        let projects = vec![project("owned", "Owned", "/repo-main")];
+        let sessions = vec![
+            session("a", "/repo-main", Some("/repo-main"), Some(owner("owned", "Owned")), None, 1, "2026-07-05T12:00:00Z"),
+            session("b", "/repo-feature", Some("/repo-feature"), Some(owner("owned", "Owned")), None, 1, "2026-07-05T12:01:00Z"),
+        ];
+
+        let sections = group_for_panel(&sessions, &projects, None);
+
+        assert_eq!(sections.len(), 1);
+        assert!(sections[0].worktrees.is_none());
+        assert_eq!(sections[0].sessions.len(), 2);
     }
 
     #[test]

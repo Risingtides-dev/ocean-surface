@@ -962,6 +962,21 @@ pub struct ProjectInfo {
     pub name: String,
     #[serde(default)]
     pub workspace_root: String,
+    #[serde(default)]
+    pub git_branch: Option<String>,
+    #[serde(default)]
+    pub git_dirty: Option<bool>,
+    #[serde(default)]
+    pub worktrees: Vec<WorktreeInfo>,
+}
+
+/// One worktree attached to a project (from `GET /v1/projects` enrichment).
+/// Excludes the main worktree (the project root itself).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct WorktreeInfo {
+    pub path: String,
+    #[serde(default)]
+    pub branch: Option<String>,
 }
 
 /// `POST /v1/projects` request body — mirrors `ocean-daemon::CreateProjectRequest`
@@ -1025,6 +1040,12 @@ pub struct FsDirEntry {
     /// True when this directory contains a `.git` sub-directory.
     #[serde(default)]
     pub git: bool,
+    /// True when the daemon reports this directory as a git repo root.
+    #[serde(default)]
+    pub is_repo: bool,
+    /// Current branch when this is a git repo, if the daemon can resolve it.
+    #[serde(default)]
+    pub git_branch: Option<String>,
 }
 
 /// Response from `GET /v1/fs/dirs?path=<path>`.
@@ -2632,7 +2653,7 @@ impl Daemon {
     /// ([`project_create_error`]) instead of a POST. While the POST is in flight
     /// [`project_create_pending`] is true (drives the Create button label). On
     /// success the returned project is upserted into the `projects` catalogue
-    /// and selected via [`begin_project_session`] (persist + lazy new session),
+    /// and selected via `set_project` (persisted, no session created),
     /// and the status flips to a concise `project created`. On any failure the
     /// status becomes `project create failed: <concise reason>` and the same
     /// reason lands on [`project_create_error`] so the form stays open with an
@@ -2697,7 +2718,7 @@ impl Daemon {
                             }
                         });
                         status.set("project created".into());
-                        daemon.begin_project_session(project.id.clone());
+                        daemon.set_project(Some(project.id.clone()));
                         pending.set(false);
                     }
                     Ok(r) => {
@@ -4208,6 +4229,13 @@ pub(crate) fn daemon_url_fallback(protocol: &str, host: &str) -> String {
     DEFAULT_DAEMON_URL.into()
 }
 
+/// Component-boundary path-prefix check: `prefix` matches `candidate`
+/// when candidate == prefix OR candidate starts with prefix + "/".
+/// "/a/b" matches "/a/b/c" but NOT "/a/bc".
+pub(crate) fn is_path_prefix(prefix: &str, candidate: &str) -> bool {
+    candidate == prefix || candidate.starts_with(prefix) && candidate.as_bytes().get(prefix.len()) == Some(&b'/')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5521,5 +5549,29 @@ mod tests {
             "project session does NOT pin /tmp — the daemon resolves the \
              project's real workspace_root server-side from the project_id",
         );
+    }
+
+    #[test]
+    fn old_project_json_decodes_with_defaults_for_new_fields() {
+        // Old daemon JSON (no git_branch, git_dirty, worktrees) must decode.
+        let json = r#"{"id":"p1","name":"Alpha","workspace_root":"/alpha"}"#;
+        let p: ProjectInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(p.id, "p1");
+        assert_eq!(p.name, "Alpha");
+        assert_eq!(p.workspace_root, "/alpha");
+        assert_eq!(p.git_branch, None);
+        assert_eq!(p.git_dirty, None);
+        assert!(p.worktrees.is_empty());
+    }
+
+    #[test]
+    fn old_fs_dir_json_decodes_with_defaults_for_new_fields() {
+        let json = r#"{"name":"src","path":"/src","git":true}"#;
+        let d: FsDirEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(d.name, "src");
+        assert_eq!(d.path, "/src");
+        assert!(d.git);
+        assert!(!d.is_repo);
+        assert_eq!(d.git_branch, None);
     }
 }
