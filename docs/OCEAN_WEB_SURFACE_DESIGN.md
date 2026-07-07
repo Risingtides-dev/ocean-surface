@@ -95,9 +95,24 @@ Shadows / glow
 - `--shadow-lg: 0 24px 64px rgba(0,0,0,0.65)` overlays/slide-overs only
 - `--glow-brand: 0 0 32px rgba(0,215,215,0.28)` voice orb / live moments only
 
+Material — molded from the digital ocean
+- `--specular: rgba(255,255,255,0.08)` top-edge light on raised surfaces
+- `--specular-soft: rgba(255,255,255,0.05)` fainter top-edge (elev-1 rows/controls)
+- `--specular-live: rgba(95,255,255,0.16)` aqua specular for live/active states
+- `--elev-1` inset specular-soft + tight drop — controls, menu rows, chips
+- `--elev-2` inset specular + mid drop — cards, docks, list panels
+- `--elev-3` inset specular + deep drop — popovers, modals, tooltips
+- `--well` inset shadow + faint bottom specular — inputs, data/code wells
+- `--well-deep` deeper inset — deepest wells (transcript, diff bodies)
+- `--pressed: inset 0 2px 4px rgba(0,0,0,0.60)` :active pressed-in
+- `--glow-thinking: 0 0 24px rgba(0,215,215,0.10)` breathing cognition glow
+- `--glow-live: 0 0 20px rgba(0,255,215,0.16)` active-streaming glow
+- `--pointer-x / --pointer-y: 50%` pointer-light origin (root listener writes)
+- `--pointer-light: rgba(95,255,255,0.04)` faint radial specular at pointer
+
 Motion
-- `--ease: cubic-bezier(.22,.61,.36,1)`; `--dur-fast: 160ms`; `--dur: 240ms`
-- Motion conveys state only. No bounce, no elastic, no entrance choreography.
+- `--ease: cubic-bezier(.22,.61,.36,1)`; `--dur-fast: 160ms`; `--dur: 240ms`; `--dur-slow: 420ms`; `--ease-tide: cubic-bezier(.16,.84,.28,1)` rise-from-depth (tidal entrance curve).
+- Motion conveys state only. No bounce, no elastic, no decorative entrance choreography — the ONLY entrance allowed is the tidal rise for overlays/popovers (see Material).
 - EVERY animation gets a `@media (prefers-reduced-motion: reduce)` kill.
 
 Controls & layout
@@ -162,6 +177,55 @@ Failure surfaces:
 - Errors follow voice rules: explain what went wrong in the interface voice,
   never vague, no apology.
 
+## Material — molded from the digital ocean
+
+One overhead light source. RAISED surfaces catch a top-edge specular
+(`--specular`) and cast a dark drop below; CARVED wells fall away into
+darker water. Elevation replaces borders — an element takes the border
+recipe OR the elevation recipe, never both. Agent cognition is
+bioluminescence: existing state hooks (`is-*` classes, data attrs the
+Rust already emits) drive the glow tokens — no new state plumbing, only
+new declarations on hooks that already exist.
+
+RAISED — interactive controls, cards, popovers:
+- `box-shadow: var(--elev-N)`: `--elev-1` controls/rows/chips, `--elev-2`
+  cards/docks/list panels, `--elev-3` popovers/modals/tooltips.
+- REMOVE any 1px border on the same element — the specular inset replaces
+  the outline. (The §5 "1px border + ≥16px blur" ban stands.)
+
+CARVED — inputs, code/diff/data wells:
+- Darker bg (`--bg-well`, deeper for the deepest wells) +
+  `box-shadow: var(--well)` (or `--well-deep`).
+
+PRESSED — `:active` on raised controls:
+- `box-shadow: var(--pressed); transform: translateY(1px)`.
+
+The focus ring (`--focus-ring`) is unchanged and stacks with elevation.
+
+Bioluminescence state map — attach to existing hooks only:
+- Thinking: `--glow-thinking`, a slow breathing keyframe (opacity/scale).
+- Tool running: lift `--elev-1` → `--elev-2` and brighten to `--specular-live`.
+- Streaming: materialize — incoming content fades/translates in on the tide.
+- Permission wait: `--warn` ring pulse over a `--warn-soft` fill.
+- Live call: `--accent` dot pulse. The live-state color map holds everywhere
+  — live = `--accent` pulse, connected = `--ok`, reconnecting = `--warn`,
+  failed/barge = `--err`.
+
+Tidal entrance — overlays/popovers/slide-overs only, never page load:
+- One keyframe block per file that needs it: `from { opacity: 0;
+  transform: translateY(8px) }` to settled, `var(--dur-slow) var(--ease-tide)`.
+- Conveys "rose from depth", not decoration. Killed under reduced-motion.
+
+Pointer light:
+- A root listener writes `--pointer-x` / `--pointer-y`; opted-in surfaces
+  paint a faint radial specular (`--pointer-light`) at the pointer.
+- Gates: opt-in only (never global), off under `prefers-reduced-motion` and
+  on coarse/touch pointers. Faint enough to read as light, not chrome.
+
+Portability — same grammar, three renderers. These tokens map to GPUI
+shadow + highlight layers and to iOS materials (RAISED → elevated material,
+CARVED → inset well). The names and recipes travel; only the renderer changes.
+
 ## 4. Layout
 
 - Shell: `max-width: var(--shell-max)` desktop, full-bleed below 960px.
@@ -183,7 +247,9 @@ Failure surfaces:
 - No gradient text (`background-clip: text`).
 - No `border-left`/`border-right` accent stripes > 1px. (Existing drawer
   left-rails: replace with tinted fills or dot indicators.)
-- No 1px border + ≥16px blur shadow on the same element.
+- No 1px border + ≥16px blur shadow on the same element — elevation replaces
+  the border; an element takes the border recipe OR the elevation recipe,
+  never both.
 - No border-radius > 16px on cards/inputs (pills exempt).
 - No glassmorphism as default; `backdrop-filter` only on overlay backdrops.
 - No decorative motion; no page-load choreography.
@@ -218,6 +284,11 @@ Failure surfaces:
   hover/focus; no permanent captions under controls.
 - Slide-overs (sessions/rooms): `--bg-raised` panel, `--shadow-lg`, backdrop
   `rgba(6,6,6,0.72)` + blur(4px); 280ms slide with reduced-motion fallback.
+- Sessions/rooms/call rows follow the plain-row register (§3): title left,
+  mono metadata right-aligned in `--fg-3`, destructive actions revealed on
+  hover/focus only, ONE join/leave affordance per row. No icon+title+subtitle
+  lockups, no same-weight button rows — density is conditional rendering and
+  a single overflow, not stacked affordances.
 - Live states (call/livekit): live dot = `--err`-family red pulse? No — live
   recording convention is red, but our live accent is the brand: use
   `--accent` pulsing dot for "live", `--ok` for connected, `--warn` for

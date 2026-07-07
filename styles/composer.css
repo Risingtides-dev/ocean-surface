@@ -18,14 +18,13 @@
   row-gap: 6px;
   margin: 8px 18px 12px;
   padding: 10px 12px;
-  border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--bg-elevated);
-  transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+  box-shadow: var(--elev-2);
+  transition: box-shadow var(--dur) var(--ease-tide);
 }
 .ocean-composer:focus-within {
-  border-color: var(--accent);
-  box-shadow: var(--focus-ring);
+  box-shadow: var(--elev-2), var(--focus-ring);
 }
 
 /* ── voice orb ─────────────────────────────────────────────────────────── */
@@ -234,18 +233,18 @@
   width: 100%;
   min-height: 40px;
   max-height: 160px;
-  padding: 8px 4px 0;
+  padding: 8px 10px;
   resize: none;
   border: none;
-  border-radius: 0;
+  border-radius: var(--radius);
   outline: none;
-  background: none;
+  background: var(--bg-raised);
+  box-shadow: var(--well-deep);
   color: var(--fg);
   font-family: var(--font);
   font-size: 14px;
   line-height: 1.45;
   transition:
-    border-color var(--dur-fast) var(--ease),
     background var(--dur-fast) var(--ease),
     box-shadow var(--dur-fast) var(--ease),
     opacity var(--dur-fast) var(--ease);
@@ -258,7 +257,13 @@
 .ocean-composer__input:focus,
 .ocean-composer__input:focus-visible {
   outline: none;
-  box-shadow: none;
+  box-shadow: var(--well-deep);
+}
+
+/* Tide-pool water-line: when the dock holds focus, a faint aqua specular
+   rims the well — the surface catching the overhead light. */
+.ocean-composer:focus-within .ocean-composer__input {
+  box-shadow: inset 0 1px 0 var(--specular-live), var(--well-deep);
 }
 
 .ocean-composer__input:disabled {
@@ -277,6 +282,7 @@
   border: none;
   border-radius: var(--radius);
   background: var(--accent);
+  box-shadow: var(--elev-1);
   color: var(--fg-on-accent);
   font-family: var(--font);
   font-size: 14px;
@@ -286,6 +292,7 @@
   transition:
     transform var(--dur-fast) var(--ease),
     filter var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease),
     opacity var(--dur-fast) var(--ease);
 }
 
@@ -295,11 +302,12 @@
 
 .ocean-composer__send:focus-visible {
   outline: none;
-  box-shadow: var(--focus-ring);
+  box-shadow: var(--elev-1), var(--focus-ring);
 }
 
 .ocean-composer__send:active {
-  transform: scale(0.985);
+  transform: translateY(1px);
+  box-shadow: var(--pressed);
 }
 
 .ocean-composer__send:disabled {
@@ -307,9 +315,11 @@
   cursor: not-allowed;
   pointer-events: none;
   filter: none;
+  box-shadow: none;
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .ocean-composer,
   .voice-orb,
   .voice-mode-switch,
   .ocean-composer__input,

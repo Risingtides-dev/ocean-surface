@@ -168,7 +168,9 @@
   flex: 0 0 7px;
   border-radius: var(--radius-pill);
   background: var(--accent);
-  box-shadow: 0 0 0 4px var(--accent-soft);
+  /* Live-state glow: this chip renders only while the agent drives the
+     browser — its presence is the live hook, so the dot blooms aqua. */
+  box-shadow: 0 0 0 4px var(--accent-soft), var(--glow-live);
   animation: ocean-browser-pulse 1.2s var(--ease) infinite;
 }
 
@@ -310,14 +312,14 @@
   font-size: 14px;
   line-height: 1;
   background: var(--bg-elevated);
-  border: 1px solid var(--border);
+  border: none;
   border-radius: var(--radius);
+  box-shadow: var(--elev-1);
 }
 
 .ocean-more__btn:hover {
   color: var(--fg);
   background: var(--bg-hover);
-  border-color: var(--border-strong);
 }
 
 .ocean-sessions-trigger:focus-visible,
@@ -330,7 +332,13 @@
 }
 
 .ocean-sessions-trigger:active,
-.ocean-more__btn:active,
+.ocean-more__btn:active {
+  transform: translateY(1px);
+  box-shadow: var(--pressed);
+}
+
+/* halt + council-close aren't raised keys, so they keep the scale dip —
+   pressed inset shadow only reads as "depressed" on an elevated surface. */
 .ocean-composer__halt:active,
 .ocean-council-modal__close:active {
   transform: scale(0.985);
@@ -360,7 +368,6 @@
 .ocean-more[open] .ocean-more__btn {
   color: var(--fg);
   background: var(--bg-hover);
-  border-color: var(--border-strong);
 }
 .ocean-more__menu {
   position: absolute;
@@ -372,9 +379,18 @@
   min-width: 176px;
   padding: 4px;
   background: var(--bg-elevated);
-  border: 1px solid var(--border);
+  border: none;
   border-radius: var(--radius);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--elev-3);
+  animation: ocean-tide-rise var(--dur) var(--ease-tide) backwards;
+}
+
+/* Tidal entrance — the menu rises from 8px below the surface, the overhead
+   light catching its top edge as it settles into place. The reference
+   elevated panel: a lit slab, no outline, only the specular seam + drop. */
+@keyframes ocean-tide-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 .ocean-more__item {
   display: block;
@@ -435,13 +451,13 @@
   line-height: 1;
   white-space: nowrap;
   background: var(--bg-elevated);
-  border: 1px solid var(--border);
+  border: none;
   border-radius: var(--radius);
+  box-shadow: var(--elev-1);
 }
 
 .ocean-sessions-trigger:hover {
   background: var(--bg-hover);
-  border-color: var(--border-strong);
 }
 
 /* Council modal ---------------------------------------------------------- */
@@ -495,6 +511,7 @@
 .ocean-council-modal__close:hover {
   color: var(--fg);
   background: var(--bg-elevated);
+  box-shadow: var(--elev-1);
 }
 
 .ocean-council-modal__frame {
@@ -510,5 +527,8 @@
     animation: none;
     opacity: 1;
     transform: none;
+  }
+  .ocean-more__menu {
+    animation: none;
   }
 }

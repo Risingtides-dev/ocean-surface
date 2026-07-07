@@ -102,10 +102,36 @@
   --shadow-lg: 0 24px 64px rgba(0, 0, 0, 0.65);
   --glow-brand: 0 0 32px rgba(0, 215, 215, 0.28);
 
+  /* ── Material — molded from the digital ocean ─────────────────── */
+  /* One overhead light source. RAISED surfaces catch a top-edge
+     specular and cast a dark drop below; CARVED wells fall away into
+     darker water. Elevation REPLACES borders: an element takes the
+     border recipe or the elevation recipe, never a 1px border plus a
+     big-blur shadow. Agent cognition is bioluminescence: state hooks
+     drive the glow tokens. */
+  --specular: rgba(255, 255, 255, 0.08);       /* top-edge light, raised */
+  --specular-soft: rgba(255, 255, 255, 0.05);
+  --specular-live: rgba(95, 255, 255, 0.16);   /* aqua specular, live/active */
+  --elev-1: inset 0 1px 0 var(--specular-soft), 0 1px 2px rgba(0, 0, 0, 0.50);
+  --elev-2: inset 0 1px 0 var(--specular), 0 2px 8px rgba(0, 0, 0, 0.45), 0 10px 28px rgba(0, 0, 0, 0.35);
+  --elev-3: inset 0 1px 0 var(--specular), 0 2px 8px rgba(0, 0, 0, 0.50), 0 20px 56px rgba(0, 0, 0, 0.60);
+  --well: inset 0 2px 6px rgba(0, 0, 0, 0.55), inset 0 -1px 0 rgba(255, 255, 255, 0.04);
+  --well-deep: inset 0 3px 10px rgba(0, 0, 0, 0.65), inset 0 -1px 0 rgba(255, 255, 255, 0.05);
+  --pressed: inset 0 2px 4px rgba(0, 0, 0, 0.60);
+  --glow-thinking: 0 0 24px rgba(0, 215, 215, 0.10);
+  --glow-live: 0 0 20px rgba(0, 255, 215, 0.16);
+  /* Pointer light: a root listener writes these; opted-in surfaces
+     paint a faint radial specular at the pointer. */
+  --pointer-x: 50%;
+  --pointer-y: 50%;
+  --pointer-light: rgba(95, 255, 255, 0.04);
+
   /* ── Motion ───────────────────────────────────────────────────── */
   --ease: cubic-bezier(.22, .61, .36, 1);
   --dur-fast: 160ms;
   --dur: 240ms;
+  --dur-slow: 420ms;
+  --ease-tide: cubic-bezier(.16, .84, .28, 1);  /* rise-from-depth */
 
   /* ── Controls / layout ────────────────────────────────────────── */
   --ctl-h: 34px;

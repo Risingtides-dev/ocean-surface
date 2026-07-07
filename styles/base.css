@@ -65,3 +65,42 @@ body {
   padding: env(safe-area-inset-top) env(safe-area-inset-right)
            env(safe-area-inset-bottom) env(safe-area-inset-left);
 }
+
+/* ── Pointer light: faint aqua specular that follows the cursor ─── */
+/* OPT-IN via the `ocean-lit` class. A single root mousemove listener
+   (crates/ocean-surface-ui/src/app.rs) writes --pointer-x / --pointer-y
+   onto document.documentElement as VIEWPORT percentages (clientX /
+   innerWidth * 100). This ::after overlay paints a radial specular at
+   that point so opted-in surfaces read as catching one overhead light.
+
+   Tracking approach: `background-attachment: fixed` makes the gradient
+   position resolve against the VIEWPORT (where the pointer is), not the
+   element box — so the highlight tracks the cursor as it crosses the
+   surface, while the ::after clips the paint to the element. The fixed
+   overlay alternative is rejected: a position:fixed ::after escapes the
+   element's overflow clip and would spill across the whole viewport.
+
+   No effect on touch (hover gate) or reduced-motion (killed outright).
+   --pointer-light is a faint token (rgba(95,255,255,0.04)) by design. */
+.ocean-lit { position: relative; }
+.ocean-lit::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: radial-gradient(
+    240px circle at var(--pointer-x) var(--pointer-y),
+    var(--pointer-light),
+    transparent 70%
+  );
+  background-attachment: fixed;
+  opacity: 0;
+  transition: opacity var(--dur-slow) var(--ease-tide);
+}
+@media (hover: hover) {
+  .ocean-lit:hover::after { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ocean-lit::after { display: none; }
+}

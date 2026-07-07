@@ -362,7 +362,7 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                 }
             }
         >
-            <div class="sessions-panel" role="dialog" aria-modal="true" aria-label="Sessions">
+            <div class="sessions-panel ocean-lit" role="dialog" aria-modal="true" aria-label="Sessions">
                 <div class="sessions-panel__head">
                     <h2 class="sessions-panel__title">"Sessions"</h2>
                     <button

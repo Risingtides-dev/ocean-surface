@@ -1,6 +1,6 @@
 //! Top-level app shell. Owns the Daemon, mounts the transcript + composer.
 
-use leptos::ev::SubmitEvent;
+use leptos::ev::{self, SubmitEvent};
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
@@ -109,6 +109,30 @@ pub fn App() -> impl IntoView {
             }
         }
     });
+
+    // Pointer light: ONE window mousemove listener feeds cursor position to
+    // :root as viewport percentages. Opted-in surfaces (.ocean-lit, defined
+    // in styles/base.css) paint a faint radial specular there so they read
+    // as catching one overhead light source. Cheap direct set per event —
+    // two custom properties, no rAF. Bound + on_cleanup so the listener
+    // lives with the App scope and is torn down on unmount.
+    let _pointer_light = window_event_listener(ev::mousemove, move |e: web_sys::MouseEvent| {
+        let Some(win) = web_sys::window() else { return };
+        let Some(w) = win.inner_width().ok().and_then(|v| v.as_f64()) else { return };
+        let Some(h) = win.inner_height().ok().and_then(|v| v.as_f64()) else { return };
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        let x = e.client_x() as f64 / w * 100.0;
+        let y = e.client_y() as f64 / h * 100.0;
+        let Some(doc) = win.document() else { return };
+        let Some(root) = doc.document_element() else { return };
+        let Ok(root) = root.dyn_into::<web_sys::HtmlElement>() else { return };
+        let style = root.style();
+        let _ = style.set_property("--pointer-x", &format!("{x:.2}%"));
+        let _ = style.set_property("--pointer-y", &format!("{y:.2}%"));
+    });
+    on_cleanup(move || _pointer_light.remove());
 
     let submit = {
         let daemon = daemon.clone();
@@ -431,7 +455,7 @@ pub fn App() -> impl IntoView {
                         // so a gated mutating turn can't be missed or scrolled past.
                         <PermissionPrompts daemon=daemon_for_perms.get_value() />
 
-                        <form class="ocean-composer" on:submit=move |ev| submit.with_value(|s| s(ev))>
+                        <form class="ocean-composer ocean-lit" on:submit=move |ev| submit.with_value(|s| s(ev))>
                             // Push-to-talk only when the proxy has a usable xAI key;
                             // otherwise a dim, disabled placeholder explains why.
                             <Show

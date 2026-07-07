@@ -45,16 +45,17 @@
   width: min(760px, calc(100vw - 28px));
   max-height: min(80vh, 720px);
   height: auto;
-  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  box-shadow: var(--elev-3);
   border-radius: var(--radius-lg);
   overflow: hidden;
-  animation: sessions-modal-in 200ms var(--ease) both;
+  animation: sessions-tidal-rise var(--dur-slow) var(--ease-tide) both;
 }
 
-@keyframes sessions-modal-in {
+@keyframes sessions-tidal-rise {
   from {
     opacity: 0;
-    transform: scale(0.97);
+    transform: translateY(8px);
   }
   to {
     opacity: 1;
@@ -88,9 +89,7 @@
    Shared controls, fields, and scroll treatments
    ═══════════════════════════════════════════════════════════════════ */
 
-.sessions-panel__close,
-.rooms-panel__back,
-.rooms-panel__close {
+:is(.sessions-panel__close, .rooms-panel__back, .rooms-panel__close) {
   appearance: none;
   display: inline-grid;
   place-items: center;
@@ -109,72 +108,34 @@
   transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
 }
 
-.sessions-panel__close:hover,
-.rooms-panel__back:hover,
-.rooms-panel__close:hover {
+:is(.sessions-panel__close, .rooms-panel__back, .rooms-panel__close):hover {
   background: var(--bg-elevated);
   color: var(--fg);
 }
 
-.sessions-panel__close:focus-visible,
-.rooms-panel__back:focus-visible,
-.rooms-panel__close:focus-visible,
-.sessions-panel__new-btn:focus-visible,
-.sessions-item:focus-visible,
-.rooms-panel__create-input:focus-visible,
-.rooms-panel__create-btn:focus-visible,
-.rooms-policy__row input[type="checkbox"]:focus-visible,
-.rooms-policy__cron:focus-visible,
-.rooms-item:focus-visible,
-.rooms-room__join:focus-visible,
-.rooms-room__leave:focus-visible,
-.rooms-addagent__input:focus-visible,
-.rooms-addagent__btn:focus-visible,
-.rooms-mention-hint__chip:focus-visible,
-.rooms-composer__input:focus-visible,
-.rooms-composer__send:focus-visible {
+:is(.sessions-panel__close, .rooms-panel__back, .rooms-panel__close, .sessions-panel__new-btn, .sessions-item,
+   .rooms-panel__create-input, .rooms-panel__create-btn, .rooms-policy__row input[type="checkbox"],
+   .rooms-policy__cron, .rooms-item, .rooms-room__join, .rooms-room__leave, .rooms-addagent__input,
+   .rooms-addagent__btn, .rooms-mention-hint__chip, .rooms-composer__input, .rooms-composer__send):focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
 }
 
-.sessions-panel__close:active,
-.rooms-panel__back:active,
-.rooms-panel__close:active,
-.sessions-panel__new-btn:active,
-.sessions-item:active,
-.rooms-panel__create-btn:active,
-.rooms-item:active,
-.rooms-room__join:active,
-.rooms-room__leave:active,
-.rooms-addagent__btn:active,
-.rooms-mention-hint__chip:active,
-.rooms-composer__send:active {
+:is(.sessions-panel__close, .rooms-panel__back, .rooms-panel__close, .sessions-panel__new-btn, .sessions-item,
+   .rooms-panel__create-btn, .rooms-item, .rooms-room__join, .rooms-room__leave, .rooms-addagent__btn,
+   .rooms-mention-hint__chip, .rooms-composer__send):active {
   transform: scale(0.985);
 }
 
-.sessions-panel__close:disabled,
-.rooms-panel__back:disabled,
-.rooms-panel__close:disabled,
-.sessions-panel__new-btn:disabled,
-.sessions-item:disabled,
-.rooms-panel__create-input:disabled,
-.rooms-panel__create-btn:disabled,
-.rooms-policy__row input[type="checkbox"]:disabled,
-.rooms-policy__cron:disabled,
-.rooms-item:disabled,
-.rooms-room__join:disabled,
-.rooms-room__leave:disabled,
-.rooms-addagent__input:disabled,
-.rooms-addagent__btn:disabled,
-.rooms-mention-hint__chip:disabled,
-.rooms-composer__input:disabled,
-.rooms-composer__send:disabled {
+:is(.sessions-panel__close, .rooms-panel__back, .rooms-panel__close, .sessions-panel__new-btn, .sessions-item,
+   .rooms-panel__create-input, .rooms-panel__create-btn, .rooms-policy__row input[type="checkbox"],
+   .rooms-policy__cron, .rooms-item, .rooms-room__join, .rooms-room__leave, .rooms-addagent__input,
+   .rooms-addagent__btn, .rooms-mention-hint__chip, .rooms-composer__input, .rooms-composer__send):disabled {
   opacity: 0.45;
   cursor: not-allowed;
   pointer-events: none;
 }
 
-.sessions-panel__new-btn,
 .rooms-panel__create-btn,
 .rooms-composer__send {
   appearance: none;
@@ -193,7 +154,6 @@
   transition: filter var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease);
 }
 
-.sessions-panel__new-btn:hover:not(:disabled),
 .rooms-panel__create-btn:hover:not(:disabled),
 .rooms-composer__send:hover:not(:disabled) {
   filter: brightness(1.12);
@@ -245,11 +205,7 @@
   border-color: var(--border-strong);
 }
 
-.rooms-panel__create-input,
-.rooms-policy__cron,
-.rooms-addagent__input,
-.sessions-create__input,
-.rooms-composer__input {
+:is(.rooms-panel__create-input, .rooms-policy__cron, .rooms-addagent__input, .sessions-create__input, .rooms-composer__input) {
   min-width: 0;
   height: var(--ctl-h);
   padding: 0 12px;
@@ -268,55 +224,35 @@
   font-size: 12px;
 }
 
-.rooms-panel__create-input::placeholder,
-.rooms-policy__cron::placeholder,
-.rooms-addagent__input::placeholder,
-.sessions-create__input::placeholder,
-.rooms-composer__input::placeholder {
+:is(.rooms-panel__create-input, .rooms-policy__cron, .rooms-addagent__input, .sessions-create__input, .rooms-composer__input)::placeholder {
   color: var(--fg-3);
 }
 
-.rooms-panel__create-input:hover:not(:disabled),
-.rooms-policy__cron:hover:not(:disabled),
-.rooms-addagent__input:hover:not(:disabled),
-.sessions-create__input:hover:not(:disabled),
-.rooms-composer__input:hover:not(:disabled) {
+:is(.rooms-panel__create-input, .rooms-policy__cron, .rooms-addagent__input, .sessions-create__input, .rooms-composer__input):hover:not(:disabled) {
   border-color: var(--border-strong);
 }
 
-.rooms-panel__create-input:focus:not(:disabled),
-.rooms-policy__cron:focus:not(:disabled),
-.rooms-addagent__input:focus:not(:disabled),
-.sessions-create__input:focus:not(:disabled),
-.rooms-composer__input:focus:not(:disabled) {
+:is(.rooms-panel__create-input, .rooms-policy__cron, .rooms-addagent__input, .sessions-create__input, .rooms-composer__input):focus:not(:disabled) {
   outline: none;
   border-color: var(--accent);
   box-shadow: var(--focus-ring);
 }
 
-.sessions-panel__list,
-.rooms-panel__list,
-.rooms-room__transcript {
+:is(.sessions-panel__list, .rooms-panel__list, .rooms-room__transcript) {
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
 }
 
-.sessions-panel__list::-webkit-scrollbar,
-.rooms-panel__list::-webkit-scrollbar,
-.rooms-room__transcript::-webkit-scrollbar {
+:is(.sessions-panel__list, .rooms-panel__list, .rooms-room__transcript)::-webkit-scrollbar {
   width: 8px;
 }
 
-.sessions-panel__list::-webkit-scrollbar-thumb,
-.rooms-panel__list::-webkit-scrollbar-thumb,
-.rooms-room__transcript::-webkit-scrollbar-thumb {
+:is(.sessions-panel__list, .rooms-panel__list, .rooms-room__transcript)::-webkit-scrollbar-thumb {
   border-radius: var(--radius-pill);
   background: rgba(255, 255, 255, 0.12);
 }
 
-.sessions-panel__list::-webkit-scrollbar-thumb:hover,
-.rooms-panel__list::-webkit-scrollbar-thumb:hover,
-.rooms-room__transcript::-webkit-scrollbar-thumb:hover {
+:is(.sessions-panel__list, .rooms-panel__list, .rooms-room__transcript)::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.22);
 }
 
@@ -350,7 +286,28 @@
 }
 
 .sessions-panel__new-btn {
+  appearance: none;
   align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  height: var(--ctl-h-sm);
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.sessions-panel__new-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
 }
 .sessions-create {
   display: flex;
@@ -447,7 +404,7 @@
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
-  padding: 8px;
+  padding: 8px 0;
 }
 
 /* Project grouping: collapsible sections, with a small Ocean monogram for fast scanning. */
@@ -462,7 +419,7 @@
   align-items: center;
   width: 100%;
   gap: 8px;
-  padding: 6px 8px;
+  padding: 6px 16px;
   border: 0;
   border-radius: var(--radius);
   background: transparent;
@@ -511,6 +468,8 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
 
 .sessions-group__glyph,
@@ -585,59 +544,66 @@
 
 .sessions-item {
   appearance: none;
-  display: block;
+  display: flex;
+  align-items: center;
   width: 100%;
   margin: 0;
-  padding: 10px 12px;
-  border: 1px solid transparent;
-  border-radius: var(--radius);
+  padding: 8px 16px;
+  border: none;
+  border-radius: 0;
   background: transparent;
   color: inherit;
   text-align: left;
   font-family: var(--font);
   cursor: pointer;
-  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease);
+  transition: background var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
 }
 
 .sessions-item + .sessions-item {
-  margin-top: 4px;
+  margin-top: 0;
 }
 
 .sessions-item:hover:not(:disabled) {
   background: var(--bg-hover);
+  box-shadow: var(--elev-1);
 }
 
 .sessions-item--active {
   background: var(--accent-soft);
-  border-color: var(--border-strong);
+  box-shadow: var(--elev-1);
 }
 
 .sessions-item__title {
-  margin-bottom: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
-  color: var(--fg);
-  font-size: 13px;
-  font-weight: 500;
-  line-height: 1.4;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.4;
 }
 
 .sessions-item__meta {
+  flex: 0 0 auto;
+  margin-left: 16px;
   display: flex;
   align-items: center;
   gap: 8px;
-  min-width: 0;
   color: var(--fg-3);
+  font-family: var(--mono);
   font-size: 11px;
   line-height: 1.35;
+  white-space: nowrap;
+}
+
+.sessions-item__time {
+  flex: 0 0 auto;
 }
 
 .sessions-item__turns {
   flex: 0 0 auto;
-  color: var(--fg-3);
-  font-family: var(--mono);
-  font-size: 11px;
 }
 
 .sessions-panel__empty {
@@ -894,8 +860,7 @@
   color: var(--fg);
 }
 
-.rooms-chip--agent .rooms-chip__glyph,
-.rooms-chip--agent .rooms-chip__kind {
+.rooms-chip--agent :is(.rooms-chip__glyph, .rooms-chip__kind) {
   color: var(--accent);
 }
 
@@ -968,9 +933,7 @@
   word-break: break-word;
 }
 
-.rooms-msg--system .rooms-msg__author,
-.rooms-msg--system .rooms-msg__glyph,
-.rooms-msg--system .rooms-msg__body {
+.rooms-msg--system :is(.rooms-msg__author, .rooms-msg__glyph, .rooms-msg__body) {
   color: var(--fg-3);
 }
 
@@ -1147,9 +1110,9 @@
   display: block;
   width: 100%;
   padding: 8px 12px;
-  background: var(--bg-raised);
+  background: var(--bg-well);
+  box-shadow: var(--well);
   border: none;
-  border-bottom: 1px solid var(--border-subtle);
   color: var(--fg);
   font-family: var(--font);
   font-size: 13px;

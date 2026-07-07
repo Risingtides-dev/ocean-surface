@@ -179,7 +179,8 @@
   flex-direction: column;
   gap: 6px;
   padding: 10px;
-  border: 1px solid var(--border-subtle);
+  border: none;
+  box-shadow: var(--elev-2);
   border-radius: var(--radius);
   background: var(--bg-elevated);
   color: var(--fg);
@@ -191,18 +192,19 @@
 }
 
 .ocean-canvas-card--node {
-  border-color: var(--border);
   background: var(--accent-soft);
 }
 
 .ocean-canvas-card--container {
-  border-style: dashed;
+  border: 1px dashed var(--border-subtle);
+  box-shadow: none;
   background: var(--bg-raised);
 }
 
 .ocean-canvas-card--stat {
   justify-content: center;
   background: var(--bg-well);
+  box-shadow: var(--well);
 }
 
 .ocean-canvas-card--media {
@@ -275,7 +277,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--border-subtle);
+  border: none;
+  box-shadow: var(--well);
   border-radius: var(--radius-sm);
   background: var(--bg-well);
   color: var(--fg-3);

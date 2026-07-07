@@ -99,13 +99,15 @@ body.ocean-float-mode {
 }
 
 .ocean-float__msg--user .ocean-float__bubble {
-  border: 1px solid var(--border-subtle);
+  border: none;
+  box-shadow: var(--elev-2);
   background: var(--bg-elevated);
   color: var(--fg);
 }
 
 .ocean-float__msg--agent .ocean-float__bubble {
-  border: 1px solid var(--border-subtle);
+  border: none;
+  box-shadow: var(--elev-2);
   background: var(--bg-raised);
 }
 

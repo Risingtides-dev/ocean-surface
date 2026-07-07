@@ -39,7 +39,7 @@
 .component-confirm,
 .block--component-unknown {
   background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
+  box-shadow: var(--elev-2);
   border-radius: var(--radius-lg);
   box-sizing: border-box;
   color: var(--fg);
@@ -677,6 +677,7 @@ select.form-field__input {
   min-width: 0;
   height: 10px;
   background: var(--bg-raised);
+  box-shadow: var(--well); /* carved channel — the bar runs in a recessed groove */
   border-radius: var(--radius-sm);
   overflow: hidden;
 }
@@ -685,6 +686,7 @@ select.form-field__input {
   height: 100%;
   min-width: 2px;
   background: var(--accent);
+  box-shadow: inset 0 1px 0 var(--specular-soft); /* raised fill catches the overhead light */
   border-radius: var(--radius-sm);
   transform-origin: left center;
   animation: chart-fill-in var(--dur) var(--ease) both;
@@ -699,6 +701,7 @@ select.form-field__input {
   flex: 0 0 auto;
   min-width: 4ch;
   color: var(--fg);
+  text-shadow: 0 1px 0 var(--bg); /* engraved numeral */
   font-family: var(--mono);
   font-size: 12px;
   text-align: right;
@@ -847,6 +850,7 @@ select.form-field__input {
 
 .stat-card__value {
   color: var(--fg);
+  text-shadow: 0 1px 0 var(--bg); /* engraved numeral */
   font-family: var(--mono);
   font-size: 22px;
   font-weight: 600;
@@ -1246,10 +1250,47 @@ select.form-field__input {
   border-color: var(--err);
 }
 
+/* ---- Agent cognition — running tool lift + permission waiting pulse -----
+   Targets transcript-rendered DOM; lives here because CSS is global and the
+   material pass stays in one file. Rust emits .is-running on .block--tool
+   (transcript.rs:433) while a tool is in flight; the disclosure head already
+   carries the glow breath (ocean-thinking-glow, transcript.css), so this
+   lifts the whole card body into a raised, live-rimmed surface and settles
+   flush again on ok/err. A pending .ocean-perm blocks the turn — a soft
+   --warn halo breathes until the operator decides (.is-deciding excluded). */
+.block--tool.is-running {
+  background: var(--bg-elevated);
+  border-radius: var(--radius);
+  box-shadow: inset 0 1px 0 var(--specular-live), var(--elev-2);
+  transition:
+    background-color var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease);
+}
+
+.ocean-perm:not(.is-deciding) {
+  position: relative;
+}
+
+.ocean-perm:not(.is-deciding)::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: 0 0 0 0 var(--warn-soft);
+  animation: ocean-perm-waiting 2.8s var(--ease) infinite;
+}
+
+@keyframes ocean-perm-waiting {
+  0%, 100% { box-shadow: 0 0 0 0 var(--warn-soft); }
+  50%      { box-shadow: 0 0 0 4px var(--warn-soft); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .progress-bar__fill.is-indeterminate,
   .timeline-step--active .timeline-step__dot,
-  .chart-row__fill {
+  .chart-row__fill,
+  .ocean-perm:not(.is-deciding)::after {
     animation: none;
   }
 
@@ -1261,7 +1302,8 @@ select.form-field__input {
   .confirm__btn,
   .chart-row__fill,
   .progress-bar__fill,
-  .video-embed--unknown a {
+  .video-embed--unknown a,
+  .block--tool.is-running {
     transition: none;
   }
 

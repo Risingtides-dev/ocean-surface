@@ -16,35 +16,57 @@ use crate::daemon::Daemon;
 use crate::markdown::render as render_md;
 use crate::model::{Block, Role, ToolStatus};
 
-/// One renderable item in an assistant turn: either a single non-tool block or
-/// the turn's full set of tool calls tucked into one disclosure.
+/// One renderable item in an assistant turn: a single non-tool/non-thinking
+/// block, the turn's full set of tool calls tucked into one disclosure, or the
+/// turn's full set of thinking segments tucked into one disclosure.
 #[derive(Clone, PartialEq)]
 enum RenderItem {
     Single(usize),
     ToolGroup(Vec<usize>),
+    ThinkingGroup(Vec<usize>),
 }
 
-/// Collect every `ToolCall` block in the turn into a single `ToolGroup`,
-/// rendered as one collapsible "tools (N)" disclosure positioned where the
-/// first tool call appears. Non-tool blocks (text, thinking, component) stay
-/// `Single`s in their original order. Render-only: never reorders `turn.blocks`.
+/// Collapse the turn's blocks into render items. Every `ToolCall` is tucked
+/// into one `ToolGroup` ("tools (N)") at the first tool call's position, and
+/// every `Thinking` segment is tucked into one `ThinkingGroup` ("thinking… (N
+/// chars)") at the first thinking segment's position — so a turn that streams
+/// dozens of interleaved thinking deltas renders a SINGLE thinking disclosure
+/// instead of a chip per segment (the "26-chip wall"). Other blocks (text,
+/// component) stay `Single`s in their original order. Render-only: never
+/// reorders `turn.blocks`, so both the live SSE reducer and stored-session
+/// hydration paths are covered by this one coalescing pass.
 fn render_items(blocks: &[Block]) -> Vec<RenderItem> {
     let mut items = Vec::new();
     let mut tools: Vec<usize> = Vec::new();
     let mut group_slot: Option<usize> = None;
+    let mut thinking: Vec<usize> = Vec::new();
+    let mut thinking_slot: Option<usize> = None;
     for (i, block) in blocks.iter().enumerate() {
-        if matches!(block, Block::ToolCall { .. }) {
-            if group_slot.is_none() {
-                group_slot = Some(items.len());
-                items.push(RenderItem::ToolGroup(Vec::new())); // placeholder, filled below
+        match block {
+            Block::ToolCall { .. } => {
+                if group_slot.is_none() {
+                    group_slot = Some(items.len());
+                    items.push(RenderItem::ToolGroup(Vec::new())); // placeholder, filled below
+                }
+                tools.push(i);
             }
-            tools.push(i);
-        } else {
-            items.push(RenderItem::Single(i));
+            Block::Thinking { .. } => {
+                if thinking_slot.is_none() {
+                    thinking_slot = Some(items.len());
+                    items.push(RenderItem::ThinkingGroup(Vec::new())); // placeholder, filled below
+                }
+                thinking.push(i);
+            }
+            _ => {
+                items.push(RenderItem::Single(i));
+            }
         }
     }
     if let Some(slot) = group_slot {
         items[slot] = RenderItem::ToolGroup(tools);
+    }
+    if let Some(slot) = thinking_slot {
+        items[slot] = RenderItem::ThinkingGroup(thinking);
     }
     items
 }
@@ -134,20 +156,33 @@ pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoVie
             <For
                 each=indices
                 key=|i| *i
-                children=move |idx| view! { <TurnView idx=idx turns=turns daemon=daemon.clone() /> }
+                children=move |idx| {
+                    let daemon = daemon.clone();
+                    // Snapshot streaming at creation: turns that mount while
+                    // live-streaming get `is-new` so CSS can run a one-shot
+                    // materialize entry. Hydrated history (session load) mounts
+                    // with streaming=false — no class, no page-load choreography.
+                    let is_new = daemon.streaming.get_untracked();
+                    view! { <TurnView idx=idx turns=turns daemon=daemon is_new=is_new /> }
+                }
             />
         </div>
     }
 }
 
 #[component]
-fn TurnView(idx: usize, turns: RwSignal<Vec<crate::model::Turn>>, daemon: Daemon) -> impl IntoView {
+fn TurnView(
+    idx: usize,
+    turns: RwSignal<Vec<crate::model::Turn>>,
+    daemon: Daemon,
+    is_new: bool,
+) -> impl IntoView {
     // Role is stable for the life of a turn, so read it once reactively to
     // pick the layout, then let the body derive from the signal.
     let role = move || turns.with(|t| t.get(idx).map(|turn| turn.role));
 
     view! {
-        <div class="turn">
+        <div class="turn" class:is-new=move || is_new>
             {move || match role() {
                 Some(Role::User) => view! { <UserTurn idx=idx turns=turns /> }.into_any(),
                 Some(Role::Assistant) => view! { <AssistantTurn idx=idx turns=turns daemon=daemon.clone() /> }.into_any(),
@@ -199,9 +234,15 @@ fn AssistantTurn(
                 .unwrap_or_default()
         })
     };
+    // `is-streaming` is scoped to the single turn actively being streamed. The
+    // in-flight assistant turn is always the last turn in the vec (turns append;
+    // deltas grow it in place), so gating on `streaming` AND "this is the last
+    // turn" lights up exactly one turn — not every assistant turn.
+    let streaming = daemon.streaming;
+    let is_streaming = move || streaming.get() && turns.with(|t| t.len() == idx + 1);
 
     view! {
-        <div class="turn--assistant">
+        <div class="turn--assistant" class:is-streaming=is_streaming>
             <div class="turn__header">"ocean ▸"</div>
             <div class="turn__body">
                 <For
@@ -209,6 +250,7 @@ fn AssistantTurn(
                     key=|item| match item {
                         RenderItem::Single(i) => (0u8, *i),
                         RenderItem::ToolGroup(ix) => (1u8, *ix.first().unwrap_or(&0)),
+                        RenderItem::ThinkingGroup(ix) => (2u8, *ix.first().unwrap_or(&0)),
                     }
                     children=move |item| {
                         let daemon = daemon.clone();
@@ -226,6 +268,13 @@ fn AssistantTurn(
                                     turns=turns
                                     daemon=daemon
                                 />
+                            }
+                            .into_any(),
+                            // One thinking disclosure per turn: every thinking
+                            // segment collapses into it, with a summed,
+                            // live-updating char count.
+                            RenderItem::ThinkingGroup(block_idxs) => view! {
+                                <ThinkingGroup turn_idx=idx block_idxs=block_idxs turns=turns />
                             }
                             .into_any(),
                         }
@@ -350,6 +399,72 @@ fn ToolGroup(
         </div>
     }
 }
+/// A turn's thinking segments, tucked into one collapsible `thinking… (N chars)`
+/// disclosure positioned where the first thinking segment appears. A turn can
+/// stream many thinking deltas and even interleave them with text/tools;
+/// without this tuck each segment would render its own chip (a "26-chip wall").
+/// All thinking blocks collapse into this single disclosure — a summed,
+/// live-updating char count in the header, and each segment's text as its own
+/// `<pre>` when expanded. Collapsed by default; the toggle sticks. No status
+/// tracking (thinking has no error state). Render-only: never reorders
+/// `turn.blocks`.
+#[component]
+fn ThinkingGroup(
+    turn_idx: usize,
+    block_idxs: Vec<usize>,
+    turns: RwSignal<Vec<crate::model::Turn>>,
+) -> impl IntoView {
+    let idxs = StoredValue::new(block_idxs);
+    // Local expand state (collapsed by default). Coalescing many blocks into one
+    // disclosure means there's no single model `expanded` field to mirror, so the
+    // toggle owns its own state — same shape as `ToolGroup`'s user override.
+    let open: RwSignal<bool> = RwSignal::new(false);
+    // Aggregate char count across every thinking block, read reactively so the
+    // header updates live as deltas stream into any segment.
+    let count = Signal::derive(move || {
+        turns.with(|t| {
+            t.get(turn_idx).map_or(0usize, |turn| {
+                idxs.get_value()
+                    .into_iter()
+                    .filter_map(|bi| match turn.blocks.get(bi) {
+                        Some(Block::Thinking { content, .. }) => Some(content.chars().count()),
+                        _ => None,
+                    })
+                    .sum()
+            })
+        })
+    });
+    let glyph = move || if open.get() { "▾" } else { "▸" };
+    view! {
+        <div class="block block--thinking" class:is-open=open>
+            <button class="block__pill" on:click=move |_| open.set(!open.get())>
+                {move || format!("{} thinking… ({} chars)", glyph(), count.get())}
+            </button>
+            <Show when=move || open.get()>
+                <For
+                    each=move || idxs.get_value()
+                    key=|bi| *bi
+                    children=move |bi| {
+                        let content = move || {
+                            turns.with(|t| {
+                                t.get(turn_idx)
+                                    .and_then(|turn| turn.blocks.get(bi))
+                                    .and_then(|block| match block {
+                                        Block::Thinking { content, .. } => Some(content.clone()),
+                                        _ => None,
+                                    })
+                                    .unwrap_or_default()
+                            })
+                        };
+                        view! {
+                            <pre class="block__thinking-body">{content}</pre>
+                        }
+                    }
+                />
+            </Show>
+        </div>
+    }
+}
 
 #[component]
 fn BlockView(
@@ -456,6 +571,103 @@ fn BlockView(
             .into_any(),
 
             None => ().into_any(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ToolStatus;
+
+    // Minimal ToolCall block for fixtures — only the fields render_items keys on
+    // matter; the rest are inert defaults.
+    fn tool_block(id: &str) -> Block {
+        Block::ToolCall {
+            call_id: id.into(),
+            name: "read".into(),
+            args_preview: String::new(),
+            output: String::new(),
+            status: ToolStatus::Ok,
+            expanded: false,
+        }
+    }
+
+    /// The bug: a turn that streams many thinking segments (even interleaved with
+    /// text) used to render one `thinking…` chip per segment. Now every thinking
+    /// block collapses into a single `ThinkingGroup` at the first thinking
+    /// position; non-thinking blocks stay Singles in order.
+    #[test]
+    fn all_thinking_blocks_collapse_into_one_group() {
+        let blocks = vec![
+            Block::Thinking { content: "A".into(), expanded: false },
+            Block::Text("answer".into()),
+            Block::Thinking { content: "B".into(), expanded: false },
+            Block::Thinking { content: "C".into(), expanded: false },
+        ];
+        let items = render_items(&blocks);
+        assert_eq!(items.len(), 2);
+        match &items[0] {
+            RenderItem::ThinkingGroup(idxs) => assert_eq!(idxs, &vec![0, 2, 3]),
+            other => panic!("expected ThinkingGroup at 0, got {other:?}"),
+        }
+        assert!(matches!(&items[1], RenderItem::Single(1)));
+    }
+
+    /// A lone thinking segment still tucks into a (single-element) group so the
+    /// render path is uniform — never a bare Single pointing at a thinking block.
+    #[test]
+    fn single_thinking_block_becomes_group_of_one() {
+        let blocks = vec![
+            Block::Thinking { content: "A".into(), expanded: false },
+            Block::Text("answer".into()),
+        ];
+        let items = render_items(&blocks);
+        assert_eq!(items.len(), 2);
+        assert!(matches!(&items[0], RenderItem::ThinkingGroup(idxs) if idxs == &vec![0]));
+        assert!(matches!(&items[1], RenderItem::Single(1)));
+    }
+
+    /// Thinking and tool groups coexist: each kind tucks independently, in the
+    /// order of its first member. The second thinking segment joins the FIRST
+    /// thinking group rather than opening a second one (one disclosure per kind).
+    #[test]
+    fn thinking_and_tool_groups_each_collapse_once() {
+        let blocks = vec![
+            Block::Thinking { content: "think".into(), expanded: false },
+            tool_block("c1"),
+            Block::Thinking { content: "more".into(), expanded: false },
+            tool_block("c2"),
+        ];
+        let items = render_items(&blocks);
+        assert_eq!(items.len(), 2);
+        assert!(matches!(&items[0], RenderItem::ThinkingGroup(idxs) if idxs == &vec![0, 2]));
+        assert!(matches!(&items[1], RenderItem::ToolGroup(idxs) if idxs == &vec![1, 3]));
+    }
+
+    /// A turn with no thinking produces no ThinkingGroup — text stays Single,
+    /// tools still tuck. Guards against an empty/placeholder group leaking in.
+    #[test]
+    fn no_thinking_produces_no_thinking_group() {
+        let blocks = vec![Block::Text("hi".into()), tool_block("c1")];
+        let items = render_items(&blocks);
+        assert_eq!(items.len(), 2);
+        assert!(matches!(&items[0], RenderItem::Single(0)));
+        assert!(matches!(&items[1], RenderItem::ToolGroup(_)));
+    }
+
+    /// Pure-thinking turn: one group holding every segment, nothing else.
+    /// (Models the operator's 26-delta turn: 26 blocks → 1 disclosure.)
+    #[test]
+    fn only_thinking_yields_one_group() {
+        let blocks: Vec<Block> = (0..26)
+            .map(|i| Block::Thinking { content: i.to_string(), expanded: false })
+            .collect();
+        let items = render_items(&blocks);
+        assert_eq!(items.len(), 1);
+        match &items[0] {
+            RenderItem::ThinkingGroup(idxs) => assert_eq!(idxs.len(), 26),
+            other => panic!("expected ThinkingGroup, got {other:?}"),
         }
     }
 }

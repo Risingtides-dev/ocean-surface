@@ -225,7 +225,7 @@
   margin-top: 4px;
   padding: 0 18px;
   background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
+  box-shadow: var(--elev-1);
   border-radius: var(--radius);
   color: var(--fg-2);
   font-family: var(--font);
@@ -236,14 +236,12 @@
   user-select: none;
   transition:
     background var(--dur-fast) var(--ease),
-    border-color var(--dur-fast) var(--ease),
     color var(--dur-fast) var(--ease),
     transform var(--dur-fast) var(--ease);
 }
 
 .transcript__sessions-launcher:hover {
   background: var(--bg-hover);
-  border-color: var(--border-strong);
   color: var(--fg);
 }
 
@@ -300,6 +298,7 @@
   padding: 10px 12px;
   background: var(--bg-elevated);
   border-radius: var(--radius-lg);
+  box-shadow: var(--elev-1);
   color: var(--fg);
   white-space: pre-wrap;
 }
@@ -391,7 +390,7 @@
   padding: 10px 12px;
   background: var(--bg-well);
   border-radius: var(--radius);
-  box-shadow: inset 0 0 0 1px var(--border-subtle);
+  box-shadow: var(--well);
   color: var(--fg);
   font-family: var(--mono);
   font-size: 12px;
@@ -691,7 +690,7 @@
   padding: 10px 12px;
   background: var(--bg-well);
   border-radius: var(--radius);
-  box-shadow: inset 0 0 0 1px var(--border-subtle);
+  box-shadow: var(--well);
   color: var(--fg-2);
   font-family: var(--mono);
   font-size: 12px;
@@ -710,6 +709,50 @@
     transform: translateY(0);
   }
 }
+
+/* Active-agent cognition glow — a tool in flight breathes a faint subsurface
+   cyan aura, the "looking down into water" bioluminescence. Gated ONLY on the
+   existing .is-running hook Rust emits on .block--tool / .tool-group
+   (transcript.rs:329,433): there is no per-turn streaming class, so the
+   running tool's disclosure head is the locus of "alive" work. Pulses between
+   --glow-thinking (resting) and --glow-live (peak) — both reserved for
+   cognition/live state; --glow-brand stays orb-only. */
+@keyframes ocean-thinking-glow {
+  0%, 100% { box-shadow: var(--glow-thinking); }
+  50%      { box-shadow: var(--glow-live); }
+}
+
+.block--tool.is-running .drawer__head,
+.tool-group.is-running .tool-group__head {
+  animation: ocean-thinking-glow 3.5s ease-in-out infinite;
+}
+
+/* Per-turn live hooks from transcript.rs. `is-streaming` is reactive on the
+   last assistant turn only while daemon.streaming is true; `is-new` is a
+   one-shot mount snapshot for turns created mid-stream, never hydrated
+   history. They let the agent's active thought feel alive without page-load
+   choreography. */
+.turn.is-new {
+  animation: ocean-turn-materialize 140ms var(--ease) both;
+}
+
+.turn--assistant.is-streaming .turn__body {
+  border-radius: var(--radius-lg);
+  box-shadow: var(--glow-thinking);
+  animation: ocean-thinking-glow 3.5s ease-in-out infinite;
+}
+
+@keyframes ocean-turn-materialize {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 
 /* ── Markdown tables inside text blocks ──────────────────────────── */
 .block--text table {
@@ -749,7 +792,9 @@
 
 @media (prefers-reduced-motion: reduce) {
   .ocean-perm,
-  .drawer__body {
+  .drawer__body,
+  .turn.is-new,
+  .turn--assistant.is-streaming .turn__body {
     animation: none;
   }
 
@@ -759,5 +804,10 @@
   .drawer__head,
   .tool-group__head {
     transition: none;
+  }
+
+  .block--tool.is-running .drawer__head,
+  .tool-group.is-running .tool-group__head {
+    animation: none;
   }
 }
