@@ -569,12 +569,60 @@ fn DashboardView(kind_props: Value, daemon: Daemon) -> impl IntoView {
 // Chart — bar / line / sparkline from numeric series
 // ---------------------------------------------------------------------------
 
+/// Compact, locale-free formatting for chart values: at most two decimals
+/// (trailing zeros stripped) and thousands separators once the integer part
+/// reaches four digits. Examples: `29.8`, `1.03`, `0.5`, `12`, `12,400`.
+fn compact_format(value: f64) -> String {
+    if !value.is_finite() {
+        return "0".to_string();
+    }
+    let negative = value < 0.0;
+    // Round to two decimals, then drop trailing zeros and a dangling dot so
+    // 29.80 -> 29.8, 1.00 -> 1, 0.50 -> 0.5. Always '.' — never locale-aware.
+    let rounded = format!("{:.2}", value.abs());
+    let trimmed = rounded.trim_end_matches('0').trim_end_matches('.');
+    if trimmed.is_empty() || trimmed == "0" {
+        return "0".to_string();
+    }
+    let (int_part, frac_part) = match trimmed.split_once('.') {
+        Some((i, f)) => (i, f),
+        None => (trimmed, ""),
+    };
+    let mut out = insert_commas(int_part);
+    if !frac_part.is_empty() {
+        out.push('.');
+        out.push_str(frac_part);
+    }
+    if negative {
+        out.insert(0, '-');
+    }
+    out
+}
+
+/// Groups an unsigned integer's digits into comma-separated thousands triplets.
+fn insert_commas(digits: &str) -> String {
+    let len = digits.len();
+    if len <= 3 {
+        return digits.to_string();
+    }
+    let mut out = String::with_capacity(len + len / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (len - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 /// A lightweight inline chart. Props shape:
 /// ```json
 /// { "title": "Plays", "type": "bar",
 ///   "series": [{ "label": "Mon", "value": 12 }, { "label": "Tue", "value": 30 }] }
 /// ```
-/// `type` is "bar" | "line" (line renders an SVG polyline). Pure CSS/SVG, no deps.
+/// `type` is "bar" (horizontal rows) | "line" (SVG line + area fill). Pure
+/// CSS/SVG, no deps. Long category labels ellipsize with the full text in a
+/// `title` tooltip; values are compact-formatted and mono-set.
 #[component]
 fn ChartView(kind_props: Value) -> impl IntoView {
     let title = kind_props
@@ -605,52 +653,115 @@ fn ChartView(kind_props: Value) -> impl IntoView {
             (label, value)
         })
         .collect();
+    // Floor at 1.0 so all-zero (or all-negative) series still divide safely
+    // and render zero-width fills rather than NaNs.
     let max = points
         .iter()
         .map(|(_, v)| *v)
         .fold(0.0_f64, f64::max)
         .max(1.0);
 
-    let body = if chart_type == "line" {
-        let n = points.len().max(1);
-        let coords: String = points
+    let body = if points.is_empty() {
+        view! {
+            <div class="chart-empty">"No data"</div>
+        }
+        .into_any()
+    } else if chart_type == "line" {
+        let n = points.len();
+        // Uniform-scaling 120x30 viewBox with interior padding so dots/labels
+        // never clip; height:auto keeps this aspect ratio responsively, and
+        // uniform scaling keeps dots circular (no preserveAspectRatio="none").
+        let (vb_w, vb_h) = (120.0_f64, 30.0);
+        let (pad_x, pad_top, pad_bottom) = (6.0_f64, 4.0, 5.0);
+        let plot_w = vb_w - 2.0 * pad_x;
+        let baseline = vb_h - pad_bottom;
+        let plot_h = vb_h - pad_top - pad_bottom;
+
+        let coords: Vec<(f64, f64)> = points
             .iter()
             .enumerate()
             .map(|(i, (_, v))| {
                 let x = if n > 1 {
-                    i as f64 / (n - 1) as f64 * 100.0
+                    pad_x + (i as f64 / (n - 1) as f64) * plot_w
                 } else {
-                    0.0
+                    vb_w / 2.0
                 };
-                let y = 100.0 - (v / max * 100.0);
-                format!("{x:.2},{y:.2}")
+                // Clamp negatives to the baseline for geometry; the true value
+                // still shows in the per-dot tooltip and the end labels.
+                let y = baseline - (v.max(0.0) / max) * plot_h;
+                (x, y)
             })
+            .collect();
+        let line_pts = coords
+            .iter()
+            .map(|(x, y)| format!("{x:.2},{y:.2}"))
             .collect::<Vec<_>>()
             .join(" ");
+        let (first_x, last_x) = (coords[0].0, coords[n - 1].0);
+        let area_pts = format!(
+            "{line_pts} {last_x:.2},{baseline:.2} {first_x:.2},{baseline:.2}"
+        );
+        let dots = points
+            .iter()
+            .zip(coords.iter())
+            .map(|((label, v), (x, y))| {
+                let tip = format!("{}: {}", label, compact_format(*v));
+                view! {
+                    <circle class="chart-line__dot" cx=format!("{x:.2}") cy=format!("{y:.2}") r="0.9">
+                        <title>{tip}</title>
+                    </circle>
+                }
+            })
+            .collect::<Vec<_>>();
+        // End labels live in HTML (not SVG <text>) so 11px mono holds at any width.
+        let first_val = compact_format(points[0].1);
+        let last_val = compact_format(points[n - 1].1);
+
         view! {
-            <svg class="chart-line" viewBox="0 0 100 100" preserveAspectRatio="none">
-                <polyline points=coords fill="none" />
+            <div class="chart-line__vals">
+                <span>{first_val}</span>
+                <span>{last_val}</span>
+            </div>
+            <svg class="chart-line" viewBox="0 0 120 30" preserveAspectRatio="xMidYMid meet">
+                <polygon class="chart-line__area" points=area_pts></polygon>
+                <polyline class="chart-line__line" points=line_pts></polyline>
+                {dots}
             </svg>
         }
         .into_any()
     } else {
         view! {
-            <div class="chart-bars">
-                {points.iter().map(|(label, v)| {
-                    let h = (v / max * 100.0).round();
-                    let label = label.clone();
-                    let val = *v;
-                    view! {
-                        <div class="chart-bar">
-                            <div class="chart-bar__track">
-                                <div class="chart-bar__fill" style=format!("height: {h}%")>
-                                    <span class="chart-bar__val">{val.to_string()}</span>
+            <div class="chart-rows">
+                {points
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (label, v))| {
+                        let label = label.clone();
+                        let val_str = compact_format(*v);
+                        // Width tracks the share of max; negatives clamp to a
+                        // zero-width fill but keep their true formatted value.
+                        let pct = (v.max(0.0) / max * 100.0).min(100.0);
+                        let delay = (i * 30).min(300);
+                        let fill_style = if *v > 0.0 {
+                            format!("width: {pct:.2}%; animation-delay: {delay}ms")
+                        } else {
+                            // Zero/negative: override the 2px min-width so the
+                            // fill is truly absent while the value still shows.
+                            format!("width: 0%; min-width: 0; animation-delay: {delay}ms")
+                        };
+                        view! {
+                            <div class="chart-row">
+                                <span class="chart-row__label" title=label.clone()>
+                                    {label.clone()}
+                                </span>
+                                <div class="chart-row__track">
+                                    <div class="chart-row__fill" style=fill_style></div>
                                 </div>
+                                <span class="chart-row__val">{val_str}</span>
                             </div>
-                            <span class="chart-bar__label">{label}</span>
-                        </div>
-                    }
-                }).collect::<Vec<_>>()}
+                        }
+                    })
+                    .collect::<Vec<_>>()}
             </div>
         }
         .into_any()
@@ -658,7 +769,8 @@ fn ChartView(kind_props: Value) -> impl IntoView {
 
     view! {
         <div class="component-chart">
-            {(!title.is_empty()).then(|| view! { <div class="component-chart__title">{title.clone()}</div> })}
+            {(!title.is_empty())
+                .then(|| view! { <div class="component-chart__title">{title.clone()}</div> })}
             {body}
         </div>
     }
@@ -1583,5 +1695,34 @@ mod tests {
         for (raw, expected) in cases {
             assert_eq!(extracted_youtube_id(raw).as_deref(), expected, "{raw}");
         }
+    }
+
+    #[test]
+    fn compact_format_strips_trailing_zeros_and_caps_at_two_decimals() {
+        // Spec examples: 29.8, 1.03, 0.5, 12.
+        assert_eq!(compact_format(29.8), "29.8");
+        assert_eq!(compact_format(1.03), "1.03");
+        assert_eq!(compact_format(0.5), "0.5");
+        assert_eq!(compact_format(12.0), "12");
+        assert_eq!(compact_format(0.0), "0");
+    }
+
+    #[test]
+    fn compact_format_inserts_thousands_separators_at_four_digits() {
+        assert_eq!(compact_format(12400.0), "12,400");
+        assert_eq!(compact_format(1000.0), "1,000");
+        assert_eq!(compact_format(1_234_567.89), "1,234,567.89");
+        // Rounding carries into the next thousand before separators apply.
+        assert_eq!(compact_format(999.999), "1,000");
+        assert_eq!(compact_format(1234.5), "1,234.5");
+    }
+
+    #[test]
+    fn compact_format_keeps_true_value_for_negatives() {
+        assert_eq!(compact_format(-3.5), "-3.5");
+        assert_eq!(compact_format(-12400.0), "-12,400");
+        // Rounds to zero magnitude -> plain "0", never "-0".
+        assert_eq!(compact_format(-0.001), "0");
+        assert_eq!(compact_format(-0.0), "0");
     }
 }

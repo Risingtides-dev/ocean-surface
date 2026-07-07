@@ -1013,6 +1013,52 @@ pub struct AgentTurnResponse {
     pub error: Option<String>,
 }
 
+// ── Filesystem directory listing (GET /v1/fs/dirs) ────────────────────
+
+/// One directory entry from the daemon's filesystem listing.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct FsDirEntry {
+    /// Basename of the directory (e.g. "ocean-os").
+    pub name: String,
+    /// Canonical absolute path of this directory.
+    pub path: String,
+    /// True when this directory contains a `.git` sub-directory.
+    #[serde(default)]
+    pub git: bool,
+}
+
+/// Response from `GET /v1/fs/dirs?path=<path>`.
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct FsDirsResponse {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub parent: Option<String>,
+    #[serde(default)]
+    pub home: String,
+    #[serde(default)]
+    pub dirs: Vec<FsDirEntry>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Fetch a directory listing from the daemon. `path` may include a leading
+/// `~` for home-relative requests. Returns `None` on network or decode
+/// errors — the caller handles the empty state.
+pub async fn fetch_fs_dirs(base_url: &str, path: &str) -> Option<FsDirsResponse> {
+    let encoded = js_sys::encode_uri_component(path);
+    let url = format!(
+        "{}/v1/fs/dirs?path={}",
+        base_url.trim_end_matches('/'),
+        encoded.as_string().unwrap_or_else(|| path.to_string())
+    );
+    let resp = gloo_net::http::Request::get(&url).send().await.ok()?;
+    resp.json::<FsDirsResponse>().await.ok()
+}
+
 /// Reactive handle to the daemon. Owns the live turns vec + connection
 /// status; surfaces APIs to send prompts.
 #[derive(Clone)]
@@ -2522,6 +2568,7 @@ impl Daemon {
         let projects = self.projects;
         let status = self.status;
         let current = self.project;
+        let daemon = self.clone();
         let body = ProjectCreateRequest {
             name,
             workspace_root,
@@ -2561,6 +2608,7 @@ impl Daemon {
                         current.set(Some(project.id.clone()));
                         persist_project(&project.id);
                         status.set("project created".into());
+                        daemon.new_session();
                     }
                     Ok(r) => {
                         let raw = r.error.unwrap_or_else(|| "project create rejected".into());

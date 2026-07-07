@@ -234,6 +234,7 @@ async fn main() -> anyhow::Result<()> {
         // Model picker + halt button reach the daemon through this origin too.
         .route("/v1/models", get(proxy_models))
         .route("/v1/model", get(proxy_model_get).post(proxy_model_set))
+        .route("/v1/fs/dirs", get(proxy_fs_dirs))
         .route(
             "/v1/projects",
             get(proxy_projects_list).post(proxy_projects_create),
@@ -764,6 +765,39 @@ async fn proxy_post_json(state: &AppState, path: &str, body: Bytes) -> Response 
 /// Reverse-proxy GET /v1/models (model picker catalogue).
 async fn proxy_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     proxy_get_json(&state, "/v1/models").await
+}
+
+/// Reverse-proxy GET /v1/fs/dirs?path=<path> (filesystem directory listing).
+/// Forwards the full query string so `?path=~/dev` reaches the daemon intact.
+async fn proxy_fs_dirs(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+) -> impl IntoResponse {
+    let mut url = format!(
+        "{}/v1/fs/dirs",
+        state.daemon_url.trim_end_matches('/')
+    );
+    if let Some(qs) = req.uri().query() {
+        url.push('?');
+        url.push_str(qs);
+    }
+    match state.http.get(&url).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let bytes = resp.bytes().await.unwrap_or_default();
+            (
+                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                [(header::CONTENT_TYPE, "application/json")],
+                bytes,
+            )
+                .into_response()
+        }
+        Err(err) => (
+            StatusCode::BAD_GATEWAY,
+            format!("daemon unreachable: {err}"),
+        )
+            .into_response(),
+    }
 }
 
 /// Reverse-proxy GET /v1/model (current selection).

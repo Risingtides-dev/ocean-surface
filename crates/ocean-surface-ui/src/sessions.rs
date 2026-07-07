@@ -20,8 +20,9 @@ use std::collections::HashSet;
 use leptos::prelude::*;
 use leptos::ev::SubmitEvent;
 use js_sys;
+use wasm_bindgen_futures::spawn_local;
 
-use crate::daemon::{Daemon, ProjectInfo, SessionSummary};
+use crate::daemon::{Daemon, fetch_fs_dirs, ProjectInfo, SessionSummary};
 
 // ---------------------------------------------------------------------------
 // Pure helpers — unit-testable without WASM
@@ -283,6 +284,56 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
     // Create-project form state (modal-only; posts via daemon.create_project).
     let create_name = RwSignal::new(String::new());
     let create_root = RwSignal::new(String::new());
+    // Breadcrumb directory browser state.
+    let breadcrumb_parent = RwSignal::new(String::new());
+    let breadcrumb_dirs = RwSignal::new(Vec::<crate::daemon::FsDirEntry>::new());
+    let breadcrumb_loading = RwSignal::new(false);
+    let breadcrumb_filter = RwSignal::new(String::new());
+    let breadcrumb_text_mode = RwSignal::new(false);
+    let breadcrumb_home = RwSignal::new(String::new());
+    let _popover_highlight = RwSignal::new(0usize);
+
+    // Compose create_root from breadcrumb state when not in text mode.
+    Effect::new(move |_| {
+        if !breadcrumb_text_mode.get() {
+            let parent = breadcrumb_parent.get();
+            if !parent.is_empty() {
+                let name = create_name.get();
+                let slug = if name.trim().is_empty() {
+                    "project-name".to_string()
+                } else {
+                    name.trim().to_lowercase().replace(' ', "-")
+                };
+                create_root.set(format!("{}/{}", parent.trim_end_matches('/'), slug));
+            }
+        }
+    });
+
+    // Initialize default workspace root when panel opens.
+    Effect::new(move |_| {
+        if open.get() && create_root.get_untracked().is_empty() {
+            let url = daemon.get_value().url.get_untracked();
+            create_root.set("~/dev".to_string());
+            spawn_local(async move {
+                let u = url.clone();
+                if let Some(resp) = fetch_fs_dirs(&u, "~/dev").await {
+                    if resp.ok {
+                        breadcrumb_home.set(resp.home.clone());
+                    } else {
+                        let u2 = u.clone();
+                        if let Some(resp2) = fetch_fs_dirs(&u2, "~").await {
+                            if resp2.ok {
+                                breadcrumb_home.set(resp2.home.clone());
+                                create_root.set("~".to_string());
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+
+
     let create_can_submit = move || {
         !create_name.get().trim().is_empty() && !create_root.get().trim().is_empty()
     };
@@ -295,6 +346,7 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
         let name = create_name.get_untracked();
         let root = create_root.get_untracked();
         daemon.get_value().create_project(name, root);
+        open.set(false);
         create_name.set(String::new());
         create_root.set(String::new());
     };
@@ -338,15 +390,236 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                 prop:value=move || create_name.get()
                                 on:input=move |ev| create_name.set(event_target_value(&ev))
                             />
-                            <input
-                                class="sessions-create__input"
-                                type="text"
-                                placeholder="Workspace root"
-                                autocomplete="off"
-                                spellcheck="false"
-                                prop:value=move || create_root.get()
-                                on:input=move |ev| create_root.set(event_target_value(&ev))
-                            />
+                                                        {move || if breadcrumb_text_mode.get() {
+                                view! {
+                                    <div style="display:flex;gap:6px;align-items:center;flex:1 1 auto">
+                                        <input
+                                            class="sessions-create__input"
+                                            type="text"
+                                            placeholder="Workspace root (absolute path)"
+                                            autocomplete="off"
+                                            spellcheck="false"
+                                            prop:value=move || create_root.get()
+                                            on:input=move |ev| create_root.set(event_target_value(&ev))
+                                        />
+                                        <button
+                                            class="sessions-create__text-toggle"
+                                            type="button"
+                                            title="Browse directories"
+                                            on:click=move |_| breadcrumb_text_mode.set(false)
+                                        >
+                                            "📁"
+                                        </button>
+                                    </div>
+                                }.into_any()
+                            } else {
+                                let path_str = create_root.get();
+                                let has_tilde = path_str.starts_with('~');
+                                let rest = if has_tilde { path_str[1..].to_string() } else { path_str.clone() };
+                                let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+                                let home = breadcrumb_home.get();
+                                let mut display_segs: Vec<(String, String)> = Vec::new();
+                                if has_tilde {
+                                    display_segs.push(("~".to_string(), home.clone()));
+                                    let mut prefix = home.clone();
+                                    for seg in &parts {
+                                        prefix = format!("{}/{}", prefix.trim_end_matches('/'), seg);
+                                        display_segs.push((seg.to_string(), prefix.clone()));
+                                    }
+                                } else if !parts.is_empty() {
+                                    let mut prefix = String::new();
+                                    for seg in &parts {
+                                        prefix = format!("{}/{}", prefix.trim_end_matches('/'), seg);
+                                        display_segs.push((seg.to_string(), prefix.clone()));
+                                    }
+                                }
+                                if display_segs.is_empty() {
+                                    let h = if home.is_empty() { "~".to_string() } else { "~".to_string() };
+                                    display_segs.push((h.clone(), home.clone()));
+                                }
+                                let d_url = daemon.get_value().url.get_untracked();
+
+                                view! {
+                                    <div class="sessions-create__breadcrumb">
+                                        <div class="sessions-create__breadcrumb-row">
+                                            {display_segs.iter().enumerate().map(|(idx, (label, prefix))| {
+                                                let is_last = idx == display_segs.len() - 1;
+                                                let lbl = label.clone();
+                                                let pfx = prefix.clone();
+                                                let u = d_url.clone();
+
+                                                view! {
+                                                    <button
+                                                        class="sessions-create__breadcrumb-seg"
+                                                        type="button"
+                                                        on:click={
+                                                            let uu = u.clone();
+                                                            let p = pfx.clone();
+                                                            move |_| {
+                                                                breadcrumb_parent.set(p.clone());
+                                                                breadcrumb_filter.set(String::new());
+                                                                let uuu = uu.clone();
+                                                                let p2 = p.clone();
+                                                                spawn_local(async move {
+                                                                    if let Some(resp) = fetch_fs_dirs(&uuu, &p2).await {
+                                                                        if resp.ok {
+                                                                            breadcrumb_home.set(resp.home);
+                                                                            breadcrumb_dirs.set(resp.dirs);
+                                                                        }
+                                                                    }
+                                                                });
+                                                            }
+                                                        }
+                                                    >
+                                                        {lbl}
+                                                    </button>
+                                                    {if !is_last {
+                                                        view! { <span class="sessions-create__breadcrumb-sep">" / "</span> }.into_any()
+                                                    } else {
+                                                        ().into_any()
+                                                    }}
+                                                }.into_any()
+                                            }).collect::<Vec<_>>()}
+                                        </div>
+                                        <button
+                                            class="sessions-create__text-toggle"
+                                            type="button"
+                                            title="Edit path as text"
+                                            on:click=move |_| breadcrumb_text_mode.set(true)
+                                        >
+                                            "⌨"
+                                        </button>
+                                        {move || {
+                                            let popover_parent = breadcrumb_parent.get();
+                                            if popover_parent.is_empty() {
+                                                return ().into_any();
+                                            }
+                                            let dirs = breadcrumb_dirs.get();
+                                            let filter = breadcrumb_filter.get();
+                                            let loading = breadcrumb_loading.get();
+                                            let filtered: Vec<crate::daemon::FsDirEntry> = if filter.is_empty() {
+                                                dirs.clone()
+                                            } else {
+                                                dirs.iter()
+                                                    .filter(|d| d.name.to_lowercase().contains(&filter.to_lowercase()))
+                                                    .cloned()
+                                                    .collect()
+                                            };
+
+                                            view! {
+                                                <div class="sessions-create__popover">
+                                                    <input
+                                                        class="sessions-create__popover-filter"
+                                                        type="text"
+                                                        placeholder="Filter directories..."
+                                                        autofocus=true
+                                                        prop:value=move || breadcrumb_filter.get()
+                                                        on:input=move |ev| breadcrumb_filter.set(event_target_value(&ev))
+                                                        on:keydown=move |ev| {
+                                                            if ev.key() == "Escape" {
+                                                                breadcrumb_parent.set(String::new());
+                                                            }
+                                                        }
+                                                    />
+                                                    <div class="sessions-create__popover-list">
+                                                        {if loading {
+                                                            view! { <div class="sessions-create__popover-status">"Loading..."</div> }.into_any()
+                                                        } else if filtered.is_empty() {
+                                                            view! {
+                                                                <div class="sessions-create__popover-status">"No directories"</div>
+                                                                <button
+                                                                    class="sessions-create__popover-new"
+                                                                    type="button"
+                                                                    on:click={
+                                                                        let pp = popover_parent.clone();
+                                                                        move |_| {
+                                                                            let slug = create_name.get_untracked().to_lowercase().replace(' ', "-");
+                                                                            let new_path = format!("{}/{}", pp.trim_end_matches('/'), slug);
+                                                                            create_root.set(new_path);
+                                                                            breadcrumb_parent.set(String::new());
+                                                                        }
+                                                                    }
+                                                                >
+                                                                    "+ new folder: "
+                                                                    <span class="sessions-create__popover-new-name">
+                                                                        {move || {
+                                                                            let n = create_name.get();
+                                                                            if n.trim().is_empty() { "project-name".to_string() } else { n.trim().to_lowercase().replace(' ', "-") }
+                                                                        }}
+                                                                    </span>
+                                                                </button>
+                                                            }.into_any()
+                                                        } else {
+                                                            let items: Vec<_> = filtered.iter().map(|d| {
+                                                                let name = d.name.clone();
+                                                                let path = d.path.clone();
+                                                                let is_git = d.git;
+                                                                let u = d_url.clone();
+                                                                view! {
+                                                                    <button
+                                                                        class="sessions-create__popover-item"
+                                                                        type="button"
+                                                                        on:click={
+                                                                            let path_owned = path.clone();
+                                                                            let uu = u.clone();
+                                                                            move |_| {
+                                                                                breadcrumb_parent.set(path_owned.clone());
+                                                                                breadcrumb_filter.set(String::new());
+                                                                                let uuu = uu.clone();
+                                                                                let p3 = path_owned.clone();
+                                                                                spawn_local(async move {
+                                                                                    if let Some(resp) = fetch_fs_dirs(&uuu, &p3).await {
+                                                                                        if resp.ok {
+                                                                                            breadcrumb_home.set(resp.home);
+                                                                                            breadcrumb_dirs.set(resp.dirs);
+                                                                                        }
+                                                                                    }
+                                                                                });
+                                                                            }
+                                                                        }
+                                                                    >
+                                                                        <span class="sessions-create__popover-item-name">{name.clone()}</span>
+                                                                        {if is_git {
+                                                                            view! { <span class="sessions-create__popover-item-git">"git"</span> }.into_any()
+                                                                        } else {
+                                                                            ().into_any()
+                                                                        }}
+                                                                    </button>
+                                                                }
+                                                            }).collect();
+                                                            view! {
+                                                                {items.into_iter().collect::<Vec<_>>()}
+                                                                <button
+                                                                    class="sessions-create__popover-new"
+                                                                    type="button"
+                                                                    on:click={
+                                                                        let pp = popover_parent.clone();
+                                                                        move |_| {
+                                                                            let slug = create_name.get_untracked().to_lowercase().replace(' ', "-");
+                                                                            let new_path = format!("{}/{}", pp.trim_end_matches('/'), slug);
+                                                                            create_root.set(new_path);
+                                                                            breadcrumb_parent.set(String::new());
+                                                                        }
+                                                                    }
+                                                                >
+                                                                    "+ new folder: "
+                                                                    <span class="sessions-create__popover-new-name">
+                                                                        {move || {
+                                                                            let n = create_name.get();
+                                                                            if n.trim().is_empty() { "project-name".to_string() } else { n.trim().to_lowercase().replace(' ', "-") }
+                                                                        }}
+                                                                    </span>
+                                                                </button>
+                                                            }.into_any()
+                                                        }}
+                                                    </div>
+                                                </div>
+                                            }.into_any()
+                                        }}
+                                    </div>
+                                }.into_any()
+                            }}
+
                         </div>
                         <button
                             class="sessions-create__btn"
