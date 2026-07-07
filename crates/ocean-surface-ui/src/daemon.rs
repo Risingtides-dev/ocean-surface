@@ -1977,14 +1977,11 @@ impl Daemon {
         let session_id = self.session_id.get_untracked();
         self.awaiting_session_adoption.set(false);
         let project = self.project.get_untracked();
-        // When a project is selected, send an EMPTY cwd so the daemon binds to
-        // the project's workspace_root (a non-empty cwd would win and override
-        // it). With no project, fall back to the configured cwd as before.
-        let cwd = if project.is_some() {
-            String::new()
-        } else {
-            self.cwd.get_untracked()
-        };
+        // Always send the cwd the surface is displaying. Project sessions pin
+        // this to the project's real workspace root in `begin_project_session`;
+        // sending an empty cwd made the first turn fall back to the launch/dev
+        // directory when the daemon could not resolve the project eagerly.
+        let cwd = self.cwd.get_untracked();
         let streaming = self.streaming;
         let status = self.status;
         let status_detail = self.status_detail;
@@ -2569,14 +2566,21 @@ impl Daemon {
     }
 
 
-    /// Select project `id` as the active project, then reset to a lazy new
-    /// session (the session is actually created server-side on the first
-    /// prompt — see [`new_session`]). Runtime authority stays in the daemon:
-    /// the surface only records the selection (persisted via [`set_project`])
-    /// and clears local transcript state. No local `mkdir`, no fake project —
-    /// the project's `workspace_root` is resolved server-side from `id`.
+    /// Select project `id`, pin the working directory to that project's
+    /// catalogue `workspace_root`, then reset to a lazy new session. This
+    /// mirrors [`begin_chat_session`] (which pins `/tmp`) so the first prompt
+    /// carries the real project directory instead of the surface default.
     pub fn begin_project_session(&self, id: String) {
-        self.set_project(Some(id));
+        self.set_project(Some(id.clone()));
+        let root = self.projects.with_untracked(|projects| {
+            projects
+                .iter()
+                .find(|project| project.id == id)
+                .map(|project| project.workspace_root.clone())
+        });
+        if let Some(root) = root.filter(|root| !root.trim().is_empty()) {
+            self.cwd.set(root);
+        }
         self.new_session();
     }
 

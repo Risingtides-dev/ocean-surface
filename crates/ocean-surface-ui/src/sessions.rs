@@ -37,6 +37,51 @@ pub(crate) fn session_root(s: &SessionSummary) -> &str {
         .unwrap_or(s.cwd.as_str())
 }
 
+fn project_slug(name: &str) -> String {
+    let mut slug = String::new();
+    let mut just_dashed = false;
+    for ch in name.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            just_dashed = false;
+        } else if !slug.is_empty() && !just_dashed {
+            slug.push('-');
+            just_dashed = true;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        "project-name".to_string()
+    } else {
+        slug
+    }
+}
+
+fn project_root_from_parent(parent: &str, name: &str) -> String {
+    let parent = parent.trim();
+    let base = parent.trim_end_matches('/');
+    let slug = project_slug(name);
+    if base.is_empty() {
+        if parent.starts_with('/') {
+            format!("/{slug}")
+        } else {
+            slug
+        }
+    } else {
+        format!("{base}/{slug}")
+    }
+}
+
+fn project_create_root(text_mode: bool, parent: &str, root: &str, name: &str) -> String {
+    if text_mode || parent.trim().is_empty() {
+        root.trim().to_string()
+    } else {
+        project_root_from_parent(parent, name)
+    }
+}
+
 /// One project section in the panel: a project header followed by its sessions,
 /// optionally split into worktree sub-groups when the project spans multiple
 /// workspace roots.
@@ -333,38 +378,43 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
     let breadcrumb_home = RwSignal::new(String::new());
     let _popover_highlight = RwSignal::new(0usize);
 
-    // Compose create_root from breadcrumb state when not in text mode.
+    // Browse mode treats the chosen directory as a PARENT. The actual project
+    // root is parent + normalized project-name slug, and the daemon creates
+    // that folder on POST /v1/projects.
     Effect::new(move |_| {
         if !breadcrumb_text_mode.get() {
             let parent = breadcrumb_parent.get();
-            if !parent.is_empty() {
-                let name = create_name.get();
-                let slug = if name.trim().is_empty() {
-                    "project-name".to_string()
-                } else {
-                    name.trim().to_lowercase().replace(' ', "-")
-                };
-                create_root.set(format!("{}/{}", parent.trim_end_matches('/'), slug));
+            if !parent.trim().is_empty() {
+                create_root.set(project_root_from_parent(&parent, &create_name.get()));
             }
         }
     });
 
-    // Initialize default workspace root when panel opens.
+    // Initialize default project parent when panel opens.
     Effect::new(move |_| {
         if open.get() && create_root.get_untracked().is_empty() {
             let url = daemon.get_value().url.get_untracked();
-            create_root.set("~/dev".to_string());
+            let parent = "~/dev".to_string();
+            breadcrumb_parent.set(parent.clone());
+            create_root.set(project_root_from_parent(&parent, &create_name.get_untracked()));
             spawn_local(async move {
                 let u = url.clone();
-                if let Some(resp) = fetch_fs_dirs(&u, "~/dev").await {
+                if let Some(resp) = fetch_fs_dirs(&u, &parent).await {
                     if resp.ok {
                         breadcrumb_home.set(resp.home.clone());
+                        breadcrumb_dirs.set(resp.dirs);
                     } else {
                         let u2 = u.clone();
                         if let Some(resp2) = fetch_fs_dirs(&u2, "~").await {
                             if resp2.ok {
+                                let fallback_parent = "~".to_string();
                                 breadcrumb_home.set(resp2.home.clone());
-                                create_root.set("~".to_string());
+                                breadcrumb_parent.set(fallback_parent.clone());
+                                breadcrumb_dirs.set(resp2.dirs);
+                                create_root.set(project_root_from_parent(
+                                    &fallback_parent,
+                                    &create_name.get_untracked(),
+                                ));
                             }
                         }
                     }
@@ -382,7 +432,14 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
 
 
     let create_can_submit = move || {
-        !create_name.get().trim().is_empty() && !create_root.get().trim().is_empty()
+        let name = create_name.get();
+        let root = project_create_root(
+            breadcrumb_text_mode.get(),
+            &breadcrumb_parent.get(),
+            &create_root.get(),
+            &name,
+        );
+        !name.trim().is_empty() && !root.trim().is_empty()
     };
     let start_chat = move |_| {
         daemon.get_value().begin_chat_session();
@@ -391,7 +448,12 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
     let create_project = move |ev: SubmitEvent| {
         ev.prevent_default();
         let name = create_name.get_untracked();
-        let root = create_root.get_untracked();
+        let root = project_create_root(
+            breadcrumb_text_mode.get_untracked(),
+            &breadcrumb_parent.get_untracked(),
+            &create_root.get_untracked(),
+            &name,
+        );
         daemon.get_value().create_project(name, root);
     };
 
@@ -469,7 +531,7 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                         <input
                                             class="sessions-create__input"
                                             type="text"
-                                            placeholder="Workspace root (absolute path)"
+                                            placeholder="Project folder (absolute path)"
                                             autocomplete="off"
                                             spellcheck="false"
                                             prop:value=move || create_root.get()
@@ -624,8 +686,7 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                                                     on:click={
                                                                         let pp = popover_parent.clone();
                                                                         move |_| {
-                                                                            let slug = create_name.get_untracked().to_lowercase().replace(' ', "-");
-                                                                            let new_path = format!("{}/{}", pp.trim_end_matches('/'), slug);
+                                                                            let new_path = project_root_from_parent(&pp, &create_name.get_untracked());
                                                                             create_root.set(new_path);
                                                                             breadcrumb_parent.set(String::new());
                                                                         }
@@ -680,8 +741,7 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                                                     on:click={
                                                                         let pp = popover_parent.clone();
                                                                         move |_| {
-                                                                            let slug = create_name.get_untracked().to_lowercase().replace(' ', "-");
-                                                                            let new_path = format!("{}/{}", pp.trim_end_matches('/'), slug);
+                                                                            let new_path = project_root_from_parent(&pp, &create_name.get_untracked());
                                                                             create_root.set(new_path);
                                                                             breadcrumb_parent.set(String::new());
                                                                         }
@@ -1074,5 +1134,38 @@ mod tests {
 
         // A project that already collected a session is not duplicated.
         assert_eq!(sections.iter().filter(|s| s.key == "beta").count(), 1);
+    }
+
+    #[test]
+    fn project_root_from_parent_joins_parent_and_normalized_project_name() {
+        assert_eq!(project_root_from_parent("~/dev", "Slop Check"), "~/dev/slop-check");
+    }
+
+    #[test]
+    fn project_root_from_parent_trims_trailing_parent_slash() {
+        assert_eq!(project_root_from_parent("~/dev/", "Slop Check"), "~/dev/slop-check");
+    }
+
+    #[test]
+    fn project_root_from_parent_sanitizes_name_separators_into_single_folder() {
+        for (name, expected_root) in [
+            ("evil/../etc", "~/dev/evil-etc"),
+            ("evil\\..\\etc", "~/dev/evil-etc"),
+            ("!!!pwned!!!", "~/dev/pwned"),
+            ("a...b", "~/dev/a-b"),
+        ] {
+            assert_eq!(project_root_from_parent("~/dev", name), expected_root, "name={name:?}");
+        }
+    }
+
+    #[test]
+    fn project_root_from_parent_blank_or_unusable_name_falls_back_to_project_name() {
+        for name in ["", "   ", "!!!---///"] {
+            assert_eq!(
+                project_root_from_parent("~/dev", name),
+                "~/dev/project-name",
+                "name={name:?}"
+            );
+        }
     }
 }

@@ -12,6 +12,42 @@ use crate::sessions::SessionsPanel;
 use crate::transcript::Transcript;
 use crate::voice::VoiceOrb;
 
+const COMPOSER_MIN_HEIGHT_PX: i32 = 40;
+const COMPOSER_MAX_HEIGHT_PX: i32 = 240;
+
+fn composer_height_px(scroll_height: i32) -> i32 {
+    scroll_height.clamp(COMPOSER_MIN_HEIGHT_PX, COMPOSER_MAX_HEIGHT_PX)
+}
+
+fn composer_overflow_y(scroll_height: i32) -> &'static str {
+    if scroll_height > COMPOSER_MAX_HEIGHT_PX {
+        "auto"
+    } else {
+        "hidden"
+    }
+}
+
+fn fit_composer_textarea(el: &web_sys::HtmlTextAreaElement) {
+    let style = el
+        .clone()
+        .unchecked_into::<web_sys::HtmlElement>()
+        .style();
+    let _ = style.set_property("height", "auto");
+    let scroll_height = el.scroll_height();
+    let height = composer_height_px(scroll_height);
+    let _ = style.set_property("height", &format!("{height}px"));
+    let _ = style.set_property("overflow-y", composer_overflow_y(scroll_height));
+}
+
+fn reset_composer_textarea(el: &web_sys::HtmlTextAreaElement) {
+    let style = el
+        .clone()
+        .unchecked_into::<web_sys::HtmlElement>()
+        .style();
+    let _ = style.set_property("height", &format!("{COMPOSER_MIN_HEIGHT_PX}px"));
+    let _ = style.set_property("overflow-y", "hidden");
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     let daemon = Daemon::new(daemon_url_from_env());
@@ -151,8 +187,10 @@ pub fn App() -> impl IntoView {
             }
             input.set(String::new());
             daemon.send_prompt(text);
-            // Refocus the textarea so successive prompts feel snappy.
+            // Refocus + collapse the textarea so a long prior prompt doesn't
+            // leave the next turn trapped in a tall empty scrollbox.
             if let Some(el) = textarea_ref.get_untracked() {
+                reset_composer_textarea(&el);
                 let _ = el.focus();
             }
         }
@@ -593,10 +631,16 @@ pub fn App() -> impl IntoView {
                             <textarea
                                 class="ocean-composer__input"
                                 placeholder="message Ocean…"
-                                rows="2"
                                 node_ref=textarea_ref
                                 prop:value=move || input.get()
-                                on:input=move |ev| input.set(event_target_value(&ev))
+                                on:input=move |ev| {
+                                    input.set(event_target_value(&ev));
+                                    if let Some(target) = ev.target() {
+                                        if let Ok(el) = target.dyn_into::<web_sys::HtmlTextAreaElement>() {
+                                            fit_composer_textarea(&el);
+                                        }
+                                    }
+                                }
                                 on:keydown=move |ev| {
                                     // Enter to submit, Shift+Enter for newline.
                                     if ev.key() == "Enter" && !ev.shift_key() {
@@ -695,5 +739,23 @@ fn fmt_tokens(n: u64) -> String {
         format!("{:.1}k", n as f64 / 1_000.0)
     } else {
         format!("{:.1}M", n as f64 / 1_000_000.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{composer_height_px, composer_overflow_y, COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX};
+
+    #[test]
+    fn composer_height_clamps_to_min_and_max() {
+        assert_eq!(composer_height_px(0), COMPOSER_MIN_HEIGHT_PX);
+        assert_eq!(composer_height_px(72), 72);
+        assert_eq!(composer_height_px(999), COMPOSER_MAX_HEIGHT_PX);
+    }
+
+    #[test]
+    fn composer_overflow_switches_only_past_max_height() {
+        assert_eq!(composer_overflow_y(COMPOSER_MAX_HEIGHT_PX), "hidden");
+        assert_eq!(composer_overflow_y(COMPOSER_MAX_HEIGHT_PX + 1), "auto");
     }
 }
