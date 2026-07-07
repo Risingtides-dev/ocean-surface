@@ -304,7 +304,22 @@
 }
 
 .turn--assistant .turn__body {
-  width: 100%;
+  width: auto;
+  max-width: min(74ch, 100%);
+  padding: 10px 16px;
+  background: var(--sheen-soft), var(--bg-raised);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elev-1);
+}
+
+/* Prose sits FLUSH inside the one reply card — no nested per-message bubbles
+   (the old per-`.block--text` bubble fought the card + the cognition glow). */
+.turn--assistant .turn__body .block--text {
+  max-width: none;
+  padding: 0;
+  background: none;
+  border-radius: 0;
+  box-shadow: none;
 }
 
 .block {
@@ -720,11 +735,13 @@
    assistant turn (transcript.rs; reactive on daemon.streaming, removed at
    turn_finished). Pulses between --glow-thinking (resting) and --glow-live
    (peak) — both reserved for cognition/live state; --glow-brand stays
-   orb-only. The agent answer stays flush (no radius/card chrome); the per-tool
+   orb-only. The reply is now ONE rounded neumorphic card (`.turn--assistant
+   .turn__body`), so the glow layers OVER the card's own elevation and hugs its
+   rounded edge instead of tracing a full-width black rectangle; the per-tool
    in-flight signal stays the yellow --running dot on the disclosure. */
 @keyframes ocean-thinking-glow {
-  0%, 100% { box-shadow: var(--glow-thinking); }
-  50%      { box-shadow: var(--glow-live); }
+  0%, 100% { box-shadow: var(--elev-1), var(--glow-thinking); }
+  50%      { box-shadow: var(--elev-1), var(--glow-live); }
 }
 
 .turn--assistant.is-streaming .turn__body {
