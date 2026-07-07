@@ -1,14 +1,18 @@
 # Ocean Surface
 
 The client face of [Ocean OS](https://github.com/Risingtides-dev/ocean-os).
-This repo holds the GPUI desktop app, Leptos web/PWA, Chrome extension surface,
-local proxy, voice UI, and canvas work.
+One Rust + Leptos app, built once via Trunk and shipped to two hosts: the
+browser PWA and the Tauri native shell — both load the same `dist/` WASM bundle.
+A Chrome extension wraps that same bundle. Native macOS is delivered by the
+Tauri 2.x shell (`crates/ocean-tauri`), not a separate GPUI app; the legacy
+GPUI desktop app (`crates/ocean-gui`) is soft-deprecated (source retained for
+mining into the Tauri Rust backend).
 
 Cross-repo routing and ownership map: [`docs/OCEAN_PROJECT_MAP.md`](docs/OCEAN_PROJECT_MAP.md).
 
 | Target | How | Why |
 |---|---|---|
-| GPUI desktop | `cargo run -p ocean-gui --bin ocean-gui` | native desktop collaboration surface, agent transcript, tldraw canvas host, LiveKit controls |
+| Native desktop (Tauri) | `./run-tauri.sh` (or `cd crates/ocean-tauri && cargo tauri dev`) | Tauri 2.x shell loading the same `dist/` Leptos bundle as the browser |
 | Browser PWA | `trunk serve` or `./run-surface.sh` | desktop/mobile browser access over the daemon API |
 | Chrome extension | `extension/` wrapper | browser-side panel with explicit `surface-extension` context |
 | Web proxy | `cargo run -p ocean-surface-proxy` | serves web bundle, config, STT/TTS, and daemon reverse proxy |
@@ -83,12 +87,13 @@ permission requests, completion). Surfaces must subscribe scoped to their own
 
 | Path                            | Role                                                                 |
 | ------------------------------- | -------------------------------------------------------------------- |
-| `crates/ocean-gui/`             | GPUI native desktop app and tldraw canvas host.                      |
-| `crates/ocean-gui/canvas-web/`  | tldraw/web bundle loaded by the GPUI canvas host.                    |
-| `crates/ocean-surface-ui/`      | Leptos UI (CSR/WASM) for web/PWA/extension.                          |
+| `crates/ocean-surface-ui/`      | canonical Leptos UI (CSR/WASM) for web/PWA/extension/Tauri.          |
+| `crates/ocean-tauri/`           | Tauri 2.x native desktop shell; loads the same `dist/` bundle as the browser PWA. |
 | `crates/ocean-surface-proxy/`   | axum service: holds xAI key for STT/TTS (transitional — moving to `ocean-os`), serves the WASM bundle. |
 | `extension/`                    | Chrome extension wrapper around the Leptos surface.                  |
 | `legacy-voice/`                 | Reference: the JS voice client (PR #22). Deleted once ported.        |
+| `crates/ocean-gui/`             | legacy GPUI native desktop app and tldraw canvas host (soft-deprecated, source retained for mining). |
+| `crates/ocean-gui/canvas-web/`  | tldraw/web bundle loaded by the GPUI canvas host (legacy).           |
 
 ## Dev loop
 
@@ -103,6 +108,9 @@ mkdir -p ~/.config/ocean-surface && printf '%s' "sk-YOUR-XAI-KEY" > ~/.config/oc
 # Build the wasm bundle + serve it and the xAI proxy from one binary:
 ./run-surface.sh
 # → open http://<this-host>:8790  (works on a phone via the tailnet IP)
+
+# Or build dist/ + launch the Tauri native desktop shell (loads the same bundle):
+./run-tauri.sh
 ```
 
 `run-surface.sh` binds `0.0.0.0:8790` by default. Override with
@@ -116,15 +124,18 @@ mkdir -p ~/.config/ocean-surface && printf '%s' "sk-YOUR-XAI-KEY" > ~/.config/oc
 
 5/5 green means every wired path works; then the browser check is just UI/mic confirmation.
 
-### GPUI desktop work
+### Native desktop (Tauri)
 
 ```sh
-cargo run -p ocean-gui --bin ocean-gui
-cargo check -p ocean-gui
+./run-tauri.sh                        # build dist/ + launch the Tauri shell
+cd crates/ocean-tauri && cargo tauri dev   # or, run dev mode directly
 ```
 
-The GPUI collaboration direction is documented in
-[`docs/OCEAN_GPUI_CANVAS_LIVEKIT_SPEC.md`](docs/OCEAN_GPUI_CANVAS_LIVEKIT_SPEC.md).
+Tauri loads the same `dist/` Leptos bundle the browser ships; its Rust backend
+adds native folder dialogs and path watcher (replacing the GPUI crate's `rfd`/
+`notify`). The canvas+LiveKit design intent is documented in
+[`docs/OCEAN_GPUI_CANVAS_LIVEKIT_SPEC.md`](docs/OCEAN_GPUI_CANVAS_LIVEKIT_SPEC.md)
+(now a historical reference; the implementation surface is Leptos+Tauri).
 
 ### Live-reload web dev
 
@@ -154,12 +165,13 @@ then it resolves the key in order:
 
 - Done: web/PWA chat, SSE transcript, model picker, session picker, proxy,
   voice STT/TTS, Chrome extension bootstrap.
-- In progress: GPUI native app, explicit session scoping, tldraw canvas host,
-  canvas ledger, LiveKit presence controls.
-- Next: reliable GPUI canvas IPC, tldraw render commands, LiveKit mic/camera
-  participation, surface-state injection into agent turns, and moving
-  provider-backed STT/TTS to daemon-owned voice endpoints in `ocean-os`
-  (retiring the proxy's transitional xAI key handling).
+- In progress: Tauri native shell (loads the same `dist/` bundle), explicit
+  session scoping, Leptos canvas, canvas ledger, LiveKit presence controls.
+- Next: reliable canvas IPC for Leptos+Tauri, tldraw render commands, LiveKit
+  mic/camera participation, surface-state injection into agent turns, native
+  LiveKit Rust client behind a Tauri feature flag, and moving provider-backed
+  STT/TTS to daemon-owned voice endpoints in `ocean-os` (retiring the proxy's
+  transitional xAI key handling).
 
 ## Provenance
 

@@ -1,6 +1,16 @@
 # Ocean — session handoff (2026-05-31)
 
-## Current overlay (2026-06-04)
+## Current overlay (2026-07-07)
+
+Native surface pivoted back to the documented plan: the active native surface
+is now the Tauri 2.x shell at `crates/ocean-tauri/`, which loads the same
+`dist/` Leptos WASM bundle the browser PWA ships. The legacy GPUI crate
+(`crates/ocean-gui/`) is soft-deprecated — source retained for mining into the
+Tauri Rust backend, not deleted. The GPUI canvas+LiveKit spec at
+`docs/OCEAN_GPUI_CANVAS_LIVEKIT_SPEC.md` is now a historical reference; the
+implementation surface is Leptos+Tauri.
+
+## Previous overlay (2026-06-04)
 
 The active native surface is `crates/ocean-gui`, not a Tauri shell. The GPUI
 collaboration spec is `docs/OCEAN_GPUI_CANVAS_LIVEKIT_SPEC.md`.
@@ -21,9 +31,10 @@ Read this first, then `ocean-surface/CLAUDE.md` and `ocean-os/CLAUDE.md`.
 ## The system in one paragraph
 Ocean is **two repos, one system**. `ocean-os` (`../ocean-os`) is the **brain**: a Rust
 daemon that owns the agent loop, tools, provider calls, **sessions**, permissions, and the
-event bus. `ocean-surface` (here) is the **client face**: a Rust+Leptos CSR/WASM app served
-as a PWA, plus a small axum proxy that holds the xAI/Maps keys and reverse-proxies the
-daemon. Clients are disposable; sessions live in the daemon only. They talk over
+event bus. `ocean-surface` (here) is the **client face**: one Rust+Leptos CSR/WASM app
+served as a browser PWA (via a small axum proxy that holds the xAI/Maps keys and
+reverse-proxies the daemon) and as a Tauri 2.x native desktop shell that loads the same
+`dist/` bundle. Clients are disposable; sessions live in the daemon only. They talk over
 `POST /v1/agent/turns` + `GET /v1/agent/events` (SSE) + `/v1/model[s]` + `/v1/requests/{id}/cancel`.
 
 ## Current run state (as of this handoff)

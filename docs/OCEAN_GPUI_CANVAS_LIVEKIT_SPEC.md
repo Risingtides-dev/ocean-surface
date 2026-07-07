@@ -1,3 +1,11 @@
+> **Status (2026-07-07): historical reference.** The canvas + LiveKit collaboration
+> design described below is being implemented on the Leptos web surface
+> (`crates/ocean-surface-ui/src/canvas.rs`, `src/livekit.rs`, `src/call.rs`) and
+> the Tauri native shell (`crates/ocean-tauri/`), NOT the GPUI crate. The GPUI
+> crate (`crates/ocean-gui/`) is soft-deprecated; this spec is retained as the
+> design-intent anchor for the canvas ledger + LiveKit data-channel co-editing
+> model that the Leptos+Tauri surfaces inherit.
+
 # Ocean GPUI Canvas + LiveKit Spec
 
 Status: active GPUI product direction.

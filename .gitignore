@@ -25,9 +25,9 @@ node_modules/
 /dist/
 crates/ocean-gui/canvas-web/dist/
 
-# Tauri build output (added in Phase 4)
-/crates/ocean-surface-app/gen/
-/crates/ocean-surface-app/target/
+# Tauri build output (standalone ocean-tauri shell). target/ is covered by
+# **/target/ above; gen/ holds tauri-build's regenerated capability schemas.
+/crates/ocean-tauri/gen/
 
 # local UI test artifacts
 .playwright-mcp/

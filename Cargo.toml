@@ -8,11 +8,17 @@ members = [
 # `cargo build` (no -p) builds only the native proxy. The UI crate is a
 # wasm-only target built via Trunk (or `-p ocean-surface-ui --target
 # wasm32-unknown-unknown`), so excluding it from the default set avoids a
-# pointless native compile of a browser binary.
+# pointless native compile of a browser binary. The native surface is now
+# the Tauri shell at crates/ocean-tauri/ — a standalone project (not a
+# workspace member) launched via ./run-tauri.sh.
 default-members = ["crates/ocean-surface-proxy"]
 
-# crates/ocean-gui is the native GPUI desktop face. It is intentionally not a
-# default member so `cargo build` keeps the existing proxy-focused workflow.
+# crates/ocean-gui is the LEGACY GPUI desktop face (soft-deprecated
+# 2026-07-07). The active native surface is the Tauri shell at
+# crates/ocean-tauri/ (standalone, not a workspace member). The GPUI source
+# is retained for mining into the Tauri Rust backend; do not build new
+# features on it. It stays a workspace member only so `cargo check -p
+# ocean-gui` still works for archeology.
 
 [workspace.package]
 edition = "2021"

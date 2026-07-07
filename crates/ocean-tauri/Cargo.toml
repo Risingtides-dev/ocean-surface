@@ -1,0 +1,37 @@
+[package]
+name = "ocean-tauri"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Risingtides-dev"]
+rust-version = "1.82"
+description = "Tauri 2.x native shell that hosts the ocean-surface Leptos WASM bundle."
+
+# Standalone Tauri project: intentionally NOT a member of the ocean-surface
+# workspace. `cargo tauri` manages this crate's own build graph, and keeping it
+# out of the workspace avoids a native/wasm compile race with ocean-surface-ui.
+
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["devtools"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Filesystem notifications. notify 6.x exposes no `serde` cargo feature (its
+# types already depend on serde unconditionally); we map raw events onto our own
+# serde-derived `PathEvent`, so no feature flag is needed here.
+notify = "6"
+# Sync locks held briefly (never across `.await`) — parking_lot avoids the
+parking_lot = "0.12"
+# `macros` powers the `tokio::select!` debounce loop; `sync`+`time` the channel
+# and the 200ms quiet window.
+tokio = { version = "1", features = ["sync", "time", "macros"] }
+
+[[bin]]
+name = "ocean-tauri"
+path = "src/main.rs"

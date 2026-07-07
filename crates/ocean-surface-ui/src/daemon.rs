@@ -1971,7 +1971,7 @@ impl Daemon {
                     workspace_root: &cwd,
                     project_id: project.as_deref(),
                     // A session's `client_type` is the stable surface MEDIUM
-                    // (surface-web / surface-extension), per the AGENTS.md session
+                    // (surface-web / surface-extension / surface-tauri), per the AGENTS.md session
                     // contract — never the per-turn routing tag. Even when the
                     // first interaction on a fresh surface is a voice transcript
                     // (so the threaded `client_type` is "leo-voice"), the session
@@ -2053,7 +2053,7 @@ impl Daemon {
             // ship the same active-tab/open-tab snapshot in the structured shape.
             // `None` off the extension, leaving the wire shape unchanged there.
             //
-            // Key it on the SURFACE identity (`surface-extension`/`surface-web`),
+            // Key it on the SURFACE identity (`surface-extension`/`surface-tauri`/`surface-web`),
             // NOT the flat turn `client_type`: a voice turn from the side panel
             // threads `VOICE_CLIENT_TYPE` ("leo-voice", a *routing* tag) as the
             // flat type, but the daemon's `apply_browser_context()` only treats
@@ -3650,6 +3650,18 @@ pub fn running_as_extension() -> bool {
         .unwrap_or(false)
 }
 
+/// True when this Leptos bundle is running inside the Tauri native shell
+/// (WKWebView on macOS, WebView2 elsewhere), detected by the presence of
+/// the `__TAURI_INTERNALS__` global Tauri injects. The browser PWA and the
+/// Chrome extension both lack it. Drives `surface_client_type()` so the
+/// daemon's agent sees `surface-tauri` and the surface knows it may invoke
+/// Tauri commands (`pick_folder`, `watch_paths`, ...) that browsers can't.
+pub fn running_as_tauri() -> bool {
+    let Some(window) = web_sys::window() else { return false; };
+    js_sys::Reflect::has(&window, &wasm_bindgen::JsValue::from_str("__TAURI_INTERNALS__"))
+        .unwrap_or(false)
+}
+
 /// Parse a `data:<mime>;base64,<body>` URL into a [`TurnImage`] (OCEAN-138).
 /// `chrome.tabs.captureVisibleTab` hands us exactly this shape. We keep the full
 /// `data:` URL in `data` — the daemon strips the `data:<mime>;base64,` prefix
@@ -3678,10 +3690,16 @@ pub(crate) const VOICE_CLIENT_TYPE: &str = "leo-voice";
 /// The surface identity sent to the daemon as `client_type`, so the agent's
 /// system prompt is scoped to where the user is actually talking from. This is
 /// the ambient identity for typed turns; voice turns override it with
-/// [`VOICE_CLIENT_TYPE`] via [`Daemon::send_voice_prompt`].
+/// [`VOICE_CLIENT_TYPE`] via [`Daemon::send_voice_prompt`]. Returns
+/// `"surface-extension"` in the Chrome side panel, `"surface-tauri"` inside the
+/// Tauri native shell (detected via [`running_as_tauri`] / the
+/// `__TAURI_INTERNALS__` global), or `"surface-web"` as the browser PWA
+/// fallback.
 fn surface_client_type() -> &'static str {
     if running_as_extension() {
         "surface-extension"
+    } else if running_as_tauri() {
+        "surface-tauri"
     } else {
         "surface-web"
     }
@@ -4974,6 +4992,17 @@ mod tests {
         // directly: voice must be neither.
         assert_ne!(VOICE_CLIENT_TYPE, "surface-web");
         assert_ne!(VOICE_CLIENT_TYPE, "surface-extension");
+    }
+
+    #[test]
+    fn surface_tauri_is_distinct_from_voice_and_other_surfaces() {
+        // Guard that the Tauri surface identity does NOT collide with the voice
+        // routing tag or the other surface identities. `running_as_tauri()` and
+        // `surface_client_type()` can't run off-wasm (they touch `web_sys`), so
+        // we assert against the literal "surface-tauri" directly.
+        assert_ne!("surface-tauri", "leo-voice");
+        assert_ne!("surface-tauri", "surface-web");
+        assert_ne!("surface-tauri", "surface-extension");
     }
 
     #[test]
