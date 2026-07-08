@@ -1,207 +1,317 @@
-/* Ocean workflow stage — native council/cockpit surface.
-   Serious material workflow graph: goal, operator prompt, Ocean, tools. */
+/* Ocean council stage — native Longhouse topic readout.
+   Document flow, zero coordinate math: federation councils convening, marks
+   landing on the board, quorum climbing toward a decision. Colors live in
+   tokens.css; this file is layout + material only. */
 
 .ocean-council-stage {
-  min-height: min(78vh, 760px);
-  padding: 18px;
-  background: var(--bg-raised);
-  box-shadow: var(--elev-3);
-  border-radius: var(--radius-lg);
+  height: 100%;
+  overflow-y: auto;
+  padding: 22px 20px 40px;
 }
 
-.ocean-council-stage__meta {
+.ocean-council-stage__flow {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 760px;
+  margin: 0 auto;
+}
+
+/* ── Topic card ─────────────────────────────────────────────────── */
+.ocean-council-topic {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px;
+  border-radius: var(--radius-lg);
+  background: var(--sheen), var(--bg-elevated);
+  box-shadow: var(--elev-2);
+  transition: box-shadow var(--dur) var(--ease);
+}
+.ocean-council-topic.is-running {
+  box-shadow: inset 0 1px 0 var(--specular-live), var(--elev-2), var(--glow-live);
+}
+.ocean-council-topic.is-done {
+  box-shadow: var(--elev-1);
+}
+.ocean-council-topic.is-error {
+  box-shadow: inset 0 0 0 1px var(--err-soft), var(--elev-1);
+}
+
+.ocean-council-topic__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ocean-council-topic__federation {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.ocean-council-topic__state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+.ocean-council-topic__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: var(--fg-4);
+}
+.ocean-council-topic.is-running .ocean-council-topic__dot {
+  background: var(--accent-bright);
+  box-shadow: 0 0 8px var(--accent-bright);
+  animation: council-pulse 2.4s var(--ease) infinite;
+}
+.ocean-council-topic.is-done .ocean-council-topic__dot {
+  background: var(--ok);
+}
+.ocean-council-topic.is-error .ocean-council-topic__dot {
+  background: var(--err);
+}
+
+.ocean-council-topic__title {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--fg);
+}
+.ocean-council-topic__trigger {
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+/* ── Decision (converged) ───────────────────────────────────────── */
+.ocean-council-topic__decision {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--ok-soft);
+  font-size: 13px;
+  color: var(--fg);
+}
+.ocean-council-topic__decision-tag {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ok);
+}
+
+/* ── Quorum meter ───────────────────────────────────────────────── */
+.ocean-council-quorum {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  box-shadow: var(--well);
+}
+.ocean-council-quorum__head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 14px;
-}
-
-.ocean-council-stage__eyebrow,
-.ocean-council-node__label {
-  color: var(--fg-3);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  line-height: 1.35;
-  text-transform: uppercase;
-}
-
-.ocean-council-stage__status {
-  min-width: 0;
-  color: var(--fg-3);
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+.ocean-council-quorum__pct {
+  color: var(--accent-bright);
+}
+.ocean-council-quorum__bar {
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-well);
+  overflow: hidden;
+}
+.ocean-council-quorum__fill {
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: var(--gradient);
+  transition: width var(--dur) var(--ease-tide);
+}
+.ocean-council-quorum__leader {
+  font-size: 11px;
+  color: var(--fg-2);
+}
+
+.ocean-council-tallies {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 2px;
+}
+.ocean-council-tally {
+  display: grid;
+  grid-template-columns: 1fr 90px auto;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+.ocean-council-tally__name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-
-.ocean-council-stage__scene {
-  position: relative;
-  min-height: 660px;
-  overflow: auto;
-  border-radius: var(--radius);
-  background:
-    radial-gradient(circle at top center, color-mix(in srgb, var(--accent) 8%, transparent), transparent 48%),
-    linear-gradient(180deg, var(--bg) 0%, var(--bg-raised) 100%);
-  box-shadow: var(--well-deep);
-}
-
-.ocean-council-stage__edges {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  overflow: visible;
-}
-
-.ocean-council-edge {
-  stroke: var(--border-strong);
-  stroke-width: 1.5;
-}
-
-.ocean-council-edge--live {
-  stroke: var(--accent);
-  stroke-dasharray: 6 8;
-  animation: council-edge-flow 1.8s linear infinite;
-}
-
-.ocean-council-edge--error {
-  stroke: var(--err);
-}
-
-.ocean-council-node {
-  position: absolute;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 14px;
-  border-radius: var(--radius-lg);
-  background: var(--bg-elevated);
-  box-shadow: var(--elev-2);
-  min-width: 0;
-}
-
-.ocean-council-node__title {
+.ocean-council-tally.is-leader .ocean-council-tally__name {
   color: var(--fg);
-  font-size: 15px;
-  font-weight: 600;
-  line-height: 1.35;
 }
-
-.ocean-council-node__meta,
-.ocean-council-node__body {
-  color: var(--fg-2);
-  font-size: 13px;
-  line-height: 1.5;
-}
-
-.ocean-council-node__meta {
-  font-family: var(--mono);
-  font-size: 12px;
-}
-
-.ocean-council-node__meta-row {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.ocean-council-node__state-dot {
-  width: 7px;
-  height: 7px;
+.ocean-council-tally__track {
+  height: 3px;
   border-radius: var(--radius-pill);
-  background: currentColor;
-  flex: 0 0 auto;
+  background: var(--bg-well);
+  overflow: hidden;
 }
-
-.ocean-council-node--goal {
-  background: var(--bg-raised);
-  box-shadow: inset 0 1px 0 var(--specular-live), var(--elev-2);
+.ocean-council-tally__fill {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: var(--fg-4);
+  transition: width var(--dur) var(--ease-tide);
 }
-
-.ocean-council-node--goal .ocean-council-node__title {
+.ocean-council-tally.is-leader .ocean-council-tally__fill {
+  background: var(--accent);
+}
+.ocean-council-tally__weight {
+  font-family: var(--mono);
+  color: var(--fg-3);
+}
+.ocean-council-tally.is-leader .ocean-council-tally__weight {
   color: var(--accent-bright);
 }
 
-.ocean-council-node--prompt {
-  background: var(--bg-elevated);
+/* ── Members ────────────────────────────────────────────────────── */
+.ocean-council-members {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
-
-.ocean-council-node--assistant.is-thinking,
-.ocean-council-node--tool.is-running {
-  box-shadow: inset 0 1px 0 var(--specular-live), var(--elev-2), var(--glow-thinking);
-  animation: council-node-breathe 3.2s ease-in-out infinite;
+.ocean-council-member {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-raised);
+  box-shadow: var(--elev-1);
+  font-size: 11px;
+  color: var(--fg-2);
 }
-
-.ocean-council-node--assistant.is-running,
-.ocean-council-node--assistant.is-browser-active {
-  box-shadow: inset 0 1px 0 var(--specular-live), var(--elev-2), var(--glow-live);
-}
-
-.ocean-council-node.is-done {
-  color: var(--ok);
-}
-
-.ocean-council-node.is-error {
-  color: var(--err);
-}
-
-.ocean-council-node.is-thinking,
-.ocean-council-node.is-running,
-.ocean-council-node.is-done,
-.ocean-council-node.is-error {
-  border: none;
-}
-
-.ocean-council-stage__empty {
-  min-height: 520px;
-  display: grid;
-  place-items: center;
-  text-align: center;
-  gap: 8px;
-  padding: 48px 24px;
-}
-
-.ocean-council-stage__empty-title {
+.ocean-council-member.is-lead {
   color: var(--fg);
-  font-size: 16px;
-  font-weight: 600;
+  box-shadow: inset 0 0 0 1px var(--accent-soft), var(--elev-1);
+}
+.ocean-council-member__model {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-4);
 }
 
-.ocean-council-stage__empty-body {
-  max-width: 42rem;
+/* ── Marks blackboard ───────────────────────────────────────────── */
+.ocean-council-marks {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-left: 12px;
+  border-left: 2px solid var(--border);
+}
+.ocean-council-mark {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.ocean-council-mark__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ocean-council-mark__kind {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
   color: var(--fg-3);
-  font-size: 13px;
+}
+.ocean-council-mark__kind.kind-proposal {
+  color: var(--accent-bright);
+  background: var(--accent-soft);
+}
+.ocean-council-mark__kind.kind-evidence {
+  color: var(--info);
+  background: var(--info-soft);
+}
+.ocean-council-mark__kind.kind-endorse {
+  color: var(--ok);
+  background: var(--ok-soft);
+}
+.ocean-council-mark__kind.kind-oppose {
+  color: var(--err);
+  background: var(--err-soft);
+}
+.ocean-council-mark__author {
+  font-size: 11px;
+  color: var(--fg-3);
+}
+.ocean-council-mark__summary {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg-2);
+}
+.ocean-council-mark__target {
+  color: var(--accent);
+}
+
+/* ── Empty state ────────────────────────────────────────────────── */
+.ocean-council-stage__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 100%;
+  min-height: 240px;
+  text-align: center;
+  padding: 40px 24px;
+}
+.ocean-council-stage__empty-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg-2);
+}
+.ocean-council-stage__empty-body {
+  font-size: 12px;
   line-height: 1.6;
+  color: var(--fg-3);
+  max-width: 380px;
 }
 
-@keyframes council-node-breathe {
-  0%, 100% { box-shadow: inset 0 1px 0 var(--specular-live), var(--elev-2), var(--glow-thinking); }
-  50% { box-shadow: inset 0 1px 0 var(--specular-live), var(--elev-2), var(--glow-live); }
-}
-
-@keyframes council-edge-flow {
-  from { stroke-dashoffset: 0; }
-  to { stroke-dashoffset: -28; }
+@keyframes council-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
 }
 
 @media (max-width: 960px) {
-  .ocean-council-stage {
-    min-height: 70vh;
-    padding: 14px;
-  }
-
-  .ocean-council-stage__scene {
-    min-height: 720px;
-  }
+  .ocean-council-stage { padding: 16px 14px 32px; }
+  .ocean-council-tally { grid-template-columns: 1fr 60px auto; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ocean-council-edge--live,
-  .ocean-council-node--assistant.is-thinking,
-  .ocean-council-node--tool.is-running {
-    animation: none;
-  }
+  .ocean-council-topic__dot { animation: none; }
+  .ocean-council-quorum__fill,
+  .ocean-council-tally__fill { transition: none; }
 }

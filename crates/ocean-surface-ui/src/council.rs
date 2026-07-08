@@ -1,255 +1,401 @@
+//! Council stage — native Longhouse topic readout.
+//!
+//! Renders the daemon's folded council snapshot (`GET /v1/longhouse/topics`,
+//! the OCEAN-58 durable fold that survives refresh / late attach) as a
+//! document-flow column of topic cards: a federation convenes, members seat,
+//! marks land on the board, quorum climbs, a decision resolves. The deck
+//! polls the snapshot (~1.5s) while mounted: the daemon does not push
+//! longhouse frames to this surface's event stream, and the fold is
+//! server-side, so the deck mirrors the snapshot rather than re-folding raw
+//! frames. There is no invented subagent pipe here; Longhouse is the real
+//! coordination system and this is purely its observer.
+
+use gloo_net::http::Request;
 use leptos::prelude::*;
+use serde::Deserialize;
+use wasm_bindgen_futures::spawn_local;
 
 use crate::daemon::Daemon;
-use crate::model::{Block, Role, ToolStatus, Turn};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum NodeState {
-    Idle,
-    Thinking,
-    Running,
-    Done,
-    Error,
+/// A member seated in a council topic (mirrors the daemon's folded
+/// `TopicSnapshot.members`).
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+struct Member {
+    #[serde(default)]
+    agent_id: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    role: String,
 }
 
-#[derive(Clone)]
-struct ToolNode {
-    name: String,
-    status: ToolStatus,
-    args: String,
+/// A mark posted to the topic blackboard (`proposal` / `evidence` / `endorse`
+/// / …). `kind` is a free string so an ocean-os vocabulary addition can't fail
+/// the decode.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+struct MarkView {
+    #[serde(default)]
+    mark_id: String,
+    #[serde(default)]
+    author: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    summary: String,
+    /// The proposal a non-proposal mark points at (endorse/evidence/oppose).
+    #[serde(default)]
+    target: Option<String>,
 }
 
-fn first_text(turn: &Turn) -> Option<String> {
-    turn.blocks.iter().find_map(|block| match block {
-        Block::Text(text) if !text.trim().is_empty() => Some(text.trim().to_string()),
-        _ => None,
-    })
+/// One proposal's running net weight in the quorum tally.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+struct Tally {
+    #[serde(default)]
+    proposal: String,
+    #[serde(default)]
+    net_weight: f32,
 }
 
-fn latest_user_prompt(turns: &[Turn]) -> Option<String> {
-    turns.iter().rev().find(|t| t.role == Role::User).and_then(first_text)
+/// A council topic as folded and served by the daemon. Enum-ish fields
+/// (`federation`, `trigger`, `state`, member `role`, mark `kind`) are mirrored
+/// as plain strings so an ocean-os vocabulary addition can never break the
+/// decode; unknown fields (`board_id`, `deadline_ms`, `abort_reason`, …) are
+/// ignored by serde.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+struct TopicSnapshot {
+    #[serde(default)]
+    topic_id: String,
+    #[serde(default)]
+    federation: String,
+    #[serde(default)]
+    trigger: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    state: String,
+    /// Front-runner proposal id, if any.
+    #[serde(default)]
+    leader: Option<String>,
+    /// 0.0–1.0: how close the leader is to crossing the quorum threshold.
+    #[serde(default)]
+    distance_to_quorum: f32,
+    #[serde(default)]
+    firekeeper: Option<String>,
+    /// Winning proposal id, once converged.
+    #[serde(default)]
+    decision: Option<String>,
+    #[serde(default)]
+    members: Vec<Member>,
+    #[serde(default)]
+    marks: Vec<MarkView>,
+    #[serde(default)]
+    tallies: Vec<Tally>,
 }
 
-fn latest_assistant_turn(turns: &[Turn]) -> Option<&Turn> {
-    turns.iter().rev().find(|t| t.role == Role::Assistant)
+#[derive(Debug, Default, Deserialize)]
+struct TopicsResponse {
+    #[serde(default)]
+    topics: Vec<TopicSnapshot>,
 }
 
-fn latest_assistant_summary(turns: &[Turn]) -> Option<String> {
-    latest_assistant_turn(turns).and_then(first_text)
-}
-
-fn latest_tools(turns: &[Turn]) -> Vec<ToolNode> {
-    latest_assistant_turn(turns)
-        .map(|turn| {
-            turn.blocks
-                .iter()
-                .filter_map(|block| match block {
-                    Block::ToolCall {
-                        name,
-                        status,
-                        args_preview,
-                        ..
-                    } => Some(ToolNode {
-                        name: name.clone(),
-                        status: *status,
-                        args: args_preview.clone(),
-                    }),
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn assistant_state(turns: &[Turn], streaming: bool) -> NodeState {
-    let tools = latest_tools(turns);
-    if tools.iter().any(|tool| tool.status == ToolStatus::Err) {
-        NodeState::Error
-    } else if tools.iter().any(|tool| tool.status == ToolStatus::Running) {
-        NodeState::Running
-    } else if streaming {
-        NodeState::Thinking
-    } else if latest_assistant_turn(turns).is_some() {
-        NodeState::Done
-    } else {
-        NodeState::Idle
-    }
-}
-
-fn state_class(state: NodeState) -> &'static str {
-    match state {
-        NodeState::Idle => "is-idle",
-        NodeState::Thinking => "is-thinking",
-        NodeState::Running => "is-running",
-        NodeState::Done => "is-done",
-        NodeState::Error => "is-error",
-    }
-}
-
-fn state_label(state: NodeState, browser_active: bool) -> &'static str {
-    if browser_active && matches!(state, NodeState::Running | NodeState::Thinking) {
-        "driving"
-    } else {
-        match state {
-            NodeState::Idle => "idle",
-            NodeState::Thinking => "thinking",
-            NodeState::Running => "running",
-            NodeState::Done => "settled",
-            NodeState::Error => "error",
+/// Fetch the durable topics snapshot. Any transport/decode failure yields an
+/// empty list (the honest empty state), never a panic.
+async fn fetch_topics(base: String) -> Vec<TopicSnapshot> {
+    let get_url = format!("{}/v1/longhouse/topics", base.trim_end_matches('/'));
+    match Request::get(&get_url).send().await {
+        Ok(resp) => match resp.json::<TopicsResponse>().await {
+            Ok(r) => r.topics,
+            Err(err) => {
+                log::warn!("council topics decode error: {err}");
+                Vec::new()
+            }
+        },
+        Err(err) => {
+            log::warn!("council topics fetch error: {err}");
+            Vec::new()
         }
     }
 }
 
 fn trim_line(text: &str, limit: usize) -> String {
-    let text = text.trim();
-    if text.chars().count() <= limit {
-        text.to_string()
+    let t = text.trim();
+    if t.chars().count() <= limit {
+        t.to_string()
     } else {
-        let mut out = text.chars().take(limit.saturating_sub(1)).collect::<String>();
-        out.push('…');
-        out
+        let truncated: String = t.chars().take(limit).collect();
+        format!("{}…", truncated.trim_end())
+    }
+}
+
+/// Short display id for an unresolved uuid (leader/decision/target proposals in
+/// demo data don't always map to a proposal mark).
+fn short8(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+/// Resolve an agent id to its human label, falling back to a short id.
+fn member_label(members: &[Member], id: &str) -> String {
+    members
+        .iter()
+        .find(|m| m.agent_id == id)
+        .map(|m| m.label.clone())
+        .filter(|l| !l.trim().is_empty())
+        .unwrap_or_else(|| short8(id))
+}
+
+/// Resolve a proposal id to its proposal-mark summary. Real convene data maps
+/// cleanly; demo data degrades to a short id (honest, never fabricated).
+fn proposal_label(marks: &[MarkView], id: &str) -> String {
+    marks
+        .iter()
+        .find(|m| m.mark_id == id && m.kind == "proposal")
+        .map(|m| trim_line(&m.summary, 48))
+        .unwrap_or_else(|| short8(id))
+}
+
+fn pct(v: f32) -> String {
+    format!("{:.0}%", v.clamp(0.0, 1.0) * 100.0)
+}
+
+fn state_class(state: &str) -> &'static str {
+    match state {
+        "converged" => "is-done",
+        "aborted" => "is-error",
+        _ => "is-running",
     }
 }
 
 #[component]
 pub fn CouncilStage(daemon: Daemon) -> impl IntoView {
-    let turns = daemon.turns;
-    let streaming = daemon.streaming;
-    let browser_active = daemon.browser_active;
-    let session_title = daemon.session_title;
-    let status = daemon.status;
-    let model = daemon.model;
+    let url = daemon.url;
+    let topics = RwSignal::new(Vec::<TopicSnapshot>::new());
 
-    let goal_title = move || {
-        let title = session_title.get();
-        if title.trim().is_empty() {
-            "current session".to_string()
-        } else {
-            trim_line(&title, 44)
+    // Poll the durable topics snapshot while the deck is mounted. The daemon
+    // does NOT push longhouse frames to a plain `/v1/agent/events` subscriber,
+    // so there is no reliable client-side event to react to — but the snapshot
+    // (`GET /v1/longhouse/topics`) is the authoritative OCEAN-58 fold that
+    // survives refresh / late attach. Councils deliberate at human cadence, so
+    // a ~1.5s poll is live enough and cheap (small JSON). The loop self-ends
+    // when the deck closes: `try_set` hands the value back once `topics` is
+    // disposed, which we detect and break on (no signal panic, no on_cleanup).
+    let base = url.get_untracked();
+    spawn_local(async move {
+        loop {
+            let fetched = fetch_topics(base.clone()).await;
+            if topics.try_set(fetched).is_some() {
+                break;
+            }
+            gloo_timers::future::TimeoutFuture::new(1_500).await;
         }
-    };
-    let prompt_label = move || latest_user_prompt(&turns.get()).map(|s| trim_line(&s, 72));
-    let assistant_blurb = move || latest_assistant_summary(&turns.get()).map(|s| trim_line(&s, 96));
-    let tool_nodes = move || latest_tools(&turns.get());
-    let assistant_state_sig = move || assistant_state(&turns.get(), streaming.get());
-    let has_anything = move || {
-        !turns.get().is_empty() || streaming.get() || !status.get().trim().is_empty()
-    };
+    });
 
     view! {
         <div class="ocean-council-stage">
             <Show
-                when=has_anything
+                when=move || !topics.get().is_empty()
                 fallback=|| {
                     view! {
                         <div class="ocean-council-stage__empty">
                             <div class="ocean-council-stage__empty-title">
-                                "no live workflow yet"
+                                "no councils convened yet"
                             </div>
                             <div class="ocean-council-stage__empty-body">
-                                "start a turn, convene a room, or run a council — workflow nodes appear here as the surface receives live daemon state"
+                                "a council appears here live when a workflow is convened — members seat, marks land on the board, and quorum climbs toward a decision"
                             </div>
                         </div>
                     }
                 }
             >
-                <div class="ocean-council-stage__meta">
-                    <span class="ocean-council-stage__eyebrow">"workflow stage"</span>
-                    <span class="ocean-council-stage__status">{move || trim_line(&status.get(), 80)}</span>
-                </div>
-                <div class="ocean-council-stage__scene">
-                    <svg class="ocean-council-stage__edges" viewBox="0 0 1080 720" preserveAspectRatio="none" aria-hidden="true">
-                        <line class="ocean-council-edge" x1="540" y1="96" x2="220" y2="256" />
-                        <line class="ocean-council-edge" x1="540" y1="96" x2="540" y2="256" />
-                        {move || {
-                            tool_nodes()
-                                .into_iter()
-                                .enumerate()
-                                .map(|(idx, tool)| {
-                                    let x = 220 + (idx as i32 * 220);
-                                    let edge_class = match tool.status {
-                                        ToolStatus::Running => "ocean-council-edge ocean-council-edge--live",
-                                        ToolStatus::Err => "ocean-council-edge ocean-council-edge--error",
-                                        ToolStatus::Ok => "ocean-council-edge",
-                                    };
-                                    view! {
-                                        <line class=edge_class x1="540" y1="416" x2={x.to_string()} y2="576" />
-                                    }
-                                })
-                                .collect_view()
-                        }}
-                    </svg>
-
-                    <div class="ocean-council-node ocean-council-node--goal" style="left: 420px; top: 32px; width: 240px;">
-                        <div class="ocean-council-node__label">"goal"</div>
-                        <div class="ocean-council-node__title">{goal_title}</div>
-                        <div class="ocean-council-node__meta">"session focus"</div>
-                    </div>
-
-                    <Show when=move || prompt_label().is_some()>
-                        <div class="ocean-council-node ocean-council-node--prompt" style="left: 80px; top: 208px; width: 280px;">
-                            <div class="ocean-council-node__label">"operator prompt"</div>
-                            <div class="ocean-council-node__body">{move || prompt_label().unwrap_or_default()}</div>
-                        </div>
-                    </Show>
-
-                    <div
-                        class=move || format!(
-                            "ocean-council-node ocean-council-node--assistant {}{}",
-                            state_class(assistant_state_sig()),
-                            if browser_active.get() { " is-browser-active" } else { "" }
-                        )
-                        style="left: 400px; top: 208px; width: 280px;"
-                    >
-                        <div class="ocean-council-node__label">"ocean"</div>
-                        <div class="ocean-council-node__title">
-                            {move || model.get().unwrap_or_else(|| "daemon default".into())}
-                        </div>
-                        <div class="ocean-council-node__meta-row">
-                            <span class="ocean-council-node__state-dot"></span>
-                            <span class="ocean-council-node__meta">{move || state_label(assistant_state_sig(), browser_active.get())}</span>
-                        </div>
-                        <Show when=move || assistant_blurb().is_some()>
-                            <div class="ocean-council-node__body">{move || assistant_blurb().unwrap_or_default()}</div>
-                        </Show>
-                    </div>
-
+                <div class="ocean-council-stage__flow">
                     {move || {
-                        tool_nodes()
+                        topics
+                            .get()
                             .into_iter()
-                            .enumerate()
-                            .map(|(idx, tool)| {
-                                let x = 80 + (idx * 220);
-                                let state = match tool.status {
-                                    ToolStatus::Running => NodeState::Running,
-                                    ToolStatus::Ok => NodeState::Done,
-                                    ToolStatus::Err => NodeState::Error,
-                                };
-                                let left = format!("left: {}px; top: 520px; width: 200px;", x);
-                                let body = trim_line(&tool.args, 52);
-                                let has_body = !body.is_empty();
-                                let body_text = body.clone();
-                                view! {
-                                    <div class=move || format!(
-                                        "ocean-council-node ocean-council-node--tool {}",
-                                        state_class(state)
-                                    ) style=left.clone()>
-                                        <div class="ocean-council-node__label">"tool"</div>
-                                        <div class="ocean-council-node__title">{tool.name.clone()}</div>
-                                        <div class="ocean-council-node__meta-row">
-                                            <span class="ocean-council-node__state-dot"></span>
-                                            <span class="ocean-council-node__meta">{state_label(state, false)}</span>
-                                        </div>
-                                        <Show when=move || has_body>
-                                            <div class="ocean-council-node__body">{body_text.clone()}</div>
-                                        </Show>
-                                    </div>
-                                }
-                            })
+                            .map(topic_card)
                             .collect_view()
                     }}
                 </div>
             </Show>
+        </div>
+    }
+}
+
+/// One topic card. Built wholesale on each `topics` update (card counts are
+/// tiny), so no `<For>` keying is needed — sidesteps the Leptos `<For>` stale
+/// child trap where an unchanged key freezes mutating content.
+fn topic_card(t: TopicSnapshot) -> impl IntoView {
+    let converged = t.state == "converged";
+    let topic_cls = format!("ocean-council-topic {}", state_class(&t.state));
+    let federation = t.federation.to_uppercase();
+    let state_label = t.state.clone();
+    let title = if t.title.trim().is_empty() {
+        "untitled topic".to_string()
+    } else {
+        t.title.clone()
+    };
+    let trigger_line = format!("{} · {} seated", t.trigger.replace('_', " "), t.members.len());
+
+    let decision_label = t
+        .decision
+        .as_ref()
+        .map(|id| proposal_label(&t.marks, id))
+        .unwrap_or_else(|| "resolved".to_string());
+
+    let quorum_pct = pct(t.distance_to_quorum);
+    let quorum_fill = format!("width:{}", quorum_pct);
+    let leader_label = t.leader.as_ref().map(|id| proposal_label(&t.marks, id));
+
+    // Member chips — leadership roles (steward / firekeeper) get accent skin.
+    let firekeeper = t.firekeeper.clone();
+    let member_views = t
+        .members
+        .iter()
+        .map(|m| {
+            let is_lead = m.role == "steward"
+                || m.role == "firekeeper"
+                || firekeeper.as_deref() == Some(m.agent_id.as_str());
+            let cls = if is_lead {
+                "ocean-council-member is-lead"
+            } else {
+                "ocean-council-member"
+            };
+            let name = if m.label.trim().is_empty() {
+                short8(&m.agent_id)
+            } else {
+                m.label.clone()
+            };
+            let model_view = (!m.model.is_empty()).then(|| {
+                let model = m.model.clone();
+                view! { <span class="ocean-council-member__model">{model}</span> }
+            });
+            view! {
+                <span class=cls>
+                    <span class="ocean-council-member__name">{name}</span>
+                    {model_view}
+                </span>
+            }
+        })
+        .collect_view();
+
+    // Tallies — ranked by weight, leader highlighted, bars normalized to the
+    // top weight.
+    let leader_id = t.leader.clone();
+    let max_w = t
+        .tallies
+        .iter()
+        .map(|x| x.net_weight)
+        .fold(0.0_f32, f32::max)
+        .max(0.0001);
+    let mut tallies = t.tallies.clone();
+    tallies.sort_by(|a, b| {
+        b.net_weight
+            .partial_cmp(&a.net_weight)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let marks_for_tally = t.marks.clone();
+    let has_tallies = !tallies.is_empty();
+    let tally_views = tallies
+        .iter()
+        .map(|ty| {
+            let is_leader = leader_id.as_deref() == Some(ty.proposal.as_str());
+            let cls = if is_leader {
+                "ocean-council-tally is-leader"
+            } else {
+                "ocean-council-tally"
+            };
+            let name = proposal_label(&marks_for_tally, &ty.proposal);
+            let w = (ty.net_weight / max_w * 100.0).clamp(0.0, 100.0);
+            let fill = format!("width:{:.0}%", w);
+            let weight = format!("{:.1}", ty.net_weight);
+            view! {
+                <div class=cls>
+                    <span class="ocean-council-tally__name">{name}</span>
+                    <span class="ocean-council-tally__track">
+                        <span class="ocean-council-tally__fill" style=fill></span>
+                    </span>
+                    <span class="ocean-council-tally__weight">{weight}</span>
+                </div>
+            }
+        })
+        .collect_view();
+
+    // Marks blackboard — left-rail column, kind-tagged, author-attributed.
+    let members_for_marks = t.members.clone();
+    let marks_for_target = t.marks.clone();
+    let has_marks = !t.marks.is_empty();
+    let mark_views = t
+        .marks
+        .iter()
+        .map(|mk| {
+            let kind = mk.kind.clone();
+            let kind_cls = format!("ocean-council-mark__kind kind-{kind}");
+            let author = member_label(&members_for_marks, &mk.author);
+            let summary = trim_line(&mk.summary, 120);
+            let target_view = mk.target.as_ref().map(|id| {
+                let lbl = proposal_label(&marks_for_target, id);
+                view! { <span class="ocean-council-mark__target">" → "{lbl}</span> }
+            });
+            view! {
+                <div class="ocean-council-mark">
+                    <div class="ocean-council-mark__head">
+                        <span class=kind_cls>{kind}</span>
+                        <span class="ocean-council-mark__author">{author}</span>
+                    </div>
+                    <div class="ocean-council-mark__summary">{summary}{target_view}</div>
+                </div>
+            }
+        })
+        .collect_view();
+
+    let decision_view = converged.then(|| {
+        view! {
+            <div class="ocean-council-topic__decision">
+                <span class="ocean-council-topic__decision-tag">"decided"</span>
+                <span>{decision_label}</span>
+            </div>
+        }
+    });
+
+    let quorum_view = (!converged && has_tallies).then(|| {
+        let leader_view = leader_label.map(|l| {
+            view! { <div class="ocean-council-quorum__leader">"front-runner · "{l}</div> }
+        });
+        view! {
+            <div class="ocean-council-quorum">
+                <div class="ocean-council-quorum__head">
+                    <span>"quorum"</span>
+                    <span class="ocean-council-quorum__pct">{quorum_pct}</span>
+                </div>
+                <div class="ocean-council-quorum__bar">
+                    <div class="ocean-council-quorum__fill" style=quorum_fill></div>
+                </div>
+                <div class="ocean-council-tallies">{tally_views}</div>
+                {leader_view}
+            </div>
+        }
+    });
+
+    let marks_view = has_marks.then(|| {
+        view! { <div class="ocean-council-marks">{mark_views}</div> }
+    });
+
+    view! {
+        <div class=topic_cls>
+            <div class="ocean-council-topic__head">
+                <span class="ocean-council-topic__federation">{federation}</span>
+                <span class="ocean-council-topic__state">
+                    <span class="ocean-council-topic__dot"></span>
+                    {state_label}
+                </span>
+            </div>
+            <div class="ocean-council-topic__title">{title}</div>
+            <div class="ocean-council-topic__trigger">{trigger_line}</div>
+            {decision_view}
+            {quorum_view}
+            <div class="ocean-council-members">{member_views}</div>
+            {marks_view}
         </div>
     }
 }

@@ -1198,19 +1198,6 @@ pub struct Daemon {
     /// here so `decide_permission` can retrieve the same value. Cleared when a
     /// new turn begins.
     pub active_decision_token: RwSignal<Option<String>>,
-    /// Raw payloads of council / longhouse events the daemon streams as
-    /// `Extension { extension == "longhouse" }` frames on `/v1/agent/events`,
-    /// oldest first. Captured SCHEMA-FREE in [`Daemon::connect`] *before* the
-    /// session-scope isolation guard, because a council convenes council-wide
-    /// (unscoped) and those frames carry no session id — the hard-isolation
-    /// guard would otherwise drop them before any reducer sees them (they were
-    /// silently lost before the native council surface landed). The surface
-    /// deliberately does NOT model longhouse lineage here — no invented
-    /// parent/child delegation edges; the native council view reduces these raw
-    /// payloads into its own topic/member/mark model. Bounded rolling buffer
-    /// ([`MAX_COUNCIL_EVENTS`]); NOT reset on chat-session switch, since a
-    /// council's state is orthogonal to which chat session is active.
-    pub council_events: RwSignal<Vec<Value>>,
     /// True while a `create_project` POST is in flight. Drives the Sessions
     /// panel's Create button label/disabled state and gates the modal close on
     /// the success edge. Reset to false on every terminal branch.
@@ -1383,7 +1370,6 @@ impl Daemon {
             pending_images: RwSignal::new(Vec::new()),
             canvas_patches: RwSignal::new(Vec::new()),
             active_decision_token: RwSignal::new(None),
-            council_events: RwSignal::new(Vec::new()),
             project_create_pending: RwSignal::new(false),
             project_create_error: RwSignal::new(None),
         }
@@ -1427,7 +1413,6 @@ impl Daemon {
             pending_images: RwSignal::new(Vec::new()),
             canvas_patches: RwSignal::new(Vec::new()),
             active_decision_token: RwSignal::new(None),
-            council_events: RwSignal::new(Vec::new()),
             project_create_pending: RwSignal::new(false),
             project_create_error: RwSignal::new(None),
         }
@@ -1521,7 +1506,6 @@ impl Daemon {
         // restore title/cwd) after a stream gap — see the rehydrate call below.
         let session_title = self.session_title;
         let cwd = self.cwd;
-        let council_events = self.council_events;
 
         let generation = sse_generation.get_untracked().wrapping_add(1);
         sse_generation.set(generation);
@@ -1667,25 +1651,10 @@ impl Daemon {
                         log::warn!("unparseable sse event: {data}");
                         continue;
                     };
-                    // Council / longhouse frames (extension == "longhouse")
-                    // are captured HERE — before the session-scope isolation
-                    // below — because a council convenes council-wide: those
-                    // frames carry no session id and would be dropped by the
-                    // hard-isolation guard, leaving the native council surface
-                    // blind. We keep the raw payload only; the surface does not
-                    // model longhouse lineage (no invented delegation edges).
-                    // Bounded rolling buffer; the view reduces it client-side.
-                    if let AgentEvent::Extension { extension, payload, .. } = &evt {
-                        if extension == "longhouse" {
-                            council_events.update(|events| {
-                                events.push(payload.clone());
-                                let len = events.len();
-                                if len > MAX_COUNCIL_EVENTS {
-                                    events.drain(0..len - MAX_COUNCIL_EVENTS);
-                                }
-                            });
-                        }
-                    }
+                    // NOTE: longhouse (council) frames are NOT captured here.
+                    // The daemon does not deliver them to this surface's event
+                    // stream; the council deck polls the durable
+                    // `GET /v1/longhouse/topics` snapshot instead (OCEAN-58).
 
                     // Hard isolation: every renderable product event must carry
                     // exactly the active session id. If a proxy/global stream or
@@ -3172,12 +3141,10 @@ fn apply_event(
             });
         }
         AgentEvent::Extension { extension, .. } => {
-            // Longhouse (council) payloads are captured upstream in `connect()`
-            // before session-scope isolation, so they reach `council_events`
-            // regardless of scope. By the time a frame reaches here it has
-            // passed isolation (it was scoped to the active session); extension
-            // events carry no transcript state, so there is nothing to reduce
-            // into turns — log and move on. Other extension kinds are ignored.
+            // Extension frames carry no transcript state, so there is nothing
+            // to reduce into turns — log and move on. Longhouse (council)
+            // state is read via the daemon's durable `GET /v1/longhouse/topics`
+            // snapshot (polled by the council deck), not from this stream.
             log::debug!("ignoring extension event: {extension}");
         }
         AgentEvent::Other => {
@@ -3301,11 +3268,6 @@ fn mint_decision_token() -> String {
 /// entries are dropped past this so a long, patch-heavy session stays bounded.
 const MAX_CANVAS_PATCHES: usize = 512;
 
-/// Upper bound on the council / longhouse event capture (`council_events`).
-/// Oldest payloads are dropped past this so a long-running council surface
-/// stays bounded. Council frames are small opaque payloads (not full patch
-/// envelopes), so this can sit above the canvas ledger cap.
-const MAX_COUNCIL_EVENTS: usize = 256;
 
 /// A one-line, human-readable summary of a single surface patch op, for the
 /// basic web canvas representation (OCEAN-178). Mirrors the daemon's op names.

@@ -107,11 +107,11 @@ pub fn App() -> impl IntoView {
 
     // Sessions panel overlay.
     let show_sessions = RwSignal::new(false);
-    // Council/quorum observability deck overlay (OCEAN-96). The deck is a
-    // self-contained static page (the Game Boy "longhouse" viewer) served by
-    // the proxy at /ui/council; we open it in a full-screen modal iframe so the
-    // user stays in-app. It connects to the same-origin /v1/agent/events SSE
-    // stream on its own, so there's nothing to wire beyond opening the frame.
+    // Council/quorum observability deck overlay (OCEAN-96). A native Leptos
+    // stage (crate::council::CouncilStage) inside a full-screen modal — no
+    // iframe, no proxied static page. It reads the daemon's folded Longhouse
+    // topics snapshot (GET /v1/longhouse/topics), polled while the deck is
+    // open.
     let show_council = RwSignal::new(false);
     // Call controls row — created early so Rooms::new can share the signal.
     let show_livekit_controls = RwSignal::new(false);
