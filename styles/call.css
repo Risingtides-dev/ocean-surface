@@ -1039,78 +1039,54 @@
 }
 
 /* ── Room stage (first-class room mode) ───────────────────────────────── */
-/* Entering room mode (rooms.join_open success) routes the single LiveKit
-   panel into the main column as a full call stage. Same panel, same bridge:
-   the --stage modifier reflows bar/grid/roster via flex order and adds a
-   head carrying the room name + live dot + connection state. Tidal rise
-   into the mode; reduced-motion kills the rise + state pulses. */
-.ocean-livekit--stage {
+/* A room is a mode you ENTER: opening one from the rooms browser swaps the
+   chat transcript + composer for this stage (app.rs gates on
+   `rooms.open_key` alone). Text-first — persistent rooms are daemon-native
+   and need zero LiveKit; the compact call strip above is the optional audio
+   upgrade. Panel-scale leaf classes (rooms-msg, rooms-chip, rooms-composer,
+   rooms-addagent, rooms-mention-hint) are reused and re-scaled here. */
+.room-stage {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  margin: 8px 18px;
-  padding: 16px;
-  border-radius: var(--radius-lg);
-  background: var(--bg-raised);
-  box-shadow: var(--elev-3);
+  gap: 10px;
+  width: min(880px, 100% - 36px);
+  margin: 8px auto 12px;
   animation: ocean-tide-in var(--dur-slow) var(--ease-tide) both;
 }
 
-.ocean-livekit--stage .ocean-livekit__grid {
-  order: 1;
-  flex: 1 1 auto;
-  min-height: 120px;
-  margin-top: 0;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  align-content: start;
-}
-
-.ocean-livekit--stage .ocean-livekit__roster {
-  order: 2;
-  margin-top: 0;
-}
-
-.ocean-livekit--stage .ocean-livekit__bar {
-  order: 3;
-  justify-content: flex-end;
-  gap: 6px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border-subtle);
-}
-
-.ocean-livekit__stage-head {
+.room-stage__head {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   flex: 0 0 auto;
 }
 
-.ocean-livekit__stage-live {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+.room-stage__back {
+  appearance: none;
   flex: 0 0 auto;
-  color: var(--accent);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
+  height: var(--ctl-h);
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--fg-3);
+  font-size: 12px;
   line-height: 1;
-  text-transform: uppercase;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
 }
 
-.ocean-livekit__stage-live-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: var(--radius-pill);
-  background: var(--accent);
-  animation: ocean-call-live 1.4s var(--ease) infinite;
+.room-stage__back:hover {
+  background: var(--bg-elevated);
+  color: var(--fg);
 }
 
-.ocean-livekit__stage-name {
+.room-stage__title {
   flex: 1 1 auto;
   min-width: 0;
+  margin: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1120,32 +1096,98 @@
   line-height: 1.3;
 }
 
-.ocean-livekit__stage-state {
-  display: inline-flex;
+.room-stage__roster {
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   flex: 0 0 auto;
-  color: var(--fg-3);
-  font-size: 12px;
-  font-weight: 600;
 }
 
-.ocean-livekit__stage-state-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: var(--radius-pill);
-  background: currentColor;
+.room-stage__addagent-toggle {
+  appearance: none;
+  min-height: 24px;
+  padding: 0 10px;
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--fg-3);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.room-stage__addagent-toggle:hover {
+  border-color: var(--border-strong);
+  color: var(--fg-2);
+}
+
+/* Reused panel leaf blocks, de-panelled: the stage supplies its own gutters. */
+.room-stage .rooms-addagent {
+  padding: 0;
+  border-bottom: none;
+}
+
+.room-stage .rooms-policy-summary {
+  margin: 0;
+}
+
+.room-stage__transcript {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 18px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+}
+
+/* Stage-scale message overrides (the panel rendered these smaller). */
+.room-stage .rooms-msg {
+  padding: 10px 0;
+}
+
+.room-stage .rooms-msg__author {
+  font-size: 12px;
+}
+
+.room-stage .rooms-msg__body {
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.room-stage__empty {
+  margin: auto;
+  padding: 24px;
+  color: var(--fg-3);
+  font-size: 13px;
+  line-height: 1.55;
+  text-align: center;
+}
+
+.room-stage__foot {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   flex: 0 0 auto;
 }
 
-.ocean-livekit__stage-state.is-connecting,
-.ocean-livekit__stage-state.is-reconnecting { color: var(--warn); }
-.ocean-livekit__stage-state.is-live { color: var(--ok); }
-.ocean-livekit__stage-state.is-error { color: var(--err); }
+.room-stage .rooms-mention-hint {
+  padding: 0;
+}
 
-.ocean-livekit__stage-state.is-connecting .ocean-livekit__stage-state-dot,
-.ocean-livekit__stage-state.is-reconnecting .ocean-livekit__stage-state-dot {
-  animation: ocean-call-phase-pulse 1.2s var(--ease) infinite;
+.room-stage .rooms-composer {
+  padding: 0;
+  border-top: none;
+}
+
+.room-stage .rooms-panel__status {
+  padding: 4px 2px 0;
+  border-top: none;
 }
 
 @keyframes ocean-tide-in {
@@ -1154,9 +1196,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ocean-livekit--stage,
-  .ocean-livekit__stage-live-dot,
-  .ocean-livekit__stage-state-dot {
+  .room-stage {
     animation: none;
     transform: none;
   }

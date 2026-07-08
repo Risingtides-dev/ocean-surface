@@ -446,6 +446,9 @@ impl Rooms {
         open_room.set(None);
         transcript.set(Vec::new());
         status.set("loading room…".into());
+        // Entering a room takes the stage (RoomStage swaps in for the chat
+        // surface), so the browser panel folds away.
+        self.panel_open.set(false);
 
         spawn_local(async move {
             let get_url = format!("{base}/v1/rooms/persistent/{}", encode(&key));
@@ -991,9 +994,10 @@ mod tests {
 
 // ---- View -------------------------------------------------------------------
 
-/// Rooms panel — slides in from the right (same overlay pattern as the sessions
-/// panel). Lists persistent rooms; selecting one opens a transcript view with a
-/// roster, join/leave, and a message composer.
+/// Rooms browser panel — slides in from the right (same overlay pattern as the
+/// sessions panel). Lists persistent rooms + create-with-policy; selecting a
+/// room ENTERS it: the panel closes and [`RoomStage`] takes over the main
+/// surface (rooms are a mode, not a drawer).
 #[component]
 pub fn RoomsPanel(rooms: Rooms, open: RwSignal<bool>) -> impl IntoView {
     // Fetch the room list whenever the panel opens.
@@ -1005,7 +1009,6 @@ pub fn RoomsPanel(rooms: Rooms, open: RwSignal<bool>) -> impl IntoView {
 
     let is_open = move || open.get();
     let new_room_name = RwSignal::new(String::new());
-    let composer = RwSignal::new(String::new());
 
     // ---- Trigger-policy toggles for room creation ---------------------------
     // `on_mention` defaults on (the common auto-convene case); the rest default
@@ -1033,13 +1036,7 @@ pub fn RoomsPanel(rooms: Rooms, open: RwSignal<bool>) -> impl IntoView {
         }
     };
 
-    // ---- Add-agent control inputs (room view) -------------------------------
-    let new_agent_id = RwSignal::new(String::new());
-    let new_agent_name = RwSignal::new(String::new());
 
-    let open_key = rooms.open_key;
-    let open_room = rooms.open_room;
-    let transcript = rooms.transcript;
     let room_list = rooms.list;
     let status = rooms.status;
 
@@ -1056,37 +1053,18 @@ pub fn RoomsPanel(rooms: Rooms, open: RwSignal<bool>) -> impl IntoView {
         >
             <div class="rooms-panel">
                 <div class="rooms-panel__head">
-                    <h2 class="rooms-panel__title">
-                        {move || match open_room.get() {
-                            Some(r) => r.name,
-                            None => "Rooms".to_string(),
-                        }}
-                    </h2>
-                    <div class="rooms-panel__head-actions">
-                        <Show when=move || open_key.get().is_some()>
-                            <button
-                                class="rooms-panel__back"
-                                type="button"
-                                aria-label="back to room list"
-                                title="Back to rooms"
-                                on:click=move |_| rooms.close_room()
-                            >
-                                "‹ Rooms"
-                            </button>
-                        </Show>
-                        <button
-                            class="rooms-panel__close"
-                            type="button"
-                            aria-label="close rooms panel"
-                            on:click=move |_| open.set(false)
-                        >
-                            "✕"
-                        </button>
-                    </div>
+                    <h2 class="rooms-panel__title">"Rooms"</h2>
+                    <button
+                        class="rooms-panel__close"
+                        type="button"
+                        aria-label="close rooms panel"
+                        on:click=move |_| open.set(false)
+                    >
+                        "✕"
+                    </button>
                 </div>
 
                 // ---- List view (no room open) -------------------------------
-                <Show when=move || open_key.get().is_none()>
                     <div class="rooms-panel__create">
                         <input
                             class="rooms-panel__create-input"
@@ -1197,225 +1175,288 @@ pub fn RoomsPanel(rooms: Rooms, open: RwSignal<bool>) -> impl IntoView {
                             "No rooms yet. Create one above to start collaborating."
                         </div>
                     </Show>
-                </Show>
 
-                // ---- Room view (a room is open) -----------------------------
-                <Show when=move || open_key.get().is_some()>
-                    <div class="rooms-room">
-                        // Roster + join/leave. Each chip carries a kind-tinted
-                        // class and a "human/agent/…" label so it's obvious who's
-                        // auto-convene-able (OCEAN-117).
-                        <div class="rooms-room__roster">
-                            <For
-                                each=move || open_room.get().map(|r| r.participants).unwrap_or_default()
-                                key=|p| p.id.clone()
-                                children=move |p: RoomParticipant| {
-                                    let is_agent = p.kind == RoomParticipantKind::Agent;
-                                    view! {
-                                        <span
-                                            class="rooms-chip"
-                                            class:rooms-chip--agent=is_agent
-                                            title=format!("{} ({})", p.id, p.kind.label())
-                                        >
-                                            <span class="rooms-chip__glyph">{p.kind.glyph()}</span>
-                                            {p.display_name.clone()}
-                                            <span class="rooms-chip__kind">{p.kind.label()}</span>
+
+                // Status line (errors / notices).
+                <Show when=move || !status.get().is_empty()>
+                    <div class="rooms-panel__status">{move || status.get()}</div>
+                </Show>
+            </div>
+        </div>
+    }
+}
+
+/// Full-surface room mode: entering a room from the browser panel promotes it
+/// to the main stage — the chat transcript/composer swap out and the room's
+/// own roster, transcript, and composer take the surface over (a room is a
+/// mode of operation you enter, not a drawer you peek at). Works with ZERO
+/// LiveKit configuration: the text room is daemon-native
+/// (`/v1/rooms/persistent/*`); the call strip above the stage upgrades the
+/// room to audio when LiveKit credentials exist.
+#[component]
+pub fn RoomStage(rooms: Rooms) -> impl IntoView {
+    let composer = RwSignal::new(String::new());
+    let new_agent_id = RwSignal::new(String::new());
+    let new_agent_name = RwSignal::new(String::new());
+    // Add-agent inputs are power-user chrome: hidden behind the "+ agent"
+    // ghost chip until asked for (control density: reveal-on-intent).
+    let show_add_agent = RwSignal::new(false);
+
+    let open_room = rooms.open_room;
+    let transcript = rooms.transcript;
+    let status = rooms.status;
+
+    let submit_agent = move || {
+        rooms.add_agent(
+            new_agent_id.get_untracked(),
+            new_agent_name.get_untracked(),
+        );
+        new_agent_id.set(String::new());
+        new_agent_name.set(String::new());
+        show_add_agent.set(false);
+    };
+
+    // Keep the transcript pinned to the newest message: jump to the bottom
+    // when the room's history first fills, and follow new messages tailing in
+    // unless the reader has scrolled up into history (same stick pattern as
+    // the chat transcript). The effect returns the seen length so the first
+    // fill is distinguishable from a live append.
+    let list_ref: NodeRef<leptos::html::Div> = NodeRef::new();
+    Effect::new(move |prev: Option<usize>| {
+        let len = transcript.with(|t| t.len());
+        if len > 0 {
+            if let Some(el) = list_ref.get() {
+                let first_fill = prev.unwrap_or(0) == 0;
+                let near_bottom = el.scroll_height() - el.scroll_top() - el.client_height() < 120;
+                if first_fill || near_bottom {
+                    request_animation_frame(move || el.set_scroll_top(el.scroll_height()));
+                }
+            }
+        }
+        len
+    });
+
+    view! {
+        <div class="room-stage">
+            <div class="room-stage__head">
+                <button
+                    class="room-stage__back"
+                    type="button"
+                    title="Back to rooms"
+                    on:click=move |_| {
+                        rooms.close_room();
+                        rooms.panel_open.set(true);
+                    }
+                >
+                    "‹ Rooms"
+                </button>
+                <h2 class="room-stage__title">
+                    {move || open_room.get().map(|r| r.name).unwrap_or_default()}
+                </h2>
+                <Show
+                    when=move || rooms.joined_open()
+                    fallback=move || view! {
+                        <button
+                            class="room-stage__join"
+                            type="button"
+                            on:click=move |_| rooms.join_open()
+                        >
+                            "Join room"
+                        </button>
+                    }
+                >
+                    <button
+                        class="room-stage__leave"
+                        type="button"
+                        on:click=move |_| rooms.leave_open()
+                    >
+                        "Leave"
+                    </button>
+                </Show>
+            </div>
+
+            // Roster: kind-tinted chips + reveal-on-intent add-agent.
+            <div class="room-stage__roster">
+                <For
+                    each=move || open_room.get().map(|r| r.participants).unwrap_or_default()
+                    key=|p| p.id.clone()
+                    children=move |p: RoomParticipant| {
+                        let is_agent = p.kind == RoomParticipantKind::Agent;
+                        view! {
+                            <span
+                                class="rooms-chip"
+                                class:rooms-chip--agent=is_agent
+                                title=format!("{} ({})", p.id, p.kind.label())
+                            >
+                                <span class="rooms-chip__glyph">{p.kind.glyph()}</span>
+                                {p.display_name.clone()}
+                                <span class="rooms-chip__kind">{p.kind.label()}</span>
+                            </span>
+                        }
+                    }
+                />
+                <button
+                    class="room-stage__addagent-toggle"
+                    type="button"
+                    title="Add an agent participant"
+                    on:click=move |_| show_add_agent.update(|v| *v = !*v)
+                >
+                    "+ agent"
+                </button>
+            </div>
+
+            <Show when=move || show_add_agent.get()>
+                <div class="rooms-addagent">
+                    <input
+                        class="rooms-addagent__input"
+                        type="text"
+                        placeholder="agent id (e.g. flux)"
+                        prop:value=move || new_agent_id.get()
+                        on:input=move |ev| new_agent_id.set(event_target_value(&ev))
+                        on:keydown=move |ev| {
+                            if ev.key() == "Enter" {
+                                ev.prevent_default();
+                                submit_agent();
+                            }
+                        }
+                    />
+                    <input
+                        class="rooms-addagent__input"
+                        type="text"
+                        placeholder="display name (optional)"
+                        prop:value=move || new_agent_name.get()
+                        on:input=move |ev| new_agent_name.set(event_target_value(&ev))
+                    />
+                    <button
+                        class="rooms-addagent__btn"
+                        type="button"
+                        disabled=move || new_agent_id.get().trim().is_empty()
+                        on:click=move |_| submit_agent()
+                    >
+                        "Add agent"
+                    </button>
+                </div>
+            </Show>
+
+            // Trigger-policy summary — read-only (no daemon room-update route).
+            <Show when=move || {
+                open_room.get().and_then(|r| r.trigger_policy).is_some()
+            }>
+                <div class="rooms-policy-summary">
+                    {move || {
+                        let p = open_room.get().and_then(|r| r.trigger_policy)
+                            .unwrap_or_default();
+                        let mut on: Vec<&str> = Vec::new();
+                        if p.on_mention { on.push("@mention"); }
+                        if p.on_thread_reply { on.push("thread-reply"); }
+                        if p.on_component_event { on.push("component-event"); }
+                        if p.on_schedule.is_some() { on.push("schedule"); }
+                        let triggers = if on.is_empty() {
+                            "none".to_string()
+                        } else {
+                            on.join(", ")
+                        };
+                        format!("Auto-convene: {triggers}")
+                    }}
+                </div>
+            </Show>
+
+            // Transcript — the main column.
+            <div class="room-stage__transcript" node_ref=list_ref>
+                <For
+                    each=move || transcript.get()
+                    key=|m| m.seq
+                    children=move |m: RoomMessage| {
+                        let is_system = matches!(
+                            m.kind,
+                            RoomMessageKind::System
+                                | RoomMessageKind::ParticipantJoined
+                                | RoomMessageKind::ParticipantLeft
+                        );
+                        view! {
+                            <div
+                                class="rooms-msg"
+                                class:rooms-msg--system=is_system
+                            >
+                                <Show when=move || !is_system>
+                                    <div class="rooms-msg__author">
+                                        <span class="rooms-msg__glyph">
+                                            {m.author_kind.glyph()}
                                         </span>
-                                    }
-                                }
-                            />
-                            <Show
-                                when=move || rooms.joined_open()
-                                fallback=move || view! {
+                                        {m.author_id.clone()}
+                                    </div>
+                                </Show>
+                                <div class="rooms-msg__body">{m.body.clone()}</div>
+                            </div>
+                        }
+                    }
+                />
+                <Show when=move || transcript.get().is_empty()>
+                    <div class="room-stage__empty">
+                        "No messages yet. Say something — use @id to convene an agent."
+                    </div>
+                </Show>
+            </div>
+
+            <div class="room-stage__foot">
+                // @mention discoverability: click a chip to insert `@id `.
+                <Show when=move || !rooms.agent_ids().is_empty()>
+                    <div class="rooms-mention-hint">
+                        <span class="rooms-mention-hint__label">"@agents:"</span>
+                        <For
+                            each=move || rooms.agent_ids()
+                            key=|id| id.clone()
+                            children=move |id: String| {
+                                let insert = id.clone();
+                                view! {
                                     <button
-                                        class="rooms-room__join"
+                                        class="rooms-mention-hint__chip"
                                         type="button"
-                                        on:click=move |_| rooms.join_open()
+                                        title="insert mention"
+                                        on:click=move |_| {
+                                            composer.update(|c| {
+                                                if !c.is_empty() && !c.ends_with(' ') {
+                                                    c.push(' ');
+                                                }
+                                                c.push('@');
+                                                c.push_str(&insert);
+                                                c.push(' ');
+                                            });
+                                        }
                                     >
-                                        "Join"
+                                        {format!("@{id}")}
                                     </button>
                                 }
-                            >
-                                <button
-                                    class="rooms-room__leave"
-                                    type="button"
-                                    on:click=move |_| rooms.leave_open()
-                                >
-                                    "Leave"
-                                </button>
-                            </Show>
-                        </div>
-
-                        // Add-agent control: add a participant with kind=Agent so
-                        // it can be @mentioned + auto-convened (OCEAN-117 / -111).
-                        <div class="rooms-addagent">
-                            <input
-                                class="rooms-addagent__input"
-                                type="text"
-                                placeholder="agent id (e.g. flux)"
-                                prop:value=move || new_agent_id.get()
-                                on:input=move |ev| new_agent_id.set(event_target_value(&ev))
-                                on:keydown=move |ev| {
-                                    if ev.key() == "Enter" {
-                                        ev.prevent_default();
-                                        rooms.add_agent(
-                                            new_agent_id.get_untracked(),
-                                            new_agent_name.get_untracked(),
-                                        );
-                                        new_agent_id.set(String::new());
-                                        new_agent_name.set(String::new());
-                                    }
-                                }
-                            />
-                            <input
-                                class="rooms-addagent__input"
-                                type="text"
-                                placeholder="display name (optional)"
-                                prop:value=move || new_agent_name.get()
-                                on:input=move |ev| new_agent_name.set(event_target_value(&ev))
-                            />
-                            <button
-                                class="rooms-addagent__btn"
-                                type="button"
-                                disabled=move || new_agent_id.get().trim().is_empty()
-                                on:click=move |_| {
-                                    rooms.add_agent(
-                                        new_agent_id.get_untracked(),
-                                        new_agent_name.get_untracked(),
-                                    );
-                                    new_agent_id.set(String::new());
-                                    new_agent_name.set(String::new());
-                                }
-                            >
-                                "🤖 Add agent"
-                            </button>
-                        </div>
-
-                        // Trigger-policy summary for the open room — read-only,
-                        // since there's no daemon room-update route yet.
-                        <Show when=move || {
-                            open_room.get().and_then(|r| r.trigger_policy).is_some()
-                        }>
-                            <div class="rooms-policy-summary">
-                                {move || {
-                                    let p = open_room.get().and_then(|r| r.trigger_policy)
-                                        .unwrap_or_default();
-                                    let mut on: Vec<&str> = Vec::new();
-                                    if p.on_mention { on.push("@mention"); }
-                                    if p.on_thread_reply { on.push("thread-reply"); }
-                                    if p.on_component_event { on.push("component-event"); }
-                                    if p.on_schedule.is_some() { on.push("schedule"); }
-                                    let triggers = if on.is_empty() {
-                                        "none".to_string()
-                                    } else {
-                                        on.join(", ")
-                                    };
-                                    format!("Auto-convene: {triggers}")
-                                }}
-                            </div>
-                        </Show>
-
-                        // Transcript
-                        <div class="rooms-room__transcript">
-                            <For
-                                each=move || transcript.get()
-                                key=|m| m.seq
-                                children=move |m: RoomMessage| {
-                                    let is_system = matches!(
-                                        m.kind,
-                                        RoomMessageKind::System
-                                            | RoomMessageKind::ParticipantJoined
-                                            | RoomMessageKind::ParticipantLeft
-                                    );
-                                    view! {
-                                        <div
-                                            class="rooms-msg"
-                                            class:rooms-msg--system=is_system
-                                        >
-                                            <Show when=move || !is_system>
-                                                <div class="rooms-msg__author">
-                                                    <span class="rooms-msg__glyph">
-                                                        {m.author_kind.glyph()}
-                                                    </span>
-                                                    {m.author_id.clone()}
-                                                </div>
-                                            </Show>
-                                            <div class="rooms-msg__body">{m.body.clone()}</div>
-                                        </div>
-                                    }
-                                }
-                            />
-                            <Show when=move || transcript.get().is_empty()>
-                                <div class="rooms-room__empty">
-                                    "No messages yet. Say something — use @id to convene an agent."
-                                </div>
-                            </Show>
-                        </div>
-
-                        // @mention discoverability: list the room's agent ids so a
-                        // human knows who they can mention to auto-convene. Click a
-                        // chip to insert `@id ` into the composer (OCEAN-117).
-                        <Show when=move || !rooms.agent_ids().is_empty()>
-                            <div class="rooms-mention-hint">
-                                <span class="rooms-mention-hint__label">"@agents:"</span>
-                                <For
-                                    each=move || rooms.agent_ids()
-                                    key=|id| id.clone()
-                                    children=move |id: String| {
-                                        let insert = id.clone();
-                                        view! {
-                                            <button
-                                                class="rooms-mention-hint__chip"
-                                                type="button"
-                                                title="insert mention"
-                                                on:click=move |_| {
-                                                    composer.update(|c| {
-                                                        if !c.is_empty() && !c.ends_with(' ') {
-                                                            c.push(' ');
-                                                        }
-                                                        c.push('@');
-                                                        c.push_str(&insert);
-                                                        c.push(' ');
-                                                    });
-                                                }
-                                            >
-                                                {format!("@{id}")}
-                                            </button>
-                                        }
-                                    }
-                                />
-                            </div>
-                        </Show>
-
-                        // Composer
-                        <form
-                            class="rooms-composer"
-                            on:submit=move |ev| {
-                                ev.prevent_default();
-                                let text = composer.get_untracked();
-                                rooms.post_message(text);
-                                composer.set(String::new());
                             }
-                        >
-                            <input
-                                class="rooms-composer__input"
-                                type="text"
-                                placeholder="Message… (@id to mention)"
-                                prop:value=move || composer.get()
-                                on:input=move |ev| composer.set(event_target_value(&ev))
-                            />
-                            <button
-                                class="rooms-composer__send"
-                                type="submit"
-                                disabled=move || composer.get().trim().is_empty()
-                            >
-                                "Send"
-                            </button>
-                        </form>
+                        />
                     </div>
                 </Show>
 
-                // Status line (errors / notices).
+                <form
+                    class="rooms-composer"
+                    on:submit=move |ev| {
+                        ev.prevent_default();
+                        let text = composer.get_untracked();
+                        rooms.post_message(text);
+                        composer.set(String::new());
+                    }
+                >
+                    <input
+                        class="rooms-composer__input"
+                        type="text"
+                        placeholder="Message… (@id to mention)"
+                        prop:value=move || composer.get()
+                        on:input=move |ev| composer.set(event_target_value(&ev))
+                    />
+                    <button
+                        class="rooms-composer__send"
+                        type="submit"
+                        disabled=move || composer.get().trim().is_empty()
+                    >
+                        "Send"
+                    </button>
+                </form>
+
                 <Show when=move || !status.get().is_empty()>
                     <div class="rooms-panel__status">{move || status.get()}</div>
                 </Show>

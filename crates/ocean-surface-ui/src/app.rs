@@ -7,7 +7,7 @@ use wasm_bindgen::JsCast;
 use crate::components::PermissionPrompts;
 use crate::daemon::{daemon_url_from_env, Daemon};
 use crate::model::{Block, Role, Turn};
-use crate::rooms::{Rooms, RoomsPanel};
+use crate::rooms::{RoomStage, Rooms, RoomsPanel};
 use crate::sessions::SessionsPanel;
 use crate::transcript::Transcript;
 use crate::voice::VoiceOrb;
@@ -125,11 +125,12 @@ pub fn App() -> impl IntoView {
         show_livekit_controls,
         show_rooms,
     );
-    let in_room_mode = Signal::derive(move || {
-        rooms.open_key.get().is_some()
-            && show_livekit_controls.get()
-            && !livekit_token_path.get().trim().is_empty()
-    });
+    // Room mode: a room is a mode of operation you ENTER — opening one from
+    // the rooms browser swaps the chat surface for the room's own stage
+    // (roster + transcript + composer). Purely daemon-native text; the LiveKit
+    // call is an optional in-mode upgrade, so no credential or call state
+    // gates the mode.
+    let in_room_mode = Signal::derive(move || rooms.open_key.get().is_some());
 
     // TTS: speak the assistant's final text each time a turn finishes
     // (streaming flips true→false). Gated by `muted`. We track the previous
@@ -471,15 +472,21 @@ pub fn App() -> impl IntoView {
                 </div>
             </Show>
 
-            // LiveKit collaboration presence (OCEAN-83): a single mount that
-            // either renders as a compact utility panel or expands into the
-            // full room stage once a room join routes the shared LiveKit
-            // signals. Never double-mount the singleton bridge.
+            // LiveKit collaboration presence (OCEAN-83): the compact call
+            // strip (join/leave, mic, camera, roster). In room mode it reads
+            // as the room's call upgrade — it lights up when a room join
+            // routes the shared LiveKit signals and credentials exist. Never
+            // double-mount the singleton bridge.
             <crate::livekit::LiveKitPanel
                 daemon=daemon_livekit.get_value()
                 open=show_livekit_controls
-                stage=in_room_mode
             />
+
+            // Room mode: the entered room takes the surface over in place of
+            // the chat transcript + composer below.
+            <Show when=move || in_room_mode.get()>
+                <RoomStage rooms=rooms />
+            </Show>
 
             <Show when=move || !in_room_mode.get()>
 
