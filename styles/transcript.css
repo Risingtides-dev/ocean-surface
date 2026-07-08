@@ -900,12 +900,11 @@
   }
 }
 
-/* ── Pending response — sonar ping (send → first token) ──────────────────
+/* ── Pending response — the badge, drifting (send → first token) ─────────
    The gap between submit and the first streamed delta: `streaming` is on but
-   the assistant turn doesn't exist yet. A proto-assistant header plus a
-   bioluminescent sonar ping mark exactly where the reply will materialize —
-   never dead air. Water physics: a core breathes, rings ripple outward and
-   dissolve, everything rises on --ease-tide. */
+   the assistant turn doesn't exist yet. A proto-assistant header plus the
+   Ocean badge with its swells drifting mark exactly where the reply will
+   materialize — never dead air. The wave motion IS the wait state. */
 .ocean-pending {
   display: flex;
   flex-direction: column;
@@ -921,52 +920,10 @@
   text-transform: uppercase;
 }
 
-.ocean-pending__ping {
-  position: relative;
-  /* Odd box + odd core = exact shared center (no half-pixel drift). */
-  width: 41px;
-  height: 41px;
+.ocean-pending__badge {
   margin-left: 14px;
-  display: grid;
-  place-items: center;
+  font-size: 34px;
+  line-height: 0;
+  filter: drop-shadow(0 0 10px var(--accent-soft));
 }
 
-.ocean-pending__core {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow:
-    0 0 10px var(--accent-ring),
-    0 0 26px var(--accent-soft);
-  animation: ocean-ping-core 2s var(--ease-tide) infinite;
-}
-
-.ocean-pending__ring {
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  border: 1px solid var(--accent);
-  opacity: 0;
-  animation: ocean-ping-ring 2s var(--ease-tide) infinite;
-}
-
-.ocean-pending__ring:nth-child(2) {
-  animation-delay: 0.6s;
-}
-
-@keyframes ocean-ping-core {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.35); }
-}
-
-@keyframes ocean-ping-ring {
-  0%   { transform: scale(0.24); opacity: 0.7; }
-  75%  { transform: scale(1); opacity: 0; }
-  100% { transform: scale(1); opacity: 0; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .ocean-pending__ring { display: none; }
-  .ocean-pending__core { animation: none; }
-}

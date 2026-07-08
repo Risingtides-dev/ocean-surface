@@ -184,10 +184,8 @@ pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoVie
             <Show when=pending_response>
                 <div class="ocean-pending" role="status" aria-label="Ocean is thinking">
                     <div class="ocean-pending__head">"ocean ▸"</div>
-                    <div class="ocean-pending__ping" aria-hidden="true">
-                        <span class="ocean-pending__ring"></span>
-                        <span class="ocean-pending__ring"></span>
-                        <span class="ocean-pending__core"></span>
+                    <div class="ocean-pending__badge" aria-hidden="true">
+                        <crate::icons::WaveBadge spinning=true />
                     </div>
                 </div>
             </Show>
