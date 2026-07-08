@@ -290,7 +290,7 @@ pub fn VoiceOrb(
                 on:pointerleave=ptt_up2
                 on:pointercancel=ptt_up3
             >
-                <span class="voice-orb__glyph">{view! { <crate::icons::Amplitude /> }}</span>
+                <span class="voice-orb__glyph">{view! { <crate::icons::Mic /> }}</span>
             </button>
             <button
                 class="voice-mode-switch"

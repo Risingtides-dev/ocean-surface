@@ -126,10 +126,13 @@
   --glow-thinking: 0 0 24px rgba(0, 215, 215, 0.10);
   --glow-live: 0 0 20px rgba(0, 255, 215, 0.16);
   /* Pointer light: a root listener writes these; opted-in surfaces
-     paint a faint radial specular at the pointer. */
+     paint a faint radial specular at the pointer. Hue sits on the
+     ramp's blue side (rgba(95,255,255) read green in situ); two stops
+     give the falloff a soft shoulder instead of a visible rim. */
   --pointer-x: 50%;
   --pointer-y: 50%;
-  --pointer-light: rgba(95, 255, 255, 0.04);
+  --pointer-light: rgba(56, 189, 248, 0.026);
+  --pointer-light-mid: rgba(56, 189, 248, 0.011);
 
   /* ── Motion ───────────────────────────────────────────────────── */
   --ease: cubic-bezier(.22, .61, .36, 1);

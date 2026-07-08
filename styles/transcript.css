@@ -182,29 +182,53 @@
   text-align: center;
 }
 
-/* The OCEAN splash banner — 8 rows, one solid ramp color per row (exactly
-   how the TUI paints it). Mono, sized fluidly so the 61-char art never
-   overflows a phone or the extension side panel. */
-.transcript__landing-banner {
-  margin: 0 0 4px;
-  overflow: hidden;
-  max-width: 100%;
-  font-family: var(--mono);
-  font-size: clamp(5px, 2.2vw, 16px);
-  font-weight: 600;
-  line-height: 1.25;
-  text-align: left;
+/* The brand lockup — the wave mark over a breathing depth halo, OCEAN in
+   per-letter ramp colors (one solid color per letter, exactly the header
+   wordmark language at hero scale). Replaces the TUI ASCII banner. */
+.transcript__landing-mark {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 88px;
+  height: 88px;
+  color: var(--ocean-7);
+  font-size: 44px;
   user-select: none;
 }
-.transcript__landing-banner-row { display: block; white-space: pre; }
-.transcript__landing-banner-row--1 { color: var(--ocean-1); }
-.transcript__landing-banner-row--2 { color: var(--ocean-2); }
-.transcript__landing-banner-row--3 { color: var(--ocean-3); }
-.transcript__landing-banner-row--4 { color: var(--ocean-4); }
-.transcript__landing-banner-row--5 { color: var(--ocean-5); }
-.transcript__landing-banner-row--6 { color: var(--ocean-6); }
-.transcript__landing-banner-row--7 { color: var(--ocean-7); }
-.transcript__landing-banner-row--8 { color: var(--ocean-8); }
+
+.transcript__landing-mark::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 44%, var(--accent-soft), transparent 68%);
+  animation: landing-breathe 5.6s var(--ease) infinite;
+}
+
+.transcript__landing-word {
+  display: inline-flex;
+  gap: 0.42em;
+  font-family: var(--font);
+  font-size: clamp(20px, 5vw, 30px);
+  font-weight: 600;
+  line-height: 1;
+  user-select: none;
+}
+
+.transcript__landing-word span:nth-child(1) { color: var(--ocean-4); }
+.transcript__landing-word span:nth-child(2) { color: var(--ocean-5); }
+.transcript__landing-word span:nth-child(3) { color: var(--ocean-6); }
+.transcript__landing-word span:nth-child(4) { color: var(--ocean-7); }
+.transcript__landing-word span:nth-child(5) { color: var(--ocean-8); }
+
+@keyframes landing-breathe {
+  0%, 100% { opacity: 0.55; transform: scale(0.94); }
+  50% { opacity: 1; transform: scale(1.04); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .transcript__landing-mark::before { animation: none; }
+}
 
 /* Screen-reader title; visually quiet under the banner. */
 .transcript__landing-title {
@@ -813,4 +837,75 @@
   .tool-group__head {
     transition: none;
   }
+}
+
+/* ── Pending response — sonar ping (send → first token) ──────────────────
+   The gap between submit and the first streamed delta: `streaming` is on but
+   the assistant turn doesn't exist yet. A proto-assistant header plus a
+   bioluminescent sonar ping mark exactly where the reply will materialize —
+   never dead air. Water physics: a core breathes, rings ripple outward and
+   dissolve, everything rises on --ease-tide. */
+.ocean-pending {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 2px 0 12px;
+}
+
+.ocean-pending__head {
+  color: var(--fg-3);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.ocean-pending__ping {
+  position: relative;
+  /* Odd box + odd core = exact shared center (no half-pixel drift). */
+  width: 41px;
+  height: 41px;
+  margin-left: 14px;
+  display: grid;
+  place-items: center;
+}
+
+.ocean-pending__core {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow:
+    0 0 10px var(--accent-ring),
+    0 0 26px var(--accent-soft);
+  animation: ocean-ping-core 2s var(--ease-tide) infinite;
+}
+
+.ocean-pending__ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1px solid var(--accent);
+  opacity: 0;
+  animation: ocean-ping-ring 2s var(--ease-tide) infinite;
+}
+
+.ocean-pending__ring:nth-child(2) {
+  animation-delay: 0.6s;
+}
+
+@keyframes ocean-ping-core {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.35); }
+}
+
+@keyframes ocean-ping-ring {
+  0%   { transform: scale(0.24); opacity: 0.7; }
+  75%  { transform: scale(1); opacity: 0; }
+  100% { transform: scale(1); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ocean-pending__ring { display: none; }
+  .ocean-pending__core { animation: none; }
 }

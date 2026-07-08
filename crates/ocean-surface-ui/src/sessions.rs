@@ -267,9 +267,23 @@ pub(crate) fn group_for_panel(
     sections
 }
 
-/// First letter, uppercased, for a project monogram badge.
-pub(crate) fn monogram(name: &str) -> String {
-    name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| "?".into())
+/// The surface-origin icon for a session's `[TAG]` title prefix. The tag set
+/// mirrors ocean-agent's `surface_flag` (the canonical client_type → flag
+/// map): BRWSR/TUI/WEB/GUI/CLI/VOX/ACP/SLACK/CNVS/MOBL. Recognized surfaces
+/// get a designed mark; anything else falls back to the small text badge so
+/// future surfaces degrade legibly instead of invisibly.
+pub(crate) fn origin_icon(tag: &str) -> Option<AnyView> {
+    match tag {
+        "tui" | "cli" => Some(view! { <crate::icons::Terminal /> }.into_any()),
+        "web" => Some(view! { <crate::icons::Globe /> }.into_any()),
+        "brwsr" => Some(view! { <crate::icons::Puzzle /> }.into_any()),
+        "gui" | "desktop" | "app" => Some(view! { <crate::icons::Desktop /> }.into_any()),
+        "acp" => Some(view! { <crate::icons::Code /> }.into_any()),
+        "vox" => Some(view! { <crate::icons::Mic /> }.into_any()),
+        "slack" => Some(view! { <crate::icons::Slack /> }.into_any()),
+        "mobl" => Some(view! { <crate::icons::Smartphone /> }.into_any()),
+        _ => None,
+    }
 }
 
 /// Relative time from an ISO-8601 timestamp: "2h ago", "5d ago", etc.
@@ -292,6 +306,33 @@ pub(crate) fn fmt_relative_time(updated_at: &str) -> String {
     } else {
         updated_at[..10].to_string()
     }
+}
+
+/// Session freshness: true when the timestamp is under ten minutes old.
+/// Drives the live dot on session rows.
+pub(crate) fn is_recent(updated_at: &str) -> bool {
+    let ts = js_sys::Date::parse(updated_at);
+    !ts.is_nan() && (js_sys::Date::now() - ts) < 600_000.0
+}
+
+/// Split a `[TAG] rest` origin prefix off a session title. The daemon embeds
+/// the client surface as a bracketed prefix (`[WEB] hi`, `[TUI] PM room`);
+/// rendered raw it reads as slop. `[?]` (unknown client) strips without a
+/// badge. Titles without a well-formed prefix pass through untouched.
+pub(crate) fn split_origin(title: &str) -> (Option<String>, String) {
+    let t = title.trim();
+    if let Some(rest) = t.strip_prefix('[') {
+        if let Some(end) = rest.find(']') {
+            let tag = &rest[..end];
+            let body = rest[end + 1..].trim();
+            if !tag.is_empty() && tag.len() <= 8 && !body.is_empty() {
+                let badge =
+                    if tag == "?" { None } else { Some(tag.to_ascii_lowercase()) };
+                return (badge, body.to_string());
+            }
+        }
+    }
+    (None, t.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -892,10 +933,10 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                             move |_| toggle(k.clone())
                                         }
                                     >
-                                        // Monogram badge or fallback glyph.
+                                        // Project folder mark or the Other-bucket glyph.
                                         {if s_is_project {
                                             view! {
-                                                <span class="project-logo">{monogram(&s_label)}</span>
+                                                <span class="project-logo"><crate::icons::Folder /></span>
                                             }.into_any()
                                         } else {
                                             view! {
@@ -944,7 +985,7 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                                             <div class="worktree-group__head">
                                                                 <span class="worktree-group__root">{root_label}</span>
                                                                 {if has_branch {
-                                                                    view! { <span class="worktree-group__branch">{branch_text}</span> }.into_any()
+                                                                    view! { <span class="worktree-group__branch"><crate::icons::GitBranch />{branch_text}</span> }.into_any()
                                                                 } else {
                                                                     view! { <span class="worktree-group__branch worktree-group__branch--hidden"></span> }.into_any()
                                                                 }}
@@ -952,18 +993,18 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                                                     {count}
                                                                 </span>
                                                             </div>
-                                                            {rows.into_iter().map(|s| session_row(s, daemon, open, current_id).into_any()).collect::<Vec<_>>()}
+                                                            {rows.into_iter().map(|s| session_row(s, daemon, open, current_id, false, None).into_any()).collect::<Vec<_>>()}
                                                         </div>
                                                     }.into_any()
                                                 }).collect();
                                                 // Remaining sessions (not matched to any worktree) shown flat below.
                                                 out.extend(flattened.clone().into_iter()
-                                                    .map(|s| session_row(s, daemon, open, current_id).into_any()));
+                                                    .map(|s| session_row(s, daemon, open, current_id, true, Some(s_label.clone())).into_any()));
                                                 out
                                             } else {
                                                 // Flat list.
                                                 flattened.clone().into_iter()
-                                                    .map(|s| session_row(s, daemon, open, current_id).into_any())
+                                                    .map(|s| session_row(s, daemon, open, current_id, true, if s_is_project { Some(s_label.clone()) } else { None }).into_any())
                                                     .collect::<Vec<_>>()
                                             }}
                                         </div>
@@ -991,12 +1032,15 @@ fn session_row(
     daemon: StoredValue<Daemon>,
     panel_open: RwSignal<bool>,
     current_id: RwSignal<Option<String>>,
+    show_context: bool,
+    group_label: Option<String>,
 ) -> impl IntoView {
     let session_id = session.id.clone();
-    let session_title = if session.title.trim().is_empty() {
+    let (origin, clean_title) = split_origin(&session.title);
+    let session_title = if clean_title.is_empty() {
         "(untitled)".to_string()
     } else {
-        session.title.clone()
+        clean_title
     };
     let turn_label = format!(
         "{} turn{}",
@@ -1004,6 +1048,29 @@ fn session_row(
         if session.turn_count == 1 { "" } else { "s" }
     );
     let rel_time = fmt_relative_time(&session.updated_at);
+    let fresh = is_recent(&session.updated_at);
+    // Repo context: the cwd's last segment plus the live branch. Suppressed
+    // inside worktree groups (header names root + branch) and when the tail
+    // would just echo the enclosing project group's label.
+    let repo_tail = if show_context && !session.cwd.is_empty() && session.cwd != "/" {
+        session
+            .cwd
+            .rsplit('/')
+            .find(|s| !s.is_empty())
+            .map(str::to_string)
+            .filter(|tail| {
+                group_label
+                    .as_deref()
+                    .is_none_or(|label| !label.eq_ignore_ascii_case(tail))
+            })
+    } else {
+        None
+    };
+    let branch = if show_context {
+        session.git_branch.clone().filter(|b| !b.is_empty())
+    } else {
+        None
+    };
     let row_id = session_id.clone();
 
     view! {
@@ -1020,8 +1087,23 @@ fn session_row(
                 }
             }
         >
-            <div class="sessions-item__title">{session_title}</div>
+            <div class="sessions-item__title">
+                {fresh.then(|| view! {
+                    <span class="sessions-item__dot" title="active in the last 10 minutes"></span>
+                })}
+                {origin.map(|o| match origin_icon(&o) {
+                    Some(icon) => view! {
+                        <span class="sessions-item__origin" title=format!("{o} session")>{icon}</span>
+                    }.into_any(),
+                    None => view! { <span class="sessions-item__badge">{o}</span> }.into_any(),
+                })}
+                <span class="sessions-item__name">{session_title}</span>
+            </div>
             <div class="sessions-item__meta">
+                {repo_tail.map(|p| view! { <span class="sessions-item__path">{p}</span> })}
+                {branch.map(|b| view! {
+                    <span class="sessions-item__branch"><crate::icons::GitBranch />{b}</span>
+                })}
                 <span class="sessions-item__time">{rel_time}</span>
                 <span class="sessions-item__turns">{turn_label}</span>
             </div>
@@ -1031,6 +1113,30 @@ fn session_row(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn split_origin_parses_web_prefix() {
+        let (badge, title) = super::split_origin("[WEB] hi there");
+        assert_eq!(badge.as_deref(), Some("web"));
+        assert_eq!(title, "hi there");
+    }
+
+    #[test]
+    fn split_origin_strips_unknown_client_without_badge() {
+        let (badge, title) = super::split_origin("[?] hi");
+        assert_eq!(badge, None);
+        assert_eq!(title, "hi");
+    }
+
+    #[test]
+    fn split_origin_passes_plain_titles_through() {
+        let (badge, title) = super::split_origin("plain title");
+        assert_eq!(badge, None);
+        assert_eq!(title, "plain title");
+        // Unclosed bracket / empty body stay raw.
+        assert_eq!(super::split_origin("[WEB").1, "[WEB");
+        assert_eq!(super::split_origin("[WEB]").1, "[WEB]");
+    }
+
     use super::*;
     use crate::daemon::{OwningProjectRef, WorktreeInfo};
 

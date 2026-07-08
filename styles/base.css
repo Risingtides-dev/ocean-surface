@@ -81,7 +81,8 @@ body {
    element's overflow clip and would spill across the whole viewport.
 
    No effect on touch (hover gate) or reduced-motion (killed outright).
-   --pointer-light is a faint token (rgba(95,255,255,0.04)) by design. */
+   --pointer-light / --pointer-light-mid are faint tokens by design —
+   the wide radius + mid stop keep the specular shoulder invisible. */
 .ocean-lit { position: relative; }
 .ocean-lit::after {
   content: "";
@@ -90,9 +91,10 @@ body {
   border-radius: inherit;
   pointer-events: none;
   background: radial-gradient(
-    240px circle at var(--pointer-x) var(--pointer-y),
+    320px circle at var(--pointer-x) var(--pointer-y),
     var(--pointer-light),
-    transparent 70%
+    var(--pointer-light-mid) 45%,
+    transparent 74%
   );
   background-attachment: fixed;
   opacity: 0;
