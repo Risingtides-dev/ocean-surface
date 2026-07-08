@@ -126,25 +126,57 @@ async fn main() -> anyhow::Result<()> {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
 
-    // Google Maps JS API key for the map component. Env override, else the
-    // configured default. Empty disables the map (component renders a notice).
-    let maps_key = std::env::var("GOOGLE_MAPS_API_KEY")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| Some(DEFAULT_MAPS_KEY.to_string()))
-        .filter(|s| !s.is_empty());
-    if maps_key.is_some() {
-        tracing::info!("Google Maps key resolved; map component enabled");
-    }
-    // Map ID controls the map's visual style. Defaults to DEMO_MAP_ID (works
-    // with advanced markers + Places UI Kit out of the box). Set
-    // GOOGLE_MAPS_MAP_ID to your custom styled map id to skin it.
-    let maps_map_id = std::env::var("GOOGLE_MAPS_MAP_ID")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "DEMO_MAP_ID".to_string());
+    // Google Maps JS API key for the map component. Resolution chain:
+    //   1. GOOGLE_MAPS_API_KEY env (override, highest priority)
+    //   2. ~/.config/ocean-rs/auth.json → google_maps.api_key (shared daemon config)
+    //   3. Built-in default (referrer-restricted browser key)
+    //   4. Empty → maps disabled, component shows a notice.
+    //
+    // Map ID for the visual style follows the same chain:
+    //   GOOGLE_MAPS_MAP_ID env → auth.json google_maps.map_id → "DEMO_MAP_ID".
+    let (maps_key, maps_map_id) = {
+        let mut key = std::env::var("GOOGLE_MAPS_API_KEY")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let mut map_id: Option<String> = None;
+
+        if key.is_none() {
+            // Env not set — try the shared daemon auth file.
+            match resolve_maps_from_auth_json() {
+                Ok(Some((ak, mid))) => {
+                    if !ak.is_empty() {
+                        key = Some(ak);
+                        map_id = mid;
+                    }
+                }
+                Ok(None) => { /* auth file absent or no google_maps block — fall through */ }
+                Err(err) => {
+                    tracing::warn!(error = %err, "failed to read maps config from auth.json; falling back to default");
+                }
+            }
+        }
+
+        // If still no key, use the built-in default.
+        if key.is_none() {
+            key = (!DEFAULT_MAPS_KEY.is_empty()).then(|| DEFAULT_MAPS_KEY.to_string());
+        }
+
+        if key.is_some() {
+            tracing::info!("Google Maps key resolved; map component enabled");
+        }
+
+        // Map ID: env overrides auth file, auth file overrides DEMO_MAP_ID.
+        if map_id.is_none() {
+            map_id = std::env::var("GOOGLE_MAPS_MAP_ID")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+        }
+        let m_id = map_id.unwrap_or_else(|| "DEMO_MAP_ID".to_string());
+
+        (key, m_id)
+    };
 
     // HTTP Basic auth. Credentials come from the environment — never hardcoded,
     // since this binds to 0.0.0.0 behind a public tunnel. Set OCEAN_SURFACE_AUTH=off
@@ -403,6 +435,69 @@ fn read_key_file() -> anyhow::Result<Option<String>> {
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let key = raw.trim();
     Ok((!key.is_empty()).then(|| key.to_string()))
+}
+
+/// Path to the Ocean daemon's auth file — the same `~/.config/ocean-rs/auth.json`
+/// that `ocean-providers` reads for provider API keys. Mirror of
+/// `ocean-providers::default_ocean_auth_file` so the proxy can share one set of
+/// configuration without talking to the daemon at startup.
+fn ocean_auth_file_path() -> Option<PathBuf> {
+    if let Some(config) = std::env::var_os("OCEAN_CONFIG_DIR") {
+        return Some(PathBuf::from(config).join("auth.json"));
+    }
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        return Some(PathBuf::from(xdg).join("ocean-rs").join("auth.json"));
+    }
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config/ocean-rs/auth.json"))
+}
+
+/// Resolve Google Maps configuration from `~/.config/ocean-rs/auth.json`.
+///
+/// Looks for a `google_maps` block:
+/// ```json
+/// {
+///   "google_maps": {
+///     "api_key": "AIza...",
+///     "map_id": "your-custom-map-id"
+///   }
+/// }
+/// ```
+///
+/// Returns `(api_key, map_id)` when the block exists and `api_key` is non-empty.
+/// `map_id` falls back to `None` if absent. Absent file or missing block is
+/// `Ok(None)` — not an error.
+fn resolve_maps_from_auth_json() -> anyhow::Result<Option<(String, Option<String>)>> {
+    let Some(path) = ocean_auth_file_path() else {
+        return Ok(None);
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let json: Value = serde_json::from_str(&raw)
+        .with_context(|| format!("parsing {} as JSON", path.display()))?;
+
+    let gm = match json.get("google_maps") {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+
+    let api_key = gm
+        .get("api_key")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let map_id = gm
+        .get("map_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    Ok(api_key.map(|key| (key, map_id)))
 }
 
 /// HTTP Basic auth gate. When creds are configured, every request except
