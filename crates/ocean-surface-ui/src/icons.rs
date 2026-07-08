@@ -22,19 +22,66 @@ pub fn WaveBadge(#[prop(optional)] spinning: bool) -> impl IntoView {
                 <clipPath id="wave-badge-clip">
                     <circle cx="24" cy="24" r="20.4" />
                 </clipPath>
+                // Every element is LIT FROM ABOVE - a whitened top lip that
+                // falls into a deeper body (pixel-measured: the arc peaks
+                // white-hot at its apex, the bar's top edge jumps ~35%
+                // brighter than its body). userSpaceOnUse so the light
+                // tracks the coin, not each path's bbox; stops are classed
+                // so every color stays in tokens.css.
+                <linearGradient id="wave-badge-face-g" gradientUnits="userSpaceOnUse" x1="0" y1="3" x2="0" y2="45">
+                    <stop offset="0" class="wave-badge__stop-face-hi" />
+                    <stop offset="0.55" class="wave-badge__stop-face" />
+                </linearGradient>
+                <linearGradient id="wave-badge-arc-g" gradientUnits="userSpaceOnUse" x1="0" y1="4.65" x2="0" y2="15.45">
+                    <stop offset="0" class="wave-badge__stop-arc-hi" />
+                    <stop offset="0.12" class="wave-badge__stop-arc" />
+                    <stop offset="1" class="wave-badge__stop-arc-lo" />
+                </linearGradient>
+                <linearGradient id="wave-badge-w1-g" gradientUnits="userSpaceOnUse" x1="0" y1="16" x2="0" y2="20.8">
+                    <stop offset="0" class="wave-badge__stop-w1-hi" />
+                    <stop offset="0.14" class="wave-badge__stop-w1" />
+                    <stop offset="1" class="wave-badge__stop-w1-lo" />
+                </linearGradient>
+                <linearGradient id="wave-badge-w2-g" gradientUnits="userSpaceOnUse" x1="0" y1="24.7" x2="0" y2="29.5">
+                    <stop offset="0" class="wave-badge__stop-w2-hi" />
+                    <stop offset="0.14" class="wave-badge__stop-w2" />
+                    <stop offset="1" class="wave-badge__stop-w2-lo" />
+                </linearGradient>
+                <linearGradient id="wave-badge-fill-g" gradientUnits="userSpaceOnUse" x1="0" y1="33" x2="0" y2="39.6">
+                    <stop offset="0" class="wave-badge__stop-fill-hi" />
+                    <stop offset="0.22" class="wave-badge__stop-fill" />
+                    <stop offset="1" class="wave-badge__stop-fill-lo" />
+                </linearGradient>
+                <linearGradient id="wave-badge-bar-g" gradientUnits="userSpaceOnUse" x1="0" y1="42.65" x2="0" y2="44.85">
+                    <stop offset="0" class="wave-badge__stop-bar-hi" />
+                    <stop offset="0.18" class="wave-badge__stop-bar" />
+                    <stop offset="1" class="wave-badge__stop-bar-lo" />
+                </linearGradient>
+                <linearGradient id="wave-badge-rim-g" gradientUnits="userSpaceOnUse" x1="0" y1="3" x2="0" y2="45">
+                    <stop offset="0" class="wave-badge__stop-rim-hi" />
+                    <stop offset="1" class="wave-badge__stop-rim-lo" />
+                </linearGradient>
+                // Smoky depth on the face: an inset vignette darkening
+                // toward the rim, so the black reads as a molded coin
+                // face instead of flat vector negative space.
+                <radialGradient id="wave-badge-vig-g">
+                    <stop offset="0.62" class="wave-badge__stop-vig-in" />
+                    <stop offset="1" class="wave-badge__stop-vig-out" />
+                </radialGradient>
             </defs>
             // The coin: a matte face DARKER than the page, with a thin rim
             // relief — the mark is embossed into a badge, not floating
             // strokes. Geometry + colors are pixel-measured from
             // docs/assets/ocean-logo-circular-neumorphic-reference.png.
             <circle class="wave-badge__face" cx="24" cy="24" r="21" />
-            <circle class="wave-badge__ring" cx="24" cy="24" r="20.6" />
+            <circle class="wave-badge__vig" cx="24" cy="24" r="20.6" />
+            <circle class="wave-badge__ring" cx="24" cy="24" r="20.7" />
             <g clip-path="url(#wave-badge-clip)" stroke-linecap="round">
                 // The dome runs nearly CONCENTRIC with the rim (R≈20.9 vs
                 // rim 21): apex centerline y6.6, legs dive to (8.5,13.5) /
                 // (39.5,13.5) — a wide canopy hugging the circle, not a
                 // small floating cap.
-                <path class="wave-badge__arc" d="M 8.5 13.5 A 20.9 20.9 0 0 1 39.5 13.5" />
+                <path class="wave-badge__arc" stroke-linecap="butt" d="M 8.5 13.5 A 20.9 20.9 0 0 1 39.5 13.5" />
                 // Swells: gentle — crest-to-trough 1.9 (4.5% of the face),
                 // period 22, centerlines y18.4 / y27.1. Drawn one period
                 // past each edge so the 22-unit drift loops seamlessly.

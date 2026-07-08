@@ -223,42 +223,92 @@
    exactly one period, so the seam is invisible. */
 .wave-badge {
   display: block;
-  /* Shallow relief: the coin sits ON the surface, barely. */
-  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.5));
+  /* Shallow relief + a faint luminous aura: the coin sits ON the surface,
+     barely, and breathes a little of its own light into the dark. */
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.55))
+          drop-shadow(0 0 9px color-mix(in srgb, var(--badge-w1) 9%, transparent));
 }
 
+/* Per-element relief - the texture. Every layer is lit from above: a
+   whitened top lip falling into a deeper body (the gradients defined in
+   the SVG defs), a shadow cast DOWN onto the face, and a faint glow of
+   the element's own color lifting the face around it. Filter lengths are
+   user units (48-unit viewBox), scaled from the reference's ~320px coin.
+   All colors derive from the --badge-* tokens via color-mix. */
 .wave-badge__face {
-  fill: var(--badge-face);
+  fill: url(#wave-badge-face-g);
 }
 
+.wave-badge__vig {
+  fill: url(#wave-badge-vig-g);
+}
+
+/* Thin polished rim: lit top edge falling to a dark under-edge, with a
+   faint neutral halo - a machined coin edge, not a vector outline. */
 .wave-badge__ring {
-  stroke: var(--badge-rim);
-  stroke-width: 0.8;
+  stroke: url(#wave-badge-rim-g);
+  stroke-width: 0.55;
+  filter: drop-shadow(0 0 1px rgba(255, 255, 255, 0.14));
 }
 
 .wave-badge__arc {
-  stroke: var(--badge-arc);
+  stroke: url(#wave-badge-arc-g);
   stroke-width: 3.9;
+  filter: drop-shadow(0 0.9px 0.7px rgba(0, 0, 0, 0.75))
+          drop-shadow(0 0 2.4px color-mix(in srgb, var(--badge-arc) 32%, transparent));
 }
 
 .wave-badge__w1 {
-  stroke: var(--badge-w1);
+  stroke: url(#wave-badge-w1-g);
   stroke-width: 3.7;
+  filter: drop-shadow(0 0.8px 0.7px rgba(0, 0, 0, 0.7))
+          drop-shadow(0 0 2.2px color-mix(in srgb, var(--badge-w1) 28%, transparent));
 }
 
 .wave-badge__w2 {
-  stroke: var(--badge-w2);
+  stroke: url(#wave-badge-w2-g);
   stroke-width: 3.7;
+  filter: drop-shadow(0 0.8px 0.7px rgba(0, 0, 0, 0.7))
+          drop-shadow(0 0 2.2px color-mix(in srgb, var(--badge-w2) 28%, transparent));
 }
 
 .wave-badge__fill {
-  fill: var(--badge-fill);
+  fill: url(#wave-badge-fill-g);
+  filter: drop-shadow(0 1px 0.9px rgba(0, 0, 0, 0.7))
+          drop-shadow(0 0 2.6px color-mix(in srgb, var(--badge-fill) 34%, transparent));
 }
 
 .wave-badge__bar {
-  stroke: var(--badge-bar);
+  stroke: url(#wave-badge-bar-g);
   stroke-width: 2.2;
+  filter: drop-shadow(0 0.6px 0.6px rgba(0, 0, 0, 0.75))
+          drop-shadow(0 0 2px color-mix(in srgb, var(--badge-bar) 34%, transparent));
 }
+
+/* Gradient stops - the measured light. Lip strengths are per-element
+   (the bar's lip is hard, the swells' are soft); each falls to a deeper
+   shade at its bottom edge. */
+.wave-badge__stop-face-hi { stop-color: color-mix(in srgb, var(--badge-face) 95%, white); }
+.wave-badge__stop-face { stop-color: var(--badge-face); }
+.wave-badge__stop-arc-hi { stop-color: color-mix(in srgb, var(--badge-arc) 80%, white); }
+.wave-badge__stop-arc { stop-color: var(--badge-arc); }
+.wave-badge__stop-arc-lo { stop-color: color-mix(in srgb, var(--badge-arc) 86%, black); }
+.wave-badge__stop-w1-hi { stop-color: color-mix(in srgb, var(--badge-w1) 90%, white); }
+.wave-badge__stop-w1 { stop-color: var(--badge-w1); }
+.wave-badge__stop-w1-lo { stop-color: color-mix(in srgb, var(--badge-w1) 93%, black); }
+.wave-badge__stop-w2-hi { stop-color: color-mix(in srgb, var(--badge-w2) 92%, white); }
+.wave-badge__stop-w2 { stop-color: var(--badge-w2); }
+.wave-badge__stop-w2-lo { stop-color: color-mix(in srgb, var(--badge-w2) 95%, black); }
+.wave-badge__stop-fill-hi { stop-color: color-mix(in srgb, var(--badge-fill) 92%, white); }
+.wave-badge__stop-fill { stop-color: var(--badge-fill); }
+.wave-badge__stop-fill-lo { stop-color: color-mix(in srgb, var(--badge-fill) 94%, black); }
+.wave-badge__stop-bar-hi { stop-color: color-mix(in srgb, var(--badge-bar) 75%, white); }
+.wave-badge__stop-bar { stop-color: var(--badge-bar); }
+.wave-badge__stop-bar-lo { stop-color: color-mix(in srgb, var(--badge-bar) 55%, black); }
+.wave-badge__stop-rim-hi { stop-color: color-mix(in srgb, var(--badge-rim) 72%, white); }
+.wave-badge__stop-rim-lo { stop-color: color-mix(in srgb, var(--badge-rim) 72%, black); }
+.wave-badge__stop-vig-in { stop-color: transparent; }
+.wave-badge__stop-vig-out { stop-color: rgba(0, 0, 0, 0.55); }
 
 /* Churn, not marquee. Three ingredients make current instead of a conveyor
    belt: COUNTER-FLOW (the middle swell runs against the other two — shear),
