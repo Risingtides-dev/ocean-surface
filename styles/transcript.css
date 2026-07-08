@@ -900,24 +900,14 @@
   }
 }
 
-/* ── Pending response — the badge, drifting (send → first token) ─────────
+/* ── Pending response — the badge, churning (send → first token) ─────────
    The gap between submit and the first streamed delta: `streaming` is on but
-   the assistant turn doesn't exist yet. A proto-assistant header plus the
-   Ocean badge with its swells drifting mark exactly where the reply will
-   materialize — never dead air. The wave motion IS the wait state. */
+   the assistant turn doesn't exist yet. The Ocean badge alone marks where
+   the reply will materialize — swells drifting under a calm rim, never dead
+   air, no proto-header (logo handoff: no prompt-like glyphs). */
 .ocean-pending {
   display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 2px 0 12px;
-}
-
-.ocean-pending__head {
-  color: var(--fg-3);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+  padding: 6px 0 12px;
 }
 
 .ocean-pending__badge {

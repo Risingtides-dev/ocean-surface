@@ -985,3 +985,40 @@ fix, deep-link plugin init + DeepLinkExt forward in lib.rs). Tauri side: 0
 errors, 17 tests green. wasm gate deferred - blocked by the concurrent
 session's live voice/icons refactor (their files; heals into their lane).
 _________________________________________________________________________________
+time:      [03:50pm] [08-07-26]
+agent:     [codex desktop] [gpt-5]
+worktree:  gitbutler/workspace
+type:      [feature-request]
+area:      [design]: Ocean logo and response loader direction
+
+Recorded the accepted circular neumorphic Ocean logo direction for future surface
+agents. Saved the reference PNG at `docs/assets/ocean-logo-circular-neumorphic-reference.png`,
+updated `docs/OCEAN_WEB_SURFACE_DESIGN.md` and `AGENTS.md` to make the circular
+wave mark the active logo target, and added a `handoff.md` overlay naming the web
+and Tauri implementation path. The required loading state is no longer the sonar
+ping or `ocean ▸` prompt-like header; it should be the circular logo with fluid
+current motion inside the mark during the send-to-first-token response gap, with a
+static reduced-motion fallback.
+_________________________________________________________________________________
+time:      [4:55pm] [07-08-26]
+agent:     [claude] [fable-5]
+worktree:  gitbutler/workspace
+type:      feature-request
+area:      frontend
+
+Shipped the voice privacy refactor (wake-word mode deleted — it streamed every
+utterance to xAI and matched transcripts; VoiceMode is now Off/PushToTalk/HandsFree
+with Off as a hard getUserMedia gate, a picker menu with plain-language disclosure,
+persisted Off, never-persisted hands-free, and a live listening chip), the
+hand-drawn WaveBadge logo SVG (measured from the reference PNG; ramp-token colored,
+seamless parallax drift) as both the landing mark and the send→first-token pending
+indicator (sonar ping and `ocean ▸` proto-header removed per the logo handoff), a
+border-subtle hairline on raised transcript cards (bg-raised on bg read as banding),
+and docs/OCEAN_PLATFORM_CONTRACT.md + an AGENTS.md Platform Contract section
+aligning the web and desktop teams (one core many shells, host.rs as the only
+capability seam, phone-test sorting rule, mobile-via-Tauri-2 trajectory,
+shared-file discipline). Also repaired main twice: GitButler hunk-locking had
+split interdependent app.rs hunks across lanes leaving origin/main unbuildable
+(missing host.rs); landed verified integration commits 93d7ed3/f16d6b2/66df8ee
+via detached-worktree assembly.
+_________________________________________________________________________________

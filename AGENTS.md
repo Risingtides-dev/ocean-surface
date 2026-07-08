@@ -15,6 +15,29 @@ Do not put provider calls, agent reasoning, session storage, permission policy,
 or tool execution authority in this repo. Surface code should render state,
 collect intent, attach to sessions, and call the daemon.
 
+## Platform Contract (binding — web + desktop + mobile)
+
+`docs/OCEAN_PLATFORM_CONTRACT.md` is the cross-team alignment layer; the
+desktop feature split lives in `docs/OCEAN_DESKTOP_NORTH_STAR.md` (Surface
+Capability Matrix). The load-bearing rules:
+
+- One core, many shells: `crates/ocean-surface-ui` is the product everywhere;
+  shells (proxy/PWA, extension, Tauri desktop, future Tauri mobile) stay thin.
+- `src/host.rs` is the ONLY seam for platform capability; every fn no-ops off
+  its platform, and UI mounts platform features conditionally — absence, not
+  errors.
+- Sorting rule: "does the phone version need this?" Yes → shared core (daemon
+  HTTP/SSE only, compact/touch rendering in the same slice). No, it's about
+  the machine → ocean-tauri command + host.rs wrapper + conditional mount.
+- The web core is the bones of the mobile app (Tauri 2 iOS/Android; PWA is
+  mobile v0; `compact.css` is the mobile stylesheet; no hover-only
+  affordances).
+- Shared-file discipline (`app.rs`): smallest hunks, committed promptly;
+  NEVER reference an uncommitted module from a shared file — `mod x;` +
+  usage lands only when `x` compiles with passing tests.
+- Main must build standalone: verify the pushed tree in a detached worktree
+  before pushing (GitButler lanes split hunks across sessions).
+
 ## Current Build Focus
 
 ```sh
@@ -45,9 +68,11 @@ All visual work on the Leptos web surface follows
 `docs/OCEAN_WEB_SURFACE_DESIGN.md`. Non-negotiables:
 
 - Identity is the OCEAN depth ramp (the TUI splash banner, deep indigo →
-  bright aqua). No Rising Tides magenta/purple (rejected 2026-07-04), no
-  legacy teal-mint, no gradient-clip text — the ramp paints solid colors on
-  discrete elements (banner rows, wordmark letters).
+  bright aqua) and the accepted circular neumorphic wave mark in
+  `docs/assets/ocean-logo-circular-neumorphic-reference.png`. No Rising Tides
+  magenta/purple (rejected 2026-07-04), no legacy teal-mint, no gradient-clip
+  text, and no prompt/cursor/code-glyph logo direction. The ramp paints solid
+  colors on discrete elements or vector fills inside the circular mark.
 - Stylesheets are split per domain under `styles/` (tokens → base → chrome →
   transcript → components → composer → panels → call → canvas → compact →
   float, in cascade order). Colors live ONLY in `styles/tokens.css`.
