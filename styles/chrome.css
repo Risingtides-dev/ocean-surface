@@ -55,7 +55,7 @@
   fill: currentColor;
 }
 
-/* Stroke (line) icons — WaveLogo, Menu, Council, Groups, Capture. Their SVGs
+/* Stroke (line) icons — Menu, Council, Groups, Capture, Mic. Their SVGs
    carry `fill="none" stroke="currentColor"` as presentation attributes, but a
    class selector (`.icon`, specificity 0-1-0) outranks a presentation attribute
    (0-0-0), so the global `.icon { fill: currentColor }` above would otherwise

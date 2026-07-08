@@ -141,13 +141,13 @@ pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoVie
         <div class="transcript" node_ref=container on:scroll=on_scroll>
             <Show when=is_empty>
                 <div class="transcript__landing">
-                    // The brand lockup — the wave mark breathing over a soft
-                    // depth halo, OCEAN in per-letter ramp colors (abyss to
-                    // sunlit surface). Replaces the TUI's 61-char ASCII
-                    // banner, which read as terminal cosplay at GUI scale.
+                    // The brand lockup — the Ocean badge with its swells
+                    // drifting at parallax speeds (the loading motion; the
+                    // old breathing radial pulse is gone), OCEAN in
+                    // per-letter ramp colors (abyss to sunlit surface).
                     // The rows are aria-hidden; the h1 stays for readers.
                     <div class="transcript__landing-mark" aria-hidden="true">
-                        <crate::icons::WaveLogo />
+                        <crate::icons::WaveBadge spinning=true />
                     </div>
                     <div class="transcript__landing-word" aria-hidden="true">
                         <span>"O"</span>

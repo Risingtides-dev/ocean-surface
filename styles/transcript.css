@@ -182,17 +182,17 @@
   text-align: center;
 }
 
-/* The brand lockup — the wave mark over a breathing depth halo, OCEAN in
+/* The brand lockup — the Ocean badge over a still depth halo, OCEAN in
    per-letter ramp colors (one solid color per letter, exactly the header
-   wordmark language at hero scale). Replaces the TUI ASCII banner. */
+   wordmark language at hero scale). The badge's swells drift while the
+   surface waits — the loading motion (replaces the old breathing pulse). */
 .transcript__landing-mark {
   position: relative;
   display: grid;
   place-items: center;
   width: 88px;
   height: 88px;
-  color: var(--ocean-7);
-  font-size: 44px;
+  font-size: 88px;
   user-select: none;
 }
 
@@ -202,7 +202,62 @@
   inset: 0;
   border-radius: 50%;
   background: radial-gradient(circle at 50% 44%, var(--accent-soft), transparent 68%);
-  animation: landing-breathe 5.6s var(--ease) infinite;
+  opacity: 0.7;
+}
+
+/* ── The Ocean badge (wave-badge) ─────────────────────────────────────
+   The circular brand mark: depth ramp top-to-bottom — sunlit dome arc,
+   two swells, the solid deep-water wave, the abyss bar. Reusable anywhere
+   a brand/loading mark is needed; `.is-spinning` drifts the swells at
+   parallax speeds. Each wave path repeats every 24 user units and the
+   drift translates exactly one period, so the loop is seamless. */
+.wave-badge {
+  display: block;
+}
+
+.wave-badge__ring {
+  stroke: var(--border-subtle);
+  stroke-width: 1;
+}
+
+.wave-badge__arc {
+  stroke: var(--ocean-8);
+  stroke-width: 3.8;
+}
+
+.wave-badge__w1 {
+  stroke: var(--ocean-7);
+  stroke-width: 3.4;
+}
+
+.wave-badge__w2 {
+  stroke: var(--ocean-6);
+  stroke-width: 3.4;
+}
+
+.wave-badge__fill {
+  fill: var(--ocean-5);
+}
+
+.wave-badge__bar {
+  stroke: var(--ocean-4);
+  stroke-width: 2.5;
+}
+
+.wave-badge.is-spinning .wave-badge__w1 {
+  animation: wave-drift 3.4s linear infinite;
+}
+
+.wave-badge.is-spinning .wave-badge__w2 {
+  animation: wave-drift 5.2s linear infinite;
+}
+
+.wave-badge.is-spinning .wave-badge__fill {
+  animation: wave-drift 7.4s linear infinite;
+}
+
+@keyframes wave-drift {
+  to { transform: translateX(-24px); }
 }
 
 .transcript__landing-word {
@@ -221,13 +276,12 @@
 .transcript__landing-word span:nth-child(4) { color: var(--ocean-7); }
 .transcript__landing-word span:nth-child(5) { color: var(--ocean-8); }
 
-@keyframes landing-breathe {
-  0%, 100% { opacity: 0.55; transform: scale(0.94); }
-  50% { opacity: 1; transform: scale(1.04); }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .transcript__landing-mark::before { animation: none; }
+  .wave-badge.is-spinning .wave-badge__w1,
+  .wave-badge.is-spinning .wave-badge__w2,
+  .wave-badge.is-spinning .wave-badge__fill {
+    animation: none;
+  }
 }
 
 /* Screen-reader title; visually quiet under the banner. */

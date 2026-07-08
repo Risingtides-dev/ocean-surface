@@ -4,25 +4,48 @@
 
 use leptos::prelude::*;
 
-/// The Ocean wordmark logo — a clean three-crest ocean wave. Drawn on a 24×24
-/// grid with a rounded 2px stroke so it stays crisp at header size. Replaces the
-/// old game-icons "big-wave" fill path, which rendered as an unreadable smear of
-/// disconnected blobs at 1em. (OCEAN-202)
+/// The Ocean badge — the brand mark: a circular emblem holding the depth
+/// ramp top-to-bottom (sunlit dome arc → two drifting swells → the solid
+/// deep-water wave → the abyss bar). Hand-drawn on a 48×48 grid, clipped to
+/// the circle; every element takes its color from a `--ocean-*` ramp token
+/// via CSS (`.wave-badge__*`), never inline. With `spinning=true` the
+/// swells drift at parallax speeds — the loading state. Waves repeat every
+/// 12 units and the drift translates exactly one period, so the loop is
+/// seamless.
 #[component]
-pub fn WaveLogo() -> impl IntoView {
+pub fn WaveBadge(#[prop(optional)] spinning: bool) -> impl IntoView {
+    let class = if spinning { "wave-badge is-spinning" } else { "wave-badge" };
     view! {
-        <svg class="icon icon--stroke icon--wave" viewBox="0 0 24 24" width="1em" height="1em"
-             fill="none" stroke="currentColor" stroke-width="2"
-             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M2 16c2 0 2.8-2 5-2s3 2 5 2 2.8-2 5-2 3 2 5 2" />
-            <path d="M2 11c2 0 2.8-2 5-2s3 2 5 2 2.8-2 5-2 3 2 5 2" />
-            <path d="M2 6c2 0 2.8-2 5-2s3 2 5 2 2.8-2 5-2 3 2 5 2" />
+        <svg class=class viewBox="0 0 48 48" width="1em" height="1em"
+             fill="none" aria-hidden="true">
+            <defs>
+                <clipPath id="wave-badge-clip">
+                    <circle cx="24" cy="24" r="21" />
+                </clipPath>
+            </defs>
+            <circle class="wave-badge__ring" cx="24" cy="24" r="21" />
+            <g clip-path="url(#wave-badge-clip)" stroke-linecap="round">
+                // Shallow floating dome: apex centerline y5.5, ends dive to
+                // y12.7 in the upper quarter (never the midline — a dome, not
+                // a ring). Radius solved from the three points.
+                <path class="wave-badge__arc" d="M 11.5 12.7 A 14.45 14.45 0 0 1 36.5 12.7" />
+                // Swells: period 24 (~1.75 broad undulations across the
+                // face), crest-to-trough 2.7. Drawn one period past each edge
+                // so the -24 drift loops seamlessly.
+                <path class="wave-badge__w1" d="M -24 19 q 6 -2.7 12 0 t 12 0 t 12 0 t 12 0 t 12 0 t 12 0 t 12 0" />
+                <path class="wave-badge__w2" d="M -24 27.4 q 6 -2.7 12 0 t 12 0 t 12 0 t 12 0 t 12 0 t 12 0 t 12 0" />
+                // Deep-water band: gentler top swell, half-period phase
+                // offset (inverted first bulge), flat bottom.
+                <path class="wave-badge__fill" d="M -24 34.3 q 6 2.1 12 0 t 12 0 t 12 0 t 12 0 t 12 0 t 12 0 t 12 0 L 72 38.5 L -24 38.5 Z" />
+                // Abyss bar: ~42% of the face, round-capped.
+                <path class="wave-badge__bar" d="M 15.4 42.3 L 32.6 42.3" />
+            </g>
         </svg>
     }
 }
 
 /// Menu / sessions toggle — three stacked lines (replaces "☰"). Rounded 2px
-/// stroke to match the WaveLogo + header-icon family. (OCEAN-202)
+/// stroke to match the wave-badge + header-icon family. (OCEAN-202)
 #[component]
 pub fn Menu() -> impl IntoView {
     view! {
@@ -105,7 +128,7 @@ pub fn SoundOff() -> impl IntoView {
 }
 
 /// Outbound call — a handset (replaces "📞"). Rounded 2px stroke to match the
-/// WaveLogo + header-icon family. Drives the place-call trigger (OCEAN-261).
+/// wave-badge + header-icon family. Drives the place-call trigger (OCEAN-261).
 #[component]
 pub fn Phone() -> impl IntoView {
     view! {
