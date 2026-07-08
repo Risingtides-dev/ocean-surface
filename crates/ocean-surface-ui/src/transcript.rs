@@ -125,6 +125,17 @@ pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoVie
     // composer below, which creates a session on the first message. A selected
     // session always has ≥1 turn, so this never shadows a real transcript.
     let is_empty = move || turns.with(Vec::is_empty);
+    // Send → first token: `streaming` flips on at submit, but the assistant
+    // turn only materializes when the first delta arrives — until then the
+    // last turn is the user's. That window is the pending gap.
+    let streaming = daemon.streaming;
+    let pending_response = move || {
+        streaming.get()
+            && turns.with(|t| {
+                t.last()
+                    .map_or(false, |x| matches!(x.role, crate::model::Role::User))
+            })
+    };
 
     view! {
         <div class="transcript" node_ref=container on:scroll=on_scroll>
@@ -166,6 +177,19 @@ pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoVie
                     view! { <TurnView idx=idx turns=turns daemon=daemon is_new=is_new /> }
                 }
             />
+            // The reply's landing site while the daemon works (send → first
+            // token): a proto-assistant header with a sonar ping breathing
+            // where the text is about to appear — never dead air.
+            <Show when=pending_response>
+                <div class="ocean-pending" role="status" aria-label="Ocean is thinking">
+                    <div class="ocean-pending__head">"ocean ▸"</div>
+                    <div class="ocean-pending__ping" aria-hidden="true">
+                        <span class="ocean-pending__ring"></span>
+                        <span class="ocean-pending__ring"></span>
+                        <span class="ocean-pending__core"></span>
+                    </div>
+                </div>
+            </Show>
         </div>
     }
 }

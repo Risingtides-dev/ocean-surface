@@ -278,19 +278,21 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/component/event", post(proxy_component_event))
         // Outbound call placement (POST /v1/calls/place → daemon passthrough).
         .route("/v1/calls/place", post(proxy_call_place))
-        // Longhouse council control (convene / demo) reaches the daemon through
-        // this origin, so the Game Boy deck served from dist/ can fire a demo
-        // (POST /v1/longhouse/demo) and trigger real councils same-origin.
+        // Longhouse council CONTROL endpoints (convene / demo) reach the daemon
+        // through this origin, so the native in-app council surface can drive a
+        // real council same-origin (e.g. POST /v1/longhouse/demo). The resulting
+        // council events arrive back on /v1/agent/events as
+        // extension=="longhouse" frames, which the surface now captures natively.
         .route(
             "/v1/longhouse/{*rest}",
             get(proxy_longhouse).post(proxy_longhouse),
         )
-        // Quorum/Council observability deck (OCEAN-96). The Game Boy longhouse
-        // viewer is embedded in the binary and exposed at a clean path so the
-        // web header's "Council" tab can open it. `/longhouse.html` kept as a
-        // legacy alias.
-        .route("/ui/council", get(council_deck))
-        .route("/longhouse.html", get(council_deck))
+        // The Game Boy "longhouse" deck route (/ui/council, /longhouse.html),
+        // its `council_deck` handler, and the embedded `COUNCIL_DECK_HTML` const
+        // were removed when the council modal went native — the iframe body was
+        // swapped for the in-app Leptos council component fed by the daemon's
+        // captured longhouse payloads. The orphaned static/longhouse.html is
+        // left on disk for orchestrator cleanup.
         .fallback_service(ServeDir::new(&dist).append_index_html_on_directories(true))
         // Set Cache-Control on static-file responses so a CDN / tunnel can never
         // wedge the app on a stale shell again (OCEAN — "blank pane / 11-minute
