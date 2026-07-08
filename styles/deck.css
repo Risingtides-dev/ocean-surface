@@ -243,12 +243,28 @@
   width: 12px;
   flex-shrink: 0;
   color: var(--fg-4);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* SVG chevron points down when open; rotate closed to point right. */
+.deck-files-arrow .icon {
   font-size: 9px;
+  transform: rotate(-90deg);
+  transition: transform var(--dur-fast) var(--ease);
+}
+
+.deck-files-arrow.is-open .icon {
+  transform: rotate(0deg);
 }
 
 .deck-files-icon {
   flex-shrink: 0;
   font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  color: var(--fg-3);
 }
 
 .deck-files-name {

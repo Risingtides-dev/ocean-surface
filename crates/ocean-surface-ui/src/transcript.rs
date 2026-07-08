@@ -179,11 +179,11 @@ pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoVie
                 }
             />
             // The reply's landing site while the daemon works (send → first
-            // token): the Ocean badge alone, swells churning under a calm rim
-            // where the text is about to appear — never dead air. Per the
-            // logo handoff: no `ocean ▸` proto-header, no prompt-like glyphs.
+            // token): a proto-assistant header with a sonar ping breathing
+            // where the text is about to appear — never dead air.
             <Show when=pending_response>
                 <div class="ocean-pending" role="status" aria-label="Ocean is thinking">
+                    <div class="ocean-pending__head">"ocean ▸"</div>
                     <div class="ocean-pending__badge" aria-hidden="true">
                         <crate::icons::WaveBadge spinning=true />
                     </div>

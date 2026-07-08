@@ -20,25 +20,32 @@ pub fn WaveBadge(#[prop(optional)] spinning: bool) -> impl IntoView {
              fill="none" aria-hidden="true">
             <defs>
                 <clipPath id="wave-badge-clip">
-                    <circle cx="24" cy="24" r="21" />
+                    <circle cx="24" cy="24" r="20.4" />
                 </clipPath>
             </defs>
-            <circle class="wave-badge__ring" cx="24" cy="24" r="21" />
+            // The coin: a matte face DARKER than the page, with a thin rim
+            // relief — the mark is embossed into a badge, not floating
+            // strokes. Geometry + colors are pixel-measured from
+            // docs/assets/ocean-logo-circular-neumorphic-reference.png.
+            <circle class="wave-badge__face" cx="24" cy="24" r="21" />
+            <circle class="wave-badge__ring" cx="24" cy="24" r="20.6" />
             <g clip-path="url(#wave-badge-clip)" stroke-linecap="round">
-                // Shallow floating dome: apex centerline y5.5, ends dive to
-                // y12.7 in the upper quarter (never the midline — a dome, not
-                // a ring). Radius solved from the three points.
-                <path class="wave-badge__arc" d="M 11.5 12.7 A 14.45 14.45 0 0 1 36.5 12.7" />
-                // Swells: period 24 (~1.75 broad undulations across the
-                // face), crest-to-trough 2.7. Drawn one period past each edge
-                // so the -24 drift loops seamlessly.
-                <path class="wave-badge__w1" d="M -24 19 q 6 -2.7 12 0 t 12 0 t 12 0 t 12 0 t 12 0 t 12 0 t 12 0" />
-                <path class="wave-badge__w2" d="M -24 27.4 q 6 -2.7 12 0 t 12 0 t 12 0 t 12 0 t 12 0 t 12 0 t 12 0" />
-                // Deep-water band: gentler top swell, half-period phase
-                // offset (inverted first bulge), flat bottom.
-                <path class="wave-badge__fill" d="M -24 34.3 q 6 2.1 12 0 t 12 0 t 12 0 t 12 0 t 12 0 t 12 0 t 12 0 L 72 38.5 L -24 38.5 Z" />
-                // Abyss bar: ~42% of the face, round-capped.
-                <path class="wave-badge__bar" d="M 15.4 42.3 L 32.6 42.3" />
+                // The dome runs nearly CONCENTRIC with the rim (R≈20.9 vs
+                // rim 21): apex centerline y6.6, legs dive to (8.5,13.5) /
+                // (39.5,13.5) — a wide canopy hugging the circle, not a
+                // small floating cap.
+                <path class="wave-badge__arc" d="M 8.5 13.5 A 20.9 20.9 0 0 1 39.5 13.5" />
+                // Swells: gentle — crest-to-trough 1.9 (4.5% of the face),
+                // period 22, centerlines y18.4 / y27.1. Drawn one period
+                // past each edge so the 22-unit drift loops seamlessly.
+                <path class="wave-badge__w1" d="M -22 18.4 q 5.5 -1.9 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0" />
+                <path class="wave-badge__w2" d="M -22 27.1 q 5.5 -1.9 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0" />
+                // Deep-water band: thicker than the swells (top y33.6 →
+                // bottom y39.6), half-period phase offset (inverted bulge).
+                <path class="wave-badge__fill" d="M -22 33.6 q 5.5 1.7 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 L 66 39.6 L -22 39.6 Z" />
+                // Abyss bar: bottom chord hugging the rim (y43.75, ~40% of
+                // the face wide).
+                <path class="wave-badge__bar" d="M 15.5 43.75 L 32.5 43.75" />
             </g>
         </svg>
     }

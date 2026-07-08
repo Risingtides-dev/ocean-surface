@@ -1,0 +1,390 @@
+/* Workspace pane — the permanent RIGHT-side desktop shell pane
+   (docs/OCEAN_DESKTOP_NORTH_STAR.md). Tauri-only: the component never mounts
+   on the browser PWA or Chrome extension, so these rules are inert there.
+   Colors come ONLY from tokens.css variables. Material rule (same as
+   deck.css): an element takes the border recipe OR the elevation recipe,
+   never both.
+
+   z-index ladder (right-side surfaces):
+     .workspace ........ 50  (permanent pane; above content, below reveals)
+     .deck ............. 60  (transient reveal-on-intent rail)
+     modals (panels) ... 100
+     palette overlay ... 1100
+   The workspace sits ABOVE the in-flow transcript/composer (z auto) so it can
+   overlay on compact widths, and BELOW the deck + palette so transient
+   reveals win. */
+
+/* The pane width is shared by the pane itself and the layout gutter the app
+   shell carves out of <main> when the pane is open on a wide viewport. */
+:root {
+  --workspace-w: clamp(380px, 45vw, 620px);
+}
+
+/* ── Shell ─────────────────────────────────────────────────────────── */
+
+.workspace {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: var(--workspace-w);
+  display: flex;
+  flex-direction: column;
+  background: var(--sheen-soft), var(--bg-raised);
+  box-shadow: var(--elev-3);
+  z-index: 50;
+  transform: translateX(0);
+  transition: transform var(--dur) var(--ease-tide);
+}
+
+/* Collapsed: slide fully off the right edge and drop out of hit-testing.
+   The app shell removes the layout gutter (has-workspace-open) in lockstep. */
+.workspace.is-collapsed {
+  transform: translateX(100%);
+  pointer-events: none;
+}
+
+/* Wide viewport: the pane SPLITS the surface — the shell carves a right
+   gutter out of <main> so the transcript/composer shrink to leave room.
+   Below 900px the pane OVERLAYS instead (no gutter; it sits on top with its
+   elevation shadow), mirroring compact.css's narrow-column behavior. */
+@media (min-width: 900px) {
+  .ocean-surface.has-workspace-open {
+    padding-right: var(--workspace-w);
+  }
+}
+
+/* Smooth the gutter as the pane collapses/expands. Scoped to padding-right so
+   it never interferes with other layout transitions on the shell. */
+.ocean-surface {
+  transition: padding-right var(--dur) var(--ease-tide);
+}
+
+/* ── Tab strip ─────────────────────────────────────────────────────── */
+
+.workspace-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  flex: 0 0 auto;
+  min-height: 38px;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--border-subtle);
+  overflow-x: auto;
+}
+
+.workspace-tab {
+  appearance: none;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--fg-3);
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+}
+
+.workspace-tab:hover {
+  color: var(--fg-2);
+  background: var(--bg-hover);
+}
+
+.workspace-tab.is-active {
+  color: var(--fg);
+  border-bottom-color: var(--accent);
+}
+
+.workspace-tab__title {
+  max-width: 16ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.workspace-tab__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-sm);
+  color: var(--fg-4);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+}
+
+.workspace-tab__close:hover {
+  color: var(--fg);
+  background: var(--bg-well);
+}
+
+/* ── Body: active-tab content + docked tree ────────────────────────── */
+
+.workspace-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+}
+
+/* Shared content region (Files empty-state / Preview code). */
+.workspace-preview,
+.workspace-browser {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Shared idioms (quiet empty / loading / error) ─────────────────── */
+
+.workspace-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 48px 20px;
+  text-align: center;
+  font-family: var(--font);
+  font-size: 12px;
+  color: var(--fg-3);
+  max-width: 32ch;
+  margin: auto;
+  line-height: 1.5;
+}
+
+.workspace-loading {
+  padding: 10px 14px;
+  font-family: var(--font);
+  font-size: 12px;
+  color: var(--fg-3);
+}
+
+.workspace-error {
+  padding: 10px 14px;
+  font-family: var(--font);
+  font-size: 12px;
+  color: var(--err);
+}
+
+/* ── Preview content ───────────────────────────────────────────────── */
+
+.workspace-preview__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 12px;
+}
+
+.workspace-preview__banner {
+  font-family: var(--font);
+  font-size: 11px;
+  color: var(--warn);
+  background: var(--warn-soft);
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  margin-bottom: 8px;
+}
+
+.workspace-preview__code {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--fg-2);
+  background: var(--bg-well);
+  box-shadow: var(--well);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+/* ── Docked file tree (right edge inside the pane) ─────────────────── */
+
+.workspace-tree {
+  flex: 0 0 220px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid var(--border-subtle);
+  background: var(--bg);
+}
+
+.workspace-tree-filter {
+  flex: 0 0 auto;
+  padding: 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.workspace-tree-filter__input {
+  width: 100%;
+  box-sizing: border-box;
+  appearance: none;
+  background: var(--bg-elevated);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--font);
+  font-size: 12px;
+  padding: 5px 8px;
+  outline: none;
+  transition: border-color var(--dur-fast) var(--ease);
+}
+
+.workspace-tree-filter__input:focus {
+  border-color: var(--accent-ring);
+}
+
+.workspace-tree-filter__input::placeholder {
+  color: var(--fg-4);
+}
+
+.workspace-tree-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 0 8px;
+}
+
+.workspace-tree-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.workspace-tree-node {
+  margin: 0;
+}
+
+.workspace-tree-row {
+  appearance: none;
+  width: 100%;
+  box-sizing: border-box;
+  background: transparent;
+  border: none;
+  color: var(--fg-2);
+  font-family: var(--font);
+  font-size: 12px;
+  padding: 3px 8px 3px 8px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.workspace-tree-row:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.workspace-tree-row--file {
+  color: var(--fg-3);
+}
+
+.workspace-tree__arrow {
+  width: 12px;
+  color: var(--fg-4);
+  text-align: center;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* SVG chevron points down when open; rotate closed to point right. */
+.workspace-tree__arrow .icon {
+  font-size: 10px;
+  transform: rotate(-90deg);
+  transition: transform var(--dur-fast) var(--ease);
+}
+
+.workspace-tree__arrow.is-open .icon {
+  transform: rotate(0deg);
+}
+
+.workspace-tree__icon {
+  font-size: 13px;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  color: var(--fg-3);
+}
+
+.workspace-tree__name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-tree__branch {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-4);
+  background: var(--bg-elevated);
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  max-width: 14ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Header collapse toggle (rendered in the app header, Tauri-only) ── */
+
+.ocean-workspace-toggle {
+  appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--fg-3);
+  font-family: var(--mono);
+  font-size: 15px;
+  line-height: 1;
+  width: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.ocean-workspace-toggle:hover {
+  color: var(--fg);
+  background: var(--bg-hover);
+  border-color: var(--border);
+}
+
+/* ── Reduced motion ────────────────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace,
+  .ocean-surface {
+    transition: none;
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+   BrowserPaneTab owns the .workspace-browser* block below (screencast
+   viewport + input overlay). It appends to this file's tail and reads
+   before writing so these .workspace* / .workspace-tree* rules survive.
+   ───────────────────────────────────────────────────────────────────── */

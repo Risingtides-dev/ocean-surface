@@ -74,6 +74,20 @@
   --accent-soft: rgba(0, 215, 215, 0.12);  /* tinted fills */
   --accent-ring: rgba(0, 215, 215, 0.45);  /* focus ring */
 
+  /* ── Brand — the Ocean badge (the circular mark) ─────────────── */
+  /* Source of truth: docs/assets/ocean-logo-circular-neumorphic-reference.png,
+     pixel-sampled 2026-07-08. The badge is MUTED — matte turquoise→blue on a
+     coin face darker than the page — not the neon working ramp above. These
+     tokens exist only for the badge (icons.rs WaveBadge); nothing else may
+     take them. */
+  --badge-face: #020203;                   /* coin face — darker than --bg */
+  --badge-rim: rgba(148, 156, 160, 0.22);  /* rim relief edge */
+  --badge-arc: #03D9C5;                    /* sunlit dome */
+  --badge-w1: #01D2C3;                     /* first swell */
+  --badge-w2: #01AFB5;                     /* second swell */
+  --badge-fill: #046EB2;                   /* deep-water band */
+  --badge-bar: #085F9F;                    /* abyss bar */
+
   /* ── Status ───────────────────────────────────────────────────── */
   --ok: #1ED760;    --ok-soft: rgba(30, 215, 96, 0.12);
   --err: #FF4D67;   --err-soft: rgba(255, 77, 103, 0.12);

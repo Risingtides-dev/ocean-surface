@@ -1022,3 +1022,20 @@ split interdependent app.rs hunks across lanes leaving origin/main unbuildable
 (missing host.rs); landed verified integration commits 93d7ed3/f16d6b2/66df8ee
 via detached-worktree assembly.
 _________________________________________________________________________________
+time:      [2:25pm] [07-08-26]
+agent:     [claude] [fable-5]
+worktree:  desktop-workspace-pane (gitbutler)
+type:      feature-request
+area:      frontend
+
+Workspace pane wave landed: Codex-style permanent right pane (Tauri-gated) with
+tab strip, docked filterable file tree (daemon files=1 listing), file preview
+tabs (fs/file endpoint, cache + watcher refresh), browser tab hosting the CDP
+screencast client, drag/collapse ergonomics following. Connectivity fixed
+end-to-end: daemon CORS allowlist for tauri://localhost, dual-loopback bind,
+wasm localhost->127.0.0.1 pin. Emoji glyphs purged for icons.rs SVGs
+(GitBranch/Folder/Code/ChevronDown + rotation CSS) across workspace, deck
+files, and the shared filetree component. Four capped subagents
+integrator-finished; probe scaffolding in ocean-tauri lib.rs marked REMOVE ME
+rides until the next binary pass.
+_________________________________________________________________________________

@@ -219,6 +219,13 @@ fn repo_state(root: String) -> Result<Option<RepoStateDto>, String> {
 // ── dock badge ────────────────────────────────────────────────────────────
 
 /// Set or clear the dock-icon badge. `Some(n)` shows `n`; `None` clears.
+
+/// TEMP PROBE (integration debugging): the webview reports DOM/global ground
+/// truth here; written to /tmp/ocean-probe.txt. REMOVE ME.
+#[tauri::command]
+fn probe_report(s: String) -> Result<(), String> {
+    std::fs::write("/tmp/ocean-probe.txt", s).map_err(|e| e.to_string())
+}
 /// The wasm side maps the pending permission-prompt count onto this so an
 /// agent waiting on approval is visible from the dock (host.rs `set_badge`).
 #[tauri::command]
@@ -999,6 +1006,34 @@ pub fn run() {
                     }
                 });
             }
+            // TEMP PROBE (integration debugging): 4s after boot, ask the
+            // webview for ground truth — is __TAURI_INTERNALS__ present, did
+            // the workspace pane / header chevron mount, what classes does
+            // <main> carry, which bundle hash is loaded. The answer lands in
+            // /tmp/ocean-probe.txt via the probe_report command. REMOVE ME.
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(4));
+                    if let Some(w) = handle.get_webview_window("main") {
+                        let _ = w.eval(
+                            "setTimeout(() => { try { \
+                               const report = JSON.stringify({ \
+                                 internals: !!window.__TAURI_INTERNALS__, \
+                                 workspace: !!document.querySelector('.workspace'), \
+                                 chevron: !!document.querySelector('.ocean-workspace-toggle'), \
+                                 mainClass: document.querySelector('main')?.className ?? null, \
+                                 bundle: (document.querySelector('script[src*=ocean-surface-ui]')?.getAttribute('src')) ?? null, \
+                                 href: location.href \
+                               }); \
+                               if (window.__TAURI_INTERNALS__) { \
+                                 window.__TAURI_INTERNALS__.invoke('probe_report', { s: report }); \
+                               } \
+                             } catch (e) {} }, 100);",
+                        );
+                    }
+                });
+            }
             // System-tray icon: app icon, "Ocean" tooltip, Show / Daemon / Quit.
             let show = MenuItem::with_id(app, "show", "Show Ocean", true, None::<&str>)?;
             let daemon_start_item =
@@ -1137,7 +1172,8 @@ pub fn run() {
             daemon_status,
             daemon_start,
             daemon_stop,
-            daemon_restart
+            daemon_restart,
+            probe_report
         ])
         .run(tauri::generate_context!())
         .expect("error while running ocean-tauri");

@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Ocean",
+        "title": "Ocean Desktop",
         "width": 1280,
         "height": 800,
         "minWidth": 720,
@@ -28,12 +28,16 @@
   },
   "bundle": {
     "active": false,
-    "icon": ["icons/icon.png"]
+    "icon": [
+      "icons/icon.png"
+    ]
   },
   "plugins": {
     "deep-link": {
       "desktop": {
-        "schemes": ["ocean"]
+        "schemes": [
+          "ocean"
+        ]
       }
     }
   }

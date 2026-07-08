@@ -402,11 +402,15 @@ fn dir_row(
                     }
                 }
             >
-                <span class="deck-files-arrow">
-                    {move || if is_expanded_arrow() { "▾" } else { "▸" }}
+                <span class="deck-files-arrow" class:is-open=is_expanded_arrow>
+                    <crate::icons::ChevronDown />
                 </span>
                 <span class="deck-files-icon">
-                    {if has_git { "📦" } else { "📁" }}
+                    {if has_git {
+                        view! { <crate::icons::GitBranch /> }.into_any()
+                    } else {
+                        view! { <crate::icons::Folder /> }.into_any()
+                    }}
                 </span>
                 <span class="deck-files-name">{entry_name}</span>
                 {branch_view}

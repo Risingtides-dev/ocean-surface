@@ -168,6 +168,14 @@
   flex-direction: column;
   gap: 18px;
   padding: 18px 22px;
+  /* Opaque on purpose: the animated pending badge keeps this scroll
+     content on its own compositor layer, and a transparent layer's blacks
+     can quantize differently from the page underneath — the boundary
+     rendered as a faint full-width "lighter/darker" line at the bottom of
+     the content (reported twice, Chrome and Tauri/WebKit). An opaque
+     background makes the whole box one consistent surface, so any layer
+     edge falls on designed boundaries (header/composer), never mid-page. */
+  background: var(--bg);
   color: var(--fg-2);
 }
 
@@ -206,58 +214,100 @@
 }
 
 /* ── The Ocean badge (wave-badge) ─────────────────────────────────────
-   The circular brand mark: depth ramp top-to-bottom — sunlit dome arc,
-   two swells, the solid deep-water wave, the abyss bar. Reusable anywhere
-   a brand/loading mark is needed; `.is-spinning` drifts the swells at
-   parallax speeds. Each wave path repeats every 24 user units and the
-   drift translates exactly one period, so the loop is seamless. */
+   The circular brand mark, pixel-true to the reference
+   (docs/assets/ocean-logo-circular-neumorphic-reference.png): a matte
+   coin face darker than the page, thin rim relief, and the muted
+   turquoise→blue --badge-* ramp (NOT the neon working ramp). Reusable
+   anywhere a brand/loading mark is needed; `.is-spinning` churns the
+   water. Wave paths repeat every 22 user units and every loop translates
+   exactly one period, so the seam is invisible. */
 .wave-badge {
   display: block;
+  /* Shallow relief: the coin sits ON the surface, barely. */
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.5));
+}
+
+.wave-badge__face {
+  fill: var(--badge-face);
 }
 
 .wave-badge__ring {
-  stroke: var(--border-subtle);
-  stroke-width: 1;
+  stroke: var(--badge-rim);
+  stroke-width: 0.8;
 }
 
 .wave-badge__arc {
-  stroke: var(--ocean-8);
-  stroke-width: 3.8;
+  stroke: var(--badge-arc);
+  stroke-width: 3.9;
 }
 
 .wave-badge__w1 {
-  stroke: var(--ocean-7);
-  stroke-width: 3.4;
+  stroke: var(--badge-w1);
+  stroke-width: 3.7;
 }
 
 .wave-badge__w2 {
-  stroke: var(--ocean-6);
-  stroke-width: 3.4;
+  stroke: var(--badge-w2);
+  stroke-width: 3.7;
 }
 
 .wave-badge__fill {
-  fill: var(--ocean-5);
+  fill: var(--badge-fill);
 }
 
 .wave-badge__bar {
-  stroke: var(--ocean-4);
-  stroke-width: 2.5;
+  stroke: var(--badge-bar);
+  stroke-width: 2.2;
 }
 
+/* Churn, not marquee. Three ingredients make current instead of a conveyor
+   belt: COUNTER-FLOW (the middle swell runs against the other two — shear),
+   SURGE (eased keyframes: the current pulses, near-zero velocity at the
+   loop seam so the wrap never hitches), and BOB (small translateY on offset
+   phases so the layers never sync). X always travels exactly one 22-unit
+   period per loop — the seam stays invisible. The deep band also breathes
+   from its waterline (scaleY about its bottom edge). Rim, arc, and bar stay
+   dead calm: current moves BELOW a calm surface. */
 .wave-badge.is-spinning .wave-badge__w1 {
-  animation: wave-drift 3.4s linear infinite;
+  animation: wave-churn-a 4.6s infinite;
 }
 
 .wave-badge.is-spinning .wave-badge__w2 {
-  animation: wave-drift 5.2s linear infinite;
+  animation: wave-churn-b 7.4s infinite;
 }
 
 .wave-badge.is-spinning .wave-badge__fill {
-  animation: wave-drift 7.4s linear infinite;
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+  animation: wave-churn-deep 10s infinite;
 }
 
-@keyframes wave-drift {
-  to { transform: translateX(-24px); }
+/* Top swell — fastest current, flowing left, bobbing under the arc. */
+@keyframes wave-churn-a {
+  0%   { transform: translate(0, 0); }
+  25%  { transform: translate(-5.9px, -0.5px); }
+  50%  { transform: translate(-11px, 0.15px); }
+  75%  { transform: translate(-16.1px, 0.5px); }
+  100% { transform: translate(-22px, 0); }
+}
+
+/* Middle swell — COUNTER-flow (rightward), slower, opposite bob phase.
+   The shear between this and its neighbors is what reads as churn. */
+@keyframes wave-churn-b {
+  0%   { transform: translate(0, 0.45px); }
+  25%  { transform: translate(5.7px, 0.1px); }
+  50%  { transform: translate(11px, -0.45px); }
+  75%  { transform: translate(16.7px, 0.1px); }
+  100% { transform: translate(22px, 0.45px); }
+}
+
+/* Deep band — slow leftward mass, swelling from the waterline. */
+@keyframes wave-churn-deep {
+  0%   { transform: translate(0, 0) scaleY(1); }
+  25%  { transform: translate(-5.3px, 0) scaleY(1.04); }
+  50%  { transform: translate(-11px, 0) scaleY(1); }
+  75%  { transform: translate(-16.9px, 0) scaleY(1.025); }
+  100% { transform: translate(-22px, 0) scaleY(1); }
 }
 
 .transcript__landing-word {

@@ -29,6 +29,8 @@ mod transcript;
 mod tts;
 mod voice;
 mod widget;
+mod workspace;
+mod workspace_browser;
 
 use app::App;
 use widget::{float_mode_active, FloatingApp};

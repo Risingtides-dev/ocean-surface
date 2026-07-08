@@ -1047,9 +1047,20 @@ pub struct FsDirEntry {
     #[serde(default)]
     pub git_branch: Option<String>,
 }
+/// One file entry from the daemon's filesystem listing (`files=1`).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct FsFileEntry {
+    /// Basename of the file (e.g. "main.rs").
+    pub name: String,
+    /// Canonical absolute path of this file.
+    pub path: String,
+    /// Size in bytes.
+    #[serde(default)]
+    pub size: u64,
+}
 
 /// Response from `GET /v1/fs/dirs?path=<path>`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[allow(dead_code)]
 pub struct FsDirsResponse {
     #[serde(default)]
@@ -1062,6 +1073,11 @@ pub struct FsDirsResponse {
     pub home: String,
     #[serde(default)]
     pub dirs: Vec<FsDirEntry>,
+    /// File entries — present only when the request opts in via `&files=1`.
+    /// Absent (empty) for plain dir listings, so existing callers that ignore
+    /// files are unaffected.
+    #[serde(default)]
+    pub files: Vec<FsFileEntry>,
     #[serde(default)]
     pub error: Option<String>,
 }
@@ -1078,6 +1094,58 @@ pub async fn fetch_fs_dirs(base_url: &str, path: &str) -> Option<FsDirsResponse>
     );
     let resp = gloo_net::http::Request::get(&url).send().await.ok()?;
     resp.json::<FsDirsResponse>().await.ok()
+}
+/// Fetch a directory listing WITH file entries (`&files=1`). The desktop
+/// workspace tree shows files alongside folders; everything else mirrors
+/// [`fetch_fs_dirs`] exactly. The daemon's success responses carry no `ok`
+/// field (serde default = false) — failure is signalled by `error`, so the
+/// caller uses `error.is_none()` as the success predicate (same as the
+/// files-panel helper).
+pub async fn fetch_fs_dirs_with_files(base_url: &str, path: &str) -> Option<FsDirsResponse> {
+    let encoded = js_sys::encode_uri_component(path);
+    let url = format!(
+        "{}/v1/fs/dirs?path={}&files=1",
+        base_url.trim_end_matches('/'),
+        encoded.as_string().unwrap_or_else(|| path.to_string())
+    );
+    let resp = gloo_net::http::Request::get(&url).send().await.ok()?;
+    resp.json::<FsDirsResponse>().await.ok()
+}
+
+/// Response from `GET /v1/fs/file?path=<path>` — a single file's contents.
+/// `binary` is true (with empty `content`) when the daemon detects a NUL in
+/// the leading bytes; `truncated` is true when `content` hit the daemon's
+/// cap (512 KiB). As with the dirs response, failure is signalled by `error`,
+/// not the absence of `ok`.
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct FsFileResponse {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default)]
+    pub binary: bool,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Fetch a single file's contents from the daemon. `path` may include a
+/// leading `~` for home-relative requests. Returns `None` on network or decode
+/// errors — the caller handles the empty state.
+pub async fn fetch_fs_file(base_url: &str, path: &str) -> Option<FsFileResponse> {
+    let encoded = js_sys::encode_uri_component(path);
+    let url = format!(
+        "{}/v1/fs/file?path={}",
+        base_url.trim_end_matches('/'),
+        encoded.as_string().unwrap_or_else(|| path.to_string())
+    );
+    let resp = gloo_net::http::Request::get(&url).send().await.ok()?;
+    resp.json::<FsFileResponse>().await.ok()
 }
 
 /// Reactive handle to the daemon. Owns the live turns vec + connection
@@ -4186,6 +4254,13 @@ pub(crate) fn daemon_url_fallback(protocol: &str, host: &str) -> String {
     }
     if !host.is_empty() {
         let host_only = host.split(':').next().unwrap_or(host);
+        // `localhost` resolves ::1-first on macOS while the daemon listens on
+        // the IPv4 loopback only; WKWebView's v6->v4 fallback is inconsistent
+        // (EventSource especially), so pin the IP and skip resolution games.
+        // Hits the Tauri shell (tauri://localhost) and http://localhost dev.
+        if host_only == "localhost" {
+            return DEFAULT_DAEMON_URL.into();
+        }
         return format!("http://{host_only}:4780");
     }
     DEFAULT_DAEMON_URL.into()
@@ -5421,10 +5496,12 @@ mod tests {
             daemon_url_fallback("http:", "192.168.1.50:8790"),
             "http://192.168.1.50:4780"
         );
-        assert_eq!(
-            daemon_url_fallback("http:", "localhost:8790"),
-            "http://localhost:4780"
-        );
+        // `localhost` is pinned to the IPv4 loopback: macOS resolves it
+        // ::1-first while the daemon listens on 127.0.0.1 only, and
+        // WKWebView's v6->v4 fallback is unreliable (EventSource especially).
+        assert_eq!(daemon_url_fallback("http:", "localhost:8790"), DEFAULT_DAEMON_URL);
+        // The Tauri shell (tauri://localhost) takes the same pin.
+        assert_eq!(daemon_url_fallback("tauri:", "localhost"), DEFAULT_DAEMON_URL);
     }
 
     #[test]

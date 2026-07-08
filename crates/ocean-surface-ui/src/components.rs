@@ -917,13 +917,18 @@ fn FileTreeNode(entry: Value, depth: usize, component_id: String, daemon: Daemon
     if is_dir {
         let open = RwSignal::new(depth == 0);
         let name_c = name.clone();
-        let arrow = move || if open.get() { "▾" } else { "▸" };
+        // Inline rotation (not a stylesheet rule): this component's styles
+        // live in the transcript sheet another workstream owns; keep the
+        // icon swap self-contained.
+        let arrow_style = move || {
+            if open.get() { "" } else { "transform: rotate(-90deg)" }
+        };
         view! {
             <li class="filetree__node filetree__node--dir">
                 <button class="filetree__row filetree__row--dir" type="button" style=indent
                     on:click=move |_| open.update(|v| *v = !*v)>
-                    <span class="filetree__arrow">{arrow}</span>
-                    <span class="filetree__icon">"📁"</span>
+                    <span class="filetree__arrow" style=arrow_style><crate::icons::ChevronDown /></span>
+                    <span class="filetree__icon"><crate::icons::Folder /></span>
                     <span class="filetree__name">{name_c}</span>
                 </button>
                 <Show when=move || open.get()>
@@ -956,7 +961,7 @@ fn FileTreeNode(entry: Value, depth: usize, component_id: String, daemon: Daemon
         view! {
             <li class="filetree__node">
                 <button class="filetree__row" type="button" style=indent on:click=on_click>
-                    <span class="filetree__icon">"📄"</span>
+                    <span class="filetree__icon"><crate::icons::Code /></span>
                     <span class="filetree__name">{name}</span>
                 </button>
             </li>
