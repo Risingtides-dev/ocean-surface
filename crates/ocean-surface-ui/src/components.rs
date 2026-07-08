@@ -803,9 +803,11 @@ fn TimelineView(kind_props: Value) -> impl IntoView {
                 let status = step.get("status").and_then(|v| v.as_str()).unwrap_or("pending").to_string();
                 let dot = match status.as_str() {
                     "done" => "✓",
-                    "active" => "◉",
                     "error" => "✗",
-                    _ => "○",
+                    // active/pending markers are drawn geometrically in CSS
+                    // (::before circle) — text glyphs like ◉ sit wherever the
+                    // font's metrics put them, never optical center.
+                    _ => "",
                 };
                 view! {
                     <div class=format!("timeline-step timeline-step--{status}")>

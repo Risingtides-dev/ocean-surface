@@ -48,6 +48,16 @@ fn reset_composer_textarea(el: &web_sys::HtmlTextAreaElement) {
     let _ = style.set_property("overflow-y", "hidden");
 }
 
+/// Whether the surface window currently has focus (`document.hasFocus()`).
+/// Defaults to `true` when the document can't be read so an off-focus
+/// notification is never fired on an uncertain state.
+fn window_focused() -> bool {
+    web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.has_focus().ok())
+        .unwrap_or(true)
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     let daemon = Daemon::new(daemon_url_from_env());
@@ -86,6 +96,7 @@ pub fn App() -> impl IntoView {
     let browser_active = daemon.browser_active;
     let livekit_token_path = daemon.livekit_token_path;
     let browser_last_action = daemon.browser_last_action;
+    let pending_permissions = daemon.pending_permissions;
     // Canvas patch stream (OCEAN-178): patches the agent applied this session,
     // streamed over the daemon's `surface_patch` SSE event. The GPUI native
     // shell renders these on a full canvas; the web surface renders a basic
@@ -145,6 +156,15 @@ pub fn App() -> impl IntoView {
         prev_streaming.set(now);
         // Falling edge = a turn just completed.
         if was && !now {
+            // Native OS notification when a turn finishes off-focus, so the
+            // user is pulled back to the answer (OS-presence slice). Same
+            // falling edge the TTS speak guards; independent of `muted`.
+            if !window_focused() {
+                let title = "Ocean".to_string();
+                wasm_bindgen_futures::spawn_local(async move {
+                    crate::host::notify(&title, "Turn complete").await;
+                });
+            }
             if let Some((id, text)) = latest_assistant_text(&turns.get_untracked()) {
                 if last_spoken.get_untracked().as_deref() != Some(id.as_str()) {
                     last_spoken.set(Some(id));
@@ -152,6 +172,17 @@ pub fn App() -> impl IntoView {
                 }
             }
         }
+    });
+
+    // Dock/taskbar badge mirrors the pending permission-prompt count: a
+    // non-zero count sets the macOS dock badge so a blocked tool decision is
+    // noticed; zero clears it. No-op off the Tauri shell (host::set_badge
+    // returns early on non-Tauri hosts).
+    Effect::new(move |_| {
+        let n = pending_permissions.with(|p| p.len() as i64);
+        wasm_bindgen_futures::spawn_local(async move {
+            crate::host::set_badge(if n > 0 { Some(n) } else { None }).await;
+        });
     });
 
     // Pointer light: ONE window mousemove listener feeds cursor position to
@@ -520,7 +551,7 @@ pub fn App() -> impl IntoView {
                                     <div class="voice-wrap">
                                         <button class="voice-orb is-disabled" type="button" disabled=true
                                                 title="voice off — set xAI key in ~/.config/ocean-surface/xai.key">
-                                            <span class="voice-orb__glyph"><crate::icons::Amplitude /></span>
+                                            <span class="voice-orb__glyph"><crate::icons::Mic /></span>
                                         </button>
                                         <span class="voice-hint">"voice off"</span>
                                     </div>
