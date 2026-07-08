@@ -1,0 +1,701 @@
+/* Context Deck + command palette (docs/OCEAN_DESKTOP_NORTH_STAR.md).
+   Panels: .deck-* (files / repo / browser). Palette: .palette-*.
+   Colors come ONLY from tokens.css variables. Material rule: an element
+   takes the border recipe OR the elevation recipe, never both. */
+
+/* ── Deck shell — right-side reveal-on-intent rail ─────────────────── */
+
+.deck {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(360px, 92vw);
+  display: flex;
+  flex-direction: column;
+  background: var(--sheen-soft), var(--bg-raised);
+  box-shadow: var(--elev-3);
+  z-index: 60;
+  animation: deck-rise var(--dur) var(--ease-tide);
+}
+
+@keyframes deck-rise {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.deck__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px 10px;
+}
+
+.deck__title {
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  letter-spacing: 0.02em;
+}
+
+.deck__close {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--fg-3);
+  font-size: 12px;
+  line-height: 1;
+  padding: 6px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+}
+
+.deck__close:hover {
+  color: var(--fg);
+  background: var(--bg-hover);
+}
+
+.deck__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 12px 16px;
+}
+
+/* ── Shared deck idioms ────────────────────────────────────────────── */
+
+/* Quiet empty states: centered, no chrome. */
+.deck-files-empty,
+.deck-repo-empty,
+.deck-browser-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 48px 20px;
+  text-align: center;
+}
+
+.deck-files-empty__text,
+.deck-repo-empty-text,
+.deck-browser-empty-text {
+  font-family: var(--font);
+  font-size: 12px;
+  color: var(--fg-3);
+  max-width: 26ch;
+  line-height: 1.5;
+}
+
+.deck-repo-empty-icon {
+  font-size: 18px;
+  color: var(--fg-4);
+}
+
+/* Ghost buttons (refresh, choose-folder). */
+.deck-files-btn {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg-2);
+  font-family: var(--font);
+  font-size: 12px;
+  padding: 5px 10px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.deck-files-btn:hover {
+  color: var(--fg);
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.deck-files-btn--primary {
+  border-color: var(--accent-ring);
+  color: var(--accent);
+}
+
+.deck-files-btn--primary:hover {
+  color: var(--accent-bright);
+  background: var(--accent-soft);
+  border-color: var(--accent-ring);
+}
+
+.deck-files-btn--refresh {
+  padding: 5px 8px;
+}
+
+/* ── Files panel ───────────────────────────────────────────────────── */
+
+.deck-files-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.deck-files-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 30px;
+}
+
+.deck-files-breadcrumb {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.deck-files-root-label {
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.deck-files-root-path {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.deck-files-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.deck-files-loading,
+.deck-files-error {
+  font-family: var(--font);
+  font-size: 11px;
+  padding: 4px 2px;
+}
+
+.deck-files-loading {
+  color: var(--fg-3);
+}
+
+.deck-files-error {
+  color: var(--err);
+}
+
+.deck-files-tree {
+  min-height: 0;
+}
+
+.deck-files-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.deck-files-node {
+  margin: 0;
+}
+
+.deck-files-row {
+  appearance: none;
+  border: none;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding-top: 4px;
+  padding-bottom: 4px;
+  padding-right: 8px;
+  /* padding-left set inline per depth */
+  border-radius: var(--radius-sm);
+  color: var(--fg-2);
+  font-family: var(--font);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.deck-files-row:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.deck-files-arrow {
+  width: 12px;
+  flex-shrink: 0;
+  color: var(--fg-4);
+  font-size: 9px;
+}
+
+.deck-files-icon {
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
+.deck-files-name {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.deck-files-branch {
+  flex-shrink: 0;
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  max-width: 12ch;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Repo panel ────────────────────────────────────────────────────── */
+
+.deck-repo-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.deck-repo-branch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.deck-repo-branch-icon {
+  color: var(--fg-3);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.deck-repo-branch-name {
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.deck-repo-ahead,
+.deck-repo-behind,
+.deck-repo-staged,
+.deck-repo-dirty {
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  flex-shrink: 0;
+}
+
+.deck-repo-ahead {
+  color: var(--info);
+  background: var(--info-soft);
+}
+
+.deck-repo-behind {
+  color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.deck-repo-working {
+  display: flex;
+  gap: 6px;
+}
+
+.deck-repo-staged {
+  color: var(--ok);
+  background: var(--ok-soft);
+}
+
+.deck-repo-dirty {
+  color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.deck-repo-commits {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 0;
+}
+
+.deck-repo-commit {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  min-width: 0;
+}
+
+.deck-repo-commit:hover {
+  background: var(--bg-hover);
+}
+
+.deck-repo-commit-id {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-3);
+  flex-shrink: 0;
+}
+
+.deck-repo-commit-summary {
+  font-family: var(--font);
+  font-size: 12px;
+  color: var(--fg-2);
+  min-width: 0;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.deck-repo-commit-time {
+  font-family: var(--font);
+  font-size: 10px;
+  color: var(--fg-3);
+  flex-shrink: 0;
+}
+
+/* ── Browser cockpit ───────────────────────────────────────────────── */
+
+.deck-browser-cockpit {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.deck-browser-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+.deck-browser-page-empty {
+  font-family: var(--font);
+  font-size: 11px;
+  color: var(--fg-3);
+  padding: 2px;
+}
+
+.deck-browser-page-card {
+  background: var(--sheen-soft), var(--bg-elevated);
+  box-shadow: var(--elev-1);
+  border-radius: var(--radius-lg);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.deck-browser-page-title {
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.deck-browser-page-url {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.deck-browser-page-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.deck-browser-page-elements {
+  font-family: var(--font);
+  font-size: 10px;
+  color: var(--fg-3);
+}
+
+.deck-browser-page-hint {
+  font-family: var(--font);
+  font-size: 10px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+}
+
+.deck-browser-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.deck-browser-timeline-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-2);
+  padding: 2px;
+  letter-spacing: 0.02em;
+}
+
+.deck-browser-active-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: var(--accent-bright);
+  box-shadow: var(--glow-live);
+  animation: deck-pulse 1.6s var(--ease) infinite;
+}
+
+@keyframes deck-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.deck-browser-action {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  min-width: 0;
+}
+
+.deck-browser-action:hover {
+  background: var(--bg-hover);
+}
+
+.deck-browser-action-glyph {
+  width: 14px;
+  flex-shrink: 0;
+  text-align: center;
+  color: var(--fg-3);
+  font-size: 11px;
+}
+
+.deck-browser-action-summary {
+  font-family: var(--font);
+  font-size: 12px;
+  color: var(--fg-2);
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.deck-browser-action-turn {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-4);
+  flex-shrink: 0;
+}
+
+/* ── Command palette (⌘K) ──────────────────────────────────────────── */
+
+.palette-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 1100;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 16vh;
+}
+
+.palette-panel {
+  width: min(560px, 92vw);
+  max-height: 56vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--sheen), var(--bg-raised);
+  box-shadow: var(--elev-3), var(--glow-thinking);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  animation: palette-rise var(--dur) var(--ease-tide);
+}
+
+@keyframes palette-rise {
+  from {
+    transform: translateY(10px) scale(0.99);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+}
+
+.palette-input {
+  appearance: none;
+  border: none;
+  outline: none;
+  width: 100%;
+  background: var(--bg-elevated);
+  box-shadow: var(--well);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 14px;
+  padding: 13px 16px;
+  caret-color: var(--accent);
+}
+
+.palette-input::placeholder {
+  color: var(--fg-4);
+}
+
+.palette-results {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.palette-empty {
+  font-family: var(--font);
+  font-size: 12px;
+  color: var(--fg-3);
+  text-align: center;
+  padding: 28px 16px;
+}
+
+.palette-group {
+  margin-bottom: 6px;
+}
+
+.palette-group-label {
+  font-family: var(--font);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-4);
+  padding: 6px 8px 3px;
+}
+
+.palette-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  min-width: 0;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.palette-row:hover {
+  background: var(--bg-hover);
+}
+
+.palette-row--selected {
+  background: var(--bg-hover);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.palette-row-title {
+  font-family: var(--font);
+  font-size: 13px;
+  color: var(--fg);
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.palette-row-hint {
+  font-family: var(--font);
+  font-size: 11px;
+  color: var(--fg-3);
+  margin-left: auto;
+  flex-shrink: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 24ch;
+}
+
+.palette-row-kbd {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-4);
+  flex-shrink: 0;
+}
+
+/* Selected row is the only one showing the run affordance. */
+.palette-row:not(.palette-row--selected) .palette-row-kbd {
+  visibility: hidden;
+}
+
+/* Hint loses the auto-margin when kbd is present (kbd sits right). */
+.palette-row-hint + .palette-row-kbd {
+  margin-left: 8px;
+}
+
+/* ── Reduced motion ────────────────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .deck,
+  .palette-panel {
+    animation: none;
+  }
+
+  .deck-browser-active-dot {
+    animation: none;
+  }
+}
+
+/* ── Compact hosts (extension side panel) ──────────────────────────── */
+
+.ocean-surface--extension .deck {
+  width: 100vw;
+}

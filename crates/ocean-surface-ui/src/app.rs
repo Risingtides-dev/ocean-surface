@@ -6,6 +6,12 @@ use wasm_bindgen::JsCast;
 
 use crate::components::PermissionPrompts;
 use crate::daemon::{daemon_url_from_env, Daemon};
+use crate::host::DaemonStatus;
+use crate::deck::browser::BrowserCockpit;
+use crate::deck::files::FilesPanel;
+use crate::deck::repo::RepoPanel;
+use crate::deck::DeckPanel;
+use crate::palette::{Command, CommandRegistry, CommandScope, PaletteView};
 use crate::model::{Block, Role, Turn};
 use crate::rooms::{RoomStage, Rooms, RoomsPanel};
 use crate::sessions::SessionsPanel;
@@ -72,6 +78,27 @@ pub fn App() -> impl IntoView {
     // (wrong URL → empty model picker). Any startup fetch that needs the daemon
     // URL belongs INSIDE bootstrap_then_connect, after url.set().
     daemon.bootstrap_then_connect();
+
+    // Daemon supervision (Tauri shell only). The shell supervises the
+    // ocean-daemon process and reports liveness via `daemon-status` events;
+    // we mirror it into a signal so a quiet, conditional indicator can surface
+    // "daemon offline" (process down) without new permanent chrome — the
+    // existing connection chip already covers the reachable case. Off-Tauri
+    // this is a no-op: `daemon_status()` is None and the listener never fires,
+    // so the signal stays None and the indicator never mounts.
+    let daemon_shell_status = RwSignal::new(None::<DaemonStatus>);
+    {
+        let sig = daemon_shell_status;
+        crate::host::on_daemon_status(move |s| sig.set(Some(s)));
+        // Seed from the current status so the indicator is correct before the
+        // first on-change event (best-effort; None off-Tauri).
+        let sig = daemon_shell_status;
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Some(s) = crate::host::daemon_status().await {
+                sig.set(Some(s));
+            }
+        });
+    }
 
     let input = RwSignal::new(String::new());
     let textarea_ref: NodeRef<leptos::html::Textarea> = NodeRef::new();
@@ -143,6 +170,126 @@ pub fn App() -> impl IntoView {
     // gates the mode.
     let in_room_mode = Signal::derive(move || rooms.open_key.get().is_some());
 
+    // Context deck (north star): at most ONE panel revealed at a time —
+    // reveal-on-intent via ⌘K commands, never permanent chrome.
+    let deck_panel: RwSignal<Option<DeckPanel>> = RwSignal::new(None);
+    let toggle_deck = move |p: DeckPanel| {
+        deck_panel.update(|cur| *cur = if *cur == Some(p) { None } else { Some(p) })
+    };
+    // Panels mount inside a reactive match arm that re-runs on panel switch,
+    // so the Daemon clone lives in a StoredValue (same pattern as
+    // daemon_for_perms below).
+    let daemon_for_deck = StoredValue::new(daemon.clone());
+
+    // Deep-menu registry (north star command layer): ONE registry drives the
+    // ⌘K palette today and the native menubar + header overflow when they
+    // land. Commands registered here are the integration wiring — modules
+    // never self-register.
+    let registry = CommandRegistry::new();
+    let always = Signal::derive(|| true);
+    {
+        let daemon_new_session = daemon.clone();
+        registry.register(Command {
+            id: "new-session",
+            title: "New Session".into(),
+            hint: Some("reset transcript; created on first prompt".into()),
+            scope: CommandScope::Session,
+            enabled: always,
+            run: Callback::new(move |_| daemon_new_session.new_session()),
+        });
+        registry.register(Command {
+            id: "toggle-files",
+            title: "Toggle Files Explorer".into(),
+            hint: None,
+            scope: CommandScope::Files,
+            enabled: always,
+            run: Callback::new(move |_| toggle_deck(DeckPanel::Files)),
+        });
+        registry.register(Command {
+            id: "toggle-repo",
+            title: "Toggle Repo Panel".into(),
+            hint: Some("native shell only".into()),
+            scope: CommandScope::Repo,
+            enabled: always,
+            run: Callback::new(move |_| toggle_deck(DeckPanel::Repo)),
+        });
+        registry.register(Command {
+            id: "toggle-browser",
+            title: "Toggle Browser Cockpit".into(),
+            hint: None,
+            scope: CommandScope::Browser,
+            enabled: always,
+            run: Callback::new(move |_| toggle_deck(DeckPanel::Browser)),
+        });
+        registry.register(Command {
+            id: "toggle-sessions",
+            title: "Toggle Sessions".into(),
+            hint: None,
+            scope: CommandScope::App,
+            enabled: always,
+            run: Callback::new(move |_| show_sessions.update(|v| *v = !*v)),
+        });
+        registry.register(Command {
+            id: "toggle-rooms",
+            title: "Toggle Rooms".into(),
+            hint: None,
+            scope: CommandScope::App,
+            enabled: always,
+            run: Callback::new(move |_| show_rooms.update(|v| *v = !*v)),
+        });
+        registry.register(Command {
+            id: "open-council",
+            title: "Open Council Stage".into(),
+            hint: None,
+            scope: CommandScope::App,
+            enabled: always,
+            run: Callback::new(move |_| show_council.set(true)),
+        });
+        // Daemon supervision (Tauri shell only): start/restart the supervised
+        // ocean-daemon. Hidden off-Tauri via the enabled predicate (the palette
+        // drops disabled rows) — the browser PWA/extension talk to an
+        // already-running daemon and never supervise one.
+        let daemon_tauri = crate::host::running_in_tauri();
+        registry.register(Command {
+            id: "daemon-start",
+            title: "Start Daemon".into(),
+            hint: Some("native shell only".into()),
+            scope: CommandScope::App,
+            enabled: Signal::derive(move || daemon_tauri),
+            run: Callback::new(move |_| {
+                wasm_bindgen_futures::spawn_local(async move {
+                    crate::host::daemon_start(None).await;
+                });
+            }),
+        });
+        registry.register(Command {
+            id: "daemon-restart",
+            title: "Restart Daemon".into(),
+            hint: Some("native shell only".into()),
+            scope: CommandScope::App,
+            enabled: Signal::derive(move || daemon_tauri),
+            run: Callback::new(move |_| {
+                wasm_bindgen_futures::spawn_local(async move {
+                    crate::host::daemon_restart(None).await;
+                });
+            }),
+        });
+    }
+
+    // Native app-menu bridge: the Tauri shell emits `menu-command` with a
+    // command id when the user picks a "Commands" submenu item. Route every
+    // selection through the registry — unknown ids no-op and disabled commands
+    // are refused (see CommandRegistry::run). No-op off the Tauri shell, so
+    // the browser PWA and extension simply never register a listener. The
+    // effect body reads nothing reactive, so it runs once at mount.
+    let menu_registry = registry.clone();
+    Effect::new(move |_| {
+        let reg = menu_registry.clone();
+        crate::host::on_menu_command(move |id| {
+            reg.run(&id);
+        });
+    });
+
     // TTS: speak the assistant's final text each time a turn finishes
     // (streaming flips true→false). Gated by `muted`. We track the previous
     // streaming value so we only fire on the falling edge, and remember the
@@ -182,6 +329,28 @@ pub fn App() -> impl IntoView {
         let n = pending_permissions.with(|p| p.len() as i64);
         wasm_bindgen_futures::spawn_local(async move {
             crate::host::set_badge(if n > 0 { Some(n) } else { None }).await;
+        });
+    });
+
+    // Deep links (ocean://...): the Tauri shell brings the window forward and
+    // emits `deep-link` with the raw URL when the OS asks Ocean to open one.
+    // Parse it into an action — v1 understands only `ocean://session/<id>`,
+    // which reuses the exact path a SessionsPanel row click takes
+    // (`Daemon::switch_session`): clear state, set the id, hydrate the
+    // persisted transcript, reconnect the SSE tail. Title is fetched from the
+    // GET /v1/sessions/<id> snapshot inside switch_session, so an empty title
+    // here is overwritten once that returns. Unknown/unparseable URLs are
+    // logged and dropped. No-op off the Tauri shell; the effect reads nothing
+    // reactive, so it registers the listener once at mount (mirrors
+    // on_menu_command above).
+    let daemon_for_deeplink = daemon.clone();
+    Effect::new(move |_| {
+        let daemon = daemon_for_deeplink.clone();
+        crate::host::on_deep_link(move |raw| match parse_deep_link(&raw) {
+            Some(DeepLinkAction::SelectSession(id)) => {
+                daemon.switch_session(id, String::new());
+            }
+            None => log::info!("ignoring unparseable ocean:// deep link: {raw}"),
         });
     });
 
@@ -398,6 +567,26 @@ pub fn App() -> impl IntoView {
                         <span class="ocean-status__dot"></span>
                         <span class="ocean-status__text">{move || status.get()}</span>
                     </div>
+                    // Daemon-supervision indicator (Tauri shell only). Shown
+                    // ONLY when the shell reports the daemon process is down
+                    // (stopped/unreachable) — explaining why the connection chip
+                    // above is also failing, and pointing at the palette/tray to
+                    // start it. Hidden whenever the daemon is up or off-Tauri
+                    // (signal is None), so it adds no permanent chrome.
+                    <Show when=move || {
+                        daemon_shell_status
+                            .get()
+                            .map(|s| matches!(s.state.as_str(), "stopped" | "unreachable"))
+                            .unwrap_or(false)
+                    }>
+                        <div
+                            class="ocean-status"
+                            title="The ocean-daemon process isn't running. Start it via ⌘K → Start Daemon or the tray menu."
+                        >
+                            <span class="ocean-status__dot"></span>
+                            <span class="ocean-status__text">"daemon offline"</span>
+                        </div>
+                    </Show>
                     </div>
                     // Secondary actions live behind one overflow control:
                     // council deck, rooms, voice mute, extension tab capture.
@@ -456,19 +645,6 @@ pub fn App() -> impl IntoView {
                             >
                                 "Rooms"
                             </button>
-                            <Show when=move || voice_ready.get()>
-                                <button
-                                    class="ocean-more__item"
-                                    type="button"
-                                    role="menuitem"
-                                    on:click=move |_| {
-                                        if let Some(d) = more_ref.get() { let _ = d.remove_attribute("open"); }
-                                        muted.update(|m| *m = !*m);
-                                    }
-                                >
-                                    {move || if muted.get() { "Unmute voice" } else { "Mute voice" }}
-                                </button>
-                            </Show>
                             <Show when=crate::daemon::running_as_extension>
                                 <button
                                     class="ocean-more__item"
@@ -557,7 +733,7 @@ pub fn App() -> impl IntoView {
                                     </div>
                                 }
                             >
-                                <VoiceOrb on_transcript=on_transcript on_status=on_voice_status />
+                                <VoiceOrb on_transcript=on_transcript on_status=on_voice_status muted=muted />
                             </Show>
                             // Per-turn overrides (OCEAN-79): reasoning effort +
                             // model. Compact pills next to the composer. Both
@@ -726,6 +902,44 @@ pub fn App() -> impl IntoView {
             // the main surface into room mode.
             <RoomsPanel rooms=rooms open=show_rooms />
 
+            // Context deck (north star): right-side reveal-on-intent panel,
+            // opened only through ⌘K commands — no permanent chrome.
+            <Show when=move || deck_panel.get().is_some()>
+                <aside class="deck ocean-lit" role="complementary" aria-label="Context deck">
+                    <div class="deck__bar">
+                        <span class="deck__title">
+                            {move || deck_panel.get().map(|p| p.title()).unwrap_or("")}
+                        </span>
+                        <button
+                            class="deck__close"
+                            type="button"
+                            aria-label="close deck"
+                            title="Close"
+                            on:click=move |_| deck_panel.set(None)
+                        >
+                            "✕"
+                        </button>
+                    </div>
+                    <div class="deck__body">
+                        {move || match deck_panel.get() {
+                            Some(DeckPanel::Files) => {
+                                view! { <FilesPanel daemon=daemon_for_deck.get_value() /> }.into_any()
+                            }
+                            Some(DeckPanel::Repo) => {
+                                view! { <RepoPanel daemon=daemon_for_deck.get_value() /> }.into_any()
+                            }
+                            Some(DeckPanel::Browser) => {
+                                view! { <BrowserCockpit daemon=daemon_for_deck.get_value() /> }.into_any()
+                            }
+                            None => ().into_any(),
+                        }}
+                    </div>
+                </aside>
+            </Show>
+
+            // ⌘K command palette — the deep-menu engine over the registry.
+            <PaletteView registry=registry.clone() />
+
             // Council/quorum observability deck (OCEAN-96). Native workflow
             // stage now lives inside the surface instead of an iframe.
             <Show when=move || show_council.get()>
@@ -780,9 +994,44 @@ fn fmt_tokens(n: u64) -> String {
     }
 }
 
+// ── deep links (ocean://) ───────────────────────────────────────────────
+
+/// What a parsed `ocean://` deep link asks the surface to do.
+///
+/// The Tauri shell forwards each opened URL (host.rs `on_deep_link`); the
+/// surface decides what it means. v1 supports only session selection.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DeepLinkAction {
+    /// `ocean://session/<id>` — switch to the session with this id.
+    SelectSession(String),
+}
+
+/// Parse an `ocean://` deep-link URL into a [`DeepLinkAction`].
+///
+/// The single supported shape is `ocean://session/<id>`, mapping to
+/// [`DeepLinkAction::SelectSession`]. The host must be exactly `session` and
+/// the path exactly one non-empty segment (the session id); a trailing query
+/// (`?…`) or fragment ("#…") is allowed and ignored. Anything else returns
+/// `None` so the caller logs and drops it — an unknown scheme/host/shape is
+/// not an error, just not something v1 acts on.
+///
+/// Pure on purpose: no WASM, fully unit-testable on the native target.
+pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
+    // Drop any query ("?…") / fragment ("#…") so `ocean://session/abc?ref=x`
+    // resolves to the same action as the bare URL.
+    let path = raw.split(['?', '#']).next().unwrap_or("");
+    let rest = path.strip_prefix("ocean://session/")?;
+    // The id is everything after the prefix. Reject an empty id and a
+    // multi-segment path (`ocean://session/a/b`) — a session id is atomic.
+    if rest.is_empty() || rest.contains('/') {
+        return None;
+    }
+    Some(DeepLinkAction::SelectSession(rest.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{composer_height_px, composer_overflow_y, COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX};
+    use super::{composer_height_px, composer_overflow_y, parse_deep_link, DeepLinkAction, COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX};
 
     #[test]
     fn composer_height_clamps_to_min_and_max() {
@@ -795,5 +1044,48 @@ mod tests {
     fn composer_overflow_switches_only_past_max_height() {
         assert_eq!(composer_overflow_y(COMPOSER_MAX_HEIGHT_PX), "hidden");
         assert_eq!(composer_overflow_y(COMPOSER_MAX_HEIGHT_PX + 1), "auto");
+    }
+
+    #[test]
+    fn deep_link_selects_session() {
+        assert_eq!(
+            parse_deep_link("ocean://session/abc-123"),
+            Some(DeepLinkAction::SelectSession("abc-123".into()))
+        );
+        // UUID-shaped ids (no '/') pass through unchanged.
+        assert_eq!(
+            parse_deep_link("ocean://session/11111111-2222-4333-8444-555555555555"),
+            Some(DeepLinkAction::SelectSession(
+                "11111111-2222-4333-8444-555555555555".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn deep_link_strips_query_and_fragment() {
+        assert_eq!(
+            parse_deep_link("ocean://session/abc?ref=tray"),
+            Some(DeepLinkAction::SelectSession("abc".into()))
+        );
+        assert_eq!(
+            parse_deep_link("ocean://session/abc#frag"),
+            Some(DeepLinkAction::SelectSession("abc".into()))
+        );
+    }
+
+    #[test]
+    fn deep_link_rejects_unknown_or_malformed() {
+        // Wrong scheme / shape.
+        assert_eq!(parse_deep_link("https://session/abc"), None);
+        assert_eq!(parse_deep_link("ocean:session/abc"), None);
+        // Wrong host.
+        assert_eq!(parse_deep_link("ocean://sessions/abc"), None);
+        // Missing or empty id.
+        assert_eq!(parse_deep_link("ocean://session"), None);
+        assert_eq!(parse_deep_link("ocean://session/"), None);
+        // Multi-segment path — a session id is atomic.
+        assert_eq!(parse_deep_link("ocean://session/a/b"), None);
+        // Empty input.
+        assert_eq!(parse_deep_link(""), None);
     }
 }

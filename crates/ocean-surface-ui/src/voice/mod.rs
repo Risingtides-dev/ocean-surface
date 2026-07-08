@@ -1,21 +1,20 @@
-//! Push-to-talk voice capture → STT.
+//! Voice capture → STT, in three interaction modes picked from a popover:
+//! Off (mic gated off), Push-to-talk (hold the orb), and Hands-free (open mic).
 //!
-//! A circular "orb" button. Pointer-down starts recording via
+//! A circular "orb" button. In push-to-talk, pointer-down starts recording via
 //! `getUserMedia` + `MediaRecorder`; pointer-up stops, assembles the chunks
 //! into a Blob, POSTs the raw bytes to `/api/stt`, and on `{ok, text}` hands
 //! the transcript to a callback (which drops it into the composer + submits).
 //!
 //! The proxy is same-origin as the served bundle, so `/api/stt` is relative.
 //!
-//! Submodules add the first-class hands-free capabilities on top of the
-//! push-to-talk orb: [`vad`] is the voice-activity-detection state machine
-//! that auto-endpoints speech so continuous and wake-word modes don't need a
-//! button hold.
+//! Submodules add the open-mic capability on top of the push-to-talk orb:
+//! [`vad`] is the voice-activity-detection state machine that auto-endpoints
+//! speech so hands-free mode doesn't need a button hold.
 
 pub mod listen;
 pub mod mode;
 pub mod vad;
-pub mod wake;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -38,7 +37,7 @@ pub enum RecState {
     Transcribing,
 }
 
-/// Live capture state for the hands-free modes (continuous / wake-word).
+/// Live capture state for hands-free (open-mic) mode.
 ///
 /// The STT backend (`/api/stt`) is a single-shot multipart request — it returns
 /// one final transcript with no interim/partial hypotheses — so true streaming
@@ -82,13 +81,17 @@ struct Recorder {
     _on_stop: Option<Closure<dyn FnMut(web_sys::Event)>>,
 }
 
-/// Push-to-talk orb. `on_transcript` receives the recognized text.
+/// Voice orb + mode menu. `on_transcript` receives the recognized text from a
+/// push-to-talk or hands-free capture; `muted` gates spoken (TTS) replies and is
+/// wired through the menu's "Spoken replies" toggle.
 #[component]
 pub fn VoiceOrb(
     /// Called with the transcript once STT returns.
     on_transcript: Callback<String>,
     /// Surface STT / mic errors to the shell (reuses the status line).
     on_status: Callback<String>,
+    /// Gates spoken (TTS) replies; wired to the menu's "Spoken replies" row.
+    muted: RwSignal<bool>,
 ) -> impl IntoView {
     let state = RwSignal::new(RecState::Idle);
     // Shared recorder slot the start/stop handlers both reach into.
@@ -140,63 +143,129 @@ pub fn VoiceOrb(
         move |_| stop()
     };
 
-    // Current interaction mode, cycled by the mode switcher.
-    let voice_mode = RwSignal::new(mode::VoiceMode::default());
-    // Handle to the running continuous-listen loop (hands-free modes only).
+    // Current interaction mode. Restored from localStorage on mount so the
+    // device-level Off kill switch survives a reload; the disclosed open-mic
+    // HandsFree mode never silently restores (its token decodes to push-to-talk).
+    let voice_mode = RwSignal::new(mode::VoiceMode::from_persisted(
+        local_storage()
+            .and_then(|s| s.get_item(VOICE_MODE_KEY).ok().flatten())
+            .as_deref()
+            .unwrap_or(""),
+    ));
+    // Handle to the running hands-free listen loop (open-mic mode only).
     let listen_handle: Rc<RefCell<Option<Rc<RefCell<listen::ListenLoop>>>>> =
         Rc::new(RefCell::new(None));
 
     // React to mode changes: tear down the previous mode's listener/router and
-    // stand up the new one. Push-to-talk owns no loop; hands-free modes start
-    // the continuous listener and install the matching router.
+    // stand up the new one. Off is a hard device gate — the listen loop stops,
+    // any in-flight push-to-talk capture is discarded, and getUserMedia is
+    // never called. Push-to-talk owns no loop; hands-free starts the open-mic
+    // listener and installs the router.
     {
         let listen_handle = listen_handle.clone();
+        let rec = rec.clone();
         Effect::new(move |_| {
             let m = voice_mode.get();
             // Stop any running loop from the previous mode.
             if let Some(h) = listen_handle.borrow_mut().take() {
                 listen::stop(&h);
             }
-            if m.is_hands_free() {
-                set_hands_free(Some(mode::HandsFreeState::new(m)));
-                let listen_handle = listen_handle.clone();
-                spawn_local(async move {
-                    match listen::start().await {
-                        Ok(h) => *listen_handle.borrow_mut() = Some(h),
-                        Err(msg) => {
-                            set_hands_free(None);
-                            report_status(msg);
-                        }
+            match m {
+                mode::VoiceMode::Off => {
+                    // Kill any active push-to-talk capture without uploading a
+                    // partial, then settle the orb back to rest.
+                    if state.get_untracked() == RecState::Recording {
+                        discard_recording(&rec);
+                        state.set(RecState::Idle);
                     }
-                });
-            } else {
-                set_hands_free(None);
+                    set_hands_free(None);
+                }
+                mode::VoiceMode::HandsFree => {
+                    set_hands_free(Some(mode::HandsFreeState::new(m)));
+                    let listen_handle = listen_handle.clone();
+                    spawn_local(async move {
+                        match listen::start().await {
+                            Ok(h) => *listen_handle.borrow_mut() = Some(h),
+                            Err(msg) => {
+                                set_hands_free(None);
+                                report_status(msg);
+                            }
+                        }
+                    });
+                }
+                mode::VoiceMode::PushToTalk => {
+                    set_hands_free(None);
+                }
             }
         });
     }
 
-    // Cycle PushToTalk → Continuous → WakeWord → … . Prime TTS from the gesture
-    // so hands-free TTS replies are allowed on mobile.
-    let cycle_mode = move |_| {
+    // Popover menu open state + a ref on the wrap for click-outside dismissal.
+    let show_menu = RwSignal::new(false);
+    let wrap_ref = NodeRef::<leptos::html::Div>::new();
+
+    // Apply a mode from the menu: prime TTS (mobile audio unlock), set the
+    // signal, persist it, and close the menu.
+    let choose = move |m: mode::VoiceMode| {
         tts::prime();
-        voice_mode.update(|m| *m = m.next());
+        voice_mode.set(m);
+        persist_mode(m);
+        show_menu.set(false);
     };
 
-    // Keyboard shortcut: Cmd/Ctrl+Shift+V cycles voice mode from anywhere. The
-    // chord avoids clobbering normal typing. Registered once on mount; the
-    // listener is leaked intentionally (lives for the app's lifetime).
+    // Keyboard chord: Cmd/Ctrl+Shift+V cycles voice mode from anywhere. Off is
+    // in the cycle so the chord doubles as a panic kill. Registered once on
+    // mount; the listener is leaked intentionally (lives for the app's
+    // lifetime), matching the capture-layer idiom.
     {
         if let Some(window) = web_sys::window() {
             let on_key = Closure::wrap(Box::new(move |ev: web_sys::KeyboardEvent| {
                 let key = ev.key().to_lowercase();
                 if (ev.meta_key() || ev.ctrl_key()) && ev.shift_key() && key == "v" {
                     ev.prevent_default();
-                    voice_mode.update(|m| *m = m.next());
+                    tts::prime();
+                    let next = voice_mode.get().next();
+                    voice_mode.set(next);
+                    persist_mode(next);
                 }
             }) as Box<dyn FnMut(web_sys::KeyboardEvent)>);
             let _ =
                 window.add_event_listener_with_callback("keydown", on_key.as_ref().unchecked_ref());
             on_key.forget();
+        }
+    }
+
+    // Escape closes the menu; a click outside the wrap closes it. Registered
+    // once on mount; leaked for the app's lifetime (same idiom as the chord).
+    {
+        let wrap_ref = wrap_ref.clone();
+        if let Some(window) = web_sys::window() {
+            let on_escape = Closure::wrap(Box::new(move |ev: web_sys::KeyboardEvent| {
+                if ev.key() == "Escape" {
+                    show_menu.set(false);
+                }
+            }) as Box<dyn FnMut(web_sys::KeyboardEvent)>);
+            let on_click = Closure::wrap(Box::new(move |ev: web_sys::Event| {
+                if !show_menu.get_untracked() {
+                    return;
+                }
+                let target = ev
+                    .target()
+                    .and_then(|t| t.dyn_into::<web_sys::Node>().ok());
+                let inside = match (wrap_ref.get(), target) {
+                    (Some(el), Some(t)) => el.contains(Some(&t)),
+                    _ => false,
+                };
+                if !inside {
+                    show_menu.set(false);
+                }
+            }) as Box<dyn FnMut(web_sys::Event)>);
+            let _ = window
+                .add_event_listener_with_callback("keydown", on_escape.as_ref().unchecked_ref());
+            let _ = window
+                .add_event_listener_with_callback("click", on_click.as_ref().unchecked_ref());
+            on_escape.forget();
+            on_click.forget();
         }
     }
 
@@ -206,105 +275,205 @@ pub fn VoiceOrb(
 
     let label = move || {
         let m = voice_mode.get();
-        if m.is_hands_free() {
-            // Layer the live capture status over the mode's resting label so the
-            // user gets per-utterance feedback in the hands-free modes.
-            return match hf_status.get() {
-                HandsFreeStatus::Idle => m.label().to_string(),
-                HandsFreeStatus::Listening => "listening…".to_string(),
-                HandsFreeStatus::Transcribing => "transcribing…".to_string(),
-                HandsFreeStatus::Final(text) => {
-                    // Show a trimmed confirmation of what was heard.
-                    let t = text.trim();
-                    if t.chars().count() > 28 {
-                        let short: String = t.chars().take(27).collect();
-                        format!("\u{201c}{short}\u{2026}\u{201d}")
-                    } else {
-                        format!("\u{201c}{t}\u{201d}")
+        match m {
+            mode::VoiceMode::Off => "voice off".to_string(),
+            mode::VoiceMode::HandsFree => {
+                // Layer the live capture status over the mode's resting label so
+                // the user gets per-utterance feedback in open-mic mode.
+                match hf_status.get() {
+                    HandsFreeStatus::Idle => m.label().to_string(),
+                    HandsFreeStatus::Listening => "listening…".to_string(),
+                    HandsFreeStatus::Transcribing => "transcribing…".to_string(),
+                    HandsFreeStatus::Final(text) => {
+                        let t = text.trim();
+                        if t.chars().count() > 28 {
+                            let short: String = t.chars().take(27).collect();
+                            format!("\u{201c}{short}\u{2026}\u{201d}")
+                        } else {
+                            format!("\u{201c}{t}\u{201d}")
+                        }
                     }
                 }
-            };
-        }
-        match state.get() {
-            RecState::Idle => "hold to talk".to_string(),
-            RecState::Recording => "listening… release to send".to_string(),
-            RecState::Transcribing => "transcribing…".to_string(),
+            }
+            mode::VoiceMode::PushToTalk => match state.get() {
+                RecState::Idle => "hold to talk".to_string(),
+                RecState::Recording => "listening… release to send".to_string(),
+                RecState::Transcribing => "transcribing…".to_string(),
+            },
         }
     };
     let orb_class = move || {
         let m = voice_mode.get();
         let base = format!("voice-orb {}", m.css_modifier());
-        if m.is_hands_free() {
-            // Hands-free: orb pulses to show it's live-listening, and brightens
-            // through the capture lifecycle so the visual matches the hint.
-            match hf_status.get() {
-                HandsFreeStatus::Listening => format!("{base} is-live is-capturing"),
-                HandsFreeStatus::Transcribing => format!("{base} is-live is-transcribing"),
-                _ => format!("{base} is-live"),
+        match m {
+            mode::VoiceMode::Off => format!("{base} is-off"),
+            mode::VoiceMode::HandsFree => {
+                // Open mic: orb pulses to show it's live-listening, and
+                // brightens through the capture lifecycle so the visual tracks
+                // the hint.
+                match hf_status.get() {
+                    HandsFreeStatus::Listening => format!("{base} is-live is-capturing"),
+                    HandsFreeStatus::Transcribing => format!("{base} is-live is-transcribing"),
+                    _ => format!("{base} is-live"),
+                }
             }
-        } else {
-            match state.get() {
+            mode::VoiceMode::PushToTalk => match state.get() {
                 RecState::Idle => base,
                 RecState::Recording => format!("{base} is-recording"),
                 RecState::Transcribing => format!("{base} is-transcribing"),
-            }
+            },
         }
     };
-    // Pointer handlers only fire push-to-talk; inert in hands-free modes.
+    let orb_title = move || match voice_mode.get() {
+        mode::VoiceMode::Off => "voice off — click to open voice settings",
+        mode::VoiceMode::PushToTalk => "push to talk — hold to speak",
+        mode::VoiceMode::HandsFree => "hands-free — open mic",
+    };
+    // Pointer handlers: push-to-talk records on hold; hands-free is owned by the
+    // listen loop; Off opens the menu instead of capturing.
     let ptt_down = {
         let on_down = on_down.clone();
-        move |ev: web_sys::PointerEvent| {
-            if !voice_mode.get_untracked().is_hands_free() {
-                on_down(ev);
-            }
+        move |ev: web_sys::PointerEvent| match voice_mode.get_untracked() {
+            mode::VoiceMode::PushToTalk => on_down(ev),
+            mode::VoiceMode::Off => show_menu.set(true),
+            mode::VoiceMode::HandsFree => {}
         }
     };
     let ptt_up = {
         let on_up = on_up.clone();
         move |ev: web_sys::PointerEvent| {
-            if !voice_mode.get_untracked().is_hands_free() {
+            if voice_mode.get_untracked() == mode::VoiceMode::PushToTalk {
                 on_up(ev);
             }
         }
     };
     let ptt_up2 = ptt_up.clone();
     let ptt_up3 = ptt_up.clone();
-    let mode_title = move || match voice_mode.get() {
-        mode::VoiceMode::PushToTalk => "push-to-talk — tap to switch to continuous",
-        mode::VoiceMode::Continuous => "continuous listening — tap to switch to wake-word",
-        mode::VoiceMode::WakeWord => "wake word ‘hey Ocean’ — tap to switch to push-to-talk",
-    };
 
     // Bridge: stash the transcript callback where start_recording can grab it.
-    // We use a thread-local-free approach: pass it into start via a Cell.
     provide_voice_callback(on_transcript, on_status);
 
+    let glyph = move || match voice_mode.get() {
+        mode::VoiceMode::Off => view! { <crate::icons::MicOff /> }.into_any(),
+        _ => view! { <crate::icons::Mic /> }.into_any(),
+    };
+    let mode_classes = move |m: mode::VoiceMode| {
+        if voice_mode.get() == m {
+            "voice-menu__item is-active".to_string()
+        } else {
+            "voice-menu__item".to_string()
+        }
+    };
+    let toggle_class = move || {
+        if muted.get() {
+            "voice-menu__toggle"
+        } else {
+            "voice-menu__toggle is-on"
+        }
+    };
+    let toggle_icon = move || {
+        if muted.get() {
+            view! { <crate::icons::SoundOff /> }.into_any()
+        } else {
+            view! { <crate::icons::SoundOn /> }.into_any()
+        }
+    };
+
     view! {
-        <div class="voice-wrap">
+        <div class="voice-wrap" node_ref=wrap_ref>
             <button
                 class=orb_class
                 type="button"
                 aria-label="voice input"
+                title=orb_title
                 on:pointerdown=ptt_down
                 on:pointerup=ptt_up
                 on:pointerleave=ptt_up2
                 on:pointercancel=ptt_up3
             >
-                <span class="voice-orb__glyph">{view! { <crate::icons::Mic /> }}</span>
+                <span class="voice-orb__glyph">{glyph}</span>
             </button>
+
+            // Open-mic indicator: a pulsing "listening" chip shown only while
+            // hands-free is active. Clicking it opens the settings menu.
+            <Show when=move || voice_mode.get() == mode::VoiceMode::HandsFree>
+                <button
+                    class="voice-live-chip"
+                    type="button"
+                    title="open mic — click to change voice settings"
+                    on:click=move |_| show_menu.set(true)
+                >
+                    <span class="voice-live-chip__dot" aria-hidden="true"></span>
+                    "listening"
+                </button>
+            </Show>
+
+            // Ghost trigger that opens the mode menu (the orb's own click also
+            // opens it when Off).
             <button
-                class="voice-mode-switch"
+                class="voice-trigger"
                 type="button"
-                title=mode_title
-                aria-label="switch voice mode"
-                on:click=cycle_mode
+                aria-label="voice settings"
+                title="voice settings"
+                aria-expanded=move || if show_menu.get() { "true" } else { "false" }
+                on:click=move |_| show_menu.update(|v| *v = !*v)
             >
-                {move || match voice_mode.get() {
-                    mode::VoiceMode::PushToTalk => "PTT",
-                    mode::VoiceMode::Continuous => "LIVE",
-                    mode::VoiceMode::WakeWord => "WAKE",
-                }}
+                <crate::icons::ChevronDown />
             </button>
+
+            <Show when=move || show_menu.get()>
+                <div class="voice-menu" role="menu" aria-label="voice mode">
+                    <button
+                        class=move || mode_classes(mode::VoiceMode::Off)
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked=move || if voice_mode.get() == mode::VoiceMode::Off { "true" } else { "false" }
+                        on:click=move |_| choose(mode::VoiceMode::Off)
+                    >
+                        <span class="voice-menu__item-icon"><crate::icons::MicOff /></span>
+                        <span class="voice-menu__item-label">"Off"</span>
+                        <span class="voice-menu__item-desc">"Microphone disabled — nothing is recorded"</span>
+                    </button>
+                    <button
+                        class=move || mode_classes(mode::VoiceMode::PushToTalk)
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked=move || if voice_mode.get() == mode::VoiceMode::PushToTalk { "true" } else { "false" }
+                        on:click=move |_| choose(mode::VoiceMode::PushToTalk)
+                    >
+                        <span class="voice-menu__item-icon"><crate::icons::Mic /></span>
+                        <span class="voice-menu__item-label">"Push to talk"</span>
+                        <span class="voice-menu__item-desc">"Hold the orb or Cmd+Shift+V — audio is sent only while held"</span>
+                    </button>
+                    <button
+                        class=move || mode_classes(mode::VoiceMode::HandsFree)
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked=move || if voice_mode.get() == mode::VoiceMode::HandsFree { "true" } else { "false" }
+                        on:click=move |_| choose(mode::VoiceMode::HandsFree)
+                    >
+                        <span class="voice-menu__item-icon"><crate::icons::Waves /></span>
+                        <span class="voice-menu__item-label">"Hands-free"</span>
+                        <span class="voice-menu__item-desc">"Open mic — each phrase you speak is sent for transcription"</span>
+                    </button>
+
+                    <div class="voice-menu__divider" role="separator"></div>
+
+                    <button
+                        class=toggle_class
+                        type="button"
+                        role="menuitemcheckbox"
+                        aria-checked=move || if muted.get() { "false" } else { "true" }
+                        on:click=move |_| muted.update(|m| *m = !*m)
+                    >
+                        <span class="voice-menu__item-icon">{toggle_icon}</span>
+                        <span class="voice-menu__item-label">"Spoken replies"</span>
+                    </button>
+
+                    <p class="voice-menu__note">"Hands-free streams mic audio to xAI. Voice replies use xAI TTS."</p>
+                </div>
+            </Show>
+
             <span class="voice-hint">{label}</span>
         </div>
     }
@@ -387,8 +556,8 @@ fn deliver_transcript(text: String) {
     if routed.is_some() {
         let confirm = match &routed {
             Some(mode::HandsFreeAction::Submit(cmd)) => HandsFreeStatus::Final(cmd.clone()),
-            // Bare wake-word arming or pre-wake chatter: nothing to confirm,
-            // drop back to the ambient listening state.
+            // An ignored (empty) utterance has nothing to confirm — drop back
+            // to the ambient listening state.
             _ => HandsFreeStatus::Idle,
         };
         set_hands_free_status(confirm);
@@ -397,7 +566,7 @@ fn deliver_transcript(text: String) {
         // Push-to-talk: no router, submit the raw transcript.
         None => Some(text),
         Some(mode::HandsFreeAction::Submit(cmd)) => Some(cmd),
-        // Ignored (chatter before a wake word, or a bare-wake arming turn).
+        // Ignored (empty/whitespace utterance).
         Some(mode::HandsFreeAction::Ignore) => None,
     };
     if let Some(text) = to_submit {
@@ -512,6 +681,27 @@ fn stop_recording(rec: &Rc<RefCell<Recorder>>) {
     // dropped when the Recorder slot is reset on the next start.
 }
 
+/// Abort an in-flight push-to-talk capture without uploading — used when the
+/// mode switches to Off mid-recording (hard device kill). The chunk buffer is
+/// cleared first so the recorder's pending `onstop` assembles nothing; the mic
+/// tracks are released just like a normal stop.
+fn discard_recording(rec: &Rc<RefCell<Recorder>>) {
+    let chunks = rec.borrow().chunks.clone();
+    chunks.borrow_mut().clear();
+    let mut slot = rec.borrow_mut();
+    if let Some(recorder) = slot.recorder.take() {
+        let _ = recorder.stop();
+    }
+    if let Some(stream) = slot.stream.take() {
+        let tracks = stream.get_tracks();
+        for i in 0..tracks.length() {
+            if let Ok(track) = tracks.get(i).dyn_into::<web_sys::MediaStreamTrack>() {
+                track.stop();
+            }
+        }
+    }
+}
+
 /// Concatenate the recorded chunks into a single typed Blob.
 fn assemble_blob(parts: &[Blob], mime: &str) -> Option<Blob> {
     if parts.is_empty() {
@@ -574,7 +764,7 @@ async fn upload_blob(blob: Blob, state: RwSignal<RecState>) {
 }
 
 // ---------------------------------------------------------------------------
-// Segment recorder — used by the continuous/wake-word listen loop.
+// Segment recorder — used by the hands-free (open-mic) listen loop.
 //
 // Unlike `Recorder` (push-to-talk), a segment recorder records a single
 // VAD-bounded utterance over a mic stream it does NOT own (the listen loop owns
@@ -708,4 +898,23 @@ async fn blob_to_bytes(blob: &Blob) -> Result<Vec<u8>, String> {
         .map_err(|_| "failed to read audio".to_string())?;
     let array = js_sys::Uint8Array::new(&buf);
     Ok(array.to_vec())
+}
+// ---------------------------------------------------------------------------
+// Mode persistence — a self-contained localStorage idiom (mirrors rooms.rs;
+// kept local so the proxy/daemon contract stays untouched).
+// ---------------------------------------------------------------------------
+
+const VOICE_MODE_KEY: &str = "ocean-voice-mode";
+
+fn local_storage() -> Option<web_sys::Storage> {
+    web_sys::window().and_then(|w| w.local_storage().ok().flatten())
+}
+
+/// Persist the current mode token so the device-level Off kill switch survives
+/// a reload. The disclosed open-mic HandsFree mode never silently restores: it
+/// persists as the safe default token, which decodes back to push-to-talk.
+fn persist_mode(m: mode::VoiceMode) {
+    if let Some(storage) = local_storage() {
+        let _ = storage.set_item(VOICE_MODE_KEY, m.persist_key());
+    }
 }

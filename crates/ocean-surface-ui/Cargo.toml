@@ -62,6 +62,11 @@ web-sys = { version = "0.3", features = [
   # Floating widget: depth-fade animation (get_bounding_client_rect, query_selector_all)
   "DomRect",
   "NodeList",
+  # OS presence (host.rs): native notify on Tauri (the notification plugin
+  # polyfills window.Notification), standard Web Notifications on the PWA.
+  "Notification",
+  "NotificationOptions",
+  "NotificationPermission",
 ] }
 js-sys = "0.3"
 

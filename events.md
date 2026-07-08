@@ -921,3 +921,67 @@ area:      [frontend]
 
 Finished the two follow-up surface asks on top of the material baseline. Rooms now behave like a first-class mode instead of a perpetual sidebar: `Rooms::new` carries the panel-open signal so a successful join closes the overlay, `app.rs` derives `in_room_mode` from the shared room + LiveKit signals, the main transcript/canvas/composer stack hides while a joined room owns the surface, and `LiveKitPanel` stays singly mounted while switching between compact utility presentation and the full stage layout already prepared in `styles/call.css`. Council is no longer the proxy-served Phaser/Game-Boy iframe: added native `crates/ocean-surface-ui/src/council.rs` + `styles/council.css`, enumerated the stylesheet in web + extension load points, and swapped the council modal body to a real Leptos workflow stage rendering goal/operator/Ocean/tool nodes with material state instead of the old `/ui/council` frame. Also committed the transcript-side `ThinkingGroup` coalescing fix and the `is-streaming` / `is-new` hooks needed to keep the live workflow surfaces legible. Verification: `cargo check -p ocean-surface-ui --target wasm32-unknown-unknown` green after the room/council integration, `env -u NO_COLOR trunk build --release` green, browser screenshots captured the native council stage modal, the live landing/composer baseline, and the cleaned sessions modal. Room-stage browser join smoke hit click-harness flake after the API-created smoke room, but the compiled wiring, shared-signal routing, and stage CSS all landed together in this pass.
 _________________________________________________________________________________
+time:      [11:45pm] [07-07-26]
+agent:     [claude] [fable-5]
+worktree:  desktop-* lanes (gitbutler)
+type:      feature-request
+area:      frontend
+
+Ocean Desktop north star wave 1 landed. Design doc (docs/OCEAN_DESKTOP_NORTH_STAR.md)
+plus five parallel-built modules integrated into the surface: host bridge with real
+Tauri 2 interop (__TAURI_INTERNALS__ invoke/listen, git2 repo_state command in
+ocean-tauri), context deck (Files explorer over the daemon /v1/fs/dirs API with
+native watcher invalidation; Repo panel with branch/ahead-behind/commits; Browser
+cockpit as a pure reducer over browser_* tool calls), and the ⌘K command palette
+(signal-backed registry, fuzzy scoring, scope groups) mounted in app.rs with seven
+commands. deck.css authored tokens-only. Fixed on integration: FsDirsResponse.ok
+wire mismatch (daemon signals via error field), entry.git -> is_repo, missing
+initial-load effect, Leptos closure ownership (FnOnce/FnMut), palette camelCase
+boundary detection erased by lowercasing, relative_time month-bucket clamp.
+78 module tests green, wasm green, browser smoke green (palette + all three deck
+panels live-verified), Tauri shell boots stable with the new backend. Lanes:
+desktop-skeleton, desktop-host-bridge, desktop-files-panel, desktop-repo-panel,
+desktop-cockpit, desktop-palette, desktop-integration, fix-run-tauri-no-color.
+Native menubar mirroring the registry still open; screenshots-in-cockpit blocked
+on Block::ToolCall image storage (daemon-side, wave 2).
+_________________________________________________________________________________
+time:      [12:40am] [07-08-26]
+agent:     [claude] [fable-5]
+worktree:  desktop-os-presence (gitbutler)
+type:      feature-request
+area:      frontend
+
+Desktop/web capability split settled and OS-presence wave landed. North-star doc
+gains a Surface Capability Matrix (daemon-backed features cross over to web for
+free; desktop adds only native hands) plus native-feel priorities P1-P6. Tauri
+shell gains menubar tray (Show/Quit), Cmd+Shift+Space toggle-summon global
+hotkey, hide-to-tray on close, native notifications (plugin polyfills
+window.Notification so the wasm bundle's standard Web Notifications path works
+on all surfaces), and a set_badge command mapping pending permission prompts to
+the dock badge. wasm side: host::notify/set_badge with degrade-to-no-op
+contracts and a missing-global guard, app.rs falling-edge turn-complete
+notification gated on document.hasFocus(), badge effect off pending
+permissions. Three parallel subagents; Notify stream hit the 30m cap and was
+integrator-finished (plugin dep, capability, set_badge command). Both cargo
+checks green.
+_________________________________________________________________________________
+time:      [3:20pm] [07-08-26]
+agent:     [claude] [fable-5]
+worktree:  desktop-* lanes (gitbutler)
+type:      feature-request
+area:      frontend
+
+Native-feel wave 2 landed: P3 native menubar menus projected from the
+CommandRegistry (seven kebab-case command ids shared between Rust MenuItems and
+wasm registrations, menu-command event -> CommandRegistry::run, About/Quit as
+native roles), P4 daemon supervision v1 (daemon_status/start/stop/restart
+commands, TCP liveness poller emitting daemon-status on change, tray
+Start/Restart items, palette commands, conditional offline chip; never touches
+an external daemon), P5 ocean:// deep links (plugin + on_open_url ->
+deep-link event -> parse_deep_link -> daemon.switch_session; scheme
+registration activates when bundling lands). Three parallel subagents; menus
+and deep-links hit the 30m cap and were integrator-finished (registry FnMut
+fix, deep-link plugin init + DeepLinkExt forward in lib.rs). Tauri side: 0
+errors, 17 tests green. wasm gate deferred - blocked by the concurrent
+session's live voice/icons refactor (their files; heals into their lane).
+_________________________________________________________________________________

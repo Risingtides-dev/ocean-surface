@@ -30,5 +30,11 @@
     "active": false,
     "icon": ["icons/icon.png"]
   },
-  "plugins": {}
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["ocean"]
+      }
+    }
+  }
 }

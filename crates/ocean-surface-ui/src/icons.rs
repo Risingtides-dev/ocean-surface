@@ -117,18 +117,20 @@ pub fn Phone() -> impl IntoView {
     }
 }
 
-/// Microphone — voice input. Rounded 2px stroke to match the header-icon
-/// family (replaces the game-icons "amplitude" fill smear, which read as
-/// noise at orb size).
+/// Microphone — voice input. Studio-capsule mark: grille lines inside the
+/// capsule so it reads "mic" (not "pill") at orb size. Rounded 2px stroke
+/// to match the header-icon family.
 #[component]
 pub fn Mic() -> impl IntoView {
     view! {
         <svg class="icon icon--stroke" viewBox="0 0 24 24" width="1em" height="1em"
              fill="none" stroke="currentColor" stroke-width="2"
              stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M12 2a3 3 0 0 1 3 3v7a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3z" />
-            <path d="M19 11v1a7 7 0 0 1-14 0v-1" />
-            <line x1="12" y1="19" x2="12" y2="22" />
+            <rect x="9" y="2" width="6" height="12" rx="3" />
+            <line x1="9" y1="6" x2="15" y2="6" />
+            <line x1="9" y1="9" x2="15" y2="9" />
+            <path d="M5 11a7 7 0 0 0 14 0" />
+            <line x1="12" y1="18" x2="12" y2="22" />
         </svg>
     }
 }
@@ -250,6 +252,51 @@ pub fn Smartphone() -> impl IntoView {
              stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <rect x="6" y="2" width="12" height="20" rx="2" />
             <line x1="12" y1="18" x2="12" y2="18" />
+        </svg>
+    }
+}
+
+/// Microphone disabled — the voice kill switch. Same studio capsule with a
+/// hard diagonal slash; the orb's Off state and the mode menu's Off row.
+#[component]
+pub fn MicOff() -> impl IntoView {
+    view! {
+        <svg class="icon icon--stroke" viewBox="0 0 24 24" width="1em" height="1em"
+             fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="9" y="2" width="6" height="12" rx="3" />
+            <path d="M5 11a7 7 0 0 0 14 0" />
+            <line x1="12" y1="18" x2="12" y2="22" />
+            <line x1="4" y1="4" x2="20" y2="20" />
+        </svg>
+    }
+}
+
+/// Open-mic field — hands-free mode. A source dot between spreading arcs:
+/// sound arriving from the whole room, not a held capsule.
+#[component]
+pub fn Waves() -> impl IntoView {
+    view! {
+        <svg class="icon icon--stroke" viewBox="0 0 24 24" width="1em" height="1em"
+             fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="2" />
+            <path d="M7.76 16.24a6 6 0 0 1 0-8.48" />
+            <path d="M16.24 7.76a6 6 0 0 1 0 8.48" />
+            <path d="M4.93 19.07a10 10 0 0 1 0-14.14" />
+            <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+        </svg>
+    }
+}
+
+/// Chevron — the voice-menu trigger.
+#[component]
+pub fn ChevronDown() -> impl IntoView {
+    view! {
+        <svg class="icon icon--stroke" viewBox="0 0 24 24" width="1em" height="1em"
+             fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="6 9 12 15 18 9" />
         </svg>
     }
 }

@@ -332,6 +332,11 @@
   max-width: min(74ch, 100%);
   padding: 10px 16px;
   background: var(--sheen-soft), var(--bg-raised);
+  /* --bg-raised sits 4 ticks above --bg; without a drawn edge the card's
+     boundary reads as accidental banding ("a gap of pure black to softer
+     black"), not geometry. The hairline makes it a deliberate card — same
+     idiom as .ocean-component. */
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
   box-shadow: var(--elev-1);
 }
@@ -342,6 +347,7 @@
   max-width: none;
   padding: 0;
   background: none;
+  border: none;
   border-radius: 0;
   box-shadow: none;
 }
@@ -354,6 +360,7 @@
   max-width: 72ch;
   padding: 12px 16px;
   background: var(--sheen-soft), var(--bg-raised);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
   box-shadow: var(--elev-1);
   color: var(--fg-2);

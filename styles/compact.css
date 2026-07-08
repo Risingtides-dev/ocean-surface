@@ -112,6 +112,22 @@
   display: none;
 }
 
+/* Voice menu + live chip fit the narrow side panel; the chip collapses to
+   its pulsing dot at this width, and the trigger keeps a findable floor. */
+.ocean-surface--extension .voice-menu {
+  max-width: min(224px, calc(100vw - 24px));
+}
+
+.ocean-surface--extension .voice-live-chip {
+  font-size: 0;
+  gap: 0;
+  padding: 4px;
+}
+
+.ocean-surface--extension .voice-trigger {
+  opacity: 0.35;
+}
+
 .ocean-surface--extension .ocean-composer__input {
   min-width: 0;
 }
@@ -232,6 +248,15 @@
 
   .ocean-surface .voice-hint {
     display: none;
+  }
+
+  /* Voice menu + trigger keep their narrow-width behavior under 720px. */
+  .ocean-surface .voice-menu {
+    max-width: min(224px, calc(100vw - 24px));
+  }
+
+  .ocean-surface .voice-trigger {
+    opacity: 0.35;
   }
 
   .ocean-surface .ocean-composer__input {

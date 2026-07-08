@@ -784,13 +784,28 @@ select.form-field__input {
   display: grid;
   place-items: center;
   flex: none;
-  width: 18px;
-  height: 18px;
+  /* Odd size on purpose: a 17px circle and the 1px rail line below center on
+     the same half-pixel column, so the line can never sit 1 device px off the
+     ring's axis (18px + 1px could). */
+  width: 17px;
+  height: 17px;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: 50%;
   color: var(--fg-3);
   font-size: 10px;
+  line-height: 1;
+}
+
+/* The active "orb" is geometry, not a glyph: a ::before circle grid-centered
+   inside the ring (7px odd inside 17px odd = exact center). */
+.timeline-step--active .timeline-step__dot::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 8px var(--accent-soft);
 }
 
 .timeline-step:not(:last-child) .timeline-step__rail::after {

@@ -17,9 +17,14 @@ description = "Tauri 2.x native shell that hosts the ocean-surface Leptos WASM b
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["devtools"] }
+tauri = { version = "2", features = ["devtools", "tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
+tauri-plugin-global-shortcut = "2"
+# Native notifications: polyfills `window.Notification` in the webview so the
+# wasm bundle's standard Web Notifications path routes through macOS natively.
+tauri-plugin-notification = "2"
+tauri-plugin-deep-link = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Filesystem notifications. notify 6.x exposes no `serde` cargo feature (its
@@ -31,6 +36,12 @@ parking_lot = "0.12"
 # `macros` powers the `tokio::select!` debounce loop; `sync`+`time` the channel
 # and the 200ms quiet window.
 tokio = { version = "1", features = ["sync", "time", "macros"] }
+# Local git repository inspection (repo_state command).  `vendored-libgit2`
+# bundles libgit2 so we don't depend on the system package.
+git2 = { version = "0.20", features = ["vendored-libgit2"] }
+
+[dev-dependencies]
+tempfile = "3"
 
 [[bin]]
 name = "ocean-tauri"

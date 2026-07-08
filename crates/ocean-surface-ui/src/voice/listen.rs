@@ -1,8 +1,8 @@
-//! Continuous hands-free listening engine.
+//! Hands-free (open-mic) listening engine.
 //!
-//! Push-to-talk records only while a pointer is held. The hands-free modes
-//! (continuous + wake-word) instead keep a long-lived mic stream open and let
-//! **voice-activity detection** decide when an utterance starts and ends:
+//! Push-to-talk records only while a pointer is held. Hands-free mode instead
+//! keeps a long-lived mic stream open and lets **voice-activity detection**
+//! decide when an utterance starts and ends:
 //!
 //! 1. Acquire the mic once and route it through an `AnalyserNode`.
 //! 2. On every animation frame, read the time-domain samples, compute
@@ -56,7 +56,7 @@ pub struct ListenLoop {
     running: Rc<RefCell<bool>>,
 }
 
-/// Start continuous listening. Returns a handle that must be kept alive; drop
+/// Start hands-free (open-mic) listening. Returns a handle that must be kept
 /// or call [`stop`] to end. Errors (mic denied, no AudioContext) are surfaced
 /// via the shell status callback and leave the loop not-running.
 pub async fn start() -> Result<Rc<RefCell<ListenLoop>>, String> {

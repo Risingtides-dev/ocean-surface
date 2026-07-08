@@ -15,6 +15,10 @@ REPO="$(cd "$(dirname "$0")" && pwd)"
 export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$HOME/.cargo/bin:$PATH"
 export RUSTUP_HOME="$HOME/.rustup"
 export CARGO_HOME="$HOME/.cargo"
+# Trunk 0.21.14's clap rejects `NO_COLOR=1` (wants true/false) — the agent
+# runtime/harness injects NO_COLOR=1, so trunk reinterprets it as `--no-color 1`
+# and exits 2 before building. Unset so the trunk build is color-agnostic.
+unset NO_COLOR
 
 DAEMON="${OCEAN_DAEMON_URL:-http://127.0.0.1:4780}"
 
