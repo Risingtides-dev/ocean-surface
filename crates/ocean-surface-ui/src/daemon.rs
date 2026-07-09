@@ -1287,6 +1287,18 @@ impl Daemon {
             // `/api/config` resolves to the extension itself, not the daemon.
             // Detect that and talk to the daemon directly at its loopback URL,
             // skipping the proxy bootstrap entirely.
+            // A host embed (e.g. the VS Code / Cursor webview) has no
+            // same-origin proxy to answer a relative `/api/config`, so its
+            // loader publishes the daemon base URL on `window.__ocean_daemon_url`
+            // — a loopback CORS proxy the extension host runs in front of the
+            // daemon. Honor it and connect directly, like the Chrome side panel.
+            if let Some(url) = injected_daemon_url() {
+                daemon.url.set(url);
+                daemon.connect();
+                daemon.fetch_models();
+                daemon.fetch_projects();
+                return;
+            }
             let is_extension = running_as_extension();
             if is_extension {
                 daemon.url.set(DEFAULT_DAEMON_URL.to_string());
@@ -3260,6 +3272,23 @@ pub fn running_as_extension() -> bool {
         .and_then(|w| w.location().protocol().ok())
         .map(|p| p.starts_with("chrome-extension"))
         .unwrap_or(false)
+}
+
+/// A host embed (e.g. the VS Code / Cursor webview) publishes the daemon base
+/// URL on `window.__ocean_daemon_url`, because — like the Chrome side panel —
+/// there is no same-origin proxy to serve `/api/config`. Returns that URL when
+/// a non-empty string is present. The extension host points this at a loopback
+/// CORS proxy that reflects the webview origin and forwards to the daemon.
+pub fn injected_daemon_url() -> Option<String> {
+    let window = web_sys::window()?;
+    js_sys::Reflect::get(
+        &window,
+        &wasm_bindgen::JsValue::from_str("__ocean_daemon_url"),
+    )
+    .ok()
+    .and_then(|v| v.as_string())
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty())
 }
 
 /// Parse a `data:<mime>;base64,<body>` URL into a [`TurnImage`] (OCEAN-138).
