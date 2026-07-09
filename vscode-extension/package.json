@@ -24,6 +24,7 @@
     "onCommand:ocean.openPanel",
     "onCommand:ocean.openAuxiliary",
     "onCommand:ocean.openEditor",
+    "onCommand:ocean.openWebSurface",
     "onCommand:ocean.connect",
     "onCommand:ocean.newSession",
     "onCommand:ocean.sendSelection",
@@ -101,6 +102,11 @@
         "icon": "$(layout)"
       },
       {
+        "command": "ocean.openWebSurface",
+        "title": "Ocean: Open Web Surface (full app)",
+        "icon": "$(globe)"
+      },
+      {
         "command": "ocean.connect",
         "title": "Ocean: Connect",
         "icon": "$(plug)"
@@ -134,6 +140,11 @@
       "view/title": [
         {
           "command": "ocean.openEditor",
+          "when": "view == ocean.chat || view == ocean.panelChat || view == ocean.auxChat",
+          "group": "navigation@0"
+        },
+        {
+          "command": "ocean.openWebSurface",
           "when": "view == ocean.chat || view == ocean.panelChat || view == ocean.auxChat",
           "group": "navigation@0"
         },

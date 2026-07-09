@@ -1,6 +1,14 @@
 import * as vscode from "vscode";
 import { ChatViewProvider } from "./chatViewProvider";
+import { WebSurfacePanel } from "./webSurfacePanel";
 import { log } from "./logger";
+
+function daemonUrl(): string {
+  return (
+    vscode.workspace.getConfiguration("ocean").get<string>("daemon.url")?.trim() ||
+    "http://127.0.0.1:4780"
+  );
+}
 
 let chatProvider: ChatViewProvider | undefined;
 
@@ -39,6 +47,9 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("ocean.openEditor", () => {
       chatProvider?.openEditorPanel();
     }),
+    vscode.commands.registerCommand("ocean.openWebSurface", async () => {
+      await WebSurfacePanel.show(context.extensionUri, daemonUrl());
+    }),
     vscode.commands.registerCommand("ocean.connect", async () => {
       await chatProvider?.connect();
     }),
@@ -66,6 +77,7 @@ export function activate(context: vscode.ExtensionContext): void {
 export function deactivate(): void {
   chatProvider?.dispose();
   chatProvider = undefined;
+  WebSurfacePanel.disposeShared();
 }
 
 async function focusView(viewId: string, containerId: string): Promise<void> {
