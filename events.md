@@ -1062,3 +1062,32 @@ cargo check, 3 realtime UI tests, 4 auth-gate regression tests, release Trunk
 build, and private-browser desktop/mobile boot (brand SVG, five word letters,
 OceanReveal, composer, hashed WASM, no horizontal overflow).
 _________________________________________________________________________________
+time:      [7:40pm] [07-09-26]
+agent:     [claude] [fable-5]
+worktree:  gitbutler/workspace
+type:      merge
+area:      infra
+
+Reconciled the shared GitButler workspace onto main 0c706c3 after a corrupted
+lane rebase. The desktop-integration stack's deck+palette commit conflicted
+against the new main; `but resolve` (0.19) wedged on a false "no default
+target" error (fixed by upgrading the CLI to 0.21, whose edit-mode setup
+bypass handles gitbutler/edit), and the finish rebase re-merged uncommitted
+changes destructively - duplicate FsFileEntry, mismatched braces. Root-cause
+audit proved the stack's seven commits are wholly contained in upstream
+0c706c3 (the desktop session landed them itself); the huge "unassigned WIP"
+set was mostly stale-base artifact from a 3670b1f-era worktree, and blind
+restoration had regressed landed realtime-voice/dictate work. Final state:
+tracked sources exactly at 0c706c3; deliberate overlays kept uncommitted
+(AGENTS.md platform-contract + circular-logo doc direction, mockups, tauri
+icon set); brand assets land with this entry's commit (public/brand/
+ocean-mark.svg + master PNG, regenerated PWA icons, generator script)
+because the shipped index.html references /brand/ocean-mark.svg which was
+untracked - fresh clones built a 404 favicon. Recovery state is parked on
+this machine only: local refs refs/backups/{green-worktree-tree,
+worktree-composite-20260709, desktop-integration-pre-resolve,
+desktop-integration-post-resolve, pre-unapply-workspace-snapshot} and
+/tmp/ocean-surface-wip-backup-20260709-1805. Verified live: wasm check,
+proxy check, tauri check, release Trunk build all green; wasm warning count
+fell from 94 (stale composite) to 4 on the reconciled tree.
+_________________________________________________________________________________

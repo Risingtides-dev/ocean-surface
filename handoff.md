@@ -1,6 +1,29 @@
 # Ocean — session handoff (2026-05-31)
 
-## Current overlay (2026-07-07)
+## Current overlay (2026-07-09)
+
+Workspace reconciled onto main `0c706c3` (desktop shell + slash + menu bridge
++ auth install safety). Main also carries the v22 Ocean reveal, thinkfill
+pending card, realtime voice, and Dictate mode from `5667ef4`. All four gates
+are green on this tree: wasm check, proxy check, tauri check, release Trunk
+build. Brand assets (`public/brand/`, regenerated PWA icons,
+`scripts/build-brand-assets.mjs`) land in the same commit as this overlay so
+a fresh clone no longer 404s the favicon the shipped `index.html` references.
+
+Deliberate uncommitted overlays live ONLY in the shared workspace on the
+studio machine (not in any clone of main — other sessions' threads, leave
+alone there): `AGENTS.md` + `docs/OCEAN_WEB_SURFACE_DESIGN.md` (platform
+contract + circular-logo direction), `docs/OCEAN_PLATFORM_CONTRACT.md`,
+`docs/OCEAN_SURFACE_SHELL_ARCHITECTURE_NOTE.md`, `mockups/` (brand reveal
+references, v22 approved), `crates/ocean-tauri/icons/` (bundling icon set,
+not yet wired into tauri.conf.json).
+
+Recovery state from the 2026-07-09 lane-rebase corruption is parked in LOCAL
+refs on this machine (`refs/backups/*`, see events.md 7:40pm entry) — mine
+them before re-deriving any "lost" WIP; do not reapply them wholesale, most
+of that tree is stale-base artifact that regresses landed voice work.
+
+## Previous overlay (2026-07-07)
 
 Native surface pivoted back to the documented plan: the active native surface
 is now the Tauri 2.x shell at `crates/ocean-tauri/`, which loads the same

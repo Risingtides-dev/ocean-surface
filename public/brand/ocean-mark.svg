@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="1024" height="1024" fill="none" aria-hidden="true" style="filter:drop-shadow(rgba(0, 0, 0, 0.55) 0px 2px 6px) drop-shadow(rgba(1, 210, 195, 0.09) 0px 0px 9px)">
+    <defs>
+      <clipPath id="wave-badge-clip"><circle cx="24" cy="24" r="20.4"/></clipPath>
+      <linearGradient id="wave-badge-face-g" gradientUnits="userSpaceOnUse" x1="0" y1="3" x2="0" y2="45">
+        <stop offset="0" stop-color="#0f0f10"/>
+        <stop offset="0.55" stop-color="#020203"/>
+      </linearGradient>
+      <linearGradient id="wave-badge-arc-g" gradientUnits="userSpaceOnUse" x1="0" y1="4.35" x2="0" y2="17.95">
+        <stop offset="0" stop-color="#35e1d1"/>
+        <stop offset="0.12" stop-color="#03d9c5"/>
+        <stop offset="1" stop-color="#03bba9"/>
+      </linearGradient>
+      <linearGradient id="wave-badge-w1-g" gradientUnits="userSpaceOnUse" x1="0" y1="16" x2="0" y2="20.8">
+        <stop offset="0" stop-color="#1ad7c9"/>
+        <stop offset="0.14" stop-color="#01d2c3"/>
+        <stop offset="1" stop-color="#01c3b5"/>
+      </linearGradient>
+      <linearGradient id="wave-badge-w2-g" gradientUnits="userSpaceOnUse" x1="0" y1="24.7" x2="0" y2="29.5">
+        <stop offset="0" stop-color="#15b5bb"/>
+        <stop offset="0.14" stop-color="#01afb5"/>
+        <stop offset="1" stop-color="#01a6ac"/>
+      </linearGradient>
+      <linearGradient id="wave-badge-fill-g" gradientUnits="userSpaceOnUse" x1="0" y1="33" x2="0" y2="39.6">
+        <stop offset="0" stop-color="#187ab8"/>
+        <stop offset="0.22" stop-color="#046eb2"/>
+        <stop offset="1" stop-color="#0467a7"/>
+      </linearGradient>
+      <linearGradient id="wave-badge-bar-g" gradientUnits="userSpaceOnUse" x1="0" y1="42.65" x2="0" y2="44.85">
+        <stop offset="0" stop-color="#4687b7"/>
+        <stop offset="0.18" stop-color="#085f9f"/>
+        <stop offset="1" stop-color="#043457"/>
+      </linearGradient>
+      <linearGradient id="wave-badge-rim-g" gradientUnits="userSpaceOnUse" x1="0" y1="3" x2="0" y2="45">
+        <stop offset="0" stop-color="#d8dbdd" stop-opacity="0.4381"/>
+        <stop offset="1" stop-color="#35383a" stop-opacity="0.4381"/>
+      </linearGradient>
+      <radialGradient id="wave-badge-vig-g">
+        <stop offset="0.62" stop-color="#000000" stop-opacity="0"/>
+        <stop offset="1" stop-color="#000000" stop-opacity="0.55"/>
+      </radialGradient>
+      <radialGradient id="wave-badge-occl-g">
+        <stop offset="0.78" stop-color="#000000" stop-opacity="0"/>
+        <stop offset="0.94" stop-color="#000000" stop-opacity="0.26"/>
+        <stop offset="1" stop-color="#000000" stop-opacity="0.72"/>
+      </radialGradient>
+    </defs>
+    <circle cx="24" cy="24" r="21" fill="url(#wave-badge-face-g)"/>
+    <circle cx="24" cy="24" r="20.6" fill="url(#wave-badge-vig-g)"/>
+    <circle cx="24" cy="24" r="20.7" stroke="url(#wave-badge-rim-g)" stroke-width="0.55" style="filter:drop-shadow(rgba(255, 255, 255, 0.14) 0px 0px 1px)"/>
+    <g clip-path="url(#wave-badge-clip)" stroke-linecap="round">
+      <path stroke-linecap="butt" d="M 8.2 16 A 17.7 17.7 0 0 1 39.8 16" stroke="url(#wave-badge-arc-g)" stroke-width="3.9" style="filter:drop-shadow(rgba(0, 0, 0, 0.75) 0px 0.9px 0.7px) drop-shadow(rgba(3, 217, 197, 0.32) 0px 0px 2.4px)"/>
+      <path d="M -22 18.4 q 5.5 -1.9 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0" stroke="url(#wave-badge-w1-g)" stroke-width="3.7" stroke-linecap="round" style="filter:drop-shadow(rgba(0, 0, 0, 0.7) 0px 0.8px 0.7px) drop-shadow(rgba(1, 210, 195, 0.28) 0px 0px 2.2px)"/>
+      <path d="M -22 27.1 q 5.5 -1.9 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0" stroke="url(#wave-badge-w2-g)" stroke-width="3.7" stroke-linecap="round" style="filter:drop-shadow(rgba(0, 0, 0, 0.7) 0px 0.8px 0.7px) drop-shadow(rgba(1, 175, 181, 0.28) 0px 0px 2.2px)"/>
+      <path d="M -22 33.6 q 5.5 1.7 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 L 66 39.6 L -22 39.6 Z" fill="url(#wave-badge-fill-g)" style="filter:drop-shadow(rgba(0, 0, 0, 0.7) 0px 1px 0.9px) drop-shadow(rgba(4, 110, 178, 0.34) 0px 0px 2.6px)"/>
+      <path d="M 15.5 43.75 L 32.5 43.75" stroke="url(#wave-badge-bar-g)" stroke-width="2.2" stroke-linecap="round" style="filter:drop-shadow(rgba(0, 0, 0, 0.75) 0px 0.6px 0.6px) drop-shadow(rgba(8, 95, 159, 0.34) 0px 0px 2px)"/>
+    </g>
+    <circle cx="24" cy="24" r="20.4" fill="url(#wave-badge-occl-g)"/>
+  </svg>
