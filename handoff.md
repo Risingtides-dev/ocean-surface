@@ -7,8 +7,8 @@ Workspace reconciled onto main `0c706c3` (desktop shell + slash + menu bridge
 pending card, realtime voice, and Dictate mode from `5667ef4`. All four gates
 are green on this tree: wasm check, proxy check, tauri check, release Trunk
 build. Brand assets (`public/brand/`, regenerated PWA icons,
-`scripts/build-brand-assets.mjs`) land in the same commit as this overlay so
-a fresh clone no longer 404s the favicon the shipped `index.html` references.
+`scripts/build-brand-assets.mjs`) are tracked, and `index.html` now carries
+an SVG favicon (`/brand/ocean-mark.svg`) ahead of the PNG fallbacks.
 
 Deliberate uncommitted overlays live ONLY in the shared workspace on the
 studio machine (not in any clone of main — other sessions' threads, leave

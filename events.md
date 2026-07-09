@@ -1091,3 +1091,22 @@ desktop-integration-post-resolve, pre-unapply-workspace-snapshot} and
 proxy check, tauri check, release Trunk build all green; wasm warning count
 fell from 94 (stale composite) to 4 on the reconciled tree.
 _________________________________________________________________________________
+time:      [7:49pm] [07-09-26]
+agent:     [claude] [fable-5]
+worktree:  gitbutler/workspace
+type:      bug-report
+area:      frontend
+
+Correction to the 7:40pm entry: the previously shipped index.html never
+referenced /brand/ocean-mark.svg - that favicon link existed only in the
+machine-local workspace overlay, so there was no fresh-clone 404. A detached
+build of landed main (2181dcf) proved it: dist carried the brand assets and
+regenerated icons, but zero ocean-mark references in the HTML. Actual
+sequence: 2181dcf tracked the assets; this follow-up wires the SVG favicon
+into index.html (image/svg+xml ahead of the PNG fallbacks). The dist is
+shared by web, PWA, and the Tauri shell (frontendDist), where the absolute
+/brand/ path resolves inside the bundle; the extension is unaffected - its
+manifest and sidepanel.html reference no icons. Gate for this commit before
+landing: rebuild the bundle from the exact committed tree, grep
+dist/index.html for the ocean-mark link, confirm dist/brand/ contents.
+_________________________________________________________________________________
