@@ -82,11 +82,31 @@
      take them. */
   --badge-face: #020203;                   /* coin face — darker than --bg */
   --badge-rim: rgba(148, 156, 160, 0.22);  /* rim relief edge */
-  --badge-arc: #03D9C5;                    /* sunlit dome */
-  --badge-w1: #01D2C3;                     /* first swell */
-  --badge-w2: #01AFB5;                     /* second swell */
-  --badge-fill: #046EB2;                   /* deep-water band */
-  --badge-bar: #085F9F;                    /* abyss bar */
+  /* Six-strata depth ramp: sunlit aqua surface → indigo abyss. Muted,
+     not the neon working ramp. Per-band hi/lo derive via color-mix in the
+     wave-badge rules (transcript.css). */
+  --badge-b1: #4fd8c0;                      /* aqua surface */
+  --badge-b2: #2bb4a6;                      /* teal */
+  --badge-b3: #1f95b8;                      /* cyan-blue */
+  --badge-b4: #2170be;                      /* blue */
+  --badge-b5: #2453bc;                      /* deep blue */
+  --badge-b6: #1a2f8e;                      /* indigo abyss */
+  --badge-foam: #eafcff;                    /* surface glint / whitecap */
+  --badge-split: #05101f;                   /* dark longitudinal split */
+  --badge-gloss: #cff4ff;                   /* top specular sheen (glass) */
+
+  /* ── Water reveal — the scene water gradient, crest, and tint ─── */
+  --water-hi: #2ea6c6;
+  --water-mid: #1c63b0;
+  --water-lo: #0a1642;
+  --water-crest: var(--badge-foam);
+  --water-crest-soft: #bfeff8;
+  --water-tint: #0b2048;
+
+  /* Wordmark / reveal type + slow letter shimmer (solid fills, never
+     gradient-clip text). Shimmer brightens each letter toward foam. */
+  --wm-font: 'Poppins', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --letter-shimmer: color-mix(in srgb, var(--badge-foam) 55%, var(--ocean-8));
 
   /* ── Status ───────────────────────────────────────────────────── */
   --ok: #1ED760;    --ok-soft: rgba(30, 215, 96, 0.12);

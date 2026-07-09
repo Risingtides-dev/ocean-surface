@@ -141,28 +141,23 @@ pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoVie
         <div class="transcript" node_ref=container on:scroll=on_scroll>
             <Show when=is_empty>
                 <div class="transcript__landing">
-                    // The brand lockup — the Ocean badge with its swells
-                    // drifting at parallax speeds (the loading motion; the
-                    // old breathing radial pulse is gone), OCEAN in
-                    // per-letter ramp colors (abyss to sunlit surface).
-                    // The rows are aria-hidden; the h1 stays for readers.
-                    <div class="transcript__landing-mark" aria-hidden="true">
-                        <crate::icons::WaveBadge spinning=true />
-                    </div>
-                    <div class="transcript__landing-word" aria-hidden="true">
-                        <span>"O"</span>
-                        <span>"C"</span>
-                        <span>"E"</span>
-                        <span>"A"</span>
-                        <span>"N"</span>
+                    // Approved v22 wordmark reveal: drip → splash → rising
+                    // tide unveils OCEAN; orb rides the surface into idle.
+                    // The scene SVG is aria-hidden (inside OceanReveal); the
+                    // h1 stays for readers. The Sessions launcher lives
+                    // INSIDE the scene, surfacing in the water zone when
+                    // the rAF waterline floods past it (data-flooded stamp —
+                    // no hardcoded delay; reduced-motion shows it always).
+                    <div class="transcript__landing-reveal">
+                        <crate::icons::OceanReveal />
+                        <button
+                            class="transcript__sessions-launcher"
+                            on:click=move |_| show_sessions.set(true)
+                        >
+                            "Sessions"
+                        </button>
                     </div>
                     <h1 class="transcript__landing-title">"Ocean"</h1>
-                    <button
-                        class="transcript__sessions-launcher"
-                        on:click=move |_| show_sessions.set(true)
-                    >
-                        "Sessions"
-                    </button>
                 </div>
             </Show>
             <For
@@ -179,15 +174,13 @@ pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoVie
                 }
             />
             // The reply's landing site while the daemon works (send → first
-            // token): a proto-assistant header with a sonar ping breathing
-            // where the text is about to appear — never dead air.
+            // token): the Ocean badge alone, swells churning under a calm rim
+            // where the text is about to appear — never dead air. Per the
+            // logo handoff: no `ocean ▸` proto-header, no prompt-like glyphs.
             <Show when=pending_response>
-                <div class="ocean-pending" role="status" aria-label="Ocean is thinking">
-                    <div class="ocean-pending__head">"ocean ▸"</div>
-                    <div class="ocean-pending__badge" aria-hidden="true">
-                        <crate::icons::WaveBadge spinning=true />
-                    </div>
-                </div>
+                // Half-filled water card reveals "thinking…" as the tide
+                // rises — pending gap between send and first token.
+                <crate::icons::OceanThinking />
             </Show>
         </div>
     }
@@ -363,7 +356,10 @@ fn ToolGroup(
                     .filter(|&bi| {
                         matches!(
                             turn.blocks.get(bi),
-                            Some(Block::ToolCall { status: ToolStatus::Err, .. })
+                            Some(Block::ToolCall {
+                                status: ToolStatus::Err,
+                                ..
+                            })
                         )
                     })
                     .count()
@@ -424,10 +420,7 @@ fn ToolGroup(
 /// freeze the group at its first segment and miss every later delta. Scanning
 /// the turn's blocks each update keeps the count and body current forever.
 #[component]
-fn ThinkingGroup(
-    turn_idx: usize,
-    turns: RwSignal<Vec<crate::model::Turn>>,
-) -> impl IntoView {
+fn ThinkingGroup(turn_idx: usize, turns: RwSignal<Vec<crate::model::Turn>>) -> impl IntoView {
     // Local expand state (collapsed by default). Coalescing many blocks into one
     // disclosure means there's no single model `expanded` field to mirror, so the
     // toggle owns its own state — same shape as `ToolGroup`'s user override.
@@ -612,10 +605,19 @@ mod tests {
     #[test]
     fn all_thinking_blocks_collapse_into_one_group() {
         let blocks = vec![
-            Block::Thinking { content: "A".into(), expanded: false },
+            Block::Thinking {
+                content: "A".into(),
+                expanded: false,
+            },
             Block::Text("answer".into()),
-            Block::Thinking { content: "B".into(), expanded: false },
-            Block::Thinking { content: "C".into(), expanded: false },
+            Block::Thinking {
+                content: "B".into(),
+                expanded: false,
+            },
+            Block::Thinking {
+                content: "C".into(),
+                expanded: false,
+            },
         ];
         let items = render_items(&blocks);
         assert_eq!(items.len(), 2);
@@ -631,7 +633,10 @@ mod tests {
     #[test]
     fn single_thinking_block_becomes_group_of_one() {
         let blocks = vec![
-            Block::Thinking { content: "A".into(), expanded: false },
+            Block::Thinking {
+                content: "A".into(),
+                expanded: false,
+            },
             Block::Text("answer".into()),
         ];
         let items = render_items(&blocks);
@@ -646,9 +651,15 @@ mod tests {
     #[test]
     fn thinking_and_tool_groups_each_collapse_once() {
         let blocks = vec![
-            Block::Thinking { content: "think".into(), expanded: false },
+            Block::Thinking {
+                content: "think".into(),
+                expanded: false,
+            },
             tool_block("c1"),
-            Block::Thinking { content: "more".into(), expanded: false },
+            Block::Thinking {
+                content: "more".into(),
+                expanded: false,
+            },
             tool_block("c2"),
         ];
         let items = render_items(&blocks);
@@ -673,7 +684,10 @@ mod tests {
     #[test]
     fn only_thinking_yields_one_group() {
         let blocks: Vec<Block> = (0..26)
-            .map(|i| Block::Thinking { content: i.to_string(), expanded: false })
+            .map(|i| Block::Thinking {
+                content: i.to_string(),
+                expanded: false,
+            })
             .collect();
         let items = render_items(&blocks);
         assert_eq!(items.len(), 1);

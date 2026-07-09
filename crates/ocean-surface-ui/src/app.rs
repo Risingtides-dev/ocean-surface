@@ -6,13 +6,13 @@ use wasm_bindgen::JsCast;
 
 use crate::components::PermissionPrompts;
 use crate::daemon::{daemon_url_from_env, Daemon};
-use crate::host::DaemonStatus;
 use crate::deck::browser::BrowserCockpit;
 use crate::deck::files::FilesPanel;
 use crate::deck::repo::RepoPanel;
 use crate::deck::DeckPanel;
-use crate::palette::{Command, CommandRegistry, CommandScope, PaletteView};
+use crate::host::DaemonStatus;
 use crate::model::{Block, Role, Turn};
+use crate::palette::{Command, CommandRegistry, CommandScope, PaletteView};
 use crate::rooms::{RoomStage, Rooms, RoomsPanel};
 use crate::sessions::SessionsPanel;
 use crate::transcript::Transcript;
@@ -34,10 +34,7 @@ fn composer_overflow_y(scroll_height: i32) -> &'static str {
 }
 
 fn fit_composer_textarea(el: &web_sys::HtmlTextAreaElement) {
-    let style = el
-        .clone()
-        .unchecked_into::<web_sys::HtmlElement>()
-        .style();
+    let style = el.clone().unchecked_into::<web_sys::HtmlElement>().style();
     let _ = style.set_property("height", "auto");
     let scroll_height = el.scroll_height();
     let height = composer_height_px(scroll_height);
@@ -46,10 +43,7 @@ fn fit_composer_textarea(el: &web_sys::HtmlTextAreaElement) {
 }
 
 fn reset_composer_textarea(el: &web_sys::HtmlTextAreaElement) {
-    let style = el
-        .clone()
-        .unchecked_into::<web_sys::HtmlElement>()
-        .style();
+    let style = el.clone().unchecked_into::<web_sys::HtmlElement>().style();
     let _ = style.set_property("height", &format!("{COMPOSER_MIN_HEIGHT_PX}px"));
     let _ = style.set_property("overflow-y", "hidden");
 }
@@ -67,6 +61,10 @@ fn window_focused() -> bool {
 #[component]
 pub fn App() -> impl IntoView {
     let daemon = Daemon::new(daemon_url_from_env());
+    // Voice phases 2/3: hand the realtime voice-chat module its daemon handle
+    // once — the orb's menu entry starts sessions without prop-threading.
+    crate::voice::realtime::install(daemon.clone());
+
     // Zero-config boot: fetch /api/config from the same-origin proxy to learn
     // the daemon URL + confirm auth is preconfigured, THEN connect AND fetch the
     // model catalogue — in that order, inside bootstrap. Falls back to
@@ -362,16 +360,24 @@ pub fn App() -> impl IntoView {
     // lives with the App scope and is torn down on unmount.
     let _pointer_light = window_event_listener(ev::mousemove, move |e: web_sys::MouseEvent| {
         let Some(win) = web_sys::window() else { return };
-        let Some(w) = win.inner_width().ok().and_then(|v| v.as_f64()) else { return };
-        let Some(h) = win.inner_height().ok().and_then(|v| v.as_f64()) else { return };
+        let Some(w) = win.inner_width().ok().and_then(|v| v.as_f64()) else {
+            return;
+        };
+        let Some(h) = win.inner_height().ok().and_then(|v| v.as_f64()) else {
+            return;
+        };
         if w <= 0.0 || h <= 0.0 {
             return;
         }
         let x = e.client_x() as f64 / w * 100.0;
         let y = e.client_y() as f64 / h * 100.0;
         let Some(doc) = win.document() else { return };
-        let Some(root) = doc.document_element() else { return };
-        let Ok(root) = root.dyn_into::<web_sys::HtmlElement>() else { return };
+        let Some(root) = doc.document_element() else {
+            return;
+        };
+        let Ok(root) = root.dyn_into::<web_sys::HtmlElement>() else {
+            return;
+        };
         let style = root.style();
         let _ = style.set_property("--pointer-x", &format!("{x:.2}%"));
         let _ = style.set_property("--pointer-y", &format!("{y:.2}%"));
@@ -427,6 +433,21 @@ pub fn App() -> impl IntoView {
     };
     let on_voice_status = Callback::new(move |msg: String| status.set(msg));
 
+    // Dictate mode: transcript lands in the composer for review rather than
+    // auto-sending. VoiceOrb routes to this when Dictate is active.
+    let on_dictate = Callback::new(move |text: String| {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        input.update(|s| {
+            if !s.is_empty() && !s.ends_with(' ') {
+                s.push(' ');
+            }
+            s.push_str(&text);
+        });
+    });
+
     // Clones for the composer's per-turn override controls (OCEAN-79). These
     // controls live INSIDE the chat-branch <Show> fallback, which must be `Fn`,
     // so they go through StoredValue (Copy) — a plain clone would be moved out of
@@ -450,6 +471,31 @@ pub fn App() -> impl IntoView {
     let daemon_livekit = StoredValue::new(daemon.clone());
     let daemon_phone_call = StoredValue::new(daemon.clone());
 
+    // Realtime voice-chat layout (voice phases 2/3): while a session is
+    // connecting/live the composer input hides and the orb takes center
+    // stage; once the voice agent renders components the orb docks back to
+    // its composer slot so they get the room. Class-only — stage Off leaves
+    // the DOM untouched. `--voice-level` carries the live mic level into the
+    // orb's CSS so its water reacts to the user's voice.
+    let rt_stage = crate::voice::realtime::stage();
+    let rt_turns = daemon.turns;
+    let rt_components_visible = Memo::new(move |_| {
+        rt_turns.with(|t| {
+            t.iter().any(|turn| {
+                turn.blocks
+                    .iter()
+                    .any(|b| matches!(b, crate::model::Block::Component { .. }))
+            })
+        })
+    });
+    let voice_chat_active = move || {
+        rt_stage.get() != crate::voice::realtime::RealtimeStage::Off && !rt_components_visible.get()
+    };
+    let voice_chat_docked = move || {
+        rt_stage.get() != crate::voice::realtime::RealtimeStage::Off && rt_components_visible.get()
+    };
+    let voice_level_style = move || format!("{:.3}", crate::voice::realtime::level().get());
+
     // In the Chrome side panel the cockpit lives in a ~360px-wide column. Tag
     // the root so the shared stylesheet's compact `.ocean-surface--extension`
     // rules apply, without forking the layout for the full-width web app.
@@ -459,19 +505,21 @@ pub fn App() -> impl IntoView {
         "ocean-surface"
     };
 
+    // Clone before the root view! so nested closures / children can each
+    // take their own handle without moving the outer registry.
+    let registry_for_view = registry.clone();
     view! {
-        <main class=root_class>
+        <main
+            class=root_class
+            class:voice-chat-active=voice_chat_active
+            class:voice-chat-docked=voice_chat_docked
+            style=("--voice-level", voice_level_style)
+        >
             <header class="ocean-header">
                 <div class="ocean-brand" aria-label="Ocean">
-                    // The OCEAN wordmark carries the TUI splash depth ramp,
-                    // one solid color per letter (no gradient text) — the same
-                    // xterm ramp the terminal banner paints per line.
+                    <crate::icons::WaveBadge spinning=false compact=true />
                     <span class="ocean-brand__word" aria-hidden="true">
-                        <span class="ocean-brand__ch ocean-brand__ch--1">"O"</span>
-                        <span class="ocean-brand__ch ocean-brand__ch--2">"C"</span>
-                        <span class="ocean-brand__ch ocean-brand__ch--3">"E"</span>
-                        <span class="ocean-brand__ch ocean-brand__ch--4">"A"</span>
-                        <span class="ocean-brand__ch ocean-brand__ch--5">"N"</span>
+                        <crate::icons::OceanWordmark />
                     </span>
                 </div>
                 <div class="ocean-header__right">
@@ -1031,7 +1079,10 @@ pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
 
 #[cfg(test)]
 mod tests {
-    use super::{composer_height_px, composer_overflow_y, parse_deep_link, DeepLinkAction, COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX};
+    use super::{
+        composer_height_px, composer_overflow_y, parse_deep_link, DeepLinkAction,
+        COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX,
+    };
 
     #[test]
     fn composer_height_clamps_to_min_and_max() {

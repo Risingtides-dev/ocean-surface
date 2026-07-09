@@ -1,10 +1,12 @@
-//! Voice capture → STT, in three interaction modes picked from a popover:
-//! Off (mic gated off), Push-to-talk (hold the orb), and Hands-free (open mic).
+//! Voice capture → STT, in four interaction modes picked from a popover:
+//! Off (mic gated off), Dictate (hold-to-talk, transcript to composer),
+//! Push-to-talk (hold the orb), and Hands-free (open mic).
 //!
-//! A circular "orb" button. In push-to-talk, pointer-down starts recording via
-//! `getUserMedia` + `MediaRecorder`; pointer-up stops, assembles the chunks
-//! into a Blob, POSTs the raw bytes to `/api/stt`, and on `{ok, text}` hands
-//! the transcript to a callback (which drops it into the composer + submits).
+//! A circular "orb" button. In push-to-talk and dictate, pointer-down starts
+//! recording via `getUserMedia` + `MediaRecorder`; pointer-up stops, assembles
+//! the chunks into a Blob, POSTs the raw bytes to `/api/stt`, and on `{ok, text}`
+//! hands the transcript to a callback (push-to-talk: auto-sends; dictate: appends
+//! to the composer for manual send).
 //!
 //! The proxy is same-origin as the served bundle, so `/api/stt` is relative.
 //!
@@ -14,6 +16,7 @@
 
 pub mod listen;
 pub mod mode;
+pub mod realtime;
 pub mod vad;
 
 use std::cell::RefCell;
@@ -82,16 +85,22 @@ struct Recorder {
 }
 
 /// Voice orb + mode menu. `on_transcript` receives the recognized text from a
-/// push-to-talk or hands-free capture; `muted` gates spoken (TTS) replies and is
-/// wired through the menu's "Spoken replies" toggle.
+/// push-to-talk or hands-free capture; `on_dictate` (when set) is used instead
+/// in Dictate mode to append the transcript to the composer without sending.
+/// `muted` gates spoken (TTS) replies and is wired through the menu's "Spoken
+/// replies" toggle.
 #[component]
 pub fn VoiceOrb(
-    /// Called with the transcript once STT returns.
+    /// Called with the transcript once STT returns (push-to-talk / hands-free).
     on_transcript: Callback<String>,
     /// Surface STT / mic errors to the shell (reuses the status line).
     on_status: Callback<String>,
     /// Gates spoken (TTS) replies; wired to the menu's "Spoken replies" row.
     muted: RwSignal<bool>,
+    /// Dictation mode callback — if set, transcripts are handed off here instead
+    /// of `on_transcript` while Dictate mode is active.
+    #[prop(optional)]
+    on_dictate: Option<Callback<String>>,
 ) -> impl IntoView {
     let state = RwSignal::new(RecState::Idle);
     // Shared recorder slot the start/stop handlers both reach into.
@@ -164,6 +173,7 @@ pub fn VoiceOrb(
     {
         let listen_handle = listen_handle.clone();
         let rec = rec.clone();
+        let on_dictate = on_dictate.clone();
         Effect::new(move |_| {
             let m = voice_mode.get();
             // Stop any running loop from the previous mode.
@@ -179,9 +189,17 @@ pub fn VoiceOrb(
                         state.set(RecState::Idle);
                     }
                     set_hands_free(None);
+                    DICTATE_CB.with(|c| *c.borrow_mut() = None);
+                }
+                mode::VoiceMode::Dictate => {
+                    // Same capture as PushToTalk; route transcripts through the
+                    // dictate callback so they land in the composer for review.
+                    set_hands_free(None);
+                    DICTATE_CB.with(|c| *c.borrow_mut() = on_dictate.clone());
                 }
                 mode::VoiceMode::HandsFree => {
                     set_hands_free(Some(mode::HandsFreeState::new(m)));
+                    DICTATE_CB.with(|c| *c.borrow_mut() = None);
                     let listen_handle = listen_handle.clone();
                     spawn_local(async move {
                         match listen::start().await {
@@ -195,6 +213,7 @@ pub fn VoiceOrb(
                 }
                 mode::VoiceMode::PushToTalk => {
                     set_hands_free(None);
+                    DICTATE_CB.with(|c| *c.borrow_mut() = None);
                 }
             }
         });
@@ -205,8 +224,10 @@ pub fn VoiceOrb(
     let wrap_ref = NodeRef::<leptos::html::Div>::new();
 
     // Apply a mode from the menu: prime TTS (mobile audio unlock), set the
-    // signal, persist it, and close the menu.
+    // signal, persist it, and close the menu. Picking ANY classic mode ends a
+    // live realtime voice chat — one mic owner at a time (voice phases 2/3).
     let choose = move |m: mode::VoiceMode| {
+        realtime::stop();
         tts::prime();
         voice_mode.set(m);
         persist_mode(m);
@@ -223,6 +244,8 @@ pub fn VoiceOrb(
                 let key = ev.key().to_lowercase();
                 if (ev.meta_key() || ev.ctrl_key()) && ev.shift_key() && key == "v" {
                     ev.prevent_default();
+                    // The chord is also a panic kill for a live voice chat.
+                    realtime::stop();
                     tts::prime();
                     let next = voice_mode.get().next();
                     voice_mode.set(next);
@@ -249,9 +272,7 @@ pub fn VoiceOrb(
                 if !show_menu.get_untracked() {
                     return;
                 }
-                let target = ev
-                    .target()
-                    .and_then(|t| t.dyn_into::<web_sys::Node>().ok());
+                let target = ev.target().and_then(|t| t.dyn_into::<web_sys::Node>().ok());
                 let inside = match (wrap_ref.get(), target) {
                     (Some(el), Some(t)) => el.contains(Some(&t)),
                     _ => false,
@@ -262,8 +283,8 @@ pub fn VoiceOrb(
             }) as Box<dyn FnMut(web_sys::Event)>);
             let _ = window
                 .add_event_listener_with_callback("keydown", on_escape.as_ref().unchecked_ref());
-            let _ = window
-                .add_event_listener_with_callback("click", on_click.as_ref().unchecked_ref());
+            let _ =
+                window.add_event_listener_with_callback("click", on_click.as_ref().unchecked_ref());
             on_escape.forget();
             on_click.forget();
         }
@@ -272,8 +293,19 @@ pub fn VoiceOrb(
     // Reactive hands-free capture status: the listen loop publishes onto this so
     // the orb can show "listening… → transcribing… → final text" per utterance.
     let hf_status = hands_free_status_signal();
+    // Realtime voice-chat stage (voice phases 2/3): while Connecting/Live the
+    // orb renders live and the menu offers "End voice chat" instead of entry.
+    let rt_stage = realtime::stage();
 
+    let rt_label = move || match rt_stage.get() {
+        realtime::RealtimeStage::Connecting => Some("connecting voice chat…".to_string()),
+        realtime::RealtimeStage::Live => Some("voice chat live — speak naturally".to_string()),
+        realtime::RealtimeStage::Off => None,
+    };
     let label = move || {
+        if let Some(live) = rt_label() {
+            return live;
+        }
         let m = voice_mode.get();
         match m {
             mode::VoiceMode::Off => "voice off".to_string(),
@@ -295,6 +327,11 @@ pub fn VoiceOrb(
                     }
                 }
             }
+            mode::VoiceMode::Dictate => match state.get() {
+                RecState::Idle => "dictating — transcript lands in the message box".to_string(),
+                RecState::Recording => "listening… release to append".to_string(),
+                RecState::Transcribing => "transcribing…".to_string(),
+            },
             mode::VoiceMode::PushToTalk => match state.get() {
                 RecState::Idle => "hold to talk".to_string(),
                 RecState::Recording => "listening… release to send".to_string(),
@@ -305,6 +342,13 @@ pub fn VoiceOrb(
     let orb_class = move || {
         let m = voice_mode.get();
         let base = format!("voice-orb {}", m.css_modifier());
+        match rt_stage.get() {
+            realtime::RealtimeStage::Connecting => {
+                return format!("{base} is-voicechat is-transcribing");
+            }
+            realtime::RealtimeStage::Live => return format!("{base} is-voicechat is-live"),
+            realtime::RealtimeStage::Off => {}
+        }
         match m {
             mode::VoiceMode::Off => format!("{base} is-off"),
             mode::VoiceMode::HandsFree => {
@@ -317,6 +361,11 @@ pub fn VoiceOrb(
                     _ => format!("{base} is-live"),
                 }
             }
+            mode::VoiceMode::Dictate => match state.get() {
+                RecState::Idle => base,
+                RecState::Recording => format!("{base} is-recording"),
+                RecState::Transcribing => format!("{base} is-transcribing"),
+            },
             mode::VoiceMode::PushToTalk => match state.get() {
                 RecState::Idle => base,
                 RecState::Recording => format!("{base} is-recording"),
@@ -324,17 +373,23 @@ pub fn VoiceOrb(
             },
         }
     };
-    let orb_title = move || match voice_mode.get() {
-        mode::VoiceMode::Off => "voice off — click to open voice settings",
-        mode::VoiceMode::PushToTalk => "push to talk — hold to speak",
-        mode::VoiceMode::HandsFree => "hands-free — open mic",
+    let orb_title = move || {
+        if rt_stage.get() != realtime::RealtimeStage::Off {
+            return "voice chat live — open voice settings to end it";
+        }
+        match voice_mode.get() {
+            mode::VoiceMode::Off => "voice off — click to open voice settings",
+            mode::VoiceMode::Dictate => "dictate — hold to speak, transcript lands in composer",
+            mode::VoiceMode::PushToTalk => "push to talk — hold to speak",
+            mode::VoiceMode::HandsFree => "hands-free — open mic",
+        }
     };
-    // Pointer handlers: push-to-talk records on hold; hands-free is owned by the
-    // listen loop; Off opens the menu instead of capturing.
+    // Pointer handlers: push-to-talk + dictate record on hold; hands-free is
+    // owned by the listen loop; Off opens the menu instead of capturing.
     let ptt_down = {
         let on_down = on_down.clone();
         move |ev: web_sys::PointerEvent| match voice_mode.get_untracked() {
-            mode::VoiceMode::PushToTalk => on_down(ev),
+            mode::VoiceMode::PushToTalk | mode::VoiceMode::Dictate => on_down(ev),
             mode::VoiceMode::Off => show_menu.set(true),
             mode::VoiceMode::HandsFree => {}
         }
@@ -342,7 +397,8 @@ pub fn VoiceOrb(
     let ptt_up = {
         let on_up = on_up.clone();
         move |ev: web_sys::PointerEvent| {
-            if voice_mode.get_untracked() == mode::VoiceMode::PushToTalk {
+            let m = voice_mode.get_untracked();
+            if m == mode::VoiceMode::PushToTalk || m == mode::VoiceMode::Dictate {
                 on_up(ev);
             }
         }
@@ -435,6 +491,17 @@ pub fn VoiceOrb(
                         <span class="voice-menu__item-desc">"Microphone disabled — nothing is recorded"</span>
                     </button>
                     <button
+                        class=move || mode_classes(mode::VoiceMode::Dictate)
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked=move || if voice_mode.get() == mode::VoiceMode::Dictate { "true" } else { "false" }
+                        on:click=move |_| choose(mode::VoiceMode::Dictate)
+                    >
+                        <span class="voice-menu__item-icon"><crate::icons::Mic /></span>
+                        <span class="voice-menu__item-label">"Dictate"</span>
+                        <span class="voice-menu__item-desc">"Hold to talk — transcript lands in the message box for review"</span>
+                    </button>
+                    <button
                         class=move || mode_classes(mode::VoiceMode::PushToTalk)
                         type="button"
                         role="menuitemradio"
@@ -455,6 +522,41 @@ pub fn VoiceOrb(
                         <span class="voice-menu__item-icon"><crate::icons::Waves /></span>
                         <span class="voice-menu__item-label">"Hands-free"</span>
                         <span class="voice-menu__item-desc">"Open mic — each phrase you speak is sent for transcription"</span>
+                    </button>
+                    // Realtime voice chat (voice phases 2/3): a full
+                    // speech-to-speech session — not a persisted mode, so it
+                    // rides below the radio group. Entering it device-gates
+                    // the classic capture modes (mode → Off) so exactly one
+                    // thing ever owns the mic.
+                    <button
+                        class=move || if rt_stage.get() == realtime::RealtimeStage::Off {
+                            "voice-menu__item".to_string()
+                        } else {
+                            "voice-menu__item is-active".to_string()
+                        }
+                        type="button"
+                        role="menuitem"
+                        on:click=move |_| {
+                            if rt_stage.get_untracked() == realtime::RealtimeStage::Off {
+                                tts::prime();
+                                voice_mode.set(mode::VoiceMode::Off);
+                                persist_mode(mode::VoiceMode::Off);
+                                realtime::start();
+                            } else {
+                                realtime::stop();
+                            }
+                            show_menu.set(false);
+                        }
+                    >
+                        <span class="voice-menu__item-icon"><crate::icons::Waves /></span>
+                        <span class="voice-menu__item-label">
+                            {move || if rt_stage.get() == realtime::RealtimeStage::Off {
+                                "Voice chat"
+                            } else {
+                                "End voice chat"
+                            }}
+                        </span>
+                        <span class="voice-menu__item-desc">"Live conversation — speak with Ocean in realtime"</span>
                     </button>
 
                     <div class="voice-menu__divider" role="separator"></div>
@@ -495,6 +597,12 @@ fn provide_voice_callback(on_transcript: Callback<String>, on_status: Callback<S
 // to the shell callback as before.
 thread_local! {
     static HANDS_FREE: RefCell<Option<mode::HandsFreeState>> = const { RefCell::new(None) };
+}
+
+// Dictation callback — set while Dictate mode is active, so async uploads can
+// route transcripts to the composer-append path instead of auto-sending.
+thread_local! {
+    static DICTATE_CB: RefCell<Option<Callback<String>>> = const { RefCell::new(None) };
 }
 
 // Live hands-free capture status, surfaced to the orb so the user gets visual
@@ -563,18 +671,25 @@ fn deliver_transcript(text: String) {
         set_hands_free_status(confirm);
     }
     let to_submit = match routed {
-        // Push-to-talk: no router, submit the raw transcript.
+        // Dictate or push-to-talk: no router, handle directly.
         None => Some(text),
         Some(mode::HandsFreeAction::Submit(cmd)) => Some(cmd),
         // Ignored (empty/whitespace utterance).
         Some(mode::HandsFreeAction::Ignore) => None,
     };
     if let Some(text) = to_submit {
-        VOICE_CB.with(|c| {
-            if let Some((cb, _)) = c.borrow().as_ref() {
-                cb.run(text);
-            }
-        });
+        // In Dictate mode the async upload routes through DICTATE_CB so the
+        // transcript lands in the composer for review instead of auto-sending.
+        let dictate = DICTATE_CB.with(|c| c.borrow().clone());
+        if let Some(cb) = dictate {
+            cb.run(text);
+        } else {
+            VOICE_CB.with(|c| {
+                if let Some((cb, _)) = c.borrow().as_ref() {
+                    cb.run(text);
+                }
+            });
+        }
     }
 }
 

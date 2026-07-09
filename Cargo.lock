@@ -6128,6 +6128,7 @@ dependencies = [
  "leptos",
  "log",
  "pulldown-cmark",
+ "send_wrapper",
  "serde",
  "serde_json",
  "wasm-bindgen",

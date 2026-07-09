@@ -4,7 +4,10 @@
 # This is the entrypoint launchd execs (via dev.risingtides.ocean-surface-proxy.plist).
 # Unlike run-surface.sh, it does NOT run a trunk build — a supervised service must
 # respawn fast and deterministically, so the wasm bundle is built once at install
-# time (see ops/install-surface-proxy.sh) and this script only serves it.
+# time (see ops/install-surface-proxy.sh) and this script only serves it. Prod
+# serves the dedicated dist-prod dir (~/.config/ocean-surface/dist-prod), which
+# dev rebuilds (trunk serve / run-surface.sh) never touch — so a dev loop can
+# never clobber the public site the way the shared repo dist dir once did.
 #
 # It exec's the prebuilt proxy binary with the production env. The xAI key is NOT
 # baked in here; the binary resolves it from ~/.config/ocean-surface/xai.key (or
@@ -26,13 +29,20 @@ if [[ ! -x "$BIN" ]]; then
   exit 127
 fi
 
+# Production dist dir — the dedicated dist-prod bundle that dev rebuilds never
+# touch (see header). Honored from env/plist, defaulting to the prod dir. Set
+# BEFORE the magic-word guard below so the guard and the serve path can never
+# diverge: the glob, the magic check, and what the proxy actually serves all
+# read this one variable.
+export OCEAN_SURFACE_DIST="${OCEAN_SURFACE_DIST:-$HOME/.config/ocean-surface/dist-prod}"
+
 # Guard: never serve a corrupt/all-zero wasm (OCEAN-121). Assert the bundle's
 # magic word before binding, so a bad build fails loudly instead of serving blank.
 shopt -s nullglob
-wasm_files=( "$REPO"/dist/*_bg.wasm )
+wasm_files=( "$OCEAN_SURFACE_DIST"/*_bg.wasm )
 shopt -u nullglob
 if (( ${#wasm_files[@]} == 0 )); then
-  echo "FATAL: no dist/*_bg.wasm present — run 'trunk build --release' (or run-surface.sh once)." >&2
+  echo "FATAL: no *_bg.wasm present in $OCEAN_SURFACE_DIST — copy a committed release bundle into ~/.config/ocean-surface/dist-prod (dev rebuilds are not served)." >&2
   exit 1
 fi
 for w in "${wasm_files[@]}"; do
@@ -44,8 +54,8 @@ for w in "${wasm_files[@]}"; do
 done
 
 # Production env. These mirror run-surface.sh; override via the plist or env.
+# (OCEAN_SURFACE_DIST is exported above, before the guard.)
 export OCEAN_SURFACE_BIND="${OCEAN_SURFACE_BIND:-0.0.0.0:8790}"
-export OCEAN_SURFACE_DIST="${OCEAN_SURFACE_DIST:-$REPO/dist}"
 export OCEAN_DAEMON_URL="${OCEAN_DAEMON_URL:-http://127.0.0.1:4780}"
 
 echo "==> ocean-surface-proxy: bind=$OCEAN_SURFACE_BIND dist=$OCEAN_SURFACE_DIST daemon=$OCEAN_DAEMON_URL"

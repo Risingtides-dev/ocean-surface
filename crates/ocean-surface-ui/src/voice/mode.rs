@@ -1,11 +1,14 @@
 //! Voice interaction mode + the hands-free runtime state machine.
 //!
-//! The orb operates in one of three modes, picked from a popover menu:
+//! The orb operates in one of four modes, picked from a popover menu:
 //!
 //! - [`VoiceMode::Off`] — the microphone is gated off at the device level. No
 //!   audio is captured, ever; a true kill switch. It persists across reloads as
 //!   `"off"` only because the user set it that way; the disclosed open-mic mode
 //!   never does (see [`VoiceMode::persist_key`]).
+//! - [`VoiceMode::Dictate`] — hold the orb to talk (same capture as
+//!   PushToTalk), but the transcript is appended to the composer instead of
+//!   auto-sent. The user reviews and presses Send manually.
 //! - [`VoiceMode::PushToTalk`] — hold the orb to talk (the default, original
 //!   behavior). Audio is sent only while the orb is held.
 //! - [`VoiceMode::HandsFree`] — open mic. Each VAD-endpointed phrase is sent to
@@ -23,6 +26,10 @@ pub enum VoiceMode {
     /// Microphone gated off at the device level — a kill switch. No audio is
     /// ever captured; the orb renders muted and clicks open the mode menu.
     Off,
+    /// Hold-to-talk that appends transcripts to the composer without sending.
+    /// Capture is identical to PushToTalk; the transcript lands in the message
+    /// box for review before manual send.
+    Dictate,
     /// Hold-to-talk (default). Audio is sent only while the orb is held.
     #[default]
     PushToTalk,
@@ -36,7 +43,8 @@ impl VoiceMode {
     /// kill; HandsFree cycles back to Off.
     pub fn next(self) -> Self {
         match self {
-            VoiceMode::Off => VoiceMode::PushToTalk,
+            VoiceMode::Off => VoiceMode::Dictate,
+            VoiceMode::Dictate => VoiceMode::PushToTalk,
             VoiceMode::PushToTalk => VoiceMode::HandsFree,
             VoiceMode::HandsFree => VoiceMode::Off,
         }
@@ -46,6 +54,7 @@ impl VoiceMode {
     pub fn label(self) -> &'static str {
         match self {
             VoiceMode::Off => "Off",
+            VoiceMode::Dictate => "Dictate",
             VoiceMode::PushToTalk => "Push to talk",
             VoiceMode::HandsFree => "Hands-free",
         }
@@ -55,28 +64,31 @@ impl VoiceMode {
     pub fn css_modifier(self) -> &'static str {
         match self {
             VoiceMode::Off => "is-off",
+            VoiceMode::Dictate => "is-dictate",
             VoiceMode::PushToTalk => "is-ptt",
             VoiceMode::HandsFree => "is-hands-free",
         }
     }
 
     /// The localStorage token this mode persists as. Off persists as `"off"`;
-    /// both active modes persist as `"ptt"` so the disclosed open-mic HandsFree
-    /// mode is NEVER silently restored across a reload — the user must opt back
-    /// into it each session.
+    /// Dictate as `"dictate"`; PushToTalk and the disclosed open-mic HandsFree
+    /// mode both persist as `"ptt"` so HandsFree is NEVER silently restored
+    /// across a reload — the user must opt back into it each session.
     pub fn persist_key(self) -> &'static str {
         match self {
             VoiceMode::Off => "off",
+            VoiceMode::Dictate => "dictate",
             VoiceMode::PushToTalk | VoiceMode::HandsFree => "ptt",
         }
     }
 
-    /// Recover a mode from its persisted token. `"off"` restores Off; anything
-    /// else (unknown, empty, or `"ptt"`) falls back to the safe default,
-    /// push-to-talk.
+    /// Recover a mode from its persisted token. `"off"` restores Off, `"dictate"`
+    /// restores Dictate; anything else (unknown, empty, or `"ptt"`) falls back to
+    /// the safe default, push-to-talk.
     pub fn from_persisted(s: &str) -> Self {
         match s.trim() {
             "off" => VoiceMode::Off,
+            "dictate" => VoiceMode::Dictate,
             _ => VoiceMode::PushToTalk,
         }
     }
@@ -130,12 +142,13 @@ mod tests {
 
     #[test]
     fn cycle_includes_off_as_panic_kill() {
-        assert_eq!(VoiceMode::Off.next(), VoiceMode::PushToTalk);
+        assert_eq!(VoiceMode::Off.next(), VoiceMode::Dictate);
+        assert_eq!(VoiceMode::Dictate.next(), VoiceMode::PushToTalk);
         assert_eq!(VoiceMode::PushToTalk.next(), VoiceMode::HandsFree);
         assert_eq!(VoiceMode::HandsFree.next(), VoiceMode::Off);
         // Full loop returns home.
         assert_eq!(
-            VoiceMode::default().next().next().next(),
+            VoiceMode::default().next().next().next().next(),
             VoiceMode::default()
         );
     }
@@ -143,17 +156,20 @@ mod tests {
     #[test]
     fn labels_and_modifiers_cover_all_variants() {
         assert_eq!(VoiceMode::Off.label(), "Off");
+        assert_eq!(VoiceMode::Dictate.label(), "Dictate");
         assert_eq!(VoiceMode::PushToTalk.label(), "Push to talk");
         assert_eq!(VoiceMode::HandsFree.label(), "Hands-free");
 
         assert_eq!(VoiceMode::Off.css_modifier(), "is-off");
+        assert_eq!(VoiceMode::Dictate.css_modifier(), "is-dictate");
         assert_eq!(VoiceMode::PushToTalk.css_modifier(), "is-ptt");
         assert_eq!(VoiceMode::HandsFree.css_modifier(), "is-hands-free");
     }
 
     #[test]
-    fn persistence_round_trips_off_and_ptt() {
+    fn persistence_round_trips_off_ptt_and_dictate() {
         assert_eq!(VoiceMode::Off.persist_key(), "off");
+        assert_eq!(VoiceMode::Dictate.persist_key(), "dictate");
         assert_eq!(VoiceMode::PushToTalk.persist_key(), "ptt");
 
         assert_eq!(
@@ -161,11 +177,14 @@ mod tests {
             VoiceMode::Off
         );
         assert_eq!(
+            VoiceMode::from_persisted(VoiceMode::Dictate.persist_key()),
+            VoiceMode::Dictate
+        );
+        assert_eq!(
             VoiceMode::from_persisted(VoiceMode::PushToTalk.persist_key()),
             VoiceMode::PushToTalk
         );
     }
-
     #[test]
     fn hands_free_never_persists_or_restores() {
         // The disclosed open-mic mode must never be silently restored across a

@@ -1039,3 +1039,26 @@ files, and the shared filetree component. Four capped subagents
 integrator-finished; probe scaffolding in ocean-tauri lib.rs marked REMOVE ME
 rides until the next binary pass.
 _________________________________________________________________________________
+time:      [5:43pm] [07-09-26]
+agent:     [omp] [gpt-5.6-sol]
+worktree:  detached assembly from origin/main c3f152f
+type:      feature-request
+area:      frontend
+
+Landed the approved v22 Ocean reveal and thinkfill pending card with the shared
+living-water WaveBadge, solid-letter slow shimmer, header wordmark, session-id
+restore, Dictate mode, and realtime voice phases 2/3. Realtime voice mints its
+ephemeral OpenAI client secret in ocean-os, connects browser WebRTC directly to
+OpenAI, renders tool components into the transcript, writes voice handoff notes
+to the chat session, and promotes the orb to a mic-reactive center stage until a
+component docks it. The surface proxy now forwards both voice routes. During
+deployment, HTTP Basic auth was found to challenge Chromium's manifest/WASM boot
+subrequests after the document login; the gate now keeps `/`, `/v1/*`, and
+`/api/*` protected while allowing only required static PWA assets through. The
+public proxy stayed stopped while repaired. The unrelated workspace-pane closure
+was intentionally excluded; its lane must restore `class:has-workspace-open` on
+`<main>` when it lands. Verified in the isolated tree: WASM cargo check, proxy
+cargo check, 3 realtime UI tests, 4 auth-gate regression tests, release Trunk
+build, and private-browser desktop/mobile boot (brand SVG, five word letters,
+OceanReveal, composer, hashed WASM, no horizontal overflow).
+_________________________________________________________________________________

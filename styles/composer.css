@@ -556,3 +556,78 @@
     animation: none;
   }
 }
+
+/* ── Realtime voice chat (voice phases 2/3) ──────────────────────────────
+   While a voice session is connecting/live and no components are on screen
+   (`.voice-chat-active` on the app root), the composer's text input, send
+   button, and per-turn controls hide — kept mounted so their signals stay
+   alive — and the orb takes center stage: floated above the composer,
+   enlarged, its glow breathing with the live mic level (`--voice-level`,
+   0..1, written by the level meter in voice/realtime.rs). Once the voice
+   agent renders components (`.voice-chat-docked` replaces `-active`) the
+   orb returns to its normal composer slot so they get the room. Both
+   states are class-driven; stage Off removes them and reverts everything. */
+
+.voice-chat-active .ocean-composer__input,
+.voice-chat-active .ocean-composer__send,
+.voice-chat-active .ocean-turn-controls,
+.voice-chat-active .ocean-slash-menu {
+  visibility: hidden;
+}
+
+.voice-chat-active .voice-wrap {
+  /* Release the named grid placement: an abs-pos grid child WITH a grid-area
+     uses that area as its containing block, which pinned the orb to the tiny
+     orb track instead of centering over the whole composer. */
+  grid-area: auto;
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 56px);
+  transform: translateX(-50%);
+  z-index: 30;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.voice-chat-active .voice-orb {
+  width: 108px;
+  height: 108px;
+  border-radius: 50%;
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  /* Mic-reactive breathing: scale + glow track the live level. Deliberately
+     NOT transitioned — the level writes at ~60Hz and must track instantly. */
+  transform: scale(calc(1 + var(--voice-level, 0) * 0.16));
+  box-shadow: 0 0 calc(16px + 44px * var(--voice-level, 0)) var(--accent-soft);
+  /* Promotion/dock animates size only; transform/box-shadow stay untransitioned
+     so the ~60Hz level writes track instantly. Color transitions kept. */
+  transition:
+    width 300ms var(--ease),
+    height 300ms var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.voice-chat-active .voice-orb__glyph .icon,
+.voice-chat-active .voice-orb__glyph svg {
+  width: 44px;
+  height: 44px;
+}
+
+.voice-chat-active .voice-hint {
+  position: static;
+  text-align: center;
+  font-size: 13px;
+  color: var(--fg-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .voice-chat-active .voice-orb {
+    transition: none;
+    transform: none;
+    box-shadow: 0 0 16px var(--accent-soft);
+  }
+}

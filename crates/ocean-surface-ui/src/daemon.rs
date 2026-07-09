@@ -1502,6 +1502,17 @@ impl Daemon {
             let is_extension = running_as_extension();
             if is_extension {
                 daemon.url.set(DEFAULT_DAEMON_URL.to_string());
+                // Restore persisted session before connecting fresh.
+                if let Some(id) = should_restore_session(
+                    load_persisted_session().as_deref(),
+                    daemon.session_id.get_untracked().as_deref(),
+                ) {
+                    if restore_session_or_clear(&daemon, id).await {
+                        daemon.fetch_models();
+                        daemon.fetch_projects();
+                        return;
+                    }
+                }
                 daemon.connect();
                 daemon.fetch_models();
                 daemon.fetch_projects();
@@ -1537,6 +1548,17 @@ impl Daemon {
                 },
                 Err(_) => {
                     // No proxy in front (e.g. trunk serve direct). Keep fallback.
+                }
+            }
+            // Restore persisted session before connecting fresh.
+            if let Some(id) = should_restore_session(
+                load_persisted_session().as_deref(),
+                daemon.session_id.get_untracked().as_deref(),
+            ) {
+                if restore_session_or_clear(&daemon, id).await {
+                    daemon.fetch_models();
+                    daemon.fetch_projects();
+                    return;
                 }
             }
             daemon.connect();
@@ -1927,7 +1949,10 @@ impl Daemon {
                 Ok(resp) => {
                     let text = resp.text().await.unwrap_or_default();
                     log::error!("permission decision failed: {text}");
-                    status.set(format!("permission decision failed: {}", concise_error(&text)));
+                    status.set(format!(
+                        "permission decision failed: {}",
+                        concise_error(&text)
+                    ));
                     clear_pending_deciding(pending, &permission_id);
                 }
                 Err(err) => {
@@ -2104,6 +2129,7 @@ impl Daemon {
                                 streaming.set(false);
                                 return;
                             };
+                            persist_session(&new_session_id);
                             daemon.session_id.set(Some(new_session_id));
                             if let Some(title) = r.title.filter(|title| !title.trim().is_empty()) {
                                 daemon.session_title.set(title);
@@ -2224,6 +2250,7 @@ impl Daemon {
                         // Active session changes only via explicit create/select
                         // paths, not passive turn responses or SSE.
                         if daemon.session_id.get_untracked().as_deref() == session_id.as_deref() {
+                            persist_session(&r.session_id);
                             daemon.session_id.set(Some(r.session_id));
                         }
                         // The staged images were accepted with this turn — drain
@@ -2242,6 +2269,7 @@ impl Daemon {
                         // the daemon restarted). Drop it and retry once fresh.
                         if !is_retry && session_id.is_some() && err.contains("session not found") {
                             daemon.session_id.set(None);
+                            clear_persisted_session();
                             daemon.reset_token_stats();
                             status.set("session expired — starting fresh".into());
                             daemon.dispatch_prompt(prompt, true, client_type);
@@ -2261,10 +2289,7 @@ impl Daemon {
                     Err(err) => {
                         let raw = err.to_string();
                         let turn_id = daemon.active_turn_id.get_untracked().unwrap_or_else(|| {
-                            format!(
-                                "dispatch-error-{}",
-                                daemon.turns.get_untracked().len()
-                            )
+                            format!("dispatch-error-{}", daemon.turns.get_untracked().len())
                         });
                         surface_turn_failure(
                             daemon.turns,
@@ -2281,11 +2306,8 @@ impl Daemon {
                 Err(err) => {
                     let raw = err.to_string();
                     let turn_id = daemon.active_turn_id.get_untracked().unwrap_or_else(|| {
-                            format!(
-                                "dispatch-error-{}",
-                                daemon.turns.get_untracked().len()
-                            )
-                        });
+                        format!("dispatch-error-{}", daemon.turns.get_untracked().len())
+                    });
                     surface_turn_failure(
                         daemon.turns,
                         status,
@@ -2559,6 +2581,7 @@ impl Daemon {
         self.pending_permissions.set(Vec::new());
         self.active_decision_token.set(None);
         self.session_id.set(Some(id.clone()));
+        persist_session(&id);
         self.awaiting_session_adoption.set(false);
         self.session_title.set(title);
         self.status.set("loading session…".into());
@@ -2643,6 +2666,7 @@ impl Daemon {
         self.pending_permissions.set(Vec::new());
         self.active_decision_token.set(None);
         self.session_id.set(None);
+        clear_persisted_session();
         self.awaiting_session_adoption.set(false);
         self.session_title.set(String::new());
         self.status.set("new session".into());
@@ -2650,7 +2674,6 @@ impl Daemon {
         self.reset_token_stats();
         self.connect();
     }
-
 
     /// Select project `id`, pin the working directory to that project's
     /// catalogue `workspace_root`, then reset to a lazy new session. This
@@ -2842,10 +2865,7 @@ impl Daemon {
                             log::warn!("component event ignored (no waiter): {text}");
                         } else {
                             log::error!("component event error: {text}");
-                            status.set(format!(
-                                "component event error: {}",
-                                concise_error(&text)
-                            ));
+                            status.set(format!("component event error: {}", concise_error(&text)));
                         }
                     }
                 }
@@ -2860,6 +2880,105 @@ impl Daemon {
             }
         });
     }
+    /// Ask the daemon for an ephemeral OpenAI Realtime client secret (voice
+    /// phases 2/3). Same-origin through the proxy; the API key stays on the
+    /// daemon. `session_id` scopes the voice agent's briefing + handoffs.
+    pub async fn realtime_client_secret(
+        &self,
+        session_id: Option<String>,
+    ) -> Result<RealtimeSecret, String> {
+        let url = self.url.get_untracked();
+        let post_url = format!(
+            "{}/v1/voice/realtime/client-secret",
+            url.trim_end_matches('/')
+        );
+        let body = json!({ "session_id": session_id });
+        let resp = Request::post(&post_url)
+            .header("content-type", "application/json")
+            .json(&body)
+            .map_err(|e| format!("secret request encode failed: {e}"))?
+            .send()
+            .await
+            .map_err(|e| format!("secret request failed: {e}"))?;
+        if !resp.ok() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("secret mint failed: {}", concise_error(&text)));
+        }
+        resp.json::<RealtimeSecret>()
+            .await
+            .map_err(|e| format!("secret decode failed: {e}"))
+    }
+
+    /// Append an out-of-turn message to a chat session (the voice agent's
+    /// `write_handoff` notes) via `POST /v1/agent/sessions/{id}/messages`.
+    pub async fn append_session_message(
+        &self,
+        session_id: &str,
+        content: &str,
+        kind: Option<&str>,
+    ) -> Result<(), String> {
+        let url = self.url.get_untracked();
+        let post_url = format!(
+            "{}/v1/agent/sessions/{session_id}/messages",
+            url.trim_end_matches('/')
+        );
+        let body = json!({ "role": "user", "content": content, "kind": kind });
+        let resp = Request::post(&post_url)
+            .header("content-type", "application/json")
+            .json(&body)
+            .map_err(|e| format!("append encode failed: {e}"))?
+            .send()
+            .await
+            .map_err(|e| format!("append failed: {e}"))?;
+        if !resp.ok() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("append rejected: {}", concise_error(&text)));
+        }
+        Ok(())
+    }
+
+    /// Fold a locally-originated component render into the transcript — the
+    /// realtime voice agent's `render_component` tool arriving over the
+    /// WebRTC data channel (voice phases 2/3). Mirrors the SSE
+    /// `ComponentRender` reducer: upsert by id anywhere in the transcript,
+    /// else attach to the current assistant turn.
+    pub fn render_local_component(&self, component_id: String, kind: String, props: Value) {
+        self.turns.update(|t| {
+            for turn in t.iter_mut() {
+                for block in turn.blocks.iter_mut() {
+                    if let Block::Component {
+                        component_id: id, ..
+                    } = block
+                    {
+                        if *id == component_id {
+                            *block = Block::Component {
+                                component_id: component_id.clone(),
+                                kind: kind.clone(),
+                                props: props.clone(),
+                            };
+                            return;
+                        }
+                    }
+                }
+            }
+            let turn = ensure_component_turn(t);
+            turn.blocks.push(Block::Component {
+                component_id,
+                kind,
+                props,
+            });
+        });
+    }
+}
+
+/// The daemon's `POST /v1/voice/realtime/client-secret` response (voice
+/// phases 2/3): a short-lived secret the browser presents straight to
+/// OpenAI's Realtime `calls` endpoint, plus the model it was minted for.
+/// `expires_at` is upstream metadata we don't act on client-side.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RealtimeSecret {
+    pub client_secret: String,
+    pub model: String,
 }
 
 /// Mutate the turns vec in response to a single SSE event. Splits assistant
@@ -3056,14 +3175,7 @@ fn apply_event(
             // GPUI shell, which puts the error in its status line (OCEAN-100).
             // Daemon `AgentTurnStatus` is one of completed/failed/cancelled.
             if let Some(err) = error {
-                surface_turn_failure(
-                    turns,
-                    status,
-                    status_detail,
-                    &turn_id,
-                    "turn failed",
-                    &err,
-                );
+                surface_turn_failure(turns, status, status_detail, &turn_id, "turn failed", &err);
             } else if turn_status != "completed" {
                 // A non-success status with no error string (e.g. "cancelled").
                 status_detail.set(None);
@@ -3336,7 +3448,6 @@ fn mint_decision_token() -> String {
 /// entries are dropped past this so a long, patch-heavy session stays bounded.
 const MAX_CANVAS_PATCHES: usize = 512;
 
-
 /// A one-line, human-readable summary of a single surface patch op, for the
 /// basic web canvas representation (OCEAN-178). Mirrors the daemon's op names.
 fn summarize_surface_patch(patch: &SurfacePatch) -> String {
@@ -3399,7 +3510,6 @@ fn summarize_args(args: &Value) -> String {
         other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
     }
 }
-
 
 /// Append an expanded error tool block to the transcript for a failed turn.
 /// Attaches to the existing assistant turn for `turn_id` when present.
@@ -3826,9 +3936,14 @@ pub fn running_as_extension() -> bool {
 /// daemon's agent sees `surface-tauri` and the surface knows it may invoke
 /// Tauri commands (`pick_folder`, `watch_paths`, ...) that browsers can't.
 pub fn running_as_tauri() -> bool {
-    let Some(window) = web_sys::window() else { return false; };
-    js_sys::Reflect::has(&window, &wasm_bindgen::JsValue::from_str("__TAURI_INTERNALS__"))
-        .unwrap_or(false)
+    let Some(window) = web_sys::window() else {
+        return false;
+    };
+    js_sys::Reflect::has(
+        &window,
+        &wasm_bindgen::JsValue::from_str("__TAURI_INTERNALS__"),
+    )
+    .unwrap_or(false)
 }
 
 /// Parse a `data:<mime>;base64,<body>` URL into a [`TurnImage`] (OCEAN-138).
@@ -4220,6 +4335,78 @@ fn clear_persisted_model_override() {
     }
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+const SESSION_STORAGE_KEY: &str = "ocean.session_id";
+
+fn load_persisted_session() -> Option<String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        local_storage()
+            .and_then(|s| s.get_item(SESSION_STORAGE_KEY).ok().flatten())
+            .filter(|s| !s.is_empty())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        None
+    }
+}
+
+fn persist_session(_id: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some(s) = local_storage() {
+            let _ = s.set_item(SESSION_STORAGE_KEY, _id);
+        }
+    }
+}
+
+fn clear_persisted_session() {
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some(s) = local_storage() {
+            let _ = s.remove_item(SESSION_STORAGE_KEY);
+        }
+    }
+}
+
+/// Pure decision helper: should we restore a persisted session on boot?
+/// Returns the session id if `persisted` is present and non-empty AND no
+/// session is already active. Testable off-wasm.
+fn should_restore_session<'a>(persisted: Option<&'a str>, active: Option<&str>) -> Option<&'a str> {
+    match persisted {
+        Some(id) if !id.is_empty() && active.is_none() => Some(id),
+        _ => None,
+    }
+}
+
+/// Pre-flight fetch to verify a persisted session exists on the daemon, then
+/// restore via [`Daemon::switch_session`]. On failure (non-200, decode error,
+/// missing session) the persisted key is cleared and this returns `false` so
+/// the caller falls through to the normal boot path with state untouched.
+async fn restore_session_or_clear(daemon: &Daemon, id: &str) -> bool {
+    let url = daemon.url.get_untracked();
+    let get_url = format!("{}/v1/sessions/{id}", url.trim_end_matches('/'));
+    match Request::get(&get_url).send().await {
+        Ok(resp) => match resp.json::<SessionDetailResponse>().await {
+            Ok(r) if r.ok => {
+                if let Some(detail) = r.session {
+                    daemon.switch_session(detail.id, detail.title);
+                    return true;
+                }
+            }
+            Err(err) => {
+                log::error!("session restore decode error: {err}");
+            }
+            _ => {}
+        },
+        Err(err) => {
+            log::error!("session restore fetch error: {err}");
+        }
+    }
+    clear_persisted_session();
+    false
+}
+
 /// Resolve the daemon URL at startup from compile-time env → page origin → loopback.
 ///
 /// The only case that legitimately needs `http://127.0.0.1:4780` is the
@@ -4270,7 +4457,8 @@ pub(crate) fn daemon_url_fallback(protocol: &str, host: &str) -> String {
 /// when candidate == prefix OR candidate starts with prefix + "/".
 /// "/a/b" matches "/a/b/c" but NOT "/a/bc".
 pub(crate) fn is_path_prefix(prefix: &str, candidate: &str) -> bool {
-    candidate == prefix || candidate.starts_with(prefix) && candidate.as_bytes().get(prefix.len()) == Some(&b'/')
+    candidate == prefix
+        || candidate.starts_with(prefix) && candidate.as_bytes().get(prefix.len()) == Some(&b'/')
 }
 
 #[cfg(test)]
@@ -4703,6 +4891,156 @@ mod tests {
         assert_eq!(tool_call.0, "component_render");
         assert_eq!(tool_call.1, ToolStatus::Err);
         assert!(tool_call.2, "failed tool call auto-expands");
+    }
+
+    /// Live SSE reducer parity: `replace:true` must update the mounted component
+    /// in-place, not append a second block with the same id. Reconnect replay has
+    /// its own coverage above; this guards the live path the web surface uses
+    /// while a turn is streaming.
+    #[test]
+    fn live_component_replace_overwrites_in_place() {
+        let session_id = "session-component-live-replace";
+        let turn_id = "turn-with-component";
+        let daemon = daemon_with_session(session_id);
+
+        apply_test_event(
+            &daemon,
+            AgentEvent::AssistantTextDelta {
+                session_id: session_id.to_string(),
+                turn_id: turn_id.to_string(),
+                delta: "rendering".to_string(),
+            },
+        );
+        apply_test_event(
+            &daemon,
+            AgentEvent::ComponentRender {
+                session_id: session_id.to_string(),
+                component_id: "status".to_string(),
+                kind: "progress".to_string(),
+                props: serde_json::json!({ "label": "Working", "value": 0.2 }),
+                replace: false,
+            },
+        );
+        apply_test_event(
+            &daemon,
+            AgentEvent::ComponentRender {
+                session_id: session_id.to_string(),
+                component_id: "status".to_string(),
+                kind: "progress".to_string(),
+                props: serde_json::json!({ "label": "Working", "value": 0.9 }),
+                replace: true,
+            },
+        );
+
+        let turns = daemon.turns.get_untracked();
+        assert_eq!(
+            turns.len(),
+            1,
+            "component stays attached to the active turn"
+        );
+        assert_eq!(turns[0].turn_id.as_deref(), Some(turn_id));
+        assert_eq!(turns[0].blocks.len(), 2, "text + one replaced component");
+        assert!(matches!(turns[0].blocks[0], Block::Text(_)));
+        match &turns[0].blocks[1] {
+            Block::Component {
+                component_id,
+                kind,
+                props,
+            } => {
+                assert_eq!(component_id, "status");
+                assert_eq!(kind, "progress");
+                assert_eq!(props["value"], 0.9, "latest props win");
+            }
+            other => panic!("expected replaced Component block, got {other:?}"),
+        }
+    }
+
+    /// A live component can be unmounted before any assistant text exists (for
+    /// example, a purely visual status card). The reducer creates a synthetic turn
+    /// for the render; unmounting must prune the now-empty turn so stale blank
+    /// assistant rows do not survive on the web surface.
+    #[test]
+    fn live_component_unmount_prunes_empty_component_turn() {
+        let session_id = "session-component-live-unmount";
+        let daemon = daemon_with_session(session_id);
+
+        apply_test_event(
+            &daemon,
+            AgentEvent::ComponentRender {
+                session_id: session_id.to_string(),
+                component_id: "toast".to_string(),
+                kind: "callout".to_string(),
+                props: serde_json::json!({ "variant": "info", "body": "Heads up" }),
+                replace: false,
+            },
+        );
+        assert_eq!(
+            daemon.turns.get_untracked().len(),
+            1,
+            "render creates a host turn"
+        );
+
+        apply_test_event(
+            &daemon,
+            AgentEvent::ComponentUnmount {
+                session_id: session_id.to_string(),
+                component_id: "toast".to_string(),
+            },
+        );
+
+        assert!(
+            daemon.turns.get_untracked().is_empty(),
+            "unmounting the only component must remove the empty synthetic turn"
+        );
+    }
+
+    /// Session scoping is load-bearing for multiple web surfaces sharing the
+    /// daemon. A component frame for another session must not mutate this
+    /// transcript, even if it reuses an id currently mounted here.
+    #[test]
+    fn live_component_event_for_other_session_is_ignored() {
+        let active_session = "session-component-active";
+        let other_session = "session-component-other";
+        let daemon = daemon_with_session(active_session);
+
+        apply_test_event(
+            &daemon,
+            AgentEvent::ComponentRender {
+                session_id: active_session.to_string(),
+                component_id: "shared-id".to_string(),
+                kind: "progress".to_string(),
+                props: serde_json::json!({ "value": 0.1 }),
+                replace: false,
+            },
+        );
+        apply_test_event(
+            &daemon,
+            AgentEvent::ComponentRender {
+                session_id: other_session.to_string(),
+                component_id: "shared-id".to_string(),
+                kind: "progress".to_string(),
+                props: serde_json::json!({ "value": 1.0 }),
+                replace: true,
+            },
+        );
+
+        let turns = daemon.turns.get_untracked();
+        let component = turns
+            .iter()
+            .flat_map(|turn| &turn.blocks)
+            .find_map(|block| match block {
+                Block::Component {
+                    component_id,
+                    props,
+                    ..
+                } if component_id == "shared-id" => Some(props.clone()),
+                _ => None,
+            })
+            .expect("active session component should still exist");
+        assert_eq!(
+            component["value"], 0.1,
+            "other session event must be ignored"
+        );
     }
 
     #[test]
@@ -5499,9 +5837,15 @@ mod tests {
         // `localhost` is pinned to the IPv4 loopback: macOS resolves it
         // ::1-first while the daemon listens on 127.0.0.1 only, and
         // WKWebView's v6->v4 fallback is unreliable (EventSource especially).
-        assert_eq!(daemon_url_fallback("http:", "localhost:8790"), DEFAULT_DAEMON_URL);
+        assert_eq!(
+            daemon_url_fallback("http:", "localhost:8790"),
+            DEFAULT_DAEMON_URL
+        );
         // The Tauri shell (tauri://localhost) takes the same pin.
-        assert_eq!(daemon_url_fallback("tauri:", "localhost"), DEFAULT_DAEMON_URL);
+        assert_eq!(
+            daemon_url_fallback("tauri:", "localhost"),
+            DEFAULT_DAEMON_URL
+        );
     }
 
     #[test]
@@ -5612,5 +5956,39 @@ mod tests {
         assert!(d.git);
         assert!(!d.is_repo);
         assert_eq!(d.git_branch, None);
+    }
+
+    // -- session persistence (should_restore_session pure helper) --
+
+    #[test]
+    fn should_restore_session_returns_id_when_persisted_and_no_active() {
+        assert_eq!(
+            should_restore_session(Some("sess-abc"), None),
+            Some("sess-abc")
+        );
+    }
+
+    #[test]
+    fn should_restore_session_returns_none_when_already_active() {
+        assert_eq!(
+            should_restore_session(Some("sess-abc"), Some("other")),
+            None
+        );
+        // Same session already active — still skip (no-op restore).
+        assert_eq!(
+            should_restore_session(Some("sess-abc"), Some("sess-abc")),
+            None
+        );
+    }
+
+    #[test]
+    fn should_restore_session_returns_none_when_no_persisted() {
+        assert_eq!(should_restore_session(None, None), None);
+        assert_eq!(should_restore_session(None, Some("active")), None);
+    }
+
+    #[test]
+    fn should_restore_session_filters_empty_string() {
+        assert_eq!(should_restore_session(Some(""), None), None);
     }
 }

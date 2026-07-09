@@ -278,6 +278,18 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/component/event", post(proxy_component_event))
         // Outbound call placement (POST /v1/calls/place → daemon passthrough).
         .route("/v1/calls/place", post(proxy_call_place))
+        // Realtime voice chat (voice phases 2/3): the browser asks the daemon
+        // to mint an ephemeral OpenAI Realtime client secret same-origin, then
+        // talks WebRTC directly to OpenAI. The voice agent's handoff notes are
+        // appended into the chat session through this origin too.
+        .route(
+            "/v1/voice/realtime/client-secret",
+            post(proxy_realtime_client_secret),
+        )
+        .route(
+            "/v1/agent/sessions/{id}/messages",
+            post(proxy_session_message_append),
+        )
         // Longhouse council CONTROL endpoints (convene / demo) reach the daemon
         // through this origin, so the native in-app council surface can drive a
         // real council same-origin (e.g. POST /v1/longhouse/demo). The resulting
@@ -405,16 +417,35 @@ fn read_key_file() -> anyhow::Result<Option<String>> {
     Ok((!key.is_empty()).then(|| key.to_string()))
 }
 
-/// HTTP Basic auth gate. When creds are configured, every request except
-/// `/health` must carry a matching `Authorization: Basic` header; otherwise
-/// we return 401 with a WWW-Authenticate challenge (the browser's native
-/// login popup). No cookies, no sessions — nothing to expire or lock you out.
+/// Static resources required to boot the already-authenticated PWA document.
+/// API namespaces are never public, even if a future route happens to contain
+/// a hash-looking suffix.
+fn is_public_boot_asset(path: &str) -> bool {
+    if path.starts_with("/v1/") || path.starts_with("/api/") {
+        return false;
+    }
+
+    path == "/health"
+        || path == "/manifest.webmanifest"
+        || path == "/sw.js"
+        || path == "/favicon.ico"
+        || path == "/apple-touch-icon.png"
+        || path.starts_with("/icon-")
+        || path.starts_with("/brand/")
+        || path.starts_with("/fonts/")
+        || is_hashed_asset(path)
+}
+
+/// HTTP Basic auth gate. The document and every API request require matching
+/// credentials. Static PWA boot assets are public because Chromium does not
+/// reliably replay Basic credentials for manifest/service-worker fetches; the
+/// authenticated document still gates entry and all daemon authority remains
+/// behind `/v1/*` and `/api/*`.
 async fn basic_auth_gate(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
     let Some((want_user, want_pass)) = state.basic_auth.as_ref() else {
         return next.run(req).await; // auth disabled
     };
-    // Let health through unauthenticated so tunnels/monitors can probe.
-    if req.uri().path() == "/health" {
+    if is_public_boot_asset(req.uri().path()) {
         return next.run(req).await;
     }
 
@@ -771,14 +802,8 @@ async fn proxy_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
 /// Reverse-proxy GET /v1/fs/dirs?path=<path> (filesystem directory listing).
 /// Forwards the full query string so `?path=~/dev` reaches the daemon intact.
-async fn proxy_fs_dirs(
-    State(state): State<Arc<AppState>>,
-    req: Request,
-) -> impl IntoResponse {
-    let mut url = format!(
-        "{}/v1/fs/dirs",
-        state.daemon_url.trim_end_matches('/')
-    );
+async fn proxy_fs_dirs(State(state): State<Arc<AppState>>, req: Request) -> impl IntoResponse {
+    let mut url = format!("{}/v1/fs/dirs", state.daemon_url.trim_end_matches('/'));
     if let Some(qs) = req.uri().query() {
         url.push('?');
         url.push_str(qs);
@@ -871,11 +896,26 @@ async fn proxy_component_event(
 }
 
 /// Reverse-proxy POST /v1/calls/place (outbound call → daemon).
-async fn proxy_call_place(
+async fn proxy_call_place(State(state): State<Arc<AppState>>, body: Bytes) -> impl IntoResponse {
+    proxy_post_json(&state, CALL_PLACE_DAEMON_PATH, body).await
+}
+/// Reverse-proxy POST /v1/voice/realtime/client-secret (ephemeral OpenAI
+/// Realtime token mint → daemon; the key never reaches the browser).
+async fn proxy_realtime_client_secret(
     State(state): State<Arc<AppState>>,
     body: Bytes,
 ) -> impl IntoResponse {
-    proxy_post_json(&state, CALL_PLACE_DAEMON_PATH, body).await
+    proxy_post_json(&state, "/v1/voice/realtime/client-secret", body).await
+}
+
+/// Reverse-proxy POST /v1/agent/sessions/{id}/messages (voice-agent handoff
+/// note appended to a chat session → daemon).
+async fn proxy_session_message_append(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> impl IntoResponse {
+    proxy_post_json(&state, &format!("/v1/agent/sessions/{id}/messages"), body).await
 }
 
 /// Reverse-proxy POST /v1/rooms/{room_id}/livekit-token.
@@ -1317,16 +1357,20 @@ async fn tts(
 #[cfg(test)]
 mod tests {
     use super::{
-        config_payload, is_hashed_asset, livekit_token_daemon_path, percent_encode_path_segment,
-        sse_no_buffer_headers, wasm_headers, AppState, CALL_PLACE_DAEMON_PATH, WASM_CACHE_CONTROL,
+        basic_auth_gate, config_payload, is_hashed_asset, livekit_token_daemon_path,
+        percent_encode_path_segment, sse_no_buffer_headers, wasm_headers, AppState,
+        CALL_PLACE_DAEMON_PATH, WASM_CACHE_CONTROL,
     };
+    use std::sync::Arc;
+
     use axum::{
         body::Body,
         http::{header, Request, StatusCode},
         middleware,
-        routing::get,
+        routing::{get, post},
         Router,
     };
+    use base64::Engine;
     use tower::ServiceExt; // for `oneshot`
 
     /// Build a router that returns a tiny body for any path, wrapped in the
@@ -1342,6 +1386,128 @@ mod tests {
                 )
             }))
             .layer(middleware::from_fn(wasm_headers))
+    }
+
+    fn auth_test_state() -> Arc<AppState> {
+        Arc::new(AppState {
+            http: reqwest::Client::new(),
+            xai_http: reqwest::Client::new(),
+            xai_key: None,
+            voice_profile: "leo".to_string(),
+            daemon_url: "http://127.0.0.1:4780".to_string(),
+            default_livekit_room_id: "project:surface-test".to_string(),
+            tldraw_sync_uri: None,
+            maps_key: None,
+            maps_map_id: "DEMO_MAP_ID".to_string(),
+            basic_auth: Some(("ocean".to_string(), "surface".to_string())),
+        })
+    }
+
+    fn auth_gate_test_router() -> Router {
+        let state = auth_test_state();
+
+        Router::new()
+            .route("/", get(|| async { StatusCode::OK }))
+            .route("/v1/agent/turns", post(|| async { StatusCode::OK }))
+            .fallback(get(|| async { StatusCode::OK }))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                basic_auth_gate,
+            ))
+            .with_state(state)
+    }
+
+    fn request(path: &str) -> Request<Body> {
+        Request::builder()
+            .uri(path)
+            .body(Body::empty())
+            .expect("test request must be valid")
+    }
+
+    fn valid_basic_auth_header() -> String {
+        let encoded = base64::engine::general_purpose::STANDARD.encode("ocean:surface");
+        format!("Basic {encoded}")
+    }
+
+    fn assert_basic_challenge(resp: axum::response::Response) {
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.headers().get(header::WWW_AUTHENTICATE).unwrap(),
+            "Basic realm=\"Ocean Surface\""
+        );
+    }
+
+    #[tokio::test]
+    async fn basic_auth_challenges_unauthenticated_root() {
+        let resp = auth_gate_test_router()
+            .oneshot(request("/"))
+            .await
+            .expect("router should respond");
+
+        assert_basic_challenge(resp);
+    }
+
+    #[tokio::test]
+    async fn basic_auth_challenges_unauthenticated_agent_turns() {
+        let resp = auth_gate_test_router()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/agent/turns")
+                    .body(Body::empty())
+                    .expect("test request must be valid"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_basic_challenge(resp);
+    }
+
+    #[tokio::test]
+    async fn basic_auth_allows_valid_credentials_for_root() {
+        let resp = auth_gate_test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::AUTHORIZATION, valid_basic_auth_header())
+                    .body(Body::empty())
+                    .expect("test request must be valid"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn basic_auth_allows_static_pwa_assets_without_credentials() {
+        let cases = [
+            "/ocean-surface-ui-0123456789abcdef_bg.wasm",
+            "/index-0123456789abcdef.js",
+            "/tailwind-0123456789abcdef.css",
+            "/manifest.webmanifest",
+            "/sw.js",
+            "/icon-192.png",
+            "/brand/ocean-mark.svg",
+            "/fonts/inter-var.woff2",
+        ];
+        let mut challenged = Vec::new();
+
+        for path in cases {
+            let resp = auth_gate_test_router()
+                .oneshot(request(path))
+                .await
+                .expect("router should respond");
+
+            if resp.status() != StatusCode::OK {
+                challenged.push((path, resp.status()));
+            }
+        }
+
+        assert!(
+            challenged.is_empty(),
+            "static PWA assets must bypass Basic auth; challenged responses: {challenged:?}"
+        );
     }
 
     #[tokio::test]

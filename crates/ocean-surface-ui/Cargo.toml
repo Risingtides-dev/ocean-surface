@@ -62,13 +62,39 @@ web-sys = { version = "0.3", features = [
   # Floating widget: depth-fade animation (get_bounding_client_rect, query_selector_all)
   "DomRect",
   "NodeList",
+  # Reduced-motion check + path-node iteration for the wave-badge rAF loop
+  "MediaQueryList",
+  "Node",
   # OS presence (host.rs): native notify on Tauri (the notification plugin
   # polyfills window.Notification), standard Web Notifications on the PWA.
   "Notification",
   "NotificationOptions",
   "NotificationPermission",
+  # Workspace browser pane (workspace_browser.rs): stream the agent daemon's
+  # Chrome over SSE (EventSource + MessageEvent) and forward pointer/keyboard
+  # input back over CDP (MouseEvent/WheelEvent/KeyboardEvent → POST).
+  "EventSource",
+  "MessageEvent",
+  "EventTarget",
+  "HtmlDivElement",
+  "MouseEvent",
+  "WheelEvent",
+  "KeyboardEvent",
+  # Realtime voice chat (voice phases 2/3): WebRTC peer connection to
+  # OpenAI's Realtime API + data-channel tool calls (voice/realtime.rs).
+  "RtcPeerConnection",
+  "RtcSessionDescription",
+  "RtcSessionDescriptionInit",
+  "RtcSdpType",
+  "RtcDataChannel",
+  "RtcTrackEvent",
+  "RtcRtpSender",
+  "RtcIceGatheringState",
 ] }
 js-sys = "0.3"
+# Satisfies on_cleanup's Send+Sync bound for the wave-badge rAF Rc state
+# (sound on wasm's single thread).
+send_wrapper = "0.6"
 
 [features]
 default = []

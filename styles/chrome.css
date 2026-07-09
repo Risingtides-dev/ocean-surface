@@ -23,14 +23,51 @@
 .ocean-brand {
   display: inline-flex;
   align-items: center;
+  gap: 8px;
   min-width: 0;
 }
 
-/* The OCEAN wordmark — the TUI splash depth ramp, one solid color per
-   letter (terminal-native; no gradient-clip text). Mono, tracked wide. */
+.ocean-brand__word span:nth-child(1) { color: var(--ocean-4); }
+.ocean-brand__word span:nth-child(2) { color: var(--ocean-5); }
+.ocean-brand__word span:nth-child(3) { color: var(--ocean-6); }
+.ocean-brand__word span:nth-child(4) { color: var(--ocean-7); }
+.ocean-brand__word span:nth-child(5) { color: var(--ocean-8); }
+
+/* Slow solid-color shimmer across the header wordmark letters. Each span
+   keeps its ramp color (--letter-fill) and eases toward --letter-shimmer;
+   never gradient-clip text. */
+.ocean-brand__word span:nth-child(1) { --letter-fill: var(--ocean-4); }
+.ocean-brand__word span:nth-child(2) { --letter-fill: var(--ocean-5); }
+.ocean-brand__word span:nth-child(3) { --letter-fill: var(--ocean-6); }
+.ocean-brand__word span:nth-child(4) { --letter-fill: var(--ocean-7); }
+.ocean-brand__word span:nth-child(5) { --letter-fill: var(--ocean-8); }
+@media (prefers-reduced-motion: no-preference) {
+  .ocean-brand__word span {
+    animation: ocean-brand-shimmer 5.5s ease-in-out infinite;
+  }
+  .ocean-brand__word span:nth-child(1) { animation-delay: 0s; }
+  .ocean-brand__word span:nth-child(2) { animation-delay: -0.55s; }
+  .ocean-brand__word span:nth-child(3) { animation-delay: -1.1s; }
+  .ocean-brand__word span:nth-child(4) { animation-delay: -1.65s; }
+  .ocean-brand__word span:nth-child(5) { animation-delay: -2.2s; }
+  @keyframes ocean-brand-shimmer {
+    0%, 100% { color: var(--letter-fill); }
+    40% { color: color-mix(in srgb, var(--letter-fill) 35%, var(--letter-shimmer)); }
+  }
+}
+
+/* Header lockup — the mark and the wordmark side by side, vertically
+   centered with a quiet gap. */
+.ocean-brand .wave-badge {
+  flex: none;
+  font-size: 24px;
+}
+
 .ocean-brand__word {
   display: inline-flex;
-  font-family: var(--mono);
+  /* Brand font — the same --wm-font (Poppins) the landing reveal letters
+     use; the old --mono terminal face predates the wordmark switch. */
+  font-family: var(--wm-font);
   font-size: 14px;
   font-weight: 700;
   letter-spacing: 0.22em;
@@ -38,11 +75,6 @@
   white-space: nowrap;
   cursor: default;
 }
-.ocean-brand__ch--1 { color: var(--ocean-4); }
-.ocean-brand__ch--2 { color: var(--ocean-5); }
-.ocean-brand__ch--3 { color: var(--ocean-6); }
-.ocean-brand__ch--4 { color: var(--ocean-7); }
-.ocean-brand__ch--5 { color: var(--ocean-8); }
 
 /* Inline SVG icons inherit text color + size (1em). The default treatment is
    FILLED (the game-icons set: SoundOn/SoundOff/Amplitude) — they need
