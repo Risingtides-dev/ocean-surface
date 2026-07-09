@@ -526,7 +526,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <div id="activity" hidden></div>
   <div id="messages"></div>
   <form id="composer">
-    <textarea id="input" rows="3" placeholder="Ask Ocean" title="Enter sends. Shift+Enter inserts a line."></textarea>
+    <textarea id="input" rows="1" placeholder="Ask Ocean" title="Enter sends. Shift+Enter inserts a line."></textarea>
     <div class="actions">
       <button type="submit" title="Send with Enter">Send</button>
       <button type="button" id="inlineAssist" class="secondary" title="Run inline assist on the active editor">Inline</button>
