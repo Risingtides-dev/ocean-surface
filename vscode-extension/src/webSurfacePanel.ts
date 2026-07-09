@@ -40,6 +40,19 @@ export class WebSurfacePanel {
       }
     }
 
+    // A webview can't necessarily reach a raw loopback URL: under Remote SSH,
+    // WSL, Codespaces or a devcontainer the extension host runs somewhere the
+    // webview's browser cannot route to. asExternalUri maps the local port to
+    // whatever the client can actually reach (a no-op locally).
+    const externalUrl = (
+      await vscode.env.asExternalUri(
+        vscode.Uri.parse(WebSurfacePanel.proxy.url),
+      )
+    )
+      .toString()
+      .replace(/\/$/, "");
+    log(`Web surface daemon endpoint (external): ${externalUrl}`);
+
     const panel = vscode.window.createWebviewPanel(
       WebSurfacePanel.viewType,
       "Ocean",
@@ -53,7 +66,7 @@ export class WebSurfacePanel {
       },
     );
     panel.iconPath = vscode.Uri.joinPath(extensionUri, "media", "wave.svg");
-    WebSurfacePanel.current = new WebSurfacePanel(panel, extensionUri);
+    WebSurfacePanel.current = new WebSurfacePanel(panel, extensionUri, externalUrl);
   }
 
   static disposeShared(): void {
@@ -64,9 +77,39 @@ export class WebSurfacePanel {
   private constructor(
     private readonly panel: vscode.WebviewPanel,
     extensionUri: vscode.Uri,
+    daemonUrl: string,
   ) {
-    const proxyUrl = WebSurfacePanel.proxy!.url;
-    panel.webview.html = renderWasmHtml(panel.webview, extensionUri, proxyUrl);
+    panel.webview.html = renderWasmHtml(panel.webview, extensionUri, daemonUrl);
+
+    // The webview reports what it actually sees, so diagnosing a failed connect
+    // needs only the Output -> Ocean channel (no devtools, no frame switching:
+    // VS Code runs webview content in a nested iframe, so a console typed
+    // against the default `top` context reads the wrong window).
+    panel.webview.onDidReceiveMessage((msg) => {
+      switch (msg?.type) {
+        case "diag":
+          log(
+            `Web surface diag: injected __ocean_daemon_url=${
+              msg.daemonUrl ?? "<undefined>"
+            } origin=${msg.origin}`,
+          );
+          break;
+        case "wasm-ok":
+          log("Web surface: WASM initialised");
+          break;
+        case "wasm-fail":
+          logError(`Web surface: WASM init failed: ${msg.error}`);
+          break;
+        case "csp":
+          logError(
+            `Web surface CSP violation: directive=${msg.directive} blocked=${msg.blocked}`,
+          );
+          break;
+        default:
+          break;
+      }
+    });
+
     panel.onDidDispose(() => {
       WebSurfacePanel.current = undefined;
     });
@@ -128,14 +171,34 @@ function renderWasmHtml(
   <meta name="theme-color" content="#06111d" />
   <link rel="stylesheet" href="${cssUri}" />
   <title>Ocean</title>
-  <script nonce="${nonce}">window.__ocean_daemon_url = ${JSON.stringify(daemonUrl)};</script>
+  <script nonce="${nonce}">
+    // Must run before the (deferred) module script so the WASM bootstrap sees it.
+    window.__ocean_daemon_url = ${JSON.stringify(daemonUrl)};
+    const __vscode = acquireVsCodeApi();
+    window.__ocean_vscode = __vscode;
+    __vscode.postMessage({
+      type: "diag",
+      daemonUrl: window.__ocean_daemon_url ?? null,
+      origin: location.origin,
+    });
+    window.addEventListener("securitypolicyviolation", (e) => {
+      __vscode.postMessage({
+        type: "csp",
+        directive: e.violatedDirective,
+        blocked: e.blockedURI,
+      });
+    });
+  </script>
   <script type="module" nonce="${nonce}">
     import init from "${jsUri}";
-    init({ module_or_path: "${wasmUri}" }).catch((err) => {
-      document.body.innerHTML =
-        '<pre style="color:#ff7f95;font:13px monospace;padding:16px">Ocean WASM failed to load:\\n' +
-        String(err) + '</pre>';
-    });
+    init({ module_or_path: "${wasmUri}" })
+      .then(() => window.__ocean_vscode.postMessage({ type: "wasm-ok" }))
+      .catch((err) => {
+        window.__ocean_vscode.postMessage({ type: "wasm-fail", error: String(err) });
+        document.body.innerHTML =
+          '<pre style="color:#ff7f95;font:13px monospace;padding:16px">Ocean WASM failed to load:\\n' +
+          String(err) + '</pre>';
+      });
   </script>
 </head>
 <body></body>

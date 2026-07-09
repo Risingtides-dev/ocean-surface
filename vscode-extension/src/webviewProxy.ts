@@ -39,6 +39,16 @@ export async function startWebviewProxy(
     );
     res.setHeader("Access-Control-Allow-Headers", "content-type,authorization");
 
+    // Chromium's Private Network Access: a secure context (the webview, served
+    // from vscode-webview://) reaching a private address (127.0.0.1) sends a
+    // preflight carrying `Access-Control-Request-Private-Network: true` and
+    // requires this header on the response, or the request is blocked before it
+    // ever reaches us. Loopback-to-loopback never triggers this, which is why
+    // it only shows up inside the webview.
+    if (req.headers["access-control-request-private-network"]) {
+      res.setHeader("Access-Control-Allow-Private-Network", "true");
+    }
+
     if (req.method === "OPTIONS") {
       res.writeHead(204);
       res.end();
