@@ -571,6 +571,67 @@
 .voice-chat-active .ocean-composer__input,
 .voice-chat-active .ocean-composer__send,
 .voice-chat-active .ocean-turn-controls,
+
+/* Composer slash-command popover (TUI parity) */
+.ocean-slash-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
+  max-height: 280px;
+  overflow: auto;
+  z-index: 40;
+  padding: 6px;
+  border-radius: var(--radius-md, 10px);
+  background: var(--surface-elevated, var(--bg-elevated, #12141a));
+  border: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
+  box-shadow: var(--shadow-md, 0 8px 28px rgba(0,0,0,0.35));
+}
+.ocean-slash-menu__group + .ocean-slash-menu__group {
+  margin-top: 6px;
+}
+.ocean-slash-menu__group-label {
+  padding: 4px 8px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--fg-muted, #8b93a7);
+}
+.ocean-slash-menu__row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 12px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg, #e8ecf5);
+  cursor: pointer;
+}
+.ocean-slash-menu__row.is-selected,
+.ocean-slash-menu__row:hover {
+  background: var(--surface-hover, rgba(255,255,255,0.06));
+}
+.ocean-slash-menu__row.is-disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.ocean-slash-menu__title {
+  font-size: 13px;
+}
+.ocean-slash-menu__alias {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  color: var(--fg-muted, #8b93a7);
+}
+.ocean-slash-menu__hint {
+  grid-column: 1 / -1;
+  font-size: 11px;
+  color: var(--fg-muted, #8b93a7);
+}
+
 .voice-chat-active .ocean-slash-menu {
   visibility: hidden;
 }

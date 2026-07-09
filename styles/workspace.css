@@ -17,7 +17,13 @@
 /* The pane width is shared by the pane itself and the layout gutter the app
    shell carves out of <main> when the pane is open on a wide viewport. */
 :root {
-  --workspace-w: clamp(380px, 45vw, 620px);
+  /* Pre-hydration fallback only; MUST equal DEFAULT_WORKSPACE_W in
+     workspace.rs — Rust owns the live value via an inline --workspace-w
+     property on <html> (set as the derived pane width changes). */
+  --workspace-w: 520px;
+  /* Readable content rail: transcript turns + composer share this centered
+     column when the pane stretches the shell (desktop split view). */
+  --workspace-rail: 860px;
 }
 
 /* ── Shell ─────────────────────────────────────────────────────────── */
@@ -44,13 +50,27 @@
   pointer-events: none;
 }
 
-/* Wide viewport: the pane SPLITS the surface — the shell carves a right
-   gutter out of <main> so the transcript/composer shrink to leave room.
-   Below 900px the pane OVERLAYS instead (no gutter; it sits on top with its
-   elevation shadow), mirroring compact.css's narrow-column behavior. */
+/* Wide viewport: the pane SPLITS the surface. The shell stops centering as a
+   1120px card in the FULL viewport (that model stranded its centering margin
+   as a dead strip between the column and the fixed-right pane) and instead
+   fills the remaining viewport, minus the pane gutter. Content rides a
+   readable centered rail inside; the header spans the full remaining width
+   like real app chrome. Below 900px the pane OVERLAYS instead (no gutter),
+   mirroring compact.css's narrow-column behavior. */
 @media (min-width: 900px) {
   .ocean-surface.has-workspace-open {
+    max-width: none;
     padding-right: var(--workspace-w);
+  }
+  .ocean-surface.has-workspace-open .transcript > *,
+  .ocean-surface.has-workspace-open .ocean-perms {
+    width: 100%;
+    max-width: var(--workspace-rail);
+    margin-inline: auto;
+  }
+  .ocean-surface.has-workspace-open .ocean-composer {
+    width: min(var(--workspace-rail), calc(100% - 36px));
+    margin-inline: auto;
   }
 }
 
@@ -60,6 +80,19 @@
   transition: padding-right var(--dur) var(--ease-tide);
 }
 
+/* During drag-resize the pointer moves the pane instantly; animating the
+   shell gutter behind it reads as rubber-band churn. Suppress all layout
+   transitions for the duration of the gesture. */
+html.is-resizing .ocean-surface,
+html.is-resizing .workspace {
+  transition: none;
+}
+html.is-resizing {
+  cursor: col-resize;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 /* ── Tab strip ─────────────────────────────────────────────────────── */
 
 .workspace-tabs {
@@ -67,7 +100,8 @@
   align-items: stretch;
   gap: 0;
   flex: 0 0 auto;
-  min-height: 38px;
+  min-height: 56px;
+  background: var(--bg-raised);
   padding: 0 6px;
   border-bottom: 1px solid var(--border-subtle);
   overflow-x: auto;
@@ -136,14 +170,25 @@
   flex-direction: row;
 }
 
-/* Shared content region (Files empty-state / Preview code). */
+/* Shared content region (Files empty-state / Preview code / Repo panel). */
 .workspace-preview,
-.workspace-browser {
+.workspace-browser,
+.workspace-repo {
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+
+/* Repo tab body mounts the deck's RepoPanel, which was authored for the
+   deck's `.deck__body` (flex fill + vertical scroll + `0 12px 16px` padding).
+   The pane's content region is flush, so this wrapper supplies that chrome —
+   the panel itself is fully fluid (min-width:0 flex items with ellipsis) and
+   degrades cleanly from the 320px pane floor up to its max. */
+.workspace-repo {
+  overflow-y: auto;
+  padding: 0 12px 16px;
 }
 
 /* ── Shared idioms (quiet empty / loading / error) ─────────────────── */
@@ -221,6 +266,18 @@
   min-height: 0;
   border-left: 1px solid var(--border-subtle);
   background: var(--bg);
+}
+
+/* Files tab: the tree IS the body. The content region renders nothing there,
+   the tree flexes to fill the pane, and the collapse affordance disappears —
+   collapsing the active tab's own body would be a dead end. */
+.workspace.files-active .workspace-tree {
+  flex: 1 1 auto;
+  border-left: none;
+}
+
+.workspace.files-active .workspace-tree-toggle {
+  display: none;
 }
 
 .workspace-tree-filter {
@@ -388,3 +445,58 @@
    viewport + input overlay). It appends to this file's tail and reads
    before writing so these .workspace* / .workspace-tree* rules survive.
    ───────────────────────────────────────────────────────────────────── */
+
+/* ── ergonomics: drag-resize handle + collapsible tree ──────────────────── */
+.workspace-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 60;
+  touch-action: none;
+}
+.workspace-resize:hover,
+.workspace-resize:active {
+  background: var(--border-strong, rgba(255, 255, 255, 0.12));
+}
+
+/* Tree collapse: the toggle stays as a slim rail; filter + body hide. */
+.workspace-tree-toggle {
+  flex: 0 0 auto;
+  width: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-4);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.workspace-tree-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--fg-2);
+}
+.workspace-tree-toggle .icon {
+  transform: rotate(0deg);
+  transition: transform var(--dur-fast) var(--ease);
+}
+.workspace-tree-toggle.is-collapsed .icon {
+  transform: rotate(-90deg);
+}
+
+/* Collapsed tree: keep only the toggle visible as a slim header strip. */
+.workspace-tree.is-collapsed {
+  flex: 0 0 28px;
+  border-left: none;
+}
+.workspace-tree.is-collapsed .workspace-tree-filter,
+.workspace-tree.is-collapsed .workspace-tree-body {
+  display: none;
+}
+.workspace-tree.is-collapsed .workspace-tree-toggle {
+  margin: 4px auto;
+}

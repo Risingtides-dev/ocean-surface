@@ -25,6 +25,7 @@ mod palette;
 mod place_call;
 mod rooms;
 mod sessions;
+mod slash_menu;
 mod transcript;
 mod tts;
 mod voice;

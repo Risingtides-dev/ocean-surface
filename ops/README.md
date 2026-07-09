@@ -19,20 +19,28 @@ login (`RunAtLoad`).
 | Launcher it execs | `deploy/ocean-surface-proxy.sh` |
 | Installed plist path | `~/Library/LaunchAgents/dev.risingtides.ocean-surface-proxy.plist` |
 | Bind address | `0.0.0.0:8790` (env `OCEAN_SURFACE_BIND`) |
-| Bundle served | `dist/` (env `OCEAN_SURFACE_DIST`) |
+| Bundle served | `~/.config/ocean-surface/dist-prod` (env `OCEAN_SURFACE_DIST`; repo `dist/` is dev-only) |
 | Daemon proxied to | `http://127.0.0.1:4780` (env `OCEAN_DAEMON_URL`) |
+| Auth env file | `~/.config/ocean-surface/proxy-auth.env` (0600; sourced by the launcher) |
 | Logs (stdout+stderr) | `/private/tmp/ocean-surface-proxy.log` |
 
 > The launcher serves a **prebuilt** bundle — it does **not** run `trunk build` on
-> every respawn (that's what `run-surface.sh` is for during dev). The wasm bundle
-> is built once at install time. Rebuild + reinstall after UI changes by re-running
-> the install script.
+> every respawn (that's what `run-surface.sh` is for during dev). Prod serves the
+> dedicated `dist-prod` dir so a local `trunk serve` / `run-surface.sh` loop can
+> never clobber the public site. Rebuild + rsync into `dist-prod` after UI changes
+> (see the ocean-surface-prod-deploy skill); re-running the install script alone is
+> not enough if you only refreshed repo `dist/`.
 >
-> The xAI voice key is **not** stored in the plist. The binary resolves it from
+> Secrets stay out of the plist. The xAI voice key is resolved from
 > `~/.config/ocean-surface/xai.key` (or env `XAI_API_KEY`). HTTP Basic auth is
-> **on by default** (the binary's built-in operator creds); set
-> `OCEAN_SURFACE_AUTH=off` in the plist's `EnvironmentVariables` only for trusted
-> localhost.
+> **on by default** and requires operator-supplied creds in
+> `~/.config/ocean-surface/proxy-auth.env` (0600) exporting
+> `OCEAN_SURFACE_AUTH=on`, `OCEAN_SURFACE_USER`, and `OCEAN_SURFACE_PASS`
+> (password typically read from `proxy-basic-auth.txt`). There are **no**
+> built-in operator credentials. The tracked plist template does **not** set
+> `OCEAN_SURFACE_AUTH`; do not put USER/PASS in the plist. For a trusted
+> localhost throwaway only, export `OCEAN_SURFACE_AUTH=off` in the process
+> environment (never commit that override into the template).
 
 ### Install / enable supervision
 

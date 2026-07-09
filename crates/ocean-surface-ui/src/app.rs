@@ -6,20 +6,27 @@ use wasm_bindgen::JsCast;
 
 use crate::components::PermissionPrompts;
 use crate::daemon::{daemon_url_from_env, Daemon};
+use crate::host::DaemonStatus;
 use crate::deck::browser::BrowserCockpit;
 use crate::deck::files::FilesPanel;
 use crate::deck::repo::RepoPanel;
 use crate::deck::DeckPanel;
-use crate::host::DaemonStatus;
-use crate::model::{Block, Role, Turn};
 use crate::palette::{Command, CommandRegistry, CommandScope, PaletteView};
+use crate::slash_menu::{SlashMenu, SlashRow};
+use crate::model::{Block, Role, Turn};
 use crate::rooms::{RoomStage, Rooms, RoomsPanel};
 use crate::sessions::SessionsPanel;
 use crate::transcript::Transcript;
 use crate::voice::VoiceOrb;
+use crate::workspace::WorkspaceFocus;
 
 const COMPOSER_MIN_HEIGHT_PX: i32 = 40;
 const COMPOSER_MAX_HEIGHT_PX: i32 = 240;
+
+/// localStorage key for the workspace pane's open/collapse state ("1" open,
+/// "0" collapsed; absent defaults to open — the pane is the desktop shell's
+/// primary surface). Persisted so a relaunch restores it.
+const WORKSPACE_OPEN_KEY: &str = "ocean.workspace.open";
 
 fn composer_height_px(scroll_height: i32) -> i32 {
     scroll_height.clamp(COMPOSER_MIN_HEIGHT_PX, COMPOSER_MAX_HEIGHT_PX)
@@ -34,7 +41,10 @@ fn composer_overflow_y(scroll_height: i32) -> &'static str {
 }
 
 fn fit_composer_textarea(el: &web_sys::HtmlTextAreaElement) {
-    let style = el.clone().unchecked_into::<web_sys::HtmlElement>().style();
+    let style = el
+        .clone()
+        .unchecked_into::<web_sys::HtmlElement>()
+        .style();
     let _ = style.set_property("height", "auto");
     let scroll_height = el.scroll_height();
     let height = composer_height_px(scroll_height);
@@ -43,7 +53,10 @@ fn fit_composer_textarea(el: &web_sys::HtmlTextAreaElement) {
 }
 
 fn reset_composer_textarea(el: &web_sys::HtmlTextAreaElement) {
-    let style = el.clone().unchecked_into::<web_sys::HtmlElement>().style();
+    let style = el
+        .clone()
+        .unchecked_into::<web_sys::HtmlElement>()
+        .style();
     let _ = style.set_property("height", &format!("{COMPOSER_MIN_HEIGHT_PX}px"));
     let _ = style.set_property("overflow-y", "hidden");
 }
@@ -58,13 +71,90 @@ fn window_focused() -> bool {
         .unwrap_or(true)
 }
 
+/// Read a localStorage value as an owned string (None when storage is
+/// unavailable or the key is unset). Mirrors the helper style in workspace.rs
+/// so the pane and the shell persist layout the same way.
+fn ls_get(key: &str) -> Option<String> {
+    web_sys::window()
+        .and_then(|w| w.local_storage().ok())
+        .and_then(|r| r)
+        .and_then(|r| r.get_item(key).ok())
+        .flatten()
+}
+
+/// Write a localStorage value; silently no-ops when storage is unavailable
+/// (private mode, etc.) — same graceful degradation as workspace.rs.
+fn ls_set(key: &str, val: &str) {
+    let _ = web_sys::window()
+        .and_then(|w| w.local_storage().ok())
+        .and_then(|r| r)
+        .map(|r| r.set_item(key, val));
+}
+
+/// Scope label for composer `/` popover rows. Mirrors the private
+/// `CommandScope::label()` in palette.rs (kept private there so that crate
+/// owns the display strings) so app.rs can build [`SlashRow`]s without editing
+/// palette.rs.
+fn scope_label(scope: CommandScope) -> &'static str {
+    match scope {
+        CommandScope::Session => "Session",
+        CommandScope::Files => "Files",
+        CommandScope::Repo => "Repo",
+        CommandScope::Browser => "Browser",
+        CommandScope::App => "App",
+    }
+}
+
+/// Dispatch a composer `/` command. Arg-taking commands (`/model`, `/thinking`)
+/// are handled here so the slash popover and the ⌘K palette run identical code;
+/// `/clear` + `/help` (and every other id) delegate to the registry's own `run`
+/// callback via `registry.run`, which refuses disabled commands. Returns `true`
+/// when a command matched and ran.
+fn run_slash(id: &str, args: &str, daemon: &Daemon, registry: &CommandRegistry) -> bool {
+    match id {
+        "model" => {
+            if args.is_empty() {
+                daemon
+                    .status
+                    .set("use /model <id> or the selector below".into());
+            } else {
+                daemon.set_model_override(Some(args.into()));
+                daemon.status.set(format!("model \u{2192} {args}"));
+            }
+            true
+        }
+        "thinking" => match args {
+            "" | "default" => {
+                daemon.set_thinking_level(None);
+                daemon.status.set("thinking \u{2192} default".into());
+                true
+            }
+            "off" | "minimal" | "low" | "medium" | "high" | "xhigh" => {
+                daemon.set_thinking_level(Some(args.into()));
+                daemon.status.set(format!("thinking \u{2192} {args}"));
+                true
+            }
+            _ => {
+                daemon.status.set(format!(
+                    "unknown level: {args} (off|minimal|low|medium|high|xhigh|default)"
+                ));
+                true
+            }
+        },
+        // `/clear`, `/help`, new-session, toggle-*, workspace-toggle,
+        // open-council — all route through the registry callback so there is
+        // exactly one execution path (the slash popover pick and the ⌘K palette
+        // behave identically). Disabled soon-commands are refused here.
+        _ => registry.run(id),
+    }
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     let daemon = Daemon::new(daemon_url_from_env());
     // Voice phases 2/3: hand the realtime voice-chat module its daemon handle
     // once — the orb's menu entry starts sessions without prop-threading.
     crate::voice::realtime::install(daemon.clone());
-
     // Zero-config boot: fetch /api/config from the same-origin proxy to learn
     // the daemon URL + confirm auth is preconfigured, THEN connect AND fetch the
     // model catalogue — in that order, inside bootstrap. Falls back to
@@ -152,6 +242,24 @@ pub fn App() -> impl IntoView {
     // Call controls row — created early so Rooms::new can share the signal.
     let show_livekit_controls = RwSignal::new(false);
     let show_rooms = RwSignal::new(false);
+    // Sessions and Rooms are sibling browse overlays (same right-hand modal
+    // pattern) — opening one closes the other so they never stack. Every
+    // entry point (palette command, header buttons) routes through these two
+    // closures; a second toggle convention beside them is a bug.
+    let toggle_sessions = move || {
+        let opening = !show_sessions.get_untracked();
+        if opening {
+            show_rooms.set(false);
+        }
+        show_sessions.set(opening);
+    };
+    let toggle_rooms = move || {
+        let opening = !show_rooms.get_untracked();
+        if opening {
+            show_sessions.set(false);
+        }
+        show_rooms.set(opening);
+    };
     // Persistent Rooms panel (OCEAN-108). Shares the Daemon's `url` signal so it
     // targets the same origin; opens a right-hand overlay like Sessions.
     let rooms = Rooms::new(
@@ -168,8 +276,12 @@ pub fn App() -> impl IntoView {
     // gates the mode.
     let in_room_mode = Signal::derive(move || rooms.open_key.get().is_some());
 
-    // Context deck (north star): at most ONE panel revealed at a time —
-    // reveal-on-intent via ⌘K commands, never permanent chrome.
+    // Context deck (north star): the WEB/EXTENSION reveal rail. At most ONE
+    // panel revealed at a time, reveal-on-intent via ⌘K commands, never
+    // permanent chrome. On Tauri the deck never mounts (the Show gate below
+    // hard-gates it on !in_tauri) — the desktop shell's persistent surfaces
+    // live in the workspace pane instead, so the toggle-* commands route
+    // there on Tauri and here on every other host.
     let deck_panel: RwSignal<Option<DeckPanel>> = RwSignal::new(None);
     let toggle_deck = move |p: DeckPanel| {
         deck_panel.update(|cur| *cur = if *cur == Some(p) { None } else { Some(p) })
@@ -179,12 +291,39 @@ pub fn App() -> impl IntoView {
     // daemon_for_perms below).
     let daemon_for_deck = StoredValue::new(daemon.clone());
 
+    // Workspace pane (north star desktop shell): THE right-side surface on
+    // Tauri — permanent, tabbed (Files · previews · Browser · Repo). One
+    // command layer routes per-host: toggle-* commands open+focus a tab here
+    // on Tauri and reveal the deck on web/extension. `workspace_open` is the
+    // shared collapse state for the header toggle, the ⌘K `workspace-toggle`
+    // command, and the pane itself; persisted to localStorage so a relaunch
+    // restores it, defaulting open when the key is absent. Off-Tauri the pane
+    // never mounts, so this is inert there.
+    let in_tauri = crate::host::running_in_tauri();
+    let workspace_open: RwSignal<bool> = RwSignal::new(
+        // Default OPEN when the key is absent; only an explicit "0" starts
+        // collapsed (the pane is the shell's primary surface).
+        ls_get(WORKSPACE_OPEN_KEY).map(|s| s != "0").unwrap_or(true),
+    );
+    // One-shot focus intent from the toggle-* commands (Tauri path): the pane
+    // watches this and opens/focuses the matching tab, then resets to None.
+    let workspace_focus: RwSignal<Option<WorkspaceFocus>> = RwSignal::new(None);
+    let daemon_for_workspace = StoredValue::new(daemon.clone());
+
+    // Persist the pane open/collapse state so a relaunch restores it. Runs
+    // once at setup (writing the init value back — idempotent) and on every
+    // change thereafter.
+    Effect::new(move |_| {
+        ls_set(WORKSPACE_OPEN_KEY, if workspace_open.get() { "1" } else { "0" });
+    });
+
     // Deep-menu registry (north star command layer): ONE registry drives the
     // ⌘K palette today and the native menubar + header overflow when they
     // land. Commands registered here are the integration wiring — modules
     // never self-register.
     let registry = CommandRegistry::new();
     let always = Signal::derive(|| true);
+    let never = Signal::derive(|| false);
     {
         let daemon_new_session = daemon.clone();
         registry.register(Command {
@@ -192,6 +331,7 @@ pub fn App() -> impl IntoView {
             title: "New Session".into(),
             hint: Some("reset transcript; created on first prompt".into()),
             scope: CommandScope::Session,
+            slash: Some("/new"),
             enabled: always,
             run: Callback::new(move |_| daemon_new_session.new_session()),
         });
@@ -200,46 +340,73 @@ pub fn App() -> impl IntoView {
             title: "Toggle Files Explorer".into(),
             hint: None,
             scope: CommandScope::Files,
+            slash: Some("/files"),
             enabled: always,
-            run: Callback::new(move |_| toggle_deck(DeckPanel::Files)),
+            run: Callback::new(move |_| {
+                if in_tauri {
+                    workspace_open.set(true);
+                    workspace_focus.set(Some(WorkspaceFocus::Files));
+                } else {
+                    toggle_deck(DeckPanel::Files);
+                }
+            }),
         });
         registry.register(Command {
             id: "toggle-repo",
             title: "Toggle Repo Panel".into(),
-            hint: Some("native shell only".into()),
+            hint: None,
             scope: CommandScope::Repo,
+            slash: Some("/repo"),
             enabled: always,
-            run: Callback::new(move |_| toggle_deck(DeckPanel::Repo)),
+            run: Callback::new(move |_| {
+                if in_tauri {
+                    workspace_open.set(true);
+                    workspace_focus.set(Some(WorkspaceFocus::Repo));
+                } else {
+                    toggle_deck(DeckPanel::Repo);
+                }
+            }),
         });
         registry.register(Command {
             id: "toggle-browser",
             title: "Toggle Browser Cockpit".into(),
             hint: None,
             scope: CommandScope::Browser,
+            slash: Some("/browser"),
             enabled: always,
-            run: Callback::new(move |_| toggle_deck(DeckPanel::Browser)),
+            run: Callback::new(move |_| {
+                if in_tauri {
+                    workspace_open.set(true);
+                    workspace_focus.set(Some(WorkspaceFocus::Browser));
+                } else {
+                    toggle_deck(DeckPanel::Browser);
+                }
+            }),
         });
         registry.register(Command {
             id: "toggle-sessions",
             title: "Toggle Sessions".into(),
             hint: None,
             scope: CommandScope::App,
+            slash: Some("/sessions"),
             enabled: always,
-            run: Callback::new(move |_| show_sessions.update(|v| *v = !*v)),
+            run: Callback::new(move |_| toggle_sessions()),
         });
         registry.register(Command {
             id: "toggle-rooms",
             title: "Toggle Rooms".into(),
             hint: None,
             scope: CommandScope::App,
+            slash: Some("/rooms"),
             enabled: always,
-            run: Callback::new(move |_| show_rooms.update(|v| *v = !*v)),
+            run: Callback::new(move |_| toggle_rooms()),
         });
         registry.register(Command {
             id: "open-council",
             title: "Open Council Stage".into(),
             hint: None,
             scope: CommandScope::App,
+            slash: Some("/council"),
             enabled: always,
             run: Callback::new(move |_| show_council.set(true)),
         });
@@ -253,6 +420,7 @@ pub fn App() -> impl IntoView {
             title: "Start Daemon".into(),
             hint: Some("native shell only".into()),
             scope: CommandScope::App,
+            slash: None,
             enabled: Signal::derive(move || daemon_tauri),
             run: Callback::new(move |_| {
                 wasm_bindgen_futures::spawn_local(async move {
@@ -265,6 +433,7 @@ pub fn App() -> impl IntoView {
             title: "Restart Daemon".into(),
             hint: Some("native shell only".into()),
             scope: CommandScope::App,
+            slash: None,
             enabled: Signal::derive(move || daemon_tauri),
             run: Callback::new(move |_| {
                 wasm_bindgen_futures::spawn_local(async move {
@@ -272,7 +441,210 @@ pub fn App() -> impl IntoView {
                 });
             }),
         });
+        // Workspace pane toggle (Tauri shell only). The id matches the native
+        // app-menu "Toggle Workspace" MenuItem — the orchestrator wires that
+        // item afterward (no lib.rs edit here); on_menu_command above routes
+        // the id back to this registry entry.
+        registry.register(Command {
+            id: "workspace-toggle",
+            title: "Toggle Workspace".into(),
+            hint: Some("native shell only".into()),
+            scope: CommandScope::App,
+            slash: Some("/workspace"),
+            enabled: Signal::derive(move || in_tauri),
+            run: Callback::new(move |_| workspace_open.update(|v| *v = !*v)),
+        });
+        // Composer `/` commands — Session-scoped, wired. The `run` callbacks
+        // here are fallback status hints; the real dispatch for arg-taking
+        // commands (`/model`, `/thinking`) lives in `run_slash`, and `/clear`
+        // + `/help` delegate back to these callbacks via `registry.run`, so
+        // the slash popover and the ⌘K palette run identical code.
+        let daemon_clear = daemon.clone();
+        registry.register(Command {
+            id: "clear",
+            title: "Clear transcript".into(),
+            hint: None,
+            scope: CommandScope::Session,
+            slash: Some("/clear"),
+            enabled: always,
+            run: Callback::new(move |_| {
+                daemon_clear.turns.set(Vec::new());
+                daemon_clear.status.set("transcript cleared".into());
+            }),
+        });
+        let daemon_model = daemon.clone();
+        registry.register(Command {
+            id: "model",
+            title: "Set model".into(),
+            hint: Some("/model <id>".into()),
+            scope: CommandScope::Session,
+            slash: Some("/model"),
+            enabled: always,
+            run: Callback::new(move |_| {
+                daemon_model
+                    .status
+                    .set("use /model <id> or the selector below".into());
+            }),
+        });
+        let daemon_thinking = daemon.clone();
+        registry.register(Command {
+            id: "thinking",
+            title: "Set reasoning effort".into(),
+            hint: Some("/thinking <level>".into()),
+            scope: CommandScope::Session,
+            slash: Some("/thinking"),
+            enabled: always,
+            run: Callback::new(move |_| {
+                daemon_thinking
+                    .status
+                    .set("use /thinking off|minimal|low|medium|high|xhigh|default".into());
+            }),
+        });
+        let daemon_help = daemon.clone();
+        registry.register(Command {
+            id: "help",
+            title: "Show commands".into(),
+            hint: None,
+            scope: CommandScope::Session,
+            slash: Some("/help"),
+            enabled: always,
+            run: Callback::new(move |_| daemon_help.status.set("type / to browse commands".into())),
+        });
+        // Composer `/` commands — roadmap. Mirrors the TUI's `soon` surface:
+        // every TUI command is reachable by typing, but disabled rows render
+        // greyed and never fire. `run` is inert; `registry.run` refuses them
+        // via the `enabled` predicate.
+        registry.register(Command {
+            id: "advisor",
+            title: "Advisor model".into(),
+            hint: Some("coming soon".into()),
+            scope: CommandScope::Session,
+            slash: Some("/advisor"),
+            enabled: never,
+            run: Callback::new(|_| ()),
+        });
+        registry.register(Command {
+            id: "resume",
+            title: "Resume a session".into(),
+            hint: Some("use the sessions panel".into()),
+            scope: CommandScope::Session,
+            slash: Some("/resume"),
+            enabled: never,
+            run: Callback::new(|_| ()),
+        });
+        registry.register(Command {
+            id: "login",
+            title: "Provider logins".into(),
+            hint: Some("coming soon".into()),
+            scope: CommandScope::App,
+            slash: Some("/login"),
+            enabled: never,
+            run: Callback::new(|_| ()),
+        });
+        registry.register(Command {
+            id: "providers",
+            title: "Providers & API keys".into(),
+            hint: Some("coming soon".into()),
+            scope: CommandScope::App,
+            slash: Some("/providers"),
+            enabled: never,
+            run: Callback::new(|_| ()),
+        });
+        registry.register(Command {
+            id: "settings",
+            title: "Settings".into(),
+            hint: Some("coming soon".into()),
+            scope: CommandScope::App,
+            slash: Some("/settings"),
+            enabled: never,
+            run: Callback::new(|_| ()),
+        });
+        registry.register(Command {
+            id: "graph",
+            title: "Graph view".into(),
+            hint: Some("coming soon".into()),
+            scope: CommandScope::App,
+            slash: Some("/graph"),
+            enabled: never,
+            run: Callback::new(|_| ()),
+        });
+        registry.register(Command {
+            id: "terminal",
+            title: "Terminal".into(),
+            hint: Some("coming soon".into()),
+            scope: CommandScope::App,
+            slash: Some("/terminal"),
+            enabled: never,
+            run: Callback::new(|_| ()),
+        });
+        registry.register(Command {
+            id: "quit",
+            title: "Quit".into(),
+            hint: Some("coming soon".into()),
+            scope: CommandScope::App,
+            slash: Some("/quit"),
+            enabled: never,
+            run: Callback::new(|_| ()),
+        });
     }
+
+    // Composer `/` popover state. One reactive source of truth: `slash_query`
+    // is the command-name token (text after the leading `/`, up to the first
+    // space) so the menu keeps filtering while the user types args — e.g.
+    // `/model gpt-5` keeps `/model` selected and passes `gpt-5` as the arg on
+    // pick. `slash_items` mirrors registry order so the flat `slash_selected`
+    // index lines up with `<SlashMenu>`'s row order. The menu is open while the
+    // input is a leading-slash line with at least one matching command.
+    let slash_selected: RwSignal<usize> = RwSignal::new(0);
+    let slash_query = Signal::derive(move || {
+        input
+            .get()
+            .strip_prefix('/')
+            .and_then(|rest| rest.split_whitespace().next())
+            .unwrap_or("")
+            .to_string()
+    });
+    let slash_items = Signal::derive({
+        let registry = registry.clone();
+        move || {
+        let t = input.get();
+        if !t.starts_with('/') {
+            return Vec::new();
+        }
+        let q = slash_query.get();
+        registry
+            .slash_filter(&q)
+            .into_iter()
+            .map(|c| SlashRow {
+                id: c.id.to_string(),
+                title: c.title.clone(),
+                alias: c.slash.unwrap_or("").to_string(),
+                hint: c.hint.clone(),
+                group: scope_label(c.scope).to_string(),
+                enabled: c.enabled.get(),
+            })
+            .collect::<Vec<_>>()
+        }
+    });
+    let slash_open = Signal::derive(move || {
+        input.get().starts_with('/') && !slash_items.get().is_empty()
+    });
+    // One stable pick callback shared by the popover click + Send-button path.
+    // Args are the text after the first whitespace (empty for bare commands).
+    let on_slash_pick = Callback::new({
+        let daemon = daemon.clone();
+        let registry = registry.clone();
+        move |id: String| {
+            let args = input
+                .get_untracked()
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("")
+                .to_string();
+            run_slash(&id, &args, &daemon, &registry);
+            input.set(String::new());
+        }
+    });
 
     // Native app-menu bridge: the Tauri shell emits `menu-command` with a
     // command id when the user picks a "Commands" submenu item. Route every
@@ -286,6 +658,11 @@ pub fn App() -> impl IntoView {
         crate::host::on_menu_command(move |id| {
             reg.run(&id);
         });
+        // The subscriber is now registered — dispatched before the await
+        // below on the same FIFO IPC channel, so it lands before the shell
+        // drains `pending`. Tell the host it may replay any boot-time menu
+        // clicks that fired pre-attach. No-op off the Tauri shell.
+        wasm_bindgen_futures::spawn_local(crate::host::notify_ui_ready());
     });
 
     // TTS: speak the assistant's final text each time a turn finishes
@@ -360,32 +737,48 @@ pub fn App() -> impl IntoView {
     // lives with the App scope and is torn down on unmount.
     let _pointer_light = window_event_listener(ev::mousemove, move |e: web_sys::MouseEvent| {
         let Some(win) = web_sys::window() else { return };
-        let Some(w) = win.inner_width().ok().and_then(|v| v.as_f64()) else {
-            return;
-        };
-        let Some(h) = win.inner_height().ok().and_then(|v| v.as_f64()) else {
-            return;
-        };
+        let Some(w) = win.inner_width().ok().and_then(|v| v.as_f64()) else { return };
+        let Some(h) = win.inner_height().ok().and_then(|v| v.as_f64()) else { return };
         if w <= 0.0 || h <= 0.0 {
             return;
         }
         let x = e.client_x() as f64 / w * 100.0;
         let y = e.client_y() as f64 / h * 100.0;
         let Some(doc) = win.document() else { return };
-        let Some(root) = doc.document_element() else {
-            return;
-        };
-        let Ok(root) = root.dyn_into::<web_sys::HtmlElement>() else {
-            return;
-        };
+        let Some(root) = doc.document_element() else { return };
+        let Ok(root) = root.dyn_into::<web_sys::HtmlElement>() else { return };
         let style = root.style();
         let _ = style.set_property("--pointer-x", &format!("{x:.2}%"));
         let _ = style.set_property("--pointer-y", &format!("{y:.2}%"));
     });
     on_cleanup(move || _pointer_light.remove());
 
+    // Window-level Escape closes the topmost open reveal — priority follows
+    // the z-order: council stage (full-screen modal) over the rooms/sessions
+    // browse overlays over the deck rail (web/extension only — the Show gate
+    // keeps the deck off Tauri). The palette's and slash-menu's own Escape
+    // arms call stop_propagation(), so an Escape they handle never bubbles
+    // here: one Escape closes exactly one surface, never a cascade.
+    let _overlay_escape =
+        window_event_listener(ev::keydown, move |e: ev::KeyboardEvent| {
+            if e.key() != "Escape" {
+                return;
+            }
+            if show_council.get() {
+                show_council.set(false);
+            } else if show_rooms.get() {
+                show_rooms.set(false);
+            } else if show_sessions.get() {
+                show_sessions.set(false);
+            } else if deck_panel.get().is_some() {
+                deck_panel.set(None);
+            }
+        });
+    on_cleanup(move || _overlay_escape.remove());
+
     let submit = {
         let daemon = daemon.clone();
+        let registry = registry.clone();
         move |ev: SubmitEvent| {
             ev.prevent_default();
             let text = input.get_untracked();
@@ -393,7 +786,27 @@ pub fn App() -> impl IntoView {
                 return;
             }
             input.set(String::new());
-            daemon.send_prompt(text);
+            // A `/`-prefixed input is a slash command, never a prompt. Route
+            // it through the same dispatcher the popover uses (best subseq
+            // match on the command-name token) so clicking Send on `/model
+            // gpt-5` behaves like pressing Enter in the menu; an unknown or
+            // disabled token clears with a hint. This closes the path the
+            // textarea keydown guard can't reach (the submit button).
+            if text.starts_with('/') {
+                let rest = text.strip_prefix('/').unwrap_or("");
+                let name = rest.split_whitespace().next().unwrap_or("");
+                let args = rest.split_whitespace().nth(1).unwrap_or("");
+                match registry.slash_filter(name).into_iter().next() {
+                    Some(cmd) if cmd.enabled.get_untracked() => {
+                        run_slash(cmd.id, args, &daemon, &registry);
+                    }
+                    _ => daemon
+                        .status
+                        .set("unknown command \u{2014} type / to see them".into()),
+                }
+            } else {
+                daemon.send_prompt(text);
+            }
             // Refocus + collapse the textarea so a long prior prompt doesn't
             // leave the next turn trapped in a tall empty scrollbox.
             if let Some(el) = textarea_ref.get_untracked() {
@@ -489,10 +902,12 @@ pub fn App() -> impl IntoView {
         })
     });
     let voice_chat_active = move || {
-        rt_stage.get() != crate::voice::realtime::RealtimeStage::Off && !rt_components_visible.get()
+        rt_stage.get() != crate::voice::realtime::RealtimeStage::Off
+            && !rt_components_visible.get()
     };
     let voice_chat_docked = move || {
-        rt_stage.get() != crate::voice::realtime::RealtimeStage::Off && rt_components_visible.get()
+        rt_stage.get() != crate::voice::realtime::RealtimeStage::Off
+            && rt_components_visible.get()
     };
     let voice_level_style = move || format!("{:.3}", crate::voice::realtime::level().get());
 
@@ -511,6 +926,7 @@ pub fn App() -> impl IntoView {
     view! {
         <main
             class=root_class
+            class:has-workspace-open=move || in_tauri && workspace_open.get()
             class:voice-chat-active=voice_chat_active
             class:voice-chat-docked=voice_chat_docked
             style=("--voice-level", voice_level_style)
@@ -532,7 +948,7 @@ pub fn App() -> impl IntoView {
                         type="button"
                         aria-label="sessions"
                         title="Sessions"
-                        on:click=move |_| show_sessions.update(|v| *v = !*v)
+                        on:click=move |_| toggle_sessions()
                     >
                         "Sessions"
                     </button>
@@ -688,7 +1104,7 @@ pub fn App() -> impl IntoView {
                                 role="menuitem"
                                 on:click=move |_| {
                                     if let Some(d) = more_ref.get() { let _ = d.remove_attribute("open"); }
-                                    show_rooms.update(|v| *v = !*v);
+                                    toggle_rooms();
                                 }
                             >
                                 "Rooms"
@@ -708,6 +1124,22 @@ pub fn App() -> impl IntoView {
                             </Show>
                         </div>
                     </details>
+                    // Workspace pane collapse toggle (Tauri shell only). Slim
+                    // chevron at the header's right edge — the pane docks right,
+                    // so the toggle sits at the boundary. Chevrons point toward
+                    // the edge the pane slides to: open shows "›" (collapse to
+                    // the right), collapsed shows "‹" (reveal from the right).
+                    <Show when=move || in_tauri>
+                        <button
+                            class="ocean-workspace-toggle"
+                            type="button"
+                            aria-label="toggle workspace"
+                            title=move || if workspace_open.get() { "Hide workspace" } else { "Show workspace" }
+                            on:click=move |_| workspace_open.update(|v| *v = !*v)
+                        >
+                            {move || if workspace_open.get() { "›" } else { "‹" }}
+                        </button>
+                    </Show>
                 </div>
             </header>
 
@@ -766,7 +1198,7 @@ pub fn App() -> impl IntoView {
                         // so a gated mutating turn can't be missed or scrolled past.
                         <PermissionPrompts daemon=daemon_for_perms.get_value() />
 
-                        <form class="ocean-composer ocean-lit" on:submit=move |ev| submit.with_value(|s| s(ev))>
+                        <form class="ocean-composer ocean-lit" style:position="relative" on:submit=move |ev| submit.with_value(|s| s(ev))>
                             // Push-to-talk only when the proxy has a usable xAI key;
                             // otherwise a dim, disabled placeholder explains why.
                             <Show
@@ -781,7 +1213,7 @@ pub fn App() -> impl IntoView {
                                     </div>
                                 }
                             >
-                                <VoiceOrb on_transcript=on_transcript on_status=on_voice_status muted=muted />
+                                <VoiceOrb on_transcript=on_transcript on_status=on_voice_status muted=muted on_dictate=on_dictate />
                             </Show>
                             // Per-turn overrides (OCEAN-79): reasoning effort +
                             // model. Compact pills next to the composer. Both
@@ -890,6 +1322,25 @@ pub fn App() -> impl IntoView {
                                     />
                                 </select>
                             </div>
+                            {move || {
+                                // Reactive (not `<Show>`) so the plain Vec<usize
+                                // props re-evaluate every keystroke: the list
+                                // refines as the query narrows and the highlight
+                                // tracks arrow-key selection.
+                                if !slash_open.get() {
+                                    return None;
+                                }
+                                let items = slash_items.get();
+                                if items.is_empty() {
+                                    return None;
+                                }
+                                let selected = slash_selected
+                                    .get()
+                                    .min(items.len().saturating_sub(1));
+                                Some(view! {
+                                    <SlashMenu items selected on_pick=on_slash_pick.clone() />
+                                })
+                            }}
                             <textarea
                                 class="ocean-composer__input"
                                 placeholder="message Ocean…"
@@ -903,16 +1354,90 @@ pub fn App() -> impl IntoView {
                                         }
                                     }
                                 }
-                                on:keydown=move |ev| {
-                                    // Enter to submit, Shift+Enter for newline.
-                                    if ev.key() == "Enter" && !ev.shift_key() {
-                                        ev.prevent_default();
-                                        if let Some(target) = ev.target() {
-                                            if let Ok(el) = target.dyn_into::<web_sys::HtmlElement>() {
-                                                if let Ok(Some(form)) = el.closest("form") {
-                                                    if let Ok(form) = form.dyn_into::<web_sys::HtmlFormElement>()
-                                                    {
-                                                        let _ = form.request_submit();
+                                on:keydown={
+                                    let daemon = daemon.clone();
+                                    let registry = registry.clone();
+                                    move |ev| {
+                                        let key = ev.key();
+                                        let text = input.get_untracked();
+                                        let items = slash_items.get_untracked();
+                                        // While the input is a leading-slash line
+                                        // with matching commands the popover drives:
+                                        // arrows move selection, Enter/Tab pick,
+                                        // Escape dismisses \u{2014} none fall
+                                        // through to submit.
+                                        if text.starts_with('/') && !items.is_empty() {
+                                            let len = items.len();
+                                            match key.as_str() {
+                                                "ArrowDown" => {
+                                                    ev.prevent_default();
+                                                    slash_selected
+                                                        .update(|i| *i = (*i + 1) % len);
+                                                    return;
+                                                }
+                                                "ArrowUp" => {
+                                                    ev.prevent_default();
+                                                    slash_selected.update(|i| {
+                                                        *i = if *i == 0 {
+                                                            len.saturating_sub(1)
+                                                        } else {
+                                                            *i - 1
+                                                        }
+                                                    });
+                                                    return;
+                                                }
+                                                "Enter" | "Tab" => {
+                                                    ev.prevent_default();
+                                                    let idx = slash_selected
+                                                        .get_untracked()
+                                                        .min(len.saturating_sub(1));
+                                                    let row = &items[idx];
+                                                    if row.enabled {
+                                                        let args = text
+                                                            .split_whitespace()
+                                                            .nth(1)
+                                                            .unwrap_or("")
+                                                            .to_string();
+                                                        run_slash(
+                                                            &row.id,
+                                                            &args,
+                                                            &daemon,
+                                                            &registry,
+                                                        );
+                                                    } else {
+                                                        daemon.status.set(
+                                                            "unknown command \u{2014} type / to see them"
+                                                                .into(),
+                                                        );
+                                                    }
+                                                    input.set(String::new());
+                                                    return;
+                                                }
+                                                "Escape" => {
+                                                    ev.prevent_default();
+                                                    // Stop propagation so the
+                                                    // window-level Escape
+                                                    // (which closes the deck)
+                                                    // doesn't also fire — one
+                                                    // Escape clears the slash
+                                                    // menu only, no cascade.
+                                                    ev.stop_propagation();
+                                                    input.set(String::new());
+                                                    return;
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                        // Enter to submit, Shift+Enter for newline.
+                                        if key == "Enter" && !ev.shift_key() {
+                                            ev.prevent_default();
+                                            if let Some(target) = ev.target() {
+                                                if let Ok(el) = target.dyn_into::<web_sys::HtmlElement>() {
+                                                    if let Ok(Some(form)) = el.closest("form") {
+                                                        if let Ok(form) = form.dyn_into::<web_sys::HtmlFormElement>()
+                                                        {
+                                                            let _ = form.request_submit();
+                                                        }
                                                     }
                                                 }
                                             }
@@ -950,9 +1475,10 @@ pub fn App() -> impl IntoView {
             // the main surface into room mode.
             <RoomsPanel rooms=rooms open=show_rooms />
 
-            // Context deck (north star): right-side reveal-on-intent panel,
-            // opened only through ⌘K commands — no permanent chrome.
-            <Show when=move || deck_panel.get().is_some()>
+            // Context deck (north star): the web/extension reveal rail. On
+            // Tauri it can never mount (hard-gated on !in_tauri) — the desktop
+            // shell's surfaces live in the workspace pane below.
+            <Show when=move || deck_panel.get().is_some() && !in_tauri>
                 <aside class="deck ocean-lit" role="complementary" aria-label="Context deck">
                     <div class="deck__bar">
                         <span class="deck__title">
@@ -985,8 +1511,24 @@ pub fn App() -> impl IntoView {
                 </aside>
             </Show>
 
+            // Workspace pane (north star desktop shell): THE right-side
+            // surface on Tauri, permanent + tabbed (Files · previews · Browser
+            // · Repo). position:fixed (see styles/workspace.css) so DOM order
+            // is flexible; it docks right of the transcript via the shell's
+            // `has-workspace-open` gutter on wide viewports. The web/extension
+            // layout is untouched — the pane never mounts there.
+            // `focus_intent` carries one-shot tab-focus intents from the
+            // toggle-* commands.
+            <Show when=move || in_tauri>
+                <crate::workspace::WorkspacePane
+                    daemon=daemon_for_workspace.get_value()
+                    open=workspace_open
+                    focus_intent=workspace_focus
+                />
+            </Show>
+
             // ⌘K command palette — the deep-menu engine over the registry.
-            <PaletteView registry=registry.clone() />
+            <PaletteView registry=registry_for_view />
 
             // Council/quorum observability deck (OCEAN-96). Native workflow
             // stage now lives inside the surface instead of an iframe.
@@ -1079,10 +1621,7 @@ pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        composer_height_px, composer_overflow_y, parse_deep_link, DeepLinkAction,
-        COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX,
-    };
+    use super::{composer_height_px, composer_overflow_y, parse_deep_link, DeepLinkAction, COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX};
 
     #[test]
     fn composer_height_clamps_to_min_and_max() {

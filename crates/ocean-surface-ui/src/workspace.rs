@@ -21,6 +21,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use leptos::prelude::*;
+use leptos::ev;
+use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::daemon::{
@@ -45,15 +47,31 @@ pub enum TabKind {
     Preview(String),
     /// Persistent stub tab — renders the slot a sibling agent fills.
     Browser,
+    /// Persistent repo-state tab — mounts the deck's RepoPanel. Never closable;
+    /// sits last in the strip (after Browser).
+    Repo,
 }
 
-/// One tab in the workspace strip. `id` is stable (`files` / `browser` /
-/// `preview:<path>`) so the strip can key on it.
+/// One tab in the workspace strip. `id` is stable (`files` / `browser` / `repo`
+/// / `preview:<path>`) so the strip can key on it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkspaceTab {
     pub id: String,
     pub title: String,
     pub kind: TabKind,
+}
+
+/// A one-shot intent to focus a specific workspace surface. Set on the pane's
+/// `focus_intent` prop by the command layer (app.rs) when a toggle-* command
+/// fires on Tauri — where Files/Browser/Repo live in THIS pane, not the deck.
+/// The pane's Effect opens or focuses the matching persistent tab, makes it
+/// active, then resets the signal to `None` so a repeat of the same intent
+/// re-fires.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkspaceFocus {
+    Files,
+    Browser,
+    Repo,
 }
 
 // ---------------------------------------------------------------------------
@@ -84,13 +102,16 @@ pub(crate) fn format_kib(size: u64) -> String {
 }
 
 /// Ensure a tab for `kind` exists in `tabs` and return its index, making it
-/// the active tab. `Files` and `Browser` are singletons (focus existing);
-/// `Preview(path)` is keyed by path and inserted before the persistent
-/// `Browser` tab so the strip keeps its Files · previews · Browser order.
+/// the active tab. `Files`, `Browser`, and `Repo` are singletons (focus
+/// existing); `Preview(path)` is keyed by path and inserted before the
+/// persistent `Browser` tab so the strip keeps its Files · previews · Browser
+/// · Repo order (Repo is always last — it is pushed onto the tail when missing
+/// and never displaced by a new preview).
 pub(crate) fn open_or_focus(tabs: &mut Vec<WorkspaceTab>, kind: &TabKind) -> usize {
     match kind {
         TabKind::Files => focus_or_push(tabs, kind, "files", "Files"),
         TabKind::Browser => focus_or_push(tabs, kind, "browser", "Browser"),
+        TabKind::Repo => focus_or_push(tabs, kind, "repo", "Repo"),
         TabKind::Preview(path) => {
             if let Some(i) = tabs
                 .iter()
@@ -127,9 +148,9 @@ fn focus_or_push(tabs: &mut Vec<WorkspaceTab>, kind: &TabKind, id: &str, title: 
 }
 
 /// Close the tab with `id`. Only `Preview` tabs are closable — closing a
-/// persistent `Files`/`Browser` tab is a no-op. Returns the new active index:
-/// closing the active tab moves focus to its left neighbour (clamped); closing
-/// a tab to the right of active is focus-neutral.
+/// persistent `Files`/`Browser`/`Repo` tab is a no-op. Returns the new active
+/// index: closing the active tab moves focus to its left neighbour (clamped);
+/// closing a tab to the right of active is focus-neutral.
 pub(crate) fn close_tab(tabs: &mut Vec<WorkspaceTab>, active: usize, id: &str) -> usize {
     let Some(i) = tabs.iter().position(|t| t.id == id) else {
         return active;
@@ -160,15 +181,73 @@ type DirCallback = Arc<dyn Fn(String) + Send + Sync>;
 type FileCallback = Arc<dyn Fn(String) + Send + Sync>;
 
 // ---------------------------------------------------------------------------
+// Pane geometry — pure width math (unit-tested) + persisted-layout constants
+// ---------------------------------------------------------------------------
+
+/// Desired pane width when none is persisted; MUST equal the pre-hydration
+/// `--workspace-w` fallback in workspace.css (`:root`).
+const DEFAULT_WORKSPACE_W: f64 = 520.0;
+/// Hard floor on the pane — wins over every other constraint (a degenerate
+/// tiny window accepts a pane wider than its viewport rather than vanishing).
+const MIN_PANE_W: f64 = 320.0;
+/// In split view the content column is guaranteed at least this much, so the
+/// pane's max is the tighter of (65% of viewport) and (viewport − this floor).
+const COLUMN_MIN_W: f64 = 480.0;
+/// Split-view breakpoint; MUST equal the `@media (min-width: 900px)` rule in
+/// workspace.css. At or above this the pane SPLITS; below it OVERLAYS.
+const SPLIT_BP: f64 = 900.0;
+/// Pane may take at most this fraction of the viewport in split view.
+const MAX_PANE_FACTOR: f64 = 0.65;
+/// In overlay mode a sliver of the underlying context stays visible.
+const OVERLAY_EDGE_W: f64 = 48.0;
+/// Below this pane width a Preview/Browser tab auto-collapses the tree.
+const NARROW_PANE_W: f64 = 560.0;
+
+/// Pure auto-collapse rule for the docked tree: only wide content tabs
+/// (Preview/Browser) collapse it, and only in a narrow pane. Never Files —
+/// the tree is that tab's body — and never Repo (a compact list that
+/// coexists with the tree).
+fn tree_auto_collapses(kind: &TabKind, pane_w: f64) -> bool {
+    matches!(kind, TabKind::Preview(_) | TabKind::Browser) && pane_w < NARROW_PANE_W
+}
+
+const LS_WIDTH: &str = "ocean.workspace.w";
+const LS_TREE: &str = "ocean.workspace.tree";
+const LS_TREE_USER: &str = "ocean.workspace.tree.user-set";
+
+/// Effective pane width for a desired width at a given viewport.
+///
+/// Split mode (`vw >= SPLIT_BP`): the pane may take up to 65% of the viewport
+/// but must always leave [`COLUMN_MIN_W`] for the content column. Overlay mode
+/// (`vw < SPLIT_BP`): the pane may cover all but an [`OVERLAY_EDGE_W`] context
+/// sliver. [`MIN_PANE_W`] wins over everything (degenerate tiny windows
+/// accepted).
+pub(crate) fn effective_width(desired: f64, vw: f64) -> f64 {
+    let max = if vw >= SPLIT_BP {
+        (vw * MAX_PANE_FACTOR).min(vw - COLUMN_MIN_W)
+    } else {
+        vw - OVERLAY_EDGE_W
+    };
+    desired.clamp(MIN_PANE_W, max.max(MIN_PANE_W))
+}
+
+
+// ---------------------------------------------------------------------------
 // WorkspacePane component
 // ---------------------------------------------------------------------------
 
 /// The permanent right-side desktop pane. `open` is the shared collapse state
 /// owned by the app shell (header toggle + ⌘K command flip the same signal);
 /// the pane renders `is-collapsed` from it and the shell adjusts its layout
-/// gutter to match.
+/// gutter to match. `focus_intent` is a one-shot set by the command layer
+/// (app.rs) to surface a specific tab when a toggle-* command fires on Tauri —
+/// the Effect below opens/focuses the matching tab and resets it to `None`.
 #[component]
-pub fn WorkspacePane(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
+pub fn WorkspacePane(
+    daemon: Daemon,
+    open: RwSignal<bool>,
+    focus_intent: RwSignal<Option<WorkspaceFocus>>,
+) -> impl IntoView {
     // Root = session cwd, the same source the deck files panel reads. An
     // empty / "/" cwd leaves the tree empty until a session lands.
     let tree_root: RwSignal<Option<String>> = {
@@ -181,10 +260,12 @@ pub fn WorkspacePane(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
     };
     let daemon_url = daemon.url;
 
-    // Tabs: Files and Browser are persistent; Preview tabs come and go.
+    // Tabs: Files, Browser, and Repo are persistent; Preview tabs come and go.
+    // Repo sits LAST (after Browser) and is never closable.
     let tabs: RwSignal<Vec<WorkspaceTab>> = RwSignal::new(vec![
         WorkspaceTab { id: "files".into(), title: "Files".into(), kind: TabKind::Files },
         WorkspaceTab { id: "browser".into(), title: "Browser".into(), kind: TabKind::Browser },
+        WorkspaceTab { id: "repo".into(), title: "Repo".into(), kind: TabKind::Repo },
     ]);
     let active_tab: RwSignal<usize> = RwSignal::new(0);
 
@@ -362,6 +443,25 @@ pub fn WorkspacePane(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
         });
     }
 
+    // ---- Command-layer focus intent (one-shot) ----
+    // app.rs sets focus_intent when a toggle-* command fires on Tauri (where
+    // the Files/Browser/Repo surfaces live in THIS pane, not the deck).
+    // Some(f) opens/focuses the matching persistent tab and makes it active,
+    // then resets the signal to None so the same intent re-fires next time.
+    Effect::new(move |_| {
+        let Some(f) = focus_intent.get() else { return; };
+        let kind = match f {
+            WorkspaceFocus::Files => TabKind::Files,
+            WorkspaceFocus::Browser => TabKind::Browser,
+            WorkspaceFocus::Repo => TabKind::Repo,
+        };
+        let mut t = tabs.get();
+        let idx = open_or_focus(&mut t, &kind);
+        tabs.set(t);
+        active_tab.set(idx);
+        focus_intent.set(None);
+    });
+
     // Pre-clone for the view's render closures.
     let ld_tree = Arc::clone(&load_dir);
     let ed_tree = Arc::clone(&expand_dir);
@@ -370,17 +470,185 @@ pub fn WorkspacePane(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
     // Hoisted out of `view!`: a turbofish (`collect::<Vec<_>>()`) inside an
     // RSX attribute position parses `<Vec<_>>` as a tag opener.
     let tab_entries = move || tabs.get().into_iter().enumerate().collect::<Vec<_>>();
-    // Dedicated clone for the tab-content closure below (FnMut, re-runs):
-    // the Browser tab renders the sibling module's live screencast component.
+    // Dedicated clones for the tab-content closures below (FnMut, re-runs):
+    // the Browser tab renders the sibling module's live screencast component,
+    // and the Repo tab mounts the deck's RepoPanel (same component the deck
+    // uses — the workspace is its home on Tauri).
     let daemon_browser = daemon.clone();
+    let daemon_repo = daemon.clone();
 
+// ── ergonomics: drag-resize + collapsible tree ────────────────────────────
+// The DESIRED width persists across sessions; the EFFECTIVE pane width
+// (`pane_w`, derived) clamps it to the live viewport so the shell gutter
+// never outruns the content column. The live `--workspace-w` custom property
+// has exactly ONE writer — the effect below — so handlers only ever mutate
+// `desired_w` / `viewport_w`.
+
+fn ls_get_f64(key: &str) -> Option<f64> {
+    web_sys::window()?.local_storage().ok()??.get_item(key).ok()?.and_then(|s| s.parse::<f64>().ok())
+}
+fn ls_get_bool(key: &str) -> bool {
+    web_sys::window()
+        .and_then(|w| w.local_storage().ok())
+        .and_then(|r| r)
+        .and_then(|r| r.get_item(key).ok())
+        .flatten()
+        .map(|s| s == "1")
+        .unwrap_or(false)
+}
+fn ls_set(key: &str, val: &str) {
+    let _ = web_sys::window()
+        .and_then(|w| w.local_storage().ok())
+        .and_then(|r| r)
+        .map(|r| r.set_item(key, val));
+}
+fn read_viewport_w() -> f64 {
+    web_sys::window()
+        .and_then(|w| w.inner_width().ok())
+        .and_then(|n| n.as_f64())
+        .unwrap_or(1280.0)
+}
+fn set_workspace_w_var(px: f64) {
+    let css = format!("{px}px");
+    if let Some(el) = web_sys::window().and_then(|w| w.document()).and_then(|d| d.document_element()) {
+        if let Ok(el) = el.dyn_into::<web_sys::HtmlElement>() {
+            let _ = el.style().set_property("--workspace-w", &css);
+        }
+    }
+}
+/// Toggle the `is-resizing` class on <html>. During a drag the pointer moves
+/// the pane instantly; animating the shell gutter behind it reads as
+/// rubber-band churn, so workspace.css suppresses layout transitions while the
+/// class is present. `pointercancel` mirrors `pointerup` because pointer
+/// capture can be revoked by the OS mid-gesture.
+fn set_resizing(on: bool) {
+    if let Some(el) = web_sys::window().and_then(|w| w.document()).and_then(|d| d.document_element()) {
+        if let Ok(el) = el.dyn_into::<web_sys::HtmlElement>() {
+            let _ = el.class_list().toggle_with_force("is-resizing", on);
+        }
+    }
+}
+// tiny helper because leptos::ev::Pointer* target access is verbose
+fn ev_target_element(ev: &web_sys::PointerEvent) -> Option<web_sys::Element> {
+    let t = ev.target()?;
+    t.dyn_into::<web_sys::Element>().ok()
+}
+
+let desired_w: RwSignal<f64> = RwSignal::new(ls_get_f64(LS_WIDTH).unwrap_or(DEFAULT_WORKSPACE_W));
+let viewport_w: RwSignal<f64> = RwSignal::new(read_viewport_w());
+let user_set_tree: RwSignal<bool> = RwSignal::new(ls_get_bool(LS_TREE_USER));
+let tree_collapsed_user: RwSignal<bool> = RwSignal::new(ls_get_bool(LS_TREE));
+// Effective pane width: the desired width clamped to the live viewport. This
+// is the single value every consumer reads (the CSS-var effect below, the
+// tree auto-collapse heuristic) — nothing recomputes the clamp itself.
+let pane_w = Signal::derive(move || effective_width(desired_w.get(), viewport_w.get()));
+// Files tab = the docked tree IS the body (the content region renders
+// nothing there), so while it is active the tree can never collapse away —
+// a collapsed body would leave a dead pane. Auto-collapse only applies to
+// wide content tabs (Preview/Browser) in a narrow pane; a user collapse
+// applies to any content tab but is likewise overridden on Files.
+let files_active = Signal::derive(move || {
+    let active = active_tab.get();
+    tabs.with(|t| t.get(active).map(|tab| matches!(tab.kind, TabKind::Files)).unwrap_or(false))
+});
+let tree_collapsed = {
+    let pane_w = pane_w;
+    let user_set_tree = user_set_tree;
+    let tree_collapsed_user = tree_collapsed_user;
+    Signal::derive(move || {
+        if files_active.get() {
+            false
+        } else if user_set_tree.get() {
+            tree_collapsed_user.get()
+        } else {
+            let active = active_tab.get();
+            let tabs_vec = tabs.get();
+            tabs_vec
+                .get(active)
+                .map(|t| tree_auto_collapses(&t.kind, pane_w.get()))
+                .unwrap_or(false)
+        }
+    })
+};
+let dragging: RwSignal<bool> = RwSignal::new(false);
+
+// Single writer of the live `--workspace-w` custom property: the derived pane
+// width drives it, so handlers only mutate `desired_w` / `viewport_w`. Runs
+// once at setup (the initial sync — the CSS :root fallback holds until then)
+// and again on every drag tick or window resize.
+Effect::new(move |_| {
+    set_workspace_w_var(pane_w.get());
+});
+
+// Keep the viewport in sync so the derived width re-clamps when the OS resizes
+// the window (e.g. snapping a maximized window back to a tile). Bound +
+// on_cleanup so the listener lives with the component scope and is torn down
+// on unmount (matching app.rs's pointer-light listener).
+let _resize_listener = window_event_listener(ev::resize, move |_| {
+    viewport_w.set(read_viewport_w());
+});
+on_cleanup(move || _resize_listener.remove());
+
+let on_resize_move = move |ev: web_sys::PointerEvent| {
+    if !dragging.get() { return; }
+    let x = ev.client_x() as f64;
+    let vw = viewport_w.get();
+    // WYSIWYG: store the EFFECTIVE width at this pointer position as the
+    // desired width, so the handle can never outrun the clamp — a drag into
+    // the no-go zone parks at the boundary instead of over/undershooting.
+    desired_w.set(effective_width(vw - x, vw));
+};
+let on_resize_up = move |ev: web_sys::PointerEvent| {
+    dragging.set(false);
+    set_resizing(false);
+    if let Some(el) = ev_target_element(&ev) { let _ = el.release_pointer_capture(ev.pointer_id()); }
+    // Persist only on release (unchanged from the original behavior).
+    ls_set(LS_WIDTH, &desired_w.get_untracked().to_string());
+};
+// Pointer capture can be cancelled by the OS mid-gesture; mirror pointerup so
+// the is-resizing class and drag lock never get stuck on.
+let on_resize_cancel = move |ev: web_sys::PointerEvent| {
+    dragging.set(false);
+    set_resizing(false);
+    if let Some(el) = ev_target_element(&ev) { let _ = el.release_pointer_capture(ev.pointer_id()); }
+    ls_set(LS_WIDTH, &desired_w.get_untracked().to_string());
+};
+let on_resize_down = move |ev: web_sys::PointerEvent| {
+    dragging.set(true);
+    set_resizing(true);
+    if let Some(el) = ev_target_element(&ev) { let _ = el.set_pointer_capture(ev.pointer_id()); }
+};
+let reset_width = move |_| {
+    desired_w.set(DEFAULT_WORKSPACE_W);
+    ls_set(LS_WIDTH, &DEFAULT_WORKSPACE_W.to_string());
+};
+let toggle_tree = move |_| {
+    let now = !tree_collapsed.get();
+    user_set_tree.set(true);
+    tree_collapsed_user.set(now);
+    ls_set(LS_TREE_USER, "1");
+    ls_set(LS_TREE, if now { "1" } else { "0" });
+};
     view! {
         <aside
             class="workspace"
             class:is-collapsed=move || !open.get()
+            class:files-active=move || files_active.get()
             role="complementary"
             aria-label="Workspace"
         >
+            <div
+                class="workspace-resize"
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="Resize workspace"
+                title="Drag to resize — double-click to reset"
+                on:pointerdown=on_resize_down
+                on:pointermove=on_resize_move
+                on:pointerup=on_resize_up
+                on:pointercancel=on_resize_cancel
+                on:dblclick=reset_width
+            ></div>
             // ---- Tab strip ----
             <div class="workspace-tabs">
                 <For
@@ -432,20 +700,27 @@ pub fn WorkspacePane(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                         return view! { <div class="workspace-empty"></div> }.into_any();
                     };
                     match &tab.kind {
-                        TabKind::Files => view! {
-                            <div class="workspace-preview">
-                                <div class="workspace-empty">
-                                    "Open file — select a file from the tree"
-                                </div>
-                            </div>
+                        TabKind::Files => {
+                            // No content node — the docked tree IS this tab's
+                            // body; `.workspace.files-active` (workspace.css)
+                            // flexes the tree to fill the pane.
+                            ().into_any()
                         }
-                        .into_any(),
                         TabKind::Browser => view! {
                             <div class="workspace-browser">
                                 // Live agent-browser view: CDP screencast of the
                                 // daemon-owned Chrome + input forwarding
                                 // (workspace_browser.rs).
                                 <crate::workspace_browser::WorkspaceBrowser daemon=daemon_browser.clone() />
+                            </div>
+                        }
+                        .into_any(),
+                        TabKind::Repo => view! {
+                            <div class="workspace-repo">
+                                // Repo state (branch, dirty/staged, commits) —
+                                // the same RepoPanel the deck mounts; the
+                                // workspace is its home on Tauri.
+                                <crate::deck::repo::RepoPanel daemon=daemon_repo.clone() />
                             </div>
                         }
                         .into_any(),
@@ -519,7 +794,16 @@ pub fn WorkspacePane(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                 }}
 
                 // ---- Docked file tree (right edge inside the pane) ----
-                <aside class="workspace-tree" aria-label="Files">
+                <aside class="workspace-tree" class:is-collapsed=move || tree_collapsed.get() aria-label="Files">
+                    <button
+                        class="workspace-tree-toggle"
+                        class:is-collapsed=move || tree_collapsed.get()
+                        type="button"
+                        title=move || if tree_collapsed.get() { "Show file tree" } else { "Hide file tree" }
+                        on:click=toggle_tree
+                    >
+                        <crate::icons::ChevronDown />
+                    </button>
                     <div class="workspace-tree-filter">
                         <input
                             class="workspace-tree-filter__input"
@@ -961,5 +1245,131 @@ mod tests {
         let new_active = close_tab(&mut tabs, 2, "preview:/a");
         assert_eq!(new_active, 1);
         assert_eq!(tabs.len(), 3);
+    }
+
+    // ---- Repo tab (persistent, last position) + focus mapping ----
+
+    #[test]
+    fn open_or_focus_repo_present_focuses_existing() {
+        let mut tabs = vec![
+            tab("files", TabKind::Files),
+            tab("browser", TabKind::Browser),
+            tab("repo", TabKind::Repo),
+        ];
+        let i = open_or_focus(&mut tabs, &TabKind::Repo);
+        assert_eq!(i, 2);
+        assert_eq!(tabs.len(), 3); // no duplicate
+    }
+
+    #[test]
+    fn open_or_focus_preview_inserts_before_browser_keeps_repo_last() {
+        let mut tabs = vec![
+            tab("files", TabKind::Files),
+            tab("browser", TabKind::Browser),
+            tab("repo", TabKind::Repo),
+        ];
+        let i = open_or_focus(&mut tabs, &TabKind::Preview("/root/a.rs".into()));
+        // Files(0) · preview(1) · Browser(2) · Repo(3) — Repo stays last.
+        assert_eq!(i, 1);
+        assert_eq!(tabs.len(), 4);
+        assert!(matches!(&tabs[1].kind, TabKind::Preview(_)));
+        assert!(matches!(&tabs[2].kind, TabKind::Browser));
+        assert!(matches!(&tabs[3].kind, TabKind::Repo));
+    }
+
+    #[test]
+    fn open_or_focus_focus_each_persistent_kind_no_duplicates() {
+        // Mirrors the focus_intent Effect's WorkspaceFocus -> TabKind mapping:
+        // focusing each persistent surface lands on its tab without dupes.
+        let mut tabs = vec![
+            tab("files", TabKind::Files),
+            tab("browser", TabKind::Browser),
+            tab("repo", TabKind::Repo),
+        ];
+        assert_eq!(open_or_focus(&mut tabs, &TabKind::Files), 0);
+        assert_eq!(open_or_focus(&mut tabs, &TabKind::Browser), 1);
+        assert_eq!(open_or_focus(&mut tabs, &TabKind::Repo), 2);
+        assert_eq!(tabs.len(), 3);
+        assert_eq!(tabs[0].id, "files");
+        assert_eq!(tabs[1].id, "browser");
+        assert_eq!(tabs[2].id, "repo");
+    }
+
+    #[test]
+    fn close_tab_repo_is_noop() {
+        let mut tabs = vec![
+            tab("files", TabKind::Files),
+            tab("browser", TabKind::Browser),
+            tab("repo", TabKind::Repo),
+        ];
+        // Repo is persistent: closing it from any active index is a no-op.
+        assert_eq!(close_tab(&mut tabs, 2, "repo"), 2);
+        assert_eq!(close_tab(&mut tabs, 0, "repo"), 0);
+        assert_eq!(tabs.len(), 3);
+        // The close button never renders for it (only Preview is closable),
+        // but close_tab must defend regardless.
+        assert!(matches!(&tabs[2].kind, TabKind::Repo));
+    }
+
+    // ---- effective_width (pure clamp math) ----
+
+    #[test]
+    fn effective_width_split_column_floor() {
+        // vw=1000, desired=650: split mode, the content column keeps 480, so
+        // the pane parks at vw − 480 = 520 (under the 65% = 650 cap anyway).
+        assert_eq!(effective_width(650.0, 1000.0), 520.0);
+    }
+
+    #[test]
+    fn effective_width_split_65pct_cap() {
+        // vw=2000, desired=1400: 65% of 2000 = 1300 caps below the
+        // vw − 480 = 1520 column floor, so the pane stops at 1300.
+        assert_eq!(effective_width(1400.0, 2000.0), 1300.0);
+    }
+
+    #[test]
+    fn effective_width_min_floor_wins() {
+        // vw=1200, desired=100: MIN_PANE_W (320) wins over the tiny desired.
+        assert_eq!(effective_width(100.0, 1200.0), 320.0);
+    }
+
+    #[test]
+    fn effective_width_overlay_keeps_context_sliver() {
+        // vw=800 (< 900): overlay mode covers all but a 48px sliver → 752.
+        assert_eq!(effective_width(900.0, 800.0), 752.0);
+    }
+
+    #[test]
+    fn effective_width_degenerate_window_clamps_to_min() {
+        // vw=350 (< 900): overlay max would be 302, but MIN_PANE_W (320) wins
+        // — a degenerate window accepts a pane wider than its viewport.
+        assert_eq!(effective_width(500.0, 350.0), 320.0);
+    }
+
+    #[test]
+    fn effective_width_boundary_at_split_bp_is_split() {
+        // vw=900 exactly is split (>=), so the pane max is the column floor
+        // vw − 480 = 420, not the overlay 852. A large desired parks at 420.
+        assert_eq!(effective_width(900.0, 900.0), 420.0);
+    }
+
+    // ---- tree_auto_collapses ----
+
+    #[test]
+    fn tree_never_auto_collapses_on_files_or_repo() {
+        // Files: the tree IS the tab body — collapsing it would leave a dead
+        // pane. Repo: compact list, coexists with the tree at any width.
+        assert!(!tree_auto_collapses(&TabKind::Files, 320.0));
+        assert!(!tree_auto_collapses(&TabKind::Repo, 320.0));
+    }
+
+    #[test]
+    fn tree_auto_collapses_wide_tabs_only_below_narrow() {
+        let preview = TabKind::Preview("/root/a.rs".into());
+        assert!(tree_auto_collapses(&preview, NARROW_PANE_W - 1.0));
+        assert!(tree_auto_collapses(&TabKind::Browser, NARROW_PANE_W - 1.0));
+        // At and above the threshold the tree stays docked.
+        assert!(!tree_auto_collapses(&preview, NARROW_PANE_W));
+        assert!(!tree_auto_collapses(&TabKind::Browser, NARROW_PANE_W + 40.0));
     }
 }

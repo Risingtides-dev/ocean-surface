@@ -58,6 +58,10 @@ pub struct Command {
     pub hint: Option<String>,
     /// Scope for grouping and visual tagging.
     pub scope: CommandScope,
+    /// Optional composer `/` alias (e.g. `Some("/new")`). Commands without
+    /// an alias are invisible to the slash popover; the ⌘K palette still
+    /// lists them. The alias is display + match text for `slash_filter`.
+    pub slash: Option<&'static str>,
     /// Availability predicate evaluated at open/filter time. Host-gating
     /// (e.g. Tauri-only commands) happens here: the integrator wires a
     /// `Signal<bool>` that reflects the current host.
@@ -81,6 +85,7 @@ pub struct Command {
 ///     title: "Toggle Context Deck".into(),
 ///     hint: None,
 ///     scope: CommandScope::App,
+///     slash: None,
 ///     enabled: Signal::derive(move || show_deck.get()),
 ///     run: Callback::new(move |_| show_deck.update(|v| *v = !*v)),
 /// });
@@ -132,6 +137,28 @@ impl CommandRegistry {
             false
         }
     }
+
+    /// Filter commands that carry a slash alias by a subsequence match of
+    /// `query` against the alias (leading `/` on either side ignored). An
+    /// empty query returns every command with a slash alias in registry
+    /// order. Drives the composer `/` popover.
+    pub fn slash_filter(&self, query: &str) -> Vec<Command> {
+        let q = query.trim().trim_start_matches('/').to_lowercase();
+        self.commands
+            .get_untracked()
+            .into_iter()
+            .filter(|cmd| {
+                let Some(alias) = cmd.slash else {
+                    return false;
+                };
+                let target = alias.trim_start_matches('/');
+                if q.is_empty() {
+                    return true;
+                }
+                slash_subseq(target, &q)
+            })
+            .collect()
+    }
 }
 
 impl Default for CommandRegistry {
@@ -157,6 +184,26 @@ impl Default for CommandRegistry {
 /// These bonuses compound, so `"fp"` against `"FilesPanel"` scores:
 ///   'f' at 0 → +10 (start) +3 (prefix) = 13, 'p' at 5 → +5 (camelCase
 ///   boundary) +2 (consecutive=1) = 7 → total 20.
+
+/// Subsequence match for slash aliases. Case-insensitive; returns true when
+/// every char of `query` appears in order inside `target`. Mirrors the shape
+/// of ocean-tui's `shell::slash::subseq_score` (a boolean gate — scoring is
+/// unnecessary for the short alias set).
+fn slash_subseq(target: &str, query: &str) -> bool {
+    let target = target.to_lowercase();
+    let mut ti = target.chars().peekable();
+    for qc in query.chars() {
+        loop {
+            match ti.next() {
+                Some(tc) if tc == qc => break,
+                Some(_) => continue,
+                None => return false,
+            }
+        }
+    }
+    true
+}
+
 fn fuzzy_score(query: &str, target: &str) -> Option<f64> {
     if query.is_empty() {
         return Some(0.0);
@@ -658,6 +705,7 @@ mod tests {
             title: "Test Command".into(),
             hint: None,
             scope: CommandScope::App,
+            slash: None,
             enabled: Signal::from(enabled),
             run: Callback::new(|_| {}),
         };
@@ -675,6 +723,7 @@ mod tests {
             title: "Toggle Files".into(),
             hint: None,
             scope: CommandScope::Files,
+            slash: None,
             enabled: Signal::from(RwSignal::new(true)),
             run: Callback::new(move |_| fired_run.update(|n| *n += 1)),
         });
@@ -698,6 +747,7 @@ mod tests {
             title: "Open Council".into(),
             hint: None,
             scope: CommandScope::App,
+            slash: None,
             enabled: Signal::from(enabled),
             run: Callback::new(move |_| fired.update(|n| *n += 1)),
         });
@@ -753,5 +803,55 @@ mod tests {
         assert_eq!(CommandScope::Repo.label(), "Repo");
         assert_eq!(CommandScope::Browser.label(), "Browser");
         assert_eq!(CommandScope::App.label(), "App");
+    }
+
+    // ── slash_filter ────────────────────────────────────────────────────
+
+    /// Build a minimal command with the given id + slash alias for filter tests.
+    fn slash_filter_cmd(id: &'static str, slash: Option<&'static str>) -> Command {
+        Command {
+            id,
+            title: id.into(),
+            hint: None,
+            scope: CommandScope::App,
+            slash,
+            enabled: Signal::derive(|| true),
+            run: Callback::new(|_| {}),
+        }
+    }
+
+    #[test]
+    fn slash_filter_partial_query_returns_only_matching_alias() {
+        let registry = CommandRegistry::new();
+        registry.register(slash_filter_cmd("new-session", Some("/new")));
+        registry.register(slash_filter_cmd("pick-model", Some("/model")));
+        let ids: Vec<&str> = registry.slash_filter("mod").iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec!["pick-model"]);
+    }
+
+    #[test]
+    fn slash_filter_empty_query_returns_all_aliased_in_registry_order() {
+        let registry = CommandRegistry::new();
+        registry.register(slash_filter_cmd("new-session", Some("/new")));
+        registry.register(slash_filter_cmd("no-alias", None));
+        registry.register(slash_filter_cmd("pick-model", Some("/model")));
+        let ids: Vec<&str> = registry.slash_filter("").iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec!["new-session", "pick-model"]);
+    }
+
+    #[test]
+    fn slash_filter_no_match_returns_empty() {
+        let registry = CommandRegistry::new();
+        registry.register(slash_filter_cmd("new-session", Some("/new")));
+        registry.register(slash_filter_cmd("pick-model", Some("/model")));
+        assert!(registry.slash_filter("xyz").is_empty());
+    }
+
+    #[test]
+    fn slash_filter_ignores_leading_slash_on_alias() {
+        let registry = CommandRegistry::new();
+        registry.register(slash_filter_cmd("toggle-files", Some("/files")));
+        let ids: Vec<&str> = registry.slash_filter("file").iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec!["toggle-files"]);
     }
 }

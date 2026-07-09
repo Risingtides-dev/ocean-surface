@@ -1,0 +1,63 @@
+<h2>ocean-gui structure cleanup: target shape</h2>
+<p class="subtitle">One canonical GPUI app. Agent-first spine. Canvas and vault become session/workspace surfaces, not competing product identities.</p>
+
+<div class="section">
+  <div class="label">Target module boundary</div>
+  <div class="mockup">
+    <div class="mockup-header">Shell coordinator becomes thin</div>
+    <div class="mockup-body">
+      <div style="display:grid;grid-template-columns:1fr 1.2fr 1fr;gap:14px;align-items:center;">
+        <div style="display:flex;flex-direction:column;gap:12px;">
+          <div class="placeholder"><strong>App chrome</strong><br><span>window, tabs, status bar</span></div>
+          <div class="placeholder"><strong>Command palette</strong><br><span>actions, shortcuts, routing</span></div>
+          <div class="placeholder"><strong>LiveKit panel</strong><br><span>presence, rooms, A/V state</span></div>
+        </div>
+        <div style="border:2px solid currentColor;border-radius:16px;padding:22px;text-align:center;background:rgba(255,255,255,.05);">
+          <div class="label">Coordinator</div>
+          <h3 style="margin-top:8px;">OceanGuiShell</h3>
+          <p>Owns app-level state, routes events, composes view models. Does not contain every renderer, daemon flow, canvas operation, and editor behavior inline.</p>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:12px;">
+          <div class="placeholder"><strong>Agent thread</strong><br><span>session, transcript, composer, tools</span></div>
+          <div class="placeholder"><strong>Canvas workspace</strong><br><span>CanvasLedger, cards, co-edit UI</span></div>
+          <div class="placeholder"><strong>Vault/editor</strong><br><span>notes, rope buffer, backlinks</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">Migration phases</div>
+  <div class="cards">
+    <div class="card" data-choice="phase1" onclick="toggleSelect(this)">
+      <div class="card-body">
+        <h3>1. Remove ambiguity</h3>
+        <p>Quarantine/delete <code>ocean-gui-egui</code>, document <code>ocean-gui</code> as the only supported native app, and make wrong launch paths impossible to mistake for product behavior.</p>
+      </div>
+    </div>
+    <div class="card" data-choice="phase2" onclick="toggleSelect(this)">
+      <div class="card-body">
+        <h3>2. Rename reality</h3>
+        <p>Native <code>CanvasLedger</code> is the canvas. Retire stale tldraw-owned names, dead adapter code, and footer/debug copy that implies the old model still owns the surface.</p>
+      </div>
+    </div>
+    <div class="card" data-choice="phase3" onclick="toggleSelect(this)">
+      <div class="card-body">
+        <h3>3. Extract product slices</h3>
+        <p>Move render/state/event chunks out of <code>view.rs</code> by product seam: chrome, agent thread, canvas workspace, vault editor, LiveKit panel, command palette.</p>
+      </div>
+    </div>
+    <div class="card" data-choice="phase4" onclick="toggleSelect(this)">
+      <div class="card-body">
+        <h3>4. Make Agent-first explicit</h3>
+        <p>Default launch and empty states should orient around creating/attaching to a session. Canvas and vault become workspace surfaces attached to that session.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="label">Safety rule</div>
+  <p>No rewrite. No new behavior until the old behavior has a named module and a green check. Each phase keeps <code>cargo check -p ocean-gui</code>, <code>cargo test -p ocean-gui</code>, and the LiveKit feature check green.</p>
+</div>

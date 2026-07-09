@@ -146,6 +146,20 @@ pub fn on_menu_command(handler: impl Fn(String) + 'static) {
     }));
 }
 
+/// Tell the Tauri shell the webview has attached its `menu-command` listener,
+/// so native app-menu selections should stop being queued and any that fired
+/// pre-attach replayed. Called once from the app-menu Effect in app.rs,
+/// strictly after `on_menu_command` registers its subscriber — both IPCs
+/// share the webview's single FIFO channel, so the subscriber lands before
+/// the shell drains. No-op on non-Tauri hosts — the replay buffer only
+/// exists behind the shell.
+pub async fn notify_ui_ready() {
+    if !running_in_tauri() {
+        return;
+    }
+    let _ = tauri_invoke("ui_ready", &JsValue::NULL).await;
+}
+
 /// Subscribe to shell `deep-link` events. The shell emits these — one per
 /// `ocean://` URL the OS asked Ocean to open — carrying the raw URL string as
 /// the payload; the handler parses it into an action (e.g.

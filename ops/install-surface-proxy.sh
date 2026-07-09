@@ -39,6 +39,43 @@ done
 
 export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$HOME/.cargo/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
 
+# --- auth-env preflight (prod contract) ----------------------------------------
+# Creds live in a 0600 env file sourced by deploy/ocean-surface-proxy.sh — never
+# in the plist. Fail early with an actionable message so a fresh install cannot
+# stage a supervised proxy that then refuses to boot (auth on, no creds) or,
+# worse, gets an ad-hoc AUTH=off override. This check does not print secrets.
+AUTH_ENV="$HOME/.config/ocean-surface/proxy-auth.env"
+if [[ ! -f "$AUTH_ENV" ]]; then
+  echo "ERROR: missing $AUTH_ENV" >&2
+  echo "       Prod auth requires a 0600 env file that exports:" >&2
+  echo "         OCEAN_SURFACE_AUTH=on" >&2
+  echo "         OCEAN_SURFACE_USER=..." >&2
+  echo "         OCEAN_SURFACE_PASS=..." >&2
+  echo "       Create it before installing (chmod 600). Password material" >&2
+  echo "       typically lives in ~/.config/ocean-surface/proxy-basic-auth.txt." >&2
+  echo "       There are no built-in operator credentials." >&2
+  exit 1
+fi
+# shellcheck disable=SC1090
+# Source in a subshell so we can validate without leaking into this script's env
+# permanently beyond the checks below.
+auth_mode="$(set -a; . "$AUTH_ENV"; set +a; printf '%s' "${OCEAN_SURFACE_AUTH:-}")"
+auth_user="$(set -a; . "$AUTH_ENV"; set +a; printf '%s' "${OCEAN_SURFACE_USER:-}")"
+auth_pass="$(set -a; . "$AUTH_ENV"; set +a; printf '%s' "${OCEAN_SURFACE_PASS:-}")"
+if [[ -z "$auth_mode" || -z "$auth_user" || -z "$auth_pass" ]]; then
+  echo "ERROR: $AUTH_ENV must export OCEAN_SURFACE_AUTH, OCEAN_SURFACE_USER, and OCEAN_SURFACE_PASS." >&2
+  echo "       Refusing to install an incomplete auth config (values not printed)." >&2
+  exit 1
+fi
+if [[ "$auth_mode" != "on" && "$auth_mode" != "off" ]]; then
+  echo "ERROR: OCEAN_SURFACE_AUTH in $AUTH_ENV must be 'on' or 'off' (got a non-empty other value)." >&2
+  exit 1
+fi
+if [[ "$auth_mode" == "off" ]]; then
+  echo "WARNING: OCEAN_SURFACE_AUTH=off in $AUTH_ENV — trusted-localhost escape hatch only." >&2
+fi
+# Never echo USER/PASS.
+
 # --- build-from-main guard (operator rule) -------------------------------------
 # The supervised service runs a PREBUILT binary; that binary must be built from
 # main. HARD-FAIL on a non-main checkout BEFORE any build/install — a warn+sleep

@@ -43,9 +43,21 @@ struct PathEvent {
 /// (spawned from `run`) shares the same handle as the command handlers; the
 /// `Arc` is constructed explicitly in `run` (not via `Default`) because the
 /// poller's host:port comes from `OCEAN_DAEMON_URL`.
+/// Readiness gate + replay buffer for native menu selections that fire
+/// before the webview's `menu-command` listener attaches. Tauri drops events
+/// with no subscriber, so boot-time app-menu clicks (which can arrive the
+/// instant the native menu is wired, well before WASM mounts) would vanish.
+/// `pending` holds them in arrival order; `ui_ready` flips `ready` and
+/// drains, so replayed commands run in the order the user clicked them.
+struct MenuBridge {
+    ready: bool,
+    pending: Vec<String>,
+}
+
 struct AppState {
     watchers: Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
     daemon: Arc<DaemonSup>,
+    menu: Mutex<MenuBridge>,
 }
 
 fn kind_str(kind: &EventKind) -> &'static str {
@@ -234,6 +246,30 @@ fn set_badge(app: AppHandle, count: Option<i64>) -> Result<(), String> {
         return Ok(());
     };
     win.set_badge_count(count).map_err(|e| e.to_string())
+}
+
+/// Mark the webview's `menu-command` listener as attached and replay any
+/// native app-menu selections that fired before it registered. Called once
+/// from the wasm bundle (host::notify_ui_ready) right after `on_menu_command`
+/// registers its subscriber — by then the burst of boot-time menu clicks that
+/// would otherwise have been dropped is sitting in `pending`. Drains in
+/// arrival order so replayed commands run in the order the user clicked them.
+///
+/// Race safety: both the `event.listen` IPC (registering the subscriber) and
+/// this command travel the webview's single FIFO IPC channel, and `listen` is
+/// dispatched first (see app.rs), so the subscriber is registered before the
+/// drain emits — no replayed event is lost.
+#[tauri::command]
+fn ui_ready(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let pending = {
+        let mut bridge = state.menu.lock();
+        bridge.ready = true;
+        std::mem::take(&mut bridge.pending)
+    };
+    for id in pending {
+        let _ = app.emit("menu-command", id);
+    }
+    Ok(())
 }
 
 // ── daemon supervision ───────────────────────────────────────────────────
@@ -984,6 +1020,10 @@ pub fn run() {
         .manage(AppState {
             watchers: Default::default(),
             daemon: Arc::new(DaemonSup::new(host, port)),
+            menu: Mutex::new(MenuBridge {
+                ready: false,
+                pending: Vec::new(),
+            }),
         })
         .setup(|app| {
             // Background daemon-supervision liveness poller: probes the daemon
@@ -1112,11 +1152,19 @@ pub fn run() {
                 MenuItem::with_id(app, "toggle-rooms", "Toggle Rooms", true, None::<&str>)?;
             let cmd_council =
                 MenuItem::with_id(app, "open-council", "Open Council Stage", true, None::<&str>)?;
+            let cmd_workspace = MenuItem::with_id(
+                app,
+                "workspace-toggle",
+                "Toggle Workspace",
+                true,
+                None::<&str>,
+            )?;
             let commands_submenu = Submenu::with_items(
                 app,
                 "Commands",
                 true,
                 &[
+                    &cmd_workspace,
                     &cmd_new_session,
                     &cmd_files,
                     &cmd_repo,
@@ -1154,14 +1202,27 @@ pub fn run() {
         })
         .on_menu_event(|app, event| {
             // Re-emit app-menu selections as `menu-command`, carrying the menu
-            // item's id. The wasm host bridge (host::on_menu_command) routes the
-            // id to CommandRegistry::run; unknown ids — and the predefined
+            // item's id. The wasm host bridge (host::on_menu_command) routes
+            // the id to CommandRegistry::run; unknown ids — and the predefined
             // About/Quit roles, which also act natively — resolve to a no-op
-            // false inside the registry lookup, so emitting them is harmless.
-            // (Tray-menu selections are handled by the tray's own
-            // on_menu_event and never reach here.)
-            let id = event.id.as_ref();
-            let _ = app.emit("menu-command", id);
+            // inside the registry lookup, so emitting them is harmless. (Tray-
+            // menu selections are handled by the tray's own on_menu_event and
+            // never reach here.)
+            //
+            // Readiness gate: until the wasm `menu-command` listener attaches,
+            // Tauri drops events with no subscriber. Selections arriving
+            // pre-attach are queued in `MenuBridge::pending` and replayed (in
+            // arrival order) by `ui_ready` once the bundle signals readiness.
+            // After that, emit immediately.
+            let id = event.id.as_ref().to_string();
+            let state = app.state::<AppState>();
+            let mut guard = state.menu.lock();
+            if guard.ready {
+                drop(guard);
+                let _ = app.emit("menu-command", &id);
+            } else {
+                guard.pending.push(id);
+            }
         })
         .invoke_handler(tauri::generate_handler![
             pick_folder,
@@ -1173,7 +1234,8 @@ pub fn run() {
             daemon_start,
             daemon_stop,
             daemon_restart,
-            probe_report
+            probe_report,
+            ui_ready
         ])
         .run(tauri::generate_context!())
         .expect("error while running ocean-tauri");

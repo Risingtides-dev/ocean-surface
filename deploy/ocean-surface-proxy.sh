@@ -58,5 +58,16 @@ done
 export OCEAN_SURFACE_BIND="${OCEAN_SURFACE_BIND:-0.0.0.0:8790}"
 export OCEAN_DAEMON_URL="${OCEAN_DAEMON_URL:-http://127.0.0.1:4780}"
 
+# HTTP Basic auth: creds live in a 0600 env file, NEVER in the plist (plists
+# are world-readable by default and leak easily via dotfile syncs). The file
+# exports OCEAN_SURFACE_AUTH / OCEAN_SURFACE_USER / OCEAN_SURFACE_PASS; if it
+# is absent the binary's own guard applies (refuses to boot with auth on and
+# no creds; OCEAN_SURFACE_AUTH=off is the trusted-localhost escape hatch).
+AUTH_ENV="$HOME/.config/ocean-surface/proxy-auth.env"
+if [[ -f "$AUTH_ENV" ]]; then
+  # shellcheck disable=SC1090
+  . "$AUTH_ENV"
+fi
+
 echo "==> ocean-surface-proxy: bind=$OCEAN_SURFACE_BIND dist=$OCEAN_SURFACE_DIST daemon=$OCEAN_DAEMON_URL"
 exec "$BIN"

@@ -5043,6 +5043,145 @@ mod tests {
         );
     }
 
+    /// Live SSE reducer parity: `replace:true` must update the mounted component
+    /// in-place, not append a second block with the same id. Reconnect replay has
+    /// its own coverage above; this guards the live path the web surface uses
+    /// while a turn is streaming.
+    #[test]
+    fn live_component_replace_overwrites_in_place() {
+        let session_id = "session-component-live-replace";
+        let turn_id = "turn-with-component";
+        let daemon = daemon_with_session(session_id);
+
+        apply_test_event(
+            &daemon,
+            AgentEvent::AssistantTextDelta {
+                session_id: session_id.to_string(),
+                turn_id: turn_id.to_string(),
+                delta: "rendering".to_string(),
+            },
+        );
+        apply_test_event(
+            &daemon,
+            AgentEvent::ComponentRender {
+                session_id: session_id.to_string(),
+                component_id: "status".to_string(),
+                kind: "progress".to_string(),
+                props: serde_json::json!({ "label": "Working", "value": 0.2 }),
+                replace: false,
+            },
+        );
+        apply_test_event(
+            &daemon,
+            AgentEvent::ComponentRender {
+                session_id: session_id.to_string(),
+                component_id: "status".to_string(),
+                kind: "progress".to_string(),
+                props: serde_json::json!({ "label": "Working", "value": 0.9 }),
+                replace: true,
+            },
+        );
+
+        let turns = daemon.turns.get_untracked();
+        assert_eq!(turns.len(), 1, "component stays attached to the active turn");
+        assert_eq!(turns[0].turn_id.as_deref(), Some(turn_id));
+        assert_eq!(turns[0].blocks.len(), 2, "text + one replaced component");
+        assert!(matches!(turns[0].blocks[0], Block::Text(_)));
+        match &turns[0].blocks[1] {
+            Block::Component {
+                component_id,
+                kind,
+                props,
+            } => {
+                assert_eq!(component_id, "status");
+                assert_eq!(kind, "progress");
+                assert_eq!(props["value"], 0.9, "latest props win");
+            }
+            other => panic!("expected replaced Component block, got {other:?}"),
+        }
+    }
+
+    /// A live component can be unmounted before any assistant text exists (for
+    /// example, a purely visual status card). The reducer creates a synthetic turn
+    /// for the render; unmounting must prune the now-empty turn so stale blank
+    /// assistant rows do not survive on the web surface.
+    #[test]
+    fn live_component_unmount_prunes_empty_component_turn() {
+        let session_id = "session-component-live-unmount";
+        let daemon = daemon_with_session(session_id);
+
+        apply_test_event(
+            &daemon,
+            AgentEvent::ComponentRender {
+                session_id: session_id.to_string(),
+                component_id: "toast".to_string(),
+                kind: "callout".to_string(),
+                props: serde_json::json!({ "variant": "info", "body": "Heads up" }),
+                replace: false,
+            },
+        );
+        assert_eq!(daemon.turns.get_untracked().len(), 1, "render creates a host turn");
+
+        apply_test_event(
+            &daemon,
+            AgentEvent::ComponentUnmount {
+                session_id: session_id.to_string(),
+                component_id: "toast".to_string(),
+            },
+        );
+
+        assert!(
+            daemon.turns.get_untracked().is_empty(),
+            "unmounting the only component must remove the empty synthetic turn"
+        );
+    }
+
+    /// Session scoping is load-bearing for multiple web surfaces sharing the
+    /// daemon. A component frame for another session must not mutate this
+    /// transcript, even if it reuses an id currently mounted here.
+    #[test]
+    fn live_component_event_for_other_session_is_ignored() {
+        let active_session = "session-component-active";
+        let other_session = "session-component-other";
+        let daemon = daemon_with_session(active_session);
+
+        apply_test_event(
+            &daemon,
+            AgentEvent::ComponentRender {
+                session_id: active_session.to_string(),
+                component_id: "shared-id".to_string(),
+                kind: "progress".to_string(),
+                props: serde_json::json!({ "value": 0.1 }),
+                replace: false,
+            },
+        );
+        apply_test_event(
+            &daemon,
+            AgentEvent::ComponentRender {
+                session_id: other_session.to_string(),
+                component_id: "shared-id".to_string(),
+                kind: "progress".to_string(),
+                props: serde_json::json!({ "value": 1.0 }),
+                replace: true,
+            },
+        );
+
+        let turns = daemon.turns.get_untracked();
+        let component = turns
+            .iter()
+            .flat_map(|turn| &turn.blocks)
+            .find_map(|block| match block {
+                Block::Component {
+                    component_id,
+                    props,
+                    ..
+                } if component_id == "shared-id" => Some(props.clone()),
+                _ => None,
+            })
+            .expect("active session component should still exist");
+        assert_eq!(component["value"], 0.1, "other session event must be ignored");
+    }
+
     #[test]
     fn session_create_response_decodes_without_ok_field() {
         // OCEAN-124 regression. The daemon's POST /v1/agent/sessions returns
@@ -5846,6 +5985,12 @@ mod tests {
             daemon_url_fallback("tauri:", "localhost"),
             DEFAULT_DAEMON_URL
         );
+        // `localhost` is pinned to the IPv4 loopback: macOS resolves it
+        // ::1-first while the daemon listens on 127.0.0.1 only, and
+        // WKWebView's v6->v4 fallback is unreliable (EventSource especially).
+        assert_eq!(daemon_url_fallback("http:", "localhost:8790"), DEFAULT_DAEMON_URL);
+        // The Tauri shell (tauri://localhost) takes the same pin.
+        assert_eq!(daemon_url_fallback("tauri:", "localhost"), DEFAULT_DAEMON_URL);
     }
 
     #[test]
