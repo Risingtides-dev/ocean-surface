@@ -1303,9 +1303,10 @@ impl TokenStats {
     }
 }
 
-/// Minimal project reference the daemon attaches to a session once it serves
-/// session→project ownership (OCEAN-228). Absent on today's list payload, so
-/// grouping falls back to `workspace_root`/`cwd` matching against the catalogue.
+/// Minimal project reference the daemon attaches to a session (OCEAN-228).
+/// The daemon serves it today for exact workspace-root matches; when absent
+/// (worktree/subdir sessions, older daemons) grouping falls back to
+/// `workspace_root`/`cwd` prefix matching against the catalogue.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OwningProjectRef {
     pub id: String,
@@ -1314,8 +1315,8 @@ pub struct OwningProjectRef {
 }
 
 /// Summary of a session, matching the daemon's AgentSessionSummary. `cwd`,
-/// `workspace_root`, and `owning_project` are all `#[serde(default)]` — a
-/// current daemon serves only `cwd`, and the sessions panel groups on whatever
+/// `workspace_root`, and `owning_project` are all `#[serde(default)]` — an
+/// old daemon serves only `cwd`, and the sessions panel groups on whatever
 /// project signal is present (owning_project first, else root match).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSummary {
@@ -3206,9 +3207,9 @@ fn apply_event(
                             {
                                 if *status == ToolStatus::Running {
                                     *status = ToolStatus::Err;
-                                    // Match every other error path: open the row
-                                    // so the interrupted call is visible when the
-                                    // group auto-opens on its Err aggregate.
+                                    // Match every other error path: pre-expand
+                                    // the row (the group itself NEVER auto-opens)
+                                    // so opening it lands on the interrupted call.
                                     *expanded = true;
                                 }
                             }
@@ -5041,145 +5042,6 @@ mod tests {
             component["value"], 0.1,
             "other session event must be ignored"
         );
-    }
-
-    /// Live SSE reducer parity: `replace:true` must update the mounted component
-    /// in-place, not append a second block with the same id. Reconnect replay has
-    /// its own coverage above; this guards the live path the web surface uses
-    /// while a turn is streaming.
-    #[test]
-    fn live_component_replace_overwrites_in_place() {
-        let session_id = "session-component-live-replace";
-        let turn_id = "turn-with-component";
-        let daemon = daemon_with_session(session_id);
-
-        apply_test_event(
-            &daemon,
-            AgentEvent::AssistantTextDelta {
-                session_id: session_id.to_string(),
-                turn_id: turn_id.to_string(),
-                delta: "rendering".to_string(),
-            },
-        );
-        apply_test_event(
-            &daemon,
-            AgentEvent::ComponentRender {
-                session_id: session_id.to_string(),
-                component_id: "status".to_string(),
-                kind: "progress".to_string(),
-                props: serde_json::json!({ "label": "Working", "value": 0.2 }),
-                replace: false,
-            },
-        );
-        apply_test_event(
-            &daemon,
-            AgentEvent::ComponentRender {
-                session_id: session_id.to_string(),
-                component_id: "status".to_string(),
-                kind: "progress".to_string(),
-                props: serde_json::json!({ "label": "Working", "value": 0.9 }),
-                replace: true,
-            },
-        );
-
-        let turns = daemon.turns.get_untracked();
-        assert_eq!(turns.len(), 1, "component stays attached to the active turn");
-        assert_eq!(turns[0].turn_id.as_deref(), Some(turn_id));
-        assert_eq!(turns[0].blocks.len(), 2, "text + one replaced component");
-        assert!(matches!(turns[0].blocks[0], Block::Text(_)));
-        match &turns[0].blocks[1] {
-            Block::Component {
-                component_id,
-                kind,
-                props,
-            } => {
-                assert_eq!(component_id, "status");
-                assert_eq!(kind, "progress");
-                assert_eq!(props["value"], 0.9, "latest props win");
-            }
-            other => panic!("expected replaced Component block, got {other:?}"),
-        }
-    }
-
-    /// A live component can be unmounted before any assistant text exists (for
-    /// example, a purely visual status card). The reducer creates a synthetic turn
-    /// for the render; unmounting must prune the now-empty turn so stale blank
-    /// assistant rows do not survive on the web surface.
-    #[test]
-    fn live_component_unmount_prunes_empty_component_turn() {
-        let session_id = "session-component-live-unmount";
-        let daemon = daemon_with_session(session_id);
-
-        apply_test_event(
-            &daemon,
-            AgentEvent::ComponentRender {
-                session_id: session_id.to_string(),
-                component_id: "toast".to_string(),
-                kind: "callout".to_string(),
-                props: serde_json::json!({ "variant": "info", "body": "Heads up" }),
-                replace: false,
-            },
-        );
-        assert_eq!(daemon.turns.get_untracked().len(), 1, "render creates a host turn");
-
-        apply_test_event(
-            &daemon,
-            AgentEvent::ComponentUnmount {
-                session_id: session_id.to_string(),
-                component_id: "toast".to_string(),
-            },
-        );
-
-        assert!(
-            daemon.turns.get_untracked().is_empty(),
-            "unmounting the only component must remove the empty synthetic turn"
-        );
-    }
-
-    /// Session scoping is load-bearing for multiple web surfaces sharing the
-    /// daemon. A component frame for another session must not mutate this
-    /// transcript, even if it reuses an id currently mounted here.
-    #[test]
-    fn live_component_event_for_other_session_is_ignored() {
-        let active_session = "session-component-active";
-        let other_session = "session-component-other";
-        let daemon = daemon_with_session(active_session);
-
-        apply_test_event(
-            &daemon,
-            AgentEvent::ComponentRender {
-                session_id: active_session.to_string(),
-                component_id: "shared-id".to_string(),
-                kind: "progress".to_string(),
-                props: serde_json::json!({ "value": 0.1 }),
-                replace: false,
-            },
-        );
-        apply_test_event(
-            &daemon,
-            AgentEvent::ComponentRender {
-                session_id: other_session.to_string(),
-                component_id: "shared-id".to_string(),
-                kind: "progress".to_string(),
-                props: serde_json::json!({ "value": 1.0 }),
-                replace: true,
-            },
-        );
-
-        let turns = daemon.turns.get_untracked();
-        let component = turns
-            .iter()
-            .flat_map(|turn| &turn.blocks)
-            .find_map(|block| match block {
-                Block::Component {
-                    component_id,
-                    props,
-                    ..
-                } if component_id == "shared-id" => Some(props.clone()),
-                _ => None,
-            })
-            .expect("active session component should still exist");
-        assert_eq!(component["value"], 0.1, "other session event must be ignored");
     }
 
     #[test]
