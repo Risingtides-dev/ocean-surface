@@ -1163,3 +1163,26 @@ bundle.active is false so it was never a sanctioned artifact) to ~/.Trash
 and terminated its process; the repo debug instance was left alone. Tauri
 picks up the fix on the next natural rebuild - nothing was launched.
 _________________________________________________________________________________
+time:      [11:07pm] [07-09-26]
+agent:     [claude] [fable-5]
+type:      [merge]
+area:      [infra]
+
+Landed every piece of rotting uncommitted work across the repo's worktrees.
+Main checkout carried ~370 lines of finished, wasm-checked work left dirty by
+prior sessions: the transcript de-slop (role headers dropped, unified
+transcript-disclosure classes with aria-expanded, ocean-lit ornament stripped),
+a real ToolGroup fix (member indices derived reactively so mid-stream tool
+appends no longer freeze the group), Send/Stop composer icons, the Tauri app
+icon set, and - worst - docs/OCEAN_PLATFORM_CONTRACT.md, cited as BINDING by
+AGENTS.md yet never tracked. Also fixed both docs pointing at a ghost logo
+reference (docs/assets/... never existed; now public/brand/master-1024.png).
+Landed the ocean-gui egui-bin removal that had been designed in 2350d2e then
+left dirty in a superpowers worktree (cargo check ocean-gui + proxy green,
+lock reconciled on main). Assembly-worktree landing per the multilane skill:
+all slices committed at aeae948, wasm + proxy + gui checks re-run on the exact
+assembled tree before push. Discarded as superseded: ocean-ship-assembly
+staged content (byte-identical to origin/main), verify-314's proxy main.rs
+(stale fail-open auth predating the landed fail-closed version). Stale
+verify/build worktrees pruned.
+_________________________________________________________________________________
