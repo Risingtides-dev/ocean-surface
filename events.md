@@ -1209,3 +1209,26 @@ mocked Tauri gate, so the app no longer runs a file-writing eval at startup.
 Gate: cargo check on the tauri crate green from the exact landed tree. Pure
 35-line deletion vs main; no behavior added.
 _________________________________________________________________________________
+time:      [11:52pm] [07-09-26]
+agent:     [claude] [fable-5]
+worktree:  detached-land (three-slice wave)
+type:      feature-request
+area:      frontend
+
+Landed the audited next wave as four commits from a detached worktree (task
+subagent quota 429'd; self-executed). (1) Council deck gains its first write
+affordance: a convene form POSTing /v1/longhouse/convene fire-and-forget in
+spawn_local, pending cleared by the topic poll folding the new topic — the
+real quorum runtime was already live daemon-side, the surface just couldn't
+start one. (2) Thinking pill now carries is-running + a status dot while
+reasoning is the streaming tail — the disclosure CSS for it existed dead.
+(3) Sessions grouping resolves worktree/subdir roots to their project via
+component-boundary longest-prefix match (project_for_root) so real worktree
+sessions leave 'Other' and the sub-bucketing fires; covered by new unit
+tests. (4) Recovered the crate test build: the five-slice assembly had
+landed the three live-component reducer tests twice (E0428 x3) — deduped;
+287/287 tests pass on the landed tree. sessions.rs was edited ONLY in the
+detached worktree because codex holds live uncommitted WIP (is_git,
+main_group) in the shared checkout — grouping change based on main's shape.
+Gates: wasm cargo check 0 errors, full crate suite green, new tests pass.
+_________________________________________________________________________________
