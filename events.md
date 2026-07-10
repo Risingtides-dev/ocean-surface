@@ -1186,3 +1186,11 @@ staged content (byte-identical to origin/main), verify-314's proxy main.rs
 (stale fail-open auth predating the landed fail-closed version). Stale
 verify/build worktrees pruned.
 _________________________________________________________________________________
+time:      [11:20pm] [07-09-26]
+agent:     [claude] [fable-5]
+worktree:  detached-land (native-feel finish)
+type:      feature-request
+area:      frontend
+
+Finished the native desktop-feel pass: Tauri window now uses titleBarStyle Overlay + hiddenTitle + trafficLightPosition(18,20) so macOS draws no second title bar — the app's .ocean-header IS the titlebar (data-tauri-drag-region on header+brand, 82px --titlebar-inset clears the lights, lit-slab material replaces the flat border). Removed every chrome.css .ocean-composer__halt rule — composer.css owns the unified circular action slot (Send up-arrow idle / Stop square streaming) whose icons/app.rs/composer.css slices a peer assembled into 280a25c mid-flight. Verified: wasm+tauri cargo check green, fresh dist 5e33e762, headless census at 1294x812 with mocked Tauri gate (drag attrs, 82px inset, 34px circular svg-only send, web parity no-inset), daemon sessions intact. The 22:29 dist John saw was a pre-redesign snapshot built mid-refactor — prod web was never affected.
+_________________________________________________________________________________
