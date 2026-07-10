@@ -1408,3 +1408,18 @@ status dot with zero horizontal overflow or browser errors. Refreshed
 handoff.md to make this the current baseline and archived the superseded
 red-CI/provenance snapshot under .agentignore.
 _________________________________________________________________________________
+
+time:      [7:40pm] [07-10-26]
+agent:     [omp] [glm-5.2]
+worktree:  /tmp/ocean-map-surface (origin/main detached)
+type:      [workflow]
+area:      [docs]
+
+Mirrored the voice phase-4 (2026-07-10) connection-contract change into
+docs/OCEAN_PROJECT_MAP.md so the surface map matches the other three Ocean
+repos byte-for-byte. Added the three daemon-owned voice routes
+(/v1/voice/stt, /v1/voice/tts, /v1/voice/realtime/client-secret) to the
+"Core daemon routes used by surfaces" block and a paragraph noting the
+surface proxy forwards /api/stt and /api/tts to the daemon and that provider
+keys resolve only inside ocean-os.
+_________________________________________________________________________________
