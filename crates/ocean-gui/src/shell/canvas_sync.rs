@@ -206,8 +206,7 @@ mod tests {
     use super::*;
     use crate::shell::canvas::{
         ActorId, ActorRef, CanvasComponentPatch, CanvasEdgePatch, ComponentId, ComponentVersion,
-        EdgeId, Endpoint, FocusTarget, LayoutStrategy, LayoutTarget, PatchId, Rect, SurfaceId,
-        Viewport,
+        EdgeId, Endpoint, FocusTarget, LayoutStrategy, LayoutTarget, PatchId, SurfaceId, Viewport,
     };
     use serde_json::json;
 
@@ -462,7 +461,7 @@ mod tests {
 
     #[test]
     fn choose_peer_picks_lexicographically_smallest_untried() {
-        let peers = vec!["zoe", "alice", "mike"];
+        let peers = ["zoe", "alice", "mike"];
         assert_eq!(
             choose_snapshot_peer(peers.iter().copied(), &[]),
             Some("alice".to_string())
