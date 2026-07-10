@@ -1309,4 +1309,19 @@ type:      [feature-request]
 area:      [frontend]
 
 Shipped the voice-first menu IA and completed the STT/TTS ownership migration. The voice menu now leads with the two products - Voice chat (live speech-to-speech) then Dictate (transcript into the composer) - with a muted Microphone group label above the demoted Off / Push to talk / Hands-free radios and the Spoken replies toggle unchanged; pure presentation, no mode/persistence changes. The proxy's /api/stt and /api/tts stopped calling xAI directly: they forward to the daemon's new /v1/voice/stt and /v1/voice/tts (paired ocean-os landing fc8f5000), the xAI key/client/resolver code was deleted from the proxy, has_auth now reports route availability with per-request errors carrying daemon credential state, and the daemon-response translation is a pure unit-tested fn. AGENTS.md/README updated: the proxy holds no provider credentials. Verified 292 UI tests, 16 proxy tests, wasm check, live daemon round-trips (stt 200 {text:""} on a tone clip, tts 200 audio/mpeg 22KB), and the realtime mint now returns 200 with an ephemeral secret on the rebuilt daemon - Voice chat is live end-to-end pending a real-mic session.
+time:      [03:51pm] [07-10-26]
+agent:     [claude] [fable-5]
+type:      [merge]
+area:      [infra]
+
+Landed ca96abd (federated rooms design doc, 56KB) from the checkout's stale ro
+lane onto main — it sat unpushed 12h on a base 18 commits behind. Audit
+(3-way byte forensics) showed the rest of the "dirty" checkout is ~85%
+stale-base phantoms that collapse on restack (icons, loader.rs, council.rs all
+already landed); the genuine in-flight zz work (voice-menu, proxy edit, rooms
+plans, PRODUCT.md, loader mockups) is LEFT for its owning peers — it does not
+compile yet (E0382/E0525/unclosed delimiter) and 32 files are untracked. NOTE
+for the rooms peer: your working copy has an 86KB expansion of this design doc
+uncommitted in zz — commit it when ready; this landing captures the 56KB
+snapshot. Ocean-os same pass: TUI follow-ups merged to main (25bf13b3 train).
 _________________________________________________________________________________
