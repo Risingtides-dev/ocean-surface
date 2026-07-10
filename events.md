@@ -1325,3 +1325,18 @@ for the rooms peer: your working copy has an 86KB expansion of this design doc
 uncommitted in zz — commit it when ready; this landing captures the 56KB
 snapshot. Ocean-os same pass: TUI follow-ups merged to main (25bf13b3 train).
 _________________________________________________________________________________
+time:      [04:42pm] [07-10-26]
+agent:     [claude] [fable-5]
+type:      [feature-request]
+area:      [frontend]
+
+Pinned widget rail shipped (handoff priority #2): props.placement "pinned"
+docks a component into a persistent session-scoped rail outside the chat
+scroll — registry signal decoupled from turns, replay-rebuilt, cleared on
+session switch; unpin via ghost affordance or ComponentUnmount. Desktop side
+rail >=1480px in the shell's free left margin, strip-under-header below that,
+compact swipe strip. Built across two subagent runs (both hit the 30m cap;
+second salvaged the first cleanly) + a finishing pass: 3 Leptos closure/deref
+compile fixes, CSS, gates. wasm check clean; 296 host tests green incl. 4
+pinned tests. Zero daemon/wire changes — placement rides component props.
+_________________________________________________________________________________
