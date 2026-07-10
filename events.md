@@ -1378,3 +1378,16 @@ area:      [frontend]
 
 Provisioned the operator's capped OpenAI test credential in the daemon's untracked 0600 auth store, rebuilt/restarted the supervised daemon, and proved the Realtime secret mint returns 200 with gpt-realtime-2. A live WebRTC browser smoke then exposed three lifecycle defects hidden by the prior missing-key path: arena-owned thread-local status signals panicked after conditional mounts, the level-meter and WebRTC callbacks could fire after their wasm closures were dropped, and stop-during-Connecting could resurrect or orphan a hot microphone session. Converted all shared voice status signals to ArcRwSignal, tracked/cancelled the latest rAF, detached callbacks before transport close, centralized completed-session cleanup in Drop, and added a generation-guarded connect lifecycle with immediate connecting-mic shutdown, MicGuard/PendingTransport failure cleanup, and stale-result suppression. RED/GREEN regressions pin Arc ownership, latest-frame take-once semantics, and connect-generation cancellation. Verified 298 tests, wasm check, release Trunk build, delayed stop during an active OpenAI request remaining Off after 200/201 responses, then a fresh session reaching Live and ending Off with zero browser errors. Independent privacy review returned SHIP and confirmed the hot-mic race is closed.
 _________________________________________________________________________________
+time:      [6:55pm] [07-10-26]
+agent:     [omp] [claude-fable-5]
+worktree:  /tmp/oc-ci-fix (origin/main detached)
+type:      [gh-actions]
+area:      [infra]
+
+Repaired main after the Rust 1.97 stable runner exposed a new
+missing_const_for_thread_local lint in the just-landed Realtime lifecycle
+guard. Made CONNECT_GENERATION's Cell initializer const and applied canonical
+rustfmt to the same peer-hot file; no behavior changed. Verified on the exact
+detached main tree: UI wasm clippy with -D warnings, rustfmt check, and 303 UI
+tests all green.
+_________________________________________________________________________________
