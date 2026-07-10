@@ -17,6 +17,77 @@
   margin: 0 auto;
 }
 
+/* ── Convene form ───────────────────────────────────────────────── */
+/* The deck's one write affordance: quiet inline bar above the flow —
+   an input + a small accent action, never louder than the topic cards. */
+.ocean-council-convene {
+  display: flex;
+  gap: 8px;
+  max-width: 760px;
+  margin: 0 auto 16px;
+}
+.ocean-council-convene__input {
+  flex: 1;
+  min-width: 0;
+  height: var(--ctl-h);
+  padding: 0 12px;
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 13px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  outline: none;
+  transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+}
+.ocean-council-convene__input::placeholder {
+  color: var(--fg-4);
+}
+.ocean-council-convene__input:focus-visible {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+.ocean-council-convene__btn {
+  appearance: none;
+  height: var(--ctl-h);
+  padding: 0 16px;
+  color: var(--fg-on-accent);
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius);
+  box-shadow: var(--elev-1);
+  cursor: pointer;
+  transition: filter var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease);
+}
+.ocean-council-convene__btn:hover {
+  filter: brightness(1.12);
+}
+.ocean-council-convene__btn:focus-visible {
+  outline: none;
+  box-shadow: var(--elev-1), var(--focus-ring);
+}
+.ocean-council-convene__btn:active {
+  transform: translateY(1px);
+  box-shadow: var(--pressed);
+}
+.ocean-council-convene__btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+  filter: none;
+}
+.ocean-council-convene__err {
+  max-width: 760px;
+  margin: -8px auto 12px;
+  color: var(--err);
+  font-size: 12px;
+}
+
 /* ── Topic card ─────────────────────────────────────────────────── */
 .ocean-council-topic {
   display: flex;

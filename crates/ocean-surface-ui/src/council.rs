@@ -7,8 +7,9 @@
 //! polls the snapshot (~1.5s) while mounted: the daemon does not push
 //! longhouse frames to this surface's event stream, and the fold is
 //! server-side, so the deck mirrors the snapshot rather than re-folding raw
-//! frames. There is no invented subagent pipe here; Longhouse is the real
-//! coordination system and this is purely its observer.
+//! frames. The deck also carries the one write affordance: a convene form
+//! that POSTs `/v1/longhouse/convene` and lets the poll surface the topic —
+//! no client-side council state is invented; Longhouse stays the authority.
 
 use gloo_net::http::Request;
 use leptos::prelude::*;
@@ -119,6 +120,22 @@ async fn fetch_topics(base: String) -> Vec<TopicSnapshot> {
     }
 }
 
+/// Convene a council. The daemon handler awaits the WHOLE deliberation
+/// (rounds of worker calls — 45s+), so the caller must treat this as
+/// fire-and-forget: the ~1.5s topic poll shows `TopicConvened` long before
+/// this future resolves. Returns `Err(msg)` only for transport/HTTP failure.
+async fn post_convene(base: String, question: String) -> Result<(), String> {
+    let url = format!("{}/v1/longhouse/convene", base.trim_end_matches('/'));
+    let req = Request::post(&url)
+        .json(&serde_json::json!({ "question": question }))
+        .map_err(|e| format!("convene encode error: {e}"))?;
+    match req.send().await {
+        Ok(resp) if resp.ok() => Ok(()),
+        Ok(resp) => Err(format!("convene failed (status {})", resp.status())),
+        Err(err) => Err(format!("convene request error: {err}")),
+    }
+}
+
 fn trim_line(text: &str, limit: usize) -> String {
     let t = text.trim();
     if t.chars().count() <= limit {
@@ -191,8 +208,70 @@ pub fn CouncilStage(daemon: Daemon) -> impl IntoView {
         }
     });
 
+    // Convene form state. `pending` covers the window between submit and the
+    // daemon ACCEPTING the request; the handler awaits the whole council, so
+    // the pending flag clears on response OR as soon as the poll shows the
+    // topic (whichever lands first, via the same disposal-safe `try_set`).
+    let question = RwSignal::new(String::new());
+    let pending = RwSignal::new(false);
+    let convene_err = RwSignal::new(Option::<String>::None);
+    // Topic count at submit time: the poll growing past it means the daemon
+    // accepted and folded the new topic — re-enable the form then.
+    let pending_baseline = RwSignal::new(0usize);
+
+    Effect::new(move |_| {
+        let count = topics.get().len();
+        if pending.get_untracked() && count > pending_baseline.get_untracked() {
+            pending.set(false);
+        }
+    });
+
+    let on_convene = move |ev: web_sys::SubmitEvent| {
+        ev.prevent_default();
+        let q = question.get_untracked().trim().to_string();
+        if q.is_empty() || pending.get_untracked() {
+            return;
+        }
+        pending_baseline.set(topics.get_untracked().len());
+        pending.set(true);
+        convene_err.set(None);
+        question.set(String::new());
+        let base = url.get_untracked();
+        spawn_local(async move {
+            let outcome = post_convene(base, q).await;
+            // Deck may have closed while the council deliberated — try_* only.
+            let _ = pending.try_set(false);
+            if let Err(msg) = outcome {
+                let _ = convene_err.try_set(Some(msg));
+            }
+        });
+    };
+
     view! {
         <div class="ocean-council-stage">
+            <form class="ocean-council-convene" on:submit=on_convene>
+                <input
+                    class="ocean-council-convene__input"
+                    type="text"
+                    placeholder="convene a council — what should it decide?"
+                    prop:value=move || question.get()
+                    on:input=move |ev| question.set(event_target_value(&ev))
+                />
+                <button
+                    class="ocean-council-convene__btn"
+                    type="submit"
+                    disabled=move || {
+                        pending.get() || question.get().trim().is_empty()
+                    }
+                >
+                    {move || if pending.get() { "convening…" } else { "convene" }}
+                </button>
+            </form>
+            <Show when=move || convene_err.get().is_some()>
+                <div class="ocean-council-convene__err">
+                    {move || convene_err.get().unwrap_or_default()}
+                </div>
+            </Show>
             <Show
                 when=move || !topics.get().is_empty()
                 fallback=|| {
@@ -202,7 +281,7 @@ pub fn CouncilStage(daemon: Daemon) -> impl IntoView {
                                 "no councils convened yet"
                             </div>
                             <div class="ocean-council-stage__empty-body">
-                                "a council appears here live when a workflow is convened — members seat, marks land on the board, and quorum climbs toward a decision"
+                                "convene one above — members seat, marks land on the board, and quorum climbs toward a decision"
                             </div>
                         </div>
                     }
