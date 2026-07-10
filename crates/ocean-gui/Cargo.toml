@@ -2,10 +2,7 @@
 name = "ocean-gui"
 version = "0.1.0"
 edition = "2024"
-
-[[bin]]
-name = "ocean-gui-egui"
-path = "src/main.rs"
+default-run = "ocean-gui"
 
 [[bin]]
 name = "ocean-gui"
@@ -14,7 +11,6 @@ path = "src/bin/ocean_gui.rs"
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
-eframe = "0.29"
 gpui = "0.2.2"
 indexmap = { version = "2", features = ["serde"] }
 # Aligned with gpui's `image = "0.25.1"` so `image::Frame` matches the type

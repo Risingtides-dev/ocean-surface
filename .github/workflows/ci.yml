@@ -45,7 +45,7 @@ jobs:
       #   * ocean-surface-ui    — wasm-only Leptos CSR app. A native build is
       #     meaningless; it is checked against wasm32-unknown-unknown instead.
       #   * ocean-gui           — native GPUI desktop face (gpui + livekit/
-      #     libwebrtc + eframe/wgpu + rfd/GTK + wry). A full *build* of this
+      #     libwebrtc + rfd/GTK + wry). A full *build* of this
       #     crate links GPUI's blade/Vulkan renderer and the prebuilt libwebrtc
       #     and realistically wants a display/GPU-capable runner, so a full
       #     build/test stays out of the headless gate. A `cargo check`, however,
