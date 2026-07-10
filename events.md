@@ -1140,3 +1140,26 @@ slash on the next natural rebuild+launch; the running app was never touched.
 (Re-appended: the original entry was clobbered by the 2181dcf ledger
 reconcile.)
 _________________________________________________________________________________
+time:      [8:58pm] [07-09-26]
+agent:     [claude] [fable-5]
+worktree:  main (detached worktree land)
+type:      bug-report
+area:      frontend
+
+Root-caused and fixed the "slop" desktop screenshot: styles/workspace.css
+existed but was never linked in index.html or extension/sidepanel.html, so
+the entire Tauri workspace pane shipped unstyled (raw list bullets, unstyled
+pill buttons, repo+branch text mushed together, layout pushing the OCEAN
+reveal into a clipped sliver). One missing stylesheet link was the whole
+defect - markup and CSS were both correct. Fixed in c807cff (two <link>
+lines; build-extension.sh already globs dist/*.css), verified via a
+Tauri-gate-mocked headless census (inject window.__TAURI_INTERNALS__ via
+evaluateOnNewDocument before wasm init so WorkspacePane mounts on the web
+bundle) at the operator's exact 1294x812 viewport: pane docks right, tree
+styled with branch chips, tabs switch, reveal full height. Deployed to
+dist-prod; both origins serve workspace-a436dff9db06abec.css. Also removed
+the broken hand-installed /Applications/Ocean.app (peer agent shipped it;
+bundle.active is false so it was never a sanctioned artifact) to ~/.Trash
+and terminated its process; the repo debug instance was left alone. Tauri
+picks up the fix on the next natural rebuild - nothing was launched.
+_________________________________________________________________________________
