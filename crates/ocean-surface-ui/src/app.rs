@@ -4,7 +4,7 @@ use leptos::ev::{self, SubmitEvent};
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
-use crate::components::PermissionPrompts;
+use crate::components::{PermissionPrompts, PinnedRail};
 use crate::daemon::{daemon_url_from_env, Daemon};
 use crate::host::DaemonStatus;
 use crate::deck::browser::BrowserCockpit;
@@ -347,6 +347,9 @@ pub fn App() -> impl IntoView {
     // watches this and opens/focuses the matching tab, then resets to None.
     let workspace_focus: RwSignal<Option<WorkspaceFocus>> = RwSignal::new(None);
     let daemon_for_workspace = StoredValue::new(daemon.clone());
+    // Pinned rail: StoredValue (Copy) so the root view! can hand the daemon
+    // to <PinnedRail> without moving the plain clone out of the closure.
+    let daemon_for_pinned = StoredValue::new(daemon.clone());
 
     // Persist the pane open/collapse state so a relaunch restores it. Runs
     // once at setup (writing the init value back — idempotent) and on every
@@ -1606,6 +1609,13 @@ pub fn App() -> impl IntoView {
                     focus_intent=workspace_focus
                 />
             </Show>
+
+            // Pinned rail (north star): widgets the agent docked with
+            // `props.placement == "pinned"` — a left-side persistent dock that
+            // renders nothing when empty (see `PinnedRail`). position:fixed
+            // (styles/panels.css) so it rides the free viewport margin beside
+            // the centered shell, mirroring the right-side workspace pane.
+            <PinnedRail daemon=daemon_for_pinned.get_value() />
 
             // ⌘K command palette — the deep-menu engine over the registry.
             <PaletteView registry=registry_for_view />

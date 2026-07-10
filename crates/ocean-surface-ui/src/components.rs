@@ -9,7 +9,7 @@ use leptos::prelude::*;
 use serde_json::{json, Value};
 use wasm_bindgen::prelude::*;
 
-use crate::daemon::Daemon;
+use crate::daemon::{Daemon, PinnedWidget};
 
 #[wasm_bindgen]
 extern "C" {
@@ -1580,6 +1580,65 @@ pub fn PermissionPrompts(daemon: Daemon) -> impl IntoView {
                 />
             </div>
         </Show>
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pinned rail — docked widgets that persist across turns
+// ---------------------------------------------------------------------------
+
+/// The persistent pinned rail: widgets the agent docked with
+/// `props.placement == "pinned"` (map/player/metrics that stay visible across
+/// turns, outside the chat scroll). Collapses to nothing when empty (absence,
+/// not chrome); each card reuses [`ComponentView`] and carries a ghost unpin
+/// affordance. Desktop lays out as a side rail; compact/mobile collapses to a
+/// stacked dock (see `panels.css`). Session-scoped via the daemon registry.
+#[component]
+pub fn PinnedRail(daemon: Daemon) -> impl IntoView {
+    let pinned = daemon.pinned_widgets;
+    // StoredValue (Copy): the <Show> children closure must be `Fn`, so it
+    // can't move a plain `Daemon` clone into the <For> children below.
+    let daemon = StoredValue::new(daemon);
+    view! {
+        <Show when=move || !pinned.with(Vec::is_empty)>
+            <aside class="pinned-rail" aria-label="Pinned widgets">
+                <For
+                    each=move || pinned.get()
+                    key=|w| w.component_id.clone()
+                    children=move |widget| {
+                        view! {
+                            <PinnedCard widget daemon=daemon.get_value() />
+                        }
+                    }
+                />
+            </aside>
+        </Show>
+    }
+}
+
+/// One docked widget: the component render plus a ghost unpin (×) affordance.
+#[component]
+fn PinnedCard(widget: PinnedWidget, daemon: Daemon) -> impl IntoView {
+    let component_id = widget.component_id.clone();
+    let kind = widget.kind.clone();
+    let props = widget.props.clone();
+    let unpin_id = widget.component_id.clone();
+    let daemon_unpin = daemon.clone();
+    view! {
+        <section class="pinned-card">
+            <button
+                class="pinned-card__unpin"
+                type="button"
+                aria-label="unpin widget"
+                title="Unpin from rail"
+                on:click=move |_| daemon_unpin.unpin_widget(&unpin_id)
+            >
+                "×"
+            </button>
+            <div class="pinned-card__body">
+                <ComponentView component_id kind kind_props=props daemon />
+            </div>
+        </section>
     }
 }
 

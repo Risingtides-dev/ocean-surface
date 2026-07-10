@@ -587,3 +587,23 @@
   flex-wrap: wrap;
 }
 
+
+/* Pinned rail on touch/compact: full-bleed swipe strip; unpin always
+   visible (no hover on touch). */
+@media (max-width: 720px) {
+  .pinned-rail {
+    top: 58px;
+    left: 8px;
+    right: 8px;
+    gap: 8px;
+    max-height: 30vh;
+  }
+
+  .pinned-card {
+    flex: 0 0 78vw;
+  }
+
+  .pinned-card__unpin {
+    opacity: 1;
+  }
+}

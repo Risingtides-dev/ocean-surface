@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
-use crate::model::{Block, Role, ToolStatus, Turn};
+use crate::model::{Block, ComponentPlacement, Role, ToolStatus, Turn};
 
 pub const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:4780";
 
@@ -1148,6 +1148,16 @@ pub async fn fetch_fs_file(base_url: &str, path: &str) -> Option<FsFileResponse>
     resp.json::<FsFileResponse>().await.ok()
 }
 
+/// A component the agent docked into the persistent pinned rail. Keyed by
+/// `component_id` (upsert — last write wins); rendered by the same
+/// [`ComponentView`](crate::components::ComponentView) as an inline component.
+#[derive(Debug, Clone)]
+pub struct PinnedWidget {
+    pub component_id: String,
+    pub kind: String,
+    pub props: Value,
+}
+
 /// Reactive handle to the daemon. Owns the live turns vec + connection
 /// status; surfaces APIs to send prompts.
 #[derive(Clone)]
@@ -1260,6 +1270,13 @@ pub struct Daemon {
     /// renders a basic representation of the patch stream so the data is no
     /// longer silently dropped at the transport layer. Reset on session change.
     pub canvas_patches: RwSignal<Vec<CanvasPatchEntry>>,
+    /// Pinned widgets docked in the persistent rail (map/player/metrics that
+    /// stay visible across turns, outside the chat scroll). A `component_render`
+    /// whose `props.placement == "pinned"` docks here instead of into the
+    /// transcript, so it never duplicates inline. Id-keyed via [`PinnedWidget`]
+    /// (Vec-backed for ordered, Leptos-idiomatic reactivity). Session-scoped —
+    /// cleared on switch/new/clear, rebuilt on reconnect/reload.
+    pub pinned_widgets: RwSignal<Vec<PinnedWidget>>,
     /// Per-turn CSPRNG secret sent on the turn submission and replayed on
     /// every permission-decision POST for that turn (OCEAN-185 / OCEAN-314).
     /// Minted by `mint_decision_token()` at `dispatch_prompt` time and stored
@@ -1438,6 +1455,7 @@ impl Daemon {
             agent_override: RwSignal::new(None),
             pending_images: RwSignal::new(Vec::new()),
             canvas_patches: RwSignal::new(Vec::new()),
+            pinned_widgets: RwSignal::new(Vec::new()),
             active_decision_token: RwSignal::new(None),
             project_create_pending: RwSignal::new(false),
             project_create_error: RwSignal::new(None),
@@ -1481,6 +1499,7 @@ impl Daemon {
             agent_override: RwSignal::new(None),
             pending_images: RwSignal::new(Vec::new()),
             canvas_patches: RwSignal::new(Vec::new()),
+            pinned_widgets: RwSignal::new(Vec::new()),
             active_decision_token: RwSignal::new(None),
             project_create_pending: RwSignal::new(false),
             project_create_error: RwSignal::new(None),
@@ -1597,6 +1616,7 @@ impl Daemon {
         // restore title/cwd) after a stream gap — see the rehydrate call below.
         let session_title = self.session_title;
         let cwd = self.cwd;
+        let pinned_widgets = self.pinned_widgets;
 
         let generation = sse_generation.get_untracked().wrapping_add(1);
         sse_generation.set(generation);
@@ -1657,6 +1677,7 @@ impl Daemon {
                         session_title,
                         cwd,
                         model,
+                        pinned_widgets,
                     )
                     .await;
                 }
@@ -1789,6 +1810,7 @@ impl Daemon {
                         browser_active,
                         browser_last_action,
                         canvas_patches,
+                        pinned_widgets,
                         awaiting_session_adoption,
                         session_title,
                         cwd,
@@ -2578,6 +2600,7 @@ impl Daemon {
         self.browser_active.set(false);
         self.browser_last_action.set(None);
         self.canvas_patches.set(Vec::new());
+        self.pinned_widgets.set(Vec::new());
         self.pending_images.set(Vec::new());
         self.pending_permissions.set(Vec::new());
         self.active_decision_token.set(None);
@@ -2600,6 +2623,7 @@ impl Daemon {
         let cwd = self.cwd;
         let model = self.model;
         let status = self.status;
+        let pinned_widgets = self.pinned_widgets;
 
         spawn_local(async move {
             let get_url = format!("{}/v1/sessions/{id}", url.trim_end_matches('/'));
@@ -2624,10 +2648,12 @@ impl Daemon {
                         if !detail.model.is_empty() {
                             model.set(Some(detail.model));
                         }
-                        turns.set(turns_from_session_transcript(
+                        let (rebuilt_turns, rebuilt_pinned) = turns_from_session_transcript(
                             detail.transcript,
                             &detail.tool_context,
-                        ));
+                        );
+                        turns.set(rebuilt_turns);
+                        pinned_widgets.set(rebuilt_pinned);
                         status.set("session loaded".into());
                     }
                     Ok(r) => {
@@ -2663,6 +2689,7 @@ impl Daemon {
         self.browser_active.set(false);
         self.browser_last_action.set(None);
         self.canvas_patches.set(Vec::new());
+        self.pinned_widgets.set(Vec::new());
         self.pending_images.set(Vec::new());
         self.pending_permissions.set(Vec::new());
         self.active_decision_token.set(None);
@@ -2944,6 +2971,18 @@ impl Daemon {
     /// `ComponentRender` reducer: upsert by id anywhere in the transcript,
     /// else attach to the current assistant turn.
     pub fn render_local_component(&self, component_id: String, kind: String, props: Value) {
+        // Mirrors the SSE ComponentRender reducer: a pinned render docks into
+        // the rail instead of the transcript.
+        if component_placement(&props) == ComponentPlacement::Pinned {
+            let widget = PinnedWidget {
+                component_id: component_id.clone(),
+                kind: kind.clone(),
+                props: props.clone(),
+            };
+            self.pinned_widgets
+                .update(|pinned| upsert_pinned(pinned, widget));
+            return;
+        }
         self.turns.update(|t| {
             for turn in t.iter_mut() {
                 for block in turn.blocks.iter_mut() {
@@ -2969,6 +3008,15 @@ impl Daemon {
                 props,
             });
         });
+    }
+
+    /// Remove a pinned widget from the rail (the card's unpin affordance).
+    /// Session-scoped: the registry is cleared on session switch anyway, so
+    /// this only undocks within the current session. A subsequent re-render of
+    /// the same id re-pins it.
+    pub fn unpin_widget(&self, component_id: &str) {
+        self.pinned_widgets
+            .update(|pinned| pinned.retain(|w| w.component_id != component_id));
     }
 }
 
@@ -3000,6 +3048,7 @@ fn apply_event(
     browser_active: RwSignal<bool>,
     browser_last_action: RwSignal<Option<String>>,
     canvas_patches: RwSignal<Vec<CanvasPatchEntry>>,
+    pinned_widgets: RwSignal<Vec<PinnedWidget>>,
     awaiting_session_adoption: RwSignal<bool>,
     // Header-bound session identity (OCEAN-236). A `session_created` frame is the
     // authoritative source for the live session's title and working directory; the
@@ -3240,6 +3289,19 @@ fn apply_event(
             replace,
             ..
         } => {
+            // A pinned component docks into the persistent rail instead of
+            // the transcript: route it to the pinned registry and skip the
+            // inline block so it never duplicates. `placement` defaults to
+            // inline, so every existing render is unchanged.
+            if component_placement(&props) == ComponentPlacement::Pinned {
+                let widget = PinnedWidget {
+                    component_id: component_id.clone(),
+                    kind: kind.clone(),
+                    props: props.clone(),
+                };
+                pinned_widgets.update(|pinned| upsert_pinned(pinned, widget));
+                return;
+            }
             turns.update(|t| {
                 if *replace {
                     // Replace existing component with same id.
@@ -3284,6 +3346,9 @@ fn apply_event(
                 // Remove empty turns.
                 t.retain(|turn| !turn.blocks.is_empty());
             });
+            // A pinned widget unmounts from the rail, not the transcript.
+            pinned_widgets
+                .update(|pinned| pinned.retain(|w| w.component_id != *component_id));
         }
         AgentEvent::BrowserActivity { active, .. } => {
             browser_active.set(*active);
@@ -3637,6 +3702,7 @@ async fn rehydrate_transcript(
     session_title: RwSignal<String>,
     cwd: RwSignal<String>,
     model: RwSignal<Option<String>>,
+    pinned_widgets: RwSignal<Vec<PinnedWidget>>,
 ) {
     // If the user switched away from this session while we were disconnected,
     // the reconnect (and this hydrate) is for a session no longer on screen.
@@ -3694,16 +3760,18 @@ async fn rehydrate_transcript(
     // authoritative snapshot, which includes anything missed during the gap —
     // including ComponentRender frames recovered from persisted tool-call args
     // (OCEAN-382), so rendered components re-render instead of vanishing.
-    turns.set(turns_from_session_transcript(
+    let (rebuilt_turns, rebuilt_pinned) = turns_from_session_transcript(
         detail.transcript,
         &detail.tool_context,
-    ));
+    );
+    turns.set(rebuilt_turns);
+    pinned_widgets.set(rebuilt_pinned);
 }
 
 fn turns_from_session_transcript(
     entries: Vec<SessionTranscriptEntry>,
     tool_context: &[SessionToolContext],
-) -> Vec<Turn> {
+) -> (Vec<Turn>, Vec<PinnedWidget>) {
     // Index `component_render` tool-CALL args by tool_call_id so a `component_render`
     // tool-RESULT entry in the transcript can recover its props. The transcript
     // text for these results is only the daemon's summary ("rendered component
@@ -3720,6 +3788,7 @@ fn turns_from_session_transcript(
         .collect();
 
     let mut turns = Vec::new();
+    let mut pinned: Vec<PinnedWidget> = Vec::new();
     for entry in entries {
         // A component_render/unmount result carries a non-empty summary text, so
         // route on the tool name BEFORE the empty-text skip below. Only replay a
@@ -3734,7 +3803,7 @@ fn turns_from_session_transcript(
                 .as_deref()
                 .and_then(|id| render_calls.get(id))
             {
-                replay_component_call(&mut turns, component);
+                replay_component_call(&mut turns, &mut pinned, component);
                 continue;
             }
         }
@@ -3781,7 +3850,7 @@ fn turns_from_session_transcript(
             _ => {}
         }
     }
-    turns
+    (turns, pinned)
 }
 
 /// Fold a persisted `component_render` / `component_unmount` tool call back into
@@ -3790,7 +3859,11 @@ fn turns_from_session_transcript(
 /// rendered component (map, table, workflow card) survives a mid-turn SSE
 /// reconnect: its props are read from the call's persisted `arguments` rather
 /// than from a live frame that was dropped during the gap (OCEAN-382).
-fn replay_component_call(turns: &mut Vec<Turn>, call: &SessionToolContext) {
+fn replay_component_call(
+    turns: &mut Vec<Turn>,
+    pinned: &mut Vec<PinnedWidget>,
+    call: &SessionToolContext,
+) {
     let args = call.arguments.as_ref();
     let Some(component_id) = args
         .and_then(|a| a.get("id"))
@@ -3810,6 +3883,7 @@ fn replay_component_call(turns: &mut Vec<Turn>, call: &SessionToolContext) {
             });
         }
         turns.retain(|turn| !turn.blocks.is_empty());
+        pinned.retain(|w| w.component_id != component_id);
         return;
     }
 
@@ -3828,6 +3902,21 @@ fn replay_component_call(turns: &mut Vec<Turn>, call: &SessionToolContext) {
         .and_then(|a| a.get("replace"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+
+    // A pinned render docks into the rail instead of the transcript (mirrors
+    // the live reducer): route it to the pinned vec the caller folds back into
+    // the registry alongside the rebuilt turns.
+    if component_placement(&props) == ComponentPlacement::Pinned {
+        upsert_pinned(
+            pinned,
+            PinnedWidget {
+                component_id,
+                kind,
+                props,
+            },
+        );
+        return;
+    }
 
     // replace:true overwrites the existing block with the same id in place,
     // matching the live reducer. A render of an id already present (without
@@ -3859,6 +3948,33 @@ fn replay_component_call(turns: &mut Vec<Turn>, call: &SessionToolContext) {
         kind,
         props,
     });
+}
+
+/// Read a component's placement from its payload. `props.placement == "pinned"`
+/// docks the component into the persistent rail; anything else (including a
+/// missing key, an unknown value, or a non-string) renders inline as before.
+/// Sourced from `props` so it flows through every path — live SSE event, voice
+/// `render_component`, and persisted-tool-call replay — with no daemon/wire
+/// change.
+fn component_placement(props: &Value) -> ComponentPlacement {
+    match props.get("placement").and_then(|v| v.as_str()) {
+        Some("pinned") => ComponentPlacement::Pinned,
+        _ => ComponentPlacement::Inline,
+    }
+}
+
+/// Upsert a pinned widget by `component_id` (last write wins), preserving
+/// insertion order. The Vec is treated as an id-keyed map — Leptos-idiomatic
+/// for a small ordered reactive collection.
+fn upsert_pinned(pinned: &mut Vec<PinnedWidget>, widget: PinnedWidget) {
+    if let Some(existing) = pinned
+        .iter_mut()
+        .find(|w| w.component_id == widget.component_id)
+    {
+        *existing = widget;
+    } else {
+        pinned.push(widget);
+    }
 }
 
 fn ensure_assistant_turn<'a>(turns: &'a mut Vec<Turn>, turn_id: &str) -> &'a mut Turn {
@@ -4512,7 +4628,7 @@ mod tests {
 
     #[test]
     fn failed_tool_call_hydrates_expanded() {
-        let turns = turns_from_session_transcript(vec![tool_entry(true)], &[]);
+        let (turns, _pinned) = turns_from_session_transcript(vec![tool_entry(true)], &[]);
         let block = &turns[0].blocks[0];
         match block {
             Block::ToolCall {
@@ -4527,7 +4643,7 @@ mod tests {
 
     #[test]
     fn successful_tool_call_hydrates_collapsed() {
-        let turns = turns_from_session_transcript(vec![tool_entry(false)], &[]);
+        let (turns, _pinned) = turns_from_session_transcript(vec![tool_entry(false)], &[]);
         let block = &turns[0].blocks[0];
         match block {
             Block::ToolCall {
@@ -4555,6 +4671,7 @@ mod tests {
             daemon.browser_active,
             daemon.browser_last_action,
             daemon.canvas_patches,
+            daemon.pinned_widgets,
             daemon.awaiting_session_adoption,
             daemon.session_title,
             daemon.cwd,
@@ -4733,7 +4850,7 @@ mod tests {
             }),
         )];
 
-        let turns = turns_from_session_transcript(transcript, &tool_context);
+        let (turns, _pinned) = turns_from_session_transcript(transcript, &tool_context);
 
         // Text + component fold into the one assistant turn (no synthetic split).
         assert_eq!(turns.len(), 1, "component attaches to the text turn");
@@ -4787,7 +4904,7 @@ mod tests {
             ),
         ];
 
-        let turns = turns_from_session_transcript(transcript, &tool_context);
+        let (turns, _pinned) = turns_from_session_transcript(transcript, &tool_context);
         let components: Vec<_> = turns
             .iter()
             .flat_map(|t| &t.blocks)
@@ -4832,7 +4949,7 @@ mod tests {
             },
         ];
 
-        let turns = turns_from_session_transcript(transcript, &tool_context);
+        let (turns, _pinned) = turns_from_session_transcript(transcript, &tool_context);
         assert!(
             !turns
                 .iter()
@@ -4865,7 +4982,7 @@ mod tests {
             serde_json::json!({ "id": "map-1", "kind": "map", "props": {} }),
         )];
 
-        let turns = turns_from_session_transcript(transcript, &tool_context);
+        let (turns, _pinned) = turns_from_session_transcript(transcript, &tool_context);
 
         // No phantom component mounted from the failed call.
         assert!(
@@ -5041,6 +5158,131 @@ mod tests {
         assert_eq!(
             component["value"], 0.1,
             "other session event must be ignored"
+        );
+    }
+
+    #[test]
+    fn component_placement_defaults_inline_and_reads_pinned() {
+        assert_eq!(
+            component_placement(&serde_json::json!({})),
+            ComponentPlacement::Inline
+        );
+        assert_eq!(
+            component_placement(&serde_json::json!({ "placement": "inline" })),
+            ComponentPlacement::Inline
+        );
+        assert_eq!(
+            component_placement(&serde_json::json!({ "placement": "pinned", "value": 0.5 })),
+            ComponentPlacement::Pinned
+        );
+        // Unknown values and non-strings fall back to inline, never panic.
+        assert_eq!(
+            component_placement(&serde_json::json!({ "placement": "dock" })),
+            ComponentPlacement::Inline
+        );
+        assert_eq!(
+            component_placement(&serde_json::json!({ "placement": 7 })),
+            ComponentPlacement::Inline
+        );
+    }
+
+    #[test]
+    fn pinned_component_render_docks_to_rail_not_transcript() {
+        let session_id = "session-pinned-render";
+        let daemon = daemon_with_session(session_id);
+
+        apply_test_event(
+            &daemon,
+            AgentEvent::ComponentRender {
+                session_id: session_id.to_string(),
+                component_id: "map-1".to_string(),
+                kind: "map".to_string(),
+                props: serde_json::json!({ "placement": "pinned", "markers": [] }),
+                replace: false,
+            },
+        );
+
+        let pinned = daemon.pinned_widgets.get_untracked();
+        assert_eq!(pinned.len(), 1, "pinned render docks into the rail");
+        assert_eq!(pinned[0].component_id, "map-1");
+        assert_eq!(pinned[0].kind, "map");
+        assert!(
+            daemon.turns.get_untracked().is_empty(),
+            "pinned component must not also appear inline"
+        );
+    }
+
+    #[test]
+    fn pinned_component_replace_upserts_in_place() {
+        let session_id = "session-pinned-replace";
+        let daemon = daemon_with_session(session_id);
+
+        for value in [0.2_f64, 0.9] {
+            apply_test_event(
+                &daemon,
+                AgentEvent::ComponentRender {
+                    session_id: session_id.to_string(),
+                    component_id: "prog".to_string(),
+                    kind: "progress".to_string(),
+                    props: serde_json::json!({ "placement": "pinned", "value": value }),
+                    replace: true,
+                },
+            );
+        }
+
+        let pinned = daemon.pinned_widgets.get_untracked();
+        assert_eq!(pinned.len(), 1, "replace upserts, never duplicates");
+        assert_eq!(pinned[0].props["value"], 0.9, "latest props win");
+    }
+
+    #[test]
+    fn pinned_component_unmount_removes_from_rail() {
+        let session_id = "session-pinned-unmount";
+        let daemon = daemon_with_session(session_id);
+
+        apply_test_event(
+            &daemon,
+            AgentEvent::ComponentRender {
+                session_id: session_id.to_string(),
+                component_id: "card".to_string(),
+                kind: "stat".to_string(),
+                props: serde_json::json!({ "placement": "pinned" }),
+                replace: false,
+            },
+        );
+        assert_eq!(daemon.pinned_widgets.get_untracked().len(), 1);
+
+        apply_test_event(
+            &daemon,
+            AgentEvent::ComponentUnmount {
+                session_id: session_id.to_string(),
+                component_id: "card".to_string(),
+            },
+        );
+        assert!(
+            daemon.pinned_widgets.get_untracked().is_empty(),
+            "unmount removes the pinned widget"
+        );
+    }
+
+    #[test]
+    fn unpin_widget_removes_from_rail() {
+        let daemon = daemon_with_session("session-pinned-unpin");
+        apply_test_event(
+            &daemon,
+            AgentEvent::ComponentRender {
+                session_id: "session-pinned-unpin".to_string(),
+                component_id: "m".to_string(),
+                kind: "map".to_string(),
+                props: serde_json::json!({ "placement": "pinned" }),
+                replace: false,
+            },
+        );
+        assert_eq!(daemon.pinned_widgets.get_untracked().len(), 1);
+        daemon.unpin_widget("m");
+        assert!(
+            daemon.pinned_widgets.get_untracked().is_empty(),
+            "unpin_widget removes the docked card"
         );
     }
 

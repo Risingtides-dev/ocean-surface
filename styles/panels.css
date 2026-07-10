@@ -1365,3 +1365,85 @@
   font-size: 12px;
   margin-top: 6px;
 }
+
+/* ---- Pinned widget rail (components::PinnedRail) ------------------------ */
+/* Persistent dock for components the agent rendered with
+   `props.placement: "pinned"` — absent entirely when nothing is pinned.
+   Default shape (narrow/medium viewports): a fixed strip under the header,
+   horizontally scrollable. Wide viewports (>=1480px, where the centered
+   shell leaves real margin): a left side rail riding the free gutter,
+   mirroring the right-side workspace pane. z 40 sits under workspace (50)
+   and deck (60): the rail is furniture, never an overlay winner. */
+
+.pinned-rail {
+  position: fixed;
+  top: 62px;
+  left: 12px;
+  right: 12px;
+  display: flex;
+  flex-direction: row;
+  gap: 10px;
+  padding: 4px;
+  max-height: 34vh;
+  overflow-x: auto;
+  overflow-y: hidden;
+  z-index: 40;
+  scrollbar-width: thin;
+}
+
+.pinned-card {
+  position: relative;
+  flex: 0 0 clamp(220px, 40vw, 320px);
+  min-width: 0;
+  background: var(--bg-raised);
+  border-radius: 10px;
+  box-shadow: var(--elev-3);
+  padding: 10px;
+  overflow: auto;
+}
+
+.pinned-card__unpin {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  background: none;
+  border: none;
+  color: var(--fg-3);
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 6px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+  z-index: 1;
+}
+
+.pinned-card:hover .pinned-card__unpin,
+.pinned-card__unpin:focus-visible {
+  opacity: 1;
+}
+
+.pinned-card__unpin:hover {
+  color: var(--fg);
+}
+
+.pinned-card__body {
+  min-width: 0;
+}
+
+@media (min-width: 1480px) {
+  .pinned-rail {
+    flex-direction: column;
+    top: 68px;
+    bottom: 12px;
+    right: auto;
+    width: clamp(150px, calc((100vw - var(--shell-max)) / 2 - 24px), 300px);
+    max-height: none;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  .pinned-card {
+    flex: 0 0 auto;
+  }
+}

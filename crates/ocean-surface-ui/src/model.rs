@@ -23,6 +23,20 @@ pub enum ToolStatus {
     Err,
 }
 
+/// Where a rendered component should appear in the surface. Most components
+/// render inline in the transcript (`Inline`, the default). A `Pinned`
+/// component docks into the persistent pinned rail instead — it stays visible
+/// across turns, outside the chat scroll. Parsed from the component payload's
+/// `props.placement` (see `daemon::component_placement`); defaults to inline so
+/// every existing render is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ComponentPlacement {
+    #[default]
+    Inline,
+    Pinned,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Block {
     Text(String),
