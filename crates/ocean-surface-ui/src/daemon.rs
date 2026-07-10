@@ -2648,10 +2648,8 @@ impl Daemon {
                         if !detail.model.is_empty() {
                             model.set(Some(detail.model));
                         }
-                        let (rebuilt_turns, rebuilt_pinned) = turns_from_session_transcript(
-                            detail.transcript,
-                            &detail.tool_context,
-                        );
+                        let (rebuilt_turns, rebuilt_pinned) =
+                            turns_from_session_transcript(detail.transcript, &detail.tool_context);
                         turns.set(rebuilt_turns);
                         pinned_widgets.set(rebuilt_pinned);
                         status.set("session loaded".into());
@@ -3225,7 +3223,7 @@ fn apply_event(
             // GPUI shell, which puts the error in its status line (OCEAN-100).
             // Daemon `AgentTurnStatus` is one of completed/failed/cancelled.
             if let Some(err) = error {
-                surface_turn_failure(turns, status, status_detail, &turn_id, "turn failed", &err);
+                surface_turn_failure(turns, status, status_detail, turn_id, "turn failed", err);
             } else if turn_status != "completed" {
                 // A non-success status with no error string (e.g. "cancelled").
                 status_detail.set(None);
@@ -3293,7 +3291,7 @@ fn apply_event(
             // the transcript: route it to the pinned registry and skip the
             // inline block so it never duplicates. `placement` defaults to
             // inline, so every existing render is unchanged.
-            if component_placement(&props) == ComponentPlacement::Pinned {
+            if component_placement(props) == ComponentPlacement::Pinned {
                 let widget = PinnedWidget {
                     component_id: component_id.clone(),
                     kind: kind.clone(),
@@ -3347,8 +3345,7 @@ fn apply_event(
                 t.retain(|turn| !turn.blocks.is_empty());
             });
             // A pinned widget unmounts from the rail, not the transcript.
-            pinned_widgets
-                .update(|pinned| pinned.retain(|w| w.component_id != *component_id));
+            pinned_widgets.update(|pinned| pinned.retain(|w| w.component_id != *component_id));
         }
         AgentEvent::BrowserActivity { active, .. } => {
             browser_active.set(*active);
@@ -3694,6 +3691,7 @@ fn concise_error(err: &str) -> String {
 /// `connect()` reconnect loop can `await` it inline without a `&self` handle.
 /// Like the snapshot loader, it guards against a session switch landing mid
 /// fetch by re-checking the active `session_id` before mutating any signal.
+#[allow(clippy::too_many_arguments)] // signal-handle mirror of load_session_snapshot; a bundle struct would only obscure the seven independent signals
 async fn rehydrate_transcript(
     url: String,
     expected_session_id: String,
@@ -3760,10 +3758,8 @@ async fn rehydrate_transcript(
     // authoritative snapshot, which includes anything missed during the gap —
     // including ComponentRender frames recovered from persisted tool-call args
     // (OCEAN-382), so rendered components re-render instead of vanishing.
-    let (rebuilt_turns, rebuilt_pinned) = turns_from_session_transcript(
-        detail.transcript,
-        &detail.tool_context,
-    );
+    let (rebuilt_turns, rebuilt_pinned) =
+        turns_from_session_transcript(detail.transcript, &detail.tool_context);
     turns.set(rebuilt_turns);
     pinned_widgets.set(rebuilt_pinned);
 }
@@ -6092,9 +6088,15 @@ mod tests {
         // `localhost` is pinned to the IPv4 loopback: macOS resolves it
         // ::1-first while the daemon listens on 127.0.0.1 only, and
         // WKWebView's v6->v4 fallback is unreliable (EventSource especially).
-        assert_eq!(daemon_url_fallback("http:", "localhost:8790"), DEFAULT_DAEMON_URL);
+        assert_eq!(
+            daemon_url_fallback("http:", "localhost:8790"),
+            DEFAULT_DAEMON_URL
+        );
         // The Tauri shell (tauri://localhost) takes the same pin.
-        assert_eq!(daemon_url_fallback("tauri:", "localhost"), DEFAULT_DAEMON_URL);
+        assert_eq!(
+            daemon_url_fallback("tauri:", "localhost"),
+            DEFAULT_DAEMON_URL
+        );
     }
 
     #[test]

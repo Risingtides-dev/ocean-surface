@@ -173,7 +173,6 @@ pub fn VoiceOrb(
     {
         let listen_handle = listen_handle.clone();
         let rec = rec.clone();
-        let on_dictate = on_dictate.clone();
         Effect::new(move |_| {
             let m = voice_mode.get();
             // Stop any running loop from the previous mode.
@@ -195,7 +194,7 @@ pub fn VoiceOrb(
                     // Same capture as PushToTalk; route transcripts through the
                     // dictate callback so they land in the composer for review.
                     set_hands_free(None);
-                    DICTATE_CB.with(|c| *c.borrow_mut() = on_dictate.clone());
+                    DICTATE_CB.with(|c| *c.borrow_mut() = on_dictate);
                 }
                 mode::VoiceMode::HandsFree => {
                     set_hands_free(Some(mode::HandsFreeState::new(m)));
@@ -218,7 +217,6 @@ pub fn VoiceOrb(
             }
         });
     }
-
 
     // Popover menu open state + a ref on the wrap for click-outside dismissal.
     let show_menu = RwSignal::new(false);
@@ -274,7 +272,6 @@ pub fn VoiceOrb(
     // Escape closes the menu; a click outside the wrap closes it. Registered
     // once on mount; leaked for the app's lifetime (same idiom as the chord).
     {
-        let wrap_ref = wrap_ref.clone();
         if let Some(window) = web_sys::window() {
             let on_escape = Closure::wrap(Box::new(move |ev: web_sys::KeyboardEvent| {
                 if ev.key() == "Escape" {
@@ -716,7 +713,7 @@ fn deliver_transcript(text: String) {
     if let Some(text) = to_submit {
         // In Dictate mode the async upload routes through DICTATE_CB so the
         // transcript lands in the composer for review instead of auto-sending.
-        let dictate = DICTATE_CB.with(|c| c.borrow().clone());
+        let dictate = DICTATE_CB.with(|c| *c.borrow());
         if let Some(cb) = dictate {
             cb.run(text);
         } else {

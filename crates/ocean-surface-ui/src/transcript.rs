@@ -134,7 +134,7 @@ pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoVie
         streaming.get()
             && turns.with(|t| {
                 t.last()
-                    .map_or(false, |x| matches!(x.role, crate::model::Role::User))
+                    .is_some_and(|x| matches!(x.role, crate::model::Role::User))
             })
     };
 

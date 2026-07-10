@@ -109,10 +109,7 @@ fn summary_from_args(name: &str, args_preview: &str) -> String {
             .unwrap_or("?")
             .to_string(),
         BrowserOp::Type => {
-            let sel = args
-                .get("selector")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
+            let sel = args.get("selector").and_then(|v| v.as_str()).unwrap_or("?");
             let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("?");
             format!("{} → \"{}\"", sel, text)
         }
@@ -166,9 +163,7 @@ pub fn reduce(turns: &[Turn]) -> CockpitState {
             });
 
             // Parse browser_read_page result
-            if name == "browser_read_page"
-                && matches!(status, ToolStatus::Ok)
-                && !output.is_empty()
+            if name == "browser_read_page" && matches!(status, ToolStatus::Ok) && !output.is_empty()
             {
                 // Malformed JSON is skipped — no panic.
                 if let Ok(val) = serde_json::from_str::<Value>(output) {
@@ -551,7 +546,10 @@ mod tests {
 
         let state = reduce(&turns);
         assert_eq!(state.actions.len(), 1);
-        assert!(state.page.is_none(), "malformed result JSON should be skipped");
+        assert!(
+            state.page.is_none(),
+            "malformed result JSON should be skipped"
+        );
     }
 
     // ------------------------------------------------------------------

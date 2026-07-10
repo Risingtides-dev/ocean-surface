@@ -1353,3 +1353,21 @@ cleanup," so this completes it: handler/const deleted, stale /ui/council +
 removed, plus rustfmt on the just-landed stt/tts forwarders. Gates: proxy
 check clean, clippy -D warnings 0, 16/16 tests, fmt clean.
 _________________________________________________________________________________
+time:      [05:31pm] [07-10-26]
+agent:     [claude] [fable-5]
+type:      [gh-actions]
+area:      [infra]
+
+Cleared the surface repo's FULL wasm clippy debt: the ui crate's CI clippy
+step had 101 errors hiding under the proxy dead-code abort — 53 redundant
+`let x = x;` self-rebinds (codemod, cross-checked against CI's flagged list;
+6 Copy-signal block-captures verified semantically identical, repo.rs's 3
+reverted as unflagged), ~23 machine-applied fixes (inspect_err, Copy clones,
+div_ceil, sort_by_key), and a hand pass: orphaned fuzzy-scoring doc block
+deleted, identical-if collapsed, dead RealtimeSession.session_id field and
+FilesPanel selected_path signal removed, dir_row recursion-only param dropped
+(8->7 args), RafHolder/LevelMeterHandles type aliases, allow(dead_code) on the
+daemon_stop host seam + allow(too_many_arguments) on rehydrate_transcript with
+rationale. Gates on this exact tree: CI's five steps green locally (proxy
+build/test/clippy, ui wasm check/clippy 0 errors) + 296 host tests.
+_________________________________________________________________________________

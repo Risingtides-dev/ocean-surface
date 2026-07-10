@@ -11,11 +11,15 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use web_sys::{
-    CanvasRenderingContext2d, HtmlCanvasElement, WebGlBuffer, WebGlProgram,
-    WebGlRenderingContext, WebGlShader, WebGlTexture, WebGlUniformLocation, WebglLoseContext,
+    CanvasRenderingContext2d, HtmlCanvasElement, WebGlBuffer, WebGlProgram, WebGlRenderingContext,
+    WebGlShader, WebGlTexture, WebGlUniformLocation, WebglLoseContext,
 };
 
 static UID: AtomicUsize = AtomicUsize::new(0);
+
+/// Shared holder for the self-rescheduling rAF callback: the closure must
+/// outlive its registration, and unmount cleanup needs to drop it.
+type RafHolder = Rc<RefCell<Option<Closure<dyn FnMut(f64)>>>>;
 
 // ── Shader sources ─────────────────────────────────────────────────────
 
@@ -225,9 +229,8 @@ fn parse_hex(hex: &str) -> [f32; 3] {
     if hex.len() < 6 {
         return [0.0, 0.0, 0.0];
     }
-    let ch = |i: usize| -> f32 {
-        u8::from_str_radix(&hex[i..i + 2], 16).unwrap_or(0) as f32 / 255.0
-    };
+    let ch =
+        |i: usize| -> f32 { u8::from_str_radix(&hex[i..i + 2], 16).unwrap_or(0) as f32 / 255.0 };
     [ch(0), ch(2), ch(4)]
 }
 
@@ -643,10 +646,9 @@ pub fn SoundingsThinking() -> impl IntoView {
     // ---- Animated path: WebGL available, no reduced-motion preference ----
     if !reduce && gl_ok {
         let raf_id: Rc<RefCell<i32>> = Rc::new(RefCell::new(0));
-        let holder: Rc<RefCell<Option<Closure<dyn FnMut(f64)>>>> = Rc::new(RefCell::new(None));
+        let holder: RafHolder = Rc::new(RefCell::new(None));
         let engine: Rc<RefCell<Option<Engine>>> = Rc::new(RefCell::new(None));
-        let initialised: Rc<std::cell::Cell<bool>> =
-            Rc::new(std::cell::Cell::new(false));
+        let initialised: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
         let gl_failed: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
 
         let plate_inner = plate_id.clone();
@@ -808,35 +810,29 @@ fn init_engine(doc: &web_sys::Document, plate_id: &str) -> Result<Engine, String
         )
         .map_err(|_| "setAttribute")?;
 
-    let plate = doc
-        .get_element_by_id(plate_id)
-        .ok_or("plate not found")?;
-    plate
-        .append_child(&canvas)
-        .map_err(|_| "appendChild")?;
+    let plate = doc.get_element_by_id(plate_id).ok_or("plate not found")?;
+    plate.append_child(&canvas).map_err(|_| "appendChild")?;
 
     // Initialise WebGL.
     let gl = init_gl(&canvas)?;
 
     let vs = compile_shader(&gl, WebGlRenderingContext::VERTEX_SHADER, QUAD_VS)?;
-    let fs = compile_shader(&gl, WebGlRenderingContext::FRAGMENT_SHADER, THINKING_FS)
-        .map_err(|e| {
+    let fs = compile_shader(&gl, WebGlRenderingContext::FRAGMENT_SHADER, THINKING_FS).inspect_err(
+        |_| {
             gl.delete_shader(Some(&vs));
-            e
-        })?;
-    let prog = link_program(&gl, &vs, &fs).map_err(|e| {
+        },
+    )?;
+    let prog = link_program(&gl, &vs, &fs).inspect_err(|_| {
         gl.delete_shader(Some(&vs));
         gl.delete_shader(Some(&fs));
-        e
     })?;
     let uniforms = build_uniform_map(&gl, &prog);
     let quad_buf = create_fullscreen_quad(&gl);
-    let word = make_thinking_texture(&gl).map_err(|e| {
+    let word = make_thinking_texture(&gl).inspect_err(|_| {
         gl.delete_program(Some(&prog));
         gl.delete_shader(Some(&vs));
         gl.delete_shader(Some(&fs));
         gl.delete_buffer(Some(&quad_buf));
-        e
     })?;
 
     let lose_ext: Option<WebglLoseContext> = gl
@@ -892,7 +888,9 @@ fn warp_p(x: f32, y: f32) -> (f32, f32) {
     (x * (1.0 + y * 0.45), y * 1.35)
 }
 
-fn clamp01(t: f32) -> f32 { t.clamp(0.0, 1.0) }
+fn clamp01(t: f32) -> f32 {
+    t.clamp(0.0, 1.0)
+}
 
 fn out_cubic(t: f32) -> f32 {
     let u = clamp01(t);
@@ -1005,7 +1003,13 @@ fn make_letter_textures(
         .and_then(|style| style.get_property_value("--wm-font").ok())
         .unwrap_or_else(|| "'Poppins', system-ui, sans-serif".into());
 
-    let token_names: [&str; 5] = ["--ocean-4", "--ocean-5", "--ocean-6", "--ocean-7", "--ocean-8"];
+    let token_names: [&str; 5] = [
+        "--ocean-4",
+        "--ocean-5",
+        "--ocean-6",
+        "--ocean-7",
+        "--ocean-8",
+    ];
     let letters: [char; 5] = ['O', 'C', 'E', 'A', 'N'];
 
     let mut tex_arr: [Option<WebGlTexture>; 5] = [None, None, None, None, None];
@@ -1043,8 +1047,7 @@ fn make_letter_textures(
             .unwrap_or_else(|| "#ffffff".into());
 
         ctx.set_fill_style_str(&fill);
-        ctx
-            .fill_text(&letters[i].to_string(), 128.0, 140.0)
+        ctx.fill_text(&letters[i].to_string(), 128.0, 140.0)
             .map_err(|_| "fillText")?;
 
         tex_arr[i] = Some(make_texture(gl, &canvas));
@@ -1145,7 +1148,7 @@ impl SoundingsLandingEngine {
         // ── letter etches ────────────────────────────────────────────
         let letter_p: [(f32, f32); 5] = [
             (-2.0 * L_GAP, L_Y),
-            (-1.0 * L_GAP, L_Y),
+            (-L_GAP, L_Y),
             (0.0, L_Y),
             (1.0 * L_GAP, L_Y),
             (2.0 * L_GAP, L_Y),
@@ -1153,8 +1156,8 @@ impl SoundingsLandingEngine {
 
         let mut ring_backs: Vec<Evt> = Vec::new();
 
-        for i in 0..5 {
-            let (lx, ly) = warp_p(letter_p[i].0, letter_p[i].1);
+        for (i, &(px, py)) in letter_p.iter().enumerate() {
+            let (lx, ly) = warp_p(px, py);
             let l = &mut self.letters[i];
             let mut boost: f32 = 0.0;
 
@@ -1192,9 +1195,7 @@ impl SoundingsLandingEngine {
                     continue;
                 }
                 let te = t - e.t0;
-                if te > 0.0
-                    && self.chor.c * te > ((bx - e.x).powi(2) + (by - e.y).powi(2)).sqrt()
-                {
+                if te > 0.0 && self.chor.c * te > ((bx - e.x).powi(2) + (by - e.y).powi(2)).sqrt() {
                     self.revealed = true;
                     let _ = self.el.set_attribute("data-flooded", "");
                     break;
@@ -1223,12 +1224,10 @@ impl SoundingsLandingEngine {
                 let fade = clamp01((t - b.hold_from) / 0.35);
                 let (y, glow) = if t < b.fall_from {
                     let pre = clamp01((t - (b.fall_from - 0.12)) / 0.12);
-                    let y =
-                        b.y_top + 0.012 * pre * pre;
+                    let y = b.y_top + 0.012 * pre * pre;
                     let glow = fade
                         * (0.45
-                            + 0.22
-                                * ((t - b.hold_from) * 2.0 * std::f32::consts::PI * 1.0).sin()
+                            + 0.22 * ((t - b.hold_from) * 2.0 * std::f32::consts::PI * 1.0).sin()
                             + 0.35 * pre * pre);
                     (y, glow)
                 } else {
@@ -1334,13 +1333,9 @@ impl SoundingsLandingEngine {
         gl.use_program(Some(&self.letter_prog));
 
         let aspect = w as f32 / h as f32;
-        for i in 0..5 {
+        for (i, &(lpx, lpy)) in letter_p.iter().enumerate() {
             let l = &self.letters[i];
-            let d = if l.etch_t >= 0.0 {
-                t - l.etch_t
-            } else {
-                -1.0
-            };
+            let d = if l.etch_t >= 0.0 { t - l.etch_t } else { -1.0 };
             let flash = if d >= 0.0 {
                 (-d * 4.0).exp() * FLASH
             } else {
@@ -1387,7 +1382,7 @@ impl SoundingsLandingEngine {
                 };
             }
 
-            letter_u2f!("uPos", 2.0 * letter_p[i].0 / aspect, 2.0 * letter_p[i].1);
+            letter_u2f!("uPos", 2.0 * lpx / aspect, 2.0 * lpy);
             letter_u2f!("uScl", 2.0 * half / aspect, 2.0 * half);
             letter_u1f!("uLit", (l.lit + l.boost + shim).min(1.0));
             letter_u1f!("uFlash", flash.min(1.0));
@@ -1454,7 +1449,7 @@ pub fn SoundingsLanding() -> impl IntoView {
     // ── Animated path ────────────────────────────────────────────────
     if !reduce && gl_ok {
         let raf_id: Rc<RefCell<i32>> = Rc::new(RefCell::new(0));
-        let holder: Rc<RefCell<Option<Closure<dyn FnMut(f64)>>>> = Rc::new(RefCell::new(None));
+        let holder: RafHolder = Rc::new(RefCell::new(None));
         let engine: Rc<RefCell<Option<SoundingsLandingEngine>>> = Rc::new(RefCell::new(None));
         let initialised: Rc<Cell<bool>> = Rc::new(Cell::new(false));
         let gl_failed: Rc<Cell<bool>> = Rc::new(Cell::new(false));
@@ -1542,18 +1537,15 @@ pub fn SoundingsLanding() -> impl IntoView {
             let Some(host_el) = doc.get_element_by_id(&host_settle) else {
                 return;
             };
-            match init_landing_engine(&doc, &host_el) {
-                Ok(mut eng) => {
-                    // Frozen mid-scene: letters lit, field idle. Step a few
-                    // fixed frames so per-frame accumulators (letter lit,
-                    // launcher reveal) converge before freezing.
-                    eng.t0 = 0.0;
-                    for i in 0..40 {
-                        eng.render(4500.0 + f64::from(i) * 16.0);
-                    }
-                    *engine_clone.borrow_mut() = Some(eng);
+            if let Ok(mut eng) = init_landing_engine(&doc, &host_el) {
+                // Frozen mid-scene: letters lit, field idle. Step a few
+                // fixed frames so per-frame accumulators (letter lit,
+                // launcher reveal) converge before freezing.
+                eng.t0 = 0.0;
+                for i in 0..40 {
+                    eng.render(4500.0 + f64::from(i) * 16.0);
                 }
-                Err(_) => {}
+                *engine_clone.borrow_mut() = Some(eng);
             }
         }) as Box<dyn FnMut(f64)>);
 
@@ -1604,46 +1596,36 @@ fn init_landing_engine(
             "position:absolute;inset:0;width:100%;height:100%;display:block",
         )
         .map_err(|_| "setAttribute")?;
-    host
-        .append_child(&canvas)
-        .map_err(|_| "appendChild")?;
+    host.append_child(&canvas).map_err(|_| "appendChild")?;
 
     let gl = init_gl(&canvas)?;
 
     // Compile field program.
-    let field_vs =
-        compile_shader(&gl, WebGlRenderingContext::VERTEX_SHADER, QUAD_VS)?;
-    let field_fs =
-        compile_shader(&gl, WebGlRenderingContext::FRAGMENT_SHADER, HERO_FS)
-            .map_err(|e| {
-                gl.delete_shader(Some(&field_vs));
-                e
-            })?;
-    let field_prog = link_program(&gl, &field_vs, &field_fs).map_err(|e| {
+    let field_vs = compile_shader(&gl, WebGlRenderingContext::VERTEX_SHADER, QUAD_VS)?;
+    let field_fs = compile_shader(&gl, WebGlRenderingContext::FRAGMENT_SHADER, HERO_FS)
+        .inspect_err(|_| {
+            gl.delete_shader(Some(&field_vs));
+        })?;
+    let field_prog = link_program(&gl, &field_vs, &field_fs).inspect_err(|_| {
         gl.delete_shader(Some(&field_vs));
         gl.delete_shader(Some(&field_fs));
-        e
     })?;
     let field_uniforms = build_uniform_map(&gl, &field_prog);
 
     // Compile letter program.
-    let letter_vs =
-        compile_shader(&gl, WebGlRenderingContext::VERTEX_SHADER, LETTER_VS)?;
-    let letter_fs =
-        compile_shader(&gl, WebGlRenderingContext::FRAGMENT_SHADER, LETTER_FS)
-            .map_err(|e| {
-                gl.delete_shader(Some(&letter_vs));
-                e
-            })?;
-    let letter_prog = link_program(&gl, &letter_vs, &letter_fs).map_err(|e| {
+    let letter_vs = compile_shader(&gl, WebGlRenderingContext::VERTEX_SHADER, LETTER_VS)?;
+    let letter_fs = compile_shader(&gl, WebGlRenderingContext::FRAGMENT_SHADER, LETTER_FS)
+        .inspect_err(|_| {
+            gl.delete_shader(Some(&letter_vs));
+        })?;
+    let letter_prog = link_program(&gl, &letter_vs, &letter_fs).inspect_err(|_| {
         gl.delete_shader(Some(&letter_vs));
         gl.delete_shader(Some(&letter_fs));
-        e
     })?;
     let letter_uniforms = build_uniform_map(&gl, &letter_prog);
 
     let quad_buf = create_fullscreen_quad(&gl);
-    let ltx = make_letter_textures(&gl, doc).map_err(|e| {
+    let ltx = make_letter_textures(&gl, doc).inspect_err(|_| {
         gl.delete_program(Some(&field_prog));
         gl.delete_program(Some(&letter_prog));
         gl.delete_shader(Some(&field_vs));
@@ -1651,7 +1633,6 @@ fn init_landing_engine(
         gl.delete_shader(Some(&letter_vs));
         gl.delete_shader(Some(&letter_fs));
         gl.delete_buffer(Some(&quad_buf));
-        e
     })?;
 
     let (chor, events, bead, next_idle) = schedule();

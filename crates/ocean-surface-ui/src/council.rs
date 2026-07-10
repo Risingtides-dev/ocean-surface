@@ -314,7 +314,11 @@ fn topic_card(t: TopicSnapshot) -> impl IntoView {
     } else {
         t.title.clone()
     };
-    let trigger_line = format!("{} · {} seated", t.trigger.replace('_', " "), t.members.len());
+    let trigger_line = format!(
+        "{} · {} seated",
+        t.trigger.replace('_', " "),
+        t.members.len()
+    );
 
     let decision_label = t
         .decision

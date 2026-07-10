@@ -164,9 +164,16 @@ pub fn user_facing_realtime_error(raw: &str) -> String {
 pub fn install(daemon: Daemon) {
     DAEMON.with(|d| *d.borrow_mut() = Some(daemon));
     // Eagerly allocate global signals under the App root owner.
-    STAGE.with(|c| { c.borrow_mut().get_or_insert_with(|| RwSignal::new(RealtimeStage::Off)); });
-    LEVEL.with(|c| { c.borrow_mut().get_or_insert_with(|| RwSignal::new(0.0)); });
-    LAST_ERROR.with(|c| { c.borrow_mut().get_or_insert_with(|| ArcRwSignal::new(None)); });
+    STAGE.with(|c| {
+        c.borrow_mut()
+            .get_or_insert_with(|| RwSignal::new(RealtimeStage::Off));
+    });
+    LEVEL.with(|c| {
+        c.borrow_mut().get_or_insert_with(|| RwSignal::new(0.0));
+    });
+    LAST_ERROR.with(|c| {
+        c.borrow_mut().get_or_insert_with(|| ArcRwSignal::new(None));
+    });
 }
 
 fn daemon() -> Option<Daemon> {
@@ -187,8 +194,6 @@ struct RealtimeSession {
     raf_handle: Option<i32>,
     frame_cell: Option<FrameCell>,
     running: Rc<RefCell<bool>>,
-    /// The chat session the voice agent hands notes off to.
-    session_id: Option<String>,
     /// Event/track/message closures that must outlive their registration.
     _closures: Vec<Box<dyn std::any::Any>>,
 }
@@ -408,16 +413,17 @@ async fn connect(daemon: Daemon, session_id: Option<String>) -> Result<RealtimeS
         raf_handle: Some(raf_handle),
         frame_cell: Some(frame_cell),
         running,
-        session_id,
         _closures: closures,
     })
 }
 
+/// Teardown bundle [`start_level_meter`] hands back: audio context, rAF id,
+/// the frame cell, and the running flag `stop` flips.
+type LevelMeterHandles = (AudioContext, i32, FrameCell, Rc<RefCell<bool>>);
+
 /// Analyser + self-rescheduling rAF loop writing [`level`]. Returns the
 /// handles [`stop`] needs for teardown.
-fn start_level_meter(
-    mic: &MediaStream,
-) -> Result<(AudioContext, i32, FrameCell, Rc<RefCell<bool>>), String> {
+fn start_level_meter(mic: &MediaStream) -> Result<LevelMeterHandles, String> {
     let window = web_sys::window().ok_or("no window")?;
     let ctx = AudioContext::new().map_err(|_| "no audio context".to_string())?;
     let source = ctx
@@ -676,8 +682,7 @@ mod tests {
 
     #[test]
     fn user_facing_realtime_error_hides_secret_mint_transport_json() {
-        let raw_secret_mint_error =
-            r#"secret mint failed: {"error":"no OpenAI credential configured (OCEAN_OPENAI_API_KEY / OPENAI_API_KEY / auth.json)"}"#;
+        let raw_secret_mint_error = r#"secret mint failed: {"error":"no OpenAI credential configured (OCEAN_OPENAI_API_KEY / OPENAI_API_KEY / auth.json)"}"#;
 
         assert_eq!(
             super::user_facing_realtime_error(raw_secret_mint_error),

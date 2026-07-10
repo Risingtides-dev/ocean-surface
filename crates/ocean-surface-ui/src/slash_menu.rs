@@ -48,9 +48,7 @@ pub struct SlashRow {
 /// — because [`SlashMenu`]'s `selected` argument is a flat index across the
 /// same filtered order, not a per-group index. Keeping the flat index on the
 /// grouped row lets the render check selection without a second pass.
-fn group_by_first_appearance(
-    items: Vec<SlashRow>,
-) -> Vec<(String, Vec<(usize, SlashRow)>)> {
+fn group_by_first_appearance(items: Vec<SlashRow>) -> Vec<(String, Vec<(usize, SlashRow)>)> {
     let mut groups: Vec<(String, Vec<(usize, SlashRow)>)> = Vec::new();
     for (idx, row) in items.into_iter().enumerate() {
         match groups.iter_mut().find(|(g, _)| *g == row.group) {
@@ -105,9 +103,6 @@ pub fn SlashMenu(
                             let enabled = row.enabled;
                             let is_selected = flat_idx == selected;
                             let is_disabled = !enabled;
-                            // Clone the callback per row; Callback is cheaply
-                            // cloneable (Arc-backed) and each row needs its own.
-                            let on_pick = on_pick.clone();
                             view! {
                                 <div
                                     class="ocean-slash-menu__row"

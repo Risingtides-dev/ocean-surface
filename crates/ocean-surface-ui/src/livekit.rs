@@ -236,7 +236,11 @@ pub fn LiveKitPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                     let p = path;
                     spawn_local(async move {
                         match ocean_livekit_connect(
-                            &p, "web-surface", "web-surface", "Web Surface", &cb,
+                            &p,
+                            "web-surface",
+                            "web-surface",
+                            "Web Surface",
+                            &cb,
                         )
                         .await
                         {
@@ -252,8 +256,7 @@ pub fn LiveKitPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                             }
                             Err(_) => {
                                 auto_connect_join_state.set(JoinState::Disconnected);
-                                auto_connect_error
-                                    .set(Some("LiveKit SDK failed to load".into()));
+                                auto_connect_error.set(Some("LiveKit SDK failed to load".into()));
                             }
                         }
                     });
@@ -353,7 +356,6 @@ pub fn LiveKitPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
             let _ = ocean_livekit_set_camera(next).await;
         });
     };
-
 
     view! {
         // Only show the panel after the operator asks for call controls, while

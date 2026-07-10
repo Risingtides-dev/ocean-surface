@@ -95,14 +95,14 @@ fn draw_tide_water(ctx: &CanvasRenderingContext2d, s: f64, t: f64, amp: f64) {
 
     // ── water body ──
     ctx.begin_path();
-    let _ = ctx.move_to(-2.0, lvl + dev(0.0));
+    ctx.move_to(-2.0, lvl + dev(0.0));
     let mut x = 0.0;
     while x <= s + step {
-        let _ = ctx.line_to(x, lvl + dev(x));
+        ctx.line_to(x, lvl + dev(x));
         x += step;
     }
-    let _ = ctx.line_to(s + 2.0, s + 2.0);
-    let _ = ctx.line_to(-2.0, s + 2.0);
+    ctx.line_to(s + 2.0, s + 2.0);
+    ctx.line_to(-2.0, s + 2.0);
     ctx.close_path();
     let wg = ctx.create_linear_gradient(0.0, lvl - s * 0.05, 0.0, s);
     let _ = wg.add_color_stop(0.0, "rgba(46,166,198,0.52)");
@@ -121,9 +121,9 @@ fn draw_tide_water(ctx: &CanvasRenderingContext2d, s: f64, t: f64, amp: f64) {
         while x <= s + step {
             let y = by + dev(x + (b * 17) as f64) * (0.5 / b as f64);
             if x == 0.0 {
-                let _ = ctx.move_to(-2.0, y);
+                ctx.move_to(-2.0, y);
             } else {
-                let _ = ctx.line_to(x, y);
+                ctx.line_to(x, y);
             }
             x += step;
         }
@@ -139,9 +139,9 @@ fn draw_tide_water(ctx: &CanvasRenderingContext2d, s: f64, t: f64, amp: f64) {
         while x <= s + step {
             let y = lvl + dev(x);
             if x == 0.0 {
-                let _ = ctx.move_to(-2.0, y);
+                ctx.move_to(-2.0, y);
             } else {
-                let _ = ctx.line_to(x, y);
+                ctx.line_to(x, y);
             }
             x += step;
         }
@@ -167,6 +167,10 @@ fn draw_tide_frame(ctx: &CanvasRenderingContext2d, s: f64, t: f64, spinning: boo
     coin_top(ctx, s);
 }
 
+/// Holder for the self-rescheduling rAF callback (outlives registration;
+/// dropped on unmount).
+type RafHolder = Rc<RefCell<Option<Closure<dyn FnMut(f64)>>>>;
+
 // ── WaveBadge component ────────────────────────────────────────────────
 
 /// The Ocean badge — a Canvas 2D tide coin (waterline churns while loading,
@@ -181,7 +185,7 @@ pub fn WaveBadge(
 ) -> impl IntoView {
     let canvas_ref: NodeRef<leptos::html::Canvas> = NodeRef::new();
     let raf_id: Rc<RefCell<i32>> = Rc::new(RefCell::new(0));
-    let holder: Rc<RefCell<Option<Closure<dyn FnMut(f64)>>>> = Rc::new(RefCell::new(None));
+    let holder: RafHolder = Rc::new(RefCell::new(None));
     let start: Rc<RefCell<Option<f64>>> = Rc::new(RefCell::new(None));
 
     // Cancel pending rAF and drop the callback on unmount.
@@ -267,15 +271,12 @@ pub fn WaveBadge(
 
             if let Some(c) = holder2.borrow().as_ref() {
                 if let Some(win) = web_sys::window() {
-                    if let Ok(id) =
-                        win.request_animation_frame(c.as_ref().unchecked_ref())
-                    {
+                    if let Ok(id) = win.request_animation_frame(c.as_ref().unchecked_ref()) {
                         *raf_id2.borrow_mut() = id;
                     }
                 }
             }
-        })
-            as Box<dyn FnMut(f64)>);
+        }) as Box<dyn FnMut(f64)>);
 
         if let Some(win) = web_sys::window() {
             if let Ok(id) = win.request_animation_frame(cb.as_ref().unchecked_ref()) {
@@ -619,4 +620,3 @@ pub fn Stop() -> impl IntoView {
         </svg>
     }
 }
-

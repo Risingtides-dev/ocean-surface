@@ -93,4 +93,3 @@ fn realtime_active_css_hides_all_composer_controls_in_one_completed_rule() {
         "expected one completed .voice-chat-active rule with selectors {expected_selectors:?} and display:none so the composer input, send button, turn controls, and slash menu all hide together; parsed realtime rules were {rules:#?}"
     );
 }
-

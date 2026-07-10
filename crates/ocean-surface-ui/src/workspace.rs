@@ -20,8 +20,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use leptos::prelude::*;
 use leptos::ev;
+use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
@@ -92,13 +92,13 @@ pub(crate) fn name_matches(name: &str, filter: &str) -> bool {
 /// keep the deck's repo-first ordering via [`sort_entries`]; files are a flat
 /// alphabetical run beneath them.
 pub(crate) fn sort_files(files: &mut [FsFileEntry]) {
-    files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    files.sort_by_key(|a| a.name.to_lowercase());
 }
 
 /// Render a byte size as whole KiB (round up so a 1-byte file reads "1 KiB",
 /// never "0 KiB"; 0 bytes reads "0 KiB").
 pub(crate) fn format_kib(size: u64) -> String {
-    format!("{} KiB", (size + 1023) / 1024)
+    format!("{} KiB", size.div_ceil(1024))
 }
 
 /// Ensure a tab for `kind` exists in `tabs` and return its index, making it
@@ -166,7 +166,11 @@ pub(crate) fn close_tab(tabs: &mut Vec<WorkspaceTab>, active: usize, id: &str) -
         active - 1
     } else if active == i {
         // Removed the focused tab → land on the left neighbour (clamped).
-        if i == 0 { 0 } else { i - 1 }
+        if i == 0 {
+            0
+        } else {
+            i - 1
+        }
     } else {
         active
     };
@@ -231,7 +235,6 @@ pub(crate) fn effective_width(desired: f64, vw: f64) -> f64 {
     desired.clamp(MIN_PANE_W, max.max(MIN_PANE_W))
 }
 
-
 // ---------------------------------------------------------------------------
 // WorkspacePane component
 // ---------------------------------------------------------------------------
@@ -263,9 +266,21 @@ pub fn WorkspacePane(
     // Tabs: Files, Browser, and Repo are persistent; Preview tabs come and go.
     // Repo sits LAST (after Browser) and is never closable.
     let tabs: RwSignal<Vec<WorkspaceTab>> = RwSignal::new(vec![
-        WorkspaceTab { id: "files".into(), title: "Files".into(), kind: TabKind::Files },
-        WorkspaceTab { id: "browser".into(), title: "Browser".into(), kind: TabKind::Browser },
-        WorkspaceTab { id: "repo".into(), title: "Repo".into(), kind: TabKind::Repo },
+        WorkspaceTab {
+            id: "files".into(),
+            title: "Files".into(),
+            kind: TabKind::Files,
+        },
+        WorkspaceTab {
+            id: "browser".into(),
+            title: "Browser".into(),
+            kind: TabKind::Browser,
+        },
+        WorkspaceTab {
+            id: "repo".into(),
+            title: "Repo".into(),
+            kind: TabKind::Repo,
+        },
     ]);
     let active_tab: RwSignal<usize> = RwSignal::new(0);
 
@@ -284,10 +299,6 @@ pub fn WorkspacePane(
     // ---- Tree load / expand / collapse (mirror deck::files::FilesPanel) ----
 
     let load_dir: DirCallback = {
-        let daemon_url = daemon_url;
-        let dir_cache = dir_cache;
-        let loading_path = loading_path;
-        let load_error = load_error;
         Arc::new(move |path: String| {
             let url = daemon_url.get_untracked();
             loading_path.set(Some(path.clone()));
@@ -313,9 +324,6 @@ pub fn WorkspacePane(
     };
 
     let expand_dir: DirCallback = {
-        let dir_cache = dir_cache;
-        let expanded = expanded;
-        let loading_path = loading_path;
         let load_dir = Arc::clone(&load_dir);
         Arc::new(move |path: String| {
             let loaded = dir_cache.with(|c| c.contains_key(&path));
@@ -330,7 +338,6 @@ pub fn WorkspacePane(
     };
 
     let collapse_dir: DirCallback = {
-        let expanded = expanded;
         Arc::new(move |path: String| {
             expanded.update(|e| {
                 e.remove(&path);
@@ -341,10 +348,6 @@ pub fn WorkspacePane(
     // ---- File content fetch (shared by open + watcher refetch) ----
 
     let fetch_file_content: FileCallback = {
-        let daemon_url = daemon_url;
-        let preview_cache = preview_cache;
-        let preview_loading = preview_loading;
-        let preview_error = preview_error;
         Arc::new(move |path: String| {
             let url = daemon_url.get_untracked();
             preview_loading.set(Some(path.clone()));
@@ -372,9 +375,6 @@ pub fn WorkspacePane(
     // ---- File open: focus/open a Preview tab, then fetch on cache miss ----
 
     let open_file: FileCallback = {
-        let tabs = tabs;
-        let active_tab = active_tab;
-        let preview_cache = preview_cache;
         let fetch_file_content = Arc::clone(&fetch_file_content);
         Arc::new(move |path: String| {
             // 1. Open/focus the Preview tab for this path.
@@ -393,11 +393,8 @@ pub fn WorkspacePane(
     // ---- Watcher: tree refresh + live preview refetch ----
 
     {
-        let tree_root = tree_root;
         let load_dir = Arc::clone(&load_dir);
-        let dir_cache = dir_cache;
-        let expanded = expanded;
-        let preview_cache = preview_cache;
+
         let fetch_file_content = Arc::clone(&fetch_file_content);
         crate::host::on_path_changed(move |ev| {
             // Tree: re-list the parent of the changed path (the deck pattern).
@@ -449,7 +446,9 @@ pub fn WorkspacePane(
     // Some(f) opens/focuses the matching persistent tab and makes it active,
     // then resets the signal to None so the same intent re-fires next time.
     Effect::new(move |_| {
-        let Some(f) = focus_intent.get() else { return; };
+        let Some(f) = focus_intent.get() else {
+            return;
+        };
         let kind = match f {
             WorkspaceFocus::Files => TabKind::Files,
             WorkspaceFocus::Browser => TabKind::Browser,
@@ -477,158 +476,179 @@ pub fn WorkspacePane(
     let daemon_browser = daemon.clone();
     let daemon_repo = daemon.clone();
 
-// ── ergonomics: drag-resize + collapsible tree ────────────────────────────
-// The DESIRED width persists across sessions; the EFFECTIVE pane width
-// (`pane_w`, derived) clamps it to the live viewport so the shell gutter
-// never outruns the content column. The live `--workspace-w` custom property
-// has exactly ONE writer — the effect below — so handlers only ever mutate
-// `desired_w` / `viewport_w`.
+    // ── ergonomics: drag-resize + collapsible tree ────────────────────────────
+    // The DESIRED width persists across sessions; the EFFECTIVE pane width
+    // (`pane_w`, derived) clamps it to the live viewport so the shell gutter
+    // never outruns the content column. The live `--workspace-w` custom property
+    // has exactly ONE writer — the effect below — so handlers only ever mutate
+    // `desired_w` / `viewport_w`.
 
-fn ls_get_f64(key: &str) -> Option<f64> {
-    web_sys::window()?.local_storage().ok()??.get_item(key).ok()?.and_then(|s| s.parse::<f64>().ok())
-}
-fn ls_get_bool(key: &str) -> bool {
-    web_sys::window()
-        .and_then(|w| w.local_storage().ok())
-        .and_then(|r| r)
-        .and_then(|r| r.get_item(key).ok())
-        .flatten()
-        .map(|s| s == "1")
-        .unwrap_or(false)
-}
-fn ls_set(key: &str, val: &str) {
-    let _ = web_sys::window()
-        .and_then(|w| w.local_storage().ok())
-        .and_then(|r| r)
-        .map(|r| r.set_item(key, val));
-}
-fn read_viewport_w() -> f64 {
-    web_sys::window()
-        .and_then(|w| w.inner_width().ok())
-        .and_then(|n| n.as_f64())
-        .unwrap_or(1280.0)
-}
-fn set_workspace_w_var(px: f64) {
-    let css = format!("{px}px");
-    if let Some(el) = web_sys::window().and_then(|w| w.document()).and_then(|d| d.document_element()) {
-        if let Ok(el) = el.dyn_into::<web_sys::HtmlElement>() {
-            let _ = el.style().set_property("--workspace-w", &css);
+    fn ls_get_f64(key: &str) -> Option<f64> {
+        web_sys::window()?
+            .local_storage()
+            .ok()??
+            .get_item(key)
+            .ok()?
+            .and_then(|s| s.parse::<f64>().ok())
+    }
+    fn ls_get_bool(key: &str) -> bool {
+        web_sys::window()
+            .and_then(|w| w.local_storage().ok())
+            .and_then(|r| r)
+            .and_then(|r| r.get_item(key).ok())
+            .flatten()
+            .map(|s| s == "1")
+            .unwrap_or(false)
+    }
+    fn ls_set(key: &str, val: &str) {
+        let _ = web_sys::window()
+            .and_then(|w| w.local_storage().ok())
+            .and_then(|r| r)
+            .map(|r| r.set_item(key, val));
+    }
+    fn read_viewport_w() -> f64 {
+        web_sys::window()
+            .and_then(|w| w.inner_width().ok())
+            .and_then(|n| n.as_f64())
+            .unwrap_or(1280.0)
+    }
+    fn set_workspace_w_var(px: f64) {
+        let css = format!("{px}px");
+        if let Some(el) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.document_element())
+        {
+            if let Ok(el) = el.dyn_into::<web_sys::HtmlElement>() {
+                let _ = el.style().set_property("--workspace-w", &css);
+            }
         }
     }
-}
-/// Toggle the `is-resizing` class on <html>. During a drag the pointer moves
-/// the pane instantly; animating the shell gutter behind it reads as
-/// rubber-band churn, so workspace.css suppresses layout transitions while the
-/// class is present. `pointercancel` mirrors `pointerup` because pointer
-/// capture can be revoked by the OS mid-gesture.
-fn set_resizing(on: bool) {
-    if let Some(el) = web_sys::window().and_then(|w| w.document()).and_then(|d| d.document_element()) {
-        if let Ok(el) = el.dyn_into::<web_sys::HtmlElement>() {
-            let _ = el.class_list().toggle_with_force("is-resizing", on);
+    /// Toggle the `is-resizing` class on <html>. During a drag the pointer moves
+    /// the pane instantly; animating the shell gutter behind it reads as
+    /// rubber-band churn, so workspace.css suppresses layout transitions while the
+    /// class is present. `pointercancel` mirrors `pointerup` because pointer
+    /// capture can be revoked by the OS mid-gesture.
+    fn set_resizing(on: bool) {
+        if let Some(el) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.document_element())
+        {
+            if let Ok(el) = el.dyn_into::<web_sys::HtmlElement>() {
+                let _ = el.class_list().toggle_with_force("is-resizing", on);
+            }
         }
     }
-}
-// tiny helper because leptos::ev::Pointer* target access is verbose
-fn ev_target_element(ev: &web_sys::PointerEvent) -> Option<web_sys::Element> {
-    let t = ev.target()?;
-    t.dyn_into::<web_sys::Element>().ok()
-}
+    // tiny helper because leptos::ev::Pointer* target access is verbose
+    fn ev_target_element(ev: &web_sys::PointerEvent) -> Option<web_sys::Element> {
+        let t = ev.target()?;
+        t.dyn_into::<web_sys::Element>().ok()
+    }
 
-let desired_w: RwSignal<f64> = RwSignal::new(ls_get_f64(LS_WIDTH).unwrap_or(DEFAULT_WORKSPACE_W));
-let viewport_w: RwSignal<f64> = RwSignal::new(read_viewport_w());
-let user_set_tree: RwSignal<bool> = RwSignal::new(ls_get_bool(LS_TREE_USER));
-let tree_collapsed_user: RwSignal<bool> = RwSignal::new(ls_get_bool(LS_TREE));
-// Effective pane width: the desired width clamped to the live viewport. This
-// is the single value every consumer reads (the CSS-var effect below, the
-// tree auto-collapse heuristic) — nothing recomputes the clamp itself.
-let pane_w = Signal::derive(move || effective_width(desired_w.get(), viewport_w.get()));
-// Files tab = the docked tree IS the body (the content region renders
-// nothing there), so while it is active the tree can never collapse away —
-// a collapsed body would leave a dead pane. Auto-collapse only applies to
-// wide content tabs (Preview/Browser) in a narrow pane; a user collapse
-// applies to any content tab but is likewise overridden on Files.
-let files_active = Signal::derive(move || {
-    let active = active_tab.get();
-    tabs.with(|t| t.get(active).map(|tab| matches!(tab.kind, TabKind::Files)).unwrap_or(false))
-});
-let tree_collapsed = {
-    let pane_w = pane_w;
-    let user_set_tree = user_set_tree;
-    let tree_collapsed_user = tree_collapsed_user;
-    Signal::derive(move || {
-        if files_active.get() {
-            false
-        } else if user_set_tree.get() {
-            tree_collapsed_user.get()
-        } else {
-            let active = active_tab.get();
-            let tabs_vec = tabs.get();
-            tabs_vec
-                .get(active)
-                .map(|t| tree_auto_collapses(&t.kind, pane_w.get()))
+    let desired_w: RwSignal<f64> =
+        RwSignal::new(ls_get_f64(LS_WIDTH).unwrap_or(DEFAULT_WORKSPACE_W));
+    let viewport_w: RwSignal<f64> = RwSignal::new(read_viewport_w());
+    let user_set_tree: RwSignal<bool> = RwSignal::new(ls_get_bool(LS_TREE_USER));
+    let tree_collapsed_user: RwSignal<bool> = RwSignal::new(ls_get_bool(LS_TREE));
+    // Effective pane width: the desired width clamped to the live viewport. This
+    // is the single value every consumer reads (the CSS-var effect below, the
+    // tree auto-collapse heuristic) — nothing recomputes the clamp itself.
+    let pane_w = Signal::derive(move || effective_width(desired_w.get(), viewport_w.get()));
+    // Files tab = the docked tree IS the body (the content region renders
+    // nothing there), so while it is active the tree can never collapse away —
+    // a collapsed body would leave a dead pane. Auto-collapse only applies to
+    // wide content tabs (Preview/Browser) in a narrow pane; a user collapse
+    // applies to any content tab but is likewise overridden on Files.
+    let files_active = Signal::derive(move || {
+        let active = active_tab.get();
+        tabs.with(|t| {
+            t.get(active)
+                .map(|tab| matches!(tab.kind, TabKind::Files))
                 .unwrap_or(false)
+        })
+    });
+    let tree_collapsed = {
+        Signal::derive(move || {
+            if files_active.get() {
+                false
+            } else if user_set_tree.get() {
+                tree_collapsed_user.get()
+            } else {
+                let active = active_tab.get();
+                let tabs_vec = tabs.get();
+                tabs_vec
+                    .get(active)
+                    .map(|t| tree_auto_collapses(&t.kind, pane_w.get()))
+                    .unwrap_or(false)
+            }
+        })
+    };
+    let dragging: RwSignal<bool> = RwSignal::new(false);
+
+    // Single writer of the live `--workspace-w` custom property: the derived pane
+    // width drives it, so handlers only mutate `desired_w` / `viewport_w`. Runs
+    // once at setup (the initial sync — the CSS :root fallback holds until then)
+    // and again on every drag tick or window resize.
+    Effect::new(move |_| {
+        set_workspace_w_var(pane_w.get());
+    });
+
+    // Keep the viewport in sync so the derived width re-clamps when the OS resizes
+    // the window (e.g. snapping a maximized window back to a tile). Bound +
+    // on_cleanup so the listener lives with the component scope and is torn down
+    // on unmount (matching app.rs's pointer-light listener).
+    let _resize_listener = window_event_listener(ev::resize, move |_| {
+        viewport_w.set(read_viewport_w());
+    });
+    on_cleanup(move || _resize_listener.remove());
+
+    let on_resize_move = move |ev: web_sys::PointerEvent| {
+        if !dragging.get() {
+            return;
         }
-    })
-};
-let dragging: RwSignal<bool> = RwSignal::new(false);
-
-// Single writer of the live `--workspace-w` custom property: the derived pane
-// width drives it, so handlers only mutate `desired_w` / `viewport_w`. Runs
-// once at setup (the initial sync — the CSS :root fallback holds until then)
-// and again on every drag tick or window resize.
-Effect::new(move |_| {
-    set_workspace_w_var(pane_w.get());
-});
-
-// Keep the viewport in sync so the derived width re-clamps when the OS resizes
-// the window (e.g. snapping a maximized window back to a tile). Bound +
-// on_cleanup so the listener lives with the component scope and is torn down
-// on unmount (matching app.rs's pointer-light listener).
-let _resize_listener = window_event_listener(ev::resize, move |_| {
-    viewport_w.set(read_viewport_w());
-});
-on_cleanup(move || _resize_listener.remove());
-
-let on_resize_move = move |ev: web_sys::PointerEvent| {
-    if !dragging.get() { return; }
-    let x = ev.client_x() as f64;
-    let vw = viewport_w.get();
-    // WYSIWYG: store the EFFECTIVE width at this pointer position as the
-    // desired width, so the handle can never outrun the clamp — a drag into
-    // the no-go zone parks at the boundary instead of over/undershooting.
-    desired_w.set(effective_width(vw - x, vw));
-};
-let on_resize_up = move |ev: web_sys::PointerEvent| {
-    dragging.set(false);
-    set_resizing(false);
-    if let Some(el) = ev_target_element(&ev) { let _ = el.release_pointer_capture(ev.pointer_id()); }
-    // Persist only on release (unchanged from the original behavior).
-    ls_set(LS_WIDTH, &desired_w.get_untracked().to_string());
-};
-// Pointer capture can be cancelled by the OS mid-gesture; mirror pointerup so
-// the is-resizing class and drag lock never get stuck on.
-let on_resize_cancel = move |ev: web_sys::PointerEvent| {
-    dragging.set(false);
-    set_resizing(false);
-    if let Some(el) = ev_target_element(&ev) { let _ = el.release_pointer_capture(ev.pointer_id()); }
-    ls_set(LS_WIDTH, &desired_w.get_untracked().to_string());
-};
-let on_resize_down = move |ev: web_sys::PointerEvent| {
-    dragging.set(true);
-    set_resizing(true);
-    if let Some(el) = ev_target_element(&ev) { let _ = el.set_pointer_capture(ev.pointer_id()); }
-};
-let reset_width = move |_| {
-    desired_w.set(DEFAULT_WORKSPACE_W);
-    ls_set(LS_WIDTH, &DEFAULT_WORKSPACE_W.to_string());
-};
-let toggle_tree = move |_| {
-    let now = !tree_collapsed.get();
-    user_set_tree.set(true);
-    tree_collapsed_user.set(now);
-    ls_set(LS_TREE_USER, "1");
-    ls_set(LS_TREE, if now { "1" } else { "0" });
-};
+        let x = ev.client_x() as f64;
+        let vw = viewport_w.get();
+        // WYSIWYG: store the EFFECTIVE width at this pointer position as the
+        // desired width, so the handle can never outrun the clamp — a drag into
+        // the no-go zone parks at the boundary instead of over/undershooting.
+        desired_w.set(effective_width(vw - x, vw));
+    };
+    let on_resize_up = move |ev: web_sys::PointerEvent| {
+        dragging.set(false);
+        set_resizing(false);
+        if let Some(el) = ev_target_element(&ev) {
+            let _ = el.release_pointer_capture(ev.pointer_id());
+        }
+        // Persist only on release (unchanged from the original behavior).
+        ls_set(LS_WIDTH, &desired_w.get_untracked().to_string());
+    };
+    // Pointer capture can be cancelled by the OS mid-gesture; mirror pointerup so
+    // the is-resizing class and drag lock never get stuck on.
+    let on_resize_cancel = move |ev: web_sys::PointerEvent| {
+        dragging.set(false);
+        set_resizing(false);
+        if let Some(el) = ev_target_element(&ev) {
+            let _ = el.release_pointer_capture(ev.pointer_id());
+        }
+        ls_set(LS_WIDTH, &desired_w.get_untracked().to_string());
+    };
+    let on_resize_down = move |ev: web_sys::PointerEvent| {
+        dragging.set(true);
+        set_resizing(true);
+        if let Some(el) = ev_target_element(&ev) {
+            let _ = el.set_pointer_capture(ev.pointer_id());
+        }
+    };
+    let reset_width = move |_| {
+        desired_w.set(DEFAULT_WORKSPACE_W);
+        ls_set(LS_WIDTH, &DEFAULT_WORKSPACE_W.to_string());
+    };
+    let toggle_tree = move |_| {
+        let now = !tree_collapsed.get();
+        user_set_tree.set(true);
+        tree_collapsed_user.set(now);
+        ls_set(LS_TREE_USER, "1");
+        ls_set(LS_TREE, if now { "1" } else { "0" });
+    };
     view! {
         <aside
             class="workspace"
@@ -1370,6 +1390,9 @@ mod tests {
         assert!(tree_auto_collapses(&TabKind::Browser, NARROW_PANE_W - 1.0));
         // At and above the threshold the tree stays docked.
         assert!(!tree_auto_collapses(&preview, NARROW_PANE_W));
-        assert!(!tree_auto_collapses(&TabKind::Browser, NARROW_PANE_W + 40.0));
+        assert!(!tree_auto_collapses(
+            &TabKind::Browser,
+            NARROW_PANE_W + 40.0
+        ));
     }
 }

@@ -169,22 +169,6 @@ impl Default for CommandRegistry {
 
 // ── Fuzzy matching ─────────────────────────────────────────────────────────
 
-/// Fuzzy subsequence score for `query` against `target`.
-///
-/// Returns `None` when `query` is not a subsequence of `target`
-/// (case-insensitive). Higher scores are better matches.
-///
-/// Scoring heuristics (all additive):
-/// - **Exact prefix** — matching the start of the target (ti == qi): +3.0
-/// - **Word boundary** — matching after `-`, `_`, `/`, `.`, space, or a
-///   camelCase boundary: +5.0
-/// - **Consecutive** — contiguous run of matched chars: +2.0 × run length
-/// - **Start of target** — first char matches position 0: +10.0
-///
-/// These bonuses compound, so `"fp"` against `"FilesPanel"` scores:
-///   'f' at 0 → +10 (start) +3 (prefix) = 13, 'p' at 5 → +5 (camelCase
-///   boundary) +2 (consecutive=1) = 7 → total 20.
-
 /// Subsequence match for slash aliases. Case-insensitive; returns true when
 /// every char of `query` appears in order inside `target`. Mirrors the shape
 /// of ocean-tui's `shell::slash::subseq_score` (a boolean gate — scoring is
@@ -362,60 +346,59 @@ pub fn PaletteView(registry: CommandRegistry) -> impl IntoView {
 
     // ── Filter + group + score ───────────────────────────────────────────
     // Re-derived every time `query` or `registry.commands` changes.
-    let filtered_groups: Memo<Vec<(CommandScope, Vec<ScoredCommand>)>> =
-        Memo::new(move |_| {
-            let q = query.get();
-            let q = q.trim();
-            let cmds = registry.commands.get();
+    let filtered_groups: Memo<Vec<(CommandScope, Vec<ScoredCommand>)>> = Memo::new(move |_| {
+        let q = query.get();
+        let q = q.trim();
+        let cmds = registry.commands.get();
 
-            let mut groups: Vec<(CommandScope, Vec<ScoredCommand>)> = Vec::new();
+        let mut groups: Vec<(CommandScope, Vec<ScoredCommand>)> = Vec::new();
 
-            for cmd in cmds.iter() {
-                // Host/state gating: disabled commands are invisible.
-                if !cmd.enabled.get() {
-                    continue;
+        for cmd in cmds.iter() {
+            // Host/state gating: disabled commands are invisible.
+            if !cmd.enabled.get() {
+                continue;
+            }
+
+            let score = if q.is_empty() {
+                0.0
+            } else {
+                match fuzzy_score(q, &cmd.title) {
+                    Some(s) => s,
+                    None => continue, // no match → hidden
                 }
+            };
 
-                let score = if q.is_empty() {
-                    0.0
-                } else {
-                    match fuzzy_score(q, &cmd.title) {
-                        Some(s) => s,
-                        None => continue, // no match → hidden
-                    }
-                };
-
-                let group = groups.iter_mut().find(|(s, _)| *s == cmd.scope);
-                if let Some((_, cmds)) = group {
-                    cmds.push(ScoredCommand {
+            let group = groups.iter_mut().find(|(s, _)| *s == cmd.scope);
+            if let Some((_, cmds)) = group {
+                cmds.push(ScoredCommand {
+                    command: cmd.clone(),
+                    score,
+                });
+            } else {
+                groups.push((
+                    cmd.scope,
+                    vec![ScoredCommand {
                         command: cmd.clone(),
                         score,
-                    });
-                } else {
-                    groups.push((
-                        cmd.scope,
-                        vec![ScoredCommand {
-                            command: cmd.clone(),
-                            score,
-                        }],
-                    ));
-                }
+                    }],
+                ));
             }
+        }
 
-            // Sort within each group by score descending (best first).
-            for (_, cmds) in groups.iter_mut() {
-                cmds.sort_by(|a, b| {
-                    b.score
-                        .partial_cmp(&a.score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-            }
+        // Sort within each group by score descending (best first).
+        for (_, cmds) in groups.iter_mut() {
+            cmds.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
 
-            // Sort groups by scope order.
-            groups.sort_by_key(|(s, _)| s.order());
+        // Sort groups by scope order.
+        groups.sort_by_key(|(s, _)| s.order());
 
-            groups
-        });
+        groups
+    });
 
     // ── Flat list for index-based navigation ─────────────────────────────
     let flat_commands: Memo<Vec<ScoredCommand>> = Memo::new(move |_| {
@@ -429,30 +412,28 @@ pub fn PaletteView(registry: CommandRegistry) -> impl IntoView {
     let total_count = move || flat_commands.get().len();
 
     // ── Keyboard navigation inside the palette ───────────────────────────
-    let on_input_keydown = move |ev: KeyboardEvent| {
-        match ev.key().as_str() {
-            "Escape" => {
+    let on_input_keydown = move |ev: KeyboardEvent| match ev.key().as_str() {
+        "Escape" => {
+            open.set(false);
+        }
+        "ArrowDown" => {
+            ev.prevent_default();
+            selected_index.update(|i| *i = next_index(*i, total_count()));
+        }
+        "ArrowUp" => {
+            ev.prevent_default();
+            selected_index.update(|i| *i = prev_index(*i, total_count()));
+        }
+        "Enter" => {
+            ev.prevent_default();
+            let idx = selected_index.get_untracked();
+            let cmds = flat_commands.get_untracked();
+            if let Some(sc) = cmds.get(idx) {
+                sc.command.run.run(());
                 open.set(false);
             }
-            "ArrowDown" => {
-                ev.prevent_default();
-                selected_index.update(|i| *i = next_index(*i, total_count()));
-            }
-            "ArrowUp" => {
-                ev.prevent_default();
-                selected_index.update(|i| *i = prev_index(*i, total_count()));
-            }
-            "Enter" => {
-                ev.prevent_default();
-                let idx = selected_index.get_untracked();
-                let cmds = flat_commands.get_untracked();
-                if let Some(sc) = cmds.get(idx) {
-                    sc.command.run.run(());
-                    open.set(false);
-                }
-            }
-            _ => {}
         }
+        _ => {}
     };
 
     // ── View ─────────────────────────────────────────────────────────────

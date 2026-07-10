@@ -381,7 +381,7 @@ fn TableView(component_id: String, kind_props: Value, daemon: Daemon) -> impl In
                         view! {
                             <tr on:click=move |_| oc(i) class="data-table__row">
                                 {cells.iter().enumerate().map(|(j, cell)| {
-                                    let col_label = columns.get(j).map(|c| cell_text(c)).unwrap_or_default();
+                                    let col_label = columns.get(j).map(cell_text).unwrap_or_default();
                                     view! { <td data-label=col_label>{cell_text(cell)}</td> }
                                 }).collect::<Vec<_>>()}
                             </tr>
@@ -699,9 +699,7 @@ fn ChartView(kind_props: Value) -> impl IntoView {
             .collect::<Vec<_>>()
             .join(" ");
         let (first_x, last_x) = (coords[0].0, coords[n - 1].0);
-        let area_pts = format!(
-            "{line_pts} {last_x:.2},{baseline:.2} {first_x:.2},{baseline:.2}"
-        );
+        let area_pts = format!("{line_pts} {last_x:.2},{baseline:.2} {first_x:.2},{baseline:.2}");
         let dots = points
             .iter()
             .zip(coords.iter())
@@ -922,7 +920,11 @@ fn FileTreeNode(entry: Value, depth: usize, component_id: String, daemon: Daemon
         // live in the transcript sheet another workstream owns; keep the
         // icon swap self-contained.
         let arrow_style = move || {
-            if open.get() { "" } else { "transform: rotate(-90deg)" }
+            if open.get() {
+                ""
+            } else {
+                "transform: rotate(-90deg)"
+            }
         };
         view! {
             <li class="filetree__node filetree__node--dir">
@@ -1761,8 +1763,14 @@ mod tests {
                 "https://www.youtube.com/watch?v=Watch-Id_42&feature=share",
                 Some("Watch-Id_42"),
             ),
-            ("https://www.youtube.com/embed/Embed_123-xy", Some("Embed_123-xy")),
-            ("https://www.youtube.com/shorts/Shorts_123-xy?feature=share", Some("Shorts_123-xy")),
+            (
+                "https://www.youtube.com/embed/Embed_123-xy",
+                Some("Embed_123-xy"),
+            ),
+            (
+                "https://www.youtube.com/shorts/Shorts_123-xy?feature=share",
+                Some("Shorts_123-xy"),
+            ),
             ("https://example.com/watch?v=not-youtube", None),
         ];
 

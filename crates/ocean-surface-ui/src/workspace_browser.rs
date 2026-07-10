@@ -67,7 +67,11 @@ struct DisplayRect {
 /// screencast `{w, h}`. Linear in each axis — the `<img>` is stretched to fill
 /// its viewport, so the overlay rect equals the image rect. Returns `None` for
 /// degenerate (zero) sizes so callers no-op instead of dividing by zero.
-fn map_point_to_frame(point: (f64, f64), rect: DisplayRect, frame: (u32, u32)) -> Option<(f64, f64)> {
+fn map_point_to_frame(
+    point: (f64, f64),
+    rect: DisplayRect,
+    frame: (u32, u32),
+) -> Option<(f64, f64)> {
     let (frame_w, frame_h) = frame;
     if rect.width <= 0.0 || rect.height <= 0.0 || frame_w == 0 || frame_h == 0 {
         return None;
@@ -105,11 +109,7 @@ pub fn WorkspaceBrowser(daemon: Daemon) -> impl IntoView {
 
     spawn_local({
         let active = Arc::clone(&active);
-        let url = url;
-        let frame_src = frame_src;
-        let frame_size = frame_size;
-        let connected = connected;
-        let no_browser = no_browser;
+
         async move {
             let mut backoff = BACKOFF_START_MS;
             while active.load(Ordering::SeqCst) {
@@ -131,13 +131,16 @@ pub fn WorkspaceBrowser(daemon: Daemon) -> impl IntoView {
                 let errored = Rc::new(Cell::new(false));
 
                 let on_frame = Closure::wrap(Box::new({
-                    let frame_src = frame_src;
-                    let frame_size = frame_size;
-                    let no_browser = no_browser;
                     move |ev: MessageEvent| {
-                        let Some(text) = ev.data().as_string() else { return };
-                        let Ok(v) = serde_json::from_str::<Value>(&text) else { return };
-                        let Some(b64) = v.get("b64").and_then(Value::as_str) else { return };
+                        let Some(text) = ev.data().as_string() else {
+                            return;
+                        };
+                        let Ok(v) = serde_json::from_str::<Value>(&text) else {
+                            return;
+                        };
+                        let Some(b64) = v.get("b64").and_then(Value::as_str) else {
+                            return;
+                        };
                         let w = v.get("w").and_then(Value::as_u64).unwrap_or(0) as u32;
                         let h = v.get("h").and_then(Value::as_u64).unwrap_or(0) as u32;
                         frame_src.set(format!("data:image/jpeg;base64,{b64}"));
@@ -149,21 +152,25 @@ pub fn WorkspaceBrowser(daemon: Daemon) -> impl IntoView {
                         no_browser.set(false);
                     }
                 }) as Box<dyn FnMut(MessageEvent)>);
-                let _ = es.add_event_listener_with_callback("frame", on_frame.as_ref().unchecked_ref());
+                let _ =
+                    es.add_event_listener_with_callback("frame", on_frame.as_ref().unchecked_ref());
 
                 let on_status = Closure::wrap(Box::new({
-                    let no_browser = no_browser;
-                    let frame_src = frame_src;
                     move |ev: MessageEvent| {
-                        let Some(text) = ev.data().as_string() else { return };
-                        let Ok(v) = serde_json::from_str::<Value>(&text) else { return };
+                        let Some(text) = ev.data().as_string() else {
+                            return;
+                        };
+                        let Ok(v) = serde_json::from_str::<Value>(&text) else {
+                            return;
+                        };
                         if v.get("state").and_then(Value::as_str) == Some("no-browser") {
                             no_browser.set(true);
                             frame_src.set(String::new());
                         }
                     }
                 }) as Box<dyn FnMut(MessageEvent)>);
-                let _ = es.add_event_listener_with_callback("status", on_status.as_ref().unchecked_ref());
+                let _ = es
+                    .add_event_listener_with_callback("status", on_status.as_ref().unchecked_ref());
 
                 let on_error = Closure::wrap(Box::new({
                     let errored = Rc::clone(&errored);
@@ -197,16 +204,14 @@ pub fn WorkspaceBrowser(daemon: Daemon) -> impl IntoView {
 
     // ── input forwarding ──────────────────────────────────────────────────
     let on_click = {
-        let url = url;
-        let overlay_ref = overlay_ref;
-        let frame_size = frame_size;
-        let input_error = input_error;
         move |ev: web_sys::MouseEvent| {
             let Some(el) = overlay_ref.get() else { return };
             // Focus so subsequent keydown lands on the overlay (the capture
             // surface), and so a screen reader announces it as interactive.
             let _ = el.focus();
-            let Some(frame) = frame_size.get_untracked() else { return };
+            let Some(frame) = frame_size.get_untracked() else {
+                return;
+            };
             let r = el.get_bounding_client_rect();
             let rect = DisplayRect {
                 left: r.left(),
@@ -221,18 +226,20 @@ pub fn WorkspaceBrowser(daemon: Daemon) -> impl IntoView {
             };
             let base = url.get_untracked();
             let target = format!("{}{}", base.trim_end_matches('/'), INPUT_PATH);
-            post_input(target, json!({ "kind": "click", "x": x, "y": y }), input_error);
+            post_input(
+                target,
+                json!({ "kind": "click", "x": x, "y": y }),
+                input_error,
+            );
         }
     };
 
     let on_wheel = {
-        let url = url;
-        let overlay_ref = overlay_ref;
-        let frame_size = frame_size;
-        let input_error = input_error;
         move |ev: web_sys::WheelEvent| {
             let Some(el) = overlay_ref.get() else { return };
-            let Some(frame) = frame_size.get_untracked() else { return };
+            let Some(frame) = frame_size.get_untracked() else {
+                return;
+            };
             let r = el.get_bounding_client_rect();
             let rect = DisplayRect {
                 left: r.left(),
@@ -256,8 +263,6 @@ pub fn WorkspaceBrowser(daemon: Daemon) -> impl IntoView {
     };
 
     let on_key = {
-        let url = url;
-        let input_error = input_error;
         move |ev: web_sys::KeyboardEvent| {
             // The overlay only sees keys while it holds focus, so every event
             // is intended for the remote browser. Prevent default to stop the
@@ -345,7 +350,7 @@ pub fn WorkspaceBrowser(daemon: Daemon) -> impl IntoView {
 fn post_input(target: String, body: Value, err: RwSignal<Option<String>>) {
     let flash = move || {
         err.set(Some("input failed".to_string()));
-        let err = err;
+
         spawn_local(async move {
             TimeoutFuture::new(1_500).await;
             err.set(None);
@@ -376,7 +381,12 @@ mod tests {
     use super::*;
 
     fn rect(left: f64, top: f64, width: f64, height: f64) -> DisplayRect {
-        DisplayRect { left, top, width, height }
+        DisplayRect {
+            left,
+            top,
+            width,
+            height,
+        }
     }
 
     #[test]

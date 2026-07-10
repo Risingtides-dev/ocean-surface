@@ -273,9 +273,7 @@ pub async fn daemon_status() -> Option<DaemonStatus> {
         return None;
     }
     match tauri_invoke("daemon_status", &JsValue::NULL).await {
-        Ok(val) if !val.is_null() && !val.is_undefined() => {
-            Some(jsval_to::<DaemonStatus>(&val))
-        }
+        Ok(val) if !val.is_null() && !val.is_undefined() => Some(jsval_to::<DaemonStatus>(&val)),
         _ => None,
     }
 }
@@ -297,6 +295,7 @@ pub async fn daemon_start(bin: Option<String>) -> bool {
 
 /// Stop the daemon the shell owns. Never affects an external daemon the shell
 /// didn't spawn. Returns `false` on non-Tauri hosts.
+#[allow(dead_code)] // host-seam symmetry with daemon_start/daemon_restart; no surface affordance wires stop yet
 pub async fn daemon_stop() -> bool {
     if !running_in_tauri() {
         return false;
@@ -405,7 +404,5 @@ fn jsval_to<T: serde::de::DeserializeOwned + Default>(val: &JsValue) -> T {
     let s = json.as_string().unwrap_or_default();
     // Use a default on parse failure so a single malformed payload
     // doesn't poison the subscriber callback chain.
-    serde_json::from_str(&s).unwrap_or_else(|_| {
-        serde_json::from_str("null").unwrap_or_default()
-    })
+    serde_json::from_str(&s).unwrap_or_else(|_| serde_json::from_str("null").unwrap_or_default())
 }

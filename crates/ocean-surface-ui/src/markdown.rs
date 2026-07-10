@@ -59,8 +59,10 @@ pub fn render(src: &str) -> String {
     // pulldown-cmark's HTML writer emits plain `<a href>` with no attributes,
     // so inject target/rel after the fact, then revert sanitised (empty-href)
     // links so dead links stay inert.
-    out = out
-        .replace("<a href=\"", "<a target=\"_blank\" rel=\"noopener noreferrer\" href=\"");
+    out = out.replace(
+        "<a href=\"",
+        "<a target=\"_blank\" rel=\"noopener noreferrer\" href=\"",
+    );
     out = out.replace(
         "<a target=\"_blank\" rel=\"noopener noreferrer\" href=\"\">",
         "<a href=\"\">",
@@ -80,7 +82,7 @@ fn safe_url(dest: CowStr, allow_data: bool) -> CowStr {
         .filter(|c| !c.is_ascii_whitespace() && !c.is_control())
         .collect();
     let lower = cleaned.to_ascii_lowercase();
-    let safe = match lower.find(|c: char| matches!(c, ':' | '/' | '?' | '#')) {
+    let safe = match lower.find([':', '/', '?', '#']) {
         // A ':' before any path/query/fragment delimiter is an explicit scheme;
         // allow only known-inert ones.
         Some(i) if lower.as_bytes()[i] == b':' => {
@@ -158,10 +160,7 @@ mod tests {
             "unsafe destination should be emptied while preserving link text: {tab_in_pointy_destination}"
         );
 
-        for source in [
-            "[x](java\tscript:alert(1))",
-            "[x](java\nscript:alert(1))",
-        ] {
+        for source in ["[x](java\tscript:alert(1))", "[x](java\nscript:alert(1))"] {
             let html = render(source);
 
             assert!(
@@ -225,8 +224,14 @@ mod tests {
 "#,
         );
 
-        assert!(html.contains("<strong>b</strong>"), "bold should render: {html}");
-        assert!(html.contains("<em>e</em>"), "emphasis should render: {html}");
+        assert!(
+            html.contains("<strong>b</strong>"),
+            "bold should render: {html}"
+        );
+        assert!(
+            html.contains("<em>e</em>"),
+            "emphasis should render: {html}"
+        );
         assert!(
             html.contains("<a target=\"_blank\" rel=\"noopener noreferrer\" href=\"https://example.com/path?q=1\">safe</a>"),
             "safe https links should keep their href: {html}"

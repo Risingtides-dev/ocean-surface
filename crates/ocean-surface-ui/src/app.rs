@@ -6,16 +6,16 @@ use wasm_bindgen::JsCast;
 
 use crate::components::{PermissionPrompts, PinnedRail};
 use crate::daemon::{daemon_url_from_env, Daemon};
-use crate::host::DaemonStatus;
 use crate::deck::browser::BrowserCockpit;
 use crate::deck::files::FilesPanel;
 use crate::deck::repo::RepoPanel;
 use crate::deck::DeckPanel;
-use crate::palette::{Command, CommandRegistry, CommandScope, PaletteView};
-use crate::slash_menu::{SlashMenu, SlashRow};
+use crate::host::DaemonStatus;
 use crate::model::{Block, Role, Turn};
+use crate::palette::{Command, CommandRegistry, CommandScope, PaletteView};
 use crate::rooms::{RoomStage, Rooms, RoomsPanel};
 use crate::sessions::SessionsPanel;
+use crate::slash_menu::{SlashMenu, SlashRow};
 use crate::transcript::Transcript;
 use crate::voice::VoiceOrb;
 use crate::workspace::WorkspaceFocus;
@@ -79,10 +79,7 @@ fn surface_voice_layout(
 }
 
 fn fit_composer_textarea(el: &web_sys::HtmlTextAreaElement) {
-    let style = el
-        .clone()
-        .unchecked_into::<web_sys::HtmlElement>()
-        .style();
+    let style = el.clone().unchecked_into::<web_sys::HtmlElement>().style();
     let _ = style.set_property("height", "auto");
     let scroll_height = el.scroll_height();
     let height = composer_height_px(scroll_height);
@@ -91,10 +88,7 @@ fn fit_composer_textarea(el: &web_sys::HtmlTextAreaElement) {
 }
 
 fn reset_composer_textarea(el: &web_sys::HtmlTextAreaElement) {
-    let style = el
-        .clone()
-        .unchecked_into::<web_sys::HtmlElement>()
-        .style();
+    let style = el.clone().unchecked_into::<web_sys::HtmlElement>().style();
     let _ = style.set_property("height", &format!("{COMPOSER_MIN_HEIGHT_PX}px"));
     let _ = style.set_property("overflow-y", "hidden");
 }
@@ -355,7 +349,10 @@ pub fn App() -> impl IntoView {
     // once at setup (writing the init value back — idempotent) and on every
     // change thereafter.
     Effect::new(move |_| {
-        ls_set(WORKSPACE_OPEN_KEY, if workspace_open.get() { "1" } else { "0" });
+        ls_set(
+            WORKSPACE_OPEN_KEY,
+            if workspace_open.get() { "1" } else { "0" },
+        );
     });
 
     // Deep-menu registry (north star command layer): ONE registry drives the
@@ -648,28 +645,27 @@ pub fn App() -> impl IntoView {
     let slash_items = Signal::derive({
         let registry = registry.clone();
         move || {
-        let t = input.get();
-        if !t.starts_with('/') {
-            return Vec::new();
-        }
-        let q = slash_query.get();
-        registry
-            .slash_filter(&q)
-            .into_iter()
-            .map(|c| SlashRow {
-                id: c.id.to_string(),
-                title: c.title.clone(),
-                alias: c.slash.unwrap_or("").to_string(),
-                hint: c.hint.clone(),
-                group: scope_label(c.scope).to_string(),
-                enabled: c.enabled.get(),
-            })
-            .collect::<Vec<_>>()
+            let t = input.get();
+            if !t.starts_with('/') {
+                return Vec::new();
+            }
+            let q = slash_query.get();
+            registry
+                .slash_filter(&q)
+                .into_iter()
+                .map(|c| SlashRow {
+                    id: c.id.to_string(),
+                    title: c.title.clone(),
+                    alias: c.slash.unwrap_or("").to_string(),
+                    hint: c.hint.clone(),
+                    group: scope_label(c.scope).to_string(),
+                    enabled: c.enabled.get(),
+                })
+                .collect::<Vec<_>>()
         }
     });
-    let slash_open = Signal::derive(move || {
-        input.get().starts_with('/') && !slash_items.get().is_empty()
-    });
+    let slash_open =
+        Signal::derive(move || input.get().starts_with('/') && !slash_items.get().is_empty());
     // One stable pick callback shared by the popover click + Send-button path.
     // Args are the text after the first whitespace (empty for bare commands).
     let on_slash_pick = Callback::new({
@@ -778,16 +774,24 @@ pub fn App() -> impl IntoView {
     // lives with the App scope and is torn down on unmount.
     let _pointer_light = window_event_listener(ev::mousemove, move |e: web_sys::MouseEvent| {
         let Some(win) = web_sys::window() else { return };
-        let Some(w) = win.inner_width().ok().and_then(|v| v.as_f64()) else { return };
-        let Some(h) = win.inner_height().ok().and_then(|v| v.as_f64()) else { return };
+        let Some(w) = win.inner_width().ok().and_then(|v| v.as_f64()) else {
+            return;
+        };
+        let Some(h) = win.inner_height().ok().and_then(|v| v.as_f64()) else {
+            return;
+        };
         if w <= 0.0 || h <= 0.0 {
             return;
         }
         let x = e.client_x() as f64 / w * 100.0;
         let y = e.client_y() as f64 / h * 100.0;
         let Some(doc) = win.document() else { return };
-        let Some(root) = doc.document_element() else { return };
-        let Ok(root) = root.dyn_into::<web_sys::HtmlElement>() else { return };
+        let Some(root) = doc.document_element() else {
+            return;
+        };
+        let Ok(root) = root.dyn_into::<web_sys::HtmlElement>() else {
+            return;
+        };
         let style = root.style();
         let _ = style.set_property("--pointer-x", &format!("{x:.2}%"));
         let _ = style.set_property("--pointer-y", &format!("{y:.2}%"));
@@ -800,21 +804,20 @@ pub fn App() -> impl IntoView {
     // keeps the deck off Tauri). The palette's and slash-menu's own Escape
     // arms call stop_propagation(), so an Escape they handle never bubbles
     // here: one Escape closes exactly one surface, never a cascade.
-    let _overlay_escape =
-        window_event_listener(ev::keydown, move |e: ev::KeyboardEvent| {
-            if e.key() != "Escape" {
-                return;
-            }
-            if show_council.get() {
-                show_council.set(false);
-            } else if show_rooms.get() {
-                show_rooms.set(false);
-            } else if show_sessions.get() {
-                show_sessions.set(false);
-            } else if deck_panel.get().is_some() {
-                deck_panel.set(None);
-            }
-        });
+    let _overlay_escape = window_event_listener(ev::keydown, move |e: ev::KeyboardEvent| {
+        if e.key() != "Escape" {
+            return;
+        }
+        if show_council.get() {
+            show_council.set(false);
+        } else if show_rooms.get() {
+            show_rooms.set(false);
+        } else if show_sessions.get() {
+            show_sessions.set(false);
+        } else if deck_panel.get().is_some() {
+            deck_panel.set(None);
+        }
+    });
     on_cleanup(move || _overlay_escape.remove());
 
     let submit = {
@@ -945,7 +948,6 @@ pub fn App() -> impl IntoView {
 
     // Snapshot the component count when voice transitions out of Off.
     let _ = {
-        let rt_stage = rt_stage;
         let rt_count = rt_current_component_count;
         let rt_baseline = rt_baseline_component_count;
         Effect::new(move |_| {
@@ -1413,7 +1415,7 @@ pub fn App() -> impl IntoView {
                                     .get()
                                     .min(items.len().saturating_sub(1));
                                 Some(view! {
-                                    <SlashMenu items selected on_pick=on_slash_pick.clone() />
+                                    <SlashMenu items selected on_pick=on_slash_pick />
                                 })
                             }}
                             <textarea
@@ -1711,7 +1713,10 @@ pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
 
 #[cfg(test)]
 mod tests {
-    use super::{composer_height_px, composer_overflow_y, parse_deep_link, DeepLinkAction, COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX};
+    use super::{
+        composer_height_px, composer_overflow_y, parse_deep_link, DeepLinkAction,
+        COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX,
+    };
 
     #[test]
     fn composer_height_clamps_to_min_and_max() {
@@ -1733,8 +1738,11 @@ mod tests {
         // not from "any component exists in the transcript". A pre-existing card
         // must not pre-dock a new realtime session before the voice agent renders
         // anything in that session.
-        let no_new_components =
-            super::surface_voice_layout(crate::voice::realtime::RealtimeStage::Connecting, Some(2), 2);
+        let no_new_components = super::surface_voice_layout(
+            crate::voice::realtime::RealtimeStage::Connecting,
+            Some(2),
+            2,
+        );
         assert!(no_new_components.center_stage);
         assert!(!no_new_components.docked);
 
@@ -1743,11 +1751,11 @@ mod tests {
         assert!(!component_rendered_during_voice.center_stage);
         assert!(component_rendered_during_voice.docked);
 
-        let off = super::surface_voice_layout(crate::voice::realtime::RealtimeStage::Off, Some(2), 3);
+        let off =
+            super::surface_voice_layout(crate::voice::realtime::RealtimeStage::Off, Some(2), 3);
         assert!(!off.center_stage);
         assert!(!off.docked);
     }
-
 
     #[test]
     fn realtime_layout_distinguishes_captured_zero_baseline() {

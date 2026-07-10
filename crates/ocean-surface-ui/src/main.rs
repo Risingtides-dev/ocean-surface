@@ -11,9 +11,9 @@ use leptos::prelude::*;
 
 mod app;
 mod call;
-mod council;
 mod canvas;
 mod components;
+mod council;
 mod daemon;
 mod deck;
 mod host;

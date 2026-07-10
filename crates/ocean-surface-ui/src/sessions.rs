@@ -17,13 +17,12 @@
 //! empty sessions no longer accumulate in the store; historical litter is
 //! pruned from the display).
 
-use std::collections::HashSet;
-use leptos::prelude::*;
 use leptos::ev::SubmitEvent;
-use js_sys;
+use leptos::prelude::*;
+use std::collections::HashSet;
 use wasm_bindgen_futures::spawn_local;
 
-use crate::daemon::{Daemon, fetch_fs_dirs, is_path_prefix, ProjectInfo, SessionSummary};
+use crate::daemon::{fetch_fs_dirs, is_path_prefix, Daemon, ProjectInfo, SessionSummary};
 
 // ---------------------------------------------------------------------------
 // Pure helpers — unit-testable without WASM
@@ -176,7 +175,10 @@ pub(crate) fn group_for_panel(
             ("__other__".to_string(), "Other".to_string(), false)
         };
 
-        match sections.iter_mut().find(|sec: &&mut ProjectSection| sec.key == key) {
+        match sections
+            .iter_mut()
+            .find(|sec: &&mut ProjectSection| sec.key == key)
+        {
             Some(sec) => sec.sessions.push((*s).clone()),
             None => sections.push(ProjectSection {
                 key,
@@ -266,7 +268,12 @@ pub(crate) fn group_for_panel(
                         .first()
                         .map(|s| s.updated_at.as_str())
                         .unwrap_or("")
-                        .cmp(a.sessions.first().map(|s| s.updated_at.as_str()).unwrap_or("")),
+                        .cmp(
+                            a.sessions
+                                .first()
+                                .map(|s| s.updated_at.as_str())
+                                .unwrap_or(""),
+                        ),
                 }
             });
             sec.worktrees = Some(wt_groups);
@@ -284,8 +291,16 @@ pub(crate) fn group_for_panel(
         if b.key == "__other__" && a.key != "__other__" {
             return std::cmp::Ordering::Less;
         }
-        let a_ts = a.sessions.first().map(|s| s.updated_at.as_str()).unwrap_or("");
-        let b_ts = b.sessions.first().map(|s| s.updated_at.as_str()).unwrap_or("");
+        let a_ts = a
+            .sessions
+            .first()
+            .map(|s| s.updated_at.as_str())
+            .unwrap_or("");
+        let b_ts = b
+            .sessions
+            .first()
+            .map(|s| s.updated_at.as_str())
+            .unwrap_or("");
         match (a_ts.is_empty(), b_ts.is_empty()) {
             (false, false) => b_ts.cmp(a_ts),
             (true, true) => a
@@ -359,8 +374,11 @@ pub(crate) fn split_origin(title: &str) -> (Option<String>, String) {
             let tag = &rest[..end];
             let body = rest[end + 1..].trim();
             if !tag.is_empty() && tag.len() <= 8 && !body.is_empty() {
-                let badge =
-                    if tag == "?" { None } else { Some(tag.to_ascii_lowercase()) };
+                let badge = if tag == "?" {
+                    None
+                } else {
+                    Some(tag.to_ascii_lowercase())
+                };
                 return (badge, body.to_string());
             }
         }
@@ -493,7 +511,10 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
             let url = daemon.get_value().url.get_untracked();
             let parent = "~/dev".to_string();
             breadcrumb_parent.set(parent.clone());
-            create_root.set(project_root_from_parent(&parent, &create_name.get_untracked()));
+            create_root.set(project_root_from_parent(
+                &parent,
+                &create_name.get_untracked(),
+            ));
             spawn_local(async move {
                 let u = url.clone();
                 if let Some(resp) = fetch_fs_dirs(&u, &parent).await {
@@ -528,15 +549,17 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
         }
     });
 
-    let create_root_value = move || if register_existing.get() {
-        create_root.get()
-    } else {
-        project_create_root(
-            breadcrumb_text_mode.get(),
-            &breadcrumb_parent.get(),
-            &create_root.get(),
-            &create_name.get(),
-        )
+    let create_root_value = move || {
+        if register_existing.get() {
+            create_root.get()
+        } else {
+            project_create_root(
+                breadcrumb_text_mode.get(),
+                &breadcrumb_parent.get(),
+                &create_root.get(),
+                &create_name.get(),
+            )
+        }
     };
     let create_can_submit = move || {
         let name = create_name.get();
@@ -562,8 +585,13 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
         let pending = daemon.get_value().project_create_pending.get();
         let was_pending = prev_pending.get_untracked();
         prev_pending.set(pending);
-        if was_pending && !pending
-            && daemon.get_value().project_create_error.get_untracked().is_none()
+        if was_pending
+            && !pending
+            && daemon
+                .get_value()
+                .project_create_error
+                .get_untracked()
+                .is_none()
         {
             open.set(false);
             create_name.set(String::new());
@@ -667,7 +695,7 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                     }
                                 }
                                 if display_segs.is_empty() {
-                                    let h = if home.is_empty() { "~".to_string() } else { "~".to_string() };
+                                    let h = "~".to_string();
                                     display_segs.push((h.clone(), home.clone()));
                                 }
                                 let d_url = daemon.get_value().url.get_untracked();
@@ -1006,7 +1034,7 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                                 let mut out: Vec<_> = wts.into_iter().map(|wt: WorktreeGroup| {
                                                     let rows = wt.sessions.clone();
                                                     let count = rows.len();
-                                                    let root_label = wt.root.split('/').last()
+                                                    let root_label = wt.root.split('/').next_back()
                                                         .filter(|s| !s.is_empty())
                                                         .unwrap_or("worktree")
                                                         .to_string();
@@ -1234,9 +1262,33 @@ mod tests {
     fn zero_turn_sessions_are_pruned_unless_active() {
         let projects = vec![project("repo", "Repo", "/repo")];
         let sessions = vec![
-            session("active-zero", "/repo", Some("/repo"), None, None, 0, "2026-07-05T12:02:00Z"),
-            session("stale-zero", "/repo", Some("/repo"), None, None, 0, "2026-07-05T12:01:00Z"),
-            session("with-turn", "/repo", Some("/repo"), None, None, 1, "2026-07-05T12:00:00Z"),
+            session(
+                "active-zero",
+                "/repo",
+                Some("/repo"),
+                None,
+                None,
+                0,
+                "2026-07-05T12:02:00Z",
+            ),
+            session(
+                "stale-zero",
+                "/repo",
+                Some("/repo"),
+                None,
+                None,
+                0,
+                "2026-07-05T12:01:00Z",
+            ),
+            session(
+                "with-turn",
+                "/repo",
+                Some("/repo"),
+                None,
+                None,
+                1,
+                "2026-07-05T12:00:00Z",
+            ),
         ];
 
         let sections = group_for_panel(&sessions, &projects, Some("active-zero"));
@@ -1276,17 +1328,47 @@ mod tests {
     fn exact_workspace_or_cwd_root_matches_project_and_other_stays_last() {
         let projects = vec![project("matched", "Matched", "/repo")];
         let sessions = vec![
-            session("workspace-match", "/ignored", Some("/repo"), None, None, 1, "2026-07-05T12:01:00Z"),
-            session("cwd-match", "/repo", None, None, None, 1, "2026-07-05T12:00:00Z"),
-            session("unmatched-newest", "/elsewhere", None, None, None, 1, "2026-07-05T12:02:00Z"),
+            session(
+                "workspace-match",
+                "/ignored",
+                Some("/repo"),
+                None,
+                None,
+                1,
+                "2026-07-05T12:01:00Z",
+            ),
+            session(
+                "cwd-match",
+                "/repo",
+                None,
+                None,
+                None,
+                1,
+                "2026-07-05T12:00:00Z",
+            ),
+            session(
+                "unmatched-newest",
+                "/elsewhere",
+                None,
+                None,
+                None,
+                1,
+                "2026-07-05T12:02:00Z",
+            ),
         ];
 
         let sections = group_for_panel(&sessions, &projects, None);
 
-        let keys: Vec<&str> = sections.iter().map(|section| section.key.as_str()).collect();
+        let keys: Vec<&str> = sections
+            .iter()
+            .map(|section| section.key.as_str())
+            .collect();
         assert_eq!(keys, vec!["matched", "__other__"]);
-        let matched_ids: Vec<&str> =
-            sections[0].sessions.iter().map(|session| session.id.as_str()).collect();
+        let matched_ids: Vec<&str> = sections[0]
+            .sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect();
         assert_eq!(matched_ids, vec!["workspace-match", "cwd-match"]);
         assert_eq!(sections[1].sessions[0].id, "unmatched-newest");
     }
@@ -1300,9 +1382,33 @@ mod tests {
             &[("/wt/repo-feature", Some("feature/x"))],
         )];
         let sessions = vec![
-            session("subdir", "/repo/crates/ui", Some("/repo/crates/ui"), None, None, 1, "2026-07-05T12:02:00Z"),
-            session("worktree", "/wt/repo-feature/src", None, None, None, 1, "2026-07-05T12:01:00Z"),
-            session("sibling-name", "/repo-x", None, None, None, 1, "2026-07-05T12:00:00Z"),
+            session(
+                "subdir",
+                "/repo/crates/ui",
+                Some("/repo/crates/ui"),
+                None,
+                None,
+                1,
+                "2026-07-05T12:02:00Z",
+            ),
+            session(
+                "worktree",
+                "/wt/repo-feature/src",
+                None,
+                None,
+                None,
+                1,
+                "2026-07-05T12:01:00Z",
+            ),
+            session(
+                "sibling-name",
+                "/repo-x",
+                None,
+                None,
+                None,
+                1,
+                "2026-07-05T12:00:00Z",
+            ),
         ];
 
         let sections = group_for_panel(&sessions, &projects, None);
@@ -1400,7 +1506,10 @@ mod tests {
 
         assert_eq!(sections.len(), 1);
         let sec = &sections[0];
-        let worktrees = sec.worktrees.as_ref().expect("worktree sub-groups expected");
+        let worktrees = sec
+            .worktrees
+            .as_ref()
+            .expect("worktree sub-groups expected");
         assert_eq!(worktrees.len(), 1);
         let feature = &worktrees[0];
         assert_eq!(feature.root, "/repo-feature");
@@ -1416,8 +1525,24 @@ mod tests {
     fn project_without_worktrees_renders_flat_even_with_multiple_roots() {
         let projects = vec![project("owned", "Owned", "/repo-main")];
         let sessions = vec![
-            session("a", "/repo-main", Some("/repo-main"), Some(owner("owned", "Owned")), None, 1, "2026-07-05T12:00:00Z"),
-            session("b", "/repo-feature", Some("/repo-feature"), Some(owner("owned", "Owned")), None, 1, "2026-07-05T12:01:00Z"),
+            session(
+                "a",
+                "/repo-main",
+                Some("/repo-main"),
+                Some(owner("owned", "Owned")),
+                None,
+                1,
+                "2026-07-05T12:00:00Z",
+            ),
+            session(
+                "b",
+                "/repo-feature",
+                Some("/repo-feature"),
+                Some(owner("owned", "Owned")),
+                None,
+                1,
+                "2026-07-05T12:01:00Z",
+            ),
         ];
 
         let sections = group_for_panel(&sessions, &projects, None);
@@ -1429,20 +1554,61 @@ mod tests {
 
     #[test]
     fn project_sections_and_rows_sort_newest_first_with_other_last() {
-        let projects = vec![project("alpha", "Alpha", "/alpha"), project("beta", "Beta", "/beta")];
+        let projects = vec![
+            project("alpha", "Alpha", "/alpha"),
+            project("beta", "Beta", "/beta"),
+        ];
         let sessions = vec![
-            session("alpha-old", "/alpha", Some("/alpha"), None, None, 1, "2026-07-05T12:00:00Z"),
-            session("alpha-new", "/alpha", Some("/alpha"), None, None, 1, "2026-07-05T12:02:00Z"),
-            session("beta-newest-project", "/beta", Some("/beta"), None, None, 1, "2026-07-05T12:03:00Z"),
-            session("other-newest-overall", "/other", None, None, None, 1, "2026-07-05T12:04:00Z"),
+            session(
+                "alpha-old",
+                "/alpha",
+                Some("/alpha"),
+                None,
+                None,
+                1,
+                "2026-07-05T12:00:00Z",
+            ),
+            session(
+                "alpha-new",
+                "/alpha",
+                Some("/alpha"),
+                None,
+                None,
+                1,
+                "2026-07-05T12:02:00Z",
+            ),
+            session(
+                "beta-newest-project",
+                "/beta",
+                Some("/beta"),
+                None,
+                None,
+                1,
+                "2026-07-05T12:03:00Z",
+            ),
+            session(
+                "other-newest-overall",
+                "/other",
+                None,
+                None,
+                None,
+                1,
+                "2026-07-05T12:04:00Z",
+            ),
         ];
 
         let sections = group_for_panel(&sessions, &projects, None);
 
-        let keys: Vec<&str> = sections.iter().map(|section| section.key.as_str()).collect();
+        let keys: Vec<&str> = sections
+            .iter()
+            .map(|section| section.key.as_str())
+            .collect();
         assert_eq!(keys, vec!["beta", "alpha", "__other__"]);
-        let alpha_rows: Vec<&str> =
-            sections[1].sessions.iter().map(|session| session.id.as_str()).collect();
+        let alpha_rows: Vec<&str> = sections[1]
+            .sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect();
         assert_eq!(alpha_rows, vec!["alpha-new", "alpha-old"]);
     }
     #[test]
@@ -1453,8 +1619,24 @@ mod tests {
             project("blank", "", "/some/blank"),
         ];
         let sessions = vec![
-            session("beta-sess", "/beta", Some("/beta"), None, None, 1, "2026-07-05T12:00:00Z"),
-            session("other-sess", "/elsewhere", None, None, None, 1, "2026-07-05T12:05:00Z"),
+            session(
+                "beta-sess",
+                "/beta",
+                Some("/beta"),
+                None,
+                None,
+                1,
+                "2026-07-05T12:00:00Z",
+            ),
+            session(
+                "other-sess",
+                "/elsewhere",
+                None,
+                None,
+                None,
+                1,
+                "2026-07-05T12:05:00Z",
+            ),
         ];
 
         let sections = group_for_panel(&sessions, &projects, None);
@@ -1476,12 +1658,18 @@ mod tests {
 
     #[test]
     fn project_root_from_parent_joins_parent_and_normalized_project_name() {
-        assert_eq!(project_root_from_parent("~/dev", "Slop Check"), "~/dev/slop-check");
+        assert_eq!(
+            project_root_from_parent("~/dev", "Slop Check"),
+            "~/dev/slop-check"
+        );
     }
 
     #[test]
     fn project_root_from_parent_trims_trailing_parent_slash() {
-        assert_eq!(project_root_from_parent("~/dev/", "Slop Check"), "~/dev/slop-check");
+        assert_eq!(
+            project_root_from_parent("~/dev/", "Slop Check"),
+            "~/dev/slop-check"
+        );
     }
 
     #[test]
@@ -1492,7 +1680,11 @@ mod tests {
             ("!!!pwned!!!", "~/dev/pwned"),
             ("a...b", "~/dev/a-b"),
         ] {
-            assert_eq!(project_root_from_parent("~/dev", name), expected_root, "name={name:?}");
+            assert_eq!(
+                project_root_from_parent("~/dev", name),
+                expected_root,
+                "name={name:?}"
+            );
         }
     }
 

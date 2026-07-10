@@ -891,7 +891,6 @@ fn short_time(ts: &str) -> String {
     trimmed.chars().take(16).collect()
 }
 
-
 // ---- LiveKit room-call routing helpers ------------------------------------
 
 /// Build the per-room LiveKit token path, percent-encoding the room key
@@ -901,11 +900,7 @@ fn livekit_token_path_for_room(key: &str) -> String {
 }
 
 /// Set the LiveKit room id + token path signals for a room key.
-fn route_livekit_room_call(
-    key: &str,
-    room_id: &RwSignal<String>,
-    token_path: &RwSignal<String>,
-) {
+fn route_livekit_room_call(key: &str, room_id: &RwSignal<String>, token_path: &RwSignal<String>) {
     room_id.set(key.to_string());
     token_path.set(livekit_token_path_for_room(key));
 }
@@ -970,8 +965,7 @@ mod tests {
     #[test]
     fn clear_livekit_room_call_clears_matching_room() {
         let room_key: RwSignal<String> = RwSignal::new("room-a".to_string());
-        let token_path: RwSignal<String> =
-            RwSignal::new(livekit_token_path_for_room("room-a"));
+        let token_path: RwSignal<String> = RwSignal::new(livekit_token_path_for_room("room-a"));
 
         clear_livekit_room_call_if_current("room-a", &room_key, &token_path);
 
@@ -982,8 +976,7 @@ mod tests {
     #[test]
     fn clear_livekit_room_call_preserves_non_matching_room() {
         let room_key: RwSignal<String> = RwSignal::new("room-a".to_string());
-        let token_path: RwSignal<String> =
-            RwSignal::new(livekit_token_path_for_room("room-a"));
+        let token_path: RwSignal<String> = RwSignal::new(livekit_token_path_for_room("room-a"));
 
         clear_livekit_room_call_if_current("room-b", &room_key, &token_path);
 
@@ -1035,7 +1028,6 @@ pub fn RoomsPanel(rooms: Rooms, open: RwSignal<bool>) -> impl IntoView {
             Some(policy)
         }
     };
-
 
     let room_list = rooms.list;
     let status = rooms.status;
@@ -1207,10 +1199,7 @@ pub fn RoomStage(rooms: Rooms) -> impl IntoView {
     let status = rooms.status;
 
     let submit_agent = move || {
-        rooms.add_agent(
-            new_agent_id.get_untracked(),
-            new_agent_name.get_untracked(),
-        );
+        rooms.add_agent(new_agent_id.get_untracked(), new_agent_name.get_untracked());
         new_agent_id.set(String::new());
         new_agent_name.set(String::new());
         show_add_agent.set(false);

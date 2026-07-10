@@ -71,21 +71,15 @@ pub fn FilesPanel(daemon: Daemon) -> impl IntoView {
     };
     let daemon_url = daemon.url;
 
-    let dir_cache: RwSignal<HashMap<String, Vec<FsDirEntry>>> =
-        RwSignal::new(HashMap::new());
+    let dir_cache: RwSignal<HashMap<String, Vec<FsDirEntry>>> = RwSignal::new(HashMap::new());
     let loading_path: RwSignal<Option<String>> = RwSignal::new(None);
     let load_error: RwSignal<Option<String>> = RwSignal::new(None);
     let expanded: RwSignal<HashSet<String>> = RwSignal::new(HashSet::new());
-    let selected_path: RwSignal<Option<String>> = RwSignal::new(None);
     let watcher_active: RwSignal<bool> = RwSignal::new(false);
 
     // ---- Shared closures (Arc for Send+Sync, clone before capturing) ----
 
     let load_dir: DirCallback = {
-        let daemon_url = daemon_url;
-        let dir_cache = dir_cache;
-        let loading_path = loading_path;
-        let load_error = load_error;
         Arc::new(move |path: String| {
             let url = daemon_url.get_untracked();
             loading_path.set(Some(path.clone()));
@@ -113,9 +107,6 @@ pub fn FilesPanel(daemon: Daemon) -> impl IntoView {
     };
 
     let expand_dir: DirCallback = {
-        let dir_cache = dir_cache;
-        let expanded = expanded;
-        let loading_path = loading_path;
         let load_dir = Arc::clone(&load_dir);
         Arc::new(move |path: String| {
             let loaded = dir_cache.with(|c| c.contains_key(&path));
@@ -130,7 +121,6 @@ pub fn FilesPanel(daemon: Daemon) -> impl IntoView {
     };
 
     let collapse_dir: DirCallback = {
-        let expanded = expanded;
         Arc::new(move |path: String| {
             expanded.update(|e| {
                 e.remove(&path);
@@ -140,9 +130,8 @@ pub fn FilesPanel(daemon: Daemon) -> impl IntoView {
 
     // ---- choose_folder (Tauri-only action) ----
     let choose_folder = {
-        let panel_root = panel_root;
         let load_dir = Arc::clone(&load_dir);
-        let watcher_active = watcher_active;
+
         move || {
             let load_dir = Arc::clone(&load_dir);
             spawn_local(async move {
@@ -161,10 +150,8 @@ pub fn FilesPanel(daemon: Daemon) -> impl IntoView {
 
     // ---- Watcher setup ----
     {
-        let panel_root = panel_root;
         let load_dir = Arc::clone(&load_dir);
-        let dir_cache = dir_cache;
-        let expanded = expanded;
+
         crate::host::on_path_changed(move |ev| {
             let Some(root) = panel_root.get() else { return };
             let target = refresh_target(&root, &ev.path, &ev.kind);
@@ -206,8 +193,6 @@ pub fn FilesPanel(daemon: Daemon) -> impl IntoView {
 
     // ---- Cleanup ----
     let cleanup_watcher = {
-        let watcher_active = watcher_active;
-        let panel_root = panel_root;
         move || {
             if watcher_active.get() {
                 if let Some(root) = panel_root.get_untracked() {
@@ -327,7 +312,6 @@ pub fn FilesPanel(daemon: Daemon) -> impl IntoView {
                                                 1,
                                                 dir_cache,
                                                 expanded,
-                                                selected_path,
                                                 Arc::clone(&ld),
                                                 Arc::clone(&ed),
                                                 Arc::clone(&cd),
@@ -357,7 +341,6 @@ fn dir_row(
     depth: usize,
     dir_cache: RwSignal<HashMap<String, Vec<FsDirEntry>>>,
     expanded: RwSignal<HashSet<String>>,
-    selected_path: RwSignal<Option<String>>,
     load_dir: DirCallback,
     expand_dir: DirCallback,
     collapse_dir: DirCallback,
@@ -426,7 +409,6 @@ fn dir_row(
                                 depth + 1,
                                 dir_cache,
                                 expanded,
-                                selected_path,
                                 Arc::clone(&load_dir),
                                 Arc::clone(&expand_dir),
                                 Arc::clone(&collapse_dir),
@@ -438,7 +420,8 @@ fn dir_row(
                 view! { <div></div> }.into_any()
             }}
         </li>
-    }.into_any()
+    }
+    .into_any()
 }
 
 // ---------------------------------------------------------------------------
