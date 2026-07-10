@@ -6,9 +6,9 @@
 //!    on the same network can load the app over HTTP without needing trunk
 //!    serve running. Production deployment runs *only* this binary.
 //!
-//! 2. Hold the xAI API key and proxy STT + TTS requests so the WASM client
-//!    never sees the secret. The browser fetches `/api/config` on load for
-//!    zero-config bootstrap, then talks to `/api/stt` and `/api/tts`.
+//! 2. Forward STT + TTS requests to the daemon's voice endpoints so the
+//!    browser never touches provider credentials. The daemon holds the
+//!    xAI key; the proxy relays `/api/stt` and `/api/tts` to it.
 //!
 //! Run: `cargo run -p ocean-surface-proxy -- --dist ./dist --bind 0.0.0.0:8790`
 //! Then point a browser at http://<host>:8790/.
@@ -33,8 +33,6 @@ use serde_json::{json, Value};
 use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
-const XAI_STT_URL: &str = "https://api.x.ai/v1/stt";
-const XAI_TTS_URL: &str = "https://api.x.ai/v1/tts";
 const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:4780";
 const DEFAULT_LIVEKIT_ROOM_ID: &str = "project:surface-main";
 const DEFAULT_VOICE_PROFILE: &str = "leo";
@@ -44,7 +42,7 @@ const DEFAULT_MAPS_KEY: &str = "AIzaSyCmUHR3JD9AZfw9DiRvvSSZsRitdGuunPs";
 
 const CALL_PLACE_DAEMON_PATH: &str = "/v1/calls/place";
 
-/// Shared state: an HTTP client plus the resolved xAI key + voice config.
+/// Shared state.
 struct AppState {
     /// General-purpose client used for the reverse-proxy routes — including the
     /// long-lived SSE streams (`/v1/agent/events`, `/v1/events`) that are piped
@@ -52,14 +50,6 @@ struct AppState {
     /// `reqwest` `.timeout()` covers the whole request lifetime including reading
     /// the body, which would sever those open-ended event streams mid-session.
     http: reqwest::Client,
-    /// Dedicated, timeout-bounded client for the xAI STT/TTS upstream calls.
-    /// Those are non-streaming batch requests (audio in → JSON/mp3 out, fully
-    /// buffered), so a full connect + request timeout is correct here and keeps
-    /// a hung xAI call from blocking the proxy. Kept separate from `http` so the
-    /// bound never touches the streaming reverse-proxy routes.
-    xai_http: reqwest::Client,
-    /// The resolved xAI API key, if one could be found at startup.
-    xai_key: Option<String>,
     voice_profile: String,
     daemon_url: String,
     default_livekit_room_id: String,
@@ -77,8 +67,11 @@ struct AppState {
 }
 
 impl AppState {
+    /// The proxy no longer holds provider credentials — STT/TTS routes forward
+    /// to the daemon, which resolves the xAI key per-request. Report routes as
+    /// available; per-request errors carry credential state from the daemon.
     fn has_auth(&self) -> bool {
-        self.xai_key.is_some()
+        true
     }
 }
 
@@ -98,19 +91,6 @@ async fn main() -> anyhow::Result<()> {
     let dist = std::env::var("OCEAN_SURFACE_DIST")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("dist"));
-
-    let xai_key = match resolve_xai_key() {
-        Ok(key) => key,
-        Err(err) => {
-            tracing::warn!(error = %err, "failed to resolve xAI key; STT/TTS will be disabled");
-            None
-        }
-    };
-    if xai_key.is_some() {
-        tracing::info!("xAI key resolved; STT/TTS enabled");
-    } else {
-        tracing::warn!("no xAI key found (env XAI_API_KEY, ~/.config/ocean-surface/xai.key, or ~/.pi/agent/settings.json); STT/TTS disabled. Drop your key in ~/.config/ocean-surface/xai.key to preconfigure voice.");
-    }
 
     let voice_profile =
         std::env::var("OCEAN_VOICE_PROFILE").unwrap_or_else(|_| DEFAULT_VOICE_PROFILE.into());
@@ -174,24 +154,8 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Bounded client for the xAI STT/TTS upstream calls. Without a timeout a
-    // stalled xAI response leaves the handler's `.send().await` pending forever
-    // and ties up the request. These are non-streaming batch calls (audio in →
-    // JSON/mp3 out, fully buffered), so a full request timeout is safe:
-    //   connect 10s — establish the TLS connection;
-    //   request 60s — the whole batch STT/TTS round-trip.
-    // The general `http` client stays timeout-free so the long-lived SSE
-    // reverse-proxy streams aren't severed mid-session.
-    let xai_http = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-
     let state = Arc::new(AppState {
         http: reqwest::Client::new(),
-        xai_http,
-        xai_key,
         voice_profile,
         daemon_url,
         default_livekit_room_id,
@@ -343,78 +307,6 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
     axum::serve(listener, app).await?;
     Ok(())
-}
-
-/// Resolve the xAI API key, in priority order:
-///   1. env `XAI_API_KEY`
-///   2. the dedicated key file `~/.config/ocean-surface/xai.key` (override
-///      path via `OCEAN_SURFACE_KEY_FILE`) — the canonical "preconfigured"
-///      location: drop the key there once and every launch picks it up with
-///      no env-setting.
-///   3. JSON path `.xai.apiKey` inside `~/.pi/agent/settings.json`.
-///
-/// Returns `Ok(None)` when no key is configured (absent files are not errors).
-fn resolve_xai_key() -> anyhow::Result<Option<String>> {
-    // 1. Environment.
-    if let Ok(key) = std::env::var("XAI_API_KEY") {
-        let key = key.trim().to_string();
-        if !key.is_empty() {
-            return Ok(Some(key));
-        }
-    }
-
-    // 2. Dedicated persistent key file — the preconfigured source of truth.
-    if let Some(key) = read_key_file()? {
-        return Ok(Some(key));
-    }
-
-    // 3. Legacy fallback: the pi agent settings file.
-    let settings_path = match std::env::var("XAI_SETTINGS_FILE") {
-        Ok(path) => PathBuf::from(path),
-        Err(_) => {
-            let home = std::env::var("HOME").context("HOME is not set")?;
-            PathBuf::from(home).join(".pi/agent/settings.json")
-        }
-    };
-
-    if !settings_path.exists() {
-        return Ok(None);
-    }
-
-    let raw = std::fs::read_to_string(&settings_path)
-        .with_context(|| format!("reading {}", settings_path.display()))?;
-    let settings: Value = serde_json::from_str(&raw)
-        .with_context(|| format!("parsing {} as JSON", settings_path.display()))?;
-
-    let key = settings
-        .get("xai")
-        .and_then(|x| x.get("apiKey"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-
-    Ok(key)
-}
-
-/// Read the dedicated key file. Default path `~/.config/ocean-surface/xai.key`,
-/// overridable via `OCEAN_SURFACE_KEY_FILE`. Whole-file contents, trimmed.
-/// Absent file is not an error (returns Ok(None)).
-fn read_key_file() -> anyhow::Result<Option<String>> {
-    let path = match std::env::var("OCEAN_SURFACE_KEY_FILE") {
-        Ok(p) => PathBuf::from(p),
-        Err(_) => {
-            let home = std::env::var("HOME").context("HOME is not set")?;
-            PathBuf::from(home).join(".config/ocean-surface/xai.key")
-        }
-    };
-    if !path.exists() {
-        return Ok(None);
-    }
-    let raw =
-        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let key = raw.trim();
-    Ok((!key.is_empty()).then(|| key.to_string()))
 }
 
 /// Static resources required to boot the already-authenticated PWA document.
@@ -597,15 +489,14 @@ fn is_hashed_asset(path: &str) -> bool {
     }
 }
 
-/// Health check — reports STT/TTS readiness, which is simply whether a key
-/// resolved at startup.
-async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let ready = state.has_auth();
+/// Health check. STT/TTS routes are always available — per-request errors
+/// carry the daemon's credential state (the proxy no longer holds the xAI key).
+async fn health() -> Json<Value> {
     Json(json!({
         "ok": true,
         "service": "ocean-surface-proxy",
-        "stt": ready,
-        "tts": ready,
+        "stt": true,
+        "tts": true,
     }))
 }
 
@@ -1228,73 +1119,64 @@ async fn proxy_events(State(state): State<Arc<AppState>>, req: Request) -> impl 
     }
 }
 
-/// POST /api/stt — forward raw audio bytes to xAI as multipart, return `{ok, text}`.
+/// POST /api/stt — forward raw audio bytes to the daemon's voice STT endpoint.
+/// The daemon holds the xAI key and handles multipart construction.
+/// Returns `{ok, text}` on success, `{ok: false, error}` on failure.
 async fn stt(State(state): State<Arc<AppState>>, body: Bytes) -> impl IntoResponse {
-    let Some(key) = state.xai_key.as_deref() else {
-        return Json(json!({ "ok": false, "error": "xAI key not configured" })).into_response();
-    };
+    let url = format!(
+        "{}/v1/voice/stt",
+        state.daemon_url.trim_end_matches('/')
+    );
 
-    if body.is_empty() {
-        return Json(json!({ "ok": false, "error": "empty audio body" })).into_response();
-    }
-
-    let part = match reqwest::multipart::Part::bytes(body.to_vec())
-        .file_name("clip.webm")
-        .mime_str("application/octet-stream")
-    {
-        Ok(part) => part,
-        Err(err) => {
-            return Json(json!({ "ok": false, "error": format!("multipart: {err}") }))
-                .into_response();
-        }
-    };
-
-    let form = reqwest::multipart::Form::new()
-        .part("file", part)
-        .text("model", "grok-stt")
-        .text("language", "en")
-        .text("response_format", "json");
-
-    let resp = state
-        .xai_http
-        .post(XAI_STT_URL)
-        .bearer_auth(key)
-        .multipart(form)
+    let resp = match state
+        .http
+        .post(&url)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .body(body.to_vec())
         .send()
-        .await;
-
-    let resp = match resp {
+        .await
+    {
         Ok(resp) => resp,
         Err(err) => {
-            tracing::error!(error = %err, "stt request failed");
-            return Json(json!({ "ok": false, "error": format!("stt request failed: {err}") }))
+            tracing::error!(error = %err, "stt daemon unreachable");
+            return Json(json!({ "ok": false, "error": format!("stt daemon unreachable: {err}") }))
                 .into_response();
         }
     };
 
     let status = resp.status();
+
+    // Tolerate non-JSON bodies from the daemon (a 502 gateway error etc).
     let payload: Value = match resp.json().await {
-        Ok(payload) => payload,
-        Err(err) => {
-            return Json(json!({ "ok": false, "error": format!("stt decode failed: {err}") }))
+        Ok(v) => v,
+        Err(_) => {
+            return Json(json!({ "ok": false, "error": "stt daemon returned invalid JSON" }))
                 .into_response();
         }
     };
 
-    if !status.is_success() {
-        tracing::error!(%status, ?payload, "stt upstream error");
-        return Json(json!({ "ok": false, "error": "stt_failed", "detail": payload }))
-            .into_response();
+    translate_stt_daemon_response(status, &payload)
+}
+
+/// Translate a daemon STT response into the browser-facing `{ok, text}` or
+/// `{ok: false, error}` JSON shape.
+fn translate_stt_daemon_response(status: StatusCode, payload: &Value) -> Response {
+    if status.is_success() {
+        let text = payload
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        Json(json!({ "ok": true, "text": text })).into_response()
+    } else {
+        let error = payload
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("stt_failed");
+        tracing::error!(%status, ?payload, "stt daemon error");
+        Json(json!({ "ok": false, "error": error })).into_response()
     }
-
-    let text = payload
-        .get("text")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_string();
-
-    Json(json!({ "ok": true, "text": text })).into_response()
 }
 
 #[derive(Deserialize)]
@@ -1302,56 +1184,69 @@ struct TtsRequest {
     text: String,
 }
 
-/// POST /api/tts — forward `{text}` to xAI, stream mp3 bytes back to the browser.
+/// POST /api/tts — forward `{text}` to the daemon's voice TTS endpoint.
+/// The daemon holds the xAI key and handles upstream construction.
+/// Forwards `voice` from the configured profile so the daemon applies it.
 async fn tts(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TtsRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let key = state.xai_key.as_deref().ok_or((
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "xAI key not configured".to_string(),
-    ))?;
-
-    let text = req.text.trim();
+    let text = req.text.trim().to_string();
     if text.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "text required".to_string()));
     }
 
+    let url = format!(
+        "{}/v1/voice/tts",
+        state.daemon_url.trim_end_matches('/')
+    );
+
     let resp = state
-        .xai_http
-        .post(XAI_TTS_URL)
-        .bearer_auth(key)
+        .http
+        .post(&url)
+        .header(header::CONTENT_TYPE, "application/json")
         .json(&json!({
-            "model": "grok-tts",
             "text": text,
             "voice": state.voice_profile,
-            "language": "en",
-            "response_format": "mp3",
         }))
         .send()
         .await
         .map_err(|err| {
-            tracing::error!(error = %err, "tts request failed");
+            tracing::error!(error = %err, "tts daemon unreachable");
             (
                 StatusCode::BAD_GATEWAY,
-                format!("tts request failed: {err}"),
+                format!("tts daemon unreachable: {err}"),
             )
         })?;
 
     let status = resp.status();
     if !status.is_success() {
-        let detail = resp.text().await.unwrap_or_default();
-        tracing::error!(%status, %detail, "tts upstream error");
+        // Try to extract a daemon error JSON; fall back to the body text.
+        let body = resp.text().await.unwrap_or_default();
+        let err_msg = serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_string))
+            .unwrap_or(body);
+        tracing::error!(%status, %err_msg, "tts daemon error");
         let code = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-        return Err((code, format!("tts_failed: {detail}")));
+        return Err((code, format!("tts_failed: {err_msg}")));
     }
+
+    // Forward audio bytes with whatever content-type the daemon returned
+    // (audio/mpeg for xAI). If no content-type, default to audio/mpeg.
+    let content_type = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("audio/mpeg")
+        .to_string();
 
     let audio = resp
         .bytes()
         .await
         .map_err(|err| (StatusCode::BAD_GATEWAY, format!("tts read failed: {err}")))?;
 
-    Ok(([(header::CONTENT_TYPE, "audio/mpeg")], audio))
+    Ok(([(header::CONTENT_TYPE, content_type)], audio))
 }
 
 #[cfg(test)]
@@ -1391,8 +1286,6 @@ mod tests {
     fn auth_test_state() -> Arc<AppState> {
         Arc::new(AppState {
             http: reqwest::Client::new(),
-            xai_http: reqwest::Client::new(),
-            xai_key: None,
             voice_profile: "leo".to_string(),
             daemon_url: "http://127.0.0.1:4780".to_string(),
             default_livekit_room_id: "project:surface-test".to_string(),
@@ -1624,8 +1517,6 @@ mod tests {
     fn config_payload_includes_surface_collaboration_defaults() {
         let state = AppState {
             http: reqwest::Client::new(),
-            xai_http: reqwest::Client::new(),
-            xai_key: Some("configured".to_string()),
             voice_profile: "leo".to_string(),
             daemon_url: "http://127.0.0.1:4780".to_string(),
             default_livekit_room_id: "project/surface demo".to_string(),
@@ -1649,5 +1540,44 @@ mod tests {
             payload["surface"]["livekit_token_path"],
             "/v1/rooms/project%2Fsurface%20demo/livekit-token"
         );
+    }
+
+    // ── translate_stt_daemon_response unit tests ──
+
+    #[test]
+    fn translate_stt_success_extracts_text() {
+        use super::translate_stt_daemon_response;
+        use axum::http::StatusCode;
+        let payload = serde_json::json!({"text": "hello world"});
+        let resp = translate_stt_daemon_response(StatusCode::OK, &payload);
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn translate_stt_success_handles_missing_text() {
+        use super::translate_stt_daemon_response;
+        use axum::http::StatusCode;
+        let payload = serde_json::json!({});
+        let resp = translate_stt_daemon_response(StatusCode::OK, &payload);
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn translate_stt_daemon_error_json() {
+        use super::translate_stt_daemon_response;
+        use axum::http::StatusCode;
+        let payload = serde_json::json!({"error": "credential unavailable"});
+        let resp = translate_stt_daemon_response(StatusCode::SERVICE_UNAVAILABLE, &payload);
+        // The proxy always returns 200 for handled errors to keep the client contract simple.
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn translate_stt_daemon_bad_gateway() {
+        use super::translate_stt_daemon_response;
+        use axum::http::StatusCode;
+        let payload = serde_json::json!({"error": "upstream returned 500"});
+        let resp = translate_stt_daemon_response(StatusCode::BAD_GATEWAY, &payload);
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

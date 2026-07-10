@@ -18,10 +18,10 @@ Cross-repo routing and ownership map: [`docs/OCEAN_PROJECT_MAP.md`](docs/OCEAN_P
 | Web proxy | `cargo run -p ocean-surface-proxy` | serves web bundle, config, STT/TTS, and daemon reverse proxy |
 
 All targets are thin clients over `ocean-daemon`. None hold agent logic or
-session authority, and none hold provider credentials — with one transitional
-exception: `ocean-surface-proxy` still holds the xAI STT/TTS key until
-provider-backed voice moves to daemon-owned endpoints in `ocean-os` (see
-"Auth — preconfigured" below). They speak the daemon's product agent API:
+session authority, and none hold provider credentials. Voice STT/TTS
+credentials are owned by ocean-os (daemon endpoints `/v1/voice/stt` and
+`/v1/voice/tts`); the proxy forwards to the daemon transparently. They speak
+the daemon's product agent API:
 
 ```
 POST /v1/agent/sessions
@@ -89,7 +89,7 @@ permission requests, completion). Surfaces must subscribe scoped to their own
 | ------------------------------- | -------------------------------------------------------------------- |
 | `crates/ocean-surface-ui/`      | canonical Leptos UI (CSR/WASM) for web/PWA/extension/Tauri.          |
 | `crates/ocean-tauri/`           | Tauri 2.x native desktop shell; loads the same `dist/` bundle as the browser PWA. |
-| `crates/ocean-surface-proxy/`   | axum service: holds xAI key for STT/TTS (transitional — moving to `ocean-os`), serves the WASM bundle. |
+| `crates/ocean-surface-proxy/`   | axum service: forwards voice STT/TTS to the daemon, serves the WASM bundle. |
 | `extension/`                    | Chrome extension wrapper around the Leptos surface.                  |
 | `legacy-voice/`                 | Reference: the JS voice client (PR #22). Deleted once ported.        |
 | `crates/ocean-gui/`             | legacy GPUI native desktop app and tldraw canvas host (soft-deprecated, source retained for mining). |
@@ -102,10 +102,7 @@ permission requests, completion). Surfaces must subscribe scoped to their own
 The daemon must be running (in `../ocean-os`: `cargo run -p ocean-daemon --release`). Then:
 
 ```sh
-# Preconfigure voice once — drop your xAI key here (gitignored):
-mkdir -p ~/.config/ocean-surface && printf '%s' "sk-YOUR-XAI-KEY" > ~/.config/ocean-surface/xai.key
-
-# Build the wasm bundle + serve it and the xAI proxy from one binary:
+# Build the wasm bundle + serve it and the proxy from one binary:
 ./run-surface.sh
 # → open http://<this-host>:8790  (works on a phone via the tailnet IP)
 
@@ -119,7 +116,7 @@ mkdir -p ~/.config/ocean-surface && printf '%s' "sk-YOUR-XAI-KEY" > ~/.config/oc
 ### Verify before you open the browser
 
 ```sh
-./smoke.sh        # health, /api/config, chat round-trip, + live STT/TTS if a key is set
+./smoke.sh        # health, /api/config, chat round-trip, + live STT/TTS (daemon must be running)
 ```
 
 5/5 green means every wired path works; then the browser check is just UI/mic confirmation.
@@ -148,30 +145,27 @@ Note: `trunk serve` serves the UI but NOT the proxy, so voice (`/api/stt`,
 `/api/tts`) and `/api/config` need `run-surface.sh`. Text chat works under
 both.
 
-## Auth — preconfigured
+## Voice — daemon-owned
 
-The proxy holds the xAI key server-side (the browser never sees it). This is
-transitional — provider credentials are moving to `ocean-os` (daemon-owned
-voice endpoints); the proxy keeps them only until that migration lands. Until
-then it resolves the key in order:
-
-1. env `XAI_API_KEY`
-2. `~/.config/ocean-surface/xai.key` (override: `OCEAN_SURFACE_KEY_FILE`) — set once, every launch picks it up
-3. `~/.pi/agent/settings.json` → `.xai.apiKey` (legacy fallback)
+Voice STT/TTS provider credentials are owned by `ocean-os` (daemon endpoints
+`/v1/voice/stt` and `/v1/voice/tts`). The proxy forwards `/api/stt` and
+`/api/tts` to the daemon transparently; the browser never sees a credential.
+Set `XAI_API_KEY` in the daemon's environment (or configure the credential
+via ocean-os's provider auth file). The proxy no longer reads or stores an
+xAI key.
 
 `GET /api/config` reports `has_auth`; the UI fetches it on boot so no URL or credential is ever typed in the browser.
 
 ## Roadmap
 
 - Done: web/PWA chat, SSE transcript, model picker, session picker, proxy,
-  voice STT/TTS, Chrome extension bootstrap.
+  voice STT/TTS, Chrome extension bootstrap, provider-backed STT/TTS moved
+  to daemon-owned voice endpoints in `ocean-os` (proxy no longer holds xAI key).
 - In progress: Tauri native shell (loads the same `dist/` bundle), explicit
   session scoping, Leptos canvas, canvas ledger, LiveKit presence controls.
 - Next: reliable canvas IPC for Leptos+Tauri, tldraw render commands, LiveKit
   mic/camera participation, surface-state injection into agent turns, native
-  LiveKit Rust client behind a Tauri feature flag, and moving provider-backed
-  STT/TTS to daemon-owned voice endpoints in `ocean-os` (retiring the proxy's
-  transitional xAI key handling).
+  LiveKit Rust client behind a Tauri feature flag.
 
 ## Provenance
 

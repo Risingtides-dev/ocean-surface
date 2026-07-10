@@ -130,17 +130,17 @@ Web surface session UI:
 |---|---|
 | `crates/ocean-surface-ui/` | Leptos WASM web/PWA/extension UI |
 | `crates/ocean-tauri/` | Tauri 2.x native desktop shell; loads the same dist/ bundle as the browser PWA |
-| `crates/ocean-surface-proxy/` | axum proxy for web bundle, STT/TTS (transitional), config, daemon reverse proxy |
+| `crates/ocean-surface-proxy/` | axum proxy for web bundle, STT/TTS relay to the daemon, config, daemon reverse proxy |
 | `extension/` | Chrome extension wrapper around the Leptos surface |
 | `vscode-extension/` | Cursor/VS Code ACP client surface with sidebar, bottom-panel, editor-tab, and status-bar launch modes |
 | `legacy-voice/` | reference voice code only; do not build new architecture here |
 | `crates/ocean-gui/` | legacy GPUI native desktop app and tldraw canvas host (soft-deprecated, source retained for mining) |
 | `crates/ocean-gui/canvas-web/` | web bundle loaded into the GPUI canvas webview (legacy) |
 
-The proxy's xAI STT/TTS key handling is transitional — provider credentials
-are moving to `ocean-os` (daemon-owned voice endpoints); the proxy keeps them
-only until that migration lands. Do not extend it with new provider
-credentials or provider calls.
+The proxy holds no provider credentials. `/api/stt` and `/api/tts` forward to
+the daemon's `/v1/voice/stt` and `/v1/voice/tts`, where `ocean-os` resolves the
+xAI key per-request (env `XAI_API_KEY` / auth.json `xai` block). Do not add
+provider credentials or direct provider calls to the proxy.
 
 ## Build / Check
 
