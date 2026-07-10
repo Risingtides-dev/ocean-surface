@@ -1267,3 +1267,11 @@ multi-minute provider STALLS remains an ocean-os follow-up (daemon holds the
 turn Running with no terminal frame; surface clears cleanly only on emitted
 TurnFinished).
 _________________________________________________________________________________
+time:      [3:52pm] [07-10-26]
+agent:     [omp] [gpt-5.6-sol]
+worktree:  /tmp/ocean-voice-proxy-surface (origin/main detached)
+type:      [feature-request]
+area:      [frontend]
+
+Shipped the voice-first menu IA and completed the STT/TTS ownership migration. The voice menu now leads with the two products - Voice chat (live speech-to-speech) then Dictate (transcript into the composer) - with a muted Microphone group label above the demoted Off / Push to talk / Hands-free radios and the Spoken replies toggle unchanged; pure presentation, no mode/persistence changes. The proxy's /api/stt and /api/tts stopped calling xAI directly: they forward to the daemon's new /v1/voice/stt and /v1/voice/tts (paired ocean-os landing fc8f5000), the xAI key/client/resolver code was deleted from the proxy, has_auth now reports route availability with per-request errors carrying daemon credential state, and the daemon-response translation is a pure unit-tested fn. AGENTS.md/README updated: the proxy holds no provider credentials. Verified 292 UI tests, 16 proxy tests, wasm check, live daemon round-trips (stt 200 {text:""} on a tone clip, tts 200 audio/mpeg 22KB), and the realtime mint now returns 200 with an ephemeral secret on the rebuilt daemon - Voice chat is live end-to-end pending a real-mic session.
+_________________________________________________________________________________
