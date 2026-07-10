@@ -32,6 +32,7 @@ use livekit::{ConnectionState, Room, RoomEvent, RoomOptions};
 use tokio::sync::mpsc::{self, Receiver as ClientCommandReceiver};
 use tokio::task::JoinHandle;
 
+use super::canvas_sync::CANVAS_SYNC_TOPIC;
 use super::surface_livekit::SurfaceLiveKitParticipant;
 use super::surface_livekit_client::{
     CLIENT_COMMAND_BUFFER, SurfaceLiveKitClientAction, SurfaceLiveKitClientCommand,
@@ -40,7 +41,6 @@ use super::surface_livekit_client::{
     validate_surface_update,
 };
 use super::surface_livekit_video::decode_bgra;
-use super::canvas_sync::CANVAS_SYNC_TOPIC;
 
 pub fn spawn_surface_livekit_client(
     request: SurfaceLiveKitJoinRequest,

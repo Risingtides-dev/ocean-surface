@@ -26,6 +26,7 @@ use super::canvas::{
     FIT_PADDING, LedgerSink, LedgerSource, OceanCanvasView, Rect, SurfacePatchEnvelope,
     prompt_with_canvas_context,
 };
+use super::canvas_sync::{self, CanvasSyncMessage};
 use super::commands::{CommandSpec, ShellCommand, filtered_commands};
 use super::daemon::{
     AgentSessionCreateRequest, AgentTurnRequest, AgentTurnResponse, ComponentEventRequest,
@@ -63,7 +64,6 @@ use super::surface_livekit_client::{
     SurfaceLiveKitClientEvent, SurfaceLiveKitClientHandle, SurfaceLiveKitJoinRequest,
     SurfaceLiveKitSurfaceUpdate, spawn_surface_livekit_client,
 };
-use super::canvas_sync::{self, CanvasSyncMessage};
 use super::surface_livekit_video::SurfaceVideoFrame;
 use super::theme;
 use super::vault_index::Backlink;
@@ -415,12 +415,9 @@ impl OceanGuiShell {
                 // `human:<identity>` — distinct per participant, so concurrent
                 // edits to the same component converge deterministically.
                 let actor = match (&actor.kind[..], &actor.id) {
-                    ("human", None) => ActorRef::human(
-                        sync_identity
-                            .lock()
-                            .ok()
-                            .and_then(|guard| guard.clone()),
-                    ),
+                    ("human", None) => {
+                        ActorRef::human(sync_identity.lock().ok().and_then(|guard| guard.clone()))
+                    }
                     _ => actor,
                 };
                 if let Ok(mut guard) = write_cell.lock()
@@ -4579,7 +4576,9 @@ impl OceanGuiShell {
                 self.surface_livekit.mark_failed(error.clone());
                 self.agent.status = format!("token error: {error}");
             }
-            SurfaceLiveKitMessage::Client(event) => self.apply_surface_livekit_client_event(event, cx),
+            SurfaceLiveKitMessage::Client(event) => {
+                self.apply_surface_livekit_client_event(event, cx)
+            }
         }
     }
 
@@ -5536,15 +5535,17 @@ impl OceanGuiShell {
         self.sync_active_canvas_into_set();
         let existing = self.canvas_ledgers.take(&canvas_id);
 
-        let Some(batch) =
-            apply_patches_to_ledger(existing, session_id, canvas_id.clone(), patches)
+        let Some(batch) = apply_patches_to_ledger(existing, session_id, canvas_id.clone(), patches)
         else {
             // Defensive: the batch was non-empty yet produced no ledger. Nothing to
             // publish, and nothing was taken to restore (a present canvas would have
             // applied), so just return.
             return;
         };
-        let AppliedPatchBatch { ledger, newly_applied } = batch;
+        let AppliedPatchBatch {
+            ledger,
+            newly_applied,
+        } = batch;
 
         // Apply ONLY the batch's last camera-affecting op, mirroring the ledger's
         // sequential replay. A non-camera batch (`None`) leaves the user's pan/zoom
@@ -5637,7 +5638,10 @@ impl OceanGuiShell {
             while let Ok(env) = self.canvas_sync_outbound.try_recv() {
                 if canvas_sync::sync_eligible(&env.patch) {
                     let _ = handle.try_publish_canvas_data(
-                        canvas_sync::encode(&CanvasSyncMessage::Patch { v: 1, envelope: env }),
+                        canvas_sync::encode(&CanvasSyncMessage::Patch {
+                            v: 1,
+                            envelope: env,
+                        }),
                         Vec::new(),
                     );
                 }
@@ -5652,13 +5656,9 @@ impl OceanGuiShell {
         // next one (or give up if every peer has been tried). Check the timeout
         // on a reference first so an in-flight (not-yet-timed-out) request is
         // NOT taken and dropped — its chunks may still be arriving.
-        let timed_out = self
-            .canvas_sync_pending_snapshot
-            .as_ref()
-            .is_some_and(|p| {
-                p.sent_at.elapsed()
-                    > Duration::from_millis(canvas_sync::SNAPSHOT_REQUEST_TIMEOUT_MS)
-            });
+        let timed_out = self.canvas_sync_pending_snapshot.as_ref().is_some_and(|p| {
+            p.sent_at.elapsed() > Duration::from_millis(canvas_sync::SNAPSHOT_REQUEST_TIMEOUT_MS)
+        });
         if timed_out {
             let pending = self
                 .canvas_sync_pending_snapshot
@@ -5675,11 +5675,7 @@ impl OceanGuiShell {
     /// Resolve a best-effort on-disk [`CanvasStore`] for a canvas, mirroring
     /// `apply_patches_to_ledger`: real store → temp-dir fallback on a missing
     /// `home → none on I/O error. Never panics.
-    fn canvas_store_for(
-        &self,
-        session_id: &str,
-        canvas_id: &CanvasId,
-    ) -> Option<CanvasStore> {
+    fn canvas_store_for(&self, session_id: &str, canvas_id: &CanvasId) -> Option<CanvasStore> {
         match CanvasStore::for_session(session_id, canvas_id) {
             Ok(store) => Some(store),
             Err(CanvasStoreError::MissingHome) => {
@@ -5711,11 +5707,7 @@ impl OceanGuiShell {
 
     /// Core snapshot request: pick the next untried peer, publish a
     /// `SnapshotRequest` targeted at it, and record the in-flight request.
-    fn request_canvas_snapshot_with_tried(
-        &mut self,
-        canvas_id: CanvasId,
-        tried: Vec<String>,
-    ) {
+    fn request_canvas_snapshot_with_tried(&mut self, canvas_id: CanvasId, tried: Vec<String>) {
         if self.canvas_sync_synced.contains(&canvas_id) {
             self.canvas_sync_pending_snapshot = None;
             return;
@@ -5779,10 +5771,8 @@ impl OceanGuiShell {
         // overlap an immutable borrow of the handle.
         if let Some(handle) = self.surface_livekit_client.as_ref() {
             for chunk in canvas_sync::chunk_snapshot(canvas_id, request_id, &ledger_json) {
-                let _ = handle.try_publish_canvas_data(
-                    canvas_sync::encode(&chunk),
-                    vec![requester.clone()],
-                );
+                let _ = handle
+                    .try_publish_canvas_data(canvas_sync::encode(&chunk), vec![requester.clone()]);
             }
         }
     }
@@ -5878,7 +5868,11 @@ impl OceanGuiShell {
                 // NOTE: deliberately do NOT re-broadcast — LiveKit already
                 // fanned this patch out to every peer.
             }
-            CanvasSyncMessage::SnapshotRequest { canvas_id, request_id, .. } => {
+            CanvasSyncMessage::SnapshotRequest {
+                canvas_id,
+                request_id,
+                ..
+            } => {
                 self.serve_canvas_snapshot(&canvas_id, &request_id, from_identity);
             }
             CanvasSyncMessage::Snapshot {
@@ -5903,14 +5897,19 @@ impl OceanGuiShell {
                         .canvas_sync_reassembly
                         .entry(request_id.clone())
                         .or_insert_with(|| {
-                            (canvas_id.clone(), canvas_sync::SnapshotReassembly::new(chunk_count))
+                            (
+                                canvas_id.clone(),
+                                canvas_sync::SnapshotReassembly::new(chunk_count),
+                            )
                         });
                     entry.1.insert(chunk_index, data_b64);
                     entry.1.try_assemble()
                 };
                 if let Some(result) = assembly_result {
-                    let assembled_canvas_id =
-                        self.canvas_sync_reassembly.get(&request_id).map(|(c, _)| c.clone());
+                    let assembled_canvas_id = self
+                        .canvas_sync_reassembly
+                        .get(&request_id)
+                        .map(|(c, _)| c.clone());
                     self.canvas_sync_reassembly.remove(&request_id);
                     match result {
                         Ok(bytes) => {
@@ -5919,8 +5918,7 @@ impl OceanGuiShell {
                             }
                         }
                         Err(err) => {
-                            self.agent.status =
-                                format!("canvas snapshot reassemble failed: {err}");
+                            self.agent.status = format!("canvas snapshot reassemble failed: {err}");
                             // Clear pending; a future roster tick retries the next peer.
                             self.canvas_sync_pending_snapshot = None;
                         }
@@ -5943,7 +5941,6 @@ impl OceanGuiShell {
         // Drop any queued outbound edits so they don't publish on a stale link.
         while self.canvas_sync_outbound.try_recv().is_ok() {}
     }
-
 
     /// Number of native-canvas repaint requests issued so far (test/observation
     /// hook for the §16 patch hot path).
@@ -9203,7 +9200,10 @@ fn apply_patches_to_ledger_with_store(
         store.persist(&ledger, &newly_applied);
     }
 
-    Some(AppliedPatchBatch { ledger, newly_applied })
+    Some(AppliedPatchBatch {
+        ledger,
+        newly_applied,
+    })
 }
 
 fn canvas_web_index_path() -> Option<PathBuf> {
@@ -9834,7 +9834,11 @@ mod tests {
 
         // Replica A: alice upserts a card, then moves it.
         let mut a = CanvasLedger::new("canvas:main", "sess-a", CanvasMode::default());
-        a.apply_patch(upsert_envelope("c1", "alice's card").patch, alice.clone(), 1);
+        a.apply_patch(
+            upsert_envelope("c1", "alice's card").patch,
+            alice.clone(),
+            1,
+        );
         a.apply_patch(
             SurfacePatch::MoveComponent {
                 component_id: ComponentId::new("c1"),
@@ -9856,7 +9860,10 @@ mod tests {
                 if !canvas_sync::sync_eligible(&env.patch) {
                     continue;
                 }
-                let msg = CanvasSyncMessage::Patch { v: 1, envelope: env.clone() };
+                let msg = CanvasSyncMessage::Patch {
+                    v: 1,
+                    envelope: env.clone(),
+                };
                 let decoded = canvas_sync::decode(&canvas_sync::encode(&msg))
                     .expect("wire encode/decode roundtrips");
                 let CanvasSyncMessage::Patch { envelope, .. } = decoded else {
@@ -9875,7 +9882,10 @@ mod tests {
             ab.components.keys().cloned().collect();
         let ba_keys: std::collections::BTreeSet<ComponentId> =
             ba.components.keys().cloned().collect();
-        assert_eq!(ab_keys, ba_keys, "both replicas converge on the same components");
+        assert_eq!(
+            ab_keys, ba_keys,
+            "both replicas converge on the same components"
+        );
 
         // The contended positions and winning versions match regardless of order.
         assert_eq!(ab.component(&ComponentId::new("c1")).unwrap().rect.x, 100.0);
@@ -10655,7 +10665,8 @@ mod tests {
             vec![upsert_envelope("hello", "hello from the agent")],
             None,
         )
-        .expect("non-empty patch batch yields a ledger").ledger;
+        .expect("non-empty patch batch yields a ledger")
+        .ledger;
 
         assert_eq!(ledger.canvas_id, CanvasId::new("canvas:main"));
         let component = ledger
@@ -10680,7 +10691,8 @@ mod tests {
             vec![upsert_envelope("a", "first")],
             None,
         )
-        .unwrap().ledger;
+        .unwrap()
+        .ledger;
 
         let second = apply_patches_to_ledger_with_store(
             Some(first),
@@ -10689,7 +10701,8 @@ mod tests {
             vec![upsert_envelope("b", "second")],
             None,
         )
-        .unwrap().ledger;
+        .unwrap()
+        .ledger;
 
         assert!(second.component(&ComponentId::new("a")).is_some());
         assert!(second.component(&ComponentId::new("b")).is_some());
@@ -10715,7 +10728,9 @@ mod tests {
                 canvas_id.clone(),
                 vec![env],
                 None,
-            ).map(|b| b.ledger) {
+            )
+            .map(|b| b.ledger)
+            {
                 set.put(ledger);
                 set.set_active(&canvas_id);
             }
@@ -10786,7 +10801,9 @@ mod tests {
             canvas_id.clone(),
             vec![env],
             None,
-        ).map(|b| b.ledger) {
+        )
+        .map(|b| b.ledger)
+        {
             set.put(ledger);
             set.set_active(&canvas_id);
         }
@@ -10992,7 +11009,8 @@ mod tests {
             vec![upsert_envelope("a", "first")],
             Some(&store),
         )
-        .unwrap().ledger;
+        .unwrap()
+        .ledger;
         let l1 = apply_patches_to_ledger_with_store(
             Some(l1),
             "sess-1".to_string(),
@@ -11000,7 +11018,8 @@ mod tests {
             vec![upsert_envelope("b", "second")],
             Some(&store),
         )
-        .unwrap().ledger;
+        .unwrap()
+        .ledger;
         assert_eq!(l1.components.len(), 2);
         let rev_before = l1.revision;
         drop(l1);
@@ -11014,7 +11033,8 @@ mod tests {
             vec![upsert_envelope("c", "after restart")],
             Some(&store),
         )
-        .unwrap().ledger;
+        .unwrap()
+        .ledger;
 
         assert!(
             l2.component(&ComponentId::new("a")).is_some(),
@@ -11128,7 +11148,8 @@ mod tests {
         // a fresh surface receiving its first agent mutation.
         let ledger =
             apply_patches_to_ledger_with_store(None, session_id, canvas_id.clone(), patches, None)
-                .expect("non-empty batch yields a mutated native ledger").ledger;
+                .expect("non-empty batch yields a mutated native ledger")
+                .ledger;
 
         // Revision bumped off zero — the native view's next frame sees a change.
         assert_eq!(

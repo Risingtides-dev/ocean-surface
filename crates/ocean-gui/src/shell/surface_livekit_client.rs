@@ -355,7 +355,10 @@ pub(super) fn coalesce_surface_update(
                 return SurfaceLiveKitClientAction::Disconnect;
             }
             Err(TryRecvError::Empty) => {
-                return SurfaceLiveKitClientAction::UpdateSurface { update, canvas_data };
+                return SurfaceLiveKitClientAction::UpdateSurface {
+                    update,
+                    canvas_data,
+                };
             }
             Err(TryRecvError::Disconnected) => {
                 return SurfaceLiveKitClientAction::Closed;
@@ -533,13 +536,17 @@ mod tests {
         sender.try_send(p2.clone()).unwrap();
 
         match coalesce_surface_update(&mut receiver, first) {
-            SurfaceLiveKitClientAction::UpdateSurface { update, canvas_data } => {
+            SurfaceLiveKitClientAction::UpdateSurface {
+                update,
+                canvas_data,
+            } => {
                 assert_eq!(
                     update.room_metadata,
                     r#"{"surface_session_id":"surface:third"}"#
                 );
                 assert_eq!(
-                    canvas_data, vec![p1, p2],
+                    canvas_data,
+                    vec![p1, p2],
                     "canvas packets are carried through in enqueue order"
                 );
             }

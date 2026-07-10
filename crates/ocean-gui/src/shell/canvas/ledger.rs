@@ -1431,7 +1431,10 @@ mod tests {
 
         let touched = local.merge_snapshot(&remote);
 
-        assert!(touched.is_empty(), "a lower-rev remote snapshot is superseded");
+        assert!(
+            touched.is_empty(),
+            "a lower-rev remote snapshot is superseded"
+        );
         assert_eq!(
             local.component(&ComponentId::new("c1")).unwrap().rect.x,
             42.0,
@@ -1455,20 +1458,17 @@ mod tests {
         let mut local_absent = ledger();
         let touched = local_absent.merge_snapshot(&remote);
         assert_eq!(touched, vec![ComponentId::new("lonely")]);
-        assert!(local_absent
-            .component(&ComponentId::new("lonely"))
-            .is_some());
+        assert!(
+            local_absent
+                .component(&ComponentId::new("lonely"))
+                .is_some()
+        );
 
         // Present locally (versioned) → skipped, local keeps its own state and
         // version.
         let mut local_present = ledger();
-        local_present.apply_remote_patch(versioned_upsert_env(
-            "lonely",
-            77.0,
-            3,
-            "human",
-            "operator",
-        ));
+        local_present
+            .apply_remote_patch(versioned_upsert_env("lonely", 77.0, 3, "human", "operator"));
         let local_version = local_present
             .merge_state
             .version(&ComponentId::new("lonely"))
@@ -1482,11 +1482,14 @@ mod tests {
             local_present
                 .component(&ComponentId::new("lonely"))
                 .unwrap()
-                .rect.x,
+                .rect
+                .x,
             77.0,
         );
         assert_eq!(
-            local_present.merge_state.version(&ComponentId::new("lonely")),
+            local_present
+                .merge_state
+                .version(&ComponentId::new("lonely")),
             local_version.as_ref(),
         );
     }
@@ -1560,11 +1563,19 @@ mod tests {
         // The contended `shared` resolves to the higher-rev writer (bob, rev 5)
         // on both, regardless of merge order.
         assert_eq!(
-            a_prime.component(&ComponentId::new("shared")).unwrap().rect.x,
+            a_prime
+                .component(&ComponentId::new("shared"))
+                .unwrap()
+                .rect
+                .x,
             20.0,
         );
         assert_eq!(
-            b_prime.component(&ComponentId::new("shared")).unwrap().rect.x,
+            b_prime
+                .component(&ComponentId::new("shared"))
+                .unwrap()
+                .rect
+                .x,
             20.0,
         );
         assert_eq!(

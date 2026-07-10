@@ -361,7 +361,16 @@ mod tests {
 
     #[test]
     fn chunk_and_reassemble_roundtrip_at_boundaries() {
-        for &size in &[0usize, 1, 2, SNAPSHOT_CHUNK_RAW_BYTES - 1, SNAPSHOT_CHUNK_RAW_BYTES, SNAPSHOT_CHUNK_RAW_BYTES + 1, SNAPSHOT_CHUNK_RAW_BYTES * 2, SNAPSHOT_CHUNK_RAW_BYTES * 2 + 1] {
+        for &size in &[
+            0usize,
+            1,
+            2,
+            SNAPSHOT_CHUNK_RAW_BYTES - 1,
+            SNAPSHOT_CHUNK_RAW_BYTES,
+            SNAPSHOT_CHUNK_RAW_BYTES + 1,
+            SNAPSHOT_CHUNK_RAW_BYTES * 2,
+            SNAPSHOT_CHUNK_RAW_BYTES * 2 + 1,
+        ] {
             let payload: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
             let canvas_id = CanvasId::new("canvas:main");
             let chunks = chunk_snapshot(&canvas_id, "req", &payload);
@@ -426,7 +435,10 @@ mod tests {
         reassembly.insert(2, "Yg==".to_string()); // "b"
         assert!(reassembly.try_assemble().is_none(), "missing middle chunk");
         reassembly.insert(1, "Yw==".to_string()); // "c"
-        let assembled = reassembly.try_assemble().expect("all chunks present").expect("base64 decodes");
+        let assembled = reassembly
+            .try_assemble()
+            .expect("all chunks present")
+            .expect("base64 decodes");
         // Assembled in index order: chunk 0 ("a") + chunk 1 ("c") + chunk 2 ("b").
         assert_eq!(assembled, b"acb");
     }
