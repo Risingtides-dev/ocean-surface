@@ -1232,3 +1232,11 @@ detached worktree because codex holds live uncommitted WIP (is_git,
 main_group) in the shared checkout — grouping change based on main's shape.
 Gates: wasm cargo check 0 errors, full crate suite green, new tests pass.
 _________________________________________________________________________________
+time:      [3:09pm] [07-10-26]
+agent:     [omp] [gpt-5.6-sol]
+worktree:  /tmp/ocean-voice-repair-surface (origin/main detached)
+type:      [bug-report]
+area:      [frontend]
+
+Restored the landed GPT Realtime Voice chat path after a later CSS merge malformed the voice-chat selector list and made the button appear inert. Voice chat now synchronously enters its center-stage state, hides the composer controls while connecting/live, docks only after a component is added after voice start, restores classic TTS barge-over protection, and returns to Off with a visible Retry voice chat row and concise missing-key error when ephemeral-secret minting fails. Root-owned realtime signals prevent disposed-owner WASM panics across conditional VoiceOrb mounts. Added RED/GREEN regressions for CSS, zero-card baseline docking, model URL encoding, and retry/error behavior; verified 292 tests, wasm check, release Trunk build, and headless delayed-failure UI flow with no page errors. A successful WebRTC call remains externally gated by provisioning a standard OpenAI platform API key in ocean-os.
+_________________________________________________________________________________
