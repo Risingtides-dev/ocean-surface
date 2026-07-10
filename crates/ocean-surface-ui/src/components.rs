@@ -380,8 +380,9 @@ fn TableView(component_id: String, kind_props: Value, daemon: Daemon) -> impl In
                         let oc = on_row_click.clone();
                         view! {
                             <tr on:click=move |_| oc(i) class="data-table__row">
-                                {cells.iter().map(|cell| {
-                                    view! { <td>{cell_text(cell)}</td> }
+                                {cells.iter().enumerate().map(|(j, cell)| {
+                                    let col_label = columns.get(j).map(|c| cell_text(c)).unwrap_or_default();
+                                    view! { <td data-label=col_label>{cell_text(cell)}</td> }
                                 }).collect::<Vec<_>>()}
                             </tr>
                         }

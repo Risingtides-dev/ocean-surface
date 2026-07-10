@@ -1240,3 +1240,30 @@ area:      [frontend]
 
 Restored the landed GPT Realtime Voice chat path after a later CSS merge malformed the voice-chat selector list and made the button appear inert. Voice chat now synchronously enters its center-stage state, hides the composer controls while connecting/live, docks only after a component is added after voice start, restores classic TTS barge-over protection, and returns to Off with a visible Retry voice chat row and concise missing-key error when ephemeral-secret minting fails. Root-owned realtime signals prevent disposed-owner WASM panics across conditional VoiceOrb mounts. Added RED/GREEN regressions for CSS, zero-card baseline docking, model URL encoding, and retry/error behavior; verified 292 tests, wasm check, release Trunk build, and headless delayed-failure UI flow with no page errors. A successful WebRTC call remains externally gated by provisioning a standard OpenAI platform API key in ocean-os.
 _________________________________________________________________________________
+
+time: [ 3:37AM] [07-10-26]
+agent: [claude] [fable-5]
+worktree: main
+type: bug-report
+area: frontend
+
+Production recovery after john's live-surface QA (Tide Coin missing, thinking
+stuck, components clipped, stale glow). Ported the deliverables Tide Coin into
+WaveBadge as a Canvas 2D coin (icons.rs) — waterline churns spinning, settles
+calm at rest, DPR<=2, static under reduced motion. Replaced the old
+ocean-thinking-glow aura with the edgelight specular top-edge breath +
+"ocean is working…" status row, and made the thinking disclosure past-tense on
+terminal turns (transcript.rs/css). Fixed compact component clipping at phone
+widths with true reflow — kanban stacks, tables cardify with per-column
+data-labels, charts/stats/dashboard single-column (compact.css + components.rs).
+Shipped the newest brand mark. Verified live on ocean.agentsworld.org (fresh
+wasm 404c414333d86edc): tide coin painted (pixel-checked), specular present,
+real table cardified + contained at 361px. NOTE: transcript.rs/css also carry
+the earlier role-header-removal + transcript-disclosure coherence changes from a
+prior lane — shipped together here; flag for veto if unwanted. Daemon left on
+deepseek-v4-pro (least-flaky of a currently-flaky provider set; codex/claude
+502/timeout this window — upstream, ocean-os territory). Thinking-forever on
+multi-minute provider STALLS remains an ocean-os follow-up (daemon holds the
+turn Running with no terminal frame; surface clears cleanly only on emitted
+TurnFinished).
+_________________________________________________________________________________

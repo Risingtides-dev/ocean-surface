@@ -285,3 +285,305 @@
   max-width: 100%;
   overflow-x: auto;
 }
+
+/* ── Narrow component reflow (≤480px) — stack kanban, cardify tables,
+   full-width charts, single-col stats/dashboards. True reflow, not
+   overflow-x band-aids. ─────────────────────────────────────────────── */
+@media (max-width: 480px) {
+  /* Container: prevent turn body from growing past viewport --------- */
+  .ocean-surface .turn--assistant .turn__body {
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  /* All component wrappers: fill the turn body, don't push offscreen */
+  .ocean-surface .component-kanban,
+  .ocean-surface .component-form,
+  .ocean-surface .component-table,
+  .ocean-surface .component-progress,
+  .ocean-surface .component-markdown,
+  .ocean-surface .component-dashboard,
+  .ocean-surface .component-chart,
+  .ocean-surface .component-timeline,
+  .ocean-surface .component-stats,
+  .ocean-surface .component-filetree,
+  .ocean-surface .component-diff,
+  .ocean-surface .component-code,
+  .ocean-surface .component-callout,
+  .ocean-surface .component-gallery,
+  .ocean-surface .component-confirm,
+  .ocean-surface .block--map,
+  .ocean-surface .block--video,
+  .ocean-surface .block--component-unknown {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+  }
+
+  /* Kanban: stack columns vertically -------------------------------- */
+  .ocean-surface .kanban-columns {
+    flex-direction: column;
+    gap: 12px;
+    max-height: none;
+    overflow-x: visible;
+  }
+  .ocean-surface .kanban-column {
+    min-width: 0;
+    max-width: none;
+    flex: 1 1 auto;
+    width: 100%;
+  }
+
+  /* Table: cardify rows — hide thead, display tr/td as blocks ----- */
+  .ocean-surface .component-table {
+    overflow-x: visible;
+  }
+  .ocean-surface .data-table {
+    display: block;
+    min-width: 0;
+    width: 100%;
+  }
+  .ocean-surface .data-table thead {
+    display: none;
+  }
+  .ocean-surface .data-table tbody {
+    display: block;
+  }
+  .ocean-surface .data-table__row {
+    display: block;
+    margin-bottom: 6px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius);
+  }
+  .ocean-surface .data-table td {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+    padding: 6px 12px;
+    border-bottom: none;
+    text-align: right;
+  }
+  .ocean-surface .data-table td:not(:last-child) {
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .ocean-surface .data-table td::before {
+    content: attr(data-label);
+    flex: 0 0 auto;
+    color: var(--fg-3);
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .ocean-surface .data-table__footer {
+    margin-top: 4px;
+    border-top: 1px solid var(--border-subtle);
+  }
+
+  /* Chart: label wraps to full row, track follows ------------------- */
+  .ocean-surface .chart-row {
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    min-height: auto;
+    padding: 4px 6px;
+  }
+  .ocean-surface .chart-row__label {
+    flex: 1 1 100%;
+    max-width: none;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+  }
+  .ocean-surface .chart-row__track {
+    flex: 1 1 auto;
+  }
+
+  /* Stats: single column -------------------------------------------- */
+  .ocean-surface .component-stats {
+    grid-template-columns: 1fr;
+  }
+  .ocean-surface .stat-card {
+    min-width: 0;
+  }
+
+  /* Form: full width ------------------------------------------------ */
+  .ocean-surface .component-form form {
+    width: 100%;
+  }
+
+  /* Progress: full width -------------------------------------------- */
+  .ocean-surface .component-progress {
+    width: 100%;
+  }
+
+  /* Gallery: tighter grid ------------------------------------------- */
+  .ocean-surface .component-gallery {
+    grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+  }
+
+  /* Dashboard: single column (override inline grid-template-columns) */
+  .ocean-surface .component-dashboard {
+    grid-template-columns: 1fr !important;
+    overflow-x: visible;
+  }
+  .ocean-surface .dashboard-cell {
+    min-width: 0;
+  }
+
+  /* Confirm: wrap action buttons ------------------------------------ */
+  .ocean-surface .confirm__actions {
+    flex-wrap: wrap;
+  }
+
+}
+
+/* ── Extension: always-compact component reflow ───────────────────────
+   The Chrome side-panel is always narrow (~361–420px); components must
+   reflow regardless of any viewport media query. */
+.ocean-surface--extension .turn--assistant .turn__body {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.ocean-surface--extension .component-kanban,
+.ocean-surface--extension .component-form,
+.ocean-surface--extension .component-table,
+.ocean-surface--extension .component-progress,
+.ocean-surface--extension .component-markdown,
+.ocean-surface--extension .component-dashboard,
+.ocean-surface--extension .component-chart,
+.ocean-surface--extension .component-timeline,
+.ocean-surface--extension .component-stats,
+.ocean-surface--extension .component-filetree,
+.ocean-surface--extension .component-diff,
+.ocean-surface--extension .component-code,
+.ocean-surface--extension .component-callout,
+.ocean-surface--extension .component-gallery,
+.ocean-surface--extension .component-confirm,
+.ocean-surface--extension .block--map,
+.ocean-surface--extension .block--video,
+.ocean-surface--extension .block--component-unknown {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+/* Extension kanban: stack columns */
+.ocean-surface--extension .kanban-columns {
+  flex-direction: column;
+  gap: 12px;
+  max-height: none;
+  overflow-x: visible;
+}
+.ocean-surface--extension .kanban-column {
+  min-width: 0;
+  max-width: none;
+  flex: 1 1 auto;
+  width: 100%;
+}
+
+/* Extension table: cardify */
+.ocean-surface--extension .component-table {
+  overflow-x: visible;
+}
+.ocean-surface--extension .data-table {
+  display: block;
+  min-width: 0;
+  width: 100%;
+}
+.ocean-surface--extension .data-table thead {
+  display: none;
+}
+.ocean-surface--extension .data-table tbody {
+  display: block;
+}
+.ocean-surface--extension .data-table__row {
+  display: block;
+  margin-bottom: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+}
+.ocean-surface--extension .data-table td {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: none;
+  text-align: right;
+}
+.ocean-surface--extension .data-table td:not(:last-child) {
+  border-bottom: 1px solid var(--border-subtle);
+}
+.ocean-surface--extension .data-table td::before {
+  content: attr(data-label);
+  flex: 0 0 auto;
+  color: var(--fg-3);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.ocean-surface--extension .data-table__footer {
+  margin-top: 4px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* Extension chart: label wraps */
+.ocean-surface--extension .chart-row {
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-height: auto;
+  padding: 4px 6px;
+}
+.ocean-surface--extension .chart-row__label {
+  flex: 1 1 100%;
+  max-width: none;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+.ocean-surface--extension .chart-row__track {
+  flex: 1 1 auto;
+}
+
+/* Extension stats: single column */
+.ocean-surface--extension .component-stats {
+  grid-template-columns: 1fr;
+}
+.ocean-surface--extension .stat-card {
+  min-width: 0;
+}
+
+/* Extension form: full width */
+.ocean-surface--extension .component-form form {
+  width: 100%;
+}
+
+/* Extension progress: full width */
+.ocean-surface--extension .component-progress {
+  width: 100%;
+}
+
+/* Extension gallery: tighter grid */
+.ocean-surface--extension .component-gallery {
+  grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+}
+
+/* Extension dashboard: single column */
+.ocean-surface--extension .component-dashboard {
+  grid-template-columns: 1fr !important;
+  overflow-x: visible;
+}
+.ocean-surface--extension .dashboard-cell {
+  min-width: 0;
+}
+
+/* Extension confirm: wrap actions */
+.ocean-surface--extension .confirm__actions {
+  flex-wrap: wrap;
+}
+

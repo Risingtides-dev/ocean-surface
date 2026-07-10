@@ -19,6 +19,7 @@ mod deck;
 mod host;
 mod icons;
 mod livekit;
+mod loader;
 mod markdown;
 mod model;
 mod palette;

@@ -13,6 +13,7 @@ use wasm_bindgen::JsCast;
 
 use crate::components::ComponentView;
 use crate::daemon::Daemon;
+use crate::icons::WaveBadge;
 use crate::markdown::render as render_md;
 use crate::model::{Block, Role, ToolStatus};
 
@@ -141,15 +142,11 @@ pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoVie
         <div class="transcript" node_ref=container on:scroll=on_scroll>
             <Show when=is_empty>
                 <div class="transcript__landing">
-                    // Approved v22 wordmark reveal: drip → splash → rising
-                    // tide unveils OCEAN; orb rides the surface into idle.
-                    // The scene SVG is aria-hidden (inside OceanReveal); the
-                    // h1 stays for readers. The Sessions launcher lives
-                    // INSIDE the scene, surfacing in the water zone when
-                    // the rAF waterline floods past it (data-flooded stamp —
-                    // no hardcoded delay; reduced-motion shows it always).
+                    // Approved v22 hero landing: Soundings field with
+                    // dispersive wave physics, letter etches, and the
+                    // launcher etching in when a wavefront crosses it.
                     <div class="transcript__landing-reveal">
-                        <crate::icons::OceanReveal />
+                        <crate::loader::SoundingsLanding />
                         <button
                             class="transcript__sessions-launcher"
                             on:click=move |_| show_sessions.set(true)
@@ -180,7 +177,7 @@ pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoVie
             <Show when=pending_response>
                 // Half-filled water card reveals "thinking…" as the tide
                 // rises — pending gap between send and first token.
-                <crate::icons::OceanThinking />
+                <crate::loader::SoundingsThinking />
             </Show>
         </div>
     }
@@ -258,6 +255,14 @@ fn AssistantTurn(
 
     view! {
         <div class="turn--assistant" class:is-streaming=is_streaming>
+            // Status row — tide coin + "ocean is working…" per edgelight.js.
+            // Visible only while this turn is the live streaming tail.
+            <Show when=is_streaming>
+                <div class="ocean-status-row">
+                    <WaveBadge spinning=true compact=true />
+                    <span>"ocean is working…"</span>
+                </div>
+            </Show>
             <div class="turn__body">
                 <For
                     each=items
@@ -417,17 +422,17 @@ fn ToolGroup(
         </div>
     }
 }
-/// A turn's thinking segments, tucked into one collapsible `thinking…`
-/// disclosure positioned where the first thinking segment appears. A turn can
-/// stream many thinking deltas and even interleave them with text/tools;
-/// without this tuck each segment would render its own chip (a "26-chip wall").
+/// A turn's thinking segments, tucked into one collapsible disclosure
+/// positioned where the first thinking segment appears. A turn can stream
+/// many thinking deltas and even interleave them with text/tools; without
+/// this tuck each segment would render its own chip (a "26-chip wall").
 /// All thinking blocks collapse into this single disclosure; each segment's
 /// text renders as its own `<pre>` when expanded. Collapsed by default; the
-/// toggle sticks. The label is a plain `thinking…` — no char counter (that's
-/// debug telemetry, not UI). While reasoning is the streaming tail of the
-/// last turn the head carries `is-running` + a status dot (the tokens-level
-/// cue tools already have); it drops the moment text/tools follow or the
-/// turn finishes. Render-only: never reorders `turn.blocks`.
+/// toggle sticks. While reasoning is the streaming tail the head carries
+/// `is-running`, a status dot, and the active label `thinking…`; once the
+/// turn finishes (or a non-thinking block follows) the label switches to
+/// past-tense `thought`, the dot drops, and the group stays collapsed.
+/// Render-only: never reorders `turn.blocks`.
 ///
 /// Member indices are DERIVED reactively from `turns`, not snapshotted from the
 /// render-item prop: thinking segments keep appending mid-stream and the parent
@@ -486,7 +491,11 @@ fn ThinkingGroup(
                 <Show when=move || running.get()>
                     <span class="transcript-disclosure__dot"></span>
                 </Show>
-                <span class="transcript-disclosure__label">"thinking…"</span>
+                // Live tail: active present-tense; terminal turn: past-tense,
+                // no dot, collapsed by default while content stays accessible.
+                <span class="transcript-disclosure__label">
+                    {move || if running.get() { "thinking…" } else { "thought" }}
+                </span>
             </button>
             <Show when=move || open.get()>
                 <For
