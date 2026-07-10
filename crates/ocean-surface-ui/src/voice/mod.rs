@@ -492,55 +492,10 @@ pub fn VoiceOrb(
 
             <Show when=move || show_menu.get()>
                 <div class="voice-menu" role="menu" aria-label="voice mode">
-                    <button
-                        class=move || mode_classes(mode::VoiceMode::Off)
-                        type="button"
-                        role="menuitemradio"
-                        aria-checked=move || if voice_mode.get() == mode::VoiceMode::Off { "true" } else { "false" }
-                        on:click=move |_| choose(mode::VoiceMode::Off)
-                    >
-                        <span class="voice-menu__item-icon"><crate::icons::MicOff /></span>
-                        <span class="voice-menu__item-label">"Off"</span>
-                        <span class="voice-menu__item-desc">"Microphone disabled — nothing is recorded"</span>
-                    </button>
-                    <button
-                        class=move || mode_classes(mode::VoiceMode::Dictate)
-                        type="button"
-                        role="menuitemradio"
-                        aria-checked=move || if voice_mode.get() == mode::VoiceMode::Dictate { "true" } else { "false" }
-                        on:click=move |_| choose(mode::VoiceMode::Dictate)
-                    >
-                        <span class="voice-menu__item-icon"><crate::icons::Mic /></span>
-                        <span class="voice-menu__item-label">"Dictate"</span>
-                        <span class="voice-menu__item-desc">"Hold to talk — transcript lands in the message box for review"</span>
-                    </button>
-                    <button
-                        class=move || mode_classes(mode::VoiceMode::PushToTalk)
-                        type="button"
-                        role="menuitemradio"
-                        aria-checked=move || if voice_mode.get() == mode::VoiceMode::PushToTalk { "true" } else { "false" }
-                        on:click=move |_| choose(mode::VoiceMode::PushToTalk)
-                    >
-                        <span class="voice-menu__item-icon"><crate::icons::Mic /></span>
-                        <span class="voice-menu__item-label">"Push to talk"</span>
-                        <span class="voice-menu__item-desc">"Hold the orb or Cmd+Shift+V — audio is sent only while held"</span>
-                    </button>
-                    <button
-                        class=move || mode_classes(mode::VoiceMode::HandsFree)
-                        type="button"
-                        role="menuitemradio"
-                        aria-checked=move || if voice_mode.get() == mode::VoiceMode::HandsFree { "true" } else { "false" }
-                        on:click=move |_| choose(mode::VoiceMode::HandsFree)
-                    >
-                        <span class="voice-menu__item-icon"><crate::icons::Waves /></span>
-                        <span class="voice-menu__item-label">"Hands-free"</span>
-                        <span class="voice-menu__item-desc">"Open mic — each phrase you speak is sent for transcription"</span>
-                    </button>
-                    // Realtime voice chat (voice phases 2/3): a full
-                    // speech-to-speech session — not a persisted mode, so it
-                    // rides below the radio group. Entering it device-gates
-                    // the classic capture modes (mode → Off) so exactly one
-                    // thing ever owns the mic.
+                    // Realtime voice chat (voice phases 2/3): the primary
+                    // speech-to-speech entry point, positioned first in the menu.
+                    // Not a persisted mode — entering it device-gates the classic
+                    // capture modes (mode → Off) so exactly one thing owns the mic.
                     {{
                         let rt_entry = move || {
                             realtime::voice_menu_realtime_entry(
@@ -592,6 +547,55 @@ pub fn VoiceOrb(
                         }
                     }}
 
+                    <button
+                        class=move || mode_classes(mode::VoiceMode::Dictate)
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked=move || if voice_mode.get() == mode::VoiceMode::Dictate { "true" } else { "false" }
+                        on:click=move |_| choose(mode::VoiceMode::Dictate)
+                    >
+                        <span class="voice-menu__item-icon"><crate::icons::Mic /></span>
+                        <span class="voice-menu__item-label">"Dictate"</span>
+                        <span class="voice-menu__item-desc">"Hold to talk — transcript lands in the message box for review"</span>
+                    </button>
+
+                    <div class="voice-menu__divider" role="separator"></div>
+                    <span class="voice-menu__group-label" aria-hidden="true">"Microphone"</span>
+
+                    <button
+                        class=move || mode_classes(mode::VoiceMode::Off)
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked=move || if voice_mode.get() == mode::VoiceMode::Off { "true" } else { "false" }
+                        on:click=move |_| choose(mode::VoiceMode::Off)
+                    >
+                        <span class="voice-menu__item-icon"><crate::icons::MicOff /></span>
+                        <span class="voice-menu__item-label">"Off"</span>
+                        <span class="voice-menu__item-desc">"Microphone disabled — nothing is recorded"</span>
+                    </button>
+                    <button
+                        class=move || mode_classes(mode::VoiceMode::PushToTalk)
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked=move || if voice_mode.get() == mode::VoiceMode::PushToTalk { "true" } else { "false" }
+                        on:click=move |_| choose(mode::VoiceMode::PushToTalk)
+                    >
+                        <span class="voice-menu__item-icon"><crate::icons::Mic /></span>
+                        <span class="voice-menu__item-label">"Push to talk"</span>
+                        <span class="voice-menu__item-desc">"Hold the orb or Cmd+Shift+V — audio is sent only while held"</span>
+                    </button>
+                    <button
+                        class=move || mode_classes(mode::VoiceMode::HandsFree)
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked=move || if voice_mode.get() == mode::VoiceMode::HandsFree { "true" } else { "false" }
+                        on:click=move |_| choose(mode::VoiceMode::HandsFree)
+                    >
+                        <span class="voice-menu__item-icon"><crate::icons::Waves /></span>
+                        <span class="voice-menu__item-label">"Hands-free"</span>
+                        <span class="voice-menu__item-desc">"Open mic — each phrase you speak is sent for transcription"</span>
+                    </button>
+
                     <div class="voice-menu__divider" role="separator"></div>
 
                     <button
@@ -604,7 +608,6 @@ pub fn VoiceOrb(
                         <span class="voice-menu__item-icon">{toggle_icon}</span>
                         <span class="voice-menu__item-label">"Spoken replies"</span>
                     </button>
-
                     <p class="voice-menu__note">"Hands-free streams mic audio to xAI. Voice replies use xAI TTS."</p>
                 </div>
             </Show>

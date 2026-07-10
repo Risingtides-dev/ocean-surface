@@ -291,6 +291,19 @@
   border-top: 1px solid var(--border-subtle);
 }
 
+/* "Microphone" group label — non-interactive section header for the
+   radio-group portion of the voice menu. */
+.voice-menu__group-label {
+  display: block;
+  padding: 6px 8px 2px;
+  font-size: 10px;
+  line-height: 1.4;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+  user-select: none;
+}
+
 /* Spoken-replies toggle — a quiet row with a trailing state dot (::after);
    is-on blooms the dot aqua to read as "replies on". */
 .voice-menu__toggle {
