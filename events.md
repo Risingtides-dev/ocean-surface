@@ -1370,4 +1370,11 @@ FilesPanel selected_path signal removed, dir_row recursion-only param dropped
 daemon_stop host seam + allow(too_many_arguments) on rehydrate_transcript with
 rationale. Gates on this exact tree: CI's five steps green locally (proxy
 build/test/clippy, ui wasm check/clippy 0 errors) + 296 host tests.
+time:      [5:49pm] [07-10-26]
+agent:     [omp] [gpt-5.6-sol]
+worktree:  /tmp/ocean-realtime-signal-fix (origin/main detached)
+type:      [bug-report]
+area:      [frontend]
+
+Provisioned the operator's capped OpenAI test credential in the daemon's untracked 0600 auth store, rebuilt/restarted the supervised daemon, and proved the Realtime secret mint returns 200 with gpt-realtime-2. A live WebRTC browser smoke then exposed three lifecycle defects hidden by the prior missing-key path: arena-owned thread-local status signals panicked after conditional mounts, the level-meter and WebRTC callbacks could fire after their wasm closures were dropped, and stop-during-Connecting could resurrect or orphan a hot microphone session. Converted all shared voice status signals to ArcRwSignal, tracked/cancelled the latest rAF, detached callbacks before transport close, centralized completed-session cleanup in Drop, and added a generation-guarded connect lifecycle with immediate connecting-mic shutdown, MicGuard/PendingTransport failure cleanup, and stale-result suppression. RED/GREEN regressions pin Arc ownership, latest-frame take-once semantics, and connect-generation cancellation. Verified 298 tests, wasm check, release Trunk build, delayed stop during an active OpenAI request remaining Off after 200/201 responses, then a fresh session reaching Live and ending Off with zero browser errors. Independent privacy review returned SHIP and confirmed the hot-mic race is closed.
 _________________________________________________________________________________
