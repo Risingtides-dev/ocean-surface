@@ -1,0 +1,56 @@
+<!doctype html><html><head><meta charset="utf-8"><title>OCEAN</title>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+<style>
+body{margin:0;min-height:100vh;background:#050607;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:40px;font-family:system-ui}
+.cap{font-size:12px;letter-spacing:.34em;text-transform:uppercase;color:#2e5b63}
+svg.badge{overflow:visible;filter:drop-shadow(0 22px 70px rgba(0,50,75,.5))}
+#arc{filter:drop-shadow(0 1px .9px rgba(0,0,0,.8)) drop-shadow(0 0 3.2px rgba(46,232,214,.4))}
+.wg{filter:drop-shadow(0 .9px .8px rgba(0,0,0,.78)) drop-shadow(0 0 2.6px rgba(23,211,194,.34))}
+#deepg{filter:drop-shadow(0 1.1px 1px rgba(0,0,0,.78)) drop-shadow(0 0 3px rgba(13,166,196,.38))}
+#bar{filter:drop-shadow(0 .6px .6px rgba(0,0,0,.8)) drop-shadow(0 0 2px rgba(16,110,165,.5))}
+.crest{fill:none;stroke-width:.6;opacity:.8}
+</style></head><body>
+<div class="cap">ocean</div>
+<svg class="badge" width="440" height="440" viewBox="0 0 48 48" fill="none">
+ <defs>
+  <clipPath id="clip"><circle cx="24" cy="24" r="20.2"/></clipPath>
+  <linearGradient id="gArc" x1="0" y1="5" x2="0" y2="15.5" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#a8fff6"/><stop offset=".24" stop-color="#2ee8d6"/><stop offset="1" stop-color="#0da699"/>
+  </linearGradient>
+  <linearGradient id="gW1" x1="0" y1="19" x2="0" y2="23.8" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#63f5e3"/><stop offset=".25" stop-color="#17d3c2"/><stop offset="1" stop-color="#089186"/>
+  </linearGradient>
+  <linearGradient id="gW2" x1="0" y1="25.6" x2="0" y2="30.4" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#31e0d4"/><stop offset=".25" stop-color="#0cbdb4"/><stop offset="1" stop-color="#067a82"/>
+  </linearGradient>
+  <linearGradient id="gDeep" x1="0" y1="31.8" x2="0" y2="39.8" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#12a9c6"/><stop offset=".5" stop-color="#076c96"/><stop offset="1" stop-color="#043158"/>
+  </linearGradient>
+  <linearGradient id="gBar" x1="0" y1="42.4" x2="0" y2="44" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#1477b8"/><stop offset="1" stop-color="#0a3f6e"/>
+  </linearGradient>
+  <radialGradient id="gVig"><stop offset=".6" stop-color="rgba(0,0,0,0)"/><stop offset="1" stop-color="rgba(0,0,0,.5)"/></radialGradient>
+  <radialGradient id="gOccl"><stop offset=".78" stop-color="rgba(0,0,0,0)"/><stop offset=".94" stop-color="rgba(0,0,0,.28)"/><stop offset="1" stop-color="rgba(0,0,0,.78)"/></radialGradient>
+ </defs>
+ <circle cx="24" cy="24" r="21" fill="#03060b"/>
+ <circle cx="24" cy="24" r="20.6" fill="url(#gVig)"/>
+ <circle cx="24" cy="24" r="20.7" stroke="#143443" stroke-width=".6"/>
+ <g clip-path="url(#clip)">
+   <path id="arc" d="M 7.23 15.50 A 18.8 18.8 0 0 1 40.77 15.50 A 28.74 28.74 0 0 0 7.23 15.50 Z" fill="url(#gArc)"/>
+   <g id="water">
+     <g id="w1g" class="wg"><path d="M -24.00 19.60 Q -20.00 18.10 -16.00 19.60 Q -12.00 21.10 -8.00 19.60 Q -4.00 18.10 0.00 19.60 Q 4.00 21.10 8.00 19.60 Q 12.00 18.10 16.00 19.60 Q 20.00 21.10 24.00 19.60 Q 28.00 18.10 32.00 19.60 Q 36.00 21.10 40.00 19.60 Q 44.00 18.10 48.00 19.60 Q 52.00 21.10 56.00 19.60 Q 60.00 18.10 64.00 19.60 Q 68.00 21.10 72.00 19.60 Q 76.00 18.10 80.00 19.60 Q 84.00 21.10 88.00 19.60 L 88.00 23.20 Q 84.00 24.70 80.00 23.20 Q 76.00 21.70 72.00 23.20 Q 68.00 24.70 64.00 23.20 Q 60.00 21.70 56.00 23.20 Q 52.00 24.70 48.00 23.20 Q 44.00 21.70 40.00 23.20 Q 36.00 24.70 32.00 23.20 Q 28.00 21.70 24.00 23.20 Q 20.00 24.70 16.00 23.20 Q 12.00 21.70 8.00 23.20 Q 4.00 24.70 0.00 23.20 Q -4.00 21.70 -8.00 23.20 Q -12.00 24.70 -16.00 23.20 Q -20.00 21.70 -24.00 23.20 Z" fill="url(#gW1)"/><path class="crest" d="M -24 19.6 Q -20.00 18.10 -16.00 19.60 Q -12.00 21.10 -8.00 19.60 Q -4.00 18.10 0.00 19.60 Q 4.00 21.10 8.00 19.60 Q 12.00 18.10 16.00 19.60 Q 20.00 21.10 24.00 19.60 Q 28.00 18.10 32.00 19.60 Q 36.00 21.10 40.00 19.60 Q 44.00 18.10 48.00 19.60 Q 52.00 21.10 56.00 19.60 Q 60.00 18.10 64.00 19.60 Q 68.00 21.10 72.00 19.60 Q 76.00 18.10 80.00 19.60 Q 84.00 21.10 88.00 19.60" stroke="#c2fff7"/></g>
+     <g id="w2g" class="wg"><path d="M -24.00 26.20 Q -20.00 24.70 -16.00 26.20 Q -12.00 27.70 -8.00 26.20 Q -4.00 24.70 0.00 26.20 Q 4.00 27.70 8.00 26.20 Q 12.00 24.70 16.00 26.20 Q 20.00 27.70 24.00 26.20 Q 28.00 24.70 32.00 26.20 Q 36.00 27.70 40.00 26.20 Q 44.00 24.70 48.00 26.20 Q 52.00 27.70 56.00 26.20 Q 60.00 24.70 64.00 26.20 Q 68.00 27.70 72.00 26.20 Q 76.00 24.70 80.00 26.20 Q 84.00 27.70 88.00 26.20 L 88.00 29.80 Q 84.00 31.30 80.00 29.80 Q 76.00 28.30 72.00 29.80 Q 68.00 31.30 64.00 29.80 Q 60.00 28.30 56.00 29.80 Q 52.00 31.30 48.00 29.80 Q 44.00 28.30 40.00 29.80 Q 36.00 31.30 32.00 29.80 Q 28.00 28.30 24.00 29.80 Q 20.00 31.30 16.00 29.80 Q 12.00 28.30 8.00 29.80 Q 4.00 31.30 0.00 29.80 Q -4.00 28.30 -8.00 29.80 Q -12.00 31.30 -16.00 29.80 Q -20.00 28.30 -24.00 29.80 Z" fill="url(#gW2)"/><path class="crest" d="M -24 26.2 Q -20.00 24.70 -16.00 26.20 Q -12.00 27.70 -8.00 26.20 Q -4.00 24.70 0.00 26.20 Q 4.00 27.70 8.00 26.20 Q 12.00 24.70 16.00 26.20 Q 20.00 27.70 24.00 26.20 Q 28.00 24.70 32.00 26.20 Q 36.00 27.70 40.00 26.20 Q 44.00 24.70 48.00 26.20 Q 52.00 27.70 56.00 26.20 Q 60.00 24.70 64.00 26.20 Q 68.00 27.70 72.00 26.20 Q 76.00 24.70 80.00 26.20 Q 84.00 27.70 88.00 26.20" stroke="#93f4ea"/></g>
+     <g id="deepg"><path d="M -24 32.8 Q -20.00 31.30 -16.00 32.80 Q -12.00 34.30 -8.00 32.80 Q -4.00 31.30 0.00 32.80 Q 4.00 34.30 8.00 32.80 Q 12.00 31.30 16.00 32.80 Q 20.00 34.30 24.00 32.80 Q 28.00 31.30 32.00 32.80 Q 36.00 34.30 40.00 32.80 Q 44.00 31.30 48.00 32.80 Q 52.00 34.30 56.00 32.80 Q 60.00 31.30 64.00 32.80 Q 68.00 34.30 72.00 32.80 Q 76.00 31.30 80.00 32.80 Q 84.00 34.30 88.00 32.80 L 88.0 39.8 L -24 39.8 Z" fill="url(#gDeep)"/><path class="crest" d="M -24 32.8 Q -20.00 31.30 -16.00 32.80 Q -12.00 34.30 -8.00 32.80 Q -4.00 31.30 0.00 32.80 Q 4.00 34.30 8.00 32.80 Q 12.00 31.30 16.00 32.80 Q 20.00 34.30 24.00 32.80 Q 28.00 31.30 32.00 32.80 Q 36.00 34.30 40.00 32.80 Q 44.00 31.30 48.00 32.80 Q 52.00 34.30 56.00 32.80 Q 60.00 31.30 64.00 32.80 Q 68.00 34.30 72.00 32.80 Q 76.00 31.30 80.00 32.80 Q 84.00 34.30 88.00 32.80" stroke="#6fdcec"/></g>
+   </g>
+   <path id="bar" d="M 16.8 43.2 L 31.2 43.2" stroke="url(#gBar)" stroke-width="1.9"/>
+ </g>
+ <circle cx="24" cy="24" r="20.2" fill="url(#gOccl)"/>
+</svg>
+<div class="cap">the coin &middot; one current</div>
+<script>
+gsap.to("#w1g",   { x: 16, duration: 2.6, ease: "none", repeat: -1 });
+gsap.to("#w2g",   { x: 16, duration: 3.6, ease: "none", repeat: -1 });
+gsap.to("#deepg", { x: 16, duration: 5.0, ease: "none", repeat: -1 });
+gsap.to("#water", { y: -0.9, duration: 2.8, ease: "sine.inOut", yoyo: true, repeat: -1 });
+</script>
+</body></html>

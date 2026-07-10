@@ -1,0 +1,100 @@
+<!doctype html><html><head><meta charset="utf-8"><title>OCEAN v15</title><style>
+*{box-sizing:border-box;margin:0}
+body{background:#050d13;min-height:100vh;font-family:-apple-system,system-ui,sans-serif;color:#e8f4f2;display:flex;flex-direction:column;align-items:center;gap:60px;padding:76px 24px}
+.hero{display:flex;flex-direction:column;align-items:center;gap:28px}
+.hero .mark{width:280px;height:280px;filter:drop-shadow(0 20px 46px rgba(2,10,16,.72))}
+.word{display:flex;overflow:hidden;font-size:44px;font-weight:650;letter-spacing:.34em;text-indent:.34em}
+.word span{display:inline-block;transform:translateY(115%)}
+.w1{color:#4fdcc4}.w2{color:#33bbb6}.w3{color:#2a9dbd}.w4{color:#2f78c9}.w5{color:#4a63d8}
+.loadrow{display:flex;align-items:center;gap:14px;background:#081620;border:1px solid #0f2833;border-radius:14px;padding:12px 20px}
+.loadrow .mark{width:46px;height:46px;filter:drop-shadow(0 4px 10px rgba(2,10,16,.6))}
+.loadrow em{font-style:normal;color:#89b0bb;font-size:15px}
+</style></head><body>
+<div class="hero"><span id="heroMark"></span>
+<div class="word"><span class="w1">O</span><span class="w2">C</span><span class="w3">E</span><span class="w4">A</span><span class="w5">N</span></div></div>
+<div class="loadrow"><span id="chipMark"></span><em>thinking&hellip;</em></div>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+<script>
+const NS="http://www.w3.org/2000/svg";
+const EDGES=[
+  {y0:14.0,a:1.50,k:0.33,spd:0.85,ph:0.2},
+  {y0:20.4,a:1.15,k:0.44,spd:1.05,ph:1.5},
+  {y0:25.2,a:0.92,k:0.52,spd:0.75,ph:2.8},
+  {y0:31.6,a:0.82,k:0.40,spd:0.95,ph:4.0},
+  {y0:36.6,a:0.66,k:0.58,spd:0.68,ph:5.2},
+];
+const STEP=0.4,X0=1.5,X1=46.5;
+function ey(E,x,t){
+  const br=1+0.11*Math.sin(0.55*t+E.ph);
+  const s=Math.sin(E.k*x-E.spd*t+E.ph)+0.44*Math.sin(1.7*E.k*x-1.28*E.spd*t+E.ph*1.6+0.7);
+  return E.y0+E.a*br*s+E.a*0.09*Math.sin(3.0*E.k*x+0.5*E.spd*t+E.ph);
+}
+function samp(E,t){const p=[];for(let x=X0;x<=X1+0.01;x+=STEP)p.push([x,ey(E,x,t)]);return p;}
+function bandTop(top,botY){let d="M"+top[0][0].toFixed(2)+" "+top[0][1].toFixed(2);for(let i=1;i<top.length;i++)d+="L"+top[i][0].toFixed(2)+" "+top[i][1].toFixed(2);return d+"L"+X1.toFixed(2)+" "+botY+"L"+X0.toFixed(2)+" "+botY+"Z";}
+function band2(top,bot){let d="M"+top[0][0].toFixed(2)+" "+top[0][1].toFixed(2);for(let i=1;i<top.length;i++)d+="L"+top[i][0].toFixed(2)+" "+top[i][1].toFixed(2);for(let i=bot.length-1;i>=0;i--)d+="L"+bot[i][0].toFixed(2)+" "+bot[i][1].toFixed(2);return d+"Z";}
+function edge(pts){let d="M"+pts[0][0].toFixed(2)+" "+pts[0][1].toFixed(2);for(let i=1;i<pts.length;i++)d+="L"+pts[i][0].toFixed(2)+" "+pts[i][1].toFixed(2);return d;}
+function grad(id,tag,y1,y2,c1,c2){return `<linearGradient id="${tag}${id}" x1="0" y1="${y1}" x2="0" y2="${y2}" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="${c1}"/><stop offset="1" stop-color="${c2}"/></linearGradient>`;}
+let UID=0;
+function buildBadge(compact){
+  const id=++UID;
+  // size-tuned weights: chip needs bold strokes + low blur to survive downscaling
+  const P=compact
+    ?{splW:.85,splB:.05,splO:.62,coreW:.62,coreO:.92,coreB:.03,haloW:1.15,softB:.22,fbW:.42,fbO:.58,fbhW:.72,glossO:.12}
+    :{splW:.30,splB:.13,splO:.56,coreW:.30,coreO:.85,coreB:.05,haloW:.95,softB:.22,fbW:.22,fbO:.50,fbhW:.60,glossO:.15};
+  const svg=document.createElementNS(NS,"svg");
+  svg.setAttribute("viewBox","0 0 48 48");svg.setAttribute("class","mark");
+  svg.innerHTML=`<defs>
+    <clipPath id="coin${id}"><circle cx="24" cy="24" r="20.4"/></clipPath>
+    ${grad(id,"gA",5,16,"#5ce3cb","#34bda8")}
+    ${grad(id,"gB",15,22,"#33bab4","#1c8496")}
+    ${grad(id,"gC",21,27,"#2a9cc0","#1a6fa0")}
+    ${grad(id,"gD",26,33,"#2c72c6","#184f94")}
+    ${grad(id,"gE",32,39,"#2a54c2","#14357e")}
+    ${grad(id,"gF",36,46,"#233ba8","#0a1642")}
+    <radialGradient id="gFace${id}" cx=".5" cy=".4" r=".64"><stop offset=".7" stop-color="#061127"/><stop offset="1" stop-color="#020813"/></radialGradient>
+    <radialGradient id="gGloss${id}" cx=".5" cy=".18" r=".6"><stop offset="0" stop-color="#cff4ff" stop-opacity="${P.glossO}"/><stop offset=".55" stop-color="#cff4ff" stop-opacity="0"/></radialGradient>
+    <radialGradient id="gOccl${id}" cx=".5" cy=".5" r=".5"><stop offset=".78" stop-color="#000" stop-opacity="0"/><stop offset=".97" stop-color="#000" stop-opacity=".46"/><stop offset="1" stop-color="#000" stop-opacity=".7"/></radialGradient>
+    <filter id="soft${id}" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="${P.softB}"/></filter>
+    <filter id="crisp${id}" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="${P.coreB}"/></filter>
+    <filter id="spl${id}" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="${P.splB}"/></filter>
+  </defs>
+  <circle cx="24" cy="24" r="21.6" fill="#0a1930"/>
+  <circle cx="24" cy="24" r="21.6" fill="none" stroke="#132c4c" stroke-width=".5" opacity=".9"/>
+  <circle cx="24" cy="24" r="20.4" fill="url(#gFace${id})"/>
+  <g clip-path="url(#coin${id})">
+    <path class="bF" fill="url(#gF${id})"/>
+    <path class="bE" fill="url(#gE${id})"/>
+    <path class="bD" fill="url(#gD${id})"/>
+    <path class="bC" fill="url(#gC${id})"/>
+    <path class="bB" fill="url(#gB${id})"/>
+    <path class="bA" fill="url(#gA${id})"/>
+    <path class="sB" fill="none" stroke="#05101f" stroke-width="${P.splW}" stroke-opacity="${P.splO}" filter="url(#spl${id})"/>
+    <path class="sC" fill="none" stroke="#05101f" stroke-width="${P.splW}" stroke-opacity="${P.splO}" filter="url(#spl${id})"/>
+    <path class="sD" fill="none" stroke="#05101f" stroke-width="${P.splW}" stroke-opacity="${P.splO}" filter="url(#spl${id})"/>
+    <path class="sE" fill="none" stroke="#05101f" stroke-width="${P.splW}" stroke-opacity="${P.splO}" filter="url(#spl${id})"/>
+    <path class="sF" fill="none" stroke="#05101f" stroke-width="${P.splW}" stroke-opacity="${(P.splO*0.85).toFixed(2)}" filter="url(#spl${id})"/>
+    <path class="fAh" fill="none" stroke="#dff9ff" stroke-width="${P.haloW}" stroke-linecap="round" stroke-opacity=".22" filter="url(#soft${id})"/>
+    <path class="fA" fill="none" stroke="#f4feff" stroke-width="${P.coreW}" stroke-linecap="round" stroke-opacity="${P.coreO}" filter="url(#crisp${id})"/>
+    <path class="fBh" fill="none" stroke="#cfeeff" stroke-width="${P.fbhW}" stroke-linecap="round" stroke-opacity=".14" filter="url(#soft${id})"/>
+    <path class="fB" fill="none" stroke="#e8f9ff" stroke-width="${P.fbW}" stroke-linecap="round" stroke-opacity="${P.fbO}" filter="url(#crisp${id})"/>
+    <rect x="0" y="0" width="48" height="48" fill="url(#gGloss${id})"/>
+    <circle cx="24" cy="24" r="20.4" fill="url(#gOccl${id})"/>
+  </g>
+  <circle cx="24" cy="24" r="20.4" fill="none" stroke="#040b18" stroke-width=".6"/>`;
+  const q=c=>svg.querySelector("."+c);
+  return {svg,bA:q("bA"),bB:q("bB"),bC:q("bC"),bD:q("bD"),bE:q("bE"),bF:q("bF"),sB:q("sB"),sC:q("sC"),sD:q("sD"),sE:q("sE"),sF:q("sF"),fA:q("fA"),fAh:q("fAh"),fB:q("fB"),fBh:q("fBh")};
+}
+function drive(b,t){
+  const A=samp(EDGES[0],t),B=samp(EDGES[1],t),C=samp(EDGES[2],t),D=samp(EDGES[3],t),E=samp(EDGES[4],t);
+  b.bA.setAttribute("d",bandTop(A,2));b.bB.setAttribute("d",band2(A,B));b.bC.setAttribute("d",band2(B,C));
+  b.bD.setAttribute("d",band2(C,D));b.bE.setAttribute("d",band2(D,E));b.bF.setAttribute("d",bandTop(E,46));
+  b.sB.setAttribute("d",edge(A));b.sC.setAttribute("d",edge(B));b.sD.setAttribute("d",edge(C));b.sE.setAttribute("d",edge(D));b.sF.setAttribute("d",edge(E));
+  b.fAh.setAttribute("d",edge(A));b.fA.setAttribute("d",edge(A));b.fBh.setAttribute("d",edge(B));b.fB.setAttribute("d",edge(B));
+}
+const hero=buildBadge(false),chip=buildBadge(true);
+document.getElementById("heroMark").appendChild(hero.svg);
+document.getElementById("chipMark").appendChild(chip.svg);
+const t0=performance.now();
+gsap.ticker.add(()=>{const t=(performance.now()-t0)/1000*0.6;drive(hero,t);drive(chip,t);});
+gsap.set(".word span",{y:"115%"});gsap.to(".word span",{y:"0%",duration:.9,ease:"power3.out",stagger:.07,delay:.25});
+</script></body></html>

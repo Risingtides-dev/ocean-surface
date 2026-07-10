@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ocean — material pass mockup</title>
+<style>
+/* ── Token contract (mirrors styles/tokens.css) ─────────────────── */
+:root {
+  --bg: #060606; --bg-raised: #0A0A0A; --bg-elevated: #141414;
+  --bg-hover: #1B1C21; --bg-well: #23252B;
+  --fg: #FAFCFF; --fg-2: #B8B9BB; --fg-3: #909098; --fg-4: #5A5C63;
+  --ocean-1: #00005F; --ocean-2: #0000AF; --ocean-3: #005FAF; --ocean-4: #0087AF;
+  --ocean-5: #00AFD7; --ocean-6: #00D7D7; --ocean-7: #00FFD7; --ocean-8: #5FFFFF;
+  --accent: var(--ocean-6); --fg-on-accent: #03181A;
+  --accent-ring: rgba(0,215,215,0.45);
+  --ok: #1ED760; --warn: #FFB224; --err: #FF4D67;
+  --border-subtle: rgba(255,255,255,0.06);
+  --radius-sm: 4px; --radius: 6px; --radius-lg: 10px; --radius-pill: 999px;
+  --specular: rgba(255,255,255,0.08); --specular-soft: rgba(255,255,255,0.05);
+  --specular-live: rgba(95,255,255,0.16);
+  --elev-1: inset 0 1px 0 var(--specular-soft), 0 1px 2px rgba(0,0,0,0.50);
+  --elev-2: inset 0 1px 0 var(--specular), 0 2px 8px rgba(0,0,0,0.45), 0 10px 28px rgba(0,0,0,0.35);
+  --elev-3: inset 0 1px 0 var(--specular), 0 2px 8px rgba(0,0,0,0.50), 0 20px 56px rgba(0,0,0,0.60);
+  --well: inset 0 2px 6px rgba(0,0,0,0.55), inset 0 -1px 0 rgba(255,255,255,0.04);
+  --well-deep: inset 0 3px 10px rgba(0,0,0,0.65), inset 0 -1px 0 rgba(255,255,255,0.05);
+  --pressed: inset 0 2px 4px rgba(0,0,0,0.60);
+  --glow-thinking: 0 0 24px rgba(0,215,215,0.10);
+  --glow-live: 0 0 20px rgba(0,255,215,0.16);
+  --pointer-light: rgba(95,255,255,0.05);
+  --ease: cubic-bezier(.22,.61,.36,1); --ease-tide: cubic-bezier(.16,.84,.28,1);
+  --dur: 240ms; --dur-slow: 420ms;
+  --font: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;
+}
+* { box-sizing: border-box; margin: 0; }
+body {
+  background: var(--bg); color: var(--fg); font: 14px/1.55 var(--font);
+  min-height: 100vh; display: flex; flex-direction: column;
+}
+/* ── Header ─────────────────────────────────────────────────────── */
+header {
+  height: 56px; background: var(--bg-raised);
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex; align-items: center; gap: 8px; padding: 0 20px;
+  position: relative; z-index: 4;
+}
+.wordmark { font-weight: 700; letter-spacing: 0.16em; font-size: 15px; }
+.wordmark span:nth-child(1){color:var(--ocean-3)} .wordmark span:nth-child(2){color:var(--ocean-4)}
+.wordmark span:nth-child(3){color:var(--ocean-5)} .wordmark span:nth-child(4){color:var(--ocean-6)}
+.wordmark span:nth-child(5){color:var(--ocean-7)}
+.spacer { flex: 1 }
+.meta { font: 11px var(--mono); color: var(--fg-3); }
+.ghost {
+  background: transparent; border: 0; color: var(--fg-3); font: 600 14px var(--font);
+  height: 28px; min-width: 28px; border-radius: var(--radius); cursor: pointer;
+  transition: background var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+}
+.ghost:hover { background: var(--bg-elevated); color: var(--fg); box-shadow: var(--elev-1); }
+.ghost:active { box-shadow: var(--pressed); transform: translateY(1px); }
+/* overflow menu — elev-3 raised panel, no border, tidal entrance */
+.more { position: relative }
+.menu {
+  position: absolute; right: 0; top: 36px; min-width: 172px;
+  background: var(--bg-elevated); border-radius: var(--radius);
+  box-shadow: var(--elev-3); padding: 4px; z-index: 9;
+  animation: rise var(--dur) var(--ease-tide) both;
+}
+.menu button {
+  display: block; width: 100%; text-align: left; background: none; border: 0;
+  color: var(--fg-2); font: 13px var(--font); padding: 7px 10px;
+  border-radius: var(--radius-sm); cursor: pointer;
+}
+.menu button:hover { background: var(--bg-hover); color: var(--fg); }
+@keyframes rise { from { opacity: 0; transform: translateY(8px) } to { opacity: 1; transform: none } }
+/* ── Shell ──────────────────────────────────────────────────────── */
+.shell { flex: 1; max-width: 860px; width: 100%; margin: 0 auto; padding: 28px 24px 130px; }
+/* ── Transcript depth grading ───────────────────────────────────── */
+.turn-user {
+  background: var(--bg-elevated); box-shadow: var(--elev-1);
+  border-radius: var(--radius-lg); padding: 10px 14px; max-width: 72ch;
+  margin: 0 0 18px auto; width: fit-content; color: var(--fg);
+}
+.turn-agent { max-width: 72ch; color: var(--fg-2); margin-bottom: 14px; }
+.turn-agent.is-thinking {
+  border-radius: var(--radius-lg); padding: 10px 14px; margin-left: -14px;
+  animation: breathe 3.5s ease-in-out infinite;
+}
+@keyframes breathe {
+  0%,100% { box-shadow: 0 0 0 rgba(0,215,215,0) } 50% { box-shadow: var(--glow-thinking) }
+}
+/* tool drawer — carved well; running card lifts + breathes */
+.tool {
+  background: var(--bg-well); box-shadow: var(--well);
+  border-radius: var(--radius); padding: 8px 12px; margin: 10px 0 22px;
+  font: 12px var(--mono); color: var(--fg-3);
+  display: flex; align-items: center; gap: 8px; max-width: 72ch;
+  transition: box-shadow var(--dur-slow) var(--ease-tide), background var(--dur-slow) var(--ease-tide);
+}
+.tool .dot { width: 6px; height: 6px; border-radius: var(--radius-pill); background: var(--ok); flex: none }
+.tool.is-running {
+  background: var(--bg-elevated);
+  box-shadow: inset 0 1px 0 var(--specular-live), 0 2px 8px rgba(0,0,0,0.45), 0 10px 28px rgba(0,0,0,0.35);
+  animation: toolbreathe 2.8s ease-in-out infinite;
+}
+.tool.is-running .dot { background: var(--warn); animation: blink 1.4s ease-in-out infinite }
+@keyframes toolbreathe {
+  0%,100% { box-shadow: inset 0 1px 0 var(--specular-live), 0 2px 8px rgba(0,0,0,0.45) }
+  50% { box-shadow: inset 0 1px 0 var(--specular-live), 0 2px 8px rgba(0,0,0,0.45), var(--glow-live) }
+}
+@keyframes blink { 0%,100% { opacity: 1 } 50% { opacity: 0.35 } }
+/* ── Chart card — elev-2, carved tracks, raised fills ──────────── */
+.card {
+  background: var(--bg-elevated); border-radius: var(--radius-lg);
+  box-shadow: var(--elev-2); padding: 16px; max-width: 480px; margin: 8px 0 26px;
+  position: relative;
+}
+.card h3 {
+  font: 600 11px var(--font); text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--fg-3); margin-bottom: 12px;
+}
+.crow { display: grid; grid-template-columns: 92px 1fr 52px; gap: 10px; align-items: center; margin: 7px 0 }
+.crow .lbl { font-size: 12px; color: var(--fg-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.crow .track { height: 10px; background: var(--bg-well); box-shadow: var(--well); border-radius: var(--radius-sm); overflow: hidden }
+.crow .fill { height: 100%; background: var(--ocean-5); box-shadow: inset 0 1px 0 var(--specular-soft); border-radius: var(--radius-sm) }
+.crow .val { font: 12px var(--mono); color: var(--fg-2); text-align: right }
+/* ── Composer — raised dock, tide-pool well ─────────────────────── */
+.composer {
+  position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+  width: min(720px, calc(100vw - 40px));
+  background: var(--bg-raised); border-radius: var(--radius-lg);
+  box-shadow: var(--elev-2); padding: 10px; z-index: 5;
+}
+.composer .pool {
+  background: #08090B; box-shadow: var(--well-deep);
+  border-radius: var(--radius); padding: 10px 12px;
+  transition: box-shadow var(--dur) var(--ease);
+}
+.composer:focus-within .pool {
+  box-shadow: var(--well-deep), inset 0 1px 0 var(--specular-live), 0 0 0 2px var(--accent-ring);
+}
+.composer textarea {
+  width: 100%; background: none; border: 0; outline: 0; resize: none;
+  color: var(--fg); font: 14px/1.5 var(--font); min-height: 40px;
+}
+.composer textarea::placeholder { color: var(--fg-3) }
+.composer .row { display: flex; align-items: center; gap: 8px; padding: 8px 2px 0 }
+.composer .mini { background: none; border: 0; color: var(--fg-3); font: 12px var(--font); cursor: pointer }
+.send {
+  margin-left: auto; background: var(--accent); color: var(--fg-on-accent);
+  border: 0; font: 600 13px var(--font); height: 28px; padding: 0 14px;
+  border-radius: var(--radius); box-shadow: var(--elev-1); cursor: pointer;
+  transition: filter var(--dur) var(--ease);
+}
+.send:hover { filter: brightness(1.12) }
+.send:active { box-shadow: var(--pressed); transform: translateY(1px) }
+/* ── Sessions panel — elev-3, plain rows, tidal rise ────────────── */
+.sessions {
+  position: fixed; right: 26px; top: 76px; width: 300px;
+  background: var(--bg-elevated); border-radius: var(--radius-lg);
+  box-shadow: var(--elev-3); padding: 8px; z-index: 6;
+  animation: rise var(--dur-slow) var(--ease-tide) both;
+}
+.sessions .grp {
+  font: 600 11px var(--font); text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--fg-3); padding: 8px 10px 4px;
+}
+.sessions .row {
+  display: flex; align-items: baseline; gap: 8px; padding: 7px 10px;
+  border-radius: var(--radius); cursor: pointer;
+  transition: background var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+}
+.sessions .row:hover { background: var(--bg-hover); box-shadow: var(--elev-1) }
+.sessions .row .t { font-size: 13px; color: var(--fg); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.sessions .row .m { font: 11px var(--mono); color: var(--fg-3); flex: none }
+.sessions .row .x {
+  opacity: 0; background: none; border: 0; color: var(--fg-3); cursor: pointer;
+  font-size: 12px; transition: opacity var(--dur) var(--ease);
+}
+.sessions .row:hover .x { opacity: 1 }
+/* live room row */
+.livedot {
+  width: 6px; height: 6px; border-radius: var(--radius-pill);
+  background: var(--accent); flex: none; align-self: center;
+  animation: blink 1.6s ease-in-out infinite;
+}
+/* ── Pointer light — cursor as light source ─────────────────────── */
+.ocean-lit { position: relative; overflow: hidden }
+.ocean-lit::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  border-radius: inherit; opacity: 0; transition: opacity var(--dur-slow) var(--ease);
+  background: radial-gradient(240px circle at var(--px, 50%) var(--py, 50%), var(--pointer-light), transparent 70%);
+}
+.ocean-lit:hover::after { opacity: 1 }
+@media (prefers-reduced-motion: reduce) {
+  .menu, .sessions { animation: none }
+  .turn-agent.is-thinking, .tool.is-running, .tool.is-running .dot, .livedot { animation: none }
+  .ocean-lit::after { display: none }
+}
+.note { font: 11px var(--mono); color: var(--fg-4); margin-top: 40px }
+</style>
+</head>
+<body>
+<header>
+  <div class="wordmark"><span>O</span><span>C</span><span>E</span><span>A</span><span>N</span></div>
+  <div class="spacer"></div>
+  <div class="meta">ocean-surface · 12.4k tok</div>
+  <button class="ghost">◫</button>
+  <div class="more">
+    <button class="ghost">⋯</button>
+    <div class="menu">
+      <button>Council</button><button>Rooms</button><button>Join call</button>
+      <button>Mute</button><button>Capture</button>
+    </div>
+  </div>
+</header>
+
+<div class="shell">
+  <div class="turn-user">show me a breakdown of the campaign spend by platform</div>
+
+  <div class="turn-agent">Pulling the spend data now — here's the split across the four active platforms for June.</div>
+
+  <div class="tool"><span class="dot"></span> read_sheet campaign-spend-june · ok · 214ms</div>
+
+  <div class="card ocean-lit">
+    <h3>Campaign Spend — June</h3>
+    <div class="crow"><span class="lbl">TikTok</span><span class="track"><span class="fill" style="width:88%"></span></span><span class="val">42,800</span></div>
+    <div class="crow"><span class="lbl">Instagram</span><span class="track"><span class="fill" style="width:64%"></span></span><span class="val">31,050</span></div>
+    <div class="crow"><span class="lbl">YouTube</span><span class="track"><span class="fill" style="width:35%"></span></span><span class="val">17,200</span></div>
+    <div class="crow"><span class="lbl">Snapchat</span><span class="track"><span class="fill" style="width:9%"></span></span><span class="val">4,310</span></div>
+  </div>
+
+  <div class="turn-user">now cross-reference against the UGC delivery rates</div>
+
+  <div class="turn-agent is-thinking">Cross-referencing delivery rates against spend — TikTok's cost-per-delivered looks strongest so far…</div>
+
+  <div class="tool is-running"><span class="dot"></span> query_campaign_hub delivery-rates · running</div>
+
+  <div class="note">mockup — tool card above is mid-run (lifted + breathing); agent turn is thinking (subsurface glow); hover the chart card and composer for pointer light</div>
+</div>
+
+<div class="sessions">
+  <div class="grp">ocean-surface</div>
+  <div class="row"><span class="livedot"></span><span class="t">war room — launch day</span><span class="m">live</span><button class="x">×</button></div>
+  <div class="row"><span class="t">material pass fan-out</span><span class="m">2m</span><button class="x">×</button></div>
+  <div class="row"><span class="t">chart card rebuild</span><span class="m">1d</span><button class="x">×</button></div>
+  <div class="grp">campaign-hub</div>
+  <div class="row"><span class="t">payout reconciliation</span><span class="m">3d</span><button class="x">×</button></div>
+  <div class="grp">other</div>
+  <div class="row"><span class="t">scratch — api probe</span><span class="m">6d</span><button class="x">×</button></div>
+</div>
+
+<div class="composer ocean-lit">
+  <div class="pool"><textarea placeholder="Message Ocean…" autofocus></textarea></div>
+  <div class="row">
+    <button class="mini">gpt-5.2 ▾</button><button class="mini">thinking: auto ▾</button>
+    <button class="send">Send</button>
+  </div>
+</div>
+
+<script>
+// Pointer light: one listener, element-relative coords per lit surface.
+addEventListener('mousemove', e => {
+  document.querySelectorAll('.ocean-lit').forEach(el => {
+    const r = el.getBoundingClientRect();
+    el.style.setProperty('--px', ((e.clientX - r.left) / r.width * 100) + '%');
+    el.style.setProperty('--py', ((e.clientY - r.top) / r.height * 100) + '%');
+  });
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,138 @@
+<!doctype html><html><head><meta charset="utf-8"><title>OCEAN v17 reveal</title><style>
+*{box-sizing:border-box;margin:0}
+body{background:#050d13;min-height:100vh;font-family:-apple-system,system-ui,sans-serif;color:#e8f4f2;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:60px 24px}
+.stage{display:flex;flex-direction:column;align-items:center;gap:4px}
+.mark{width:150px;height:150px;filter:drop-shadow(0 16px 40px rgba(2,10,16,.7))}
+.wm{width:480px;height:132px;overflow:visible}
+.replay{margin-top:30px;background:#0b1c26;border:1px solid #143246;color:#7fb5c4;border-radius:10px;padding:8px 16px;font-size:13px;cursor:pointer}
+</style></head><body>
+<div class="stage">
+ <svg id="badge" class="mark" viewBox="0 0 48 48" fill="none" aria-hidden="true"></svg>
+ <svg class="wm" viewBox="0 0 480 132">
+  <defs>
+   <clipPath id="tideClip"><path id="tideCp" d="M0 140 L480 140 L480 140 L0 140 Z"/></clipPath>
+   <filter id="foamGlow" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="1.4"/></filter>
+  </defs>
+  <!-- water body: faint aqua fill so the tide has depth, not just a line -->
+  <path id="body" fill="#1fb6c9" fill-opacity=".10" d=""/>
+  <!-- OCEAN: per-letter SOLID depth ramp, only visible below the waterline -->
+  <g clip-path="url(#tideClip)" font-family="-apple-system,system-ui,sans-serif" font-weight="700" font-size="74" text-anchor="middle">
+   <text x="68"  y="94" fill="#0087AF">O</text>
+   <text x="154" y="94" fill="#00AFD7">C</text>
+   <text x="240" y="94" fill="#00D7D7">E</text>
+   <text x="326" y="94" fill="#00FFD7">A</text>
+   <text x="412" y="94" fill="#5FFFFF">N</text>
+  </g>
+  <!-- rich waterline: soft glow crest + bright core + flecks -->
+  <path id="crestGlow" fill="none" stroke="#bfeff8" stroke-width="4.5" stroke-linecap="round" stroke-opacity=".38" filter="url(#foamGlow)" opacity="0"/>
+  <path id="crest" fill="none" stroke="#eafcff" stroke-width="2.3" stroke-linecap="round" stroke-opacity=".92" opacity="0"/>
+  <g id="flecks" opacity="0"></g>
+ </svg>
+</div>
+<button class="replay" id="replay">replay</button>
+<svg id="dropLayer" style="position:fixed;inset:0;pointer-events:none" width="100%" height="100%">
+ <defs><radialGradient id="dg" cx=".4" cy=".3" r=".85"><stop offset="0" stop-color="#d6f7ff"/><stop offset=".5" stop-color="#49cbe0"/><stop offset="1" stop-color="#1673a6"/></radialGradient></defs>
+ <path id="neck" fill="#37b8d6" opacity="0"/>
+ <ellipse id="droplet" rx="5.5" ry="6.5" fill="url(#dg)" opacity="0"/>
+ <g id="crown"></g>
+ <circle id="ripple" fill="none" stroke="#cfeffa" stroke-width="2" opacity="0"/>
+</svg>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+<script>
+const NS="http://www.w3.org/2000/svg";
+// ---------- badge (v15 living water) ----------
+const EDGES=[{y0:14.0,a:1.50,k:0.33,spd:0.85,ph:0.2},{y0:20.4,a:1.15,k:0.44,spd:1.05,ph:1.5},{y0:25.2,a:0.92,k:0.52,spd:0.75,ph:2.8},{y0:31.6,a:0.82,k:0.40,spd:0.95,ph:4.0},{y0:36.6,a:0.66,k:0.58,spd:0.68,ph:5.2}];
+const STEP=0.4,X0=1.5,X1=46.5;
+function ey(E,x,t){const br=1+0.11*Math.sin(0.55*t+E.ph);const s=Math.sin(E.k*x-E.spd*t+E.ph)+0.44*Math.sin(1.7*E.k*x-1.28*E.spd*t+E.ph*1.6+0.7);return E.y0+E.a*br*s+E.a*0.09*Math.sin(3.0*E.k*x+0.5*E.spd*t+E.ph);}
+function samp(E,t){const p=[];for(let x=X0;x<=X1+0.01;x+=STEP)p.push([x,ey(E,x,t)]);return p;}
+function bandTop(top,by){let d="M"+top[0][0].toFixed(2)+" "+top[0][1].toFixed(2);for(let i=1;i<top.length;i++)d+="L"+top[i][0].toFixed(2)+" "+top[i][1].toFixed(2);return d+"L"+X1+" "+by+"L"+X0+" "+by+"Z";}
+function band2(t,b){let d="M"+t[0][0].toFixed(2)+" "+t[0][1].toFixed(2);for(let i=1;i<t.length;i++)d+="L"+t[i][0].toFixed(2)+" "+t[i][1].toFixed(2);for(let i=b.length-1;i>=0;i--)d+="L"+b[i][0].toFixed(2)+" "+b[i][1].toFixed(2);return d+"Z";}
+function edge(p){let d="M"+p[0][0].toFixed(2)+" "+p[0][1].toFixed(2);for(let i=1;i<p.length;i++)d+="L"+p[i][0].toFixed(2)+" "+p[i][1].toFixed(2);return d;}
+const badge=document.getElementById("badge");
+badge.innerHTML=`<defs><clipPath id="c"><circle cx="24" cy="24" r="20.4"/></clipPath>
+<linearGradient id="ba" gradientUnits="userSpaceOnUse" x1="0" y1="5" x2="0" y2="16"><stop offset="0" stop-color="#5ce3cb"/><stop offset="1" stop-color="#34bda8"/></linearGradient>
+<linearGradient id="bb" gradientUnits="userSpaceOnUse" x1="0" y1="15" x2="0" y2="22"><stop offset="0" stop-color="#33bab4"/><stop offset="1" stop-color="#1a7f98"/></linearGradient>
+<linearGradient id="bc" gradientUnits="userSpaceOnUse" x1="0" y1="21" x2="0" y2="27"><stop offset="0" stop-color="#2a9cc0"/><stop offset="1" stop-color="#1a6fa0"/></linearGradient>
+<linearGradient id="bd" gradientUnits="userSpaceOnUse" x1="0" y1="26" x2="0" y2="33"><stop offset="0" stop-color="#2c72c6"/><stop offset="1" stop-color="#184f94"/></linearGradient>
+<linearGradient id="be" gradientUnits="userSpaceOnUse" x1="0" y1="32" x2="0" y2="39"><stop offset="0" stop-color="#2a54c2"/><stop offset="1" stop-color="#14357e"/></linearGradient>
+<linearGradient id="bf" gradientUnits="userSpaceOnUse" x1="0" y1="36" x2="0" y2="46"><stop offset="0" stop-color="#233ba8"/><stop offset="1" stop-color="#0a1642"/></linearGradient>
+<radialGradient id="bface" cx=".5" cy=".4" r=".64"><stop offset=".7" stop-color="#061127"/><stop offset="1" stop-color="#020813"/></radialGradient>
+<radialGradient id="boccl"><stop offset=".78" stop-color="#000" stop-opacity="0"/><stop offset=".97" stop-color="#000" stop-opacity=".46"/><stop offset="1" stop-color="#000" stop-opacity=".7"/></radialGradient>
+<filter id="sf"><feGaussianBlur stdDeviation=".2"/></filter><filter id="cr"><feGaussianBlur stdDeviation=".05"/></filter></defs>
+<circle cx="24" cy="24" r="21.6" fill="#0a1930"/><circle cx="24" cy="24" r="20.4" fill="url(#bface)"/>
+<g clip-path="url(#c)">
+<path class="p bf" fill="url(#bf)"/><path class="p be" fill="url(#be)"/><path class="p bd" fill="url(#bd)"/><path class="p bc" fill="url(#bc)"/><path class="p bb" fill="url(#bb)"/><path class="p ba" fill="url(#ba)"/>
+<path class="s sB" fill="none" stroke="#05101f" stroke-width=".3" stroke-opacity=".55" filter="url(#sf)"/><path class="s sC" fill="none" stroke="#05101f" stroke-width=".3" stroke-opacity=".55" filter="url(#sf)"/><path class="s sD" fill="none" stroke="#05101f" stroke-width=".3" stroke-opacity=".55" filter="url(#sf)"/><path class="s sE" fill="none" stroke="#05101f" stroke-width=".3" stroke-opacity=".55" filter="url(#sf)"/><path class="s sF" fill="none" stroke="#05101f" stroke-width=".3" stroke-opacity=".47" filter="url(#sf)"/>
+<path class="fa" fill="none" stroke="#f4feff" stroke-width=".3" stroke-linecap="round" stroke-opacity=".85" filter="url(#cr)"/>
+<circle cx="24" cy="24" r="20.4" fill="url(#boccl)"/></g>`;
+const q=s=>badge.querySelector(s);
+const B={ba:q(".ba"),bb:q(".bb"),bc:q(".bc"),bd:q(".bd"),be:q(".be"),bf:q(".bf"),sB:q(".sB"),sC:q(".sC"),sD:q(".sD"),sE:q(".sE"),sF:q(".sF"),fa:q(".fa")};
+const t0=performance.now();
+gsap.ticker.add(()=>{const t=(performance.now()-t0)/1000*0.6;const A=samp(EDGES[0],t),b=samp(EDGES[1],t),c=samp(EDGES[2],t),d=samp(EDGES[3],t),e=samp(EDGES[4],t);
+ B.ba.setAttribute("d",bandTop(A,2));B.bb.setAttribute("d",band2(A,b));B.bc.setAttribute("d",band2(b,c));B.bd.setAttribute("d",band2(c,d));B.be.setAttribute("d",band2(d,e));B.bf.setAttribute("d",bandTop(e,46));
+ B.sB.setAttribute("d",edge(A));B.sC.setAttribute("d",edge(b));B.sD.setAttribute("d",edge(c));B.sE.setAttribute("d",edge(d));B.sF.setAttribute("d",edge(e));B.fa.setAttribute("d",edge(A));});
+
+// ---------- reveal ----------
+const WM_W=480, WM_H=132;
+const tideCp=document.getElementById("tideCp"), body=document.getElementById("body");
+const crest=document.getElementById("crest"), crestGlow=document.getElementById("crestGlow");
+const flecks=document.getElementById("flecks");
+const droplet=document.getElementById("droplet"), neck=document.getElementById("neck");
+const ripple=document.getElementById("ripple"), crown=document.getElementById("crown");
+// wavy waterline at level L (word-svg coords)
+function waveTop(L,ph,amp){let s="";for(let x=0;x<=WM_W;x+=10){const y=L+Math.sin(x*0.05+ph)*amp+Math.sin(x*0.11+ph*1.6)*amp*0.42;s+=(x===0?"M":"L")+x+" "+y.toFixed(1);}return s;}
+function tideFill(L,ph,amp){return waveTop(L,ph,amp)+`L${WM_W} ${WM_H+10} L0 ${WM_H+10} Z`;}
+// build flecks
+for(let i=0;i<7;i++){const c=document.createElementNS(NS,"circle");c.setAttribute("r",(0.8+Math.random()*1.3).toFixed(1));c.setAttribute("fill","#eafcff");flecks.appendChild(c);}
+const fleckEls=[...flecks.children];
+function centerBottomOf(el,fy){const r=el.getBoundingClientRect();return {x:r.left+r.width/2, y:r.top+r.height*fy};}
+
+let TL;
+function play(){
+  if(TL) TL.kill();
+  const st=centerBottomOf(badge,0.95);              // SOUTH POLE of the orb
+  const wr=document.querySelector(".wm").getBoundingClientRect();
+  const landX=wr.left+wr.width/2, landY=wr.top+wr.height*0.9;   // pool at word base
+  const state={L:WM_H+12, ph:0, amp:0};             // start BELOW the word -> OCEAN hidden
+  const redraw=()=>{tideCp.setAttribute("d",tideFill(state.L,state.ph,state.amp));
+    body.setAttribute("d",tideFill(state.L,state.ph,state.amp));
+    const wl=waveTop(state.L,state.ph,state.amp); crest.setAttribute("d",wl); crestGlow.setAttribute("d",wl);
+    fleckEls.forEach((f,i)=>{const x=(i+0.5)/fleckEls.length*WM_W + Math.sin(state.ph*1.3+i)*10; const y=state.L+Math.sin(x*0.05+state.ph)*state.amp - 2 - (i%2)*3; f.setAttribute("cx",x.toFixed(1)); f.setAttribute("cy",y.toFixed(1));});};
+  gsap.set([crest,crestGlow,flecks],{opacity:0});
+  gsap.set(droplet,{attr:{cx:st.x,cy:st.y,rx:2,ry:2},opacity:0});
+  gsap.set(neck,{opacity:0});
+  gsap.set("#reveal",{});
+  redraw();
+  TL=gsap.timeline({onUpdate:redraw});
+  // 1) swell + surface-tension neck at the south pole, then pinch off
+  TL.to(droplet,{attr:{rx:5.5,ry:6.5,cy:st.y+7},opacity:1,duration:.32,ease:"power1.out"});
+  TL.to(neck,{opacity:.85,duration:.12,onUpdate:()=>{const c=+droplet.getAttribute("cy");neck.setAttribute("d",`M${st.x-2.4} ${st.y-6} Q${st.x} ${(st.y+c)/2} ${st.x-1} ${c-5} L${st.x+1} ${c-5} Q${st.x} ${(st.y+c)/2} ${st.x+2.4} ${st.y-6} Z`);}},"<");
+  TL.to(neck,{opacity:0,duration:.1});             // pinch: neck snaps
+  // 2) GRAVITY fall — cy only increases (down); slight wobble + stretch
+  TL.to(droplet,{attr:{cy:landY},duration:.62,ease:"power2.in"},"<");
+  TL.to(droplet,{attr:{cx:landX},duration:.62,ease:"sine.inOut"},"<");
+  TL.to(droplet,{attr:{ry:9,rx:4.4},duration:.5,ease:"power1.in"},"<");
+  // 3) impact — flatten + vanish, ripple ring, crown droplets
+  TL.to(droplet,{attr:{ry:2.5,rx:9},opacity:0,duration:.1});
+  TL.set(ripple,{attr:{cx:landX,cy:landY,r:3},opacity:.8});
+  TL.to(ripple,{attr:{r:26},opacity:0,duration:.5,ease:"power2.out"},"<");
+  crown.innerHTML=""; for(let i=0;i<5;i++){const c=document.createElementNS(NS,"circle");c.setAttribute("r",2.2);c.setAttribute("fill","url(#dg)");crown.appendChild(c);}
+  [...crown.children].forEach((c,i)=>{const ang=(-0.35-i*0.12-0.15)*Math.PI; const dx=Math.cos(ang)*(26+i*4), dy=-Math.abs(Math.sin(ang))*(26+i*3);
+    gsap.set(c,{attr:{cx:landX,cy:landY},opacity:1});
+    TL.to(c,{attr:{cx:landX+dx*(i%2?1:-1),cy:landY+dy},duration:.28,ease:"power2.out"},"<");
+    TL.to(c,{attr:{cy:landY+8},opacity:0,duration:.4,ease:"power2.in"},">-.05");});
+  // 4) TIDE rises — slow + rich; choppy at splash, calming as it fills
+  TL.set([crest,crestGlow,flecks],{opacity:1},"<+.05");
+  TL.set(state,{amp:7},"<");
+  TL.to(state,{L:-10,duration:1.7,ease:"power2.out"},"<");
+  TL.to(state,{ph:16,duration:1.7,ease:"none"},"<");
+  TL.to(state,{amp:1.8,duration:1.7,ease:"power1.out"},"<");
+  // 5) crest glides off the top + fades; letters settle
+  TL.to([crest,crestGlow,flecks],{opacity:0,duration:.5},">-.55");
+  TL.fromTo(".wm g[clip-path]",{y:4},{y:0,duration:.7,ease:"elastic.out(1,0.5)"},">-.3");
+  // hold + loop
+  TL.to({},{duration:1.5,onComplete:play});
+}
+document.getElementById("replay").onclick=play;
+setTimeout(play, 320);   // single start (script is at body end; layout ready)
+</script></body></html>

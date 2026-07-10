@@ -1,0 +1,138 @@
+<!doctype html><html><head><meta charset="utf-8"><title>OCEAN v19</title><style>
+*{box-sizing:border-box;margin:0}
+body{background:#050d13;min-height:100vh;font-family:-apple-system,system-ui,sans-serif;color:#e8f4f2;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px}
+.scene{width:500px;height:500px;filter:drop-shadow(0 20px 50px rgba(2,10,16,.6))}
+.replay{margin-top:18px;background:#0b1c26;border:1px solid #143246;color:#7fb5c4;border-radius:10px;padding:8px 16px;font-size:13px;cursor:pointer}
+</style></head><body>
+<svg class="scene" viewBox="0 0 600 600" fill="none">
+ <defs>
+  <clipPath id="tide"><path id="tideP" d="M0 610 L600 610 L600 610 L0 610 Z"/></clipPath>
+  <clipPath id="ballClip"><circle id="ballC" cx="300" cy="148" r="66"/></clipPath>
+  <clipPath id="dripClip"><path id="dripCp" d="M0 -13 C 5 -6 7 -1 7 3 A 7 7 0 1 1 -7 3 C -7 -1 -5 -6 0 -13 Z"/></clipPath>
+  <linearGradient id="waterBody" x1="0" y1="150" x2="0" y2="600" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#2ea6c6" stop-opacity=".40"/><stop offset=".5" stop-color="#1c63b0" stop-opacity=".5"/><stop offset="1" stop-color="#0a1642" stop-opacity=".64"/></linearGradient>
+  <linearGradient id="dripRamp" x1="0" y1="-13" x2="0" y2="10" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#5ce3cb"/><stop offset=".45" stop-color="#2a86c0"/><stop offset="1" stop-color="#16307e"/></linearGradient>
+  <filter id="foamGlow" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="2"/></filter>
+ </defs>
+
+ <path id="body" fill="url(#waterBody)" d=""/>
+ <path id="crestBack" fill="none" stroke="#dff6fb" stroke-width="2" stroke-linecap="round" stroke-opacity=".55" opacity="0"/>
+ <g clip-path="url(#tide)" font-family="-apple-system,system-ui,sans-serif" font-weight="700" font-size="88" text-anchor="middle">
+   <text x="100" y="330" fill="#0087AF">O</text><text x="200" y="330" fill="#00AFD7">C</text>
+   <text x="300" y="330" fill="#00D7D7">E</text><text x="400" y="330" fill="#00FFD7">A</text><text x="500" y="330" fill="#5FFFFF">N</text>
+ </g>
+ <g id="orbG"><svg id="orb" x="234" y="82" width="132" height="132" viewBox="0 0 48 48" fill="none"></svg></g>
+ <!-- submerged cap: the orb's underwater portion, tinted + darkened -->
+ <g clip-path="url(#ballClip)"><rect id="subCap" x="234" y="200" width="132" height="420" fill="#0c2350" fill-opacity=".5"/></g>
+ <!-- ripples + front meniscus foam where the hull meets the water -->
+ <g id="rings" opacity="0"></g>
+ <path id="menGlow" fill="none" stroke="#cfeff8" stroke-width="4" stroke-linecap="round" stroke-opacity=".4" filter="url(#foamGlow)" opacity="0"/>
+ <path id="men" fill="none" stroke="#f2ffff" stroke-width="2.2" stroke-linecap="round" stroke-opacity=".92" opacity="0"/>
+ <!-- the drip: a teardrop of the orb (ramp + band + rim + sheen) -->
+ <g id="drip" opacity="0">
+   <path d="M0 -13 C 5 -6 7 -1 7 3 A 7 7 0 1 1 -7 3 C -7 -1 -5 -6 0 -13 Z" fill="url(#dripRamp)"/>
+   <g clip-path="url(#dripClip)"><path d="M-8 2 Q -3 0.5 0 2 T 8 2" fill="none" stroke="#1a6fa0" stroke-width="1.4" stroke-opacity=".6"/><path d="M-8 6 Q -3 4.6 0 6 T 8 6" fill="none" stroke="#14357e" stroke-width="1.4" stroke-opacity=".55"/></g>
+   <path d="M0 -13 C 5 -6 7 -1 7 3 A 7 7 0 1 1 -7 3 C -7 -1 -5 -6 0 -13 Z" fill="none" stroke="#0a1f3a" stroke-width=".7" stroke-opacity=".5"/>
+   <path d="M-2.6 -3 Q0 -5 2.6 -3" fill="none" stroke="#bfeee0" stroke-width="1.2" stroke-linecap="round" stroke-opacity=".6"/>
+ </g>
+</svg>
+<button class="replay" id="replay">replay</button>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+<script>
+const NS="http://www.w3.org/2000/svg";
+const EDGES=[{y0:14.0,a:1.50,k:0.33,spd:0.85,ph:0.2},{y0:20.4,a:1.15,k:0.44,spd:1.05,ph:1.5},{y0:25.2,a:0.92,k:0.52,spd:0.75,ph:2.8},{y0:31.6,a:0.82,k:0.40,spd:0.95,ph:4.0},{y0:36.6,a:0.66,k:0.58,spd:0.68,ph:5.2}];
+const STEP=0.4,X0=1.5,X1=46.5;
+function ey(E,x,t){const br=1+0.11*Math.sin(0.55*t+E.ph);const s=Math.sin(E.k*x-E.spd*t+E.ph)+0.44*Math.sin(1.7*E.k*x-1.28*E.spd*t+E.ph*1.6+0.7);return E.y0+E.a*br*s+E.a*0.09*Math.sin(3.0*E.k*x+0.5*E.spd*t+E.ph);}
+function samp(E,t){const p=[];for(let x=X0;x<=X1+0.01;x+=STEP)p.push([x,ey(E,x,t)]);return p;}
+function bandTop(top,by){let d="M"+top[0][0].toFixed(2)+" "+top[0][1].toFixed(2);for(let i=1;i<top.length;i++)d+="L"+top[i][0].toFixed(2)+" "+top[i][1].toFixed(2);return d+"L"+X1+" "+by+"L"+X0+" "+by+"Z";}
+function band2(t,b){let d="M"+t[0][0].toFixed(2)+" "+t[0][1].toFixed(2);for(let i=1;i<t.length;i++)d+="L"+t[i][0].toFixed(2)+" "+t[i][1].toFixed(2);for(let i=b.length-1;i>=0;i--)d+="L"+b[i][0].toFixed(2)+" "+b[i][1].toFixed(2);return d+"Z";}
+function edgeP(p){let d="M"+p[0][0].toFixed(2)+" "+p[0][1].toFixed(2);for(let i=1;i<p.length;i++)d+="L"+p[i][0].toFixed(2)+" "+p[i][1].toFixed(2);return d;}
+const orb=document.getElementById("orb");
+orb.innerHTML=`<defs><clipPath id="c"><circle cx="24" cy="24" r="20.4"/></clipPath>
+<linearGradient id="ba" gradientUnits="userSpaceOnUse" x1="0" y1="5" x2="0" y2="16"><stop offset="0" stop-color="#5ce3cb"/><stop offset="1" stop-color="#34bda8"/></linearGradient>
+<linearGradient id="bb" gradientUnits="userSpaceOnUse" x1="0" y1="15" x2="0" y2="22"><stop offset="0" stop-color="#33bab4"/><stop offset="1" stop-color="#1a7f98"/></linearGradient>
+<linearGradient id="bc" gradientUnits="userSpaceOnUse" x1="0" y1="21" x2="0" y2="27"><stop offset="0" stop-color="#2a9cc0"/><stop offset="1" stop-color="#1a6fa0"/></linearGradient>
+<linearGradient id="bd" gradientUnits="userSpaceOnUse" x1="0" y1="26" x2="0" y2="33"><stop offset="0" stop-color="#2c72c6"/><stop offset="1" stop-color="#184f94"/></linearGradient>
+<linearGradient id="be" gradientUnits="userSpaceOnUse" x1="0" y1="32" x2="0" y2="39"><stop offset="0" stop-color="#2a54c2"/><stop offset="1" stop-color="#14357e"/></linearGradient>
+<linearGradient id="bf" gradientUnits="userSpaceOnUse" x1="0" y1="36" x2="0" y2="46"><stop offset="0" stop-color="#233ba8"/><stop offset="1" stop-color="#0a1642"/></linearGradient>
+<radialGradient id="bface" cx=".5" cy=".4" r=".64"><stop offset=".7" stop-color="#061127"/><stop offset="1" stop-color="#020813"/></radialGradient>
+<radialGradient id="boccl"><stop offset=".78" stop-color="#000" stop-opacity="0"/><stop offset=".97" stop-color="#000" stop-opacity=".46"/><stop offset="1" stop-color="#000" stop-opacity=".7"/></radialGradient>
+<filter id="sf"><feGaussianBlur stdDeviation=".2"/></filter><filter id="cr"><feGaussianBlur stdDeviation=".05"/></filter></defs>
+<circle cx="24" cy="24" r="21.6" fill="#0a1930"/><circle cx="24" cy="24" r="20.4" fill="url(#bface)"/>
+<g clip-path="url(#c)">
+<path class="p bf" fill="url(#bf)"/><path class="p be" fill="url(#be)"/><path class="p bd" fill="url(#bd)"/><path class="p bc" fill="url(#bc)"/><path class="p bb" fill="url(#bb)"/><path class="p ba" fill="url(#ba)"/>
+<path class="s sB" fill="none" stroke="#05101f" stroke-width=".3" stroke-opacity=".55" filter="url(#sf)"/><path class="s sC" fill="none" stroke="#05101f" stroke-width=".3" stroke-opacity=".55" filter="url(#sf)"/><path class="s sD" fill="none" stroke="#05101f" stroke-width=".3" stroke-opacity=".55" filter="url(#sf)"/><path class="s sE" fill="none" stroke="#05101f" stroke-width=".3" stroke-opacity=".55" filter="url(#sf)"/><path class="s sF" fill="none" stroke="#05101f" stroke-width=".3" stroke-opacity=".47" filter="url(#sf)"/>
+<path class="fa" fill="none" stroke="#f4feff" stroke-width=".3" stroke-linecap="round" stroke-opacity=".85" filter="url(#cr)"/>
+<circle cx="24" cy="24" r="20.4" fill="url(#boccl)"/></g>`;
+const q=s=>orb.querySelector(s);
+const Bd={ba:q(".ba"),bb:q(".bb"),bc:q(".bc"),bd:q(".bd"),be:q(".be"),bf:q(".bf"),sB:q(".sB"),sC:q(".sC"),sD:q(".sD"),sE:q(".sE"),sF:q(".sF"),fa:q(".fa")};
+const t0=performance.now();
+gsap.ticker.add(()=>{const t=(performance.now()-t0)/1000*0.6;const A=samp(EDGES[0],t),b=samp(EDGES[1],t),c=samp(EDGES[2],t),d=samp(EDGES[3],t),e=samp(EDGES[4],t);
+ Bd.ba.setAttribute("d",bandTop(A,2));Bd.bb.setAttribute("d",band2(A,b));Bd.bc.setAttribute("d",band2(b,c));Bd.bd.setAttribute("d",band2(c,d));Bd.be.setAttribute("d",band2(d,e));Bd.bf.setAttribute("d",bandTop(e,46));
+ Bd.sB.setAttribute("d",edgeP(A));Bd.sC.setAttribute("d",edgeP(b));Bd.sD.setAttribute("d",edgeP(c));Bd.sE.setAttribute("d",edgeP(d));Bd.sF.setAttribute("d",edgeP(e));Bd.fa.setAttribute("d",edgeP(A));});
+
+// ---------- scene ----------
+const W=600, CX=300, CY=148, R=66, ORB_X=234, ORB_Y=82;
+const POLE_Y=212, LAND_Y=556, L_FINAL=158;
+const body=document.getElementById("body"), crestBack=document.getElementById("crestBack");
+const tideP=document.getElementById("tideP"), ballC=document.getElementById("ballC");
+const subCap=document.getElementById("subCap"), orbG=document.getElementById("orbG");
+const men=document.getElementById("men"), menGlow=document.getElementById("menGlow");
+const rings=document.getElementById("rings"), drip=document.getElementById("drip");
+function waveTop(L,ph,amp,x0,x1){let s="";for(let x=x0;x<=x1;x+=8){const y=L+Math.sin(x*0.035+ph)*amp+Math.sin(x*0.08+ph*1.6)*amp*0.4;s+=(x===x0?"M":"L")+x+" "+y.toFixed(1);}return s;}
+function bodyD(L,ph,amp){return waveTop(L,ph,amp,0,W)+`L${W} 600 L0 600 Z`;}
+for(let i=0;i<2;i++){const e=document.createElementNS(NS,"ellipse");e.setAttribute("fill","none");e.setAttribute("stroke","#bfeff8");e.setAttribute("stroke-width",1.4);rings.appendChild(e);}
+const ringEls=[...rings.children];
+const S={L:620,ph:0,amp:0,bob:0};
+function redraw(){
+  const cyNow=CY+S.bob;
+  ballC.setAttribute("cy",cyNow);
+  orbG.setAttribute("transform",`translate(0 ${S.bob.toFixed(2)})`);
+  body.setAttribute("d",bodyD(S.L,S.ph,S.amp));
+  tideP.setAttribute("d",bodyD(S.L,S.ph,S.amp));
+  subCap.setAttribute("y",S.L.toFixed(1));
+  // ambient waterline behind the orb — two segments that stop at the hull
+  const dx=(S.L>cyNow-R && S.L<cyNow+R)?Math.sqrt(Math.max(0,R*R-(S.L-cyNow)**2)):0;
+  if(dx>1){crestBack.setAttribute("d", waveTop(S.L,S.ph,S.amp,0,CX-dx-4)+" "+waveTop(S.L,S.ph,S.amp,CX+dx+4,W));}
+  else{crestBack.setAttribute("d", waveTop(S.L,S.ph,S.amp,0,W));}
+  // front meniscus: bright waterline hugging the hull, curling up at the contacts
+  if(dx>1){const y=S.L; men.setAttribute("d",`M${CX-dx-10} ${y-3} Q${CX-dx} ${y-5} ${CX-dx} ${y} L${CX+dx} ${y} Q${CX+dx} ${y-5} ${CX+dx+10} ${y-3}`); menGlow.setAttribute("d",men.getAttribute("d"));}
+}
+let TL;
+function play(){
+  if(TL)TL.kill();
+  gsap.set([crestBack,men,menGlow,rings],{opacity:0});
+  gsap.set(drip,{opacity:0,x:CX,y:POLE_Y});
+  gsap.set("#drip path",{});
+  S.L=620;S.ph=0;S.amp=0;S.bob=0;redraw();
+  gsap.set(drip,{scaleY:1,scaleX:1,transformOrigin:"50% 50%"});
+  TL=gsap.timeline({onUpdate:redraw});
+  // 1) teardrop mini-orb swells at south pole, releases
+  TL.to(drip,{opacity:1,y:POLE_Y+6,duration:.32,ease:"power1.out"});
+  // 2) gravity fall — straight down, stretching
+  TL.to(drip,{y:LAND_Y,duration:.62,ease:"power2.in"});
+  TL.to(drip,{scaleY:1.5,scaleX:.8,duration:.5,ease:"power1.in"},"<");
+  // 3) impact: drip merges, water spreads + surface appears
+  TL.to(drip,{opacity:0,duration:.1});
+  TL.set(S,{L:LAND_Y,amp:6});
+  TL.set([crestBack],{opacity:.85});
+  // 4) tide rises to float the orb
+  TL.to(S,{L:L_FINAL,duration:2.1,ease:"power2.out"});
+  TL.to(S,{ph:18,duration:2.1,ease:"none"},"<");
+  TL.to(S,{amp:2.0,duration:2.1,ease:"power1.out"},"<");
+  // meniscus foam appears as the water reaches the hull
+  TL.to([men,menGlow],{opacity:1,duration:.4},">-1.0");
+  // 5) buoyancy: orb dips into the water it displaced, rebounds, settles, idles
+  TL.to(S,{bob:9,duration:.3,ease:"power2.out"},">-.55");
+  TL.to(S,{bob:-3,duration:1.7,ease:"elastic.out(1,0.42)"});
+  // ripple rings from the contact
+  TL.add(()=>{ringEls.forEach((r,i)=>{gsap.fromTo(r,{attr:{cx:CX,cy:S.L,rx:8,ry:2.4},opacity:.7},{attr:{rx:120+i*40,ry:26+i*8},opacity:0,duration:1.4,delay:i*.3,ease:"power2.out"});});},">-1.5");
+  gsap.set(rings,{opacity:1});
+  // idle: gentle perpetual bob + live surface
+  TL.to(S,{bob:1.5,duration:2.4,ease:"sine.inOut",repeat:1,yoyo:true},">-.2");
+  TL.to({},{duration:.8,onComplete:play});
+}
+document.getElementById("replay").onclick=play;
+setTimeout(play,320);
+</script></body></html>

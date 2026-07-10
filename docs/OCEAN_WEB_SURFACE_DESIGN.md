@@ -15,12 +15,31 @@ failure — one primary affordance, quiet metadata, ghost triggers.
 
 ## 1. Identity
 
-The OCEAN depth ramp — the ASCII splash banner from the TUI
+The OCEAN depth ramp comes from the ASCII splash banner in the TUI
 (`ocean-os/crates/ocean-tui/src/splash.rs`), deep indigo rising to bright aqua
-(xterm 17→19→25→31→38→44→50→87). The banner IS the logo: the landing hero
-renders it verbatim with one solid ramp color per row; the header wordmark
-"OCEAN" carries the ramp one solid color per letter. Never gradient-clip text —
-the ramp is always painted as solid colors on discrete elements.
+(xterm 17→19→25→31→38→44→50→87). The active logo direction is now the circular
+neumorphic wave mark, not the ASCII banner and not a terminal prompt glyph.
+Reference asset:
+`public/brand/master-1024.png` (mirrored as `public/brand/ocean-mark.svg`).
+
+Logo implementation target:
+- Replace the current three-line `WaveLogo` and text-only header wordmark with
+  an inline SVG circular mark component that preserves the reference geometry:
+  circular badge, stacked wave cutouts, teal-to-blue depth ramp, matte dark
+  relief, and shallow inner/outer shadow.
+- Keep the SVG inline in the Leptos bundle, not as `<img>`, so the same asset can
+  animate in web and Tauri. Name internal layers (`rim`, `wave-1`, `wave-2`,
+  `wave-3`, `deep-water`, `wordmark`) so CSS can target state motion.
+- Test three lockups before choosing: mark-only, lowercase `ocean`, and tighter
+  uppercase `OCEAN` with less spacing than the current landing wordmark.
+- Avoid prompt/code symbolism completely: no `>`, `_`, cursor, brackets,
+  terminal glyphs, sparkle/star motifs, mascots, or Codex-adjacent shapes.
+- Tauri consumes the same Trunk-built Leptos bundle, so the web logo component is
+  the primary fix for both browser and native shell. Generate Tauri app icons
+  from the final mark only after the web lockup is accepted.
+
+Never gradient-clip text. The ramp is always painted as solid colors on
+discrete elements, or as vector fills inside the circular mark.
 
 The page is near-black; the working accent (`--ocean-6` cyan) appears ONLY at:
 
@@ -210,6 +229,19 @@ Bioluminescence state map — attach to existing hooks only:
 - Live call: `--accent` dot pulse. The live-state color map holds everywhere
   — live = `--accent` pulse, connected = `--ok`, reconnecting = `--warn`,
   failed/barge = `--err`.
+
+Agent-response loading:
+- Replace the current pending-response sonar ping and any text like `ocean ▸`
+  with the circular Ocean mark in motion.
+- The ideal motion is fluid current inside the logo: wave bands subtly shear,
+  drift, and churn under the circular clip while the rim stays calm. It should
+  read like ocean current moving inside the mark, not a spinning loader, not a
+  bouncing dot, and not decorative page-load choreography.
+- Drive it from the existing send-to-first-token pending hook and streaming
+  state in `crates/ocean-surface-ui/src/transcript.rs`; do not add daemon state
+  for this. The spinner is surface presentation only.
+- Under `prefers-reduced-motion: reduce`, render the static circular mark with a
+  small live-state glow and no current animation.
 
 Tidal entrance — overlays/popovers/slide-overs only, never page load:
 - One keyframe block per file that needs it: `from { opacity: 0;

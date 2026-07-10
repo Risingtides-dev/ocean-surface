@@ -1,0 +1,245 @@
+<!doctype html><html><head><meta charset="utf-8"><title>OCEAN v11</title><style>
+*{box-sizing:border-box;margin:0}
+body{background:#050d13;min-height:100vh;font-family:-apple-system,system-ui,sans-serif;color:#e8f4f2;display:flex;flex-direction:column;align-items:center;gap:64px;padding:72px 24px}
+.hero{display:flex;flex-direction:column;align-items:center;gap:26px}
+.hero .mark{width:280px;height:280px;filter:drop-shadow(0 18px 44px rgba(2,10,16,.7))}
+.word{display:flex;overflow:hidden;font-size:44px;font-weight:650;letter-spacing:.34em;text-indent:.34em}
+.word span{display:inline-block;transform:translateY(115%)}
+.w1{color:#46d8c2}.w2{color:#35b9b4}.w3{color:#2a9dbd}.w4{color:#2f78c9}.w5{color:#4a63d8}
+.loadrow{display:flex;align-items:center;gap:14px;background:#081620;border:1px solid #0f2833;border-radius:14px;padding:14px 22px}
+.loadrow .mark{width:34px;height:34px}
+.loadrow em{font-style:normal;color:#6f9aa6;font-size:14px}
+</style></head><body>
+<div class="hero"><svg class="mark" viewBox="0 0 48 48" aria-label="Ocean">
+ <defs>
+  <clipPath id="coin"><circle cx="24" cy="24" r="20.4"/></clipPath>
+  <linearGradient id="gL1" x1="0" y1="0" x2="0" y2="16.6" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#46d8c2"/><stop offset="1" stop-color="#27a896"/></linearGradient>
+  <linearGradient id="gL2" x1="0" y1="18.4" x2="0" y2="24.6" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#2aa8b0"/><stop offset="1" stop-color="#187f98"/></linearGradient>
+  <linearGradient id="gL3" x1="0" y1="26" x2="0" y2="31" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#2a74c4"/><stop offset="1" stop-color="#174e96"/></linearGradient>
+  <linearGradient id="gL4" x1="0" y1="32.2" x2="0" y2="44" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#2f55c9"/><stop offset="1" stop-color="#0c1848"/></linearGradient>
+  <radialGradient id="gFace" cx=".5" cy=".42" r=".62">
+    <stop offset=".72" stop-color="#050f21"/><stop offset="1" stop-color="#020813"/></radialGradient>
+  <radialGradient id="gOccl" cx=".5" cy=".5" r=".5">
+    <stop offset=".8" stop-color="#000" stop-opacity="0"/><stop offset=".97" stop-color="#000" stop-opacity=".5"/><stop offset="1" stop-color="#000" stop-opacity=".72"/></radialGradient>
+  <filter id="cut" x="-30%" y="-30%" width="160%" height="160%">
+    <feDropShadow dx="0" dy="1.05" stdDeviation=".9" flood-color="#01070c" flood-opacity=".85"/></filter>
+  <filter id="soft" x="-30%" y="-30%" width="160%" height="160%">
+    <feGaussianBlur stdDeviation=".12"/></filter>
+  <filter id="grain">
+    <feTurbulence type="fractalNoise" baseFrequency=".55" numOctaves="2" stitchTiles="stitch" result="n"/>
+    <feColorMatrix in="n" type="matrix" values="0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 .11 0"/>
+    <feComposite operator="in" in2="SourceGraphic"/></filter>
+ </defs>
+ <circle cx="24" cy="24" r="21.6" fill="#0a1930"/>
+ <circle cx="24" cy="24" r="21.6" fill="none" stroke="#122a48" stroke-width=".5" opacity=".9"/>
+ <circle cx="24" cy="24" r="20.4" fill="url(#gFace)"/>
+ <g clip-path="url(#coin)">
+   <g class="lyr"><g class="flow f-l1">
+     <path d="M 0 0" fill="url(#gL1)" class="fill-l1" filter="url(#cut)"/>
+     <path d="M 0 0" fill="none" stroke="#b2f2e0" class="edge-l1" stroke-width=".42" opacity=".65" filter="url(#soft)"/>
+     <g class="foamg">
+       <path class="fw-l1" d="" fill="none" stroke="#d9fff4" stroke-width=".42" opacity=".42" stroke-linecap="round"/>
+       <path class="fs-l1" d="" fill="none" stroke="#ffffff" stroke-width=".3" opacity=".88" stroke-linecap="round"/>
+     </g></g></g>
+   <g class="lyr"><g class="flow f-l2">
+     <path d="M 0 0" fill="url(#gL2)" class="fill-l2" filter="url(#cut)"/>
+     <path d="M 0 0" fill="none" stroke="#a5ecdf" class="edge-l2" stroke-width=".42" opacity=".65" filter="url(#soft)"/>
+     <g class="foamg">
+       <path class="fw-l2" d="" fill="none" stroke="#d9fff4" stroke-width=".42" opacity=".42" stroke-linecap="round"/>
+       <path class="fs-l2" d="" fill="none" stroke="#ffffff" stroke-width=".3" opacity=".88" stroke-linecap="round"/>
+       <path class="fw-b-l2" d="" fill="none" stroke="#d9fff4" stroke-width=".38" opacity=".32" stroke-linecap="round"/>
+       <path class="fs-b-l2" d="" fill="none" stroke="#ffffff" stroke-width=".26" opacity=".6" stroke-linecap="round"/>
+     </g></g></g>
+   <g class="lyr"><g class="flow f-l3">
+     <path d="M 0 0" fill="url(#gL3)" class="fill-l3" filter="url(#cut)"/>
+     <path d="M 0 0" fill="none" stroke="#8fd4ef" class="edge-l3" stroke-width=".42" opacity=".65" filter="url(#soft)"/>
+     <g class="foamg">
+       <path class="fw-l3" d="" fill="none" stroke="#d9fff4" stroke-width=".42" opacity=".42" stroke-linecap="round"/>
+       <path class="fs-l3" d="" fill="none" stroke="#ffffff" stroke-width=".3" opacity=".88" stroke-linecap="round"/>
+       <path class="fw-b-l3" d="" fill="none" stroke="#d9fff4" stroke-width=".38" opacity=".32" stroke-linecap="round"/>
+       <path class="fs-b-l3" d="" fill="none" stroke="#ffffff" stroke-width=".26" opacity=".6" stroke-linecap="round"/>
+     </g></g></g>
+   <g class="lyr"><g class="flow f-l4">
+     <path d="M 0 0" fill="url(#gL4)" class="fill-l4" filter="url(#cut)"/>
+     <path d="M 0 0" fill="none" stroke="#8fa8f2" class="edge-l4" stroke-width=".42" opacity=".65" filter="url(#soft)"/>
+     <g class="foamg">
+       <path class="fw-l4" d="" fill="none" stroke="#d9fff4" stroke-width=".42" opacity=".42" stroke-linecap="round"/>
+       <path class="fs-l4" d="" fill="none" stroke="#ffffff" stroke-width=".3" opacity=".88" stroke-linecap="round"/>
+     </g></g></g>
+   <rect x="2" y="2" width="44" height="44" filter="url(#grain)" opacity=".75"/>
+   <circle cx="24" cy="24" r="20.4" fill="url(#gOccl)"/>
+ </g>
+ <circle cx="24" cy="24" r="20.4" fill="none" stroke="#040b18" stroke-width=".65"/>
+</svg><div class="word"><span class="w1">O</span><span class="w2">C</span><span class="w3">E</span><span class="w4">A</span><span class="w5">N</span></div></div>
+<div class="loadrow"><svg class="mark small" viewBox="0 0 48 48" aria-label="Ocean">
+ <defs>
+  <clipPath id="coin"><circle cx="24" cy="24" r="20.4"/></clipPath>
+  <linearGradient id="gL1" x1="0" y1="0" x2="0" y2="16.6" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#46d8c2"/><stop offset="1" stop-color="#27a896"/></linearGradient>
+  <linearGradient id="gL2" x1="0" y1="18.4" x2="0" y2="24.6" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#2aa8b0"/><stop offset="1" stop-color="#187f98"/></linearGradient>
+  <linearGradient id="gL3" x1="0" y1="26" x2="0" y2="31" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#2a74c4"/><stop offset="1" stop-color="#174e96"/></linearGradient>
+  <linearGradient id="gL4" x1="0" y1="32.2" x2="0" y2="44" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#2f55c9"/><stop offset="1" stop-color="#0c1848"/></linearGradient>
+  <radialGradient id="gFace" cx=".5" cy=".42" r=".62">
+    <stop offset=".72" stop-color="#050f21"/><stop offset="1" stop-color="#020813"/></radialGradient>
+  <radialGradient id="gOccl" cx=".5" cy=".5" r=".5">
+    <stop offset=".8" stop-color="#000" stop-opacity="0"/><stop offset=".97" stop-color="#000" stop-opacity=".5"/><stop offset="1" stop-color="#000" stop-opacity=".72"/></radialGradient>
+  <filter id="cut" x="-30%" y="-30%" width="160%" height="160%">
+    <feDropShadow dx="0" dy="1.05" stdDeviation=".9" flood-color="#01070c" flood-opacity=".85"/></filter>
+  <filter id="soft" x="-30%" y="-30%" width="160%" height="160%">
+    <feGaussianBlur stdDeviation=".12"/></filter>
+  <filter id="grain">
+    <feTurbulence type="fractalNoise" baseFrequency=".55" numOctaves="2" stitchTiles="stitch" result="n"/>
+    <feColorMatrix in="n" type="matrix" values="0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 .11 0"/>
+    <feComposite operator="in" in2="SourceGraphic"/></filter>
+ </defs>
+ <circle cx="24" cy="24" r="21.6" fill="#0a1930"/>
+ <circle cx="24" cy="24" r="21.6" fill="none" stroke="#122a48" stroke-width=".5" opacity=".9"/>
+ <circle cx="24" cy="24" r="20.4" fill="url(#gFace)"/>
+ <g clip-path="url(#coin)">
+   <g class="lyr"><g class="flow f-l1">
+     <path d="M 0 0" fill="url(#gL1)" class="fill-l1" filter="url(#cut)"/>
+     <path d="M 0 0" fill="none" stroke="#b2f2e0" class="edge-l1" stroke-width=".42" opacity=".65" filter="url(#soft)"/>
+     <g class="foamg">
+       <path class="fw-l1" d="" fill="none" stroke="#d9fff4" stroke-width=".42" opacity=".42" stroke-linecap="round"/>
+       <path class="fs-l1" d="" fill="none" stroke="#ffffff" stroke-width=".3" opacity=".88" stroke-linecap="round"/>
+     </g></g></g>
+   <g class="lyr"><g class="flow f-l2">
+     <path d="M 0 0" fill="url(#gL2)" class="fill-l2" filter="url(#cut)"/>
+     <path d="M 0 0" fill="none" stroke="#a5ecdf" class="edge-l2" stroke-width=".42" opacity=".65" filter="url(#soft)"/>
+     <g class="foamg">
+       <path class="fw-l2" d="" fill="none" stroke="#d9fff4" stroke-width=".42" opacity=".42" stroke-linecap="round"/>
+       <path class="fs-l2" d="" fill="none" stroke="#ffffff" stroke-width=".3" opacity=".88" stroke-linecap="round"/>
+       <path class="fw-b-l2" d="" fill="none" stroke="#d9fff4" stroke-width=".38" opacity=".32" stroke-linecap="round"/>
+       <path class="fs-b-l2" d="" fill="none" stroke="#ffffff" stroke-width=".26" opacity=".6" stroke-linecap="round"/>
+     </g></g></g>
+   <g class="lyr"><g class="flow f-l3">
+     <path d="M 0 0" fill="url(#gL3)" class="fill-l3" filter="url(#cut)"/>
+     <path d="M 0 0" fill="none" stroke="#8fd4ef" class="edge-l3" stroke-width=".42" opacity=".65" filter="url(#soft)"/>
+     <g class="foamg">
+       <path class="fw-l3" d="" fill="none" stroke="#d9fff4" stroke-width=".42" opacity=".42" stroke-linecap="round"/>
+       <path class="fs-l3" d="" fill="none" stroke="#ffffff" stroke-width=".3" opacity=".88" stroke-linecap="round"/>
+       <path class="fw-b-l3" d="" fill="none" stroke="#d9fff4" stroke-width=".38" opacity=".32" stroke-linecap="round"/>
+       <path class="fs-b-l3" d="" fill="none" stroke="#ffffff" stroke-width=".26" opacity=".6" stroke-linecap="round"/>
+     </g></g></g>
+   <g class="lyr"><g class="flow f-l4">
+     <path d="M 0 0" fill="url(#gL4)" class="fill-l4" filter="url(#cut)"/>
+     <path d="M 0 0" fill="none" stroke="#8fa8f2" class="edge-l4" stroke-width=".42" opacity=".65" filter="url(#soft)"/>
+     <g class="foamg">
+       <path class="fw-l4" d="" fill="none" stroke="#d9fff4" stroke-width=".42" opacity=".42" stroke-linecap="round"/>
+       <path class="fs-l4" d="" fill="none" stroke="#ffffff" stroke-width=".3" opacity=".88" stroke-linecap="round"/>
+     </g></g></g>
+   <rect x="2" y="2" width="44" height="44" filter="url(#grain)" opacity=".75"/>
+   <circle cx="24" cy="24" r="20.4" fill="url(#gOccl)"/>
+ </g>
+ <circle cx="24" cy="24" r="20.4" fill="none" stroke="#040b18" stroke-width=".65"/>
+</svg><em>thinking&hellip;</em></div>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+<script>
+// LIVING WATER — each edge is y(x,t): dominant traveling wave + harmonics
+// + a weak counter-traveling component -> interference: crests swell, collapse,
+// pass through each other. Geometry morphs every frame; nothing translates.
+const LAYERS = [
+  { id: 'l1', y0: 15.8, A: 1.35, c: 4.5, ph: 0.4, type: 'top' },
+  { id: 'l2', y0: 19.6, A: 1.15, c: 3.4, ph: 2.3, type: 'rib', th: 3.8 },
+  { id: 'l3', y0: 27.2, A: 1.10, c: 2.6, ph: 4.4, type: 'rib', th: 2.6 },
+  { id: 'l4', y0: 33.2, A: 1.00, c: 2.0, ph: 3.3, type: 'deep' },
+];
+const K1 = 2*Math.PI/16, K2 = 2*Math.PI/9.5, K3 = 2*Math.PI/23;
+const X0 = 1.5, X1 = 46.5, STEP = 0.6, MINGAP = 0.85;
+const XS = []; for (let x = X0; x <= X1 + 1e-6; x += STEP) XS.push(x);
+function edgeY(L, x, t, lag) {
+  const tt = t - (lag||0);
+  const am1 = 1 + 0.24*Math.sin(1.35*tt + L.ph*2.1);        // crests swell + collapse
+  const am2 = 1 + 0.30*Math.sin(0.9*tt + L.ph + 2.6);
+  // gusts: amplitude varies ALONG the edge, not just in time
+  const g = 1 + 0.28*Math.sin(0.55*K1*x + 0.31*tt + L.ph*1.3);
+  // turbulent cascade: eddies at descending scales, wandering (non-periodic) phases
+  const e1 = 0.30*Math.sin(2.6*K1*x - L.c*1.6*K1*tt + L.ph*3 + 0.8*Math.sin(0.23*tt + L.ph));
+  const e2 = 0.16*Math.sin(5.3*K1*x + L.c*0.9*K1*tt + L.ph*7 + 0.6*Math.sin(0.31*tt + 2*L.ph));
+  const e3 = 0.08*Math.sin(9.7*K1*x - L.c*2.3*K1*tt + 0.5*Math.sin(0.41*tt));
+  return L.y0
+    + L.A * ( g * ( am1 * Math.sin(K1*x - L.c*K1*tt + L.ph)
+    + 0.42 * am2 * Math.sin(K2*x - L.c*1.9*K2*tt + L.ph*1.7 + 0.9)
+    + 0.34 * Math.sin(K3*x + L.c*1.1*K3*tt + L.ph*0.6 + 2.1) )
+    + e1 + e2 + e3 );
+}
+function dOf(xs, ys, rev) {
+  let d = '';
+  if (rev) { for (let i = xs.length-1; i >= 0; i--) d += ' L ' + xs[i].toFixed(2) + ' ' + ys[i].toFixed(2); return d; }
+  for (let i = 0; i < xs.length; i++) d += (d ? ' L ' : 'M ') + xs[i].toFixed(2) + ' ' + ys[i].toFixed(2);
+  return d;
+}
+function tick() {
+  const t = gsap.ticker.time;
+  // 1) raw edges, pointwise
+  for (const L of LAYERS) {
+    L.top = XS.map(x => edgeY(L, x, t));
+    L.bot = L.type === 'rib'
+      ? XS.map(x => edgeY(L, x, t, 0.30) + L.th + 0.22*Math.sin(K2*x + 1.1*t + L.ph))
+      : L.top;
+  }
+  // 2) the splits are law: push colliding edges apart around their midpoint
+  for (let i = 0; i < LAYERS.length-1; i++) {
+    const a = LAYERS[i], b = LAYERS[i+1];
+    for (let j = 0; j < XS.length; j++) {
+      const gap = b.top[j] - a.bot[j];
+      if (gap < MINGAP) {
+        const push = (MINGAP - gap) / 2;
+        a.bot[j] -= push; b.top[j] += push;
+        if (a.type === 'rib' && a.bot[j] < a.top[j] + 0.6) a.bot[j] = a.top[j] + 0.6;
+      }
+    }
+  }
+  // 3) write geometry
+  for (const L of LAYERS) {
+    const top = dOf(XS, L.top);
+    let fill;
+    if (L.type === 'top')       fill = top + ' L 46.5 -6 L 1.5 -6 Z';
+    else if (L.type === 'deep') fill = top + ' L 46.5 50 L 1.5 50 Z';
+    else                        fill = top + dOf(XS, L.bot, true) + ' Z';
+    document.querySelectorAll('.fill-' + L.id).forEach(p => p.setAttribute('d', fill));
+    document.querySelectorAll('.edge-' + L.id).forEach(p => p.setAttribute('d', top));
+    if (L.type === 'rib') { const botD = dOf(XS, L.bot);
+      document.querySelectorAll('.edgeb-' + L.id).forEach(p => p.setAttribute('d', botD)); }
+    // FOAM: patchy, only where crests peak; strong core + soft wash
+    const foam = (ys, dir, base) => {
+      let strong = '', soft = '';
+      for (let j = 0; j < XS.length; j++) {
+        const dev = dir * (base - ys[j]) / L.A;            // outward swell 0..~1.6
+        const jit = 0.10*Math.sin(XS[j]*9.7 + L.ph*5 + t*0.6) + 0.06*Math.sin(XS[j]*17.3 - t*0.4);
+        const y = (ys[j] - dir*(0.16 + 0.3*Math.max(0, dev-0.2)) + jit).toFixed(2);
+        const pt = XS[j].toFixed(2) + ' ' + y;
+        const prevIn = j > 0 && strong.endsWith('_');       // sentinel per-band runs
+        if (dev > 0.55)      strong += (strong.endsWith('_') ? ' L ' + pt : ' M ' + pt) + '';
+        if (dev > 0.55) strong += '_';
+        if (dev > 0.18) soft += (soft.endsWith('_') ? ' L ' + pt : ' M ' + pt) + '_';
+      }
+      return { strong: strong.replaceAll('_',''), soft: soft.replaceAll('_','') };
+    };
+    const fTop = foam(L.top, 1, L.y0);
+    document.querySelectorAll('.fs-' + L.id).forEach(p => p.setAttribute('d', fTop.strong));
+    document.querySelectorAll('.fw-' + L.id).forEach(p => p.setAttribute('d', fTop.soft));
+    if (L.type === 'rib') {
+      const fBot = foam(L.bot, -1, L.y0 + L.th);
+      document.querySelectorAll('.fs-b-' + L.id).forEach(p => p.setAttribute('d', fBot.strong));
+      document.querySelectorAll('.fw-b-' + L.id).forEach(p => p.setAttribute('d', fBot.soft));
+    }
+  }
+}
+gsap.ticker.add(tick);
+document.querySelectorAll('.mark').forEach((m, idx) => {
+  gsap.timeline({ delay: idx ? .3 : .05 })
+    .from(m, { scale: .93, opacity: 0, duration: .7, ease: 'power3.out', transformOrigin: '50% 50%' })
+    .from(m.querySelectorAll('.lyr'), { y: 3.2, opacity: 0, duration: .65, ease: 'power2.out', stagger: .09 }, '-=.4');
+  if (m.classList.contains('small'))
+    gsap.to(m, { scale: 1.04, duration: 1.5, ease: 'sine.inOut', yoyo: true, repeat: -1, transformOrigin: '50% 50%' });
+});
+gsap.to('.word span', { y: 0, duration: .8, ease: 'power3.out', stagger: .055, delay: .5 });
+</script></body></html>

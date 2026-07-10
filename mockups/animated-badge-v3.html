@@ -1,0 +1,56 @@
+<!doctype html><html><head><meta charset="utf-8"><title>OCEAN</title>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+<style>
+body{margin:0;min-height:100vh;background:#050607;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:40px;font-family:system-ui}
+.cap{font-size:12px;letter-spacing:.34em;text-transform:uppercase;color:#2e5b63}
+svg.badge{overflow:visible;filter:drop-shadow(0 22px 70px rgba(0,50,75,.55))}
+#dome{filter:drop-shadow(0 1px 1px rgba(0,0,0,.8)) drop-shadow(0 0 3px rgba(46,232,214,.35))}
+.wg{filter:drop-shadow(0 .9px .8px rgba(0,0,0,.75)) drop-shadow(0 0 2.4px rgba(23,211,194,.3))}
+#deepg{filter:drop-shadow(0 1.1px 1px rgba(0,0,0,.75)) drop-shadow(0 0 3px rgba(13,166,196,.35))}
+.crest{fill:none;stroke-width:.7;stroke-linecap:butt;opacity:.75}
+</style></head><body>
+<div class="cap">ocean</div>
+<svg class="badge" width="440" height="440" viewBox="0 0 48 48" fill="none">
+ <defs>
+  <clipPath id="clip"><circle cx="24" cy="24" r="20.2"/></clipPath>
+  <linearGradient id="gDome" x1="0" y1="4" x2="0" y2="18.6" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#a4fff6"/><stop offset=".26" stop-color="#2ee8d6"/><stop offset="1" stop-color="#0da699"/>
+  </linearGradient>
+  <linearGradient id="gW1" x1="0" y1="19.6" x2="0" y2="25.2" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#5ff4e2"/><stop offset=".25" stop-color="#17d3c2"/><stop offset="1" stop-color="#089a8e"/>
+  </linearGradient>
+  <linearGradient id="gW2" x1="0" y1="26.4" x2="0" y2="32" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#2fe0d6"/><stop offset=".25" stop-color="#0cbdb4"/><stop offset="1" stop-color="#067f86"/>
+  </linearGradient>
+  <linearGradient id="gDeep" x1="0" y1="32.8" x2="0" y2="45.5" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#12b2cc"/><stop offset=".4" stop-color="#0777a0"/><stop offset="1" stop-color="#04365f"/>
+  </linearGradient>
+  <radialGradient id="gLight" cx=".38" cy=".3" r=".9">
+    <stop offset="0" stop-color="rgba(120,220,235,.14)"/><stop offset=".55" stop-color="rgba(0,0,0,0)"/><stop offset="1" stop-color="rgba(0,0,0,.6)"/>
+  </radialGradient>
+  <radialGradient id="gOccl"><stop offset=".76" stop-color="rgba(0,0,0,0)"/><stop offset=".93" stop-color="rgba(0,0,0,.3)"/><stop offset="1" stop-color="rgba(0,0,0,.8)"/></radialGradient>
+ </defs>
+ <circle cx="24" cy="24" r="21" fill="#04070c"/>
+ <circle cx="24" cy="24" r="20.7" stroke="#123241" stroke-width=".6"/>
+ <g clip-path="url(#clip)">
+  <g id="water">
+   <path id="dome" d="M 6.11 17.6 A 19.0 19.0 0 0 1 41.89 17.6 Q 37.89 18.70 33.89 17.60 Q 29.89 16.50 25.89 17.60 Q 21.89 18.70 17.89 17.60 Q 13.89 16.50 9.89 17.60 Q 5.89 18.70 1.89 17.60 Q -2.11 16.50 -6.11 17.60 Z" fill="url(#gDome)"/>
+   <g id="w1g" class="wg"><path d="M -24.00 20.20 Q -20.00 18.70 -16.00 20.20 Q -12.00 21.70 -8.00 20.20 Q -4.00 18.70 0.00 20.20 Q 4.00 21.70 8.00 20.20 Q 12.00 18.70 16.00 20.20 Q 20.00 21.70 24.00 20.20 Q 28.00 18.70 32.00 20.20 Q 36.00 21.70 40.00 20.20 Q 44.00 18.70 48.00 20.20 Q 52.00 21.70 56.00 20.20 Q 60.00 18.70 64.00 20.20 Q 68.00 21.70 72.00 20.20 Q 76.00 18.70 80.00 20.20 Q 84.00 21.70 88.00 20.20 L 88.00 24.40 Q 84.00 25.90 80.00 24.40 Q 76.00 22.90 72.00 24.40 Q 68.00 25.90 64.00 24.40 Q 60.00 22.90 56.00 24.40 Q 52.00 25.90 48.00 24.40 Q 44.00 22.90 40.00 24.40 Q 36.00 25.90 32.00 24.40 Q 28.00 22.90 24.00 24.40 Q 20.00 25.90 16.00 24.40 Q 12.00 22.90 8.00 24.40 Q 4.00 25.90 0.00 24.40 Q -4.00 22.90 -8.00 24.40 Q -12.00 25.90 -16.00 24.40 Q -20.00 22.90 -24.00 24.40 Z" fill="url(#gW1)"/><path class="crest" d="M -24 20.2 Q -20.00 18.70 -16.00 20.20 Q -12.00 21.70 -8.00 20.20 Q -4.00 18.70 0.00 20.20 Q 4.00 21.70 8.00 20.20 Q 12.00 18.70 16.00 20.20 Q 20.00 21.70 24.00 20.20 Q 28.00 18.70 32.00 20.20 Q 36.00 21.70 40.00 20.20 Q 44.00 18.70 48.00 20.20 Q 52.00 21.70 56.00 20.20 Q 60.00 18.70 64.00 20.20 Q 68.00 21.70 72.00 20.20 Q 76.00 18.70 80.00 20.20 Q 84.00 21.70 88.00 20.20" stroke="#b8fff5"/></g>
+   <g id="w2g" class="wg"><path d="M -24.00 27.00 Q -20.00 25.50 -16.00 27.00 Q -12.00 28.50 -8.00 27.00 Q -4.00 25.50 0.00 27.00 Q 4.00 28.50 8.00 27.00 Q 12.00 25.50 16.00 27.00 Q 20.00 28.50 24.00 27.00 Q 28.00 25.50 32.00 27.00 Q 36.00 28.50 40.00 27.00 Q 44.00 25.50 48.00 27.00 Q 52.00 28.50 56.00 27.00 Q 60.00 25.50 64.00 27.00 Q 68.00 28.50 72.00 27.00 Q 76.00 25.50 80.00 27.00 Q 84.00 28.50 88.00 27.00 L 88.00 31.20 Q 84.00 32.70 80.00 31.20 Q 76.00 29.70 72.00 31.20 Q 68.00 32.70 64.00 31.20 Q 60.00 29.70 56.00 31.20 Q 52.00 32.70 48.00 31.20 Q 44.00 29.70 40.00 31.20 Q 36.00 32.70 32.00 31.20 Q 28.00 29.70 24.00 31.20 Q 20.00 32.70 16.00 31.20 Q 12.00 29.70 8.00 31.20 Q 4.00 32.70 0.00 31.20 Q -4.00 29.70 -8.00 31.20 Q -12.00 32.70 -16.00 31.20 Q -20.00 29.70 -24.00 31.20 Z" fill="url(#gW2)"/><path class="crest" d="M -24 27.0 Q -20.00 25.50 -16.00 27.00 Q -12.00 28.50 -8.00 27.00 Q -4.00 25.50 0.00 27.00 Q 4.00 28.50 8.00 27.00 Q 12.00 25.50 16.00 27.00 Q 20.00 28.50 24.00 27.00 Q 28.00 25.50 32.00 27.00 Q 36.00 28.50 40.00 27.00 Q 44.00 25.50 48.00 27.00 Q 52.00 28.50 56.00 27.00 Q 60.00 25.50 64.00 27.00 Q 68.00 28.50 72.00 27.00 Q 76.00 25.50 80.00 27.00 Q 84.00 28.50 88.00 27.00" stroke="#8ef2e8"/></g>
+   <g id="deepg"><path d="M -24 33.8 Q -20.00 32.30 -16.00 33.80 Q -12.00 35.30 -8.00 33.80 Q -4.00 32.30 0.00 33.80 Q 4.00 35.30 8.00 33.80 Q 12.00 32.30 16.00 33.80 Q 20.00 35.30 24.00 33.80 Q 28.00 32.30 32.00 33.80 Q 36.00 35.30 40.00 33.80 Q 44.00 32.30 48.00 33.80 Q 52.00 35.30 56.00 33.80 Q 60.00 32.30 64.00 33.80 Q 68.00 35.30 72.00 33.80 Q 76.00 32.30 80.00 33.80 Q 84.00 35.30 88.00 33.80 L 88.0 46 L -24 46 Z" fill="url(#gDeep)"/><path class="crest" d="M -24 33.8 Q -20.00 32.30 -16.00 33.80 Q -12.00 35.30 -8.00 33.80 Q -4.00 32.30 0.00 33.80 Q 4.00 35.30 8.00 33.80 Q 12.00 32.30 16.00 33.80 Q 20.00 35.30 24.00 33.80 Q 28.00 32.30 32.00 33.80 Q 36.00 35.30 40.00 33.80 Q 44.00 32.30 48.00 33.80 Q 52.00 35.30 56.00 33.80 Q 60.00 32.30 64.00 33.80 Q 68.00 35.30 72.00 33.80 Q 76.00 32.30 80.00 33.80 Q 84.00 35.30 88.00 33.80" stroke="#66d9e8"/></g>
+  </g>
+  <circle cx="24" cy="24" r="20.4" fill="url(#gLight)"/>
+ </g>
+ <circle cx="24" cy="24" r="20.2" fill="url(#gOccl)"/>
+</svg>
+<div class="cap">one current &middot; parallax depth</div>
+<script>
+// ONE SPINNING CURRENT: every layer flows the SAME direction, continuous,
+// no pulses. Parallax speeds (front fast, deep slow) = rotating water drum.
+gsap.to("#w1g",   { x: 16, duration: 2.8, ease: "none", repeat: -1 });
+gsap.to("#w2g",   { x: 16, duration: 3.8, ease: "none", repeat: -1 });
+gsap.to("#deepg", { x: 16, duration: 5.2, ease: "none", repeat: -1 });
+// one slow organic breath of the whole body — no twitch
+gsap.to("#water", { y: -1.0, duration: 2.6, ease: "sine.inOut", yoyo: true, repeat: -1 });
+</script>
+</body></html>

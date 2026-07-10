@@ -1,0 +1,110 @@
+<!doctype html><html><head><meta charset="utf-8"><title>OCEAN v12</title><style>
+*{box-sizing:border-box;margin:0}
+body{background:#050d13;min-height:100vh;font-family:-apple-system,system-ui,sans-serif;color:#e8f4f2;display:flex;flex-direction:column;align-items:center;gap:60px;padding:76px 24px}
+.hero{display:flex;flex-direction:column;align-items:center;gap:28px}
+.hero .mark{width:280px;height:280px;filter:drop-shadow(0 20px 46px rgba(2,10,16,.72))}
+.word{display:flex;overflow:hidden;font-size:44px;font-weight:650;letter-spacing:.34em;text-indent:.34em}
+.word span{display:inline-block;transform:translateY(115%)}
+.w1{color:#4fdcc4}.w2{color:#33bbb6}.w3{color:#2a9dbd}.w4{color:#2f78c9}.w5{color:#4a63d8}
+.loadrow{display:flex;align-items:center;gap:14px;background:#081620;border:1px solid #0f2833;border-radius:14px;padding:14px 22px}
+.loadrow .mark{width:34px;height:34px}
+.loadrow em{font-style:normal;color:#6f9aa6;font-size:14px}
+</style></head><body>
+<div class="hero"><span id="heroMark"></span>
+<div class="word"><span class="w1">O</span><span class="w2">C</span><span class="w3">E</span><span class="w4">A</span><span class="w5">N</span></div></div>
+<div class="loadrow"><span id="chipMark"></span><em>thinking&hellip;</em></div>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+<script>
+const NS="http://www.w3.org/2000/svg";
+// --- three surface edges: aqua|teal boundary, teal|blue, blue|indigo. Asymmetric on purpose.
+const EDGES=[
+  {y0:16.6, a:1.75, k:0.34, spd:0.85, ph:0.2},   // main surface (biggest, slowest swell)
+  {y0:24.2, a:1.28, k:0.45, spd:1.10, ph:1.6},
+  {y0:31.2, a:0.98, k:0.54, spd:0.72, ph:3.0},   // deepest boundary (tight, calm)
+];
+const STEP=0.7, X0=1.5, X1=46.5;
+// laminar edge: two smooth components + slow breathing. NO high-freq eddies (those made mountains).
+function ey(E,x,t){
+  const br=1+0.11*Math.sin(0.55*t+E.ph);            // slow amplitude breathing
+  const s = Math.sin(E.k*x - E.spd*t + E.ph)
+          + 0.44*Math.sin(1.7*E.k*x - 1.28*E.spd*t + E.ph*1.6 + 0.7);
+  return E.y0 + E.a*br*s + E.a*0.09*Math.sin(3.0*E.k*x + 0.5*E.spd*t + E.ph); // whisper ripple
+}
+// sample one edge left->right
+function samp(E,t){const p=[];for(let x=X0;x<=X1+0.01;x+=STEP)p.push([x,ey(E,x,t)]);return p;}
+// fill band between top pts and bottom line yBot (or next edge pts)
+function bandD(top,botY){
+  let d="M"+top[0][0].toFixed(2)+" "+top[0][1].toFixed(2);
+  for(let i=1;i<top.length;i++)d+="L"+top[i][0].toFixed(2)+" "+top[i][1].toFixed(2);
+  d+="L"+X1.toFixed(2)+" "+botY+"L"+X0.toFixed(2)+" "+botY+"Z";return d;
+}
+function bandD2(top,bot){ // band between two edges
+  let d="M"+top[0][0].toFixed(2)+" "+top[0][1].toFixed(2);
+  for(let i=1;i<top.length;i++)d+="L"+top[i][0].toFixed(2)+" "+top[i][1].toFixed(2);
+  for(let i=bot.length-1;i>=0;i--)d+="L"+bot[i][0].toFixed(2)+" "+bot[i][1].toFixed(2);
+  return d+"Z";
+}
+function edgeD(pts){let d="M"+pts[0][0].toFixed(2)+" "+pts[0][1].toFixed(2);for(let i=1;i<pts.length;i++)d+="L"+pts[i][0].toFixed(2)+" "+pts[i][1].toFixed(2);return d;}
+
+let UID=0;
+function buildBadge(){
+  const id=++UID;
+  const svg=document.createElementNS(NS,"svg");
+  svg.setAttribute("viewBox","0 0 48 48");svg.setAttribute("class","mark");
+  svg.innerHTML=`<defs>
+    <clipPath id="coin${id}"><circle cx="24" cy="24" r="20.4"/></clipPath>
+    <linearGradient id="gA${id}" x1="0" y1="6" x2="0" y2="20" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#57e0c8"/><stop offset="1" stop-color="#2cb09c"/></linearGradient>
+    <linearGradient id="gB${id}" x1="0" y1="17" x2="0" y2="27" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#33b6b8"/><stop offset="1" stop-color="#1a7f98"/></linearGradient>
+    <linearGradient id="gC${id}" x1="0" y1="24" x2="0" y2="34" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2c78c8"/><stop offset="1" stop-color="#1a5296"/></linearGradient>
+    <linearGradient id="gD${id}" x1="0" y1="30" x2="0" y2="46" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2f56cc"/><stop offset="1" stop-color="#0a1642"/></linearGradient>
+    <radialGradient id="gFace${id}" cx=".5" cy=".4" r=".64">
+      <stop offset=".7" stop-color="#061127"/><stop offset="1" stop-color="#020813"/></radialGradient>
+    <radialGradient id="gGloss${id}" cx=".5" cy=".2" r=".6">
+      <stop offset="0" stop-color="#bfefff" stop-opacity=".16"/><stop offset=".5" stop-color="#bfefff" stop-opacity="0"/></radialGradient>
+    <radialGradient id="gOccl${id}" cx=".5" cy=".5" r=".5">
+      <stop offset=".78" stop-color="#000" stop-opacity="0"/><stop offset=".97" stop-color="#000" stop-opacity=".46"/><stop offset="1" stop-color="#000" stop-opacity=".7"/></radialGradient>
+    <filter id="soft${id}" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation=".18"/></filter>
+    <filter id="split${id}" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation=".26"/></filter>
+  </defs>
+  <circle cx="24" cy="24" r="21.6" fill="#0a1930"/>
+  <circle cx="24" cy="24" r="21.6" fill="none" stroke="#132c4c" stroke-width=".5" opacity=".9"/>
+  <circle cx="24" cy="24" r="20.4" fill="url(#gFace${id})"/>
+  <g clip-path="url(#coin${id})">
+    <path class="bD" fill="url(#gD${id})"/>
+    <path class="bC" fill="url(#gC${id})"/>
+    <path class="bB" fill="url(#gB${id})"/>
+    <path class="bA" fill="url(#gA${id})"/>
+    <path class="sC" fill="none" stroke="#05101f" stroke-width=".34" stroke-opacity=".55" filter="url(#split${id})"/>
+    <path class="sB" fill="none" stroke="#05101f" stroke-width=".34" stroke-opacity=".55" filter="url(#split${id})"/>
+    <path class="fA" fill="none" stroke="#eafcff" stroke-width=".5" stroke-linecap="round" stroke-opacity=".55" stroke-dasharray="2.4 3.1 1.2 4.0 1.8 3.4" filter="url(#soft${id})"/>
+    <path class="fB" fill="none" stroke="#dff6ff" stroke-width=".34" stroke-linecap="round" stroke-opacity=".3" stroke-dasharray="1.4 5.5 1.0 6.0" filter="url(#soft${id})"/>
+    <rect x="0" y="0" width="48" height="48" fill="url(#gGloss${id})"/>
+    <circle cx="24" cy="24" r="20.4" fill="url(#gOccl${id})"/>
+  </g>
+  <circle cx="24" cy="24" r="20.4" fill="none" stroke="#040b18" stroke-width=".6"/>`;
+  const q=c=>svg.querySelector("."+c);
+  return {svg,bA:q("bA"),bB:q("bB"),bC:q("bC"),bD:q("bD"),sB:q("sB"),sC:q("sC"),fA:q("fA"),fB:q("fB")};
+}
+function drive(b,t){
+  const A=samp(EDGES[0],t),B=samp(EDGES[1],t),C=samp(EDGES[2],t);
+  b.bA.setAttribute("d",bandD(A,6));           // aqua fills up above surface (rim hides top)
+  b.bB.setAttribute("d",bandD2(A,B));
+  b.bC.setAttribute("d",bandD2(B,C));
+  b.bD.setAttribute("d",bandD(C,46));
+  b.sB.setAttribute("d",edgeD(A));             // split-shadow sits on each surface line
+  b.sC.setAttribute("d",edgeD(B));
+  b.fA.setAttribute("d",edgeD(A));             // foam glint on main surface
+  b.fB.setAttribute("d",edgeD(B));
+}
+const hero=buildBadge(),chip=buildBadge();
+document.getElementById("heroMark").appendChild(hero.svg);
+document.getElementById("chipMark").appendChild(chip.svg);
+const t0=performance.now();
+gsap.ticker.add(()=>{const t=(performance.now()-t0)/1000*0.6;drive(hero,t);drive(chip,t);});
+gsap.set(".word span",{y:"115%"});
+gsap.to(".word span",{y:"0%",duration:.9,ease:"power3.out",stagger:.07,delay:.25});
+</script></body></html>

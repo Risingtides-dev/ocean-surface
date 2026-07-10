@@ -1,0 +1,143 @@
+<!doctype html><html><head><meta charset="utf-8"><title>OCEAN v20</title><style>
+*{box-sizing:border-box;margin:0}
+:root{--wm-font:system-ui}
+body{background:#050d13;min-height:100vh;font-family:-apple-system,system-ui,sans-serif;color:#e8f4f2;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px}
+.scene{width:500px;height:500px;filter:drop-shadow(0 20px 50px rgba(2,10,16,.6))}
+.ctrls{margin-top:16px;display:flex;gap:10px;align-items:center}
+.ctrls button,.ctrls select{background:#0b1c26;border:1px solid #143246;color:#7fb5c4;border-radius:10px;padding:8px 14px;font-size:13px;cursor:pointer}
+</style></head><body>
+<svg class="scene" viewBox="0 0 600 600" fill="none">
+ <defs>
+  <clipPath id="tide"><path id="tideP" d="M0 620 L600 620 L600 620 L0 620 Z"/></clipPath>
+  <clipPath id="ballClip"><circle id="ballC" cx="300" cy="148" r="58"/></clipPath>
+  <clipPath id="spread"><rect id="spreadR" x="300" y="0" width="0" height="600"/></clipPath>
+  <clipPath id="dripClip"><path d="M0 -13 C 5 -6 7 -1 7 3 A 7 7 0 1 1 -7 3 C -7 -1 -5 -6 0 -13 Z"/></clipPath>
+  <linearGradient id="waterBody" x1="0" y1="150" x2="0" y2="600" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#2ea6c6" stop-opacity=".40"/><stop offset=".5" stop-color="#1c63b0" stop-opacity=".5"/><stop offset="1" stop-color="#0a1642" stop-opacity=".64"/></linearGradient>
+  <linearGradient id="dripRamp" x1="0" y1="-13" x2="0" y2="10" gradientUnits="userSpaceOnUse">
+    <stop offset="0" stop-color="#5ce3cb"/><stop offset=".45" stop-color="#2a86c0"/><stop offset="1" stop-color="#16307e"/></linearGradient>
+  <filter id="foamGlow" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="2"/></filter>
+ </defs>
+
+ <!-- water body + waterline (spread reveal from the impact point) -->
+ <g clip-path="url(#spread)">
+   <path id="body" fill="url(#waterBody)" d=""/>
+ </g>
+ <!-- OCEAN: per-letter solid depth ramp; font is one swappable place -->
+ <g id="wordmark" clip-path="url(#tide)" font-family="var(--wm-font)" font-weight="700" font-size="88" text-anchor="middle">
+   <text x="100" y="330" fill="#0087AF">O</text><text x="200" y="330" fill="#00AFD7">C</text>
+   <text x="300" y="330" fill="#00D7D7">E</text><text x="400" y="330" fill="#00FFD7">A</text><text x="500" y="330" fill="#5FFFFF">N</text>
+ </g>
+ <!-- the orb (living water), bobs on the surface -->
+ <g id="orbG"><svg id="orb" x="234" y="82" width="132" height="132" viewBox="0 0 48 48" fill="none"></svg></g>
+ <!-- submerged cap: orb's underwater portion, tinted, top follows the SAME wave -->
+ <g clip-path="url(#ballClip)"><path id="subCap" fill="#0b2048" fill-opacity=".55" d=""/></g>
+ <!-- ONE continuous waterline in front of the ball (matches the whole surface) -->
+ <g clip-path="url(#spread)">
+   <path id="crestGlow" fill="none" stroke="#bfeff8" stroke-width="4.5" stroke-linecap="round" stroke-opacity=".3" filter="url(#foamGlow)" opacity="0"/>
+   <path id="crest" fill="none" stroke="#eafcff" stroke-width="2.3" stroke-linecap="round" stroke-opacity=".8" opacity="0"/>
+ </g>
+ <!-- drip: a teardrop of the orb -->
+ <g id="drip" opacity="0">
+   <path d="M0 -13 C 5 -6 7 -1 7 3 A 7 7 0 1 1 -7 3 C -7 -1 -5 -6 0 -13 Z" fill="url(#dripRamp)"/>
+   <g clip-path="url(#dripClip)"><path d="M-8 2 Q -3 0.5 0 2 T 8 2" fill="none" stroke="#1a6fa0" stroke-width="1.4" stroke-opacity=".6"/><path d="M-8 6 Q -3 4.6 0 6 T 8 6" fill="none" stroke="#14357e" stroke-width="1.4" stroke-opacity=".55"/></g>
+   <path d="M0 -13 C 5 -6 7 -1 7 3 A 7 7 0 1 1 -7 3 C -7 -1 -5 -6 0 -13 Z" fill="none" stroke="#0a1f3a" stroke-width=".7" stroke-opacity=".5"/>
+   <path d="M-2.6 -3 Q0 -5 2.6 -3" fill="none" stroke="#bfeee0" stroke-width="1.2" stroke-linecap="round" stroke-opacity=".6"/>
+ </g>
+</svg>
+<div class="ctrls">
+ <button id="replay">replay</button>
+ <select id="font" title="swap wordmark font">
+  <option value="system-ui">System</option>
+  <option value="'Avenir Next',system-ui">Avenir Next</option>
+  <option value="'Futura',system-ui">Futura</option>
+  <option value="'Helvetica Neue',system-ui">Helvetica Neue</option>
+  <option value="'Gill Sans',system-ui">Gill Sans</option>
+  <option value="Georgia,serif">Georgia</option>
+  <option value="'SF Mono',ui-monospace,monospace">SF Mono</option>
+ </select>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+<script>
+const NS="http://www.w3.org/2000/svg";
+// swappable wordmark font (one place; maps to a --wm-font token on port)
+document.getElementById("font").onchange=e=>document.documentElement.style.setProperty("--wm-font",e.target.value);
+// ---------- orb: six-strata living water ----------
+const EDGES=[{y0:14.0,a:1.50,k:0.33,spd:0.85,ph:0.2},{y0:20.4,a:1.15,k:0.44,spd:1.05,ph:1.5},{y0:25.2,a:0.92,k:0.52,spd:0.75,ph:2.8},{y0:31.6,a:0.82,k:0.40,spd:0.95,ph:4.0},{y0:36.6,a:0.66,k:0.58,spd:0.68,ph:5.2}];
+const STEP=0.4,X0=1.5,X1=46.5;
+function ey(E,x,t){const br=1+0.11*Math.sin(0.55*t+E.ph);const s=Math.sin(E.k*x-E.spd*t+E.ph)+0.44*Math.sin(1.7*E.k*x-1.28*E.spd*t+E.ph*1.6+0.7);return E.y0+E.a*br*s+E.a*0.09*Math.sin(3.0*E.k*x+0.5*E.spd*t+E.ph);}
+function samp(E,t){const p=[];for(let x=X0;x<=X1+0.01;x+=STEP)p.push([x,ey(E,x,t)]);return p;}
+function bandTop(top,by){let d="M"+top[0][0].toFixed(2)+" "+top[0][1].toFixed(2);for(let i=1;i<top.length;i++)d+="L"+top[i][0].toFixed(2)+" "+top[i][1].toFixed(2);return d+"L"+X1+" "+by+"L"+X0+" "+by+"Z";}
+function band2(t,b){let d="M"+t[0][0].toFixed(2)+" "+t[0][1].toFixed(2);for(let i=1;i<t.length;i++)d+="L"+t[i][0].toFixed(2)+" "+t[i][1].toFixed(2);for(let i=b.length-1;i>=0;i--)d+="L"+b[i][0].toFixed(2)+" "+b[i][1].toFixed(2);return d+"Z";}
+function edgeP(p){let d="M"+p[0][0].toFixed(2)+" "+p[0][1].toFixed(2);for(let i=1;i<p.length;i++)d+="L"+p[i][0].toFixed(2)+" "+p[i][1].toFixed(2);return d;}
+const orb=document.getElementById("orb");
+orb.innerHTML=`<defs><clipPath id="c"><circle cx="24" cy="24" r="20.4"/></clipPath>
+<linearGradient id="ba" gradientUnits="userSpaceOnUse" x1="0" y1="5" x2="0" y2="16"><stop offset="0" stop-color="#5ce3cb"/><stop offset="1" stop-color="#34bda8"/></linearGradient>
+<linearGradient id="bb" gradientUnits="userSpaceOnUse" x1="0" y1="15" x2="0" y2="22"><stop offset="0" stop-color="#33bab4"/><stop offset="1" stop-color="#1a7f98"/></linearGradient>
+<linearGradient id="bc" gradientUnits="userSpaceOnUse" x1="0" y1="21" x2="0" y2="27"><stop offset="0" stop-color="#2a9cc0"/><stop offset="1" stop-color="#1a6fa0"/></linearGradient>
+<linearGradient id="bd" gradientUnits="userSpaceOnUse" x1="0" y1="26" x2="0" y2="33"><stop offset="0" stop-color="#2c72c6"/><stop offset="1" stop-color="#184f94"/></linearGradient>
+<linearGradient id="be" gradientUnits="userSpaceOnUse" x1="0" y1="32" x2="0" y2="39"><stop offset="0" stop-color="#2a54c2"/><stop offset="1" stop-color="#14357e"/></linearGradient>
+<linearGradient id="bf" gradientUnits="userSpaceOnUse" x1="0" y1="36" x2="0" y2="46"><stop offset="0" stop-color="#233ba8"/><stop offset="1" stop-color="#0a1642"/></linearGradient>
+<radialGradient id="bface" cx=".5" cy=".4" r=".64"><stop offset=".7" stop-color="#061127"/><stop offset="1" stop-color="#020813"/></radialGradient>
+<radialGradient id="boccl"><stop offset=".78" stop-color="#000" stop-opacity="0"/><stop offset=".97" stop-color="#000" stop-opacity=".46"/><stop offset="1" stop-color="#000" stop-opacity=".7"/></radialGradient>
+<filter id="sf"><feGaussianBlur stdDeviation=".2"/></filter><filter id="cr"><feGaussianBlur stdDeviation=".05"/></filter></defs>
+<circle cx="24" cy="24" r="21.6" fill="#0a1930"/><circle cx="24" cy="24" r="20.4" fill="url(#bface)"/>
+<g clip-path="url(#c)">
+<path class="p bf" fill="url(#bf)"/><path class="p be" fill="url(#be)"/><path class="p bd" fill="url(#bd)"/><path class="p bc" fill="url(#bc)"/><path class="p bb" fill="url(#bb)"/><path class="p ba" fill="url(#ba)"/>
+<path class="s sB" fill="none" stroke="#05101f" stroke-width=".3" stroke-opacity=".55" filter="url(#sf)"/><path class="s sC" fill="none" stroke="#05101f" stroke-width=".3" stroke-opacity=".55" filter="url(#sf)"/><path class="s sD" fill="none" stroke="#05101f" stroke-width=".3" stroke-opacity=".55" filter="url(#sf)"/><path class="s sE" fill="none" stroke="#05101f" stroke-width=".3" stroke-opacity=".55" filter="url(#sf)"/><path class="s sF" fill="none" stroke="#05101f" stroke-width=".3" stroke-opacity=".47" filter="url(#sf)"/>
+<path class="fa" fill="none" stroke="#f4feff" stroke-width=".3" stroke-linecap="round" stroke-opacity=".85" filter="url(#cr)"/>
+<circle cx="24" cy="24" r="20.4" fill="url(#boccl)"/></g>`;
+const q=s=>orb.querySelector(s);
+const Bd={ba:q(".ba"),bb:q(".bb"),bc:q(".bc"),bd:q(".bd"),be:q(".be"),bf:q(".bf"),sB:q(".sB"),sC:q(".sC"),sD:q(".sD"),sE:q(".sE"),sF:q(".sF"),fa:q(".fa")};
+const t0=performance.now();
+gsap.ticker.add(()=>{const t=(performance.now()-t0)/1000*0.6;const A=samp(EDGES[0],t),b=samp(EDGES[1],t),c=samp(EDGES[2],t),d=samp(EDGES[3],t),e=samp(EDGES[4],t);
+ Bd.ba.setAttribute("d",bandTop(A,2));Bd.bb.setAttribute("d",band2(A,b));Bd.bc.setAttribute("d",band2(b,c));Bd.bd.setAttribute("d",band2(c,d));Bd.be.setAttribute("d",band2(d,e));Bd.bf.setAttribute("d",bandTop(e,46));
+ Bd.sB.setAttribute("d",edgeP(A));Bd.sC.setAttribute("d",edgeP(b));Bd.sD.setAttribute("d",edgeP(c));Bd.sE.setAttribute("d",edgeP(d));Bd.sF.setAttribute("d",edgeP(e));Bd.fa.setAttribute("d",edgeP(A));});
+
+// ---------- scene ----------
+const W=600, CX=300, CY=148, R=58, POLE_Y=206, LAND_Y=556, L_FINAL=157;
+const body=document.getElementById("body"), tideP=document.getElementById("tideP");
+const crest=document.getElementById("crest"), crestGlow=document.getElementById("crestGlow");
+const ballC=document.getElementById("ballC"), subCap=document.getElementById("subCap");
+const orbG=document.getElementById("orbG"), spreadR=document.getElementById("spreadR"), drip=document.getElementById("drip");
+function waveTop(L,ph,amp){let s="";for(let x=0;x<=W;x+=8){const y=L+Math.sin(x*0.035+ph)*amp+Math.sin(x*0.08+ph*1.6)*amp*0.4;s+=(x===0?"M":"L")+x+" "+y.toFixed(1);}return s;}
+function bodyD(L,ph,amp){return waveTop(L,ph,amp)+`L${W} 600 L0 600 Z`;}
+const S={L:620,ph:0,amp:0,bob:0};
+function redraw(){
+  ballC.setAttribute("cy",(CY+S.bob).toFixed(2));
+  orbG.setAttribute("transform",`translate(0 ${S.bob.toFixed(2)})`);
+  const bd=bodyD(S.L,S.ph,S.amp);
+  body.setAttribute("d",bd); tideP.setAttribute("d",bd); subCap.setAttribute("d",bd);
+  const wl=waveTop(S.L,S.ph,S.amp); crest.setAttribute("d",wl); crestGlow.setAttribute("d",wl);
+}
+let TL;
+function play(){
+  if(TL)TL.kill();
+  gsap.set([crest,crestGlow],{opacity:0});
+  gsap.set(spreadR,{attr:{x:300,width:0}});
+  gsap.set(drip,{opacity:0,x:CX,y:POLE_Y,scaleY:1,scaleX:1,transformOrigin:"50% 50%"});
+  S.L=620;S.ph=0;S.amp=0;S.bob=0;redraw();
+  TL=gsap.timeline({onUpdate:redraw});
+  // 1) teardrop drip swells at the south pole, releases
+  TL.to(drip,{opacity:1,y:POLE_Y+6,duration:.32,ease:"power1.out"});
+  // 2) gravity fall — straight down, stretching
+  TL.to(drip,{y:LAND_Y,duration:.62,ease:"power2.in"});
+  TL.to(drip,{scaleY:1.5,scaleX:.8,duration:.5,ease:"power1.in"},"<");
+  // 3) impact: drip merges; water SPREADS out from the point
+  TL.to(drip,{opacity:0,duration:.1});
+  TL.set(S,{L:LAND_Y,amp:6});
+  TL.set([crest,crestGlow],{opacity:.9});
+  TL.to(spreadR,{attr:{x:0,width:W},duration:.5,ease:"power2.out"},"<");
+  // 4) tide rises to float the orb
+  TL.to(S,{L:L_FINAL,duration:2.1,ease:"power2.out"},">-.12");
+  TL.to(S,{ph:18,duration:2.1,ease:"none"},"<");
+  TL.to(S,{amp:2.0,duration:2.1,ease:"power1.out"},"<");
+  // 5) buoyancy: dip into displaced water, rebound, settle, idle bob
+  TL.to(S,{bob:8,duration:.3,ease:"power2.out"},">-.5");
+  TL.to(S,{bob:-2,duration:1.7,ease:"elastic.out(1,0.42)"});
+  TL.to(S,{bob:1.4,duration:2.4,ease:"sine.inOut",repeat:1,yoyo:true},">-.2");
+  TL.to({},{duration:.8,onComplete:play});
+}
+document.getElementById("replay").onclick=play;
+setTimeout(play,320);
+</script></body></html>

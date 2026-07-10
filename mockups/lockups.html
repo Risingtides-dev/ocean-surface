@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ocean — lockup system mockup</title>
+<style>
+/* ── Token contract (mirrors styles/tokens.css) ─────────────────── */
+:root {
+  --bg: #060606; --bg-raised: #0A0A0A;
+  --fg: #FAFCFF; --fg-2: #B8B9BB; --fg-3: #909098;
+  --ocean-4: #0087AF; --ocean-5: #00AFD7; --ocean-6: #00D7D7;
+  --ocean-7: #00FFD7; --ocean-8: #5FFFFF;
+  --badge-face: #020203;
+  --badge-rim: rgba(148, 156, 160, 0.22);
+  --badge-arc: #03D9C5;
+  --badge-w1: #01D2C3;
+  --badge-w2: #01AFB5;
+  --badge-fill: #046EB2;
+  --badge-bar: #085F9F;
+  --font: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;
+}
+* { box-sizing: border-box; margin: 0; }
+body {
+  background: var(--bg); color: var(--fg);
+  font: 14px/1.55 var(--font);
+  min-height: 100vh; padding: 32px 24px;
+}
+
+h1 { font-size: 16px; font-weight: 600; color: var(--fg-2); margin-bottom: 8px; }
+h2 { font-size: 14px; font-weight: 600; color: var(--fg-3); margin: 36px 0 16px; }
+.row { display: flex; align-items: flex-end; gap: 48px; margin-bottom: 24px; flex-wrap: wrap; }
+
+/* ── The badge — pixel-true copy of transcript.css ──────────────── */
+.wave-badge {
+  display: block;
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.55))
+          drop-shadow(0 0 9px color-mix(in srgb, var(--badge-w1) 9%, transparent));
+}
+.wave-badge__face { fill: url(#wave-badge-face-g); }
+.wave-badge__vig  { fill: url(#wave-badge-vig-g); }
+.wave-badge__ring {
+  stroke: url(#wave-badge-rim-g);
+  stroke-width: 0.55;
+  filter: drop-shadow(0 0 1px rgba(255, 255, 255, 0.14));
+}
+.wave-badge__arc {
+  stroke: url(#wave-badge-arc-g);
+  stroke-width: 3.9;
+  filter: drop-shadow(0 0.9px 0.7px rgba(0, 0, 0, 0.75))
+          drop-shadow(0 0 2.4px color-mix(in srgb, var(--badge-arc) 32%, transparent));
+}
+.wave-badge__w1 {
+  stroke: url(#wave-badge-w1-g);
+  stroke-width: 3.7;
+  filter: drop-shadow(0 0.8px 0.7px rgba(0, 0, 0, 0.7))
+          drop-shadow(0 0 2.2px color-mix(in srgb, var(--badge-w1) 28%, transparent));
+}
+.wave-badge__w2 {
+  stroke: url(#wave-badge-w2-g);
+  stroke-width: 3.7;
+  filter: drop-shadow(0 0.8px 0.7px rgba(0, 0, 0, 0.7))
+          drop-shadow(0 0 2.2px color-mix(in srgb, var(--badge-w2) 28%, transparent));
+}
+.wave-badge__fill {
+  fill: url(#wave-badge-fill-g);
+  filter: drop-shadow(0 1px 0.9px rgba(0, 0, 0, 0.7))
+          drop-shadow(0 0 2.6px color-mix(in srgb, var(--badge-fill) 34%, transparent));
+}
+.wave-badge__bar {
+  stroke: url(#wave-badge-bar-g);
+  stroke-width: 2.2;
+  filter: drop-shadow(0 0.6px 0.6px rgba(0, 0, 0, 0.75))
+          drop-shadow(0 0 2px color-mix(in srgb, var(--badge-bar) 34%, transparent));
+}
+.wave-badge__occl { fill: url(#wave-badge-occl-g); }
+.wave-badge__stop-face-hi { stop-color: color-mix(in srgb, var(--badge-face) 95%, white); }
+.wave-badge__stop-face    { stop-color: var(--badge-face); }
+.wave-badge__stop-arc-hi  { stop-color: color-mix(in srgb, var(--badge-arc) 80%, white); }
+.wave-badge__stop-arc     { stop-color: var(--badge-arc); }
+.wave-badge__stop-arc-lo  { stop-color: color-mix(in srgb, var(--badge-arc) 86%, black); }
+.wave-badge__stop-w1-hi   { stop-color: color-mix(in srgb, var(--badge-w1) 90%, white); }
+.wave-badge__stop-w1      { stop-color: var(--badge-w1); }
+.wave-badge__stop-w1-lo   { stop-color: color-mix(in srgb, var(--badge-w1) 93%, black); }
+.wave-badge__stop-w2-hi   { stop-color: color-mix(in srgb, var(--badge-w2) 92%, white); }
+.wave-badge__stop-w2      { stop-color: var(--badge-w2); }
+.wave-badge__stop-w2-lo   { stop-color: color-mix(in srgb, var(--badge-w2) 95%, black); }
+.wave-badge__stop-fill-hi { stop-color: color-mix(in srgb, var(--badge-fill) 92%, white); }
+.wave-badge__stop-fill    { stop-color: var(--badge-fill); }
+.wave-badge__stop-fill-lo { stop-color: color-mix(in srgb, var(--badge-fill) 94%, black); }
+.wave-badge__stop-bar-hi  { stop-color: color-mix(in srgb, var(--badge-bar) 75%, white); }
+.wave-badge__stop-bar     { stop-color: var(--badge-bar); }
+.wave-badge__stop-bar-lo  { stop-color: color-mix(in srgb, var(--badge-bar) 55%, black); }
+.wave-badge__stop-rim-hi  { stop-color: color-mix(in srgb, var(--badge-rim) 72%, white); }
+.wave-badge__stop-rim-lo  { stop-color: color-mix(in srgb, var(--badge-rim) 72%, black); }
+.wave-badge__stop-vig-in  { stop-color: transparent; }
+.wave-badge__stop-vig-out { stop-color: rgba(0, 0, 0, 0.55); }
+.wave-badge__stop-occl-in  { stop-color: transparent; }
+.wave-badge__stop-occl-mid { stop-color: rgba(0, 0, 0, 0.26); }
+.wave-badge__stop-occl-out { stop-color: rgba(0, 0, 0, 0.72); }
+
+/* ── Lockup variants ────────────────────────────────────────────── */
+.lockup { display: inline-flex; align-items: center; }
+.variant { min-width: 340px; }
+.vlabel {
+  font: 11px var(--mono); color: var(--fg-3);
+  text-transform: uppercase; letter-spacing: 0.1em;
+  margin-bottom: 12px;
+}
+.slabel {
+  font: 10px var(--mono); color: var(--fg-3);
+  margin-top: 6px; text-align: center;
+}
+
+/* Variant A: mark only */
+.va .lockup { gap: 0; }
+
+/* Variant B: mark + lowercase "ocean" */
+.vb .lockup { gap: 8px; }
+.vb .wrd {
+  display: inline-flex; gap: 0.42em;
+  font-family: var(--font); font-weight: 600; line-height: 1;
+}
+.vb .wrd span:nth-child(1) { color: var(--ocean-4); }
+.vb .wrd span:nth-child(2) { color: var(--ocean-5); }
+.vb .wrd span:nth-child(3) { color: var(--ocean-6); }
+.vb .wrd span:nth-child(4) { color: var(--ocean-7); }
+.vb .wrd span:nth-child(5) { color: var(--ocean-8); }
+
+/* Variant C: mark + uppercase OCEAN, mono tight */
+.vc .lockup { gap: 8px; }
+.vc .wrd {
+  display: inline-flex; gap: 0.06em;
+  font-family: var(--mono); font-weight: 700; line-height: 1;
+  letter-spacing: 0.06em;
+}
+.vc .wrd span:nth-child(1) { color: var(--ocean-4); }
+.vc .wrd span:nth-child(2) { color: var(--ocean-5); }
+.vc .wrd span:nth-child(3) { color: var(--ocean-6); }
+.vc .wrd span:nth-child(4) { color: var(--ocean-7); }
+.vc .wrd span:nth-child(5) { color: var(--ocean-8); }
+
+/* Sizing */
+.sz-s .lockup .wave-badge { font-size: 20px; }
+.sz-s .lockup .wrd  { font-size: 14px; }
+.sz-m .lockup .wave-badge { font-size: 40px; }
+.sz-m .lockup .wrd  { font-size: 28px; }
+.sz-l .lockup .wave-badge { font-size: 88px; }
+.sz-l .lockup .wrd  { font-size: 60px; }
+
+hr { border: 0; border-top: 1px solid rgba(255,255,255,0.06); margin: 28px 0; }
+.note { font: 11px var(--mono); color: var(--fg-3); margin-top: 40px; }
+</style>
+</head>
+<body>
+
+<h1>Ocean — lockup system</h1>
+<p class="note" style="margin-top:4px">Three variants × three sizes. All badges static (no spin). Pick by eye.</p>
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     Shared badge SVG — canonical defs referenced by all 9 instances.
+     All SVGs share the same viewBox + userSpaceOnUse coords, so the
+     first <defs> correctly paints every badge. The CSS class selectors
+     and gradient IDs mirror styles/transcript.css exactly.
+     ═══════════════════════════════════════════════════════════════════ -->
+
+<!-- Hidden template badge — provides the canonical <defs> for all others -->
+<div style="display:none" aria-hidden="true">
+  <svg class="wave-badge" viewBox="0 0 48 48" fill="none">
+    <defs>
+      <clipPath id="wave-badge-clip"><circle cx="24" cy="24" r="20.4"/></clipPath>
+      <linearGradient id="wave-badge-face-g" gradientUnits="userSpaceOnUse" x1="0" y1="3" x2="0" y2="45">
+        <stop offset="0" class="wave-badge__stop-face-hi"/><stop offset="0.55" class="wave-badge__stop-face"/>
+      </linearGradient>
+      <linearGradient id="wave-badge-arc-g" gradientUnits="userSpaceOnUse" x1="0" y1="4.35" x2="0" y2="17.95">
+        <stop offset="0" class="wave-badge__stop-arc-hi"/><stop offset="0.12" class="wave-badge__stop-arc"/><stop offset="1" class="wave-badge__stop-arc-lo"/>
+      </linearGradient>
+      <linearGradient id="wave-badge-w1-g" gradientUnits="userSpaceOnUse" x1="0" y1="16" x2="0" y2="20.8">
+        <stop offset="0" class="wave-badge__stop-w1-hi"/><stop offset="0.14" class="wave-badge__stop-w1"/><stop offset="1" class="wave-badge__stop-w1-lo"/>
+      </linearGradient>
+      <linearGradient id="wave-badge-w2-g" gradientUnits="userSpaceOnUse" x1="0" y1="24.7" x2="0" y2="29.5">
+        <stop offset="0" class="wave-badge__stop-w2-hi"/><stop offset="0.14" class="wave-badge__stop-w2"/><stop offset="1" class="wave-badge__stop-w2-lo"/>
+      </linearGradient>
+      <linearGradient id="wave-badge-fill-g" gradientUnits="userSpaceOnUse" x1="0" y1="33" x2="0" y2="39.6">
+        <stop offset="0" class="wave-badge__stop-fill-hi"/><stop offset="0.22" class="wave-badge__stop-fill"/><stop offset="1" class="wave-badge__stop-fill-lo"/>
+      </linearGradient>
+      <linearGradient id="wave-badge-bar-g" gradientUnits="userSpaceOnUse" x1="0" y1="42.65" x2="0" y2="44.85">
+        <stop offset="0" class="wave-badge__stop-bar-hi"/><stop offset="0.18" class="wave-badge__stop-bar"/><stop offset="1" class="wave-badge__stop-bar-lo"/>
+      </linearGradient>
+      <linearGradient id="wave-badge-rim-g" gradientUnits="userSpaceOnUse" x1="0" y1="3" x2="0" y2="45">
+        <stop offset="0" class="wave-badge__stop-rim-hi"/><stop offset="1" class="wave-badge__stop-rim-lo"/>
+      </linearGradient>
+      <radialGradient id="wave-badge-vig-g">
+        <stop offset="0.62" class="wave-badge__stop-vig-in"/><stop offset="1" class="wave-badge__stop-vig-out"/>
+      </radialGradient>
+      <radialGradient id="wave-badge-occl-g">
+        <stop offset="0.78" class="wave-badge__stop-occl-in"/><stop offset="0.94" class="wave-badge__stop-occl-mid"/><stop offset="1" class="wave-badge__stop-occl-out"/>
+      </radialGradient>
+    </defs>
+  </svg>
+</div>
+
+<!-- Badge geometry macro (no <defs> — they resolve from the hidden template) -->
+<template id="badge-geom">
+  <circle class="wave-badge__face" cx="24" cy="24" r="21"/>
+  <circle class="wave-badge__vig" cx="24" cy="24" r="20.6"/>
+  <circle class="wave-badge__ring" cx="24" cy="24" r="20.7"/>
+  <g clip-path="url(#wave-badge-clip)" stroke-linecap="round">
+    <path class="wave-badge__arc" stroke-linecap="butt" d="M 8.2 16 A 17.7 17.7 0 0 1 39.8 16"/>
+    <path class="wave-badge__w1" d="M -22 18.4 q 5.5 -1.9 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0"/>
+    <path class="wave-badge__w2" d="M -22 27.1 q 5.5 -1.9 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0"/>
+    <path class="wave-badge__fill" d="M -22 33.6 q 5.5 1.7 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 L 66 39.6 L -22 39.6 Z"/>
+    <path class="wave-badge__bar" d="M 15.5 43.75 L 32.5 43.75"/>
+  </g>
+  <circle class="wave-badge__occl" cx="24" cy="24" r="20.4"/>
+</template>
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     Variant A: Mark only
+     ═══════════════════════════════════════════════════════════════════ -->
+<h2>A · Mark only</h2>
+<div class="row">
+  <div class="variant va sz-s">
+    <div class="vlabel">20px header scale</div>
+    <div class="lockup">
+      <svg class="wave-badge" viewBox="0 0 48 48" width="1em" height="1em" fill="none">
+        <circle class="wave-badge__face" cx="24" cy="24" r="21"/>
+        <circle class="wave-badge__vig" cx="24" cy="24" r="20.6"/>
+        <circle class="wave-badge__ring" cx="24" cy="24" r="20.7"/>
+        <g clip-path="url(#wave-badge-clip)" stroke-linecap="round">
+          <path class="wave-badge__arc" stroke-linecap="butt" d="M 8.2 16 A 17.7 17.7 0 0 1 39.8 16"/>
+          <path class="wave-badge__w1" d="M -22 18.4 q 5.5 -1.9 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0"/>
+          <path class="wave-badge__w2" d="M -22 27.1 q 5.5 -1.9 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0"/>
+          <path class="wave-badge__fill" d="M -22 33.6 q 5.5 1.7 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 L 66 39.6 L -22 39.6 Z"/>
+          <path class="wave-badge__bar" d="M 15.5 43.75 L 32.5 43.75"/>
+        </g>
+        <circle class="wave-badge__occl" cx="24" cy="24" r="20.4"/>
+      </svg>
+    </div>
+    <div class="slabel">20px</div>
+  </div>
+
+  <div class="variant va sz-m">
+    <div class="vlabel">40px mid scale</div>
+    <div class="lockup">
+      <svg class="wave-badge" viewBox="0 0 48 48" width="1em" height="1em" fill="none">
+        <circle class="wave-badge__face" cx="24" cy="24" r="21"/>
+        <circle class="wave-badge__vig" cx="24" cy="24" r="20.6"/>
+        <circle class="wave-badge__ring" cx="24" cy="24" r="20.7"/>
+        <g clip-path="url(#wave-badge-clip)" stroke-linecap="round">
+          <path class="wave-badge__arc" stroke-linecap="butt" d="M 8.2 16 A 17.7 17.7 0 0 1 39.8 16"/>
+          <path class="wave-badge__w1" d="M -22 18.4 q 5.5 -1.9 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0"/>
+          <path class="wave-badge__w2" d="M -22 27.1 q 5.5 -1.9 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0"/>
+          <path class="wave-badge__fill" d="M -22 33.6 q 5.5 1.7 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 L 66 39.6 L -22 39.6 Z"/>
+          <path class="wave-badge__bar" d="M 15.5 43.75 L 32.5 43.75"/>
+        </g>
+        <circle class="wave-badge__occl" cx="24" cy="24" r="20.4"/>
+      </svg>
+    </div>
+    <div class="slabel">40px</div>
+  </div>
+
+  <div class="variant va sz-l">
+    <div class="vlabel">88px hero scale</div>
+    <div class="lockup">
+      <svg class="wave-badge" viewBox="0 0 48 48" width="1em" height="1em" fill="none">
+        <circle class="wave-badge__face" cx="24" cy="24" r="21"/>
+        <circle class="wave-badge__vig" cx="24" cy="24" r="20.6"/>
+        <circle class="wave-badge__ring" cx="24" cy="24" r="20.7"/>
+        <g clip-path="url(#wave-badge-clip)" stroke-linecap="round">
+          <path class="wave-badge__arc" stroke-linecap="butt" d="M 8.2 16 A 17.7 17.7 0 0 1 39.8 16"/>
+          <path class="wave-badge__w1" d="M -22 18.4 q 5.5 -1.9 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0"/>
+          <path class="wave-badge__w2" d="M -22 27.1 q 5.5 -1.9 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0"/>
+          <path class="wave-badge__fill" d="M -22 33.6 q 5.5 1.7 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 L 66 39.6 L -22 39.6 Z"/>
+          <path class="wave-badge__bar" d="M 15.5 43.75 L 32.5 43.75"/>
+        </g>
+        <circle class="wave-badge__occl" cx="24" cy="24" r="20.4"/>
+      </svg>
+    </div>
+    <div class="slabel">88px</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     Variant B: Mark + lowercase "ocean"
+     ═══════════════════════════════════════════════════════════════════ -->
+<h2>B · Mark + lowercase "ocean" (proportional, 0.42em gap)</h2>
+<div class="row">
+  <div class="variant vb sz-s">
+    <div class="vlabel">20px header scale</div>
+    <div class="lockup">
+      <svg class="wave-badge" viewBox="0 0 48 48" width="1em" height="1em" fill="none">
+        <circle class="wave-badge__face" cx="24" cy="24" r="21"/>
+        <circle class="wave-badge__vig" cx="24" cy="24" r="20.6"/>
+        <circle class="wave-badge__ring" cx="24" cy="24" r="20.7"/>
+        <g clip-path="url(#wave-badge-clip)" stroke-linecap="round">
+          <path class="wave-badge__arc" stroke-linecap="butt" d="M 8.2 16 A 17.7 17.7 0 0 1 39.8 16"/>
+          <path class="wave-badge__w1" d="M -22 18.4 q 5.5 -1.9 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0"/>
+          <path class="wave-badge__w2" d="M -22 27.1 q 5.5 -1.9 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0"/>
+          <path class="wave-badge__fill" d="M -22 33.6 q 5.5 1.7 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 L 66 39.6 L -22 39.6 Z"/>
+          <path class="wave-badge__bar" d="M 15.5 43.75 L 32.5 43.75"/>
+        </g>
+        <circle class="wave-badge__occl" cx="24" cy="24" r="20.4"/>
+      </svg>
+      <span class="wrd"><span>o</span><span>c</span><span>e</span><span>a</span><span>n</span></span>
+    </div>
+    <div class="slabel">20px</div>
+  </div>
+
+  <div class="variant vb sz-m">
+    <div class="vlabel">40px mid scale</div>
+    <div class="lockup">
+      <svg class="wave-badge" viewBox="0 0 48 48" width="1em" height="1em" fill="none">
+        <circle class="wave-badge__face" cx="24" cy="24" r="21"/>
+        <circle class="wave-badge__vig" cx="24" cy="24" r="20.6"/>
+        <circle class="wave-badge__ring" cx="24" cy="24" r="20.7"/>
+        <g clip-path="url(#wave-badge-clip)" stroke-linecap="round">
+          <path class="wave-badge__arc" stroke-linecap="butt" d="M 8.2 16 A 17.7 17.7 0 0 1 39.8 16"/>
+          <path class="wave-badge__w1" d="M -22 18.4 q 5.5 -1.9 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0"/>
+          <path class="wave-badge__w2" d="M -22 27.1 q 5.5 -1.9 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0"/>
+          <path class="wave-badge__fill" d="M -22 33.6 q 5.5 1.7 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 L 66 39.6 L -22 39.6 Z"/>
+          <path class="wave-badge__bar" d="M 15.5 43.75 L 32.5 43.75"/>
+        </g>
+        <circle class="wave-badge__occl" cx="24" cy="24" r="20.4"/>
+      </svg>
+      <span class="wrd"><span>o</span><span>c</span><span>e</span><span>a</span><span>n</span></span>
+    </div>
+    <div class="slabel">40px</div>
+  </div>
+
+  <div class="variant vb sz-l">
+    <div class="vlabel">88px hero scale</div>
+    <div class="lockup">
+      <svg class="wave-badge" viewBox="0 0 48 48" width="1em" height="1em" fill="none">
+        <circle class="wave-badge__face" cx="24" cy="24" r="21"/>
+        <circle class="wave-badge__vig" cx="24" cy="24" r="20.6"/>
+        <circle class="wave-badge__ring" cx="24" cy="24" r="20.7"/>
+        <g clip-path="url(#wave-badge-clip)" stroke-linecap="round">
+          <path class="wave-badge__arc" stroke-linecap="butt" d="M 8.2 16 A 17.7 17.7 0 0 1 39.8 16"/>
+          <path class="wave-badge__w1" d="M -22 18.4 q 5.5 -1.9 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0"/>
+          <path class="wave-badge__w2" d="M -22 27.1 q 5.5 -1.9 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0"/>
+          <path class="wave-badge__fill" d="M -22 33.6 q 5.5 1.7 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 L 66 39.6 L -22 39.6 Z"/>
+          <path class="wave-badge__bar" d="M 15.5 43.75 L 32.5 43.75"/>
+        </g>
+        <circle class="wave-badge__occl" cx="24" cy="24" r="20.4"/>
+      </svg>
+      <span class="wrd"><span>o</span><span>c</span><span>e</span><span>a</span><span>n</span></span>
+    </div>
+    <div class="slabel">88px</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     Variant C: Mark + uppercase OCEAN, mono tight
+     ═══════════════════════════════════════════════════════════════════ -->
+<h2>C · Mark + uppercase OCEAN (mono, 0.06em gap, 0.06em letter-spacing)</h2>
+<div class="row">
+  <div class="variant vc sz-s">
+    <div class="vlabel">20px header scale</div>
+    <div class="lockup">
+      <svg class="wave-badge" viewBox="0 0 48 48" width="1em" height="1em" fill="none">
+        <circle class="wave-badge__face" cx="24" cy="24" r="21"/>
+        <circle class="wave-badge__vig" cx="24" cy="24" r="20.6"/>
+        <circle class="wave-badge__ring" cx="24" cy="24" r="20.7"/>
+        <g clip-path="url(#wave-badge-clip)" stroke-linecap="round">
+          <path class="wave-badge__arc" stroke-linecap="butt" d="M 8.2 16 A 17.7 17.7 0 0 1 39.8 16"/>
+          <path class="wave-badge__w1" d="M -22 18.4 q 5.5 -1.9 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0"/>
+          <path class="wave-badge__w2" d="M -22 27.1 q 5.5 -1.9 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0"/>
+          <path class="wave-badge__fill" d="M -22 33.6 q 5.5 1.7 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 L 66 39.6 L -22 39.6 Z"/>
+          <path class="wave-badge__bar" d="M 15.5 43.75 L 32.5 43.75"/>
+        </g>
+        <circle class="wave-badge__occl" cx="24" cy="24" r="20.4"/>
+      </svg>
+      <span class="wrd"><span>O</span><span>C</span><span>E</span><span>A</span><span>N</span></span>
+    </div>
+    <div class="slabel">20px</div>
+  </div>
+
+  <div class="variant vc sz-m">
+    <div class="vlabel">40px mid scale</div>
+    <div class="lockup">
+      <svg class="wave-badge" viewBox="0 0 48 48" width="1em" height="1em" fill="none">
+        <circle class="wave-badge__face" cx="24" cy="24" r="21"/>
+        <circle class="wave-badge__vig" cx="24" cy="24" r="20.6"/>
+        <circle class="wave-badge__ring" cx="24" cy="24" r="20.7"/>
+        <g clip-path="url(#wave-badge-clip)" stroke-linecap="round">
+          <path class="wave-badge__arc" stroke-linecap="butt" d="M 8.2 16 A 17.7 17.7 0 0 1 39.8 16"/>
+          <path class="wave-badge__w1" d="M -22 18.4 q 5.5 -1.9 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0"/>
+          <path class="wave-badge__w2" d="M -22 27.1 q 5.5 -1.9 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0"/>
+          <path class="wave-badge__fill" d="M -22 33.6 q 5.5 1.7 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 L 66 39.6 L -22 39.6 Z"/>
+          <path class="wave-badge__bar" d="M 15.5 43.75 L 32.5 43.75"/>
+        </g>
+        <circle class="wave-badge__occl" cx="24" cy="24" r="20.4"/>
+      </svg>
+      <span class="wrd"><span>O</span><span>C</span><span>E</span><span>A</span><span>N</span></span>
+    </div>
+    <div class="slabel">40px</div>
+  </div>
+
+  <div class="variant vc sz-l">
+    <div class="vlabel">88px hero scale</div>
+    <div class="lockup">
+      <svg class="wave-badge" viewBox="0 0 48 48" width="1em" height="1em" fill="none">
+        <circle class="wave-badge__face" cx="24" cy="24" r="21"/>
+        <circle class="wave-badge__vig" cx="24" cy="24" r="20.6"/>
+        <circle class="wave-badge__ring" cx="24" cy="24" r="20.7"/>
+        <g clip-path="url(#wave-badge-clip)" stroke-linecap="round">
+          <path class="wave-badge__arc" stroke-linecap="butt" d="M 8.2 16 A 17.7 17.7 0 0 1 39.8 16"/>
+          <path class="wave-badge__w1" d="M -22 18.4 q 5.5 -1.9 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0"/>
+          <path class="wave-badge__w2" d="M -22 27.1 q 5.5 -1.9 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0"/>
+          <path class="wave-badge__fill" d="M -22 33.6 q 5.5 1.7 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 t 11 0 L 66 39.6 L -22 39.6 Z"/>
+          <path class="wave-badge__bar" d="M 15.5 43.75 L 32.5 43.75"/>
+        </g>
+        <circle class="wave-badge__occl" cx="24" cy="24" r="20.4"/>
+      </svg>
+      <span class="wrd"><span>O</span><span>C</span><span>E</span><span>A</span><span>N</span></span>
+    </div>
+    <div class="slabel">88px</div>
+  </div>
+</div>
+
+<p class="note">
+  All badges static (no spin). Colors via --badge-* tokens + color-mix, mirroring
+  styles/transcript.css gradient stops exactly. The hidden badge template provides
+  the canonical &lt;defs&gt; all 9 instances reference. View in a modern browser. Pick by eye.
+</p>
+
+</body>
+</html>
