@@ -74,6 +74,11 @@ thread_local! {
     /// The last realtime connect failure message. Cleared on fresh start
     /// and clean stop; preserved on failure so the menu reopens to it.
     static LAST_ERROR: RefCell<Option<ArcRwSignal<Option<String>>>> = const { RefCell::new(None) };
+    /// Monotonic identity for the one connect attempt allowed to publish.
+    static CONNECT_GENERATION: ConnectGeneration = ConnectGeneration(Cell::new(0));
+    /// Mic acquired by an in-flight connect, exposed solely so `stop` can
+    /// disable its tracks immediately while network work is still pending.
+    static CONNECTING_MIC: RefCell<Option<(u64, MediaStream)>> = const { RefCell::new(None) };
 }
 
 /// The voice-chat stage signal (created on first access).
@@ -196,6 +201,155 @@ impl LevelMeterRafHandle {
     }
 }
 
+/// One cancellation identity for asynchronous connect attempts. Starting or
+/// stopping advances the generation; only the latest attempt may publish.
+#[derive(Default)]
+struct ConnectGeneration(Cell<u64>);
+
+impl ConnectGeneration {
+    fn begin(&self) -> u64 {
+        let next = self.0.get().wrapping_add(1);
+        self.0.set(next);
+        next
+    }
+
+    fn cancel(&self) {
+        let _ = self.begin();
+    }
+
+    fn is_current(&self, attempt: u64) -> bool {
+        self.0.get() == attempt
+    }
+
+    fn publish_if_current(&self, attempt: u64, publish: impl FnOnce()) -> bool {
+        if !self.is_current(attempt) {
+            return false;
+        }
+        publish();
+        true
+    }
+}
+
+fn begin_connect_attempt() -> u64 {
+    CONNECT_GENERATION.with(ConnectGeneration::begin)
+}
+
+fn cancel_connect_attempt() {
+    CONNECT_GENERATION.with(ConnectGeneration::cancel);
+}
+
+fn connect_attempt_is_current(attempt: u64) -> bool {
+    CONNECT_GENERATION.with(|generation| generation.is_current(attempt))
+}
+
+fn ensure_connect_attempt_current(attempt: u64) -> Result<(), String> {
+    connect_attempt_is_current(attempt)
+        .then_some(())
+        .ok_or_else(|| "voice chat cancelled".to_string())
+}
+
+fn stop_media_stream(mic: &MediaStream) {
+    for track in mic.get_tracks().iter() {
+        if let Ok(track) = track.dyn_into::<web_sys::MediaStreamTrack>() {
+            track.stop();
+        }
+    }
+}
+
+fn register_connecting_mic(attempt: u64, mic: &MediaStream) -> Result<(), String> {
+    ensure_connect_attempt_current(attempt)?;
+    CONNECTING_MIC.with(|slot| {
+        if let Some((_, previous)) = slot.borrow_mut().replace((attempt, mic.clone())) {
+            stop_media_stream(&previous);
+        }
+    });
+    Ok(())
+}
+
+fn clear_connecting_mic(attempt: u64, stop: bool) {
+    let mic = CONNECTING_MIC.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.as_ref().is_some_and(|(id, _)| *id == attempt) {
+            slot.take().map(|(_, mic)| mic)
+        } else {
+            None
+        }
+    });
+    if stop {
+        if let Some(mic) = mic {
+            stop_media_stream(&mic);
+        }
+    }
+}
+
+fn cancel_connecting_mic() {
+    if let Some((_, mic)) = CONNECTING_MIC.with(|slot| slot.borrow_mut().take()) {
+        stop_media_stream(&mic);
+    }
+}
+
+struct MicGuard(Option<MediaStream>);
+
+impl MicGuard {
+    fn new(mic: MediaStream) -> Self {
+        Self(Some(mic))
+    }
+
+    fn stream(&self) -> &MediaStream {
+        self.0.as_ref().expect("mic guard must be armed")
+    }
+
+    fn into_inner(mut self) -> MediaStream {
+        self.0.take().expect("mic guard must be armed")
+    }
+}
+
+impl Drop for MicGuard {
+    fn drop(&mut self) {
+        if let Some(mic) = &self.0 {
+            stop_media_stream(mic);
+        }
+    }
+}
+
+fn teardown_transport(
+    pc: &RtcPeerConnection,
+    channel: &RtcDataChannel,
+    audio_el: &HtmlAudioElement,
+) {
+    channel.set_onopen(None);
+    channel.set_onmessage(None);
+    channel.set_onclose(None);
+    pc.set_ontrack(None);
+    channel.close();
+    pc.close();
+    audio_el.set_src_object(None);
+}
+
+struct PendingTransport(Option<(RtcPeerConnection, RtcDataChannel, HtmlAudioElement)>);
+
+impl PendingTransport {
+    fn new(
+        pc: &RtcPeerConnection,
+        channel: &RtcDataChannel,
+        audio_el: &HtmlAudioElement,
+    ) -> Self {
+        Self(Some((pc.clone(), channel.clone(), audio_el.clone())))
+    }
+
+    fn disarm(&mut self) {
+        self.0.take();
+    }
+}
+
+impl Drop for PendingTransport {
+    fn drop(&mut self) {
+        if let Some((pc, channel, audio_el)) = &self.0 {
+            teardown_transport(pc, channel, audio_el);
+        }
+    }
+}
+
 /// Live session state. Dropping this (via [`stop`]) releases the mic, closes
 /// the peer connection, and silences the remote audio element.
 struct RealtimeSession {
@@ -209,6 +363,25 @@ struct RealtimeSession {
     running: Rc<RefCell<bool>>,
     /// Event/track/message closures that must outlive their registration.
     _closures: Vec<Box<dyn std::any::Any>>,
+}
+
+impl Drop for RealtimeSession {
+    fn drop(&mut self) {
+        *self.running.borrow_mut() = false;
+        if let (Some(handle), Some(win)) =
+            (self.raf_handle.take_for_teardown(), web_sys::window())
+        {
+            let _ = win.cancel_animation_frame(handle);
+        }
+        if let Some(cell) = self.frame_cell.take() {
+            cell.borrow_mut().take();
+        }
+        if let Some(ctx) = self.ctx.take() {
+            let _ = ctx.close();
+        }
+        teardown_transport(&self.pc, &self.channel, &self.audio_el);
+        stop_media_stream(&self.mic);
+    }
 }
 
 /// Start a realtime voice chat. No-op while one is already connecting/live.
@@ -228,24 +401,42 @@ pub fn start() {
         super::report_status("voice chat unavailable — daemon handle not installed".into());
         return;
     };
+    cancel_connecting_mic();
+    let attempt = begin_connect_attempt();
     let session_id = daemon.session_id.get_untracked();
-    // Clear any stale failure from the last session.
     last_error().set(None);
     stage().set(RealtimeStage::Connecting);
     spawn_local(async move {
-        match connect(daemon, session_id).await {
+        match connect(daemon, session_id, attempt).await {
             Ok(session) => {
-                SESSION.with(|s| *s.borrow_mut() = Some(session));
-                // Live is flipped by the data channel's `onopen`; if the
-                // channel opened before we stored the session (fast network),
-                // it already set Live and this is a no-op.
+                let mut pending = Some(session);
+                let published = CONNECT_GENERATION.with(|generation| {
+                    generation.publish_if_current(attempt, || {
+                        clear_connecting_mic(attempt, false);
+                        let session = pending.take().expect("pending realtime session");
+                        SESSION.with(|slot| {
+                            if let Some(previous) = slot.borrow_mut().replace(session) {
+                                drop(previous);
+                            }
+                        });
+                    })
+                });
+                if !published {
+                    clear_connecting_mic(attempt, true);
+                    drop(pending);
+                }
             }
             Err(msg) => {
-                stage().set(RealtimeStage::Off);
-                level().set(0.0);
-                let humanized = user_facing_realtime_error(&msg);
-                last_error().set(Some(humanized));
-                super::report_status(format!("voice chat failed: {msg}"));
+                clear_connecting_mic(attempt, true);
+                CONNECT_GENERATION.with(|generation| {
+                    generation.publish_if_current(attempt, || {
+                        stage().set(RealtimeStage::Off);
+                        level().set(0.0);
+                        let humanized = user_facing_realtime_error(&msg);
+                        last_error().set(Some(humanized));
+                        super::report_status(format!("voice chat failed: {msg}"));
+                    });
+                });
             }
         }
     });
@@ -254,45 +445,23 @@ pub fn start() {
 /// End the voice chat: release the mic, close the channel + peer connection,
 /// drop the remote audio, stop the level meter, stage → Off.
 pub fn stop() {
-    let session = SESSION.with(|s| s.borrow_mut().take());
-    if let Some(session) = session {
-        *session.running.borrow_mut() = false;
-        if let (Some(handle), Some(win)) =
-            (session.raf_handle.take_for_teardown(), web_sys::window())
-        {
-            let _ = win.cancel_animation_frame(handle);
-        }
-        if let Some(cell) = &session.frame_cell {
-            cell.borrow_mut().take();
-        }
-        if let Some(ctx) = &session.ctx {
-            let _ = ctx.close();
-        }
-        // Closing the transports queues `close`/track events. Detach their
-        // wasm-bindgen callbacks before dropping `_closures`, or the browser
-        // can invoke a freed closure on the next event-loop turn.
-        session.channel.set_onopen(None);
-        session.channel.set_onmessage(None);
-        session.channel.set_onclose(None);
-        session.pc.set_ontrack(None);
-        session.channel.close();
-        session.pc.close();
-        for track in session.mic.get_tracks().iter() {
-            if let Ok(track) = track.dyn_into::<web_sys::MediaStreamTrack>() {
-                track.stop();
-            }
-        }
-        session.audio_el.set_src_object(None);
-    }
+    cancel_connect_attempt();
+    cancel_connecting_mic();
+    drop(SESSION.with(|slot| slot.borrow_mut().take()));
     stage().set(RealtimeStage::Off);
     level().set(0.0);
     last_error().set(None);
 }
 
 /// Full connect flow: secret → mic → peer connection → SDP round-trip.
-async fn connect(daemon: Daemon, session_id: Option<String>) -> Result<RealtimeSession, String> {
+async fn connect(
+    daemon: Daemon,
+    session_id: Option<String>,
+    attempt: u64,
+) -> Result<RealtimeSession, String> {
     // 1. Ephemeral secret from the daemon (same-origin through the proxy).
     let secret = daemon.realtime_client_secret(session_id.clone()).await?;
+    ensure_connect_attempt_current(attempt)?;
 
     // 2. Mic with echo cancellation — same constraints as the listen loop, so
     //    the agent's own voice doesn't feed back into the conversation.
@@ -319,23 +488,27 @@ async fn connect(daemon: Daemon, session_id: Option<String>) -> Result<RealtimeS
     .map_err(|_| "microphone permission denied".to_string())?
     .dyn_into()
     .map_err(|_| "no media stream".to_string())?;
+    let mic = MicGuard::new(mic);
+    ensure_connect_attempt_current(attempt)?;
+    register_connecting_mic(attempt, mic.stream())?;
 
     // 3. Peer connection: mic track up, remote audio into a detached <audio>.
-    let pc = RtcPeerConnection::new().map_err(|_| "cannot create peer connection".to_string())?;
-    for track in mic.get_tracks().iter() {
-        if let Ok(track) = track.dyn_into::<web_sys::MediaStreamTrack>() {
-            let _ = pc.add_track(&track, &mic, &js_sys::Array::new());
-        }
-    }
+    // Create fallible DOM resources before the peer so every later failure is
+    // covered by PendingTransport.
     let document = window.document().ok_or("no document")?;
     let audio_el: HtmlAudioElement = document
         .create_element("audio")
         .map_err(|_| "cannot create audio element".to_string())?
         .unchecked_into();
     audio_el.set_autoplay(true);
+    let pc = RtcPeerConnection::new().map_err(|_| "cannot create peer connection".to_string())?;
+    for track in mic.stream().get_tracks().iter() {
+        if let Ok(track) = track.dyn_into::<web_sys::MediaStreamTrack>() {
+            let _ = pc.add_track(&track, mic.stream(), &js_sys::Array::new());
+        }
+    }
 
     let mut closures: Vec<Box<dyn std::any::Any>> = Vec::new();
-
     let audio_for_track = audio_el.clone();
     let ontrack = Closure::wrap(Box::new(move |ev: RtcTrackEvent| {
         let streams = ev.streams();
@@ -350,8 +523,11 @@ async fn connect(daemon: Daemon, session_id: Option<String>) -> Result<RealtimeS
 
     // 4. Data channel for Realtime events (tool calls ride here).
     let channel = pc.create_data_channel("oai-events");
+    let mut transport = PendingTransport::new(&pc, &channel, &audio_el);
     let onopen = Closure::wrap(Box::new(move || {
-        stage().set(RealtimeStage::Live);
+        if connect_attempt_is_current(attempt) {
+            stage().set(RealtimeStage::Live);
+        }
     }) as Box<dyn FnMut()>);
     channel.set_onopen(Some(onopen.as_ref().unchecked_ref()));
     closures.push(Box::new(onopen));
@@ -359,19 +535,30 @@ async fn connect(daemon: Daemon, session_id: Option<String>) -> Result<RealtimeS
     let daemon_for_events = daemon.clone();
     let session_for_events = session_id.clone();
     let onmessage = Closure::wrap(Box::new(move |ev: MessageEvent| {
-        if let Some(text) = ev.data().as_string() {
-            handle_server_event(&daemon_for_events, session_for_events.as_deref(), &text);
+        if connect_attempt_is_current(attempt) {
+            if let Some(text) = ev.data().as_string() {
+                handle_server_event(&daemon_for_events, session_for_events.as_deref(), &text);
+            }
         }
     }) as Box<dyn FnMut(MessageEvent)>);
     channel.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
     closures.push(Box::new(onmessage));
 
-    // Channel/transport failure must not strand the UI in a phantom Live.
+    // Defer teardown one event-loop turn: the session owns this Closure, so
+    // dropping it from inside itself is invalid wasm-bindgen lifecycle.
     let onclose = Closure::wrap(Box::new(move || {
-        if stage().get_untracked() == RealtimeStage::Live {
-            super::report_status("voice chat ended".into());
-            stop();
+        if !connect_attempt_is_current(attempt) {
+            return;
         }
+        spawn_local(async move {
+            gloo_timers::future::TimeoutFuture::new(0).await;
+            if connect_attempt_is_current(attempt)
+                && stage().get_untracked() == RealtimeStage::Live
+            {
+                super::report_status("voice chat ended".into());
+                stop();
+            }
+        });
     }) as Box<dyn FnMut()>);
     channel.set_onclose(Some(onclose.as_ref().unchecked_ref()));
     closures.push(Box::new(onclose));
@@ -381,11 +568,14 @@ async fn connect(daemon: Daemon, session_id: Option<String>) -> Result<RealtimeS
     let offer = JsFuture::from(pc.create_offer())
         .await
         .map_err(|_| "createOffer failed".to_string())?;
+    ensure_connect_attempt_current(attempt)?;
     let offer_init: RtcSessionDescriptionInit = offer.unchecked_into();
     JsFuture::from(pc.set_local_description(&offer_init))
         .await
         .map_err(|_| "setLocalDescription failed".to_string())?;
+    ensure_connect_attempt_current(attempt)?;
     for _ in 0..20 {
+        ensure_connect_attempt_current(attempt)?;
         if pc.ice_gathering_state() == RtcIceGatheringState::Complete {
             break;
         }
@@ -405,26 +595,30 @@ async fn connect(daemon: Daemon, session_id: Option<String>) -> Result<RealtimeS
         .send()
         .await
         .map_err(|e| format!("offer POST failed: {e}"))?;
+    ensure_connect_attempt_current(attempt)?;
     if !resp.ok() {
+        let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(format!(
-            "realtime call rejected ({}): {text}",
-            resp.status()
-        ));
+        ensure_connect_attempt_current(attempt)?;
+        return Err(format!("realtime call rejected ({status}): {text}"));
     }
     let answer_sdp = resp
         .text()
         .await
         .map_err(|e| format!("answer unreadable: {e}"))?;
+    ensure_connect_attempt_current(attempt)?;
     let answer_init = RtcSessionDescriptionInit::new(RtcSdpType::Answer);
     answer_init.set_sdp(&answer_sdp);
     JsFuture::from(pc.set_remote_description(&answer_init))
         .await
         .map_err(|_| "setRemoteDescription failed".to_string())?;
+    ensure_connect_attempt_current(attempt)?;
 
     // 6. Mic level meter for the orb's water (same analyser+rAF pattern as
-    //    the hands-free listen loop; ~60Hz, torn down by `stop`).
-    let (ctx, raf_handle, frame_cell, running) = start_level_meter(&mic)?;
+    //    the hands-free listen loop; ~60Hz, torn down by RealtimeSession::drop).
+    let (ctx, raf_handle, frame_cell, running) = start_level_meter(mic.stream())?;
+    let mic = mic.into_inner();
+    transport.disarm();
 
     Ok(RealtimeSession {
         pc,
@@ -668,6 +862,51 @@ mod tests {
 
 
     fn assert_arc_rw_signal<T>(_signal: ArcRwSignal<T>) {}
+
+    #[test]
+    fn connect_generation_begin_attempt_is_current_and_cancel_only_invalidates_that_instance() {
+        let generation = ConnectGeneration::default();
+        let other_generation = ConnectGeneration::default();
+
+        let attempt = generation.begin();
+        let other_attempt = other_generation.begin();
+
+        assert!(generation.is_current(attempt));
+        assert!(other_generation.is_current(other_attempt));
+
+        generation.cancel();
+
+        assert!(!generation.is_current(attempt));
+        assert!(
+            other_generation.is_current(other_attempt),
+            "cancelling one realtime connector must not invalidate an unrelated instance"
+        );
+    }
+
+    #[test]
+    fn connect_generation_second_begin_invalidates_first_attempt_and_becomes_current() {
+        let generation = ConnectGeneration::default();
+
+        let first = generation.begin();
+        let second = generation.begin();
+
+        assert!(!generation.is_current(first));
+        assert!(generation.is_current(second));
+    }
+
+    #[test]
+    fn connect_generation_stale_attempt_cannot_publish_after_cancel() {
+        let generation = ConnectGeneration::default();
+        let attempt = generation.begin();
+        let published = Cell::new(false);
+
+        generation.cancel();
+
+        let did_publish = generation.publish_if_current(attempt, || published.set(true));
+
+        assert!(!did_publish);
+        assert!(!published.get());
+    }
 
     #[test]
     fn level_meter_teardown_takes_latest_rescheduled_animation_frame_handle_once() {
