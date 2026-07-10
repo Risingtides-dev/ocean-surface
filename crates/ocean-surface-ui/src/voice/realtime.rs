@@ -75,7 +75,7 @@ thread_local! {
     /// and clean stop; preserved on failure so the menu reopens to it.
     static LAST_ERROR: RefCell<Option<ArcRwSignal<Option<String>>>> = const { RefCell::new(None) };
     /// Monotonic identity for the one connect attempt allowed to publish.
-    static CONNECT_GENERATION: ConnectGeneration = ConnectGeneration(Cell::new(0));
+    static CONNECT_GENERATION: ConnectGeneration = const { ConnectGeneration(Cell::new(0)) };
     /// Mic acquired by an in-flight connect, exposed solely so `stop` can
     /// disable its tracks immediately while network work is still pending.
     static CONNECTING_MIC: RefCell<Option<(u64, MediaStream)>> = const { RefCell::new(None) };
@@ -164,7 +164,6 @@ pub fn user_facing_realtime_error(raw: &str) -> String {
 /// status signals are reference-counted and therefore safe to create lazily.
 pub fn install(daemon: Daemon) {
     DAEMON.with(|d| *d.borrow_mut() = Some(daemon));
-
 }
 
 fn daemon() -> Option<Daemon> {
@@ -329,11 +328,7 @@ fn teardown_transport(
 struct PendingTransport(Option<(RtcPeerConnection, RtcDataChannel, HtmlAudioElement)>);
 
 impl PendingTransport {
-    fn new(
-        pc: &RtcPeerConnection,
-        channel: &RtcDataChannel,
-        audio_el: &HtmlAudioElement,
-    ) -> Self {
+    fn new(pc: &RtcPeerConnection, channel: &RtcDataChannel, audio_el: &HtmlAudioElement) -> Self {
         Self(Some((pc.clone(), channel.clone(), audio_el.clone())))
     }
 
@@ -368,8 +363,7 @@ struct RealtimeSession {
 impl Drop for RealtimeSession {
     fn drop(&mut self) {
         *self.running.borrow_mut() = false;
-        if let (Some(handle), Some(win)) =
-            (self.raf_handle.take_for_teardown(), web_sys::window())
+        if let (Some(handle), Some(win)) = (self.raf_handle.take_for_teardown(), web_sys::window())
         {
             let _ = win.cancel_animation_frame(handle);
         }
@@ -552,8 +546,7 @@ async fn connect(
         }
         spawn_local(async move {
             gloo_timers::future::TimeoutFuture::new(0).await;
-            if connect_attempt_is_current(attempt)
-                && stage().get_untracked() == RealtimeStage::Live
+            if connect_attempt_is_current(attempt) && stage().get_untracked() == RealtimeStage::Live
             {
                 super::report_status("voice chat ended".into());
                 stop();
@@ -859,7 +852,6 @@ fn urlencode(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     fn assert_arc_rw_signal<T>(_signal: ArcRwSignal<T>) {}
 
