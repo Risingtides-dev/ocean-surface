@@ -1110,3 +1110,33 @@ manifest and sidepanel.html reference no icons. Gate for this commit before
 landing: rebuild the bundle from the exact committed tree, grep
 dist/index.html for the ocean-mark link, confirm dist/brand/ contents.
 _________________________________________________________________________________
+time:      [7:18pm] [07-09-26]
+agent:     [claude] [fable-5]
+worktree:  main (assembly land; GitButler lanes bypassed)
+type:      release
+area:      frontend
+
+Landed and deployed the desktop-shell batch as one assembled commit 0c706c3 on
+main: workspace right-edge unify + overlay Esc discipline, composer slash
+popover (Command.slash + slash_filter + SlashMenu, 20 aliases), MenuBridge
+readiness gate + host::notify_ui_ready + app mount wiring, FsFileEntry
+duplication fix in daemon.rs, and install-path auth safety (launcher sources
+~/.config/ocean-surface/proxy-auth.env, installer preflight hard-fails without
+it, README/plist scrubbed of the false built-in-creds claim). Assembly landing
+was forced: GitButler refused to keep desktop-integration/host-bridge/skeleton
+applied simultaneously, and two lane commits were contaminated (icons/mockups
+under a MenuBridge message; daemon tests under the slash message). wasm check
+verified on the exact pushed commit in a detached worktree. Deployed build
+7f4986344107056d to dist-prod; both origins serve it. Live prod deep-drive all
+green: SW network-first picked up the deploy in one navigation, offline shell +
+runtime cache refreshed to the new hash; lazy session creation -> real daemon
+session, transcript rehydrates with the same session id after reload; palette
+Meta+K, slash popover (filter + Esc), sessions/rooms Esc peel (fixed - old
+bundle failed this), sessions<->rooms mutual exclusion both directions,
+double-fire deterministic, mobile 390x844 composer/slash in-viewport with no
+horizontal overflow. Rooms overlay is always-mounted (--open modifier) - node
+visibility probes false-positive, assert the class. Tauri picks up MenuBridge/
+slash on the next natural rebuild+launch; the running app was never touched.
+(Re-appended: the original entry was clobbered by the 2181dcf ledger
+reconcile.)
+_________________________________________________________________________________
