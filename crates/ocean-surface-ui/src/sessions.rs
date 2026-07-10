@@ -1,10 +1,11 @@
 //! Sessions panel — grouped by project, worktrees, with collapsible sections.
 //!
 //! Sessions are grouped under their owning project: authoritatively via the
-//! daemon's `owning_project` when it serves that field (once the enriched DTO
-//! lands), or by exact-matching a session's workspace root to a project in the
-//! catalogue (`daemon.projects`). Sessions with no matching project fall into
-//! an "Other" bucket.
+//! daemon's `owning_project` when it serves that field (exact-root matches
+//! today), else by matching the session's workspace root against the project
+//! catalogue (`daemon.projects`) — exact root first, then component-boundary
+//! prefix against each project's root and registered worktree paths (longest
+//! root wins). Sessions with no matching project fall into an "Other" bucket.
 //!
 //! Within a project, sessions whose workspace root sits under one of the
 //! project's registered worktrees (daemon-enriched `worktrees` on
@@ -35,6 +36,40 @@ pub(crate) fn session_root(s: &SessionSummary) -> &str {
         .as_deref()
         .filter(|r| !r.is_empty())
         .unwrap_or(s.cwd.as_str())
+}
+
+/// Resolve the catalogue project that owns `root` when the daemon didn't
+/// attach `owning_project` (worktree/subdir sessions, older daemons): exact
+/// `workspace_root` match first, then component-boundary prefix against each
+/// project's `workspace_root` and registered worktree paths. The LONGEST
+/// matching root wins so nested project roots never steal each other's
+/// sessions. Pure — unit-testable without WASM.
+pub(crate) fn project_for_root<'a>(
+    projects: &'a [ProjectInfo],
+    root: &str,
+) -> Option<&'a ProjectInfo> {
+    if root.is_empty() {
+        return None;
+    }
+    if let Some(p) = projects
+        .iter()
+        .find(|p| !p.workspace_root.is_empty() && p.workspace_root == root)
+    {
+        return Some(p);
+    }
+    projects
+        .iter()
+        .filter_map(|p| {
+            let roots = std::iter::once(p.workspace_root.as_str())
+                .chain(p.worktrees.iter().map(|wt| wt.path.as_str()));
+            roots
+                .filter(|r| !r.is_empty() && is_path_prefix(r, root))
+                .map(str::len)
+                .max()
+                .map(|len| (len, p))
+        })
+        .max_by_key(|(len, _)| *len)
+        .map(|(_, p)| p)
 }
 
 fn project_slug(name: &str) -> String {
@@ -130,9 +165,7 @@ pub(crate) fn group_for_panel(
                 op.name.clone()
             };
             (op.id.clone(), label, true)
-        } else if let Some(p) = projects.iter().find(|p| {
-            !p.workspace_root.is_empty() && p.workspace_root == session_root(s)
-        }) {
+        } else if let Some(p) = project_for_root(projects, session_root(s)) {
             let label = if p.name.trim().is_empty() {
                 p.workspace_root.clone()
             } else {
@@ -1256,6 +1289,63 @@ mod tests {
             sections[0].sessions.iter().map(|session| session.id.as_str()).collect();
         assert_eq!(matched_ids, vec!["workspace-match", "cwd-match"]);
         assert_eq!(sections[1].sessions[0].id, "unmatched-newest");
+    }
+
+    #[test]
+    fn subdir_and_worktree_roots_group_under_their_project() {
+        let projects = vec![project_with_worktrees(
+            "owned",
+            "Owned",
+            "/repo",
+            &[("/wt/repo-feature", Some("feature/x"))],
+        )];
+        let sessions = vec![
+            session("subdir", "/repo/crates/ui", Some("/repo/crates/ui"), None, None, 1, "2026-07-05T12:02:00Z"),
+            session("worktree", "/wt/repo-feature/src", None, None, None, 1, "2026-07-05T12:01:00Z"),
+            session("sibling-name", "/repo-x", None, None, None, 1, "2026-07-05T12:00:00Z"),
+        ];
+
+        let sections = group_for_panel(&sessions, &projects, None);
+
+        let keys: Vec<&str> = sections.iter().map(|sec| sec.key.as_str()).collect();
+        assert_eq!(keys, vec!["owned", "__other__"]);
+        // Subdir session stays in the project's flat list; the worktree-rooted
+        // session lands in the registered-worktree sub-group (the bucketing
+        // pass now fires for prefix-grouped sessions).
+        let flat: Vec<&str> = sections[0].sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(flat, vec!["subdir"]);
+        let wts = sections[0].worktrees.as_ref().unwrap();
+        assert_eq!(wts.len(), 1);
+        assert_eq!(wts[0].root, "/wt/repo-feature");
+        assert_eq!(wts[0].sessions[0].id, "worktree");
+        // `/repo-x` shares the string prefix but not a path component — Other.
+        assert_eq!(sections[1].sessions[0].id, "sibling-name");
+    }
+
+    #[test]
+    fn nested_project_roots_prefer_longest_match() {
+        let projects = vec![
+            project("outer", "Outer", "/mono"),
+            project("inner", "Inner", "/mono/apps/web"),
+        ];
+        let sessions = vec![session(
+            "deep",
+            "/mono/apps/web/src",
+            None,
+            None,
+            None,
+            1,
+            "2026-07-05T12:00:00Z",
+        )];
+
+        let sections = group_for_panel(&sessions, &projects, None);
+
+        // Longest matching root wins: the session belongs to the inner
+        // project; outer still renders as an empty catalogue section.
+        let inner = sections.iter().find(|s| s.key == "inner").unwrap();
+        assert_eq!(inner.sessions[0].id, "deep");
+        let outer = sections.iter().find(|s| s.key == "outer").unwrap();
+        assert!(outer.sessions.is_empty());
     }
 
     #[test]
