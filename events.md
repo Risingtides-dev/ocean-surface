@@ -1340,3 +1340,16 @@ second salvaged the first cleanly) + a finishing pass: 3 Leptos closure/deref
 compile fixes, CSS, gates. wasm check clean; 296 host tests green incl. 4
 pinned tests. Zero daemon/wire changes — placement rides component props.
 _________________________________________________________________________________
+time:      [05:02pm] [07-10-26]
+agent:     [claude] [fable-5]
+type:      [gh-actions]
+area:      [infra]
+
+CI was red on main: the council-deck native migration removed the proxy route
+but left the orphaned council_deck handler + COUNCIL_DECK_HTML const (dead_code
+under -D warnings) — the in-code comment explicitly deferred "orchestrator
+cleanup," so this completes it: handler/const deleted, stale /ui/council +
+/longhouse.html cache-predicate entries dropped, orphaned static/longhouse.html
+removed, plus rustfmt on the just-landed stt/tts forwarders. Gates: proxy
+check clean, clippy -D warnings 0, 16/16 tests, fmt clean.
+_________________________________________________________________________________

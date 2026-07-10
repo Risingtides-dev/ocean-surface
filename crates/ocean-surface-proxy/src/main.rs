@@ -263,12 +263,11 @@ async fn main() -> anyhow::Result<()> {
             "/v1/longhouse/{*rest}",
             get(proxy_longhouse).post(proxy_longhouse),
         )
-        // The Game Boy "longhouse" deck route (/ui/council, /longhouse.html),
-        // its `council_deck` handler, and the embedded `COUNCIL_DECK_HTML` const
+        // The Game Boy "longhouse" deck (/ui/council, /longhouse.html), its
+        // `council_deck` handler, and the embedded `COUNCIL_DECK_HTML` const
         // were removed when the council modal went native — the iframe body was
         // swapped for the in-app Leptos council component fed by the daemon's
-        // captured longhouse payloads. The orphaned static/longhouse.html is
-        // left on disk for orchestrator cleanup.
+        // captured longhouse payloads.
         .fallback_service(ServeDir::new(&dist).append_index_html_on_directories(true))
         // Set Cache-Control on static-file responses so a CDN / tunnel can never
         // wedge the app on a stale shell again (OCEAN — "blank pane / 11-minute
@@ -424,8 +423,6 @@ async fn static_cache_headers(req: Request, next: Next) -> Response {
     let is_dynamic = path.starts_with("/v1/")
         || path.starts_with("/api/")
         || path == "/health"
-        || path == "/ui/council"
-        || path == "/longhouse.html"
         || path.ends_with(".wasm");
     if is_dynamic {
         return next.run(req).await;
@@ -884,22 +881,6 @@ fn percent_encode_path_segment(value: &str) -> String {
     encoded
 }
 
-/// The Quorum/Council observability deck (the Game Boy "longhouse" viewer).
-/// Embedded into the binary so it's always reachable, independent of whether
-/// the build step copied it into `dist/`. Served at `/ui/council` (canonical)
-/// and `/longhouse.html` (legacy). The page connects to the existing
-/// `/v1/agent/events` SSE stream and drives councils via `/v1/longhouse/*`,
-/// both of which this proxy already exposes on the same origin.
-const COUNCIL_DECK_HTML: &str = include_str!("../static/longhouse.html");
-
-/// Serve the council deck page.
-async fn council_deck() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        COUNCIL_DECK_HTML,
-    )
-}
-
 /// Reverse-proxy the daemon's `/v1/longhouse/*` control endpoints (e.g.
 /// `demo`, `convene`). Forwards method, path tail, query, and body so the
 /// deck can drive a council through this same origin. The resulting council
@@ -1123,10 +1104,7 @@ async fn proxy_events(State(state): State<Arc<AppState>>, req: Request) -> impl 
 /// The daemon holds the xAI key and handles multipart construction.
 /// Returns `{ok, text}` on success, `{ok: false, error}` on failure.
 async fn stt(State(state): State<Arc<AppState>>, body: Bytes) -> impl IntoResponse {
-    let url = format!(
-        "{}/v1/voice/stt",
-        state.daemon_url.trim_end_matches('/')
-    );
+    let url = format!("{}/v1/voice/stt", state.daemon_url.trim_end_matches('/'));
 
     let resp = match state
         .http
@@ -1196,10 +1174,7 @@ async fn tts(
         return Err((StatusCode::BAD_REQUEST, "text required".to_string()));
     }
 
-    let url = format!(
-        "{}/v1/voice/tts",
-        state.daemon_url.trim_end_matches('/')
-    );
+    let url = format!("{}/v1/voice/tts", state.daemon_url.trim_end_matches('/'));
 
     let resp = state
         .http
