@@ -16,10 +16,10 @@
 //!
 //! Layout contract (consumed by app.rs): [`stage`] drives the voice-chat
 //! center-stage classes; [`level`] is a 0..1 mic level the orb's water binds
-//! to. Both are lazily-created process-wide signals, mirroring the
-//! `hands_free_status_signal` idiom in the parent module.
+//! to. Both are reference-counted process-wide signals, so conditional mounts
+//! and asynchronous WebRTC callbacks cannot outlive their reactive owner.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use leptos::prelude::*;
@@ -61,12 +61,11 @@ pub struct RealtimeMenuEntry {
     pub active: bool,
 }
 
-// Lazily-created process-wide signals (the `hands_free_status_signal` idiom):
-// the orb, the layout, and the async connect path all share one instance
-// regardless of mount order.
+// Process-wide voice status must not inherit the reactive owner active on first
+// access: conditional VoiceOrb mounts and WebRTC/rAF callbacks outlive owners.
 thread_local! {
-    static STAGE: RefCell<Option<RwSignal<RealtimeStage>>> = const { RefCell::new(None) };
-    static LEVEL: RefCell<Option<RwSignal<f32>>> = const { RefCell::new(None) };
+    static STAGE: RefCell<Option<ArcRwSignal<RealtimeStage>>> = const { RefCell::new(None) };
+    static LEVEL: RefCell<Option<ArcRwSignal<f32>>> = const { RefCell::new(None) };
     /// The daemon handle, installed once from app.rs so the orb's menu entry
     /// can start a session without threading props through VoiceOrb.
     static DAEMON: RefCell<Option<Daemon>> = const { RefCell::new(None) };
@@ -78,17 +77,21 @@ thread_local! {
 }
 
 /// The voice-chat stage signal (created on first access).
-pub fn stage() -> RwSignal<RealtimeStage> {
+pub fn stage() -> ArcRwSignal<RealtimeStage> {
     STAGE.with(|cell| {
-        *cell
-            .borrow_mut()
-            .get_or_insert_with(|| RwSignal::new(RealtimeStage::Off))
+        cell.borrow_mut()
+            .get_or_insert_with(|| ArcRwSignal::new(RealtimeStage::Off))
+            .clone()
     })
 }
 
 /// Live mic level 0..1 for the orb's audio-reactive water.
-pub fn level() -> RwSignal<f32> {
-    LEVEL.with(|cell| *cell.borrow_mut().get_or_insert_with(|| RwSignal::new(0.0)))
+pub fn level() -> ArcRwSignal<f32> {
+    LEVEL.with(|cell| {
+        cell.borrow_mut()
+            .get_or_insert_with(|| ArcRwSignal::new(0.0))
+            .clone()
+    })
 }
 
 /// The last realtime connect failure, if any. Lazily created.
@@ -152,28 +155,11 @@ pub fn user_facing_realtime_error(raw: &str) -> String {
     }
 }
 
-/// Install the daemon handle once AND eagerly initialize the process-wide
-/// signals under the App root owner (app.rs, at shell construction).
-///
-/// STAGE, LEVEL, and LAST_ERROR are created here rather than lazily on first
-/// access so their owners are the application root — never disposed — even
-/// when the first caller is conditionally mounted (e.g. VoiceOrb). Without
-/// eager init, a lazy creation inside a mounted subtree would die with its
-/// owner, and later calls from async closures or the level-meter loop would
-/// hit "disposed owner" panics on set.
+/// Install the daemon handle once from the application shell. Process-wide
+/// status signals are reference-counted and therefore safe to create lazily.
 pub fn install(daemon: Daemon) {
     DAEMON.with(|d| *d.borrow_mut() = Some(daemon));
-    // Eagerly allocate global signals under the App root owner.
-    STAGE.with(|c| {
-        c.borrow_mut()
-            .get_or_insert_with(|| RwSignal::new(RealtimeStage::Off));
-    });
-    LEVEL.with(|c| {
-        c.borrow_mut().get_or_insert_with(|| RwSignal::new(0.0));
-    });
-    LAST_ERROR.with(|c| {
-        c.borrow_mut().get_or_insert_with(|| ArcRwSignal::new(None));
-    });
+
 }
 
 fn daemon() -> Option<Daemon> {
@@ -183,6 +169,33 @@ fn daemon() -> Option<Daemon> {
 /// Shared, optional handle to the self-rescheduling level-meter frame closure.
 type FrameCell = Rc<RefCell<Option<Closure<dyn FnMut()>>>>;
 
+/// Latest animation frame owned by the level meter. Each frame replaces the
+/// completed handle with its successor so teardown cancels the frame that is
+/// actually still queued before dropping the callback closure.
+#[derive(Clone)]
+struct LevelMeterRafHandle(Rc<Cell<Option<i32>>>);
+
+impl LevelMeterRafHandle {
+    fn empty() -> Self {
+        Self(Rc::new(Cell::new(None)))
+    }
+
+    #[cfg(test)]
+    fn new(handle: i32) -> Self {
+        let slot = Self::empty();
+        slot.replace_after_frame(handle);
+        slot
+    }
+
+    fn replace_after_frame(&self, handle: i32) {
+        self.0.set(Some(handle));
+    }
+
+    fn take_for_teardown(&self) -> Option<i32> {
+        self.0.take()
+    }
+}
+
 /// Live session state. Dropping this (via [`stop`]) releases the mic, closes
 /// the peer connection, and silences the remote audio element.
 struct RealtimeSession {
@@ -191,7 +204,7 @@ struct RealtimeSession {
     mic: MediaStream,
     audio_el: HtmlAudioElement,
     ctx: Option<AudioContext>,
-    raf_handle: Option<i32>,
+    raf_handle: LevelMeterRafHandle,
     frame_cell: Option<FrameCell>,
     running: Rc<RefCell<bool>>,
     /// Event/track/message closures that must outlive their registration.
@@ -244,7 +257,9 @@ pub fn stop() {
     let session = SESSION.with(|s| s.borrow_mut().take());
     if let Some(session) = session {
         *session.running.borrow_mut() = false;
-        if let (Some(handle), Some(win)) = (session.raf_handle, web_sys::window()) {
+        if let (Some(handle), Some(win)) =
+            (session.raf_handle.take_for_teardown(), web_sys::window())
+        {
             let _ = win.cancel_animation_frame(handle);
         }
         if let Some(cell) = &session.frame_cell {
@@ -253,6 +268,13 @@ pub fn stop() {
         if let Some(ctx) = &session.ctx {
             let _ = ctx.close();
         }
+        // Closing the transports queues `close`/track events. Detach their
+        // wasm-bindgen callbacks before dropping `_closures`, or the browser
+        // can invoke a freed closure on the next event-loop turn.
+        session.channel.set_onopen(None);
+        session.channel.set_onmessage(None);
+        session.channel.set_onclose(None);
+        session.pc.set_ontrack(None);
         session.channel.close();
         session.pc.close();
         for track in session.mic.get_tracks().iter() {
@@ -410,7 +432,7 @@ async fn connect(daemon: Daemon, session_id: Option<String>) -> Result<RealtimeS
         mic,
         audio_el,
         ctx: Some(ctx),
-        raf_handle: Some(raf_handle),
+        raf_handle,
         frame_cell: Some(frame_cell),
         running,
         _closures: closures,
@@ -419,7 +441,12 @@ async fn connect(daemon: Daemon, session_id: Option<String>) -> Result<RealtimeS
 
 /// Teardown bundle [`start_level_meter`] hands back: audio context, rAF id,
 /// the frame cell, and the running flag `stop` flips.
-type LevelMeterHandles = (AudioContext, i32, FrameCell, Rc<RefCell<bool>>);
+type LevelMeterHandles = (
+    AudioContext,
+    LevelMeterRafHandle,
+    FrameCell,
+    Rc<RefCell<bool>>,
+);
 
 /// Analyser + self-rescheduling rAF loop writing [`level`]. Returns the
 /// handles [`stop`] needs for teardown.
@@ -443,6 +470,8 @@ fn start_level_meter(mic: &MediaStream) -> Result<LevelMeterHandles, String> {
     let frame_cell: FrameCell = Rc::new(RefCell::new(None));
     let frame_cell2 = frame_cell.clone();
     let window2 = window.clone();
+    let raf_handle = LevelMeterRafHandle::empty();
+    let raf_handle2 = raf_handle.clone();
 
     let on_frame = Closure::wrap(Box::new(move || {
         if !*running2.borrow() {
@@ -454,14 +483,17 @@ fn start_level_meter(mic: &MediaStream) -> Result<LevelMeterHandles, String> {
         let v = (vad::rms(&samples) * 4.0).clamp(0.0, 1.0);
         level().set(v);
         if let Some(cb) = frame_cell2.borrow().as_ref() {
-            let _ = window2.request_animation_frame(cb.as_ref().unchecked_ref());
+            if let Ok(handle) = window2.request_animation_frame(cb.as_ref().unchecked_ref()) {
+                raf_handle2.replace_after_frame(handle);
+            }
         }
     }) as Box<dyn FnMut()>);
     let handle = window
         .request_animation_frame(on_frame.as_ref().unchecked_ref())
         .map_err(|_| "cannot schedule level meter".to_string())?;
+    raf_handle.replace_after_frame(handle);
     *frame_cell.borrow_mut() = Some(on_frame);
-    Ok((ctx, handle, frame_cell, running))
+    Ok((ctx, raf_handle, frame_cell, running))
 }
 
 /// One server event off the data channel. Tool calls are dispatched from the
@@ -633,6 +665,27 @@ fn urlencode(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    fn assert_arc_rw_signal<T>(_signal: ArcRwSignal<T>) {}
+
+    #[test]
+    fn level_meter_teardown_takes_latest_rescheduled_animation_frame_handle_once() {
+        let handle = LevelMeterRafHandle::new(4);
+        let frame_owner = handle.clone();
+
+        frame_owner.replace_after_frame(9);
+
+        assert_eq!(handle.take_for_teardown(), Some(9));
+        assert_eq!(handle.take_for_teardown(), None);
+    }
+
+    #[test]
+    fn process_wide_realtime_status_signals_are_owner_independent_arc_rw_signals() {
+        assert_arc_rw_signal::<RealtimeStage>(stage());
+        assert_arc_rw_signal::<f32>(level());
+        assert_arc_rw_signal::<Option<String>>(last_error());
+    }
 
     #[test]
     fn render_args_accept_flat_and_nested_shapes() {

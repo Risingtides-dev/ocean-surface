@@ -306,8 +306,13 @@ pub fn VoiceOrb(
     // Realtime voice-chat stage (voice phases 2/3): while Connecting/Live the
     // orb renders live and the menu offers "End voice chat" instead of entry.
     let rt_stage = realtime::stage();
+    let rt_stage_for_label = rt_stage.clone();
+    let rt_stage_for_class = rt_stage.clone();
+    let rt_stage_for_title = rt_stage.clone();
+    let hf_status_for_label = hf_status.clone();
+    let hf_status_for_class = hf_status;
 
-    let rt_label = move || match rt_stage.get() {
+    let rt_label = move || match rt_stage_for_label.get() {
         realtime::RealtimeStage::Connecting => Some("connecting voice chat…".to_string()),
         realtime::RealtimeStage::Live => Some("voice chat live — speak naturally".to_string()),
         realtime::RealtimeStage::Off => None,
@@ -322,7 +327,7 @@ pub fn VoiceOrb(
             mode::VoiceMode::HandsFree => {
                 // Layer the live capture status over the mode's resting label so
                 // the user gets per-utterance feedback in open-mic mode.
-                match hf_status.get() {
+                match hf_status_for_label.get() {
                     HandsFreeStatus::Idle => m.label().to_string(),
                     HandsFreeStatus::Listening => "listening…".to_string(),
                     HandsFreeStatus::Transcribing => "transcribing…".to_string(),
@@ -352,7 +357,7 @@ pub fn VoiceOrb(
     let orb_class = move || {
         let m = voice_mode.get();
         let base = format!("voice-orb {}", m.css_modifier());
-        match rt_stage.get() {
+        match rt_stage_for_class.get() {
             realtime::RealtimeStage::Connecting => {
                 return format!("{base} is-voicechat is-transcribing");
             }
@@ -365,7 +370,7 @@ pub fn VoiceOrb(
                 // Open mic: orb pulses to show it's live-listening, and
                 // brightens through the capture lifecycle so the visual tracks
                 // the hint.
-                match hf_status.get() {
+                match hf_status_for_class.get() {
                     HandsFreeStatus::Listening => format!("{base} is-live is-capturing"),
                     HandsFreeStatus::Transcribing => format!("{base} is-live is-transcribing"),
                     _ => format!("{base} is-live"),
@@ -384,7 +389,7 @@ pub fn VoiceOrb(
         }
     };
     let orb_title = move || {
-        if rt_stage.get() != realtime::RealtimeStage::Off {
+        if rt_stage_for_title.get() != realtime::RealtimeStage::Off {
             return "voice chat live — open voice settings to end it";
         }
         match voice_mode.get() {
@@ -494,15 +499,26 @@ pub fn VoiceOrb(
                     // Not a persisted mode — entering it device-gates the classic
                     // capture modes (mode → Off) so exactly one thing owns the mic.
                     {{
-                        let rt_entry = move || {
+                        let rt_stage_for_menu_error = realtime::stage();
+                        let rt_stage_for_menu_label = realtime::stage();
+                        let rt_stage_for_menu_off = realtime::stage();
+                        let rt_stage_for_menu_click = realtime::stage();
+                        let rt_err_for_menu = move || {
                             realtime::voice_menu_realtime_entry(
-                                rt_stage.get(),
+                                rt_stage_for_menu_error.get(),
                                 realtime::last_error().get().as_deref(),
                             )
+                            .visible_error
                         };
-                        let rt_err_for_menu = move || rt_entry().visible_error;
-                        let rt_label_for_menu = move || rt_entry().label.to_string();
-                        let rt_off = move || rt_stage.get() == realtime::RealtimeStage::Off;
+                        let rt_label_for_menu = move || {
+                            realtime::voice_menu_realtime_entry(
+                                rt_stage_for_menu_label.get(),
+                                realtime::last_error().get().as_deref(),
+                            )
+                            .label
+                            .to_string()
+                        };
+                        let rt_off = move || rt_stage_for_menu_off.get() == realtime::RealtimeStage::Off;
 
                         view! {
                             <button
@@ -514,7 +530,7 @@ pub fn VoiceOrb(
                                 type="button"
                                 role="menuitem"
                                 on:click=move |_| {
-                                    if rt_stage.get_untracked() == realtime::RealtimeStage::Off {
+                                    if rt_stage_for_menu_click.get_untracked() == realtime::RealtimeStage::Off {
                                         tts::prime();
                                         voice_mode.set(mode::VoiceMode::Off);
                                         persist_mode(mode::VoiceMode::Off);
@@ -638,21 +654,20 @@ thread_local! {
     static DICTATE_CB: RefCell<Option<Callback<String>>> = const { RefCell::new(None) };
 }
 
-// Live hands-free capture status, surfaced to the orb so the user gets visual
-// "listening… → transcribing… → final" feedback as they speak. Lazily created
-// the first time the orb reads it so the listen loop and STT path can publish
-// updates regardless of mount order.
+// Live hands-free capture status is read by a conditionally mounted orb and
+// written by async listen/STT paths. A reference-counted signal keeps those
+// paths independent of whichever reactive owner first touches it.
 thread_local! {
-    static HANDS_FREE_STATUS: RefCell<Option<RwSignal<HandsFreeStatus>>> =
+    static HANDS_FREE_STATUS: RefCell<Option<ArcRwSignal<HandsFreeStatus>>> =
         const { RefCell::new(None) };
 }
 
-/// The reactive signal the orb binds its hands-free hint/animation to. Created
-/// on first access so both the component and the listen loop share one signal.
-fn hands_free_status_signal() -> RwSignal<HandsFreeStatus> {
+/// The owner-independent signal shared by the orb and hands-free capture.
+fn hands_free_status_signal() -> ArcRwSignal<HandsFreeStatus> {
     HANDS_FREE_STATUS.with(|s| {
-        *s.borrow_mut()
-            .get_or_insert_with(|| RwSignal::new(HandsFreeStatus::Idle))
+        s.borrow_mut()
+            .get_or_insert_with(|| ArcRwSignal::new(HandsFreeStatus::Idle))
+            .clone()
     })
 }
 
@@ -660,7 +675,7 @@ fn hands_free_status_signal() -> RwSignal<HandsFreeStatus> {
 /// Called from the listen loop on VAD transitions and from the STT path on a
 /// final transcript.
 pub(super) fn set_hands_free_status(status: HandsFreeStatus) {
-    let sig = HANDS_FREE_STATUS.with(|s| s.borrow().as_ref().copied());
+    let sig = HANDS_FREE_STATUS.with(|s| s.borrow().as_ref().cloned());
     if let Some(sig) = sig {
         // A `Final` confirmation is transient: show what was heard for a beat,
         // then fall back to the mode's ambient label — but only if nothing newer
@@ -1064,5 +1079,17 @@ fn local_storage() -> Option<web_sys::Storage> {
 fn persist_mode(m: mode::VoiceMode) {
     if let Some(storage) = local_storage() {
         let _ = storage.set_item(VOICE_MODE_KEY, m.persist_key());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_arc_rw_signal<T>(_signal: ArcRwSignal<T>) {}
+
+    #[test]
+    fn hands_free_status_signal_is_owner_independent_arc_rw_signal() {
+        assert_arc_rw_signal::<HandsFreeStatus>(hands_free_status_signal());
     }
 }

@@ -933,6 +933,7 @@ pub fn App() -> impl IntoView {
     // baseline count when we first transition out of Off; dock only when
     // the live component count exceeds that baseline.
     let rt_stage = crate::voice::realtime::stage();
+    let rt_stage_for_baseline = rt_stage.clone();
     let rt_current_component_count = {
         let rt_turns = daemon.turns;
         Memo::new(move |_| {
@@ -948,6 +949,7 @@ pub fn App() -> impl IntoView {
 
     // Snapshot the component count when voice transitions out of Off.
     let _ = {
+        let rt_stage = rt_stage_for_baseline;
         let rt_count = rt_current_component_count;
         let rt_baseline = rt_baseline_component_count;
         Effect::new(move |_| {
@@ -964,9 +966,11 @@ pub fn App() -> impl IntoView {
         })
     };
 
+    let rt_stage_for_active = rt_stage.clone();
+    let rt_stage_for_docked = rt_stage;
     let voice_chat_active = move || {
         let layout = surface_voice_layout(
-            rt_stage.get(),
+            rt_stage_for_active.get(),
             rt_baseline_component_count.get(),
             rt_current_component_count.get(),
         );
@@ -974,7 +978,7 @@ pub fn App() -> impl IntoView {
     };
     let voice_chat_docked = move || {
         let layout = surface_voice_layout(
-            rt_stage.get(),
+            rt_stage_for_docked.get(),
             rt_baseline_component_count.get(),
             rt_current_component_count.get(),
         );
