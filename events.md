@@ -1266,6 +1266,41 @@ deepseek-v4-pro (least-flaky of a currently-flaky provider set; codex/claude
 multi-minute provider STALLS remains an ocean-os follow-up (daemon holds the
 turn Running with no terminal frame; surface clears cleanly only on emitted
 TurnFinished).
+time:      [11:08pm] [07-09-26]
+agent:     [codex] [gpt-5.6-sol]
+worktree:  gitbutler/workspace
+type:      bug-report
+area:      frontend
+
+Restored Existing project as a first-class Sessions action after a later
+project-create rewrite buried it inside a breadcrumb directory browser. The
+Sessions panel now has separate, mutually exclusive Existing project and New
+project forms: existing paths are registered verbatim with a derived catalogue
+name; new roots are derived from parent plus normalized name. Deleted the
+breadcrumb, directory popover, browse/edit dual mode, Use-folder row, branch
+chips, and their horizontal scroller/CSS. Verified the exact Rust helper tests
+(2 pass), WASM cargo check, release Trunk build, intercepted POST payloads for
+both flows, success close/reset, and zero page/panel overflow at 380px. The full
+crate test binary remains independently blocked by three pre-existing duplicate
+live-component tests in daemon.rs; production compilation is green.
+_________________________________________________________________________________
+time:      [1:29pm] [07-10-26]
+agent:     [codex] [gpt-5.6-sol]
+worktree:  gitbutler/workspace
+type:      plan
+area:      analysis
+
+Locked the Ocean Rooms product architecture after tracing the working local
+room path and the federation primitives across ocean-surface, ocean-os,
+ocean-bedrock, and ocean-agents. The current SQLite room, roster, transcript,
+and mention-to-real-agent convene loop are genuine; the missing product is
+authenticated cross-machine sovereignty. The approved design uses Bedrock for
+scoped invites, active membership, global ordered history, durable replay, and
+authenticated realtime fanout; each local ocean-os executes only privately
+bound agents, and the surface remains render/intent/subscribe only. The spec
+also defines an honest local proof first, producer-scoped idempotency, a
+separate pending outbox, race-free snapshot/live cutover, active-stream
+revocation, exact-once convene, and two-machine acceptance gates.
 _________________________________________________________________________________
 time:      [3:52pm] [07-10-26]
 agent:     [omp] [gpt-5.6-sol]
