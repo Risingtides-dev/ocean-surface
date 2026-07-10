@@ -927,12 +927,18 @@ pub fn App() -> impl IntoView {
         <main
             class=root_class
             class:has-workspace-open=move || in_tauri && workspace_open.get()
+            // Desktop-only: the header doubles as the window titlebar (Tauri
+            // overlay traffic lights float over it) — pads the brand clear.
+            class:is-titlebar=in_tauri
             class:voice-chat-active=voice_chat_active
             class:voice-chat-docked=voice_chat_docked
             style=("--voice-level", voice_level_style)
         >
-            <header class="ocean-header">
-                <div class="ocean-brand" aria-label="Ocean">
+            // `data-tauri-drag-region` applies only to the element it is ON
+            // (not descendants): set it on both the header and the brand so
+            // the whole left zone drags the window on desktop; inert on web.
+            <header class="ocean-header" data-tauri-drag-region="">
+                <div class="ocean-brand" aria-label="Ocean" data-tauri-drag-region="">
                     <crate::icons::WaveBadge spinning=false compact=true />
                     <span class="ocean-brand__word" aria-hidden="true">
                         <crate::icons::OceanWordmark />
@@ -1445,8 +1451,23 @@ pub fn App() -> impl IntoView {
                                     }
                                 }
                             />
-                            // Halt the in-flight turn. Only shown while streaming.
-                            <Show when=move || streaming.get()>
+                            // Trailing action — one circular slot. Streaming shows Stop
+                            // (halt the in-flight turn); otherwise Send (submit,
+                            // disabled while empty).
+                            <Show
+                                when=move || streaming.get()
+                                fallback=move || view! {
+                                    <button
+                                        class="ocean-composer__send"
+                                        type="submit"
+                                        aria-label="send"
+                                        title="Send"
+                                        disabled=move || input.get().trim().is_empty()
+                                    >
+                                        <crate::icons::Send />
+                                    </button>
+                                }
+                            >
                                 <button
                                     class="ocean-composer__halt"
                                     type="button"
@@ -1454,16 +1475,9 @@ pub fn App() -> impl IntoView {
                                     title="Stop the running turn"
                                     on:click=move |_| daemon_halt.with_value(|d| d.halt())
                                 >
-                                    "■ Stop"
+                                    <crate::icons::Stop />
                                 </button>
                             </Show>
-                            <button
-                                class="ocean-composer__send"
-                                type="submit"
-                                disabled=move || input.get().trim().is_empty()
-                            >
-                                "Send"
-                            </button>
                         </form>
 
             </Show>

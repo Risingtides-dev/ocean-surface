@@ -6,13 +6,13 @@
 /* One dock card: orb | input on top row, minis + actions on the bottom row.
    The FORM is the framed control (focus ring lives here via :focus-within);
    the textarea inside is chromeless. DOM order (orb, turn-controls, textarea,
-   halt, send) is grid-placed — no markup reorder needed. */
+   action button) is grid-placed — no markup reorder needed. */
 .ocean-composer {
   display: grid;
-  grid-template-columns: auto 1fr auto auto;
+  grid-template-columns: auto 1fr auto;
   grid-template-areas:
-    "orb input input input"
-    "orb controls halt send";
+    "orb input input"
+    "orb controls action";
   align-items: center;
   column-gap: 10px;
   row-gap: 6px;
@@ -485,29 +485,33 @@
   cursor: not-allowed;
 }
 
-.ocean-composer__send {
-  grid-area: send;
+/* Trailing action — one circular icon slot shared by Send (idle, accent) and
+   Stop (streaming, halt-red). Mutually exclusive; both live in `action`. */
+.ocean-composer__send,
+.ocean-composer__halt {
+  grid-area: action;
   appearance: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  height: var(--ctl-h-sm);
-  padding: 0 14px;
+  width: var(--ctl-h);      /* 34px circle */
+  height: var(--ctl-h);
+  padding: 0;
+  font-size: 18px;          /* drives the 1em icon */
   border: none;
-  border-radius: var(--radius);
-  background: var(--accent);
-  box-shadow: var(--elev-1);
-  color: var(--fg-on-accent);
-  font-family: var(--font);
-  font-size: 14px;
-  font-weight: 600;
-  line-height: 1;
+  border-radius: var(--radius-pill);
   cursor: pointer;
   transition:
     transform var(--dur-fast) var(--ease),
     filter var(--dur-fast) var(--ease),
     box-shadow var(--dur-fast) var(--ease),
     opacity var(--dur-fast) var(--ease);
+}
+
+.ocean-composer__send {
+  background: var(--accent);
+  box-shadow: var(--elev-1);
+  color: var(--fg-on-accent);
 }
 
 .ocean-composer__send:hover {
@@ -525,11 +529,31 @@
 }
 
 .ocean-composer__send:disabled {
-  opacity: 0.45;
+  opacity: 0.4;
   cursor: not-allowed;
   pointer-events: none;
   filter: none;
   box-shadow: none;
+}
+
+.ocean-composer__halt {
+  background: var(--err-soft);
+  box-shadow: var(--elev-1);
+  color: var(--err);
+}
+
+.ocean-composer__halt:hover {
+  filter: brightness(1.12);
+}
+
+.ocean-composer__halt:focus-visible {
+  outline: none;
+  box-shadow: var(--elev-1), var(--focus-ring);
+}
+
+.ocean-composer__halt:active {
+  transform: translateY(1px);
+  box-shadow: var(--pressed);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -539,7 +563,8 @@
   .voice-trigger,
   .voice-live-chip,
   .ocean-composer__input,
-  .ocean-composer__send {
+  .ocean-composer__send,
+  .ocean-composer__halt {
     transition: none;
     animation: none;
   }

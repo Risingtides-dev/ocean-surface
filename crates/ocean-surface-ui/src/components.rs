@@ -112,8 +112,8 @@ pub fn ComponentView(
         }
         .into_any(),
         other => view! {
-            <div class="block block--component-unknown ocean-lit">
-                <span class="block__pill">
+            <div class="block block--component-unknown">
+                <span class="component-fallback">
                     {format!("unknown component kind: {other}")}
                 </span>
             </div>
@@ -157,7 +157,7 @@ fn KanbanView(component_id: String, kind_props: Value, daemon: Daemon) -> impl I
     };
 
     view! {
-        <div class="component-kanban ocean-lit">
+        <div class="component-kanban">
             <div class="kanban-columns">
                 {columns.into_iter().map(|col| {
                     let col_id = col.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -258,7 +258,7 @@ fn FormView(component_id: String, kind_props: Value, daemon: Daemon) -> impl Int
 
     view! {
         <div class="component-form">
-            <form class="ocean-lit" on:submit=on_submit>
+            <form on:submit=on_submit>
                 <h4 class="component-form__title">{title.to_string()}</h4>
                 {fields.clone().into_iter().map(|field| {
                     let name = field.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -365,7 +365,7 @@ fn TableView(component_id: String, kind_props: Value, daemon: Daemon) -> impl In
     let is_empty = rows.is_empty();
 
     view! {
-        <div class="component-table ocean-lit">
+        <div class="component-table">
             <table class="data-table">
                 <thead>
                     <tr>
@@ -444,7 +444,7 @@ fn ProgressView(kind_props: Value) -> impl IntoView {
     };
 
     view! {
-        <div class="component-progress ocean-lit">
+        <div class="component-progress">
             {if !label.is_empty() {
                 view! { <div class="progress-label">{label.to_string()}</div> }.into_any()
             } else {
@@ -483,7 +483,7 @@ fn MarkdownView(kind_props: Value) -> impl IntoView {
         .and_then(|v| v.as_str())
         .unwrap_or("");
     view! {
-        <div class="component-markdown ocean-lit" inner_html=crate::markdown::render(content)></div>
+        <div class="component-markdown" inner_html=crate::markdown::render(content)></div>
     }
 }
 
@@ -529,7 +529,7 @@ fn DashboardView(kind_props: Value, daemon: Daemon) -> impl IntoView {
 
     view! {
         <div
-            class="component-dashboard ocean-lit"
+            class="component-dashboard"
             style=format!(
                 "display: grid; grid-template-columns: {columns}; gap: 12px;"
             )
@@ -768,7 +768,7 @@ fn ChartView(kind_props: Value) -> impl IntoView {
     };
 
     view! {
-        <div class="component-chart ocean-lit">
+        <div class="component-chart">
             {(!title.is_empty())
                 .then(|| view! { <div class="component-chart__title">{title.clone()}</div> })}
             {body}
@@ -796,7 +796,7 @@ fn TimelineView(kind_props: Value) -> impl IntoView {
         .unwrap_or_default();
 
     view! {
-        <div class="component-timeline ocean-lit">
+        <div class="component-timeline">
             {steps.into_iter().map(|step| {
                 let label = step.get("label").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let detail = step.get("detail").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -843,7 +843,7 @@ fn StatView(kind_props: Value) -> impl IntoView {
         .unwrap_or_default();
 
     view! {
-        <div class="component-stats ocean-lit">
+        <div class="component-stats">
             {stats.into_iter().map(|s| {
                 let label = s.get("label").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let value = cell_text(s.get("value").unwrap_or(&Value::Null));
@@ -888,7 +888,7 @@ fn FileTreeView(component_id: String, kind_props: Value, daemon: Daemon) -> impl
         .unwrap_or_default();
 
     view! {
-        <div class="component-filetree ocean-lit">
+        <div class="component-filetree">
             {(!root.is_empty()).then(|| view! { <div class="filetree__root">{root.clone()}</div> })}
             <ul class="filetree__list">
                 {entries.into_iter().map(|e| {
@@ -1025,7 +1025,7 @@ fn DiffView(kind_props: Value) -> impl IntoView {
         };
 
     view! {
-        <div class="component-diff ocean-lit">
+        <div class="component-diff">
             {(!filename.is_empty()).then(|| view! { <div class="diff__filename">{filename.clone()}</div> })}
             <pre class="diff__body">
                 {lines.into_iter().map(|(kind, text)| {
@@ -1085,7 +1085,7 @@ fn CodeView(kind_props: Value) -> impl IntoView {
     let copy_label = move || if copied.get() { "copied" } else { "copy" };
 
     view! {
-        <div class="component-code ocean-lit">
+        <div class="component-code">
             <div class="code__head">
                 <span class="code__lang">{header}</span>
                 <button class="code__copy" type="button" on:click=on_copy>{copy_label}</button>
@@ -1129,7 +1129,7 @@ fn CalloutView(kind_props: Value) -> impl IntoView {
     };
 
     view! {
-        <div class=format!("component-callout component-callout--{variant} ocean-lit")>
+        <div class=format!("component-callout component-callout--{variant}")>
             <span class="callout__icon">{icon}</span>
             <div class="callout__body">
                 {(!title.is_empty()).then(|| view! { <div class="callout__title">{title.clone()}</div> })}
@@ -1156,7 +1156,7 @@ fn GalleryView(kind_props: Value) -> impl IntoView {
         .unwrap_or_default();
 
     view! {
-        <div class="component-gallery ocean-lit">
+        <div class="component-gallery">
             {images.into_iter().map(|img| {
                 let src = img.get("src").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let caption = img.get("caption").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -1225,7 +1225,7 @@ fn ConfirmView(component_id: String, kind_props: Value, daemon: Daemon) -> impl 
     let send_no = send.clone();
 
     view! {
-        <div class="component-confirm ocean-lit">
+        <div class="component-confirm">
             <div class="confirm__title">{title}</div>
             {(!body.is_empty()).then(|| view! { <div class="confirm__body">{body.clone()}</div> })}
             <div class="confirm__actions">

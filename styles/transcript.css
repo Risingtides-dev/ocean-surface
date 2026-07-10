@@ -190,28 +190,6 @@
   text-align: center;
 }
 
-/* The brand lockup — the Ocean badge over a still depth halo, OCEAN in
-   per-letter ramp colors (one solid color per letter, exactly the header
-   wordmark language at hero scale). The badge's swells drift while the
-   surface waits — the loading motion (replaces the old breathing pulse). */
-.transcript__landing-mark {
-  position: relative;
-  display: grid;
-  place-items: center;
-  width: 88px;
-  height: 88px;
-  font-size: 88px;
-  user-select: none;
-}
-
-.transcript__landing-mark::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  background: radial-gradient(circle at 50% 44%, var(--accent-soft), transparent 68%);
-  opacity: 0.7;
-}
 
 /* ── The Ocean badge (wave-badge) ─────────────────────────────────────
    The circular brand mark, pixel-true to the reference
@@ -282,41 +260,6 @@
   line-height: 0;
 }
 
-.transcript__landing-word {
-  display: inline-flex;
-  gap: 0.42em;
-  font-family: var(--font);
-  font-size: clamp(20px, 5vw, 30px);
-  font-weight: 600;
-  line-height: 1;
-  user-select: none;
-}
-
-.transcript__landing-word span:nth-child(1) { color: var(--ocean-4); }
-.transcript__landing-word span:nth-child(2) { color: var(--ocean-5); }
-.transcript__landing-word span:nth-child(3) { color: var(--ocean-6); }
-.transcript__landing-word span:nth-child(4) { color: var(--ocean-7); }
-.transcript__landing-word span:nth-child(5) { color: var(--ocean-8); }
-
-.transcript__landing-word span:nth-child(1) { --letter-fill: var(--ocean-4); }
-.transcript__landing-word span:nth-child(2) { --letter-fill: var(--ocean-5); }
-.transcript__landing-word span:nth-child(3) { --letter-fill: var(--ocean-6); }
-.transcript__landing-word span:nth-child(4) { --letter-fill: var(--ocean-7); }
-.transcript__landing-word span:nth-child(5) { --letter-fill: var(--ocean-8); }
-@media (prefers-reduced-motion: no-preference) {
-  .transcript__landing-word span {
-    animation: ocean-landing-shimmer 5.5s ease-in-out infinite;
-  }
-  .transcript__landing-word span:nth-child(1) { animation-delay: 0s; }
-  .transcript__landing-word span:nth-child(2) { animation-delay: -0.55s; }
-  .transcript__landing-word span:nth-child(3) { animation-delay: -1.1s; }
-  .transcript__landing-word span:nth-child(4) { animation-delay: -1.65s; }
-  .transcript__landing-word span:nth-child(5) { animation-delay: -2.2s; }
-  @keyframes ocean-landing-shimmer {
-    0%, 100% { color: var(--letter-fill); }
-    40% { color: color-mix(in srgb, var(--letter-fill) 35%, var(--letter-shimmer)); }
-  }
-}
 
 /* Screen-reader title; visually quiet under the banner. */
 .transcript__landing-title {
@@ -377,7 +320,6 @@
 .turn--assistant {
   display: flex;
   flex-direction: column;
-  gap: 8px;
   min-width: 0;
 }
 
@@ -389,14 +331,6 @@
   align-items: flex-start;
 }
 
-.turn__header {
-  color: var(--fg-3);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1.3;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
 
 .turn__body {
   min-width: 0;
@@ -549,234 +483,128 @@
   color: var(--fg-2);
 }
 
-/* ── Thinking disclosures ───────────────────────────────────────── */
+/* ── Generic disclosure system ─────────────────────────────────────
+   Rust emits .transcript-disclosure--group|--thinking|--row on the root
+   wrapper. Children: __head (button), __tick, __dot, __label, __status,
+   __body. State lives on the root: .is-open .is-running .is-ok .is-err */
+
+/* ---- Wrappers ---------------------------------------------------- */
 .block--thinking {
   max-width: 72ch;
 }
 
-.block__pill {
-  appearance: none;
-  display: inline-flex;
-  align-items: center;
-  min-height: var(--ctl-h-sm);
-  padding: 0 11px;
-  border: 0;
-  border-radius: var(--radius);
-  background: var(--sheen-soft), var(--bg-elevated);
-  box-shadow: var(--elev-1);
-  color: var(--fg-3);
-  font: 500 12px/1 var(--font);
-  cursor: pointer;
-  transition:
-    background var(--dur-fast) var(--ease),
-    box-shadow var(--dur-fast) var(--ease),
-    color var(--dur-fast) var(--ease),
-    transform var(--dur-fast) var(--ease);
-}
-
-.block__pill:hover {
-  background: var(--sheen-soft), var(--bg-hover);
-  box-shadow: var(--elev-2);
-  color: var(--fg);
-}
-
-.block__pill:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-}
-
-.block__pill:active {
-  transform: scale(0.985);
-  box-shadow: var(--pressed);
-}
-
-.block--thinking .block__pill {
-  font-style: italic;
-}
-
-.block__thinking-body {
-  max-height: 320px;
-  margin: 8px 0 0;
-  overflow-y: auto;
-  padding: 10px 14px;
-  background: var(--bg-raised);
-  border-radius: var(--radius);
-  box-shadow: var(--well);
-  color: var(--fg-3);
-  font: italic 13px/1.55 var(--font);
-  white-space: pre-wrap;
-}
-
-/* ── Tool disclosures in the transcript ─────────────────────────── */
 .block--tool.drawer {
   margin: 3px 0;
-}
-
-.tool-group__body {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 2px 0;
-}
-
-.tool-group__body .block--tool.drawer {
-  margin: 1px 0;
 }
 
 .tool-group {
   margin: 3px 0;
 }
 
-.tool-group__head {
+.transcript-disclosure--group > .transcript-disclosure__body > .block--tool.drawer {
+  margin: 1px 0;
+}
+
+/* ---- Head button — base ------------------------------------------ */
+.transcript-disclosure__head {
   appearance: none;
   display: flex;
   align-items: center;
   gap: 7px;
   width: 100%;
+  border: 0;
+  border-radius: var(--radius);
+  color: var(--fg-3);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: left;
+  transition:
+    background var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.transcript-disclosure__head:hover {
+  background: var(--sheen-soft), var(--bg-elevated);
+  color: var(--fg);
+}
+
+.transcript-disclosure__head:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.transcript-disclosure__head:active {
+  transform: scale(0.985);
+  box-shadow: var(--pressed);
+}
+
+/* Group variant (tool-group): taller, mono font, always raised */
+.transcript-disclosure--group > .transcript-disclosure__head {
   min-height: 28px;
   padding: 4px 10px;
-  border: 0;
-  border-radius: var(--radius);
   background: var(--sheen-soft), var(--bg-raised);
   box-shadow: var(--elev-1);
-  color: var(--fg-3);
-  cursor: pointer;
   font-family: var(--mono);
-  font-size: 12px;
-  line-height: 1.45;
-  text-align: left;
-  transition:
-    background var(--dur-fast) var(--ease),
-    box-shadow var(--dur-fast) var(--ease),
-    color var(--dur-fast) var(--ease),
-    transform var(--dur-fast) var(--ease);
 }
-
-.tool-group__head:hover,
-.tool-group.is-open .tool-group__head {
+.transcript-disclosure--group > .transcript-disclosure__head:hover,
+.transcript-disclosure--group.is-open > .transcript-disclosure__head {
   background: var(--sheen-soft), var(--bg-elevated);
   box-shadow: var(--elev-2);
-  color: var(--fg);
 }
 
-.tool-group__head:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-}
-
-.tool-group__head:active {
-  transform: scale(0.985);
-  box-shadow: var(--pressed);
-}
-
-.tool-group__tick {
-  flex: 0 0 auto;
-  width: 10px;
-  color: var(--fg-3);
-}
-
-.tool-group.is-open .tool-group__tick {
-  color: var(--accent);
-}
-
-.tool-group__dot {
-  flex: 0 0 auto;
-  width: 7px;
-  height: 7px;
-  border-radius: var(--radius-pill);
-  background: var(--fg-4);
-}
-
-.tool-group.is-running .tool-group__dot {
-  background: var(--running);
-}
-
-.tool-group.is-ok .tool-group__dot {
-  background: var(--ok);
-}
-
-.tool-group.is-err .tool-group__dot {
-  background: var(--err);
-}
-
-.tool-group__label {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--mono);
-}
-
-.tool-group__status {
-  flex: 0 0 auto;
-  color: var(--fg-3);
-  font-family: var(--mono);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1;
-}
-
-.tool-group.is-running .tool-group__status {
-  color: var(--running);
-}
-
-.tool-group.is-err .tool-group__status {
-  color: var(--err);
-}
-
-.drawer__head {
-  appearance: none;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  width: 100%;
+/* Row variant (drawer): shorter, transparent until hover/open */
+.transcript-disclosure--row > .transcript-disclosure__head {
   min-height: 24px;
   padding: 3px 8px;
-  border: 0;
-  border-radius: var(--radius);
   background: transparent;
-  color: var(--fg-3);
-  cursor: pointer;
   font-family: var(--mono);
-  font-size: 12px;
-  line-height: 1.45;
-  text-align: left;
-  transition:
-    background var(--dur-fast) var(--ease),
-    box-shadow var(--dur-fast) var(--ease),
-    color var(--dur-fast) var(--ease),
-    transform var(--dur-fast) var(--ease);
 }
 
-.drawer__head:hover,
-.drawer.is-open .drawer__head {
+.transcript-disclosure--row > .transcript-disclosure__head:hover,
+.transcript-disclosure--row.is-open > .transcript-disclosure__head {
   background: var(--sheen-soft), var(--bg-elevated);
   box-shadow: var(--elev-1);
-  color: var(--fg);
 }
 
-.drawer__head:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
+/* Thinking variant: pill-shaped, sans font, content-width */
+.transcript-disclosure--thinking > .transcript-disclosure__head {
+  display: inline-flex;
+  width: auto;
+  max-width: 100%;
+  align-self: flex-start;
+  min-height: var(--ctl-h-sm);
+  padding: 0 11px;
+  background: var(--sheen-soft), var(--bg-elevated);
+  box-shadow: var(--elev-1);
+  font: 500 12px/1 var(--font);
 }
 
-.drawer__head:active {
-  transform: scale(0.985);
-  box-shadow: var(--pressed);
+.transcript-disclosure--thinking > .transcript-disclosure__head:hover {
+  background: var(--sheen-soft), var(--bg-hover);
+  box-shadow: var(--elev-2);
 }
 
-.drawer__tick {
+.block--thinking > .transcript-disclosure__head {
+  font-style: italic;
+}
+
+/* ---- Tick (chevron) ---------------------------------------------- */
+.transcript-disclosure__tick {
   flex: 0 0 auto;
   width: 10px;
-  color: var(--fg-3);
 }
 
-.drawer.is-open .drawer__tick {
+.transcript-disclosure--group.is-open > .transcript-disclosure__head .transcript-disclosure__tick,
+.transcript-disclosure--row.is-open > .transcript-disclosure__head .transcript-disclosure__tick,
+.transcript-disclosure--thinking.is-open > .transcript-disclosure__head .transcript-disclosure__tick {
   color: var(--accent);
 }
 
-.drawer__dot {
+/* ---- Dot (status indicator) -------------------------------------- */
+.transcript-disclosure__dot {
   flex: 0 0 auto;
   width: 7px;
   height: 7px;
@@ -784,19 +612,26 @@
   background: var(--fg-4);
 }
 
-.block--tool.is-running .drawer__dot {
+.transcript-disclosure--group.is-running > .transcript-disclosure__head .transcript-disclosure__dot,
+.transcript-disclosure--row.is-running > .transcript-disclosure__head .transcript-disclosure__dot,
+.transcript-disclosure--thinking.is-running > .transcript-disclosure__head .transcript-disclosure__dot {
   background: var(--running);
 }
 
-.block--tool.is-ok .drawer__dot {
+.transcript-disclosure--group.is-ok > .transcript-disclosure__head .transcript-disclosure__dot,
+.transcript-disclosure--row.is-ok > .transcript-disclosure__head .transcript-disclosure__dot,
+.transcript-disclosure--thinking.is-ok > .transcript-disclosure__head .transcript-disclosure__dot {
   background: var(--ok);
 }
 
-.block--tool.is-err .drawer__dot {
+.transcript-disclosure--group.is-err > .transcript-disclosure__head .transcript-disclosure__dot,
+.transcript-disclosure--row.is-err > .transcript-disclosure__head .transcript-disclosure__dot,
+.transcript-disclosure--thinking.is-err > .transcript-disclosure__head .transcript-disclosure__dot {
   background: var(--err);
 }
 
-.drawer__label {
+/* ---- Label ------------------------------------------------------- */
+.transcript-disclosure__label {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
@@ -804,27 +639,50 @@
   white-space: nowrap;
 }
 
-.drawer__status {
+.transcript-disclosure--group > .transcript-disclosure__head > .transcript-disclosure__label,
+.transcript-disclosure--row > .transcript-disclosure__head > .transcript-disclosure__label {
+  font-family: var(--mono);
+}
+
+/* ---- Status ------------------------------------------------------ */
+.transcript-disclosure__status {
   flex: 0 0 auto;
   color: var(--fg-3);
-  font-family: var(--font);
   font-size: 11px;
   font-weight: 600;
   line-height: 1;
 }
 
-.block--tool.is-running .drawer__status {
+.transcript-disclosure--group.is-running > .transcript-disclosure__head .transcript-disclosure__status,
+.transcript-disclosure--row.is-running > .transcript-disclosure__head .transcript-disclosure__status,
+.transcript-disclosure--thinking.is-running > .transcript-disclosure__head .transcript-disclosure__status {
   color: var(--running);
 }
 
-.block--tool.is-err .drawer__status {
+.transcript-disclosure--group.is-err > .transcript-disclosure__head .transcript-disclosure__status,
+.transcript-disclosure--row.is-err > .transcript-disclosure__head .transcript-disclosure__status,
+.transcript-disclosure--thinking.is-err > .transcript-disclosure__head .transcript-disclosure__status {
   color: var(--err);
 }
 
-.drawer__body {
+/* ---- Body (expandable content) ----------------------------------- */
+.transcript-disclosure__body {
+  overflow: auto;
+  animation: drawer-open var(--dur-fast) var(--ease);
+}
+
+/* Group body: flex container for nested drawers */
+.transcript-disclosure--group > .transcript-disclosure__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 0;
+}
+
+/* Row body: mono code well */
+.transcript-disclosure--row > .transcript-disclosure__body {
   max-height: 320px;
   margin: 4px 0 8px 20px;
-  overflow: auto;
   padding: 10px 12px;
   background: var(--bg-well);
   border-radius: var(--radius);
@@ -834,7 +692,19 @@
   font-size: 12px;
   line-height: 1.55;
   white-space: pre-wrap;
-  animation: drawer-open var(--dur-fast) var(--ease);
+}
+
+/* Thinking body: italic prose */
+.transcript-disclosure--thinking > .transcript-disclosure__body {
+  max-height: 320px;
+  margin: 8px 0 0;
+  padding: 10px 14px;
+  background: var(--bg-raised);
+  border-radius: var(--radius);
+  box-shadow: var(--well);
+  color: var(--fg-3);
+  font: italic 13px/1.55 var(--font);
+  white-space: pre-wrap;
 }
 
 @keyframes drawer-open {
@@ -880,6 +750,41 @@
   animation: ocean-turn-materialize var(--dur-fast) var(--ease-tide) both;
 }
 
+/* ── Rich components inside assistant turn body — flat outer roots ──
+   The turn body is THE card; nested .component-* wrappers sit flush. Genuine
+   inner wells/cards keep their elevation; form, semantic callout tint, and
+   interactive confirm distinction are preserved. */
+.turn--assistant .turn__body .component-kanban,
+.turn--assistant .turn__body .component-table,
+.turn--assistant .turn__body .component-progress,
+.turn--assistant .turn__body .component-markdown,
+.turn--assistant .turn__body .component-dashboard,
+.turn--assistant .turn__body .component-chart,
+.turn--assistant .turn__body .component-timeline,
+.turn--assistant .turn__body .component-stats,
+.turn--assistant .turn__body .component-filetree,
+.turn--assistant .turn__body .component-diff,
+.turn--assistant .turn__body .component-code,
+.turn--assistant .turn__body .component-gallery,
+.turn--assistant .turn__body .block--component-unknown {
+  background: none;
+  box-shadow: none;
+  border-radius: 0;
+  padding: 0;
+}
+
+/* ── Compact containment — large components scroll locally at 380px ──
+   Dashboards, kanbans, maps, videos and disclosure bodies stay within the
+   turn without pushing page overflow. */
+.turn--assistant .turn__body .component-dashboard,
+.turn--assistant .turn__body .kanban-columns,
+.turn--assistant .turn__body .block--map,
+.turn--assistant .turn__body .block--video,
+.turn--assistant .turn__body .transcript-disclosure__body {
+  max-height: 380px;
+  overflow: auto;
+}
+
 
 /* ── Markdown tables inside text blocks ──────────────────────────── */
 .block--text table {
@@ -919,7 +824,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .ocean-perm,
-  .drawer__body,
+  .transcript-disclosure__body,
   .turn.is-new,
   .turn--assistant.is-streaming .turn__body {
     animation: none;
@@ -927,9 +832,7 @@
 
   .ocean-perm__approve,
   .ocean-perm__deny,
-  .block__pill,
-  .drawer__head,
-  .tool-group__head {
+  .transcript-disclosure__head {
     transition: none;
   }
 
@@ -1021,18 +924,6 @@
 .ocean-thinkfill__label--dim { fill: var(--fg-3); }
 .ocean-thinkfill__label--lit { fill: var(--ocean-6); }
 
-/* Legacy pending badge slot (kept for any residual markup) */
-.ocean-pending {
-  display: flex;
-  padding: 6px 0 12px;
-}
-
-.ocean-pending__badge {
-  margin-left: 14px;
-  font-size: 34px;
-  line-height: 0;
-  filter: drop-shadow(0 0 10px var(--accent-soft));
-}
 
 /* ── Full-glass landing — the reveal's water floods the whole pane ────
    The scene svg overflows its centered box (water paths span far beyond

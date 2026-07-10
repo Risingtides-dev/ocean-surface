@@ -1,7 +1,7 @@
-//! Renders the conversation. Layout mirrors the TUI's PM panel:
-//! "you ▸" / "ocean ▸" headers, a single header per assistant turn even
-//! when thinking + tools + text interleave, collapsed Thinking pills,
-//! tool chips with status color.
+//! Renders the conversation. No visible turn role headers; assistant turns
+//! use unified `transcript-disclosure` classes for tool groups, thinking
+//! groups, and individual tool rows — each with explicit `aria-expanded`.
+//! Collapsed Thinking pills and tool chips with status color.
 //!
 //! Everything derives from the `turns` signal so streaming deltas reflect
 //! live. Turns are keyed by index for stable DOM; within a turn the block
@@ -28,8 +28,8 @@ enum RenderItem {
 
 /// Collapse the turn's blocks into render items. Every `ToolCall` is tucked
 /// into one `ToolGroup` ("tools (N)") at the first tool call's position, and
-/// every `Thinking` segment is tucked into one `ThinkingGroup` ("thinking… (N
-/// chars)") at the first thinking segment's position — so a turn that streams
+/// every `Thinking` segment is tucked into one `ThinkingGroup` ("thinking…")
+/// at the first thinking segment's position — so a turn that streams
 /// dozens of interleaved thinking deltas renders a SINGLE thinking disclosure
 /// instead of a chip per segment (the "26-chip wall"). Other blocks (text,
 /// component) stay `Single`s in their original order. Render-only: never
@@ -228,7 +228,6 @@ fn UserTurn(idx: usize, turns: RwSignal<Vec<crate::model::Turn>>) -> impl IntoVi
     };
     view! {
         <div class="turn--user">
-            <div class="turn__header">"you ▸"</div>
             <div class="turn__body">{text}</div>
         </div>
     }
@@ -259,7 +258,6 @@ fn AssistantTurn(
 
     view! {
         <div class="turn--assistant" class:is-streaming=is_streaming>
-            <div class="turn__header">"ocean ▸"</div>
             <div class="turn__body">
                 <For
                     each=items
@@ -277,18 +275,12 @@ fn AssistantTurn(
                             .into_any(),
                             // One transcript tuck per assistant turn; the rows
                             // inside stay individually expandable.
-                            RenderItem::ToolGroup(block_idxs) => view! {
-                                <ToolGroup
-                                    turn_idx=idx
-                                    block_idxs=block_idxs
-                                    turns=turns
-                                    daemon=daemon
-                                />
+                            RenderItem::ToolGroup(_) => view! {
+                                <ToolGroup turn_idx=idx turns=turns daemon=daemon />
                             }
                             .into_any(),
                             // One thinking disclosure per turn: every thinking
-                            // segment collapses into it, with a summed,
-                            // live-updating char count.
+                            // segment collapses into it, a plain `thinking…` label.
                             RenderItem::ThinkingGroup(_) => view! {
                                 <ThinkingGroup turn_idx=idx turns=turns />
                             }
@@ -308,16 +300,33 @@ fn AssistantTurn(
 /// each failed call itself, so opening the group lands you on the error body.
 /// Manual toggle is sticky: the user's collapse/expand choice is absolute and
 /// survives later errors. Each row inside stays individually expandable.
+///
+/// Member indices are DERIVED reactively from `turns`, not snapshotted from a
+/// render-item prop: tool calls keep appending mid-stream and the parent `For`
+/// retains this component under a stable key, so a snapshot prop would freeze
+/// the group at its first tool call and miss every later call. Scanning the
+/// turn's blocks each update keeps the count, aggregate status, failed count,
+/// and body current forever — same contract as [`ThinkingGroup`].
 #[component]
 fn ToolGroup(
     turn_idx: usize,
-    block_idxs: Vec<usize>,
     turns: RwSignal<Vec<crate::model::Turn>>,
     daemon: Daemon,
 ) -> impl IntoView {
-    let n = block_idxs.len();
-    let idxs = StoredValue::new(block_idxs);
     let daemon = StoredValue::new(daemon);
+    // Member indices are DERIVED reactively — same contract as ThinkingGroup
+    // (tool calls keep appending mid-stream; a snapshot would freeze the group).
+    let idxs = Signal::derive(move || {
+        turns.with(|t| {
+            t.get(turn_idx).map_or(Vec::new(), |turn| {
+                turn.blocks
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, b)| matches!(b, Block::ToolCall { .. }).then_some(i))
+                    .collect::<Vec<_>>()
+            })
+        })
+    });
     // Aggregate status across the contained calls, read reactively.
     let agg = Signal::derive(move || {
         turns.with(|t| {
@@ -325,7 +334,7 @@ fn ToolGroup(
                 return ToolStatus::Ok;
             };
             let mut any_running = false;
-            for bi in idxs.get_value() {
+            for bi in idxs.get() {
                 if let Some(Block::ToolCall { status, .. }) = turn.blocks.get(bi) {
                     match status {
                         ToolStatus::Err => return ToolStatus::Err,
@@ -351,7 +360,7 @@ fn ToolGroup(
     let failed_count = Signal::derive(move || {
         turns.with(|t| {
             t.get(turn_idx).map_or(0usize, |turn| {
-                idxs.get_value()
+                idxs.get()
                     .into_iter()
                     .filter(|&bi| {
                         matches!(
@@ -381,17 +390,19 @@ fn ToolGroup(
     let glyph = move || if open.get() { "▾" } else { "▸" };
 
     view! {
-        <div class=move || format!("tool-group {}", status_class()) class:is-open=open>
-            <button class="tool-group__head" on:click=toggle>
-                <span class="tool-group__tick">{glyph}</span>
-                <span class="tool-group__dot"></span>
-                <span class="tool-group__label">{move || format!("tools ({n})")}</span>
-                <span class="tool-group__status">{status_label}</span>
+        <div class=move || format!("tool-group transcript-disclosure--group {}", status_class()) class:is-open=open>
+            <button class="transcript-disclosure__head"
+                aria-expanded=move || open.get().to_string()
+                on:click=toggle>
+                <span class="transcript-disclosure__tick">{glyph}</span>
+                <span class="transcript-disclosure__dot"></span>
+                <span class="transcript-disclosure__label">{move || format!("tools ({})", idxs.with(|ix| ix.len()))}</span>
+                <span class="transcript-disclosure__status">{status_label}</span>
             </button>
             <Show when=move || open.get()>
-                <div class="tool-group__body">
+                <div class="transcript-disclosure__body">
                     <For
-                        each=move || idxs.get_value()
+                        each=move || idxs.get()
                         key=|bi| *bi
                         children=move |bi| {
                             let daemon = daemon.get_value();
@@ -441,8 +452,10 @@ fn ThinkingGroup(turn_idx: usize, turns: RwSignal<Vec<crate::model::Turn>>) -> i
     });
     let glyph = move || if open.get() { "▾" } else { "▸" };
     view! {
-        <div class="block block--thinking" class:is-open=open>
-            <button class="block__pill" on:click=move |_| open.set(!open.get())>
+        <div class="block block--thinking transcript-disclosure--thinking" class:is-open=open>
+            <button class="transcript-disclosure__head"
+                aria-expanded=move || open.get().to_string()
+                on:click=move |_| open.set(!open.get())>
                 {move || format!("{} thinking…", glyph())}
             </button>
             <Show when=move || open.get()>
@@ -462,7 +475,7 @@ fn ThinkingGroup(turn_idx: usize, turns: RwSignal<Vec<crate::model::Turn>>) -> i
                             })
                         };
                         view! {
-                            <pre class="block__thinking-body">{content}</pre>
+                            <pre class="transcript-disclosure__body">{content}</pre>
                         }
                     }
                 />
@@ -489,12 +502,8 @@ fn BlockView(
     let toggle = move || {
         turns.update(|t| {
             if let Some(turn) = t.get_mut(turn_idx) {
-                if let Some(b) = turn.blocks.get_mut(block_idx) {
-                    match b {
-                        Block::Thinking { expanded, .. } => *expanded = !*expanded,
-                        Block::ToolCall { expanded, .. } => *expanded = !*expanded,
-                        _ => {}
-                    }
+                if let Some(Block::ToolCall { expanded, .. }) = turn.blocks.get_mut(block_idx) {
+                    *expanded = !*expanded;
                 }
             }
         });
@@ -507,22 +516,6 @@ fn BlockView(
                 <div class="block block--text" inner_html=render_md(&text)></div>
             }
             .into_any(),
-
-            Some(Block::Thinking { content, expanded }) => {
-                let count = content.chars().count();
-                let glyph = if expanded { "▾" } else { "▸" };
-                view! {
-                    <div class="block block--thinking">
-                        <button class="block__pill" on:click=move |_| toggle()>
-                            {format!("{glyph} thinking… ({count} chars)")}
-                        </button>
-                        <Show when=move || expanded>
-                            <pre class="block__thinking-body">{content.clone()}</pre>
-                        </Show>
-                    </div>
-                }
-                .into_any()
-            }
 
             Some(Block::ToolCall {
                 name,
@@ -550,16 +543,18 @@ fn BlockView(
                     output.clone()
                 };
                 view! {
-                    <div class=format!("block block--tool drawer {status_class}")
+                    <div class=format!("block block--tool drawer transcript-disclosure--row {status_class}")
                         class:is-open=move || expanded>
-                        <button class="drawer__head" on:click=move |_| toggle()>
-                            <span class="drawer__tick">{glyph}</span>
-                            <span class="drawer__dot"></span>
-                            <span class="drawer__label">{label}</span>
-                            <span class="drawer__status">{status_label}</span>
+                        <button class="transcript-disclosure__head"
+                            aria-expanded=move || expanded.to_string()
+                            on:click=move |_| toggle()>
+                            <span class="transcript-disclosure__tick">{glyph}</span>
+                            <span class="transcript-disclosure__dot"></span>
+                            <span class="transcript-disclosure__label">{label}</span>
+                            <span class="transcript-disclosure__status">{status_label}</span>
                         </button>
                         <Show when=move || expanded>
-                            <pre class="drawer__body">{body.clone()}</pre>
+                            <pre class="transcript-disclosure__body">{body.clone()}</pre>
                         </Show>
                     </div>
                 }
@@ -575,7 +570,7 @@ fn BlockView(
             }
             .into_any(),
 
-            None => ().into_any(),
+            Some(Block::Thinking { .. }) | None => ().into_any(),
         }
     }
 }

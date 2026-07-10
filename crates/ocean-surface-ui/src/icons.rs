@@ -893,6 +893,30 @@ pub fn ChevronDown() -> impl IntoView {
     }
 }
 
+/// Up-arrow — the composer Send action (submit). Stroke family.
+#[component]
+pub fn Send() -> impl IntoView {
+    view! {
+        <svg class="icon icon--stroke" viewBox="0 0 24 24" width="1em" height="1em"
+             fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 19V6" />
+            <path d="M6 12l6-6 6 6" />
+        </svg>
+    }
+}
+
+/// Filled rounded square — the composer Stop action (halt the running turn).
+#[component]
+pub fn Stop() -> impl IntoView {
+    view! {
+        <svg class="icon" viewBox="0 0 24 24" width="1em" height="1em"
+             fill="currentColor" aria-hidden="true">
+            <rect x="6" y="6" width="12" height="12" rx="2.5" />
+        </svg>
+    }
+}
+
 /// The Ocean reveal — the landing scene. A 600×600 SVG of the OCEAN wordmark
 /// being revealed by a rising waterline; a living-water orb rides the surface;
 /// a pendant drop forms, pinches off, falls, and splashes. The full timeline
