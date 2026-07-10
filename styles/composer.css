@@ -275,6 +275,14 @@
   color: var(--fg-3);
 }
 
+.voice-menu__error {
+  color: var(--err);
+  font-size: 11px;
+  line-height: 1.35;
+  padding-inline: 8px;
+  margin: 0;
+}
+
 /* Hr-like separator between mode rows and the spoken-replies toggle. */
 .voice-menu__divider {
   height: 0;
@@ -596,8 +604,10 @@
 .voice-chat-active .ocean-composer__input,
 .voice-chat-active .ocean-composer__send,
 .voice-chat-active .ocean-turn-controls,
+.voice-chat-active .ocean-slash-menu {
+  display: none;
+}
 
-/* Composer slash-command popover (TUI parity) */
 .ocean-slash-menu {
   position: absolute;
   left: 0;
@@ -655,10 +665,6 @@
   grid-column: 1 / -1;
   font-size: 11px;
   color: var(--fg-muted, #8b93a7);
-}
-
-.voice-chat-active .ocean-slash-menu {
-  visibility: hidden;
 }
 
 .voice-chat-active .voice-wrap {

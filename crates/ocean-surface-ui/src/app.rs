@@ -40,6 +40,44 @@ fn composer_overflow_y(scroll_height: i32) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SurfaceVoiceLayout {
+    center_stage: bool,
+    docked: bool,
+}
+
+/// Compute the voice-chat root classes from stage and component counts.
+/// Baseline is the component count captured when voice started; current is
+/// the live count. A pre-existing card must not pre-dock a new session.
+fn surface_voice_layout(
+    stage: crate::voice::realtime::RealtimeStage,
+    baseline_count: Option<usize>,
+    current_count: usize,
+) -> SurfaceVoiceLayout {
+    use crate::voice::realtime::RealtimeStage;
+    match stage {
+        RealtimeStage::Off => SurfaceVoiceLayout {
+            center_stage: false,
+            docked: false,
+        },
+        _ => match baseline_count {
+            // No baseline captured yet — stay center-stage.
+            None => SurfaceVoiceLayout {
+                center_stage: true,
+                docked: false,
+            },
+            Some(baseline) if current_count > baseline => SurfaceVoiceLayout {
+                center_stage: false,
+                docked: true,
+            },
+            Some(_) => SurfaceVoiceLayout {
+                center_stage: true,
+                docked: false,
+            },
+        },
+    }
+}
+
 fn fit_composer_textarea(el: &web_sys::HtmlTextAreaElement) {
     let style = el
         .clone()
@@ -884,30 +922,58 @@ pub fn App() -> impl IntoView {
     let daemon_livekit = StoredValue::new(daemon.clone());
     let daemon_phone_call = StoredValue::new(daemon.clone());
 
-    // Realtime voice-chat layout (voice phases 2/3): while a session is
-    // connecting/live the composer input hides and the orb takes center
-    // stage; once the voice agent renders components the orb docks back to
-    // its composer slot so they get the room. Class-only — stage Off leaves
-    // the DOM untouched. `--voice-level` carries the live mic level into the
-    // orb's CSS so its water reacts to the user's voice.
+    // Realtime voice-chat layout (voice phases 2/3): components rendered
+    // BEFORE voice started must not pre-dock a new session. Capture the
+    // baseline count when we first transition out of Off; dock only when
+    // the live component count exceeds that baseline.
     let rt_stage = crate::voice::realtime::stage();
-    let rt_turns = daemon.turns;
-    let rt_components_visible = Memo::new(move |_| {
-        rt_turns.with(|t| {
-            t.iter().any(|turn| {
-                turn.blocks
-                    .iter()
-                    .any(|b| matches!(b, crate::model::Block::Component { .. }))
+    let rt_current_component_count = {
+        let rt_turns = daemon.turns;
+        Memo::new(move |_| {
+            rt_turns.with(|t| {
+                t.iter()
+                    .flat_map(|turn| turn.blocks.iter())
+                    .filter(|b| matches!(b, crate::model::Block::Component { .. }))
+                    .count()
             })
         })
-    });
+    };
+    let rt_baseline_component_count = RwSignal::new(None::<usize>);
+
+    // Snapshot the component count when voice transitions out of Off.
+    let _ = {
+        let rt_stage = rt_stage;
+        let rt_count = rt_current_component_count;
+        let rt_baseline = rt_baseline_component_count;
+        Effect::new(move |_| {
+            let stage = rt_stage.get();
+            if stage != crate::voice::realtime::RealtimeStage::Off {
+                let current = rt_count.get();
+                // Only snap once per fresh start (None means not yet captured).
+                if rt_baseline.get_untracked().is_none() {
+                    rt_baseline.set(Some(current));
+                }
+            } else {
+                rt_baseline.set(None);
+            }
+        })
+    };
+
     let voice_chat_active = move || {
-        rt_stage.get() != crate::voice::realtime::RealtimeStage::Off
-            && !rt_components_visible.get()
+        let layout = surface_voice_layout(
+            rt_stage.get(),
+            rt_baseline_component_count.get(),
+            rt_current_component_count.get(),
+        );
+        layout.center_stage
     };
     let voice_chat_docked = move || {
-        rt_stage.get() != crate::voice::realtime::RealtimeStage::Off
-            && rt_components_visible.get()
+        let layout = surface_voice_layout(
+            rt_stage.get(),
+            rt_baseline_component_count.get(),
+            rt_current_component_count.get(),
+        );
+        layout.docked
     };
     let voice_level_style = move || format!("{:.3}", crate::voice::realtime::level().get());
 
@@ -1650,6 +1716,49 @@ mod tests {
         assert_eq!(composer_overflow_y(COMPOSER_MAX_HEIGHT_PX + 1), "auto");
     }
 
+    #[test]
+    fn realtime_layout_docks_only_for_components_rendered_after_voice_start() {
+        // Wished-for production seam: app.rs should compute the voice-chat root
+        // classes from stage + the component count captured when voice started,
+        // not from "any component exists in the transcript". A pre-existing card
+        // must not pre-dock a new realtime session before the voice agent renders
+        // anything in that session.
+        let no_new_components =
+            super::surface_voice_layout(crate::voice::realtime::RealtimeStage::Connecting, Some(2), 2);
+        assert!(no_new_components.center_stage);
+        assert!(!no_new_components.docked);
+
+        let component_rendered_during_voice =
+            super::surface_voice_layout(crate::voice::realtime::RealtimeStage::Live, Some(2), 3);
+        assert!(!component_rendered_during_voice.center_stage);
+        assert!(component_rendered_during_voice.docked);
+
+        let off = super::surface_voice_layout(crate::voice::realtime::RealtimeStage::Off, Some(2), 3);
+        assert!(!off.center_stage);
+        assert!(!off.docked);
+    }
+
+
+    #[test]
+    fn realtime_layout_distinguishes_captured_zero_baseline() {
+        // Regression contract: a voice session may start before any component
+        // cards exist. `None` is "baseline not captured yet"; `Some(0)` is a
+        // captured baseline of zero cards. When the first card appears after
+        // voice is live, the layout must dock instead of treating zero as an
+        // uncaptured sentinel and recapturing the baseline as one.
+        let no_components_at_voice_start = super::surface_voice_layout(
+            crate::voice::realtime::RealtimeStage::Connecting,
+            Some(0),
+            0,
+        );
+        assert!(no_components_at_voice_start.center_stage);
+        assert!(!no_components_at_voice_start.docked);
+
+        let first_component_after_voice_start =
+            super::surface_voice_layout(crate::voice::realtime::RealtimeStage::Live, Some(0), 1);
+        assert!(!first_component_after_voice_start.center_stage);
+        assert!(first_component_after_voice_start.docked);
+    }
     #[test]
     fn deep_link_selects_session() {
         assert_eq!(

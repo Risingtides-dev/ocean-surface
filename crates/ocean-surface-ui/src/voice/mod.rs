@@ -219,9 +219,22 @@ pub fn VoiceOrb(
         });
     }
 
+
     // Popover menu open state + a ref on the wrap for click-outside dismissal.
     let show_menu = RwSignal::new(false);
     let wrap_ref = NodeRef::<leptos::html::Div>::new();
+
+    // Reopen the voice menu when a realtime connect fails so the error is
+    // visible and the "Retry voice chat" entry is front-and-center.
+    {
+        Effect::new(move |_| {
+            let err = realtime::last_error().get();
+            let stage = realtime::stage().get();
+            if err.is_some() && stage == realtime::RealtimeStage::Off {
+                show_menu.set(true);
+            }
+        });
+    }
 
     // Apply a mode from the menu: prime TTS (mobile audio unlock), set the
     // signal, persist it, and close the menu. Picking ANY classic mode ends a
@@ -528,36 +541,56 @@ pub fn VoiceOrb(
                     // rides below the radio group. Entering it device-gates
                     // the classic capture modes (mode → Off) so exactly one
                     // thing ever owns the mic.
-                    <button
-                        class=move || if rt_stage.get() == realtime::RealtimeStage::Off {
-                            "voice-menu__item".to_string()
-                        } else {
-                            "voice-menu__item is-active".to_string()
-                        }
-                        type="button"
-                        role="menuitem"
-                        on:click=move |_| {
-                            if rt_stage.get_untracked() == realtime::RealtimeStage::Off {
-                                tts::prime();
-                                voice_mode.set(mode::VoiceMode::Off);
-                                persist_mode(mode::VoiceMode::Off);
-                                realtime::start();
-                            } else {
-                                realtime::stop();
-                            }
-                            show_menu.set(false);
-                        }
-                    >
-                        <span class="voice-menu__item-icon"><crate::icons::Waves /></span>
-                        <span class="voice-menu__item-label">
-                            {move || if rt_stage.get() == realtime::RealtimeStage::Off {
-                                "Voice chat"
-                            } else {
-                                "End voice chat"
+                    {{
+                        let rt_entry = move || {
+                            realtime::voice_menu_realtime_entry(
+                                rt_stage.get(),
+                                realtime::last_error().get().as_deref(),
+                            )
+                        };
+                        let rt_err_for_menu = move || rt_entry().visible_error;
+                        let rt_label_for_menu = move || rt_entry().label.to_string();
+                        let rt_off = move || rt_stage.get() == realtime::RealtimeStage::Off;
+
+                        view! {
+                            <button
+                                class=move || if rt_off() {
+                                    "voice-menu__item".to_string()
+                                } else {
+                                    "voice-menu__item is-active".to_string()
+                                }
+                                type="button"
+                                role="menuitem"
+                                on:click=move |_| {
+                                    if rt_stage.get_untracked() == realtime::RealtimeStage::Off {
+                                        tts::prime();
+                                        voice_mode.set(mode::VoiceMode::Off);
+                                        persist_mode(mode::VoiceMode::Off);
+                                        realtime::start();
+                                    } else {
+                                        realtime::stop();
+                                    }
+                                    // Close immediately on start or stop;
+                                    // the failure Effect reopens the menu
+                                    // when an error lands.
+                                    show_menu.set(false);
+                                }
+                            >
+                                <span class="voice-menu__item-icon"><crate::icons::Waves /></span>
+                                <span class="voice-menu__item-label">{rt_label_for_menu}</span>
+                                <span class="voice-menu__item-desc">"Live conversation — speak with Ocean in realtime"</span>
+                            </button>
+                            {move || {
+                                if let Some(err) = rt_err_for_menu() {
+                                    view! {
+                                        <p class="voice-menu__error">{err}</p>
+                                    }.into_any()
+                                } else {
+                                    ().into_any()
+                                }
                             }}
-                        </span>
-                        <span class="voice-menu__item-desc">"Live conversation — speak with Ocean in realtime"</span>
-                    </button>
+                        }
+                    }}
 
                     <div class="voice-menu__divider" role="separator"></div>
 

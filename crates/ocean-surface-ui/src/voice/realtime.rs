@@ -51,6 +51,16 @@ pub enum RealtimeStage {
     Live,
 }
 
+/// One entry in the voice-mode menu's realtime section. The menu reads this
+/// to render the right label, show any error, and decide retry vs stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RealtimeMenuEntry {
+    pub label: &'static str,
+    pub visible_error: Option<String>,
+    pub retryable: bool,
+    pub active: bool,
+}
+
 // Lazily-created process-wide signals (the `hands_free_status_signal` idiom):
 // the orb, the layout, and the async connect path all share one instance
 // regardless of mount order.
@@ -62,6 +72,9 @@ thread_local! {
     static DAEMON: RefCell<Option<Daemon>> = const { RefCell::new(None) };
     /// Everything the live session must keep alive (tracks, closures, nodes).
     static SESSION: RefCell<Option<RealtimeSession>> = const { RefCell::new(None) };
+    /// The last realtime connect failure message. Cleared on fresh start
+    /// and clean stop; preserved on failure so the menu reopens to it.
+    static LAST_ERROR: RefCell<Option<ArcRwSignal<Option<String>>>> = const { RefCell::new(None) };
 }
 
 /// The voice-chat stage signal (created on first access).
@@ -78,9 +91,82 @@ pub fn level() -> RwSignal<f32> {
     LEVEL.with(|cell| *cell.borrow_mut().get_or_insert_with(|| RwSignal::new(0.0)))
 }
 
-/// Install the daemon handle once (app.rs, at shell construction).
+/// The last realtime connect failure, if any. Lazily created.
+pub fn last_error() -> ArcRwSignal<Option<String>> {
+    LAST_ERROR.with(|cell| {
+        cell.borrow_mut()
+            .get_or_insert_with(|| ArcRwSignal::new(None))
+            .clone()
+    })
+}
+
+/// The voice-menu entry label and error state for the realtime row.
+/// Off with an error → "Retry voice chat" with the error visible.
+/// Live → "End voice chat", error cleared.
+pub fn voice_menu_realtime_entry(
+    stage: RealtimeStage,
+    last_error: Option<&str>,
+) -> RealtimeMenuEntry {
+    match stage {
+        RealtimeStage::Off => {
+            if let Some(err) = last_error {
+                RealtimeMenuEntry {
+                    label: "Retry voice chat",
+                    visible_error: Some(err.to_string()),
+                    retryable: true,
+                    active: false,
+                }
+            } else {
+                RealtimeMenuEntry {
+                    label: "Voice chat",
+                    visible_error: None,
+                    retryable: false,
+                    active: false,
+                }
+            }
+        }
+        RealtimeStage::Connecting => RealtimeMenuEntry {
+            label: "Connecting voice chat…",
+            visible_error: None,
+            retryable: false,
+            active: true,
+        },
+        RealtimeStage::Live => RealtimeMenuEntry {
+            label: "End voice chat",
+            visible_error: None,
+            retryable: false,
+            active: true,
+        },
+    }
+}
+
+/// Map a raw realtime error to a user-facing message, hiding credential
+/// leak details. Errors containing "no OpenAI credential configured" get
+/// the exact text "Voice chat needs an OpenAI API key."; all other messages
+/// are kept concise and unchanged.
+pub fn user_facing_realtime_error(raw: &str) -> String {
+    if raw.contains("no OpenAI credential configured") {
+        "Voice chat needs an OpenAI API key.".to_string()
+    } else {
+        raw.to_string()
+    }
+}
+
+/// Install the daemon handle once AND eagerly initialize the process-wide
+/// signals under the App root owner (app.rs, at shell construction).
+///
+/// STAGE, LEVEL, and LAST_ERROR are created here rather than lazily on first
+/// access so their owners are the application root — never disposed — even
+/// when the first caller is conditionally mounted (e.g. VoiceOrb). Without
+/// eager init, a lazy creation inside a mounted subtree would die with its
+/// owner, and later calls from async closures or the level-meter loop would
+/// hit "disposed owner" panics on set.
 pub fn install(daemon: Daemon) {
     DAEMON.with(|d| *d.borrow_mut() = Some(daemon));
+    // Eagerly allocate global signals under the App root owner.
+    STAGE.with(|c| { c.borrow_mut().get_or_insert_with(|| RwSignal::new(RealtimeStage::Off)); });
+    LEVEL.with(|c| { c.borrow_mut().get_or_insert_with(|| RwSignal::new(0.0)); });
+    LAST_ERROR.with(|c| { c.borrow_mut().get_or_insert_with(|| ArcRwSignal::new(None)); });
 }
 
 fn daemon() -> Option<Daemon> {
@@ -115,16 +201,19 @@ pub fn start() {
     if stage().get_untracked() != RealtimeStage::Off {
         return;
     }
+    // Realtime owns the audio path: stop any classic spoken reply before
+    // opening the duplex WebRTC session so the two outputs cannot overlap.
+    if tts::is_playing() {
+        tts::stop();
+    }
     let Some(daemon) = daemon() else {
         super::report_status("voice chat unavailable — daemon handle not installed".into());
         return;
     };
     let session_id = daemon.session_id.get_untracked();
+    // Clear any stale failure from the last session.
+    last_error().set(None);
     stage().set(RealtimeStage::Connecting);
-    // Barge over any TTS playback: the realtime session owns audio now.
-    if tts::is_playing() {
-        tts::stop();
-    }
     spawn_local(async move {
         match connect(daemon, session_id).await {
             Ok(session) => {
@@ -136,6 +225,8 @@ pub fn start() {
             Err(msg) => {
                 stage().set(RealtimeStage::Off);
                 level().set(0.0);
+                let humanized = user_facing_realtime_error(&msg);
+                last_error().set(Some(humanized));
                 super::report_status(format!("voice chat failed: {msg}"));
             }
         }
@@ -168,6 +259,7 @@ pub fn stop() {
     }
     stage().set(RealtimeStage::Off);
     level().set(0.0);
+    last_error().set(None);
 }
 
 /// Full connect flow: secret → mic → peer connection → SDP round-trip.
@@ -559,8 +651,43 @@ mod tests {
     }
 
     #[test]
+    fn failed_start_error_stays_visible_and_retryable_in_menu_entry() {
+        // Wished-for production seam: realtime startup failures should be stored
+        // and folded into the voice menu's realtime entry instead of disappearing
+        // into the transient shared status line.
+        let failed = super::voice_menu_realtime_entry(
+            RealtimeStage::Off,
+            Some("microphone permission denied"),
+        );
+        assert_eq!(failed.label, "Retry voice chat");
+        assert_eq!(
+            failed.visible_error.as_deref(),
+            Some("microphone permission denied")
+        );
+        assert!(failed.retryable);
+        assert!(!failed.active);
+
+        let live = super::voice_menu_realtime_entry(RealtimeStage::Live, Some("stale failure"));
+        assert_eq!(live.label, "End voice chat");
+        assert_eq!(live.visible_error, None);
+        assert!(!live.retryable);
+        assert!(live.active);
+    }
+
+    #[test]
+    fn user_facing_realtime_error_hides_secret_mint_transport_json() {
+        let raw_secret_mint_error =
+            r#"secret mint failed: {"error":"no OpenAI credential configured (OCEAN_OPENAI_API_KEY / OPENAI_API_KEY / auth.json)"}"#;
+
+        assert_eq!(
+            super::user_facing_realtime_error(raw_secret_mint_error),
+            "Voice chat needs an OpenAI API key."
+        );
+    }
+
+    #[test]
     fn urlencode_passes_model_ids_untouched() {
-        assert_eq!(urlencode("gpt-realtime-2.1"), "gpt-realtime-2.1");
+        assert_eq!(urlencode("gpt-realtime-2"), "gpt-realtime-2");
         assert_eq!(urlencode("a b"), "a%20b");
     }
 }
