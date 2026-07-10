@@ -1391,3 +1391,20 @@ rustfmt to the same peer-hot file; no behavior changed. Verified on the exact
 detached main tree: UI wasm clippy with -D warnings, rustfmt check, and 303 UI
 tests all green.
 _________________________________________________________________________________
+time:      [7:23pm] [07-10-26]
+agent:     [omp] [claude-fable-5]
+worktree:  /tmp/oc-ci-fix (origin/main detached)
+type:      [release]
+area:      [infra]
+
+Deployed the exact green a7d0940 committed tree to dist-prod after GitHub CI
+run 29129121053 passed both jobs. Guarded release build produced
+ocean-surface-ui-11f5c9a2ebf16ff4_bg.wasm (14,945,218 bytes, slightly smaller
+than the prior release); local :8790 and the tunnel serve the same hash,
+unauthenticated root and /v1 remain 401, /health is 200, and index.html has no
+trunk dev marker. A private auth-off census of the exact deployed bits at
+390x844 mounted the Canvas Tide Coin, five-letter wordmark, composer, and
+status dot with zero horizontal overflow or browser errors. Refreshed
+handoff.md to make this the current baseline and archived the superseded
+red-CI/provenance snapshot under .agentignore.
+_________________________________________________________________________________

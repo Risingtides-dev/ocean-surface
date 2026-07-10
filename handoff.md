@@ -1,102 +1,163 @@
-# Ocean — session handoff (2026-05-31)
+# Ocean Surface — session handoff
 
-## Current overlay (2026-07-09)
+Snapshot **2026-07-10 ~7:15pm EDT (23:15 UTC)**, written by the takeover
+session after the Rust 1.97 green-up and committed-tree production deploy.
+One live handoff per project — this is it. Read order: **this file → AGENTS.md
+(auto-loaded) → `events.md` tail**. Sibling repo `../ocean-os`
+(daemon/runtime authority) has its own docs.
 
-Workspace reconciled onto main `0c706c3` (desktop shell + slash + menu bridge
-+ auth install safety). Main also carries the v22 Ocean reveal, thinkfill
-pending card, realtime voice, and Dictate mode from `5667ef4`. All four gates
-are green on this tree: wasm check, proxy check, tauri check, release Trunk
-build. Brand assets (`public/brand/`, regenerated PWA icons,
-`scripts/build-brand-assets.mjs`) are tracked, and `index.html` now carries
-an SVG favicon (`/brand/ocean-mark.svg`) ahead of the PNG fallbacks.
+## How to handle this doc
 
-Deliberate uncommitted overlays live ONLY in the shared workspace on the
-studio machine (not in any clone of main — other sessions' threads, leave
-alone there): `AGENTS.md` + `docs/OCEAN_WEB_SURFACE_DESIGN.md` (platform
-contract + circular-logo direction), `docs/OCEAN_PLATFORM_CONTRACT.md`,
-`docs/OCEAN_SURFACE_SHELL_ARCHITECTURE_NOTE.md`, `mockups/` (brand reveal
-references, v22 approved), `crates/ocean-tauri/icons/` (bundling icon set,
-not yet wired into tauri.conf.json).
+Stale handoffs are worse than none. This doc is disposable by design.
 
-Recovery state from the 2026-07-09 lane-rebase corruption is parked in LOCAL
-refs on this machine (`refs/backups/*`, see events.md 7:40pm entry) — mine
-them before re-deriving any "lost" WIP; do not reapply them wholesale, most
-of that tree is stale-base artifact that regresses landed voice work.
+1. **Trust commands, not snapshot numbers.** Several agent sessions share this
+   checkout. Re-derive state before acting.
+2. **Kill rot on contact.** Fix or delete any fact proven stale.
+3. **Supersede, don't append.** At a major milestone or context reset, write a
+   fresh current-state handoff, move this one to
+   `.agentignore/handoff-archived-<YYYY-MM-DD>[-n].md`, and log the refresh in
+   `events.md`.
+4. **Never read `.agentignore/` back into active thinking.** It is forensic
+   history only.
+5. Keep this file to live deltas. AGENTS.md owns standing rules.
 
-## Previous overlay (2026-07-07)
+## The system
 
-Native surface pivoted back to the documented plan: the active native surface
-is now the Tauri 2.x shell at `crates/ocean-tauri/`, which loads the same
-`dist/` Leptos WASM bundle the browser PWA ships. The legacy GPUI crate
-(`crates/ocean-gui/`) is soft-deprecated — source retained for mining into the
-Tauri Rust backend, not deleted. The GPUI canvas+LiveKit spec at
-`docs/OCEAN_GPUI_CANVAS_LIVEKIT_SPEC.md` is now a historical reference; the
-implementation surface is Leptos+Tauri.
+Ocean is two repos, one system. `../ocean-os` is the brain: Rust daemon
+(`127.0.0.1:4780`, hand-launched, not supervised) owning the agent loop,
+tools, providers, sessions, and events. This repo is the face: one
+Leptos/WASM app (`crates/ocean-surface-ui`) shipped to the browser PWA through
+`crates/ocean-surface-proxy`, the Tauri 2 desktop shell, and the Chrome
+extension. GPUI (`crates/ocean-gui`) is soft-deprecated and mine-only.
+Surfaces attach to daemon sessions (`POST /v1/agent/sessions` →
+`GET /v1/agent/events?session_id=` → `POST /v1/agent/turns`); never adopt a
+session from the global stream.
 
-## Previous overlay (2026-06-04)
+## Live topology
 
-The active native surface is `crates/ocean-gui`, not a Tauri shell. The GPUI
-collaboration spec is `docs/OCEAN_GPUI_CANVAS_LIVEKIT_SPEC.md`.
+| Thing | Current state | Re-derive |
+|---|---|---|
+| Prod origin | `https://ocean.agentsworld.org` → cloudflared → `:8790` | `curl -sS -m 10 -o /dev/null -w '%{http_code}\n' https://ocean.agentsworld.org/health` |
+| Proxy supervisor | launchd `dev.risingtides.ocean-surface-proxy` | `launchctl print gui/$(id -u)/dev.risingtides.ocean-surface-proxy` |
+| Prod bundle | `~/.config/ocean-surface/dist-prod/ocean-surface-ui-11f5c9a2ebf16ff4_bg.wasm`; committed-tree deploy from `a7d0940`; 14,945,218 bytes (prior release 14,949,941) | authed curl of local `:8790/` and tunnel `/`, then compare to `dist-prod` |
+| Basic auth | ON; unauth `/` and `/v1` → 401; `/health` → 200. Authoritative credentials only in `~/.config/ocean-surface/proxy-auth.env` (0600); `proxy-basic-auth.txt` is stale | source the env file in a subshell; never print values |
+| Daemon | `:4780` healthy at snapshot | `curl -sS -m 3 http://127.0.0.1:4780/health` |
+| Tool/provider credentials | `~/.config/ocean-rs/tools.env`; `~/.config/ocean-rs/auth.json` | never print or track |
+| Private ops runbook | `~/.config/ocean-surface/ops-runbook.md` | — |
 
-Session semantics changed after this handoff was written:
+Production quality was verified against the exact deployed `dist-prod` through
+a private no-auth census proxy at 390×844: Canvas Tide Coin, five-letter
+wordmark, composer, and status dot present; exact `11f5…` WASM; zero
+horizontal overflow; zero browser errors. Direct real-origin DOM automation in
+this harness was confounded by Basic-auth injection and service-worker state.
+For deployment provenance, the authoritative checks are authed curl on both
+origins plus the exact-bundle private census.
 
-- Product surfaces create or choose a session before posting a turn.
-- Product surfaces subscribe to `GET /v1/agent/events?session_id=<id>`.
-- Product surfaces submit turns with `session_id`.
-- Global SSE session adoption is legacy/debug behavior only and must not drive
-  GPUI/web/extension transcript state.
+## State of main
 
-The previous "SSE session-id filter + adoption" note below is historical. Do
-not reimplement adoption.
+- **Surface `origin/main` tip `a7d0940` — CI GREEN.** GitHub Actions run
+  `29129121053` passed both jobs: proxy build/test/clippy, UI wasm check/clippy,
+  rustfmt, ocean-gui checks/clippy/tests. The code repair is `ed17423`; the
+  ledger commit is `a7d0940`. Verify with
+  `gh run list --repo Risingtides-dev/ocean-surface --workflow CI --limit 3`.
+- Recent Realtime lifecycle hardening is landed (`7ea1cab`, `9d98529`): stale
+  sessions cancel, rAF/WebRTC callbacks tear down safely, and connecting-mic
+  races are generation-guarded.
+- Already shipped; do not rebuild from old plans: pinned widget rail,
+  Soundings loaders and Tide Coin, nested sessions grouping, MCP client +
+  CapabilityRegistry in ocean-os, native in-app council deck, and removal of
+  the obsolete proxy council page.
 
-Read this first, then `ocean-surface/CLAUDE.md` and `ocean-os/CLAUDE.md`.
+## Workspace state — read before any commit
 
-## The system in one paragraph
-Ocean is **two repos, one system**. `ocean-os` (`../ocean-os`) is the **brain**: a Rust
-daemon that owns the agent loop, tools, provider calls, **sessions**, permissions, and the
-event bus. `ocean-surface` (here) is the **client face**: one Rust+Leptos CSR/WASM app
-served as a browser PWA (via a small axum proxy that holds the xAI/Maps keys and
-reverse-proxies the daemon) and as a Tauri 2.x native desktop shell that loads the same
-`dist/` bundle. Clients are disposable; sessions live in the daemon only. They talk over
-`POST /v1/agent/turns` + `GET /v1/agent/events` (SSE) + `/v1/model[s]` + `/v1/requests/{id}/cancel`.
+This is a shared GitButler checkout. Its merge-base remains `a9c6da7`, well
+behind `a7d0940`, with substantial peer WIP plus stale-base phantoms. Active
+areas include the sessions-create UI and voice/rooms work. **Workspace de-rot
+is not done and remains gated on peers landing or dropping their work.**
 
-## Current run state (as of this handoff)
-Live topology + ops procedures: local runbook at `~/.config/ocean-surface/ops-runbook.md` (private, not in git).
+Classify before believing `but status`; never quote a cached count:
 
-## Credentials
-All agent/tool keys are in **`~/.config/ocean-rs/tools.env`** (mode 600, gitignored): Google Maps + API, Brave Search, Linear, Replicate, Slack bot+channel, Cloudflare. Provider model keys (DeepSeek, Codex OAuth, Kimi) are in **`~/.config/ocean-rs/auth.json`**. ⚠️ **DeepSeek balance is exhausted** (402 Insufficient Balance) — that's why we run gpt-5.5/Kimi. Top up or stay off DeepSeek.
+```sh
+cd ~/dev/ocean-surface && but status 2>&1 | grep -oE '[AM] [^ ]+$' | awk '{print $2}' | sort -u | \
+while read -r f; do [ -f "$f" ] || continue; w=$(git hash-object "$f"); \
+m=$(git rev-parse -q --verify "origin/main:$f" 2>/dev/null); \
+if [ -z "$m" ]; then echo "NEW $f"; elif [ "$w" = "$m" ]; then echo "MATCH $f"; else echo "DIFFERS $f"; fi; done | sort | uniq -c | sort -rn
+```
 
-## What shipped this session (all committed + pushed to `main` on both repos)
+- Treat every DIFFERS file as peer WIP or a stale snapshot until proven
+  otherwise. Compare to `origin/main` before committing; `app.rs` and
+  `sessions.rs` have repeatedly reverted landed work when committed whole.
+- Land from a detached origin/main worktree with
+  `ocean-surface-clean-room-landing`; fetch and rebase immediately before
+  push.
+- Main's `events.md` is canonical. Union-merge ledger conflicts; never drop
+  either tail.
+- `but pull` refuses over peer WIP. Do not force it. Recovery skill:
+  `gitbutler-workspace-recovery`.
 
-**ocean-os** (latest → older): `9c02772` docs: all 17 component kinds · `434df08` per-session lock + strict resume-vs-create · `0ba8044` map + video kinds · `e4ce352` /v1/models + model-on-TurnStarted + cancellable turns · `9d0adfa` session_id on all events · `df87bb0` real token usage on TurnFinished · `6d87aef` 9 rich component kinds · `31ecc89` Codex provider · (earlier) burn-fix + MiniMax/Kimi.
+## Hard rules
 
-**ocean-surface** (latest → older): `6c858e4` auto-recover stale session · `6f11756` map+video components (Ocean-skinned) · `e1ffa81`/`9c2453e` SSE session-id filter + adoption · `3ca33bc`/`2002570` PWA service-worker fixes · `f995563` model picker + halt button.
+1. **Never launch or relaunch Tauri while John may be using it.** Launch only
+   on an explicit “show me”; otherwise use web, a throwaway proxy, or passive
+   screenshots (`ocean-tauri-launch-verify`).
+2. Census uncommitted UI work on a throwaway proxy at `:8791` with auth off
+   and a fresh release build. Never use `:8790` for uncommitted work
+   (`ocean-surface-headless-ui-census`).
+3. Prod deploys are committed-tree-only: detached worktree, guarded Trunk
+   build, `rsync` to `dist-prod`, then hash verification on both origins
+   (`ocean-surface-prod-deploy`).
+4. A stale service worker can serve an ancient shell. Reload twice or use a
+   fresh profile before diagnosing a regression.
+5. Stylesheets are enumerated in `index.html`, `extension/sidepanel.html`, and
+   `scripts/build-extension.sh`; colors live only in `styles/tokens.css`.
+6. Rust 1.97 rejects redundant closure rebinds under clippy. For Leptos
+   captures, use the established `StoredValue`/`daemon_for_*` patterns.
+7. Full green means every CI step, not the first passing layer: proxy
+   build/test/clippy, UI wasm check/clippy, `cargo fmt --all --check`, plus
+   ocean-gui check/clippy/tests.
 
-Highlights:
-- **18 agent-renderable components** now (was 6 working). New this session: `map` (live Google Maps + Places UI Kit, custom Map ID `75cd6c60a814ddab5a970623`, marker/place/search modes) and `video` (TikTok/IG/YouTube/Vimeo/direct-file embeds). All documented in `ocean-os/docs/AGENT_RENDER_PROTOCOL.md`.
-- **Token-burn root cause fixed**: quadratic context replay (full transcript resent every round + reloaded every turn, uncapped tool output). Three caps in `ocean-runtime/src/agent_loop.rs` + `ocean-agent` (trim-to-window, 32KB tool-output cap, 200-msg session cap). This drained the DeepSeek balance before the fix.
-- **Session foundation hardened** (per the Goose audit): per-session turn lock (no concurrent-turn corruption) + strict resume-vs-create (`create_if_missing` flag; unknown session id errors instead of silently forking) + surface auto-recovery (clears stale id, retries fresh, invisible to user). Tested + verified live.
-- **UI**: token meter in header, model dropdown (hot-swap, no restart), halt/Stop button (cancels in-flight turn), stacked/collapsing tool calls.
+## Next phases
 
-## Uncommitted / in-flight work — NOT mine, leave alone unless asked
-- `ocean-surface/index.html` — the **agent's own** map-marker fix (uses `innerMap` + `PinElement` numbered pins). Looks correct; uncommitted.
-- `ocean-surface/crates/ocean-surface-ui/src/{tts.rs,voice.rs}` — a mobile-Safari **voice/TTS prime() fix** (primes audio on tap so iOS allows playback). Compiles; uncommitted; good change.
-- `ocean-surface/AGENTS.md`, `ocean-os/{CLAUDE.md,README.md,ROADMAP.md,docs/OCEAN_SELF_IMPROVEMENT_PLAN.md,handoff.md}` — docs/scratch, someone else's WIP. Untracked/uncommitted.
-- Screenshots (`*.png`) in surface root are gitignored test artifacts.
+- **0 — Re-ground every session.** Fetch both repos; compare main tips to this
+  file; classify GitButler dirt; check prod + daemon health; read the current
+  `events.md` tail.
+- **1 — Workspace de-rot.** Gated on sessions-create and voice/rooms peers
+  landing or dropping WIP. Until then, use detached clean-room landings. CI and
+  prod are not blocked on this.
+- **2 — Prod currency. COMPLETE.** `11f5c9a2` from green `a7d0940` is live and
+  provenance-verified. Recheck only if another deploy occurs.
+- **3 — Desktop follow-through.** John's next natural launch verifies the
+  unified titlebar, circular composer, Files-as-body, and slash popover. Then
+  audit menu-command coverage, folder-picker polish, and native notifications.
+  Native LiveKit remains later and feature-flagged. Do not launch without an
+  explicit “show me.”
+- **4 — Council v2.** A first real convene burns 45s+ of worker LLM calls and
+  needs John's nod. Then improve long-running convening state, errors, and
+  progress streaming across surface + ocean-os.
+- **5 — Sessions create-flow.** Codex owns in-flight `sessions.rs` and
+  `styles/panels.css` work. Integrate only after it lands.
+- **6 — Voice cutover + rooms federation.** Peer-active. Follow the landed
+  daemon-owned STT/TTS and federated-rooms designs; check current events and
+  file ownership before editing.
+- **7 — Optional authenticated prod deep-drive.** Transcript lifecycle,
+  command/overlay matrix, and PWA/SW update path if still desired.
+- **8 — Platform remainder in ocean-os.** More component kinds such as audio,
+  sortable table, and calendar. MCP registry and pinned widgets are done.
 
-## The reference doc you'll want
-**`ocean-os/docs/GOOSE_COMPARISON_AND_EXTENSIONS_GUIDANCE.md`** — a detailed audit of Ocean vs Goose with the extensions roadmap. It's the basis for what's next.
+## Blockers
 
-## What's next (in priority order, per the audit + operator)
-1. **Extensions / MCP layer** — the big unlock. Build Ocean as an **MCP client** + a `CapabilityRegistry` so tools/skills load dynamically, instead of hardcoding each. Then the keys in `tools.env` (Brave, Slack, Replicate, Linear, Cloudflare) plug in as MCP servers. The agent loop should consume `registry.tools_for_session(...)` not a fixed `default_tools()`. **Do NOT wire those keys as one-off native Rust tools** — the audit explicitly warns that's throwaway.
-2. **Pinned widgets** — a docked/persistent widget zone in the surface chrome (map/player/metrics that stay up across turns, outside the chat scroll). Add a `placement: "inline" | "pinned"` concept to ComponentRender + a pinned registry rendered in a side rail/dock. Independent UI track.
-3. More component kinds as wanted (audio player, sortable table, creator card, calendar).
-4. (Optional, longer) ACP adapter as a second front door; subagent/delegation.
+- Workspace de-rot waits for peer WIP to land or be dropped.
+- Desktop follow-through waits for John's natural launch; never relaunch it
+  autonomously.
+- A real council convene needs John's nod because it spends multiple worker
+  calls.
+- Voice/rooms remain peer-active; coordinate rather than clobber.
 
-## Foundation is solid
-The Goose audit's session-foundation priorities are all closed (compile-green, request registration, cancellation, permission wiring, per-session lock, strict semantics). Build extensions on top with confidence.
+## Skills index
 
-## Build/run quick ref
-- Surface UI is wasm-only: `cargo build -p ocean-surface-ui --target wasm32-unknown-unknown`; bundle: `trunk build --release`.
-- Daemon: `cargo build -p ocean-daemon --release`; tests: `cargo test -p ocean-agent`.
-- The agent only knows new capabilities after the **daemon is rebuilt AND restarted** — stale binary = stale tool list (this caused a "only knows 6 components" scare; it was just an un-restarted daemon).
+`rust-ci-toolchain-drift-greenup` · `gitbutler-multilane-landing` ·
+`ocean-surface-clean-room-landing` · `ocean-surface-prod-deploy` ·
+`ocean-surface-headless-ui-census` · `ocean-tauri-launch-verify` ·
+`tauri-macos-overlay-titlebar` · `gitbutler-workspace-recovery` ·
+`worktree-rot-triage` · `ocean-surface-web-ui-loop` ·
+`ocean-surface-web-smoke`
