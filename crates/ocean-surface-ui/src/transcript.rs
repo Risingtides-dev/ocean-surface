@@ -280,9 +280,10 @@ fn AssistantTurn(
                             }
                             .into_any(),
                             // One thinking disclosure per turn: every thinking
-                            // segment collapses into it, a plain `thinking…` label.
+                            // segment collapses into it, a `thinking…` pill
+                            // that carries a live dot while reasoning streams.
                             RenderItem::ThinkingGroup(_) => view! {
-                                <ThinkingGroup turn_idx=idx turns=turns />
+                                <ThinkingGroup turn_idx=idx turns=turns streaming=streaming />
                             }
                             .into_any(),
                         }
@@ -423,7 +424,10 @@ fn ToolGroup(
 /// All thinking blocks collapse into this single disclosure; each segment's
 /// text renders as its own `<pre>` when expanded. Collapsed by default; the
 /// toggle sticks. The label is a plain `thinking…` — no char counter (that's
-/// debug telemetry, not UI). Render-only: never reorders `turn.blocks`.
+/// debug telemetry, not UI). While reasoning is the streaming tail of the
+/// last turn the head carries `is-running` + a status dot (the tokens-level
+/// cue tools already have); it drops the moment text/tools follow or the
+/// turn finishes. Render-only: never reorders `turn.blocks`.
 ///
 /// Member indices are DERIVED reactively from `turns`, not snapshotted from the
 /// render-item prop: thinking segments keep appending mid-stream and the parent
@@ -431,7 +435,11 @@ fn ToolGroup(
 /// freeze the group at its first segment and miss every later delta. Scanning
 /// the turn's blocks each update keeps the count and body current forever.
 #[component]
-fn ThinkingGroup(turn_idx: usize, turns: RwSignal<Vec<crate::model::Turn>>) -> impl IntoView {
+fn ThinkingGroup(
+    turn_idx: usize,
+    turns: RwSignal<Vec<crate::model::Turn>>,
+    streaming: RwSignal<bool>,
+) -> impl IntoView {
     // Local expand state (collapsed by default). Coalescing many blocks into one
     // disclosure means there's no single model `expanded` field to mirror, so the
     // toggle owns its own state — same shape as `ToolGroup`'s user override.
@@ -451,12 +459,34 @@ fn ThinkingGroup(turn_idx: usize, turns: RwSignal<Vec<crate::model::Turn>>) -> i
         })
     });
     let glyph = move || if open.get() { "▾" } else { "▸" };
+    // Reasoning is ACTIVELY streaming: this turn is still the streaming tail
+    // and its newest block is a Thinking segment. Mirrors AssistantTurn's
+    // is_streaming gate so exactly one disclosure can ever carry the cue.
+    let running = Signal::derive(move || {
+        streaming.get()
+            && turns.with(|t| {
+                t.len() == turn_idx + 1
+                    && t.last().is_some_and(|turn| {
+                        matches!(turn.blocks.last(), Some(Block::Thinking { .. }))
+                    })
+            })
+    });
     view! {
-        <div class="block block--thinking transcript-disclosure--thinking" class:is-open=open>
+        <div
+            class="block block--thinking transcript-disclosure--thinking"
+            class:is-open=open
+            class:is-running=running
+        >
             <button class="transcript-disclosure__head"
                 aria-expanded=move || open.get().to_string()
                 on:click=move |_| open.set(!open.get())>
-                {move || format!("{} thinking…", glyph())}
+                <span class="transcript-disclosure__tick">{glyph}</span>
+                // Status dot only while reasoning streams — the idle pill
+                // stays a quiet label, never louder than the answer.
+                <Show when=move || running.get()>
+                    <span class="transcript-disclosure__dot"></span>
+                </Show>
+                <span class="transcript-disclosure__label">"thinking…"</span>
             </button>
             <Show when=move || open.get()>
                 <For
