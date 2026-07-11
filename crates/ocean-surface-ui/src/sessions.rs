@@ -889,13 +889,13 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                             // session count + newest-session signature into the key forces a
                             // re-render whenever a section's contents change. Collapse state is
                             // keyed on `sec.key` separately, so it survives.
-                            let ts = section_newest_ts(&sec);
+                            let ts = section_newest_ts(sec);
                             format!(
                                 "{}|{}|{}|{}",
                                 sec.key,
-                                section_total_sessions(&sec),
+                                section_total_sessions(sec),
                                 ts,
-                                section_layout_signature(&sec),
+                                section_layout_signature(sec),
                             )
                         }
                         children=move |sec: ProjectSection| {
@@ -980,7 +980,7 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                                 if let Some(mg) = main_group.clone() {
                                                     let rows = mg.sessions.clone();
                                                     let count = rows.len();
-                                                    let root_label = mg.root.split('/').last()
+                                                    let root_label = mg.root.split('/').next_back()
                                                         .filter(|s| !s.is_empty())
                                                         .unwrap_or("main")
                                                         .to_string();
@@ -1007,7 +1007,7 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                                     out.extend(wts.into_iter().map(|wt: WorktreeGroup| {
                                                         let rows = wt.sessions.clone();
                                                         let count = rows.len();
-                                                        let root_label = wt.root.split('/').last()
+                                                        let root_label = wt.root.split('/').next_back()
                                                             .filter(|s| !s.is_empty())
                                                             .unwrap_or("worktree")
                                                             .to_string();
