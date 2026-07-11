@@ -444,6 +444,7 @@ mod tests {
         assert_eq!(s, "down");
     }
 
+    #[test]
     fn summary_from_read_args() {
         let s = summary_from_args("browser_read_page", r##"{"selector":"#main"}"##);
         assert_eq!(s, "#main");

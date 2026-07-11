@@ -1502,7 +1502,9 @@ fn VideoView(component_id: String, kind_props: Value) -> impl IntoView {
             }
             .into_any()
         }
-        VideoKind::Social(_, _) => unreachable!(),
+        VideoKind::Social(_, _) => {
+            unreachable!("Social embeds are handled by the early return above")
+        }
     };
 
     view! {

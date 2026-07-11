@@ -860,18 +860,25 @@ struct AgentTurnRequest<'a> {
     /// The web UI doesn't surface this yet, so it serializes as `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
     guidance: Option<Vec<String>>,
-    /// Optional room identifier for Track-0 room-scoped turns. Mirrors the
-    /// daemon's `room_id: Option<String>`. Not yet exposed in the web UI.
+    /// Optional Track-0 room id for room-scoped turns. Mirrors the daemon's
+    /// `room_id: Option<String>`, which only accepts the closed Track-0 set
+    /// (`pm`/`writers`/`orch_mesh`/`review`) and 400s anything else. Always
+    /// `None` from this surface: the UI's persistent rooms are a different
+    /// concept (keyed rooms posting via
+    /// `POST /v1/rooms/persistent/{key}/messages`, never through this turn
+    /// path — room mode unmounts the composer entirely).
     #[serde(skip_serializing_if = "Option::is_none")]
     room_id: Option<&'a str>,
     /// Per-turn reasoning effort override. Mirrors the daemon's
     /// `thinking_level: Option<ThinkingLevel>` — serialized as the lowercase
-    /// `ThinkingLevel` string the daemon expects. `None` leaves the daemon's
-    /// global default in force. Not yet exposed in the web UI.
+    /// `ThinkingLevel` string the daemon expects. Populated from the
+    /// composer's reasoning-effort control (OCEAN-79); `None` leaves the
+    /// daemon's global default in force.
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking_level: Option<&'a str>,
     /// Per-turn / per-session model override (OCEAN-36). Mirrors the daemon's
-    /// `model_id: Option<String>`. Not yet exposed in the web UI.
+    /// `model_id: Option<String>`. Populated from the composer's model
+    /// override pill (OCEAN-79); `None` keeps the daemon's global model.
     #[serde(skip_serializing_if = "Option::is_none")]
     model_id: Option<&'a str>,
     /// Images attached to the turn (OCEAN-138). Mirrors the daemon's
@@ -2220,10 +2227,12 @@ impl Daemon {
                 client_type: Some(client_type),
                 // The web UI doesn't surface free-form guidance yet; the only
                 // guidance we emit is the extension's active-tab context above.
-                // The remaining per-turn overrides serialize as `None` so the
-                // daemon applies its global defaults, matching the daemon's
-                // AgentTurnRequest wire shape (OCEAN-61).
                 guidance: active_tab_guidance,
+                // Deliberately `None`: the daemon's turn `room_id` is the
+                // closed Track-0 set (pm/writers/orch_mesh/review), NOT the
+                // surface's persistent-room keys — those rooms post through
+                // /v1/rooms/persistent/{key}/messages and never reach this
+                // path (room mode unmounts the composer and voice orb).
                 room_id: None,
                 // Per-turn overrides selected in the composer (OCEAN-79). Both
                 // are `None` until the user touches a control, preserving the

@@ -548,79 +548,15 @@ pub fn App() -> impl IntoView {
             enabled: always,
             run: Callback::new(move |_| daemon_help.status.set("type / to browse commands".into())),
         });
-        // Composer `/` commands — roadmap. Mirrors the TUI's `soon` surface:
-        // every TUI command is reachable by typing, but disabled rows render
-        // greyed and never fire. `run` is inert; `registry.run` refuses them
-        // via the `enabled` predicate.
-        registry.register(Command {
-            id: "advisor",
-            title: "Advisor model".into(),
-            hint: Some("coming soon".into()),
-            scope: CommandScope::Session,
-            slash: Some("/advisor"),
-            enabled: never,
-            run: Callback::new(|_| ()),
-        });
+        // `/resume` stays registered as a disabled signpost: the row renders
+        // greyed with a hint pointing at the sessions panel (the real resume
+        // surface), and `registry.run` refuses it via the `enabled` predicate.
         registry.register(Command {
             id: "resume",
             title: "Resume a session".into(),
             hint: Some("use the sessions panel".into()),
             scope: CommandScope::Session,
             slash: Some("/resume"),
-            enabled: never,
-            run: Callback::new(|_| ()),
-        });
-        registry.register(Command {
-            id: "login",
-            title: "Provider logins".into(),
-            hint: Some("coming soon".into()),
-            scope: CommandScope::App,
-            slash: Some("/login"),
-            enabled: never,
-            run: Callback::new(|_| ()),
-        });
-        registry.register(Command {
-            id: "providers",
-            title: "Providers & API keys".into(),
-            hint: Some("coming soon".into()),
-            scope: CommandScope::App,
-            slash: Some("/providers"),
-            enabled: never,
-            run: Callback::new(|_| ()),
-        });
-        registry.register(Command {
-            id: "settings",
-            title: "Settings".into(),
-            hint: Some("coming soon".into()),
-            scope: CommandScope::App,
-            slash: Some("/settings"),
-            enabled: never,
-            run: Callback::new(|_| ()),
-        });
-        registry.register(Command {
-            id: "graph",
-            title: "Graph view".into(),
-            hint: Some("coming soon".into()),
-            scope: CommandScope::App,
-            slash: Some("/graph"),
-            enabled: never,
-            run: Callback::new(|_| ()),
-        });
-        registry.register(Command {
-            id: "terminal",
-            title: "Terminal".into(),
-            hint: Some("coming soon".into()),
-            scope: CommandScope::App,
-            slash: Some("/terminal"),
-            enabled: never,
-            run: Callback::new(|_| ()),
-        });
-        registry.register(Command {
-            id: "quit",
-            title: "Quit".into(),
-            hint: Some("coming soon".into()),
-            scope: CommandScope::App,
-            slash: Some("/quit"),
             enabled: never,
             run: Callback::new(|_| ()),
         });
