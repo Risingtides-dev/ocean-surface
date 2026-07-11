@@ -25,6 +25,11 @@ tauri-plugin-global-shortcut = "2"
 # wasm bundle's standard Web Notifications path routes through macOS natively.
 tauri-plugin-notification = "2"
 tauri-plugin-deep-link = "2"
+# Single-instance guard (QA-005): a second launch — dev binary re-run while a
+# prior instance sits hidden in the tray, or the packaged .app beside a dev
+# run — forwards to the running instance (which summons its window) and exits
+# instead of opening a rival "Ocean Desktop" window.
+tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Filesystem notifications. notify 6.x exposes no `serde` cargo feature (its

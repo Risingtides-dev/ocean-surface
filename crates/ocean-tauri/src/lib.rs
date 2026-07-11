@@ -998,6 +998,17 @@ pub fn run() {
     let url = daemon_url_from_env();
     let (host, port) = parse_host_port(&url).unwrap_or_else(|| ("127.0.0.1".to_string(), 4780));
     tauri::Builder::default()
+        // Single-instance guard (QA-005). Close-requested hides the main
+        // window to the tray instead of quitting, so an "invisible" Ocean is
+        // often still alive when the user launches again (./run-tauri.sh, or
+        // opening the packaged .app). Without this guard each launch is a new
+        // process with its own competing "Ocean Desktop" window. With it, the
+        // second process notifies the first — which unhides/focuses its
+        // window — and exits before creating any window. Registered FIRST so
+        // the duplicate process bails before any other plugin or window init.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main_window(app);
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_notification::init())
