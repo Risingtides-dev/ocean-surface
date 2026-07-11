@@ -38,6 +38,11 @@ pub const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:4780";
 /// level and lets the wire-helper test assert it.
 pub const CHAT_WORKSPACE_ROOT: &str = "/tmp";
 
+/// Default LiveKit room the header "Join room call" entry targets when no
+/// proxy config seeded one (native shell has no proxy in front). Mirrors the
+/// proxy's `DEFAULT_LIVEKIT_ROOM_ID`.
+const DEFAULT_LIVEKIT_ROOM_ID: &str = "project:surface-main";
+
 /// Shape of the proxy's GET /api/config — the zero-config bootstrap payload.
 #[derive(Debug, Clone, Deserialize)]
 struct ProxyConfig {
@@ -1591,6 +1596,22 @@ impl Daemon {
                 Err(_) => {
                     // No proxy in front (e.g. trunk serve direct). Keep fallback.
                 }
+            }
+            // Native shell: no proxy fronts tauri://localhost, so the
+            // `/api/config` fetch above lands on the SPA fallback and the
+            // LiveKit signals stay empty, hiding the header "Join room call"
+            // entry (QA-003). Seed the same default room the proxy would have
+            // served; per-room joins still overwrite these via
+            // `route_livekit_room_call`.
+            if running_as_tauri()
+                && daemon.livekit_token_path.get_untracked().trim().is_empty()
+            {
+                daemon
+                    .livekit_room_id
+                    .set(DEFAULT_LIVEKIT_ROOM_ID.to_string());
+                daemon.livekit_token_path.set(
+                    crate::rooms::livekit_token_path_for_room(DEFAULT_LIVEKIT_ROOM_ID),
+                );
             }
             // Restore persisted session before connecting fresh.
             if let Some(id) = should_restore_session(
@@ -4060,12 +4081,14 @@ fn seen_recent_sse_id(seen: RwSignal<VecDeque<String>>, event_id: &str) -> bool 
     false
 }
 
-/// Best-effort default cwd. In the browser there's no real cwd, so we hand the
-/// daemon the operator's dev root rather than filesystem "/" — a no-project
-/// session that lands at "/" leaves the agent with zero context and "can't find
-/// anything on my drive". The operator can still override via the settings panel.
+/// Best-effort default cwd. In the browser there's no real cwd, and pinning a
+/// machine-specific dev root here made every fresh launch open a broad
+/// non-repo tree (QA-004). Empty means "no workspace yet": the daemon resolves
+/// a non-empty turn cwd, else the project root, else its own default
+/// (`resolve_cwd_for_turn`), the workspace pane renders its awaiting-session
+/// state, and session restore / turn responses set the real cwd afterward.
 fn default_cwd() -> String {
-    "/Users/risingtidesdev/dev".into()
+    String::new()
 }
 
 /// True when this bundle is running inside the Chrome extension side panel

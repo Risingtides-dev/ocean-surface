@@ -897,7 +897,7 @@ fn short_time(ts: &str) -> String {
 
 /// Build the per-room LiveKit token path, percent-encoding the room key
 /// exactly like the proxy: `/v1/rooms/{encoded}/livekit-token`.
-fn livekit_token_path_for_room(key: &str) -> String {
+pub(crate) fn livekit_token_path_for_room(key: &str) -> String {
     format!("/v1/rooms/{}/livekit-token", encode(key))
 }
 

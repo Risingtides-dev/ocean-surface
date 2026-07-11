@@ -126,6 +126,7 @@ pub fn disconnect_livekit_bridge() {
 #[component]
 pub fn LiveKitPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
     let token_path = daemon.livekit_token_path;
+    let daemon_url = daemon.url;
     let room_id = daemon.livekit_room_id;
 
     let join_state = RwSignal::new(JoinState::Disconnected);
@@ -233,7 +234,16 @@ pub fn LiveKitPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                     auto_connect_error.set(None);
                     auto_connect_join_state.set(JoinState::Connecting);
                     let cb = auto_connect_roster_cb.get_value();
-                    let p = path;
+                    // Compose against the daemon URL: behind the proxy the URL
+                    // is "" and the path stays same-origin relative; on
+                    // proxyless origins (Tauri's tauri://localhost, trunk
+                    // serve direct) a relative fetch would land on the SPA
+                    // instead of the daemon (QA-003).
+                    let p = format!(
+                        "{}{}",
+                        daemon_url.get_untracked().trim_end_matches('/'),
+                        path
+                    );
                     spawn_local(async move {
                         match ocean_livekit_connect(
                             &p,
@@ -298,8 +308,14 @@ pub fn LiveKitPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
         last_auto_path.set(None);
         join_state.set(JoinState::Connecting);
         let cb = roster_cb.get_value();
+        // Same daemon-URL composition as the auto-connect path (QA-003).
+        let fetch_url = format!(
+            "{}{}",
+            daemon_url.get_untracked().trim_end_matches('/'),
+            path
+        );
         spawn_local(async move {
-            match ocean_livekit_connect(&path, "web-surface", "web-surface", "Web Surface", &cb)
+            match ocean_livekit_connect(&fetch_url, "web-surface", "web-surface", "Web Surface", &cb)
                 .await
             {
                 Ok(status) => {
