@@ -72,7 +72,7 @@ promote_bundle() {
   fi
 
   ln -s "releases/$revision" "$next_link"
-  mv -f "$next_link" "$CURRENT_LINK"
+  python3 -c 'import os,sys; os.replace(sys.argv[1], sys.argv[2])' "$next_link" "$CURRENT_LINK"
   printf '%s\n' "$revision" > "$next_marker"
   mv -f "$next_marker" "$MARKER"
   restart_proxy

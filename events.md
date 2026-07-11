@@ -1488,3 +1488,11 @@ area:      [infra]
 
 Closed a post-install bootstrap defect caught on the real machine: both plist ProgramArguments originally referenced launchers inside the shared GitButler checkout, whose stale/dirty base did not yet contain the newly landed auto-deploy script. The installer now copies both launchers to stable `~/.config/ocean-surface/bin/` paths, the proxy receives its mutable repo path through `OCEAN_SURFACE_REPO`, and both plists execute only the stable copies. Expanded the deployment contract to 12 assertions so CI rejects a regression back to shared-checkout launcher paths.
 _________________________________________________________________________________
+time:      [07:02pm] [07-11-26]
+agent:     [omp] [gpt-5.6-sol]
+worktree:  /tmp/ocean-autodeploy (origin/main detached)
+type:      [bug-report]
+area:      [infra]
+
+Fixed the real repeated-promotion path after live verification exposed `deployed-rev` advancing while `current` still targeted the preceding release. BSD `mv -f` followed the destination directory symlink and moved the temporary link inside the old release instead of replacing `current`. Replaced that operation with Python `os.replace`, which atomically renames over the symlink itself on macOS and Linux. Added a fail-before/pass-after second-promotion regression plus old-release contamination assertion (15 total), repaired live `current` to match marker `c1c06a12f769a548c35cd394f9574fb79ce74a50`, and confirmed the symlink and marker are now identical.
+_________________________________________________________________________________

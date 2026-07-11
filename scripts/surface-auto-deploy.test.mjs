@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -30,6 +30,16 @@ try {
   assert.equal(readFileSync(join(state, 'deployed-rev'), 'utf8').trim(), 'abc123');
   assert.equal(readFileSync(join(state, 'releases', 'abc123', 'ocean_bg.wasm')).subarray(0, 4).toString('hex'), '0061736d');
 
+  const staged2 = join(root, 'staged2');
+  validBundle(staged2);
+  execFileSync(script, ['--promote', staged2, 'def456'], {
+    env: { ...process.env, OCEAN_SURFACE_STATE_DIR: state, OCEAN_SURFACE_NO_RESTART: '1' },
+    stdio: 'pipe',
+  });
+  assert.equal(readlinkSync(join(state, 'current')), 'releases/def456', 'a second promotion must replace the current symlink');
+  assert.equal(readFileSync(join(state, 'deployed-rev'), 'utf8').trim(), 'def456');
+  assert.deepEqual(readdirSync(join(state, 'releases', 'abc123')).sort(), ['index.html', 'ocean_bg.wasm']);
+
   const bad = join(root, 'bad');
   mkdirSync(bad, { recursive: true });
   writeFileSync(join(bad, 'index.html'), '<h1>broken</h1>');
@@ -39,8 +49,8 @@ try {
   });
 
   assert.notEqual(failed.status, 0, 'invalid bundle promotion must fail');
-  assert.equal(readlinkSync(join(state, 'current')), 'releases/abc123', 'failed promotion must preserve current release');
-  assert.equal(readFileSync(join(state, 'deployed-rev'), 'utf8').trim(), 'abc123', 'failed promotion must preserve marker');
+  assert.equal(readlinkSync(join(state, 'current')), 'releases/def456', 'failed promotion must preserve current release');
+  assert.equal(readFileSync(join(state, 'deployed-rev'), 'utf8').trim(), 'def456', 'failed promotion must preserve marker');
 
   const noOpState = join(root, 'noop-state');
   const mainRevision = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
@@ -65,7 +75,7 @@ try {
   assert.ok(deployPlist.includes('/Users/risingtidesdev/.config/ocean-surface/bin/ocean-surface-auto-deploy.sh'));
   assert.ok(!`${proxyPlist}\n${deployPlist}`.includes('/dev/ocean-surface/deploy/ocean-surface-'));
 
-  console.log('ALL PASS: surface atomic deployment promotion (12 assertions)');
+  console.log('ALL PASS: surface atomic deployment promotion (15 assertions)');
 } finally {
   rmSync(root, { recursive: true, force: true });
 }
