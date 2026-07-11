@@ -153,11 +153,23 @@ if (( BOOTSTRAP == 0 )); then
   exit 0
 fi
 
+bootstrap_job() {
+  local plist="$1"
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    if launchctl bootstrap "$DOMAIN" "$plist"; then
+      return 0
+    fi
+    (( attempt == 5 )) && return 1
+    sleep 1
+  done
+}
+
 echo "==> [3/3] (re)bootstrapping launchd jobs in $DOMAIN"
 launchctl bootout "$DOMAIN/$PROXY_LABEL" 2>/dev/null || true
 launchctl bootout "$DOMAIN/$AUTO_LABEL" 2>/dev/null || true
-launchctl bootstrap "$DOMAIN" "$PROXY_PLIST_DST"
-launchctl bootstrap "$DOMAIN" "$AUTO_PLIST_DST"
+bootstrap_job "$PROXY_PLIST_DST"
+bootstrap_job "$AUTO_PLIST_DST"
 launchctl enable "$DOMAIN/$PROXY_LABEL"
 launchctl enable "$DOMAIN/$AUTO_LABEL"
 launchctl kickstart -k "$DOMAIN/$PROXY_LABEL"

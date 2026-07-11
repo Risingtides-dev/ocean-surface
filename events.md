@@ -1496,3 +1496,11 @@ area:      [infra]
 
 Fixed the real repeated-promotion path after live verification exposed `deployed-rev` advancing while `current` still targeted the preceding release. BSD `mv -f` followed the destination directory symlink and moved the temporary link inside the old release instead of replacing `current`. Replaced that operation with Python `os.replace`, which atomically renames over the symlink itself on macOS and Linux. Added a fail-before/pass-after second-promotion regression plus old-release contamination assertion (15 total), repaired live `current` to match marker `c1c06a12f769a548c35cd394f9574fb79ce74a50`, and confirmed the symlink and marker are now identical.
 _________________________________________________________________________________
+time:      [07:09pm] [07-11-26]
+agent:     [omp] [gpt-5.6-sol]
+worktree:  /tmp/ocean-autodeploy (origin/main detached)
+type:      [bug-report]
+area:      [infra]
+
+Hardened live launchd reinstall after the corrected runner deployment exposed an asynchronous bootout/bootstrap race: proxy re-registration succeeded but the auto-deploy job's immediate bootstrap returned launchd error 5 until retried moments later. Recovered the live job without sudo, confirmed it executes the stable installed runner and exits CURRENT at the selected revision, and added bounded one-second bootstrap retries for both jobs so an idempotent reinstall cannot strand either supervisor.
+_________________________________________________________________________________
