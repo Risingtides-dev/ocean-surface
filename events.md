@@ -1423,3 +1423,12 @@ repos byte-for-byte. Added the three daemon-owned voice routes
 surface proxy forwards /api/stt and /api/tts to the daemon and that provider
 keys resolve only inside ocean-os.
 _________________________________________________________________________________
+
+time:      [08:27pm] [07-10-26]
+agent:     [omp] [fable-5]
+worktree:  /tmp/ocean-vsix-land (origin/main detached)
+type:      [merge]
+area:      [frontend]
+
+Restored source parity between origin/main and the Cursor extension John actually runs. origin/main carried vscode-extension/package.json at 0.1.3 while the installed VSIX was 0.1.42, built from unmerged local commit 33b0db1 (branch feat/vscode-extension-polish-0143, never pushed). Landed the vscode-extension/ subtree from 33b0db1 into a detached clean-room worktree off origin/main (c4da482) — 12 files covering session persistence, composer @mentions, diagnostic code actions, and workspace-change context — so main now carries the 0.1.42 source matching the installed extension. Verified gates in the worktree (npm ci, npm run compile -> dist/extension.js, npm run lint / tsc --noEmit) all green; no test script defined. Confirmed installed ~/.cursor/extensions/risingtides.ocean-surface-0.1.42/package.json version (0.1.42) == landed version. Touched only vscode-extension/ and this ledger; nothing outside that scope.
+_________________________________________________________________________________
