@@ -278,21 +278,22 @@ async fn main() -> anyhow::Result<()> {
         // below) untouched. It sits OUTSIDE the auth gate so it only ever
         // decorates responses that were already allowed.
         .layer(middleware::from_fn(static_cache_headers))
-        // Fix the headers on the compiled `.wasm` asset (the blank-page bug).
-        // ServeDir guesses `application/wasm` itself, but two things still broke
-        // the deployed page: (1) Cloudflare's tunnel re-compressed the wasm with
-        // `content-encoding: zstd`, which — combined with the Trunk SRI integrity
-        // on the wasm preload — made Chrome ABORT the wasm fetch, so `init()`
-        // rejected and the app never mounted; (2) the immutable hashed asset
-        // wasn't marked cacheable. This post-response layer forces
-        // `Content-Type: application/wasm` and `Cache-Control:
-        // public, max-age=31536000, immutable, no-transform`. `no-transform` is
-        // the directive Cloudflare honors to skip compression/minification, so
-        // the wasm is served byte-for-byte uncompressed and the fetch no longer
-        // aborts. Declared AFTER `static_cache_headers` so it owns the final
-        // `.wasm` response headers (keeping `no-transform`); it runs AFTER
-        // routing/ServeDir so it only touches the actual file response;
-        // non-wasm paths pass through untouched.
+        // Fix the headers on the compiled `.wasm` asset. ServeDir guesses
+        // `application/wasm` itself, but the deployed page once broke because
+        // (1) Chrome aborted the wasm preload while Trunk emitted an
+        // `integrity` attribute on it (see Trunk.toml's `no_sri` note —
+        // "integrity … ignored for preload destinations … credentials mode
+        // does not match"), observed alongside tunnel `content-encoding:
+        // zstd`, and (2) the immutable hashed asset wasn't marked cacheable.
+        // SRI/preload integrity is now disabled at build time (`no_sri` in
+        // Trunk.toml), so a CDN-applied `content-encoding` is safe — and
+        // wanted: it turns the ~3.7 MB optimized wasm into a ~1 MB transfer.
+        // This post-response layer forces `Content-Type: application/wasm`
+        // and `Cache-Control: public, max-age=31536000, immutable` (no
+        // `no-transform`, so Cloudflare MAY compress the body). Declared AFTER
+        // `static_cache_headers` so it owns the final `.wasm` response
+        // headers; it runs AFTER routing/ServeDir so it only touches the
+        // actual file response; non-wasm paths pass through untouched.
         .layer(middleware::from_fn(wasm_headers))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -364,15 +365,16 @@ async fn basic_auth_gate(State(state): State<Arc<AppState>>, req: Request, next:
         .into_response()
 }
 
-/// Header value: long-lived, immutable, and — critically — `no-transform` so
-/// Cloudflare won't zstd/gzip-compress the wasm in front of us. Without
-/// `no-transform`, the tunnel served the wasm with `content-encoding: zstd`,
-/// which (with the Trunk SRI preload) made Chrome abort the fetch → blank page.
-const WASM_CACHE_CONTROL: &str = "public, max-age=31536000, immutable, no-transform";
+/// Header value: long-lived and immutable. Deliberately WITHOUT
+/// `no-transform`: with SRI disabled at build time (`no_sri` in Trunk.toml)
+/// a `content-encoding` applied by the tunnel can no longer abort the wasm
+/// preload (there is no integrity attribute left to mismatch), and
+/// compressing the module is a large win on slow links.
+const WASM_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
 
 /// Response post-processor: for any request whose path ends in `.wasm`, force
 /// the correct MIME (`application/wasm`, required for `instantiateStreaming`)
-/// and a `no-transform` cache policy so the proxy ships the wasm uncompressed.
+/// and the immutable cache policy above.
 /// Everything else passes through unchanged. This is the primary fix for the
 /// blank deployed page — see the layer registration in `main` for the full
 /// root-cause writeup.
@@ -417,9 +419,9 @@ async fn static_cache_headers(req: Request, next: Next) -> Response {
     // embedded council/health routes set (or intentionally omit) their own
     // headers — leave them alone so we never clobber `Content-Type:
     // text/event-stream` caching or proxied JSON.
-    // `.wasm` is owned by the `wasm_headers` layer (it needs `no-transform` so
-    // Cloudflare ships the wasm uncompressed — see #55). Skip it here so we
-    // never overwrite that Cache-Control and drop `no-transform`.
+    // `.wasm` is owned by the `wasm_headers` layer (it forces the MIME type
+    // `instantiateStreaming` requires). Skip it here so we never overwrite
+    // that Cache-Control.
     let is_dynamic = path.starts_with("/v1/")
         || path.starts_with("/api/")
         || path == "/health"
@@ -1379,7 +1381,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wasm_response_gets_application_wasm_and_no_transform() {
+    async fn wasm_response_gets_application_wasm_and_allows_compression() {
         let resp = wasm_test_router()
             .oneshot(
                 Request::builder()
@@ -1397,8 +1399,11 @@ mod tests {
         );
         let cc = resp.headers().get(header::CACHE_CONTROL).unwrap();
         assert_eq!(cc, WASM_CACHE_CONTROL);
-        // The Cloudflare-compression escape hatch must be present.
-        assert!(cc.to_str().unwrap().contains("no-transform"));
+        // Compression must be ALLOWED: `no-transform` would forbid the CDN
+        // from content-encoding the (large) module. SRI is disabled at build
+        // time, so a transformed transfer can no longer abort the preload.
+        assert!(!cc.to_str().unwrap().contains("no-transform"));
+        assert!(cc.to_str().unwrap().contains("immutable"));
     }
 
     #[tokio::test]
