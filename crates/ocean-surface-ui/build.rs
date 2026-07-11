@@ -24,12 +24,18 @@ fn git(args: &[&str]) -> Option<String> {
     }
     let s = String::from_utf8(out.stdout).ok()?;
     let s = s.trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 fn main() {
     let sha = git(&["rev-parse", "--short=12", "HEAD"]).unwrap_or_else(|| "unknown".into());
-    let dirty = git(&["status", "--porcelain"]).map(|s| !s.is_empty()).unwrap_or(false);
+    let dirty = git(&["status", "--porcelain"])
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
     let rev = if dirty { format!("{sha}-dirty") } else { sha };
     println!("cargo::rustc-env=OCEAN_SURFACE_REV={rev}");
     // Watch the REAL per-checkout git files so a new commit re-embeds the rev.

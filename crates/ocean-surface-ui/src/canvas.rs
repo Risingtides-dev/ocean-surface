@@ -695,7 +695,7 @@ fn component_snapshot(c: &LedgerComponent) -> CanvasContextComponent {
             .get("status")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
-            .map(|s| clip(s)),
+            .map(clip),
         rect: [c.rect.x, c.rect.y, c.rect.w, c.rect.h],
     }
 }

@@ -20,9 +20,9 @@
 use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
 use std::collections::HashSet;
-use wasm_bindgen_futures::spawn_local;
+use wasm_bindgen::JsCast;
 
-use crate::daemon::{fetch_fs_dirs, is_path_prefix, Daemon, ProjectInfo, SessionSummary};
+use crate::daemon::{is_path_prefix, Daemon, ProjectInfo, SessionSummary};
 
 // ---------------------------------------------------------------------------
 // Pure helpers — unit-testable without WASM
@@ -108,12 +108,16 @@ fn project_root_from_parent(parent: &str, name: &str) -> String {
     }
 }
 
-fn project_create_root(text_mode: bool, parent: &str, root: &str, name: &str) -> String {
-    if text_mode || parent.trim().is_empty() {
-        root.trim().to_string()
-    } else {
-        project_root_from_parent(parent, name)
-    }
+/// Derive a project name from a directory path: the last non-empty
+/// segment after stripping a trailing slash. Falls back to "project"
+/// when the path is blank or every segment is empty.
+fn derive_project_name(path: &str) -> String {
+    path.trim()
+        .trim_end_matches('/')
+        .rsplit('/')
+        .find(|s| !s.is_empty())
+        .unwrap_or("project")
+        .to_string()
 }
 
 /// One project section in the panel: a project header followed by its sessions,
@@ -124,10 +128,17 @@ pub(crate) struct ProjectSection {
     pub key: String,
     pub label: String,
     pub is_project: bool,
-    /// Sessions not bucketed under any worktree (all sessions when `worktrees` is None).
+    /// True when the matched project has git state (branch or dirty flag).
+    pub is_git: bool,
+    /// Sessions not bucketed under any worktree or the main group
+    /// (all sessions when `worktrees` is None).
     pub sessions: Vec<SessionSummary>,
     /// Sub-groups keyed by registered worktree path, set only when >=1 session matched.
     pub worktrees: Option<Vec<WorktreeGroup>>,
+    /// Main-root nested group carved from unmatched leftovers after worktree
+    /// matching — sessions whose root lives under the project's workspace_root.
+    /// Only set when the project has registered worktrees and >=1 session qualifies.
+    pub main_group: Option<WorktreeGroup>,
 }
 
 /// A worktree section inside a project: sessions sharing one workspace root.
@@ -180,13 +191,25 @@ pub(crate) fn group_for_panel(
             .find(|sec: &&mut ProjectSection| sec.key == key)
         {
             Some(sec) => sec.sessions.push((*s).clone()),
-            None => sections.push(ProjectSection {
-                key,
-                label,
-                is_project: is_proj,
-                sessions: vec![(*s).clone()],
-                worktrees: None,
-            }),
+            None => {
+                let is_git = if is_proj {
+                    projects
+                        .iter()
+                        .find(|p| p.id == key)
+                        .is_some_and(|p| p.git_branch.is_some() || p.git_dirty.is_some())
+                } else {
+                    false
+                };
+                sections.push(ProjectSection {
+                    key,
+                    label,
+                    is_project: is_proj,
+                    is_git,
+                    sessions: vec![(*s).clone()],
+                    worktrees: None,
+                    main_group: None,
+                })
+            }
         }
     }
 
@@ -211,8 +234,10 @@ pub(crate) fn group_for_panel(
             key: p.id.clone(),
             label,
             is_project: true,
+            is_git: p.git_branch.is_some() || p.git_dirty.is_some(),
             sessions: Vec::new(),
             worktrees: None,
+            main_group: None,
         });
     }
 
@@ -220,20 +245,24 @@ pub(crate) fn group_for_panel(
     for sec in &mut sections {
         sec.sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     }
-    // Worktree bucketing: second pass inside each project section.
+    // Worktree + main-group bucketing: second pass inside each project section.
     // Sessions whose workspace root sits under a project worktree's path
-    // (component-boundary prefix match) group under that sub-row;
-    // remaining sessions stay in the project's main session list.
-    // Zero worktrees → exactly current rendering (no sub-groups).
+    // (component-boundary prefix match) group under that sub-row — worktree
+    // match always wins first so sessions never double-bucket. After matching,
+    // unmatched sessions matching the project's workspace_root form the main
+    // group; the rest remain flat strays. Zero worktrees → today's flat
+    // rendering (no sub-groups, no main node).
     for sec in &mut sections {
         if !sec.is_project {
             continue;
         }
         let proj = projects.iter().find(|p| p.id == sec.key);
-        let wts = match proj {
-            Some(p) if !p.worktrees.is_empty() => &p.worktrees,
-            _ => continue,
-        };
+        let has_wts = proj.is_some_and(|p| !p.worktrees.is_empty());
+        if !has_wts {
+            continue;
+        }
+        let proj = proj.unwrap(); // safe: has_wts ensures Some
+        let wts = &proj.worktrees;
         let mut wt_groups: Vec<WorktreeGroup> = Vec::new();
         let mut unmatched: Vec<SessionSummary> = Vec::new();
         for s in &sec.sessions {
@@ -251,6 +280,19 @@ pub(crate) fn group_for_panel(
                 }
             } else {
                 unmatched.push(s.clone());
+            }
+        }
+        // Carve main group from unmatched leftovers: sessions whose root lives
+        // under the project's workspace_root form the main node; the rest are
+        // true strays. Only applies when the project has registered worktrees.
+        let workspace_root = proj.workspace_root.as_str();
+        let mut main_sessions: Vec<SessionSummary> = Vec::new();
+        let mut strays: Vec<SessionSummary> = Vec::new();
+        for s in &unmatched {
+            if is_path_prefix(workspace_root, session_root(s)) {
+                main_sessions.push(s.clone());
+            } else {
+                strays.push(s.clone());
             }
         }
         if !wt_groups.is_empty() {
@@ -277,8 +319,16 @@ pub(crate) fn group_for_panel(
                 }
             });
             sec.worktrees = Some(wt_groups);
-            sec.sessions = unmatched;
         }
+        if !main_sessions.is_empty() {
+            main_sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            sec.main_group = Some(WorktreeGroup {
+                root: proj.workspace_root.clone(),
+                branch: proj.git_branch.clone(),
+                sessions: main_sessions,
+            });
+        }
+        sec.sessions = strays;
     }
 
     // Sort sections: "Other" always last; session-derived project groups by
@@ -291,16 +341,8 @@ pub(crate) fn group_for_panel(
         if b.key == "__other__" && a.key != "__other__" {
             return std::cmp::Ordering::Less;
         }
-        let a_ts = a
-            .sessions
-            .first()
-            .map(|s| s.updated_at.as_str())
-            .unwrap_or("");
-        let b_ts = b
-            .sessions
-            .first()
-            .map(|s| s.updated_at.as_str())
-            .unwrap_or("");
+        let a_ts = section_newest_ts(a);
+        let b_ts = section_newest_ts(b);
         match (a_ts.is_empty(), b_ts.is_empty()) {
             (false, false) => b_ts.cmp(a_ts),
             (true, true) => a
@@ -315,6 +357,87 @@ pub(crate) fn group_for_panel(
     sections
 }
 
+// --- section helpers (used by sort, For key, and collapse priming) ---
+/// Newest session timestamp across flat, worktree, and main-group sessions.
+/// Returns "" when the section is empty; ISO-8601 strings compare lexicographically.
+pub(crate) fn section_newest_ts(sec: &ProjectSection) -> &str {
+    let from_flat = sec.sessions.first().map(|s| s.updated_at.as_str());
+    let from_main = sec
+        .main_group
+        .as_ref()
+        .and_then(|mg| mg.sessions.first().map(|s| s.updated_at.as_str()));
+    let from_wts = sec.worktrees.as_ref().and_then(|wts| {
+        wts.iter()
+            .filter_map(|wt| wt.sessions.first().map(|s| s.updated_at.as_str()))
+            .max()
+    });
+    [from_flat, from_main, from_wts]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or("")
+}
+
+/// Whether any session in the section (including nested groups) has this id.
+pub(crate) fn section_contains_session(sec: &ProjectSection, session_id: &str) -> bool {
+    sec.sessions.iter().any(|s| s.id == session_id)
+        || sec
+            .main_group
+            .as_ref()
+            .is_some_and(|mg| mg.sessions.iter().any(|s| s.id == session_id))
+        || sec.worktrees.as_ref().is_some_and(|wts| {
+            wts.iter()
+                .any(|wt| wt.sessions.iter().any(|s| s.id == session_id))
+        })
+}
+
+/// Total session count across flat, main-group, and worktree sessions.
+pub(crate) fn section_total_sessions(sec: &ProjectSection) -> usize {
+    let nested: usize = sec
+        .main_group
+        .as_ref()
+        .map(|mg| mg.sessions.len())
+        .unwrap_or(0)
+        + sec
+            .worktrees
+            .as_ref()
+            .map(|wts| wts.iter().map(|wt| wt.sessions.len()).sum())
+            .unwrap_or(0);
+    sec.sessions.len() + nested
+}
+
+/// Deterministic bucket-layout signature so a flat→main/worktree recategorization
+/// changes the `<For>` key even when total count and newest timestamp are
+/// identical. Encodes the shape of sessions within a project section: number of
+/// flat sessions, main-group sessions (if any), and per-worktree session counts.
+pub(crate) fn section_layout_signature(sec: &ProjectSection) -> String {
+    let flat = sec.sessions.len();
+    let main_count = sec
+        .main_group
+        .as_ref()
+        .map(|mg| mg.sessions.len())
+        .unwrap_or(0);
+    let wt_sig: Vec<String> = sec
+        .worktrees
+        .as_ref()
+        .map(|wts| {
+            wts.iter()
+                .map(|wt| format!("{}:{}", wt.root, wt.sessions.len()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let wt_segments = if wt_sig.is_empty() {
+        String::new()
+    } else {
+        format!("|W_{}", wt_sig.join("_"))
+    };
+    let main_segment = if sec.main_group.is_some() {
+        format!("|M{}", main_count)
+    } else {
+        String::new()
+    };
+    format!("F{}{}{}", flat, main_segment, wt_segments)
+}
 /// The surface-origin icon for a session's `[TAG]` title prefix. The tag set
 /// mirrors ocean-agent's `surface_flag` (the canonical client_type → flag
 /// map): BRWSR/TUI/WEB/GUI/CLI/VOX/ACP/SLACK/CNVS/MOBL. Recognized surfaces
@@ -438,7 +561,7 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
             .filter(|sec| {
                 active_id
                     .as_deref()
-                    .is_some_and(|id| sec.sessions.iter().any(|s| s.id == id))
+                    .is_some_and(|id| section_contains_session(sec, id))
             })
             .map(|sec| sec.key.clone())
             .collect();
@@ -470,116 +593,109 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
 
     let is_empty = move || sections().is_empty();
 
-    // Create-project form state (modal-only; posts via daemon.create_project).
-    let create_name = RwSignal::new(String::new());
-    let create_root = RwSignal::new(String::new());
-    // Reveal-on-intent: the create form hides behind a quiet `+ New project`
-    // row until the user asks for it.
-    let show_create = RwSignal::new(false);
-    // Breadcrumb directory browser state.
-    let breadcrumb_parent = RwSignal::new(String::new());
-    let breadcrumb_dirs = RwSignal::new(Vec::<crate::daemon::FsDirEntry>::new());
-    let breadcrumb_loading = RwSignal::new(false);
-    let breadcrumb_filter = RwSignal::new(String::new());
-    let breadcrumb_text_mode = RwSignal::new(false);
-    let breadcrumb_home = RwSignal::new(String::new());
-    // True when the user clicked "Use this folder" — the current breadcrumb
-    // directory is the project root directly (no parent+name slug derivation).
-    let register_existing: RwSignal<bool> = RwSignal::new(false);
-    let _popover_highlight = RwSignal::new(0usize);
+    // Project-action mode: exactly one form is visible at a time.
+    #[derive(Clone, Copy, PartialEq)]
+    enum ProjectAction {
+        None,
+        NewProject,
+        ExistingProject,
+    }
 
-    // Browse mode treats the chosen directory as a PARENT. The actual project
-    // root is parent + normalized project-name slug, and the daemon creates
-    // that folder on POST /v1/projects.  When `register_existing` is true the
-    // browsed directory IS the project root (no parent+slug derivation).
-    Effect::new(move |_| {
-        if !breadcrumb_text_mode.get() {
-            let parent = breadcrumb_parent.get();
-            if !parent.trim().is_empty() {
-                if register_existing.get_untracked() {
-                    create_root.set(parent.clone());
-                } else {
-                    create_root.set(project_root_from_parent(&parent, &create_name.get()));
-                }
-            }
-        }
-    });
+    let action_mode: RwSignal<ProjectAction> = RwSignal::new(ProjectAction::None);
+    // New-project form.
+    let new_name: RwSignal<String> = RwSignal::new(String::new());
+    let new_parent: RwSignal<String> = RwSignal::new(String::new());
+    // Existing-project form.
+    let existing_path: RwSignal<String> = RwSignal::new(String::new());
 
-    // Initialize default project parent when panel opens.
-    Effect::new(move |_| {
-        if open.get() && create_root.get_untracked().is_empty() {
-            let url = daemon.get_value().url.get_untracked();
-            let parent = "~/dev".to_string();
-            breadcrumb_parent.set(parent.clone());
-            create_root.set(project_root_from_parent(
-                &parent,
-                &create_name.get_untracked(),
-            ));
-            spawn_local(async move {
-                let u = url.clone();
-                if let Some(resp) = fetch_fs_dirs(&u, &parent).await {
-                    if resp.ok {
-                        breadcrumb_home.set(resp.home.clone());
-                        breadcrumb_dirs.set(resp.dirs);
-                    } else {
-                        let u2 = u.clone();
-                        if let Some(resp2) = fetch_fs_dirs(&u2, "~").await {
-                            if resp2.ok {
-                                let fallback_parent = "~".to_string();
-                                breadcrumb_home.set(resp2.home.clone());
-                                breadcrumb_parent.set(fallback_parent.clone());
-                                breadcrumb_dirs.set(resp2.dirs);
-                                create_root.set(project_root_from_parent(
-                                    &fallback_parent,
-                                    &create_name.get_untracked(),
-                                ));
-                            }
-                        }
-                    }
-                }
-            });
-        }
-    });
-    // The reveal row is the default state every time the modal opens — reset
-    // show_create when the panel closes so reopening never shows a stale form.
     Effect::new(move |_| {
         if !open.get() {
-            show_create.set(false);
-            register_existing.set(false);
+            if daemon.get_value().project_create_pending.get_untracked() {
+                open.set(true);
+                return;
+            }
+            daemon.get_value().project_create_error.set(None);
+            action_mode.set(ProjectAction::None);
         }
     });
 
-    let create_root_value = move || {
-        if register_existing.get() {
-            create_root.get()
-        } else {
-            project_create_root(
-                breadcrumb_text_mode.get(),
-                &breadcrumb_parent.get(),
-                &create_root.get(),
-                &create_name.get(),
-            )
-        }
-    };
-    let create_can_submit = move || {
-        let name = create_name.get();
-        let root = create_root_value();
-        !name.trim().is_empty() && !root.trim().is_empty()
-    };
     let start_chat = move |_| {
         daemon.get_value().begin_chat_session();
         open.set(false);
     };
-    let create_project = move |ev: SubmitEvent| {
+
+    let cancel_project = move || {
+        if daemon.get_value().project_create_pending.get_untracked() {
+            return;
+        }
+        daemon.get_value().project_create_error.set(None);
+        action_mode.set(ProjectAction::None);
+        // Return focus to the reveal button once <Show> remounts it.
+        if let Some(win) = web_sys::window() {
+            let cb = wasm_bindgen::closure::Closure::once_into_js(move || {
+                if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+                    if let Some(el) = doc
+                        .query_selector("button.sessions-create__reveal")
+                        .ok()
+                        .flatten()
+                    {
+                        let _ = el.unchecked_into::<web_sys::HtmlElement>().focus();
+                    }
+                }
+            });
+            let _ =
+                win.set_timeout_with_callback_and_timeout_and_arguments_0(cb.unchecked_ref(), 0);
+        }
+    };
+
+    // ── Focus management for project-action forms ──────────────────────
+    let existing_input_ref: NodeRef<leptos::html::Input> = NodeRef::new();
+    let new_input_ref: NodeRef<leptos::html::Input> = NodeRef::new();
+
+    // Auto-focus the first input when a project-action form opens.
+    // NodeRef is populated after <Show> mounts its children, so the
+    // effect that fires on action_mode change will find the element.
+    Effect::new(move |_| {
+        let mode = action_mode.get();
+        let target = match mode {
+            ProjectAction::ExistingProject => existing_input_ref.get(),
+            ProjectAction::NewProject => new_input_ref.get(),
+            _ => None,
+        };
+        if let Some(el) = target {
+            let _ = el.unchecked_into::<web_sys::HtmlElement>().focus();
+        }
+    });
+    let create_new_project = move |ev: SubmitEvent| {
         ev.prevent_default();
-        let name = create_name.get_untracked();
-        let root = create_root_value();
+        if daemon.get_value().project_create_pending.get_untracked() {
+            return;
+        }
+        let name = new_name.get_untracked();
+        let parent = new_parent.get_untracked();
+        let parent = if parent.trim().is_empty() {
+            "~/dev".to_string()
+        } else {
+            parent.trim().to_string()
+        };
+        let root = project_root_from_parent(&parent, &name);
         daemon.get_value().create_project(name, root);
     };
 
-    // Create-project success closes the modal and clears the form; failure
-    // keeps it open with the inline error. Watch the falling edge of the
-    // daemon's pending signal so the close lands only after a real round-trip.
+    let add_existing_project = move |ev: SubmitEvent| {
+        ev.prevent_default();
+        if daemon.get_value().project_create_pending.get_untracked() {
+            return;
+        }
+        let path = existing_path.get_untracked().trim().to_string();
+        let name = derive_project_name(&path);
+        daemon.get_value().create_project(name, path);
+    };
+
+    let new_can_submit = move || !new_name.get().trim().is_empty();
+    let existing_can_submit = move || !existing_path.get().trim().is_empty();
+
+    // Create-project success closes the modal and clears forms.
     let prev_pending: RwSignal<bool> = RwSignal::new(false);
     Effect::new(move |_| {
         let pending = daemon.get_value().project_create_pending.get();
@@ -594,12 +710,10 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                 .is_none()
         {
             open.set(false);
-            create_name.set(String::new());
-            create_root.set(String::new());
-            breadcrumb_parent.set(String::new());
-            register_existing.set(false);
-            breadcrumb_dirs.set(Vec::new());
-            show_create.set(false);
+            new_name.set(String::new());
+            new_parent.set(String::new());
+            existing_path.set(String::new());
+            action_mode.set(ProjectAction::None);
         }
     });
 
@@ -607,21 +721,37 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
         <div
             class="sessions-overlay"
             class:sessions-overlay--open=is_open
+            hidden=move || !open.get()
             on:click=move |ev| {
+                if daemon.get_value().project_create_pending.get_untracked() {
+                    return;
+                }
                 let target = event_target::<web_sys::HtmlElement>(&ev);
                 if target.class_list().contains("sessions-overlay") {
                     open.set(false);
                 }
             }
         >
-            <div class="sessions-panel ocean-lit" role="dialog" aria-modal="true" aria-label="Sessions">
+            <div class="sessions-panel ocean-lit" role="dialog" aria-modal="true" aria-label="Sessions"
+                on:keydown=move |ev: web_sys::KeyboardEvent| {
+                    if ev.key() == "Escape" && !daemon.get_value().project_create_pending.get_untracked() {
+                        ev.prevent_default();
+                        open.set(false);
+                    }
+                }
+            >
                 <div class="sessions-panel__head">
                     <h2 class="sessions-panel__title">"Sessions"</h2>
                     <button
                         class="sessions-panel__close"
                         type="button"
                         aria-label="close sessions panel"
-                        on:click=move |_| open.set(false)
+                        disabled=move || daemon.get_value().project_create_pending.get()
+                        on:click=move |_| {
+                            if !daemon.get_value().project_create_pending.get_untracked() {
+                                open.set(false);
+                            }
+                        }
                     >
                         "✕"
                     </button>
@@ -632,318 +762,117 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                         "New chat"
                     </button>
 
-                    <button
-                        class="sessions-create__reveal"
-                        type="button"
-                        on:click=move |_| show_create.set(true)
-                    >
-                        "+ New project"
-                    </button>
-
-                    <Show when=move || show_create.get()>
-                    <form class="sessions-create" on:submit=create_project>
-                        <div class="sessions-create__inputs">
-                            <input
-                                class="sessions-create__input"
-                                type="text"
-                                placeholder="Project name"
-                                autocomplete="off"
-                                prop:value=move || create_name.get()
-                                on:input=move |ev| create_name.set(event_target_value(&ev))
-                            />
-                                                        {move || if breadcrumb_text_mode.get() {
-                                view! {
-                                    <div style="display:flex;gap:6px;align-items:center;flex:1 1 auto">
-                                        <input
-                                            class="sessions-create__input"
-                                            type="text"
-                                            placeholder="Project folder (absolute path)"
-                                            autocomplete="off"
-                                            spellcheck="false"
-                                            prop:value=move || create_root.get()
-                                            on:input=move |ev| create_root.set(event_target_value(&ev))
-                                        />
-                                        <button
-                                            class="sessions-create__mode"
-                                            type="button"
-                                            title="Browse directories"
-                                            on:click=move |_| breadcrumb_text_mode.set(false)
-                                        >
-                                            "browse"
-                                        </button>
-                                    </div>
-                                }.into_any()
-                            } else {
-                                let path_str = create_root.get();
-                                let has_tilde = path_str.starts_with('~');
-                                let rest = if has_tilde { path_str[1..].to_string() } else { path_str.clone() };
-                                let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
-                                let home = breadcrumb_home.get();
-                                let mut display_segs: Vec<(String, String)> = Vec::new();
-                                if has_tilde {
-                                    display_segs.push(("~".to_string(), home.clone()));
-                                    let mut prefix = home.clone();
-                                    for seg in &parts {
-                                        prefix = format!("{}/{}", prefix.trim_end_matches('/'), seg);
-                                        display_segs.push((seg.to_string(), prefix.clone()));
-                                    }
-                                } else if !parts.is_empty() {
-                                    let mut prefix = String::new();
-                                    for seg in &parts {
-                                        prefix = format!("{}/{}", prefix.trim_end_matches('/'), seg);
-                                        display_segs.push((seg.to_string(), prefix.clone()));
-                                    }
-                                }
-                                if display_segs.is_empty() {
-                                    let h = "~".to_string();
-                                    display_segs.push((h.clone(), home.clone()));
-                                }
-                                let d_url = daemon.get_value().url.get_untracked();
-
-                                view! {
-                                    <div class="sessions-create__breadcrumb">
-                                        <div class="sessions-create__breadcrumb-row">
-                                            {display_segs.iter().enumerate().map(|(idx, (label, prefix))| {
-                                                let is_last = idx == display_segs.len() - 1;
-                                                let lbl = label.clone();
-                                                let pfx = prefix.clone();
-                                                let u = d_url.clone();
-
-                                                view! {
-                                                    <button
-                                                        class="sessions-create__breadcrumb-seg"
-                                                        type="button"
-                                                        on:click={
-                                                            let uu = u.clone();
-                                                            let p = pfx.clone();
-                                                            move |_| {
-                                                                breadcrumb_parent.set(p.clone());
-                                                                breadcrumb_filter.set(String::new());
-                                                                let uuu = uu.clone();
-                                                                let p2 = p.clone();
-                                                                spawn_local(async move {
-                                                                    if let Some(resp) = fetch_fs_dirs(&uuu, &p2).await {
-                                                                        if resp.ok {
-                                                                            breadcrumb_home.set(resp.home);
-                                                                            breadcrumb_dirs.set(resp.dirs);
-                                                                        }
-                                                                    }
-                                                                });
-                                                            }
-                                                        }
-                                                    >
-                                                        {lbl}
-                                                    </button>
-                                                    {if !is_last {
-                                                        view! { <span class="sessions-create__breadcrumb-sep">" / "</span> }.into_any()
-                                                    } else {
-                                                        ().into_any()
-                                                    }}
-                                                }.into_any()
-                                            }).collect::<Vec<_>>()}
-                                        </div>
-                                        <button
-                                            class="sessions-create__mode"
-                                            type="button"
-                                            title="Edit path as text"
-                                            on:click=move |_| breadcrumb_text_mode.set(true)
-                                        >
-                                            "edit"
-                                        </button>
-                                        {move || {
-                                            let popover_parent = breadcrumb_parent.get();
-                                            if popover_parent.is_empty() {
-                                                return ().into_any();
-                                            }
-                                            let dirs = breadcrumb_dirs.get();
-                                            let filter = breadcrumb_filter.get();
-                                            let loading = breadcrumb_loading.get();
-                                            let filtered: Vec<crate::daemon::FsDirEntry> = {
-                                                // Drop dotfiles and common build/dep noise so the
-                                                // browser shows real project parents only.
-                                                let clean: Vec<crate::daemon::FsDirEntry> = dirs
-                                                    .iter()
-                                                    .filter(|d| {
-                                                        !(d.name.starts_with('.')
-                                                            || matches!(
-                                                                d.name.as_str(),
-                                                                "__pycache__" | "node_modules" | "target"
-                                                            ))
-                                                    })
-                                                    .cloned()
-                                                    .collect();
-                                                if filter.is_empty() {
-                                                    clean
-                                                } else {
-                                                    clean
-                                                        .iter()
-                                                        .filter(|d| {
-                                                            d.name.to_lowercase().contains(&filter.to_lowercase())
-                                                        })
-                                                        .cloned()
-                                                        .collect()
-                                                }
-                                            };
-
-                                            view! {
-                                                <div class="sessions-create__popover">
-                                                    <input
-                                                        class="sessions-create__popover-filter"
-                                                        type="text"
-                                                        placeholder="Filter directories..."
-                                                        autofocus=true
-                                                        prop:value=move || breadcrumb_filter.get()
-                                                        on:input=move |ev| breadcrumb_filter.set(event_target_value(&ev))
-                                                        on:keydown=move |ev| {
-                                                            if ev.key() == "Escape" {
-                                                                breadcrumb_parent.set(String::new());
-                                                            }
-                                                        }
-                                                    />
-                                                    {move || {
-                                                        let parent = breadcrumb_parent.get();
-                                                        if parent.trim().is_empty() {
-                                                            return ().into_any();
-                                                        }
-                                                        let basename = parent.rsplit('/').find(|s| !s.is_empty()).unwrap_or("project").to_string();
-                                                        let bn = basename.clone();
-                                                        let p = parent.clone();
-                                                        view! {
-                                                            <button
-                                                                class="sessions-create__use-existing"
-                                                                type="button"
-                                                                on:click={
-                                                                    let bnc = bn.clone();
-                                                                    let pc = p.clone();
-                                                                    move |_| {
-                                                                        create_name.set(bnc.clone());
-                                                                        create_root.set(pc.clone());
-                                                                        register_existing.set(true);
-                                                                    }
-                                                                }
-                                                            >
-                                                                "Use folder: "
-                                                                <span class="sessions-create__use-existing-path">{basename}</span>
-                                                            </button>
-                                                        }.into_any()
-                                                    }}
-                                                    <div class="sessions-create__popover-list">
-                                                        {if loading {
-                                                            view! { <div class="sessions-create__popover-status">"Loading..."</div> }.into_any()
-                                                        } else if filtered.is_empty() {
-                                                            view! {
-                                                                <div class="sessions-create__popover-status">"No directories"</div>
-                                                                <button
-                                                                    class="sessions-create__popover-new"
-                                                                    type="button"
-                                                                    on:click={
-                                                                        let pp = popover_parent.clone();
-                                                                        move |_| {
-                                                                            let new_path = project_root_from_parent(&pp, &create_name.get_untracked());
-                                                                            create_root.set(new_path);
-                                                                            breadcrumb_parent.set(String::new());
-                                                                        }
-                                                                    }
-                                                                >
-                                                                    "+ new folder: "
-                                                                    <span class="sessions-create__popover-new-name">
-                                                                        {move || {
-                                                                            let n = create_name.get();
-                                                                            if n.trim().is_empty() { "project-name".to_string() } else { n.trim().to_lowercase().replace(' ', "-") }
-                                                                        }}
-                                                                    </span>
-                                                                </button>
-                                                            }.into_any()
-                                                        } else {
-                                                            let items: Vec<_> = filtered.iter().map(|d| {
-                                                                let name = d.name.clone();
-                                                                let path = d.path.clone();
-                                                                let repo = d.is_repo;
-                                                                let branch = d.git_branch.clone();
-                                                                let u = d_url.clone();
-                                                                view! {
-                                                                    <button
-                                                                        class="sessions-create__popover-item"
-                                                                        type="button"
-                                                                        on:click={
-                                                                            let path_owned = path.clone();
-                                                                            let uu = u.clone();
-                                                                            move |_| {
-                                                                                breadcrumb_parent.set(path_owned.clone());
-                                                                                breadcrumb_filter.set(String::new());
-                                                                                let uuu = uu.clone();
-                                                                                let p3 = path_owned.clone();
-                                                                                spawn_local(async move {
-                                                                                    if let Some(resp) = fetch_fs_dirs(&uuu, &p3).await {
-                                                                                        if resp.ok {
-                                                                                            breadcrumb_home.set(resp.home);
-                                                                                            breadcrumb_dirs.set(resp.dirs);
-                                                                                        }
-                                                                                    }
-                                                                                });
-                                                                            }
-                                                                        }
-                                                                    >
-                                                                        <span class="sessions-create__popover-item-name">{name.clone()}</span>
-                                                                        {if repo && branch.is_some() {
-                                                                            view! { <span class="sessions-create__popover-item-chip">{branch.as_deref().unwrap_or("")}</span> }.into_any()
-                                                                        } else {
-                                                                            ().into_any()
-                                                                        }}
-                                                                    </button>
-                                                                }
-                                                            }).collect();
-                                                            view! {
-                                                                {items.into_iter().collect::<Vec<_>>()}
-                                                                <button
-                                                                    class="sessions-create__popover-new"
-                                                                    type="button"
-                                                                    on:click={
-                                                                        let pp = popover_parent.clone();
-                                                                        move |_| {
-                                                                            let new_path = project_root_from_parent(&pp, &create_name.get_untracked());
-                                                                            create_root.set(new_path);
-                                                                            breadcrumb_parent.set(String::new());
-                                                                        }
-                                                                    }
-                                                                >
-                                                                    "+ new folder: "
-                                                                    <span class="sessions-create__popover-new-name">
-                                                                        {move || {
-                                                                            let n = create_name.get();
-                                                                            if n.trim().is_empty() { "project-name".to_string() } else { n.trim().to_lowercase().replace(' ', "-") }
-                                                                        }}
-                                                                    </span>
-                                                                </button>
-                                                            }.into_any()
-                                                        }}
-                                                    </div>
-                                                </div>
-                                            }.into_any()
-                                        }}
-                                    </div>
-                                }.into_any()
-                            }}
-
-                        </div>
+                    <Show when=move || action_mode.get() == ProjectAction::None>
                         <button
-                            class="sessions-create__btn"
-                            type="submit"
-                            disabled=move || !create_can_submit()
-                                || daemon.get_value().project_create_pending.get()
+                            class="sessions-create__reveal"
+                            type="button"
+                            on:click=move |_| {
+                                daemon.get_value().project_create_error.set(None);
+                                action_mode.set(ProjectAction::ExistingProject);
+                            }
                         >
-                            {move || if daemon.get_value().project_create_pending.get() {
-                                "Creating…"
-                            } else {
-                                "Create project"
-                            }}
+                            "Existing project"
                         </button>
-                        <Show when=move || daemon.get_value().project_create_error.get().is_some()>
-                            <div class="sessions-create__error">
-                                {move || daemon.get_value().project_create_error.get().unwrap_or_default()}
+                        <button
+                            class="sessions-create__reveal"
+                            type="button"
+                            on:click=move |_| {
+                                daemon.get_value().project_create_error.set(None);
+                                new_parent.set("~/dev".to_string());
+                                action_mode.set(ProjectAction::NewProject);
+                            }
+                        >
+                            "+ New project"
+                        </button>
+                    </Show>
+
+                    <Show when=move || action_mode.get() == ProjectAction::ExistingProject>
+                        <form class="sessions-create" on:submit=add_existing_project>
+                            <div class="sessions-create__head">
+                                <span class="sessions-create__head-title">"Existing project"</span>
+                                <button class="sessions-create__cancel" type="button" disabled=move || daemon.get_value().project_create_pending.get() on:click=move |_| cancel_project()>
+                                    "Cancel"
+                                </button>
+                            </div> node_ref=existing_input_ref
+                            <div class="sessions-create__inputs">
+                                <input
+                                    class="sessions-create__input"
+                                    type="text"
+                                    placeholder="Existing project folder path"
+                                    aria-label="Existing project folder path"
+                                    autocomplete="off"
+                                    spellcheck="false"
+                                    prop:value=move || existing_path.get()
+                                    on:input=move |ev| existing_path.set(event_target_value(&ev))
+                                />
                             </div>
-                        </Show>
-                    </form>
+                            <button
+                                class="sessions-create__btn"
+                                type="submit"
+                                disabled=move || !existing_can_submit()
+                                    || daemon.get_value().project_create_pending.get()
+                            >
+                                {move || if daemon.get_value().project_create_pending.get() {
+                                    "Adding…"
+                                } else {
+                                    "Add project"
+                                }}
+                            </button>
+                            <Show when=move || daemon.get_value().project_create_error.get().is_some()>
+                                <div class="sessions-create__error">
+                                    {move || daemon.get_value().project_create_error.get().unwrap_or_default()}
+                                </div>
+                            </Show>
+                        </form>
+                    </Show>
+
+                    <Show when=move || action_mode.get() == ProjectAction::NewProject>
+                        <form class="sessions-create" on:submit=create_new_project>
+                            <div class="sessions-create__head">
+                                <span class="sessions-create__head-title">"New project"</span>
+                                <button class="sessions-create__cancel" type="button" disabled=move || daemon.get_value().project_create_pending.get() on:click=move |_| cancel_project()>
+                                    "Cancel"
+                                </button>
+                            </div> node_ref=new_input_ref
+                            <div class="sessions-create__inputs">
+                                <input
+                                    class="sessions-create__input"
+                                    type="text"
+                                    placeholder="Project name"
+                                    aria-label="Project name"
+                                    autocomplete="off"
+                                    prop:value=move || new_name.get()
+                                    on:input=move |ev| new_name.set(event_target_value(&ev))
+                                />
+                                <input
+                                    class="sessions-create__input"
+                                    type="text"
+                                    placeholder="Parent folder (default: ~/dev)"
+                                    aria-label="Parent folder"
+                                    autocomplete="off"
+                                    spellcheck="false"
+                                    prop:value=move || new_parent.get()
+                                    on:input=move |ev| new_parent.set(event_target_value(&ev))
+                                />
+                            </div>
+                            <button
+                                class="sessions-create__btn"
+                                type="submit"
+                                disabled=move || !new_can_submit()
+                                    || daemon.get_value().project_create_pending.get()
+                            >
+                                {move || if daemon.get_value().project_create_pending.get() {
+                                    "Creating…"
+                                } else {
+                                    "Create project"
+                                }}
+                            </button>
+                            <Show when=move || daemon.get_value().project_create_error.get().is_some()>
+                                <div class="sessions-create__error">
+                                    {move || daemon.get_value().project_create_error.get().unwrap_or_default()}
+                                </div>
+                            </Show>
+                        </form>
                     </Show>
                 </div>
 
@@ -960,89 +889,106 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                             // session count + newest-session signature into the key forces a
                             // re-render whenever a section's contents change. Collapse state is
                             // keyed on `sec.key` separately, so it survives.
-                            let head = sec.sessions.first();
+                            let ts = section_newest_ts(sec);
                             format!(
                                 "{}|{}|{}|{}",
                                 sec.key,
-                                sec.sessions.len(),
-                                head.map(|s| s.id.as_str()).unwrap_or(""),
-                                head.map(|s| s.updated_at.as_str()).unwrap_or(""),
+                                section_total_sessions(sec),
+                                ts,
+                                section_layout_signature(sec),
                             )
                         }
                         children=move |sec: ProjectSection| {
                             let skey = sec.key.clone();
                             let s_is_project = sec.is_project;
+                            let s_is_git = sec.is_git;
                             let s_label = sec.label.clone();
-                            let s_count = sec.sessions.len();
+                            let s_count = section_total_sessions(&sec);
                             let worktrees = sec.worktrees.clone();
+                            let main_group = sec.main_group.clone();
                             let flattened = sec.sessions.clone();
                             let glyph_key = skey.clone();
                             let show_key = skey.clone();
                             let click_key = skey.clone();
                             let new_key = skey.clone();
+
+                            let body_id = format!("sessions-group-body-{}", skey);
+                            let aria_key = glyph_key.clone();
                             let glyph = move || if is_collapsed(&glyph_key) { "▸" } else { "▾" };
 
                             view! {
                                 <div class="sessions-group">
-                                    // ── Group header ────────────────────────
-                                    <button
-                                        class="sessions-group__head"
-                                        class:sessions-group__head--other=!s_is_project
-                                        type="button"
-                                        on:click={
-                                            let k = click_key.clone();
-                                            move |_| toggle(k.clone())
-                                        }
-                                    >
-                                        // Project folder mark or the Other-bucket glyph.
-                                        {if s_is_project {
-                                            view! {
-                                                <span class="project-logo"><crate::icons::Folder /></span>
-                                            }.into_any()
-                                        } else {
-                                            view! {
-                                                <span class="project-logo project-logo--other">"⋯"</span>
-                                            }.into_any()
-                                        }}
-
-                                        <span class="sessions-group__label">{s_label.clone()}</span>
-                                        <span class="sessions-group__glyph">{glyph}</span>
-                                        <span class="sessions-group__count">{s_count}</span>
-                                    </button>
-
-                                    // ── Per-project new session (real projects only) ──
-                                    <Show when=move || s_is_project>
+                                    <div class="sessions-group__bar">
+                                        // ── Group header ────────────────────
                                         <button
-                                            class="sessions-group__new-btn"
+                                            class="sessions-group__head"
+                                            class:sessions-group__head--other=!s_is_project
                                             type="button"
+                                            aria-expanded=move || (!is_collapsed(&aria_key)).to_string()
+                                            aria-controls=body_id.clone()
                                             on:click={
-                                                let k = new_key.clone();
-                                                move |_| {
-                                                    daemon.get_value().begin_project_session(k.clone());
-                                                    open.set(false);
-                                                }
+                                                let k = click_key.clone();
+                                                move |_| toggle(k.clone())
                                             }
                                         >
-                                            "+ New session"
+                                            // Project folder/git mark or the Other-bucket glyph.
+                                            {if s_is_project {
+                                                if s_is_git {
+                                                    view! {
+                                                        <span class="project-logo"><crate::icons::GitBranch /></span>
+                                                    }.into_any()
+                                                } else {
+                                                    view! {
+                                                        <span class="project-logo"><crate::icons::Folder /></span>
+                                                    }.into_any()
+                                                }
+                                            } else {
+                                                view! {
+                                                    <span class="project-logo project-logo--other">"⋯"</span>
+                                                }.into_any()
+                                            }}
+
+                                            <span class="sessions-group__label">{s_label.clone()}</span>
+                                            <span class="sessions-group__glyph" aria-hidden="true">{glyph}</span>
+                                            <span class="sessions-group__count">{s_count}</span>
                                         </button>
-                                    </Show>
+
+                                        // ── Per-project new session (real projects only) ──
+                                        <Show when=move || s_is_project>
+                                            <button
+                                                class="sessions-group__new-btn"
+                                                type="button"
+                                                on:click={
+                                                    let k = new_key.clone();
+                                                    move |_| {
+                                                        daemon.get_value().begin_project_session(k.clone());
+                                                        open.set(false);
+                                                    }
+                                                }
+                                            >
+                                                "+ new session"
+                                            </button>
+                                        </Show>
+                                    </div>
 
                                     // ── Expanded body ───────────────────────
                                     <Show when=move || !is_collapsed(&show_key)>
-                                        <div class="sessions-group__body">
-                                            {if let Some(wts) = worktrees.clone() {
-                                                let mut out: Vec<_> = wts.into_iter().map(|wt: WorktreeGroup| {
-                                                    let rows = wt.sessions.clone();
+                                        <div class="sessions-group__body" id=body_id.clone()>
+                                            {if worktrees.is_some() || main_group.is_some() {
+                                                let mut out: Vec<_> = Vec::new();
+                                                // Main-root group first.
+                                                if let Some(mg) = main_group.clone() {
+                                                    let rows = mg.sessions.clone();
                                                     let count = rows.len();
-                                                    let root_label = wt.root.split('/').next_back()
+                                                    let root_label = mg.root.split('/').next_back()
                                                         .filter(|s| !s.is_empty())
-                                                        .unwrap_or("worktree")
+                                                        .unwrap_or("main")
                                                         .to_string();
-                                                    let branch_label = wt.branch.clone().filter(|b| !b.is_empty());
+                                                    let branch_label = mg.branch.clone().filter(|b| !b.is_empty());
                                                     let has_branch = branch_label.is_some();
                                                     let branch_text = branch_label.unwrap_or_default();
-                                                    view! {
-                                                        <div class="worktree-group">
+                                                    out.push(view! {
+                                                        <div class="worktree-group worktree-group--main">
                                                             <div class="worktree-group__head">
                                                                 <span class="worktree-group__root">{root_label}</span>
                                                                 {if has_branch {
@@ -1050,15 +996,43 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                                                 } else {
                                                                     view! { <span class="worktree-group__branch worktree-group__branch--hidden"></span> }.into_any()
                                                                 }}
-                                                                <span class="worktree-group__count">
-                                                                    {count}
-                                                                </span>
+                                                                <span class="worktree-group__count">{count}</span>
                                                             </div>
                                                             {rows.into_iter().map(|s| session_row(s, daemon, open, current_id, false, None).into_any()).collect::<Vec<_>>()}
                                                         </div>
-                                                    }.into_any()
-                                                }).collect();
-                                                // Remaining sessions (not matched to any worktree) shown flat below.
+                                                    }.into_any());
+                                                }
+                                                // Worktree sub-groups.
+                                                if let Some(wts) = worktrees.clone() {
+                                                    out.extend(wts.into_iter().map(|wt: WorktreeGroup| {
+                                                        let rows = wt.sessions.clone();
+                                                        let count = rows.len();
+                                                        let root_label = wt.root.split('/').next_back()
+                                                            .filter(|s| !s.is_empty())
+                                                            .unwrap_or("worktree")
+                                                            .to_string();
+                                                        let branch_label = wt.branch.clone().filter(|b| !b.is_empty());
+                                                        let has_branch = branch_label.is_some();
+                                                        let branch_text = branch_label.unwrap_or_default();
+                                                        view! {
+                                                            <div class="worktree-group">
+                                                                <div class="worktree-group__head">
+                                                                    <span class="worktree-group__root">{root_label}</span>
+                                                                    {if has_branch {
+                                                                        view! { <span class="worktree-group__branch"><crate::icons::GitBranch />{branch_text}</span> }.into_any()
+                                                                    } else {
+                                                                        view! { <span class="worktree-group__branch worktree-group__branch--hidden"></span> }.into_any()
+                                                                    }}
+                                                                    <span class="worktree-group__count">
+                                                                        {count}
+                                                                    </span>
+                                                                </div>
+                                                                {rows.into_iter().map(|s| session_row(s, daemon, open, current_id, false, None).into_any()).collect::<Vec<_>>()}
+                                                            </div>
+                                                        }.into_any()
+                                                    }));
+                                                }
+                                                // True strays below groups.
                                                 out.extend(flattened.clone().into_iter()
                                                     .map(|s| session_row(s, daemon, open, current_id, true, Some(s_label.clone())).into_any()));
                                                 out
@@ -1415,11 +1389,15 @@ mod tests {
 
         let keys: Vec<&str> = sections.iter().map(|sec| sec.key.as_str()).collect();
         assert_eq!(keys, vec!["owned", "__other__"]);
-        // Subdir session stays in the project's flat list; the worktree-rooted
-        // session lands in the registered-worktree sub-group (the bucketing
-        // pass now fires for prefix-grouped sessions).
-        let flat: Vec<&str> = sections[0].sessions.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(flat, vec!["subdir"]);
+        // Main-root subdirectories carve into the project's main group; the
+        // worktree-rooted session lands in the registered-worktree sub-group.
+        let main = sections[0]
+            .main_group
+            .as_ref()
+            .expect("main group expected");
+        assert_eq!(main.root, "/repo");
+        assert_eq!(main.sessions[0].id, "subdir");
+        assert!(sections[0].sessions.is_empty());
         let wts = sections[0].worktrees.as_ref().unwrap();
         assert_eq!(wts.len(), 1);
         assert_eq!(wts[0].root, "/wt/repo-feature");
@@ -1516,9 +1494,20 @@ mod tests {
         assert_eq!(feature.branch.as_deref(), Some("feature/redesign"));
         let wt_ids: Vec<&str> = feature.sessions.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(wt_ids, vec!["feature-nested", "feature-root"]);
-        // Unmatched sessions stay in the project's flat list, newest first.
-        let flat_ids: Vec<&str> = sec.sessions.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(flat_ids, vec!["boundary-trap", "main-root"]);
+        // Sessions matching workspace_root carve into main_group; true strays stay flat.
+        let main = sec.main_group.as_ref().expect("main group expected");
+        assert_eq!(main.root, "/repo-main");
+        assert!(main.branch.is_none());
+        let main_ids: Vec<&str> = main.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(main_ids, vec!["main-root"]);
+        // True strays (not matching any worktree or the workspace root) stay flat.
+        let stray_ids: Vec<&str> = sec.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(stray_ids, vec!["boundary-trap"]);
+        assert!(section_contains_session(sec, "main-root"));
+        assert!(section_contains_session(sec, "feature-nested"));
+        assert!(!section_contains_session(sec, "missing"));
+        assert_eq!(section_total_sessions(sec), 4);
+        assert_eq!(section_newest_ts(sec), "2026-07-05T12:03:00Z");
     }
 
     #[test]
@@ -1549,6 +1538,7 @@ mod tests {
 
         assert_eq!(sections.len(), 1);
         assert!(sections[0].worktrees.is_none());
+        assert!(sections[0].main_group.is_none());
         assert_eq!(sections[0].sessions.len(), 2);
     }
 
@@ -1657,6 +1647,29 @@ mod tests {
     }
 
     #[test]
+    fn derive_project_name_uses_final_non_empty_path_segment() {
+        for (path, expected_name) in [
+            ("/Users/smaths/dev/ocean-surface", "ocean-surface"),
+            ("~/dev/Ocean", "Ocean"),
+            (
+                "/Users/smaths/Client Projects/Ocean Surface",
+                "Ocean Surface",
+            ),
+            ("/Users/smaths/dev/ocean-surface/", "ocean-surface"),
+            ("/Users/smaths/dev/ocean-surface///", "ocean-surface"),
+        ] {
+            assert_eq!(derive_project_name(path), expected_name, "path={path:?}");
+        }
+    }
+
+    #[test]
+    fn derive_project_name_falls_back_for_blank_or_root_paths() {
+        for path in ["/", "", "   \t\n"] {
+            assert_eq!(derive_project_name(path), "project", "path={path:?}");
+        }
+    }
+
+    #[test]
     fn project_root_from_parent_joins_parent_and_normalized_project_name() {
         assert_eq!(
             project_root_from_parent("~/dev", "Slop Check"),
@@ -1697,5 +1710,71 @@ mod tests {
                 "name={name:?}"
             );
         }
+    }
+
+    #[test]
+    fn layout_signature_changes_when_sessions_move_between_buckets() {
+        let projects = vec![project_with_worktrees(
+            "owned",
+            "Owned",
+            "/repo-main",
+            &[("/repo-feature", Some("feature/redesign"))],
+        )];
+        let sessions = vec![
+            session(
+                "s1",
+                "/repo-main",
+                Some("/repo-main"),
+                Some(owner("owned", "Owned")),
+                None,
+                1,
+                "2026-07-05T12:00:00Z",
+            ),
+            session(
+                "s2",
+                "/repo-feature",
+                Some("/repo-feature"),
+                Some(owner("owned", "Owned")),
+                Some("feature/redesign"),
+                1,
+                "2026-07-05T12:01:00Z",
+            ),
+            session("s3", "/other", None, None, None, 1, "2026-07-05T12:02:00Z"),
+        ];
+        let sections = group_for_panel(&sessions, &projects, None);
+        let owned = sections.iter().find(|s| s.key == "owned").unwrap();
+        let sig = section_layout_signature(owned);
+        assert!(sig.contains("F0"), "flat count: {sig}");
+        assert!(sig.contains("M1"), "main group: {sig}");
+        assert!(sig.contains("W_"), "worktree: {sig}");
+
+        let sessions2 = vec![
+            session(
+                "s1",
+                "/repo-feature/x",
+                Some("/repo-feature/x"),
+                Some(owner("owned", "Owned")),
+                Some("feature/redesign"),
+                1,
+                "2026-07-05T12:00:00Z",
+            ),
+            session(
+                "s2",
+                "/repo-feature",
+                Some("/repo-feature"),
+                Some(owner("owned", "Owned")),
+                Some("feature/redesign"),
+                1,
+                "2026-07-05T12:01:00Z",
+            ),
+            session("s3", "/other", None, None, None, 1, "2026-07-05T12:02:00Z"),
+        ];
+        let sections2 = group_for_panel(&sessions2, &projects, None);
+        let owned2 = sections2.iter().find(|s| s.key == "owned").unwrap();
+        let sig2 = section_layout_signature(owned2);
+        assert_ne!(
+            sig, sig2,
+            "signature must change when sessions move between buckets"
+        );
     }
 }
