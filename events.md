@@ -1432,3 +1432,11 @@ area:      [frontend]
 
 Restored source parity between origin/main and the Cursor extension John actually runs. origin/main carried vscode-extension/package.json at 0.1.3 while the installed VSIX was 0.1.42, built from unmerged local commit 33b0db1 (branch feat/vscode-extension-polish-0143, never pushed). Landed the vscode-extension/ subtree from 33b0db1 into a detached clean-room worktree off origin/main (c4da482) — 12 files covering session persistence, composer @mentions, diagnostic code actions, and workspace-change context — so main now carries the 0.1.42 source matching the installed extension. Verified gates in the worktree (npm ci, npm run compile -> dist/extension.js, npm run lint / tsc --noEmit) all green; no test script defined. Confirmed installed ~/.cursor/extensions/risingtides.ocean-surface-0.1.42/package.json version (0.1.42) == landed version. Touched only vscode-extension/ and this ledger; nothing outside that scope.
 _________________________________________________________________________________
+time:      [8:50pm] [07-10-26]
+agent:     [omp] [fable-5]
+worktree:  /tmp/ocean-wasm-delivery (origin/main detached)
+type:      [bug-report]
+area:      [infra]
+
+Repaired the production wasm delivery regression behind the "old/dead surface" reports: the bundle shipped with wasm-opt disabled (OCEAN-121 workaround), so prod served a 14.9MB module that took ~80s to transfer through the tunnel and ~3min to compile — the page looked dead while technically current. Enabled data-wasm-opt=z with binaryen pinned to version_130 in Trunk.toml (guards in run-surface.sh and the proxy launcher still assert the dist wasm magic word, keeping the OCEAN-121 silent-corruption path closed), dropped no-transform from the proxy's wasm Cache-Control now that SRI is build-disabled so Cloudflare may compress the module, and added build.rs provenance: OCEAN_SURFACE_REV is embedded and logged at boot, which also forces distinct dist hashes per landed commit (Trunk hashes the pre-opt module, so the optimized bundle would otherwise have reused the old immutable URL). Result: 3.75MB wasm, local boot to interactive composer in 407ms with zero page errors, rev line visible in console.
+_________________________________________________________________________________
