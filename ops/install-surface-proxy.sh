@@ -1,22 +1,25 @@
 #!/usr/bin/env bash
-# Install + supervise the Ocean Surface proxy under launchd (OCEAN-161 / OCEAN-385).
+# Install and supervise the Ocean Surface proxy plus automatic main deployment.
 #
 # Idempotent. Safe to re-run after a pull/rebuild. What it does:
-#   1. Builds the proxy binary (release) from MAIN and ensures a valid wasm bundle.
-#   2. Copies the LaunchAgent plist into ~/Library/LaunchAgents/.
+#   1. Builds the proxy and WASM release from MAIN, then atomically promotes it.
+#   2. Installs the proxy and auto-deploy LaunchAgent plists.
 #   3. By default PRINTS the bootstrap/kickstart commands for you to run.
 #      Pass --bootstrap to actually touch the live launchd on this box.
 #
-# The live bootstrap is OPT-IN. Without --bootstrap this script only builds and
-# stages the plist; it does not start, stop, or restart anything. It HARD-FAILS
+# The live bootstrap is OPT-IN. Without --bootstrap this script builds/promotes
+# the release and stages both plists, but does not touch launchd. It HARD-FAILS
 # on a non-main checkout (override with --allow-non-main). Mirrors ocean-os's
 # ops/install-ocean-daemon.sh (build-from-main guard + idempotency).
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LABEL="dev.risingtides.ocean-surface-proxy"
-PLIST_SRC="$REPO/deploy/$LABEL.plist"
-PLIST_DST="$HOME/Library/LaunchAgents/$LABEL.plist"
+PROXY_LABEL="dev.risingtides.ocean-surface-proxy"
+AUTO_LABEL="dev.risingtides.ocean-surface-auto-deploy"
+PROXY_PLIST_SRC="$REPO/deploy/$PROXY_LABEL.plist"
+AUTO_PLIST_SRC="$REPO/deploy/$AUTO_LABEL.plist"
+PROXY_PLIST_DST="$HOME/Library/LaunchAgents/$PROXY_LABEL.plist"
+AUTO_PLIST_DST="$HOME/Library/LaunchAgents/$AUTO_LABEL.plist"
 DOMAIN="gui/$(id -u)"
 
 # --bootstrap (off by default) opts in to touching the live launchd domain.
@@ -104,60 +107,62 @@ if (( on_main == 0 )); then
   fi
 fi
 
-echo "==> [1/3] building proxy + wasm bundle (release) from '$branch'"
-# Build the binary the service runs.
+deploy_sha="$(git -C "$REPO" rev-parse HEAD)"
+echo "==> [1/3] building proxy + wasm bundle (release) from '$branch' at $deploy_sha"
 ( cd "$REPO" && cargo build -p ocean-surface-proxy --release )
 BIN="$REPO/target/release/ocean-surface-proxy"
 if [[ ! -x "$BIN" ]]; then
   echo "FATAL: build did not produce an executable at $BIN" >&2
   exit 1
 fi
-# Ensure a servable bundle exists. If trunk is available and no bundle is present,
-# build it; otherwise assume run-surface.sh / CI already produced dist/.
-shopt -s nullglob
-wasm_files=( "$REPO"/dist/*_bg.wasm )
-shopt -u nullglob
-if (( ${#wasm_files[@]} == 0 )); then
-  if command -v trunk >/dev/null 2>&1; then
-    echo "    no dist/*_bg.wasm — running 'trunk build --release'"
-    ( cd "$REPO" && trunk build --release )
-  else
-    echo "FATAL: no dist/*_bg.wasm and 'trunk' not on PATH. Build the bundle first." >&2
-    exit 1
-  fi
+if ! command -v trunk >/dev/null 2>&1; then
+  echo "FATAL: 'trunk' is required to build the release bundle." >&2
+  exit 1
 fi
+( cd "$REPO" && env -u NO_COLOR trunk build --release )
+OCEAN_SURFACE_NO_RESTART=1 \
+  "$REPO/deploy/ocean-surface-auto-deploy.sh" --promote "$REPO/dist" "$deploy_sha"
 
-echo "==> [2/3] installing plist -> $PLIST_DST"
+echo "==> [2/3] installing launch agents"
 mkdir -p "$HOME/Library/LaunchAgents"
-cp "$PLIST_SRC" "$PLIST_DST"
-plutil -lint "$PLIST_DST"
+cp "$PROXY_PLIST_SRC" "$PROXY_PLIST_DST"
+cp "$AUTO_PLIST_SRC" "$AUTO_PLIST_DST"
+plutil -lint "$PROXY_PLIST_DST"
+plutil -lint "$AUTO_PLIST_DST"
 
 if (( BOOTSTRAP == 0 )); then
   echo
-  echo "==> [3/3] plist staged. Live bootstrap is OPT-IN — not touching launchd."
-  echo "    Re-run with --bootstrap to start supervision, or run these yourself:"
+  echo "==> [3/3] plists staged. Live bootstrap is OPT-IN — not touching launchd."
+  echo "    Re-run with --bootstrap to start the proxy and automatic main deployment."
   echo
-  echo "        launchctl bootout   $DOMAIN/$LABEL 2>/dev/null || true"
-  echo "        launchctl bootstrap $DOMAIN \"$PLIST_DST\""
-  echo "        launchctl enable    $DOMAIN/$LABEL"
-  echo "        launchctl kickstart -k $DOMAIN/$LABEL"
+  echo "        launchctl bootout   $DOMAIN/$PROXY_LABEL 2>/dev/null || true"
+  echo "        launchctl bootout   $DOMAIN/$AUTO_LABEL 2>/dev/null || true"
+  echo "        launchctl bootstrap $DOMAIN \"$PROXY_PLIST_DST\""
+  echo "        launchctl bootstrap $DOMAIN \"$AUTO_PLIST_DST\""
+  echo "        launchctl enable    $DOMAIN/$PROXY_LABEL"
+  echo "        launchctl enable    $DOMAIN/$AUTO_LABEL"
+  echo "        launchctl kickstart -k $DOMAIN/$PROXY_LABEL"
   echo
   echo "    Then check it's listening:  lsof -nP -iTCP:8790 -sTCP:LISTEN"
-  echo "    Tail logs:                  tail -f /private/tmp/ocean-surface-proxy.log"
+  echo "    Tail proxy logs:             tail -f /private/tmp/ocean-surface-proxy.log"
+  echo "    Tail deploy logs:            tail -f /private/tmp/ocean-surface-auto-deploy.log"
   exit 0
 fi
 
-echo "==> [3/3] (re)bootstrapping launchd job $LABEL in $DOMAIN"
-# Tear down any previous instance so this is a clean (re)install.
-launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
-launchctl bootstrap "$DOMAIN" "$PLIST_DST"
-launchctl enable "$DOMAIN/$LABEL"
-# Force an immediate (re)start so we don't wait for the next event.
-launchctl kickstart -k "$DOMAIN/$LABEL"
+echo "==> [3/3] (re)bootstrapping launchd jobs in $DOMAIN"
+launchctl bootout "$DOMAIN/$PROXY_LABEL" 2>/dev/null || true
+launchctl bootout "$DOMAIN/$AUTO_LABEL" 2>/dev/null || true
+launchctl bootstrap "$DOMAIN" "$PROXY_PLIST_DST"
+launchctl bootstrap "$DOMAIN" "$AUTO_PLIST_DST"
+launchctl enable "$DOMAIN/$PROXY_LABEL"
+launchctl enable "$DOMAIN/$AUTO_LABEL"
+launchctl kickstart -k "$DOMAIN/$PROXY_LABEL"
 
 echo
 echo "==> done. status:"
-launchctl print "$DOMAIN/$LABEL" 2>/dev/null | grep -E 'state|pid|program|path =' | sed 's/^/    /' || true
+launchctl print "$DOMAIN/$PROXY_LABEL" 2>/dev/null | grep -E 'state|pid|program|path =' | sed 's/^/    proxy: /' || true
+launchctl print "$DOMAIN/$AUTO_LABEL" 2>/dev/null | grep -E 'state|pid|program|path =' | sed 's/^/    deploy: /' || true
 echo
 echo "    Check it's listening:   lsof -nP -iTCP:8790 -sTCP:LISTEN"
-echo "    Tail logs:              tail -f /private/tmp/ocean-surface-proxy.log"
+echo "    Tail proxy logs:        tail -f /private/tmp/ocean-surface-proxy.log"
+echo "    Tail deploy logs:       tail -f /private/tmp/ocean-surface-auto-deploy.log"

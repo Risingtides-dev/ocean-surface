@@ -160,11 +160,13 @@ For local web/proxy work:
 trunk serve --open
 ```
 
-`localhost:8790` is the operator's live surface and serves
-`~/.config/ocean-surface/dist-prod/`, not the repo's `dist/`. A merge is not a
-deployment: build from a clean committed `origin/main`, atomically refresh
-`dist-prod`, then verify the served WASM hash and UI contracts on `:8790`
-itself. Never substitute a private proxy when reporting the live app's state.
+`localhost:8790` is the operator's live surface and serves the immutable release
+selected by `~/.config/ocean-surface/current`, not the repo's `dist/`. The
+`dev.risingtides.ocean-surface-auto-deploy` LaunchAgent polls `origin/main`,
+builds and gates it in a disposable detached worktree, then atomically advances
+`current` and `deployed-rev`; failures preserve the last-known-good release.
+Still verify the served WASM hash and UI contracts on `:8790` itself—never
+substitute a private proxy when reporting the live app's state.
 Loopback origins must not retain a service worker or `ocean-shell-*` cache;
 offline PWA interception is reserved for deployed non-loopback origins.
 

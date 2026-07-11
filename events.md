@@ -1472,3 +1472,11 @@ area:      [frontend]
 
 Corrected a stale-live-surface failure where localhost:8790 remained pinned to an old dist-prod bundle and an old service worker could reduce the page to a black “Reconnecting…” emergency shell. Landed loopback service-worker retirement/cache cleanup, completed the sessions drawer contracts (global create controls below the project list; empty registered worktrees remain visible), renamed the mis-created /Users/risingtidesdev/youtube-clipping catalog record from OCEAN to youtube-clipping, built and deployed committed main bundle ocean-surface-ui-803c39bd600b2dbd_bg.wasm, and verified on 8790 itself: zero workers/caches/controllers, sustained new-session UI, neutral project glyphs, Git marker, youtube-clipping project, and its sleepy-rosalind-a28c25 worktree with count 0. Unit suite: 316 passed; service-worker contract: 13 assertions; strict wasm clippy/fmt and GitHub CI both green.
 _________________________________________________________________________________
+time:      [06:43pm] [07-11-26]
+agent:     [omp] [gpt-5.6-sol]
+worktree:  /tmp/ocean-autodeploy (origin/main detached)
+type:      [workflow]
+area:      [infra]
+
+Removed the silent main-to-live deployment gap behind localhost:8790 drift. Added a launchd auto-deploy job that polls origin/main, builds each new revision in a disposable detached worktree, runs proxy and WASM tests/checks/strict Clippy/fmt plus the deployment contract, validates the release HTML and wasm magic, then atomically advances an immutable `current` release symlink and exact `deployed-rev` marker. Any fetch, build, test, validation, or restart failure leaves the last-known-good release selected. Updated the proxy to serve `current`, made the installer build/promote and install both jobs, made uninstall remove both jobs, documented the live contract, and put the 9-assertion promotion/no-op/failure-preservation test in CI. Local contract, shell syntax, and both plist validations passed before landing.
+_________________________________________________________________________________

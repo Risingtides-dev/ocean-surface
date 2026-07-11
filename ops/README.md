@@ -3,33 +3,35 @@
 ## ocean-surface-proxy is supervised by launchd (OCEAN-161 / OCEAN-385)
 
 The **surface proxy** (`crates/ocean-surface-proxy`, built to
-`target/release/ocean-surface-proxy`) serves the compiled PWA bundle from `dist/`
-and reverse-proxies `/v1/*` to the Ocean daemon. It listens on
-**`0.0.0.0:8790`** by default.
+`target/release/ocean-surface-proxy`) serves the compiled PWA release selected
+by `~/.config/ocean-surface/current` and reverse-proxies `/v1/*` to the Ocean
+daemon. It listens on **`0.0.0.0:8790`** by default.
 
-Previously it was hand-launched via `run-surface.sh` with **no supervision** — if
-it crashed, the web surface went **silently offline**. It is now run under a
-launchd **LaunchAgent** that respawns it on crash (`KeepAlive`) and starts it at
-login (`RunAtLoad`).
+Two launchd LaunchAgents own the live surface: the proxy respawns on crash and
+starts at login; the deploy watcher polls `origin/main` every two minutes and
+promotes a new release only after a clean detached-main build passes its gates.
 
 | Thing | Value |
 |---|---|
-| launchd label | `dev.risingtides.ocean-surface-proxy` |
-| Version-controlled plist | `deploy/dev.risingtides.ocean-surface-proxy.plist` |
-| Launcher it execs | `deploy/ocean-surface-proxy.sh` |
-| Installed plist path | `~/Library/LaunchAgents/dev.risingtides.ocean-surface-proxy.plist` |
+| Proxy launchd label | `dev.risingtides.ocean-surface-proxy` |
+| Deploy launchd label | `dev.risingtides.ocean-surface-auto-deploy` |
+| Version-controlled plists | `deploy/dev.risingtides.ocean-surface-*.plist` |
+| Launchers | `deploy/ocean-surface-proxy.sh`, `deploy/ocean-surface-auto-deploy.sh` |
+| Installed plist path | `~/Library/LaunchAgents/dev.risingtides.ocean-surface-*.plist` |
 | Bind address | `0.0.0.0:8790` (env `OCEAN_SURFACE_BIND`) |
-| Bundle served | `~/.config/ocean-surface/dist-prod` (env `OCEAN_SURFACE_DIST`; repo `dist/` is dev-only) |
+| Bundle served | `~/.config/ocean-surface/current` (atomic symlink; repo `dist/` is dev-only) |
+| Deployed revision | `~/.config/ocean-surface/deployed-rev` |
 | Daemon proxied to | `http://127.0.0.1:4780` (env `OCEAN_DAEMON_URL`) |
 | Auth env file | `~/.config/ocean-surface/proxy-auth.env` (0600; sourced by the launcher) |
-| Logs (stdout+stderr) | `/private/tmp/ocean-surface-proxy.log` |
+| Logs | `/private/tmp/ocean-surface-{proxy,auto-deploy}.log` |
 
-> The launcher serves a **prebuilt** bundle — it does **not** run `trunk build` on
-> every respawn (that's what `run-surface.sh` is for during dev). Prod serves the
-> dedicated `dist-prod` dir so a local `trunk serve` / `run-surface.sh` loop can
-> never clobber the public site. Rebuild + rsync into `dist-prod` after UI changes
-> (see the ocean-surface-prod-deploy skill); re-running the install script alone is
-> not enough if you only refreshed repo `dist/`.
+> The proxy serves a **prebuilt immutable release** — it does not build on
+> respawn. The deploy watcher fetches `origin/main`, builds in a disposable
+> detached worktree, runs the WASM check/tests/strict Clippy/format gate, builds
+> the release WASM and proxy, validates the wasm magic and release HTML, then
+> atomically advances `current` and `deployed-rev`. Any failure leaves the
+> last-known-good release selected. A local `trunk serve` / `run-surface.sh`
+> loop cannot touch the live release.
 >
 > Secrets stay out of the plist. The xAI voice key is resolved from
 > `~/.config/ocean-surface/xai.key` (or env `XAI_API_KEY`). HTTP Basic auth is
@@ -45,22 +47,18 @@ login (`RunAtLoad`).
 ### Install / enable supervision
 
 ```bash
-# Stage only — builds + copies the plist, then PRINTS the launchctl commands:
+# Stage only — builds and promotes HEAD, then installs both plist files:
 ops/install-surface-proxy.sh
 
-# Or actually start supervision now (touches the live launchd domain):
+# Build/promote and start both supervised jobs now:
 ops/install-surface-proxy.sh --bootstrap
 ```
 
-By default the script is **scripts-only**: it builds the proxy (release, **from
-main** — warns if you're on a feature branch), ensures a valid `dist/` bundle
-exists, copies the plist into `~/Library/LaunchAgents/`, and then **prints** the
-`launchctl bootstrap/enable/kickstart` commands for you to run. The live bootstrap
-is **opt-in** via `--bootstrap` so a routine re-run never restarts the service out
-from under you. Idempotent — safe to re-run after a pull/rebuild. (Equivalent manual steps:
-`cp deploy/dev.risingtides.ocean-surface-proxy.plist ~/Library/LaunchAgents/` then
-`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.risingtides.ocean-surface-proxy.plist`
-and `launchctl enable gui/$(id -u)/dev.risingtides.ocean-surface-proxy`.)
+The installer hard-fails unless HEAD is `main` or detached exactly at
+`origin/main`; `--allow-non-main` is the explicit escape hatch. It builds the
+proxy and release bundle, seeds the immutable release store and `current`
+symlink, validates both plist files, then either prints the launchctl commands
+or bootstraps both jobs. Later main revisions deploy automatically.
 
 ### Check status
 
@@ -68,8 +66,13 @@ and `launchctl enable gui/$(id -u)/dev.risingtides.ocean-surface-proxy`.)
 # Is it listening?
 lsof -nP -iTCP:8790 -sTCP:LISTEN
 
-# launchd's view (state, pid, last exit code):
+# launchd's view:
 launchctl print gui/$(id -u)/dev.risingtides.ocean-surface-proxy | grep -E 'state|pid|last exit'
+launchctl print gui/$(id -u)/dev.risingtides.ocean-surface-auto-deploy | grep -E 'state|pid|last exit'
+
+# Exact revision selected by the live symlink:
+cat ~/.config/ocean-surface/deployed-rev
+readlink ~/.config/ocean-surface/current
 
 # Unauthenticated health endpoint:
 curl -fsS http://127.0.0.1:8790/health && echo
@@ -78,11 +81,15 @@ curl -fsS http://127.0.0.1:8790/health && echo
 ### Restart / read logs
 
 ```bash
-# Force a restart (e.g. after rebuilding the binary or bundle):
+# Force a proxy restart:
 launchctl kickstart -k gui/$(id -u)/dev.risingtides.ocean-surface-proxy
+
+# Trigger an immediate main check/deployment:
+launchctl kickstart -k gui/$(id -u)/dev.risingtides.ocean-surface-auto-deploy
 
 # Tail logs:
 tail -f /private/tmp/ocean-surface-proxy.log
+tail -f /private/tmp/ocean-surface-auto-deploy.log
 ```
 
 ### Uninstall / stop supervision
@@ -91,11 +98,9 @@ tail -f /private/tmp/ocean-surface-proxy.log
 ops/uninstall-surface-proxy.sh
 ```
 
-Boots the job out of launchd and removes the installed plist. The repo, the built
-binary, and `dist/` are left untouched.
+Boots both jobs out of launchd and removes both installed plist files. The repo,
+built artifacts, and immutable deployed releases are left untouched.
 
-> **Note on the daemon:** the Ocean **daemon** (`:4780`) on this box is currently
-> hand-launched and is **not** covered by this LaunchAgent — this ticket only
-> supervises the **surface proxy**. Supervision state on this box drifts, so
-> re-verify with `launchctl list | grep -i ocean` before assuming either process
-> is supervised.
+> **Note on the daemon:** the Ocean **daemon** (`:4780`) is separate from these
+> surface LaunchAgents. Re-verify supervision with
+> `launchctl list | grep -i ocean` instead of assuming process state.

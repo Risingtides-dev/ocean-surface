@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
-# Stop + unsupervise the Ocean Surface proxy (reverse of install-surface-proxy.sh).
-# Boots the job out of launchd and removes the installed plist. Leaves the repo,
-# the built binary, and the dist/ bundle untouched.
+# Stop + unsupervise the Ocean Surface proxy and automatic deploy watcher.
+# Leaves the repo, built artifacts, and immutable deployed releases untouched.
 set -euo pipefail
 
-LABEL="dev.risingtides.ocean-surface-proxy"
-PLIST_DST="$HOME/Library/LaunchAgents/$LABEL.plist"
+PROXY_LABEL="dev.risingtides.ocean-surface-proxy"
+AUTO_LABEL="dev.risingtides.ocean-surface-auto-deploy"
 DOMAIN="gui/$(id -u)"
 
-echo "==> booting out $DOMAIN/$LABEL"
-launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || echo "    (job was not loaded)"
+for label in "$AUTO_LABEL" "$PROXY_LABEL"; do
+  plist="$HOME/Library/LaunchAgents/$label.plist"
+  echo "==> booting out $DOMAIN/$label"
+  launchctl bootout "$DOMAIN/$label" 2>/dev/null || echo "    (job was not loaded)"
+  echo "==> removing $plist"
+  rm -f "$plist"
+done
 
-echo "==> removing $PLIST_DST"
-rm -f "$PLIST_DST"
-
-echo "==> done. The proxy is no longer supervised."
+echo "==> done. The proxy and deploy watcher are no longer supervised."
 echo "    Verify it stopped:  lsof -nP -iTCP:8790 -sTCP:LISTEN   (should print nothing)"

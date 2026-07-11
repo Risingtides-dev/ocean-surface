@@ -5,9 +5,9 @@
 # Unlike run-surface.sh, it does NOT run a trunk build — a supervised service must
 # respawn fast and deterministically, so the wasm bundle is built once at install
 # time (see ops/install-surface-proxy.sh) and this script only serves it. Prod
-# serves the dedicated dist-prod dir (~/.config/ocean-surface/dist-prod), which
-# dev rebuilds (trunk serve / run-surface.sh) never touch — so a dev loop can
-# never clobber the public site the way the shared repo dist dir once did.
+# serves the atomically selected release at ~/.config/ocean-surface/current;
+# dev rebuilds (trunk serve / run-surface.sh) never touch it, so a dev loop
+# cannot clobber the live surface.
 #
 # It exec's the prebuilt proxy binary with the production env. The xAI key is NOT
 # baked in here; the binary resolves it from ~/.config/ocean-surface/xai.key (or
@@ -29,12 +29,10 @@ if [[ ! -x "$BIN" ]]; then
   exit 127
 fi
 
-# Production dist dir — the dedicated dist-prod bundle that dev rebuilds never
-# touch (see header). Honored from env/plist, defaulting to the prod dir. Set
-# BEFORE the magic-word guard below so the guard and the serve path can never
-# diverge: the glob, the magic check, and what the proxy actually serves all
-# read this one variable.
-export OCEAN_SURFACE_DIST="${OCEAN_SURFACE_DIST:-$HOME/.config/ocean-surface/dist-prod}"
+# Production release symlink, atomically advanced by ocean-surface-auto-deploy.
+# Set before the magic-word guard so validation and the served path cannot
+# diverge.
+export OCEAN_SURFACE_DIST="${OCEAN_SURFACE_DIST:-$HOME/.config/ocean-surface/current}"
 
 # Guard: never serve a corrupt/all-zero wasm (OCEAN-121). Assert the bundle's
 # magic word before binding, so a bad build fails loudly instead of serving blank.
@@ -42,7 +40,7 @@ shopt -s nullglob
 wasm_files=( "$OCEAN_SURFACE_DIST"/*_bg.wasm )
 shopt -u nullglob
 if (( ${#wasm_files[@]} == 0 )); then
-  echo "FATAL: no *_bg.wasm present in $OCEAN_SURFACE_DIST — copy a committed release bundle into ~/.config/ocean-surface/dist-prod (dev rebuilds are not served)." >&2
+  echo "FATAL: no *_bg.wasm present in $OCEAN_SURFACE_DIST — the automatic deploy job must promote a verified origin/main release first." >&2
   exit 1
 fi
 for w in "${wasm_files[@]}"; do

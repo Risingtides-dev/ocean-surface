@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Poll origin/main and atomically promote a verified release when it moves.
+       The runner builds in a disposable detached worktree and preserves the
+       current release on any fetch, build, test, validation, or restart error. -->
+  <key>Label</key>
+  <string>dev.risingtides.ocean-surface-auto-deploy</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/risingtidesdev/dev/ocean-surface/deploy/ocean-surface-auto-deploy.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/risingtidesdev/dev/ocean-surface</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StartInterval</key>
+  <integer>120</integer>
+
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>LowPriorityIO</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/private/tmp/ocean-surface-auto-deploy.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/private/tmp/ocean-surface-auto-deploy.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/risingtidesdev/.rustup/toolchains/stable-aarch64-apple-darwin/bin:/Users/risingtidesdev/.cargo/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>OCEAN_SURFACE_REPO</key>
+    <string>/Users/risingtidesdev/dev/ocean-surface</string>
+    <key>OCEAN_SURFACE_STATE_DIR</key>
+    <string>/Users/risingtidesdev/.config/ocean-surface</string>
+    <key>CARGO_TARGET_DIR</key>
+    <string>/Users/risingtidesdev/dev/ocean-surface/target</string>
+  </dict>
+</dict>
+</plist>
