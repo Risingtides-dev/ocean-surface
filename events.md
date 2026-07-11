@@ -1504,3 +1504,11 @@ area:      [infra]
 
 Hardened live launchd reinstall after the corrected runner deployment exposed an asynchronous bootout/bootstrap race: proxy re-registration succeeded but the auto-deploy job's immediate bootstrap returned launchd error 5 until retried moments later. Recovered the live job without sudo, confirmed it executes the stable installed runner and exits CURRENT at the selected revision, and added bounded one-second bootstrap retries for both jobs so an idempotent reinstall cannot strand either supervisor.
 _________________________________________________________________________________
+time:      [07:13pm] [07-11-26]
+agent:     [omp] [gpt-5.6-sol]
+worktree:  /tmp/ocean-autodeploy (origin/main detached)
+type:      [bug-report]
+area:      [infra]
+
+Fixed another live-only failure found by exercising the actual launchd watcher after main advanced: killing an in-flight deploy during reinstall could leave the mkdir lock behind, and every later interval exited SKIP forever. The lock now records its owner PID, preserves a lock held by a live process, reclaims a missing/dead-owner lock with race-safe mkdir, and always removes its PID directory on normal cleanup. Added a fail-before/pass-after stale-lock no-op regression (16 total assertions).
+_________________________________________________________________________________

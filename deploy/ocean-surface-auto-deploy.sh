@@ -89,9 +89,18 @@ fi
 
 mkdir -p "$STATE_DIR"
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  echo "SKIP: another surface deployment is already running"
-  exit 0
+  owner_pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+  if [[ "$owner_pid" =~ ^[0-9]+$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
+    echo "SKIP: surface deployment already running as pid $owner_pid"
+    exit 0
+  fi
+  rm -rf "$LOCK_DIR"
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo "SKIP: another surface deployment acquired the lock"
+    exit 0
+  fi
 fi
+printf '%s\n' "$$" > "$LOCK_DIR/pid"
 
 worktree=""
 cleanup() {

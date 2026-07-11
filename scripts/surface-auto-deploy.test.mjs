@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -58,6 +58,8 @@ try {
     env: { ...process.env, OCEAN_SURFACE_STATE_DIR: noOpState, OCEAN_SURFACE_NO_RESTART: '1' },
     stdio: 'pipe',
   });
+  mkdirSync(join(noOpState, 'auto-deploy.lock'));
+  writeFileSync(join(noOpState, 'auto-deploy.lock', 'pid'), '99999999\n');
   const noOp = spawnSync(script, [], {
     env: {
       ...process.env,
@@ -70,12 +72,13 @@ try {
   });
   assert.equal(noOp.status, 0, noOp.stderr);
   assert.match(noOp.stdout, new RegExp(`CURRENT: ${mainRevision}`));
+  assert.equal(existsSync(join(noOpState, 'auto-deploy.lock')), false, 'a stale deployment lock must be reclaimed');
 
   assert.ok(proxyPlist.includes('/Users/risingtidesdev/.config/ocean-surface/bin/ocean-surface-proxy.sh'));
   assert.ok(deployPlist.includes('/Users/risingtidesdev/.config/ocean-surface/bin/ocean-surface-auto-deploy.sh'));
   assert.ok(!`${proxyPlist}\n${deployPlist}`.includes('/dev/ocean-surface/deploy/ocean-surface-'));
 
-  console.log('ALL PASS: surface atomic deployment promotion (15 assertions)');
+  console.log('ALL PASS: surface atomic deployment promotion (16 assertions)');
 } finally {
   rmSync(root, { recursive: true, force: true });
 }
