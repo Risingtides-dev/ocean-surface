@@ -263,20 +263,25 @@ pub(crate) fn group_for_panel(
         }
         let proj = proj.unwrap(); // safe: has_wts ensures Some
         let wts = &proj.worktrees;
-        let mut wt_groups: Vec<WorktreeGroup> = Vec::new();
+        // Materialize every registered worktree up front. Empty worktrees are
+        // still real project context and must remain visible in the drawer.
+        let mut wt_groups: Vec<WorktreeGroup> = wts
+            .iter()
+            .map(|wt| WorktreeGroup {
+                root: wt.path.clone(),
+                branch: wt.branch.clone(),
+                sessions: Vec::new(),
+            })
+            .collect();
         let mut unmatched: Vec<SessionSummary> = Vec::new();
         for s in &sec.sessions {
             let root = session_root(s);
             let matching = wts.iter().find(|wt| is_path_prefix(&wt.path, root));
             if let Some(wt) = matching {
-                let branch = wt.branch.clone();
-                match wt_groups.iter_mut().find(|g| g.root == wt.path) {
-                    Some(g) => g.sessions.push(s.clone()),
-                    None => wt_groups.push(WorktreeGroup {
-                        root: wt.path.clone(),
-                        branch,
-                        sessions: vec![s.clone()],
-                    }),
+                // Every registered worktree was seeded above, so a match always
+                // resolves to an existing group.
+                if let Some(group) = wt_groups.iter_mut().find(|g| g.root == wt.path) {
+                    group.sessions.push(s.clone());
                 }
             } else {
                 unmatched.push(s.clone());
@@ -757,124 +762,6 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                     </button>
                 </div>
 
-                <div class="sessions-panel__actions">
-                    <button class="sessions-panel__new-btn" type="button" on:click=start_chat>
-                        "New chat"
-                    </button>
-
-                    <Show when=move || action_mode.get() == ProjectAction::None>
-                        <button
-                            class="sessions-create__reveal"
-                            type="button"
-                            on:click=move |_| {
-                                daemon.get_value().project_create_error.set(None);
-                                action_mode.set(ProjectAction::ExistingProject);
-                            }
-                        >
-                            "Existing project"
-                        </button>
-                        <button
-                            class="sessions-create__reveal"
-                            type="button"
-                            on:click=move |_| {
-                                daemon.get_value().project_create_error.set(None);
-                                new_parent.set("~/dev".to_string());
-                                action_mode.set(ProjectAction::NewProject);
-                            }
-                        >
-                            "+ New project"
-                        </button>
-                    </Show>
-
-                    <Show when=move || action_mode.get() == ProjectAction::ExistingProject>
-                        <form class="sessions-create" on:submit=add_existing_project>
-                            <div class="sessions-create__head">
-                                <span class="sessions-create__head-title">"Existing project"</span>
-                                <button class="sessions-create__cancel" type="button" disabled=move || daemon.get_value().project_create_pending.get() on:click=move |_| cancel_project()>
-                                    "Cancel"
-                                </button>
-                            </div> node_ref=existing_input_ref
-                            <div class="sessions-create__inputs">
-                                <input
-                                    class="sessions-create__input"
-                                    type="text"
-                                    placeholder="Existing project folder path"
-                                    aria-label="Existing project folder path"
-                                    autocomplete="off"
-                                    spellcheck="false"
-                                    prop:value=move || existing_path.get()
-                                    on:input=move |ev| existing_path.set(event_target_value(&ev))
-                                />
-                            </div>
-                            <button
-                                class="sessions-create__btn"
-                                type="submit"
-                                disabled=move || !existing_can_submit()
-                                    || daemon.get_value().project_create_pending.get()
-                            >
-                                {move || if daemon.get_value().project_create_pending.get() {
-                                    "Adding…"
-                                } else {
-                                    "Add project"
-                                }}
-                            </button>
-                            <Show when=move || daemon.get_value().project_create_error.get().is_some()>
-                                <div class="sessions-create__error">
-                                    {move || daemon.get_value().project_create_error.get().unwrap_or_default()}
-                                </div>
-                            </Show>
-                        </form>
-                    </Show>
-
-                    <Show when=move || action_mode.get() == ProjectAction::NewProject>
-                        <form class="sessions-create" on:submit=create_new_project>
-                            <div class="sessions-create__head">
-                                <span class="sessions-create__head-title">"New project"</span>
-                                <button class="sessions-create__cancel" type="button" disabled=move || daemon.get_value().project_create_pending.get() on:click=move |_| cancel_project()>
-                                    "Cancel"
-                                </button>
-                            </div> node_ref=new_input_ref
-                            <div class="sessions-create__inputs">
-                                <input
-                                    class="sessions-create__input"
-                                    type="text"
-                                    placeholder="Project name"
-                                    aria-label="Project name"
-                                    autocomplete="off"
-                                    prop:value=move || new_name.get()
-                                    on:input=move |ev| new_name.set(event_target_value(&ev))
-                                />
-                                <input
-                                    class="sessions-create__input"
-                                    type="text"
-                                    placeholder="Parent folder (default: ~/dev)"
-                                    aria-label="Parent folder"
-                                    autocomplete="off"
-                                    spellcheck="false"
-                                    prop:value=move || new_parent.get()
-                                    on:input=move |ev| new_parent.set(event_target_value(&ev))
-                                />
-                            </div>
-                            <button
-                                class="sessions-create__btn"
-                                type="submit"
-                                disabled=move || !new_can_submit()
-                                    || daemon.get_value().project_create_pending.get()
-                            >
-                                {move || if daemon.get_value().project_create_pending.get() {
-                                    "Creating…"
-                                } else {
-                                    "Create project"
-                                }}
-                            </button>
-                            <Show when=move || daemon.get_value().project_create_error.get().is_some()>
-                                <div class="sessions-create__error">
-                                    {move || daemon.get_value().project_create_error.get().unwrap_or_default()}
-                                </div>
-                            </Show>
-                        </form>
-                    </Show>
-                </div>
 
                 <div class="sessions-panel__list">
                     <For
@@ -1055,6 +942,126 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                         "No sessions yet — start a chat or create a project."
                     </div>
                 </Show>
+
+                <div class="sessions-panel__actions">
+                    <button class="sessions-panel__new-btn" type="button" on:click=start_chat>
+                        "New chat"
+                    </button>
+
+                    <Show when=move || action_mode.get() == ProjectAction::None>
+                        <button
+                            class="sessions-create__reveal"
+                            type="button"
+                            on:click=move |_| {
+                                daemon.get_value().project_create_error.set(None);
+                                action_mode.set(ProjectAction::ExistingProject);
+                            }
+                        >
+                            "Existing project"
+                        </button>
+                        <button
+                            class="sessions-create__reveal"
+                            type="button"
+                            on:click=move |_| {
+                                daemon.get_value().project_create_error.set(None);
+                                new_parent.set("~/dev".to_string());
+                                action_mode.set(ProjectAction::NewProject);
+                            }
+                        >
+                            "+ New project"
+                        </button>
+                    </Show>
+
+                    <Show when=move || action_mode.get() == ProjectAction::ExistingProject>
+                        <form class="sessions-create" on:submit=add_existing_project>
+                            <div class="sessions-create__head">
+                                <span class="sessions-create__head-title">"Existing project"</span>
+                                <button class="sessions-create__cancel" type="button" disabled=move || daemon.get_value().project_create_pending.get() on:click=move |_| cancel_project()>
+                                    "Cancel"
+                                </button>
+                            </div> node_ref=existing_input_ref
+                            <div class="sessions-create__inputs">
+                                <input
+                                    class="sessions-create__input"
+                                    type="text"
+                                    placeholder="Existing project folder path"
+                                    aria-label="Existing project folder path"
+                                    autocomplete="off"
+                                    spellcheck="false"
+                                    prop:value=move || existing_path.get()
+                                    on:input=move |ev| existing_path.set(event_target_value(&ev))
+                                />
+                            </div>
+                            <button
+                                class="sessions-create__btn"
+                                type="submit"
+                                disabled=move || !existing_can_submit()
+                                    || daemon.get_value().project_create_pending.get()
+                            >
+                                {move || if daemon.get_value().project_create_pending.get() {
+                                    "Adding…"
+                                } else {
+                                    "Add project"
+                                }}
+                            </button>
+                            <Show when=move || daemon.get_value().project_create_error.get().is_some()>
+                                <div class="sessions-create__error">
+                                    {move || daemon.get_value().project_create_error.get().unwrap_or_default()}
+                                </div>
+                            </Show>
+                        </form>
+                    </Show>
+
+                    <Show when=move || action_mode.get() == ProjectAction::NewProject>
+                        <form class="sessions-create" on:submit=create_new_project>
+                            <div class="sessions-create__head">
+                                <span class="sessions-create__head-title">"New project"</span>
+                                <button class="sessions-create__cancel" type="button" disabled=move || daemon.get_value().project_create_pending.get() on:click=move |_| cancel_project()>
+                                    "Cancel"
+                                </button>
+                            </div> node_ref=new_input_ref
+                            <div class="sessions-create__inputs">
+                                <input
+                                    class="sessions-create__input"
+                                    type="text"
+                                    placeholder="Project name"
+                                    aria-label="Project name"
+                                    autocomplete="off"
+                                    prop:value=move || new_name.get()
+                                    on:input=move |ev| new_name.set(event_target_value(&ev))
+                                />
+                                <input
+                                    class="sessions-create__input"
+                                    type="text"
+                                    placeholder="Parent folder (default: ~/dev)"
+                                    aria-label="Parent folder"
+                                    autocomplete="off"
+                                    spellcheck="false"
+                                    prop:value=move || new_parent.get()
+                                    on:input=move |ev| new_parent.set(event_target_value(&ev))
+                                />
+                            </div>
+                            <button
+                                class="sessions-create__btn"
+                                type="submit"
+                                disabled=move || !new_can_submit()
+                                    || daemon.get_value().project_create_pending.get()
+                            >
+                                {move || if daemon.get_value().project_create_pending.get() {
+                                    "Creating…"
+                                } else {
+                                    "Create project"
+                                }}
+                            </button>
+                            <Show when=move || daemon.get_value().project_create_error.get().is_some()>
+                                <div class="sessions-create__error">
+                                    {move || daemon.get_value().project_create_error.get().unwrap_or_default()}
+                                </div>
+                            </Show>
+                        </form>
+                    </Show>
+                </div>
+
             </div>
         </div>
     }
@@ -1508,6 +1515,41 @@ mod tests {
         assert!(!section_contains_session(sec, "missing"));
         assert_eq!(section_total_sessions(sec), 4);
         assert_eq!(section_newest_ts(sec), "2026-07-05T12:03:00Z");
+    }
+
+    #[test]
+    fn registered_worktrees_render_even_without_sessions() {
+        let projects = vec![project_with_worktrees(
+            "owned",
+            "Owned",
+            "/repo-main",
+            &[
+                ("/repo-feature", Some("feature/redesign")),
+                ("/repo-empty", Some("feature/empty")),
+            ],
+        )];
+        let sessions = vec![session(
+            "feature-root",
+            "/repo-feature",
+            Some("/repo-feature"),
+            Some(owner("owned", "Owned")),
+            Some("feature/redesign"),
+            1,
+            "2026-07-05T12:01:00Z",
+        )];
+
+        let sections = group_for_panel(&sessions, &projects, None);
+        let worktrees = sections[0]
+            .worktrees
+            .as_ref()
+            .expect("registered worktrees should always render");
+
+        assert_eq!(worktrees.len(), 2);
+        assert_eq!(worktrees[0].root, "/repo-feature");
+        assert_eq!(worktrees[0].sessions.len(), 1);
+        assert_eq!(worktrees[1].root, "/repo-empty");
+        assert_eq!(worktrees[1].branch.as_deref(), Some("feature/empty"));
+        assert!(worktrees[1].sessions.is_empty());
     }
 
     #[test]
