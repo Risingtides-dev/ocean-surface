@@ -620,3 +620,107 @@ pub fn Stop() -> impl IntoView {
         </svg>
     }
 }
+
+/// Single person — human room participant (replaces "🧑"). Rounded 2px
+/// stroke to match the Groups two-person mark. (QA-006)
+#[component]
+pub fn Person() -> impl IntoView {
+    view! {
+        <svg class="icon icon--stroke" viewBox="0 0 24 24" width="1em" height="1em"
+             fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+            <circle cx="12" cy="7" r="4" />
+        </svg>
+    }
+}
+
+/// Robot head — agent room participant (replaces "🤖"). Antenna + two eye
+/// ticks so it reads "agent" at chip size. (QA-006)
+#[component]
+pub fn Robot() -> impl IntoView {
+    view! {
+        <svg class="icon icon--stroke" viewBox="0 0 24 24" width="1em" height="1em"
+             fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="5" y="9" width="14" height="10" rx="2" />
+            <line x1="12" y1="5" x2="12" y2="9" />
+            <circle cx="12" cy="4" r="1" />
+            <line x1="9" y1="13" x2="9" y2="15" />
+            <line x1="15" y1="13" x2="15" y2="15" />
+        </svg>
+    }
+}
+
+/// Cog — bot room participant (replaces "⚙"). Hub + rim + eight teeth.
+/// (QA-006)
+#[component]
+pub fn Cog() -> impl IntoView {
+    view! {
+        <svg class="icon icon--stroke" viewBox="0 0 24 24" width="1em" height="1em"
+             fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="6" />
+            <circle cx="12" cy="12" r="2" />
+            <line x1="12" y1="3" x2="12" y2="6" />
+            <line x1="12" y1="18" x2="12" y2="21" />
+            <line x1="3" y1="12" x2="6" y2="12" />
+            <line x1="18" y1="12" x2="21" y2="12" />
+            <line x1="5.6" y1="5.6" x2="7.8" y2="7.8" />
+            <line x1="16.2" y1="16.2" x2="18.4" y2="18.4" />
+            <line x1="5.6" y1="18.4" x2="7.8" y2="16.2" />
+            <line x1="16.2" y1="7.8" x2="18.4" y2="5.6" />
+        </svg>
+    }
+}
+
+/// Wrench — tool room participant (replaces "🔧"). (QA-006)
+#[component]
+pub fn Wrench() -> impl IntoView {
+    view! {
+        <svg class="icon icon--stroke" viewBox="0 0 24 24" width="1em" height="1em"
+             fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+        </svg>
+    }
+}
+
+/// Four-point spark — system room participant / system rows (replaces "✦").
+/// (QA-006)
+#[component]
+pub fn Spark() -> impl IntoView {
+    view! {
+        <svg class="icon icon--stroke" viewBox="0 0 24 24" width="1em" height="1em"
+             fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 3l2.2 6.8L21 12l-6.8 2.2L12 21l-2.2-6.8L3 12l6.8-2.2z" />
+        </svg>
+    }
+}
+
+/// Diagonal cross — close/dismiss affordance (replaces "✕"). (QA-006)
+#[component]
+pub fn Close() -> impl IntoView {
+    view! {
+        <svg class="icon icon--stroke" viewBox="0 0 24 24" width="1em" height="1em"
+             fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="6" y1="6" x2="18" y2="18" />
+            <line x1="18" y1="6" x2="6" y2="18" />
+        </svg>
+    }
+}
+
+/// Clockwise circular arrow — refresh affordance (replaces "↻"). (QA-006)
+#[component]
+pub fn Refresh() -> impl IntoView {
+    view! {
+        <svg class="icon icon--stroke" viewBox="0 0 24 24" width="1em" height="1em"
+             fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="23 4 23 10 17 10" />
+            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+        </svg>
+    }
+}

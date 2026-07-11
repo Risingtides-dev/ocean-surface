@@ -906,6 +906,11 @@ fn FileTreeNode(entry: Value, depth: usize, component_id: String, daemon: Daemon
         .unwrap_or("")
         .to_string();
     let is_dir = entry.get("type").and_then(|v| v.as_str()) == Some("dir");
+    // Secret-bearing filenames (.env, .env.*, *.pem, *.key, id_rsa*) are
+    // hidden by default, the way editors treat dotenv files (QA-004).
+    if !is_dir && crate::deck::files::is_secret_file(&name) {
+        return ().into_any();
+    }
     let children = entry
         .get("children")
         .and_then(|v| v.as_array())

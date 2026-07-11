@@ -49,6 +49,44 @@ pub(crate) fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
+/// Map a session cwd to a listable file-tree root. `None` for roots the
+/// trees must not follow: an unset cwd (`""`), the filesystem root (`/`),
+/// and the projectless-chat pin ([`crate::daemon::CHAT_WORKSPACE_ROOT`],
+/// `/tmp`). The daemon denies fs listing outside `$HOME`, so following the
+/// chat pin after "New chat" would strand an "access denied: /tmp is outside
+/// home directory" error in the tree instead of the clean empty state
+/// (QA-007).
+pub(crate) fn browsable_root(cwd: &str) -> Option<&str> {
+    let trimmed = cwd.trim();
+    let normalized = if trimmed.len() > 1 {
+        trimmed.trim_end_matches('/')
+    } else {
+        trimmed
+    };
+    if normalized.is_empty()
+        || normalized == "/"
+        || normalized == crate::daemon::CHAT_WORKSPACE_ROOT
+    {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+/// True when a filename matches a secret-bearing pattern that the surface
+/// file trees hide by default (the way editors treat dotenv files): dotenv
+/// files (`.env`, `.env.*`), key material (`*.pem`, `*.key`), and SSH
+/// identities (`id_rsa*`). Deliberately narrow — ordinary dotfiles people
+/// navigate to (`.gitignore`, `.github`, …) stay visible (QA-004).
+pub(crate) fn is_secret_file(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower == ".env"
+        || lower.starts_with(".env.")
+        || lower.ends_with(".pem")
+        || lower.ends_with(".key")
+        || lower.starts_with("id_rsa")
+}
+
 // ---------------------------------------------------------------------------
 // Shared callback type
 // ---------------------------------------------------------------------------
@@ -61,14 +99,9 @@ type DirCallback = Arc<dyn Fn(String) + Send + Sync>;
 
 #[component]
 pub fn FilesPanel(daemon: Daemon) -> impl IntoView {
-    let panel_root: RwSignal<Option<String>> = {
-        let cwd = daemon.cwd.get_untracked();
-        if cwd.is_empty() || cwd == "/" {
-            RwSignal::new(None)
-        } else {
-            RwSignal::new(Some(cwd))
-        }
-    };
+    let panel_root: RwSignal<Option<String>> = RwSignal::new(
+        browsable_root(&daemon.cwd.get_untracked()).map(str::to_string),
+    );
     let daemon_url = daemon.url;
 
     let dir_cache: RwSignal<HashMap<String, Vec<FsDirEntry>>> = RwSignal::new(HashMap::new());
@@ -76,6 +109,9 @@ pub fn FilesPanel(daemon: Daemon) -> impl IntoView {
     let load_error: RwSignal<Option<String>> = RwSignal::new(None);
     let expanded: RwSignal<HashSet<String>> = RwSignal::new(HashSet::new());
     let watcher_active: RwSignal<bool> = RwSignal::new(false);
+    // True while the root came from an explicit "Choose folder…" pick — a
+    // session reset then keeps the user's pick instead of clearing the tree.
+    let manual_root: RwSignal<bool> = RwSignal::new(false);
 
     // ---- Shared closures (Arc for Send+Sync, clone before capturing) ----
 
@@ -137,6 +173,8 @@ pub fn FilesPanel(daemon: Daemon) -> impl IntoView {
             spawn_local(async move {
                 if let Some(folder) = crate::host::pick_folder().await {
                     panel_root.set(Some(folder.clone()));
+                    manual_root.set(true);
+                    load_error.set(None);
                     load_dir(folder.clone());
                     if crate::host::running_in_tauri() {
                         let paths: Vec<String> = vec![folder];
@@ -179,14 +217,23 @@ pub fn FilesPanel(daemon: Daemon) -> impl IntoView {
         let cwd_sig = daemon.cwd;
         Effect::new(move |_| {
             let cwd = cwd_sig.get();
-            if cwd.is_empty() || cwd == "/" {
+            let Some(root) = browsable_root(&cwd).map(str::to_string) else {
+                // Session reset ("New chat" pins cwd to /tmp) or no session:
+                // drop any lingering load error and, unless the user picked a
+                // folder explicitly, return to the clean empty state (QA-007).
+                load_error.set(None);
+                if !manual_root.get_untracked() && panel_root.get_untracked().is_some() {
+                    panel_root.set(None);
+                }
                 return;
+            };
+            if panel_root.get_untracked().as_deref() != Some(root.as_str()) {
+                panel_root.set(Some(root.clone()));
+                manual_root.set(false);
+                load_error.set(None);
             }
-            if panel_root.get_untracked().as_deref() != Some(cwd.as_str()) {
-                panel_root.set(Some(cwd.clone()));
-            }
-            if !dir_cache.with_untracked(|c| c.contains_key(&cwd)) {
-                load_dir(cwd);
+            if !dir_cache.with_untracked(|c| c.contains_key(&root)) {
+                load_dir(root);
             }
         });
     }
@@ -241,7 +288,7 @@ pub fn FilesPanel(daemon: Daemon) -> impl IntoView {
                                     }
                                     title="Refresh"
                                 >
-                                    "↻"
+                                    <crate::icons::Refresh />
                                 </button>
                             </div>
                         }.into_any(),
@@ -506,5 +553,54 @@ mod tests {
         assert_eq!(basename("/foo/bar/baz.txt"), "baz.txt");
         assert_eq!(basename("just_a_file"), "just_a_file");
         assert_eq!(basename("/root/"), "");
+    }
+
+    #[test]
+    fn browsable_root_rejects_unset_and_fs_root() {
+        assert_eq!(browsable_root(""), None);
+        assert_eq!(browsable_root("   "), None);
+        assert_eq!(browsable_root("/"), None);
+    }
+
+    #[test]
+    fn browsable_root_rejects_chat_workspace_pin() {
+        // "New chat" pins the session cwd to CHAT_WORKSPACE_ROOT (/tmp); the
+        // daemon denies listing it, so the trees must not follow it (QA-007).
+        assert_eq!(browsable_root(crate::daemon::CHAT_WORKSPACE_ROOT), None);
+        assert_eq!(browsable_root("/tmp/"), None);
+    }
+
+    #[test]
+    fn browsable_root_passes_real_project_roots() {
+        assert_eq!(
+            browsable_root("/Users/dev/project"),
+            Some("/Users/dev/project")
+        );
+        // /tmp is only rejected exactly — subdirs of it are still listable
+        // roots as far as this helper is concerned (the daemon still gates).
+        assert_eq!(browsable_root("/tmp/scratch"), Some("/tmp/scratch"));
+    }
+
+    #[test]
+    fn secret_files_hidden() {
+        assert!(is_secret_file(".env"));
+        assert!(is_secret_file(".env.local"));
+        assert!(is_secret_file(".env.production"));
+        assert!(is_secret_file(".ENV"));
+        assert!(is_secret_file("server.pem"));
+        assert!(is_secret_file("private.key"));
+        assert!(is_secret_file("id_rsa"));
+        assert!(is_secret_file("id_rsa.pub"));
+    }
+
+    #[test]
+    fn ordinary_dotfiles_stay_visible() {
+        assert!(!is_secret_file(".gitignore"));
+        assert!(!is_secret_file(".github"));
+        assert!(!is_secret_file(".envrc")); // direnv config, not a dotenv file
+        assert!(!is_secret_file("environment.rs"));
+        assert!(!is_secret_file("keyboard.rs"));
+        assert!(!is_secret_file("monkey.txt"));
+        assert!(!is_secret_file("Cargo.toml"));
     }
 }

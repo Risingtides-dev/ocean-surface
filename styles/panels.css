@@ -914,6 +914,8 @@
 
 .rooms-chip__glyph {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
   color: var(--fg-3);
   font-size: 11px;
 }
@@ -978,6 +980,8 @@
 }
 
 .rooms-msg__glyph {
+  display: inline-flex;
+  align-items: center;
   color: var(--fg-3);
   font-size: 11px;
 }

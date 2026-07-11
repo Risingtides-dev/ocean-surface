@@ -359,15 +359,18 @@
   text-align: center;
   padding: 40px 24px;
 }
+/* One tier up from the launch values (--fg-2 / --fg-3): the near-black
+   stage left the empty-state copy too dim to read at reduced brightness
+   (QA-008). Tokens only — no bespoke colors. */
 .ocean-council-stage__empty-title {
   font-size: 15px;
   font-weight: 600;
-  color: var(--fg-2);
+  color: var(--fg);
 }
 .ocean-council-stage__empty-body {
   font-size: 12px;
   line-height: 1.6;
-  color: var(--fg-3);
+  color: var(--fg-2);
   max-width: 380px;
 }
 
