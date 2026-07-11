@@ -2,7 +2,7 @@
   "name": "ocean-surface",
   "displayName": "Ocean",
   "description": "Ocean agent surface for VS Code and Cursor — full ACP client with IDE context, filesystem, and terminal integration via ocean-acp.",
-  "version": "0.1.3",
+  "version": "0.1.42",
   "publisher": "risingtides",
   "license": "MIT",
   "repository": {
@@ -13,20 +13,49 @@
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["AI", "Chat"],
-  "keywords": ["ocean", "acp", "agent", "cursor", "ai"],
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "keywords": [
+    "ocean",
+    "acp",
+    "agent",
+    "cursor",
+    "ai"
+  ],
   "activationEvents": [
     "onStartupFinished",
     "onView:ocean.chat",
     "onView:ocean.panelChat",
     "onWebviewPanel:ocean.chatEditor",
+    "onCommand:ocean.commandMenu",
     "onCommand:ocean.openSidebar",
     "onCommand:ocean.openPanel",
     "onCommand:ocean.openEditor",
     "onCommand:ocean.connect",
     "onCommand:ocean.newSession",
     "onCommand:ocean.sendSelection",
+    "onCommand:ocean.askCurrentFile",
+    "onCommand:ocean.askWorkspaceFiles",
+    "onCommand:ocean.fixDiagnostics",
+    "onCommand:ocean.reviewWorkspaceChanges",
+    "onCommand:ocean.showLastEdits",
+    "onCommand:ocean.revertLastEdit",
+    "onCommand:ocean.revertEditSet",
     "onCommand:ocean.inlineAssist",
+    "onCommand:ocean.openRecentSession",
+    "onCommand:ocean.refreshSessions",
+    "onCommand:ocean.renameSession",
+    "onCommand:ocean.copyLastResponse",
+    "onCommand:ocean.copyTranscript",
+    "onCommand:ocean.selectModel",
+    "onCommand:ocean.selectThinkingLevel",
+    "onCommand:ocean.toggleEditorContext",
+    "onCommand:ocean.setPermissionMode",
+    "onCommand:ocean.toggleTrafficLog",
+    "onCommand:ocean.configureDaemonUrl",
+    "onCommand:ocean.configureAcpPath",
     "onCommand:ocean.cancelTurn",
     "onCommand:ocean.disconnect"
   ],
@@ -66,6 +95,11 @@
     },
     "commands": [
       {
+        "command": "ocean.commandMenu",
+        "title": "Ocean: Command Menu",
+        "icon": "$(menu)"
+      },
+      {
         "command": "ocean.openSidebar",
         "title": "Ocean: Open in Sidebar",
         "icon": "$(layout-sidebar-left)"
@@ -95,9 +129,103 @@
         "title": "Ocean: Ask About Selection"
       },
       {
+        "command": "ocean.askCurrentFile",
+        "title": "Ocean: Ask About Current File"
+      },
+      {
+        "command": "ocean.askWorkspaceFiles",
+        "title": "Ocean: Ask About Files",
+        "icon": "$(files)"
+      },
+      {
+        "command": "ocean.fixDiagnostics",
+        "title": "Ocean: Fix Diagnostics",
+        "icon": "$(wrench)"
+      },
+      {
+        "command": "ocean.reviewWorkspaceChanges",
+        "title": "Ocean: Review Workspace Changes",
+        "icon": "$(git-compare)"
+      },
+      {
+        "command": "ocean.showLastEdits",
+        "title": "Ocean: Show Last Edits",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "ocean.revertLastEdit",
+        "title": "Ocean: Revert Last Edit",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "ocean.revertEditSet",
+        "title": "Ocean: Revert Edit Set",
+        "icon": "$(discard)"
+      },
+      {
         "command": "ocean.inlineAssist",
         "title": "Ocean: Inline Assist",
-        "icon": "$(sparkle)"
+        "icon": "$(edit)"
+      },
+      {
+        "command": "ocean.openRecentSession",
+        "title": "Ocean: Open Recent Session",
+        "icon": "$(history)"
+      },
+      {
+        "command": "ocean.refreshSessions",
+        "title": "Ocean: Refresh Sessions",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "ocean.renameSession",
+        "title": "Ocean: Rename Current Session",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "ocean.copyLastResponse",
+        "title": "Ocean: Copy Last Response",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "ocean.copyTranscript",
+        "title": "Ocean: Copy Transcript",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "ocean.selectModel",
+        "title": "Ocean: Select Model",
+        "icon": "$(server-process)"
+      },
+      {
+        "command": "ocean.selectThinkingLevel",
+        "title": "Ocean: Set Thinking Level",
+        "icon": "$(symbol-constant)"
+      },
+      {
+        "command": "ocean.toggleEditorContext",
+        "title": "Ocean: Toggle Editor Context",
+        "icon": "$(symbol-field)"
+      },
+      {
+        "command": "ocean.setPermissionMode",
+        "title": "Ocean: Set Permission Mode",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "ocean.toggleTrafficLog",
+        "title": "Ocean: Toggle Traffic Log",
+        "icon": "$(output)"
+      },
+      {
+        "command": "ocean.configureDaemonUrl",
+        "title": "Ocean: Configure Daemon URL",
+        "icon": "$(link)"
+      },
+      {
+        "command": "ocean.configureAcpPath",
+        "title": "Ocean: Configure ACP Path",
+        "icon": "$(file-binary)"
       },
       {
         "command": "ocean.cancelTurn",
@@ -111,38 +239,6 @@
       }
     ],
     "menus": {
-      "view/title": [
-        {
-          "command": "ocean.openEditor",
-          "when": "view == ocean.chat || view == ocean.panelChat",
-          "group": "navigation@0"
-        },
-        {
-          "command": "ocean.openPanel",
-          "when": "view == ocean.chat",
-          "group": "navigation@0"
-        },
-        {
-          "command": "ocean.newSession",
-          "when": "(view == ocean.chat || view == ocean.panelChat) && ocean.connected",
-          "group": "navigation@1"
-        },
-        {
-          "command": "ocean.cancelTurn",
-          "when": "(view == ocean.chat || view == ocean.panelChat) && ocean.turnInProgress",
-          "group": "navigation@2"
-        },
-        {
-          "command": "ocean.connect",
-          "when": "(view == ocean.chat || view == ocean.panelChat) && !ocean.connected",
-          "group": "navigation@1"
-        },
-        {
-          "command": "ocean.disconnect",
-          "when": "(view == ocean.chat || view == ocean.panelChat) && ocean.connected",
-          "group": "navigation@3"
-        }
-      ],
       "editor/context": [
         {
           "command": "ocean.inlineAssist",
@@ -153,6 +249,28 @@
           "command": "ocean.sendSelection",
           "when": "editorHasSelection",
           "group": "ocean@2"
+        },
+        {
+          "command": "ocean.askCurrentFile",
+          "when": "editorTextFocus && !editorHasSelection",
+          "group": "ocean@2"
+        },
+        {
+          "command": "ocean.askWorkspaceFiles",
+          "when": "editorTextFocus",
+          "group": "ocean@2"
+        },
+        {
+          "command": "ocean.fixDiagnostics",
+          "when": "editorTextFocus",
+          "group": "ocean@3"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "ocean.askWorkspaceFiles",
+          "when": "resourceScheme == file",
+          "group": "ocean@1"
         }
       ]
     },
@@ -185,7 +303,10 @@
         },
         "ocean.autoApprovePermissions": {
           "type": "string",
-          "enum": ["ask", "allowAll"],
+          "enum": [
+            "ask",
+            "allowAll"
+          ],
           "default": "ask",
           "description": "How tool permission requests from the agent are handled."
         },
@@ -198,6 +319,29 @@
           "type": "boolean",
           "default": false,
           "description": "Log ACP JSON-RPC traffic to the Ocean output channel."
+        },
+        "ocean.thinkingLevel": {
+          "type": "string",
+          "enum": [
+            "",
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "enumItemLabels": [
+            "Daemon default",
+            "Off",
+            "Minimal",
+            "Low",
+            "Medium",
+            "High",
+            "Extra high"
+          ],
+          "default": "",
+          "description": "Per-turn Ocean thinking-level override. Empty leaves the daemon default in force."
         }
       }
     }
