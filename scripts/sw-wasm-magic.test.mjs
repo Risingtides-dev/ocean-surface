@@ -34,7 +34,7 @@ globalThis.caches = {
   delete: async () => false,
 };
 
-const { hasWasmMagic } = require(swPath);
+const { hasWasmMagic, isLoopbackHostname } = require(swPath);
 
 const good = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]).buffer;
 assert.strictEqual(hasWasmMagic(good), true, 'valid wasm magic should pass');
@@ -53,4 +53,12 @@ assert.strictEqual(hasWasmMagic(new Uint8Array([0x3c, 0x21, 0x64, 0x6f, 0x63]).b
 // Accepts a TypedArray view directly, not only an ArrayBuffer.
 assert.strictEqual(hasWasmMagic(new Uint8Array([0x00, 0x61, 0x73, 0x6d])), true, 'Uint8Array input should pass');
 
-console.log('ALL PASS: hasWasmMagic (8 assertions)');
+// Loopback is a development surface: its worker must retire instead of
+// intercepting navigations and pinning the emergency reconnect shell.
+assert.strictEqual(isLoopbackHostname('localhost'), true, 'localhost should retire the worker');
+assert.strictEqual(isLoopbackHostname('127.0.0.1'), true, 'IPv4 loopback should retire the worker');
+assert.strictEqual(isLoopbackHostname('::1'), true, 'IPv6 loopback should retire the worker');
+assert.strictEqual(isLoopbackHostname('[::1]'), true, 'bracketed IPv6 loopback should retire the worker');
+assert.strictEqual(isLoopbackHostname('ocean.agentsworld.org'), false, 'deployed PWA should keep the worker');
+
+console.log('ALL PASS: service-worker integrity + loopback policy (13 assertions)');

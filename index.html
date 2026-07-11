@@ -565,21 +565,38 @@
         };
       })();
 
-      // Register the service worker — required for Chrome's installable-PWA
-      // criteria. Registered at root scope so it controls the whole app.
-      //
-      // Self-healing update path (OCEAN — "blank pane / 11-minute load"): a
-      // wedged old worker used to keep controlling the page and never hand off
-      // to a fresh deploy, pinning a stale shell. We now:
-      //   1. Reload once when a NEW worker takes control
-      //      (`controllerchange`) — but only after the page already had a
-      //      controller, so the very first install doesn't trigger a reload
-      //      loop.
-      //   2. Also listen for the worker's explicit SW_ACTIVATED message as a
-      //      belt-and-suspenders trigger.
-      //   3. Poll for updates on load + when the tab regains focus, so a deploy
-      //      is picked up promptly without a manual cache-clear.
-      if ('serviceWorker' in navigator) {
+      // Register the service worker for deployed/tunneled PWA installs only.
+      // Loopback is the development surface: offline caching adds no value there
+      // and can pin a wedged fallback shell across proxy restarts. Clean up every
+      // same-origin worker (including duplicate registrations created by old
+      // credentialed localhost URLs), remove only Ocean's shell caches, then
+      // reload once so an already-controlled tab returns to the network.
+      const isLoopbackHost = ['localhost', '127.0.0.1', '::1', '[::1]']
+        .includes(window.location.hostname);
+
+      if ('serviceWorker' in navigator && isLoopbackHost) {
+        window.addEventListener('load', async () => {
+          try {
+            const registrations = await navigator.serviceWorker.getRegistrations();
+            const removed = (await Promise.all(
+              registrations.map((registration) => registration.unregister())
+            )).some(Boolean);
+
+            if ('caches' in window) {
+              const cacheNames = await caches.keys();
+              await Promise.all(
+                cacheNames
+                  .filter((name) => name.startsWith('ocean-shell-'))
+                  .map((name) => caches.delete(name))
+              );
+            }
+
+            if (removed && navigator.serviceWorker.controller) {
+              window.location.reload();
+            }
+          } catch (_) {}
+        });
+      } else if ('serviceWorker' in navigator) {
         let reloading = false;
         const hadController = !!navigator.serviceWorker.controller;
 

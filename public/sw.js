@@ -27,6 +27,12 @@
 // any older shell) is dropped the instant this worker activates.
 const CACHE = 'ocean-shell-v4';
 
+function isLoopbackHostname(hostname) {
+  return ['localhost', '127.0.0.1', '::1', '[::1]'].includes(hostname);
+}
+
+const IS_LOOPBACK = isLoopbackHostname(self.location.hostname);
+
 // Precache the install-time PWA bits. The start_url ('/') is fetched on install
 // and stored under a STABLE key (OFFLINE_KEY) — separate from live navigation
 // responses — so Chrome's installable-PWA check sees a working offline
@@ -71,6 +77,28 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     (async () => {
+      // Offline interception is harmful on the local development surface: an
+      // authenticated proxy restart can strand a controlled tab on the cached
+      // emergency shell before fresh index.html can run its own cleanup. The
+      // updated worker is the only reliable escape path, so retire at activation,
+      // remove only Ocean shell caches, and navigate every client back to the
+      // network after unregistering.
+      if (IS_LOOPBACK) {
+        await self.registration.unregister();
+        const localKeys = await caches.keys();
+        await Promise.all(
+          localKeys
+            .filter((key) => key.startsWith('ocean-shell-'))
+            .map((key) => caches.delete(key))
+        );
+        const localClients = await self.clients.matchAll({ type: 'window' });
+        await Promise.all(
+          localClients.map((client) =>
+            client.navigate(client.url).catch(() => null)
+          )
+        );
+        return;
+      }
       // Drop every cache that isn't the current one — evicts the wedged v3
       // shell and any older bundle the instant this worker activates.
       const keys = await caches.keys();
@@ -196,6 +224,9 @@ async function serveWasm(request) {
 }
 
 self.addEventListener('fetch', (event) => {
+  // A loopback worker should unregister during activation. Until that finishes,
+  // never intercept another request — especially the navigation that escapes it.
+  if (IS_LOOPBACK) return;
   const url = new URL(event.request.url);
 
   // Bypass the SW entirely for live endpoints — let them hit the network
@@ -300,5 +331,5 @@ self.addEventListener('fetch', (event) => {
 // Export the pure integrity helper for unit testing under node. Guarded so it's
 // a no-op in the service-worker runtime (no CommonJS `module` there).
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { hasWasmMagic };
+  module.exports = { hasWasmMagic, isLoopbackHostname };
 }
