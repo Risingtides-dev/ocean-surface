@@ -40,6 +40,9 @@ use widget::{float_mode_active, FloatingApp};
 fn main() {
     console_error_panic_hook::set_once();
     _ = console_log::init_with_level(log::Level::Info);
+    // Boot provenance: which commit is this bundle? (`OCEAN_SURFACE_REV` is
+    // embedded by build.rs; also forces per-commit dist hashes — see build.rs.)
+    log::info!("ocean-surface {}", env!("OCEAN_SURFACE_REV"));
     if float_mode_active() {
         mount_to_body(FloatingApp);
     } else {

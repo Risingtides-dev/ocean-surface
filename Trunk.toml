@@ -22,8 +22,11 @@ open = false
 [tools]
 # Trunk auto-installs the correct wasm-bindgen-cli version when needed.
 #
-# wasm-opt is disabled (OCEAN-121). It's turned off via data-wasm-opt="0" on the
-# `rel="rust"` link in index.html — when trunk's auto-downloaded wasm-opt fails,
-# it silently ships a corrupt all-zero wasm in dist/ while reporting success,
-# serving a blank page. The pre-wasm-opt wasm-bindgen output is already valid.
-# run-surface.sh guards the dist wasm magic word after every release build.
+# wasm-opt IS enabled (data-wasm-opt="z" on the `rel="rust"` link in
+# index.html) and pinned here so every machine runs the same binaryen —
+# either the system binary when its version matches, or trunk's managed
+# download of exactly this version. Pinning plus the dist wasm magic-word
+# guards (run-surface.sh, deploy/ocean-surface-proxy.sh) close out the
+# OCEAN-121 failure mode where a broken auto-downloaded wasm-opt silently
+# shipped an all-zero wasm while reporting success.
+wasm_opt = "version_130"

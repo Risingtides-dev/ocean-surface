@@ -19,20 +19,20 @@
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
 
     <!--
-      data-wasm-opt="0" — DO NOT REMOVE (OCEAN-121).
-      Trunk's release pipeline auto-downloads & runs its own `wasm-opt`
-      (binaryen). When that step fails — no network to fetch the binary, the
-      fetched binary can't run, or the `--output` target dir is missing — trunk
-      STILL reports "✅ success" but leaves a truncated / all-zero file in dist/.
-      A real deploy then serves a blank page:
-        CompileError: expected magic word 00 61 73 6d, found 00 00 00 00
-      The wasm-bindgen output trunk produces *before* wasm-opt is already a
-      valid, runnable module, so we disable wasm-opt to ship that instead. This
-      makes `trunk build --release` produce a bootable bundle on any machine,
-      with no dependency on wasm-opt being present or working.
-      (run-surface.sh also asserts the dist wasm magic word as a build-guard.)
+      data-wasm-opt="z" — size-optimize the release wasm (OCEAN-121 follow-up).
+      Shipping the raw wasm-bindgen output produced a ~15 MB module; combined
+      with `no-transform` on the wire it took 80s+ to transfer through the
+      tunnel and ~3 minutes to compile on page load — an effectively dead page.
+      wasm-opt -Oz cuts it to ~3.7 MB.
+      The historical OCEAN-121 hazard (trunk's auto-downloaded wasm-opt failing
+      and SILENTLY leaving a truncated/all-zero dist wasm — "expected magic word
+      00 61 73 6d, found 00 00 00 00") is handled two ways:
+        1. Trunk.toml [tools] pins wasm_opt = "version_130", so trunk uses the
+           system binaryen 130 (brew) or downloads exactly that version.
+        2. run-surface.sh and deploy/ocean-surface-proxy.sh assert the dist
+           wasm magic word, so a corrupt module can never be served.
     -->
-    <link data-trunk rel="rust" href="crates/ocean-surface-ui/Cargo.toml" data-bin="ocean-surface-ui" data-wasm-opt="0" />
+    <link data-trunk rel="rust" href="crates/ocean-surface-ui/Cargo.toml" data-bin="ocean-surface-ui" data-wasm-opt="z" />
     <link data-trunk rel="css" href="styles/tokens.css" />
     <link data-trunk rel="css" href="styles/base.css" />
     <link data-trunk rel="css" href="styles/chrome.css" />
