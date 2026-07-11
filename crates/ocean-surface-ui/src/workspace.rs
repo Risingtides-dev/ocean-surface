@@ -254,9 +254,8 @@ pub fn WorkspacePane(
     // Root = session cwd, the same source the deck files panel reads. A
     // non-browsable cwd (unset, "/", or the projectless-chat /tmp pin)
     // leaves the tree empty until a real project session lands.
-    let tree_root: RwSignal<Option<String>> = RwSignal::new(
-        browsable_root(&daemon.cwd.get_untracked()).map(str::to_string),
-    );
+    let tree_root: RwSignal<Option<String>> =
+        RwSignal::new(browsable_root(&daemon.cwd.get_untracked()).map(str::to_string));
     let daemon_url = daemon.url;
 
     // Tabs: Files, Browser, and Repo are persistent; Preview tabs come and go.

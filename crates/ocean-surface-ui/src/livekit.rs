@@ -315,8 +315,14 @@ pub fn LiveKitPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
             path
         );
         spawn_local(async move {
-            match ocean_livekit_connect(&fetch_url, "web-surface", "web-surface", "Web Surface", &cb)
-                .await
+            match ocean_livekit_connect(
+                &fetch_url,
+                "web-surface",
+                "web-surface",
+                "Web Surface",
+                &cb,
+            )
+            .await
             {
                 Ok(status) => {
                     let (ok, err) = status_ok(&status);

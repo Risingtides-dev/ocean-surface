@@ -1603,15 +1603,15 @@ impl Daemon {
             // entry (QA-003). Seed the same default room the proxy would have
             // served; per-room joins still overwrite these via
             // `route_livekit_room_call`.
-            if running_as_tauri()
-                && daemon.livekit_token_path.get_untracked().trim().is_empty()
-            {
+            if running_as_tauri() && daemon.livekit_token_path.get_untracked().trim().is_empty() {
                 daemon
                     .livekit_room_id
                     .set(DEFAULT_LIVEKIT_ROOM_ID.to_string());
-                daemon.livekit_token_path.set(
-                    crate::rooms::livekit_token_path_for_room(DEFAULT_LIVEKIT_ROOM_ID),
-                );
+                daemon
+                    .livekit_token_path
+                    .set(crate::rooms::livekit_token_path_for_room(
+                        DEFAULT_LIVEKIT_ROOM_ID,
+                    ));
             }
             // Restore persisted session before connecting fresh.
             if let Some(id) = should_restore_session(
@@ -2154,8 +2154,9 @@ impl Daemon {
         // `None` (the overwhelmingly common case: no canvas, or no placed
         // components) omits the field entirely, so non-canvas sessions keep a
         // byte-for-byte unchanged wire payload.
-        let canvas_context =
-            self.canvas_patches.with_untracked(|p| CanvasContext::from_entries(p));
+        let canvas_context = self
+            .canvas_patches
+            .with_untracked(|p| CanvasContext::from_entries(p));
         // Mint a fresh per-turn decision token (OCEAN-185 / OCEAN-314). Store
         // it in the signal so `decide_permission` can replay the same value.
         // Must be minted BEFORE the spawn so the same token covers both the

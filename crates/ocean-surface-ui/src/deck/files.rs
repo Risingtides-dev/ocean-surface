@@ -99,9 +99,8 @@ type DirCallback = Arc<dyn Fn(String) + Send + Sync>;
 
 #[component]
 pub fn FilesPanel(daemon: Daemon) -> impl IntoView {
-    let panel_root: RwSignal<Option<String>> = RwSignal::new(
-        browsable_root(&daemon.cwd.get_untracked()).map(str::to_string),
-    );
+    let panel_root: RwSignal<Option<String>> =
+        RwSignal::new(browsable_root(&daemon.cwd.get_untracked()).map(str::to_string));
     let daemon_url = daemon.url;
 
     let dir_cache: RwSignal<HashMap<String, Vec<FsDirEntry>>> = RwSignal::new(HashMap::new());
