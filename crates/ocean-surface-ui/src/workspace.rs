@@ -32,7 +32,7 @@ use crate::daemon::{
 // Reuse the deck files panel's shared helpers rather than forking the
 // sorting / refresh / basename logic — single source of truth for the
 // session-cwd tree contract.
-use crate::deck::files::{basename, refresh_target, sort_entries};
+use crate::deck::files::{basename, browsable_root, is_secret_file, refresh_target, sort_entries};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -251,16 +251,12 @@ pub fn WorkspacePane(
     open: RwSignal<bool>,
     focus_intent: RwSignal<Option<WorkspaceFocus>>,
 ) -> impl IntoView {
-    // Root = session cwd, the same source the deck files panel reads. An
-    // empty / "/" cwd leaves the tree empty until a session lands.
-    let tree_root: RwSignal<Option<String>> = {
-        let cwd = daemon.cwd.get_untracked();
-        if cwd.is_empty() || cwd == "/" {
-            RwSignal::new(None)
-        } else {
-            RwSignal::new(Some(cwd))
-        }
-    };
+    // Root = session cwd, the same source the deck files panel reads. A
+    // non-browsable cwd (unset, "/", or the projectless-chat /tmp pin)
+    // leaves the tree empty until a real project session lands.
+    let tree_root: RwSignal<Option<String>> = RwSignal::new(
+        browsable_root(&daemon.cwd.get_untracked()).map(str::to_string),
+    );
     let daemon_url = daemon.url;
 
     // Tabs: Files, Browser, and Repo are persistent; Preview tabs come and go.
@@ -428,14 +424,23 @@ pub fn WorkspacePane(
         let cwd_sig = daemon.cwd;
         Effect::new(move |_| {
             let cwd = cwd_sig.get();
-            if cwd.is_empty() || cwd == "/" {
+            let Some(root) = browsable_root(&cwd).map(str::to_string) else {
+                // Session reset ("New chat" pins cwd to /tmp) or no session:
+                // clear the tree and any lingering load error (e.g. "access
+                // denied: /tmp is outside home directory") so the pane shows
+                // its clean empty state instead of stale state (QA-007).
+                if tree_root.get_untracked().is_some() {
+                    tree_root.set(None);
+                }
+                load_error.set(None);
                 return;
+            };
+            if tree_root.get_untracked().as_deref() != Some(root.as_str()) {
+                tree_root.set(Some(root.clone()));
+                load_error.set(None);
             }
-            if tree_root.get_untracked().as_deref() != Some(cwd.as_str()) {
-                tree_root.set(Some(cwd.clone()));
-            }
-            if !dir_cache.with_untracked(|c| c.contains_key(&cwd)) {
-                load_dir(cwd);
+            if !dir_cache.with_untracked(|c| c.contains_key(&root)) {
+                load_dir(root);
             }
         });
     }
@@ -701,7 +706,7 @@ pub fn WorkspacePane(
                                                 tabs.set(t);
                                                 active_tab.set(new_active);
                                             }
-                                        >"✕"</span>
+                                        ><crate::icons::Close /></span>
                                     }
                                 })}
                             </button>
@@ -880,6 +885,7 @@ pub fn WorkspacePane(
                                                 .collect::<Vec<_>>()}
                                             {files
                                                 .into_iter()
+                                                .filter(|f| !is_secret_file(&f.name))
                                                 .filter(|f| name_matches(&f.name, &filter))
                                                 .map(|f| file_row(f, 1, Arc::clone(&of_tree)))
                                                 .collect::<Vec<_>>()}
@@ -1005,6 +1011,7 @@ fn dir_row(
                             .collect::<Vec<_>>()}
                         {files
                             .into_iter()
+                            .filter(|f| !is_secret_file(&f.name))
                             .filter(|f| name_matches(&f.name, &filter))
                             .map(|f| file_row(f, depth + 1, Arc::clone(&open_file)))
                             .collect::<Vec<_>>()}

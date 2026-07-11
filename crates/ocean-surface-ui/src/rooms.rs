@@ -59,18 +59,20 @@ pub enum RoomParticipantKind {
 }
 
 impl RoomParticipantKind {
-    /// A short glyph for the author/roster chip.
-    fn glyph(self) -> &'static str {
+    /// The author/roster chip mark — hand-drawn SVGs from `icons.rs`, same
+    /// stroke family as the rest of the surface (emoji glyphs are forbidden
+    /// in product UI; the 07-08 purge missed this path — QA-006).
+    fn icon(self) -> AnyView {
         match self {
-            RoomParticipantKind::Human => "🧑",
-            RoomParticipantKind::Agent => "🤖",
-            RoomParticipantKind::Bot => "⚙",
-            RoomParticipantKind::Tool => "🔧",
-            RoomParticipantKind::System => "✦",
+            RoomParticipantKind::Human => view! { <crate::icons::Person /> }.into_any(),
+            RoomParticipantKind::Agent => view! { <crate::icons::Robot /> }.into_any(),
+            RoomParticipantKind::Bot => view! { <crate::icons::Cog /> }.into_any(),
+            RoomParticipantKind::Tool => view! { <crate::icons::Wrench /> }.into_any(),
+            RoomParticipantKind::System => view! { <crate::icons::Spark /> }.into_any(),
         }
     }
 
-    /// A lowercase word for the kind — shown next to the glyph so the roster makes
+    /// A lowercase word for the kind — shown next to the icon so the roster makes
     /// it explicit who's an agent (i.e. auto-convene-able) vs. a human.
     fn label(self) -> &'static str {
         match self {
@@ -1052,7 +1054,7 @@ pub fn RoomsPanel(rooms: Rooms, open: RwSignal<bool>) -> impl IntoView {
                         aria-label="close rooms panel"
                         on:click=move |_| open.set(false)
                     >
-                        "✕"
+                        <crate::icons::Close />
                     </button>
                 </div>
 
@@ -1277,7 +1279,7 @@ pub fn RoomStage(rooms: Rooms) -> impl IntoView {
                                 class:rooms-chip--agent=is_agent
                                 title=format!("{} ({})", p.id, p.kind.label())
                             >
-                                <span class="rooms-chip__glyph">{p.kind.glyph()}</span>
+                                <span class="rooms-chip__glyph">{p.kind.icon()}</span>
                                 {p.display_name.clone()}
                                 <span class="rooms-chip__kind">{p.kind.label()}</span>
                             </span>
@@ -1370,7 +1372,7 @@ pub fn RoomStage(rooms: Rooms) -> impl IntoView {
                                 <Show when=move || !is_system>
                                     <div class="rooms-msg__author">
                                         <span class="rooms-msg__glyph">
-                                            {m.author_kind.glyph()}
+                                            {m.author_kind.icon()}
                                         </span>
                                         {m.author_id.clone()}
                                     </div>
