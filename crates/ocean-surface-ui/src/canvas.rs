@@ -24,6 +24,7 @@
 use std::collections::BTreeMap;
 
 use leptos::prelude::*;
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::daemon::{
@@ -515,6 +516,209 @@ impl MultiCanvasLedger {
         }
         self.canvases.keys().next().cloned()
     }
+}
+
+// ===========================================================================
+// Turn-context snapshot (canvas ledger → surface context on the turn wire)
+// ===========================================================================
+
+/// Cap on components serialized per canvas in a [`CanvasContext`] snapshot.
+/// The recorded patch log is already bounded (`MAX_CANVAS_PATCHES` = 512 in
+/// `daemon.rs`), but a snapshot rides on **every** turn POST, so it gets its own
+/// tighter budget. Components past the cap are dropped in ledger (insertion)
+/// order and counted in [`CanvasContextCanvas::omitted_components`] so the agent
+/// knows the picture is partial.
+pub const MAX_CONTEXT_COMPONENTS: usize = 128;
+
+/// Longest text slot (title / body / value / status) carried per component in a
+/// snapshot. Keeps a pathological wall-of-text card from blowing up the turn
+/// payload; the canvas render still shows the full content locally.
+pub const MAX_CONTEXT_TEXT: usize = 280;
+
+/// A compact, serializable summary of the live canvas state, injected into the
+/// turn request as surface context (`AgentTurnRequest::canvas`). This is the
+/// read-back half of the canvas loop: agent patches stream in and fold into
+/// [`WebCanvasLedger`]s; this snapshot folds the same recorded log back out so
+/// the next turn's agent sees what is actually on the operator's canvas —
+/// including operator-won merges it would otherwise be blind to.
+///
+/// Deliberately **semantic, not visual**: ids, kinds, text slots, geometry
+/// rects (canvas units, the same coordinates the agent's own patches use), and
+/// edges. No pixel data, no render/CSS state.
+///
+/// Built via [`CanvasContext::from_entries`], which returns `None` when no
+/// canvas has any placed component — the turn field is then omitted entirely,
+/// keeping the wire payload byte-for-byte unchanged for non-canvas sessions.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct CanvasContext {
+    /// The canvas the surface resolves as active by default (`canvas:main` when
+    /// present, else the first in tab order). The operator's live tab selection
+    /// is view-local state and is not threaded here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_canvas_id: Option<String>,
+    /// One snapshot per canvas that has at least one placed component, in
+    /// stable (lexicographic) canvas-id order.
+    pub canvases: Vec<CanvasContextCanvas>,
+}
+
+/// One canvas's snapshot inside a [`CanvasContext`].
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct CanvasContextCanvas {
+    pub canvas_id: String,
+    /// Placed components in ledger (insertion) order, capped at
+    /// [`MAX_CONTEXT_COMPONENTS`].
+    pub components: Vec<CanvasContextComponent>,
+    /// Edges between components, in ledger order. May reference a component
+    /// dropped by the cap; endpoints are still valid ids on the full canvas.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub edges: Vec<CanvasContextEdge>,
+    /// How many components were dropped by [`MAX_CONTEXT_COMPONENTS`]. Omitted
+    /// (0) in the common case where nothing was trimmed.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub omitted_components: usize,
+}
+
+/// One component's snapshot: id, the agent's original `kind` string, the
+/// content slots the surface itself renders (title / body first line / stat
+/// value / node status — only the ones present), and its canvas-space rect.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct CanvasContextComponent {
+    pub id: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// `[x, y, w, h]` in canvas units — the same coordinate space the agent's
+    /// own `upsert`/`move`/`resize` patches use (placement, not pixels).
+    pub rect: [f32; 4],
+}
+
+/// One edge's snapshot, endpoints resolved to plain component ids.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct CanvasContextEdge {
+    pub id: String,
+    pub from: String,
+    pub to: String,
+    /// The resolved edge kind name (`flow` / `dependency` / `reference` / raw).
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// `skip_serializing_if` helper for the omitted-components count.
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+impl CanvasContext {
+    /// Fold the recorded patch log into a turn-context snapshot, or `None` when
+    /// there is nothing to report (no entries, or no canvas holds a placed
+    /// component — e.g. only selection/viewport patches landed). `None` MUST map
+    /// to an omitted turn field so non-canvas sessions keep an unchanged wire
+    /// payload.
+    ///
+    /// Reuses [`MultiCanvasLedger::from_entries`] (no operator selection — that
+    /// is view-local), so the snapshot reflects exactly the converged,
+    /// merge-gated state the operator's canvas render shows.
+    pub fn from_entries(entries: &[CanvasPatchEntry]) -> Option<Self> {
+        if entries.is_empty() {
+            return None;
+        }
+        let multi = MultiCanvasLedger::from_entries(entries, None);
+        let canvases: Vec<CanvasContextCanvas> = multi
+            .canvas_ids()
+            .iter()
+            .filter_map(|id| {
+                let ledger = multi.canvas(id)?;
+                if ledger.components.is_empty() {
+                    return None; // an all-view-state canvas has nothing to say
+                }
+                Some(canvas_snapshot(ledger))
+            })
+            .collect();
+        if canvases.is_empty() {
+            return None;
+        }
+        Some(Self {
+            active_canvas_id: multi.resolve_active(None),
+            canvases,
+        })
+    }
+}
+
+/// Snapshot one non-empty ledger into its wire form.
+fn canvas_snapshot(ledger: &WebCanvasLedger) -> CanvasContextCanvas {
+    let total = ledger.components.len();
+    let kept = total.min(MAX_CONTEXT_COMPONENTS);
+    CanvasContextCanvas {
+        canvas_id: ledger.canvas_id.clone(),
+        components: ledger.components[..kept]
+            .iter()
+            .map(component_snapshot)
+            .collect(),
+        edges: ledger
+            .edges
+            .iter()
+            .map(|e| CanvasContextEdge {
+                id: e.id.clone(),
+                from: e.from.clone(),
+                to: e.to.clone(),
+                kind: edge_kind_name(&e.kind).to_string(),
+                label: e.label.clone().map(|l| clip(&l)),
+            })
+            .collect(),
+        omitted_components: total - kept,
+    }
+}
+
+/// Snapshot one component: the same content slots the renderer reads
+/// ([`str_slot`]/[`card_body`]/value/status), each clipped to
+/// [`MAX_CONTEXT_TEXT`], plus kind and geometry.
+fn component_snapshot(c: &LedgerComponent) -> CanvasContextComponent {
+    CanvasContextComponent {
+        id: c.id.clone(),
+        kind: c.kind.clone(),
+        title: str_slot(&c.content, "title").map(|t| clip(&t)),
+        body: card_body(c).map(|b| clip(&b)),
+        value: match c.content.get("value") {
+            Some(Value::String(s)) if !s.is_empty() => Some(clip(s)),
+            Some(Value::Number(n)) => Some(n.to_string()),
+            _ => None,
+        },
+        status: c
+            .content
+            .get("status")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(|s| clip(s)),
+        rect: [c.rect.x, c.rect.y, c.rect.w, c.rect.h],
+    }
+}
+
+/// The stable wire name of an [`EdgeKind`].
+fn edge_kind_name(kind: &EdgeKind) -> &str {
+    match kind {
+        EdgeKind::Flow => "flow",
+        EdgeKind::Dependency => "dependency",
+        EdgeKind::Reference => "reference",
+        EdgeKind::Other(raw) => raw.as_str(),
+    }
+}
+
+/// Clip a text slot to [`MAX_CONTEXT_TEXT`] on a char boundary, appending an
+/// ellipsis when trimmed.
+fn clip(s: &str) -> String {
+    if s.chars().count() <= MAX_CONTEXT_TEXT {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(MAX_CONTEXT_TEXT).collect();
+    out.push('…');
+    out
 }
 
 /// Resolve an optional edge-kind string into [`EdgeKind`], matching the native
@@ -1608,6 +1812,146 @@ mod tests {
             Some(2.0),
             "the later unversioned move wins"
         );
+    }
+
+    // ----- Turn-context snapshot (canvas → surface context) -----------------
+
+    #[test]
+    fn canvas_context_snapshot_serializes_expected_json_shape() {
+        // A brief card, a workflow node, and a flow edge between them — the
+        // snapshot must carry ids/kinds/text-slots/rects and the edge, in the
+        // compact wire shape the daemon-side spec documents. Auto-placement is
+        // deterministic: first card at the grid origin, second one slot right.
+        let entries = vec![
+            entry(
+                "canvas:main",
+                upsert(
+                    "brief-1",
+                    "brief_card",
+                    json!({ "title": "Brief", "body": "Do the thing\nsecond line" }),
+                ),
+            ),
+            entry(
+                "canvas:main",
+                upsert("node-1", "workflow_node", json!({ "status": "running" })),
+            ),
+            entry(
+                "canvas:main",
+                SurfacePatch::Connect {
+                    edge: CanvasEdgePatch {
+                        id: EdgeId::new("e1"),
+                        from: Endpoint {
+                            component_id: ComponentId::new("brief-1"),
+                            port: None,
+                        },
+                        to: Endpoint {
+                            component_id: ComponentId::new("node-1"),
+                            port: None,
+                        },
+                        kind: Some("flow".to_string()),
+                        label: None,
+                        metadata: Value::Null,
+                    },
+                },
+            ),
+        ];
+
+        let ctx = CanvasContext::from_entries(&entries).expect("non-empty canvas → Some");
+        let value = serde_json::to_value(&ctx).expect("serializes");
+        assert_eq!(
+            value,
+            json!({
+                "active_canvas_id": "canvas:main",
+                "canvases": [{
+                    "canvas_id": "canvas:main",
+                    "components": [
+                        {
+                            "id": "brief-1",
+                            "kind": "brief_card",
+                            "title": "Brief",
+                            // body is trimmed to its first line, like the render
+                            "body": "Do the thing",
+                            "rect": [80.0, 80.0, 320.0, 220.0],
+                        },
+                        {
+                            "id": "node-1",
+                            "kind": "workflow_node",
+                            "status": "running",
+                            "rect": [432.0, 80.0, 320.0, 220.0],
+                        },
+                    ],
+                    "edges": [
+                        { "id": "e1", "from": "brief-1", "to": "node-1", "kind": "flow" },
+                    ],
+                }],
+            }),
+            "snapshot JSON shape is the documented wire contract: absent slots \
+             (value/status/title/body/label) and a zero omitted count are OMITTED, \
+             not null",
+        );
+    }
+
+    #[test]
+    fn empty_or_component_less_canvas_yields_no_context() {
+        // No patches at all → None (the turn field is omitted).
+        assert_eq!(CanvasContext::from_entries(&[]), None);
+
+        // Patches landed but none placed a component (view-state only) → still
+        // None: an all-chrome canvas has nothing to inject.
+        let entries = vec![entry(
+            "canvas:main",
+            SurfacePatch::Select {
+                ids: vec![ComponentId::new("ghost")],
+            },
+        )];
+        assert_eq!(
+            CanvasContext::from_entries(&entries),
+            None,
+            "a canvas with zero placed components must send None so the wire \
+             payload is unchanged",
+        );
+
+        // And a component that was placed then deleted → back to None.
+        let entries = vec![
+            entry("canvas:main", upsert("a", "card", json!({}))),
+            entry(
+                "canvas:main",
+                SurfacePatch::DeleteComponent {
+                    component_id: ComponentId::new("a"),
+                },
+            ),
+        ];
+        assert_eq!(CanvasContext::from_entries(&entries), None);
+    }
+
+    #[test]
+    fn canvas_context_spans_canvases_and_caps_components() {
+        // Two canvases → two snapshots in stable id order, each scoped to its
+        // own components.
+        let entries = vec![
+            entry("canvas:workflow", upsert("n", "workflow_node", json!({}))),
+            entry("canvas:main", upsert("m", "card", json!({}))),
+        ];
+        let ctx = CanvasContext::from_entries(&entries).unwrap();
+        assert_eq!(ctx.active_canvas_id.as_deref(), Some("canvas:main"));
+        assert_eq!(
+            ctx.canvases
+                .iter()
+                .map(|c| c.canvas_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["canvas:main", "canvas:workflow"],
+        );
+        assert_eq!(ctx.canvases[0].components.len(), 1);
+        assert_eq!(ctx.canvases[0].components[0].id, "m");
+        assert_eq!(ctx.canvases[1].components[0].id, "n");
+
+        // Over-cap canvas: components are trimmed and the omission is counted.
+        let many: Vec<CanvasPatchEntry> = (0..MAX_CONTEXT_COMPONENTS + 5)
+            .map(|n| entry("canvas:main", upsert(&format!("c{n}"), "card", json!({}))))
+            .collect();
+        let ctx = CanvasContext::from_entries(&many).unwrap();
+        assert_eq!(ctx.canvases[0].components.len(), MAX_CONTEXT_COMPONENTS);
+        assert_eq!(ctx.canvases[0].omitted_components, 5);
     }
 
     #[test]

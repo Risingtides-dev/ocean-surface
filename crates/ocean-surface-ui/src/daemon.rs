@@ -23,6 +23,7 @@ use serde_json::{json, Value};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
+use crate::canvas::CanvasContext;
 use crate::model::{Block, ComponentPlacement, Role, ToolStatus, Turn};
 
 pub const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:4780";
@@ -914,6 +915,20 @@ struct AgentTurnRequest<'a> {
     /// the field stay back-compatible. Discover names via `GET /v1/agents`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agent: Option<&'a str>,
+    /// Live canvas snapshot injected into THIS turn as surface context — the
+    /// read-back half of the canvas loop ("Canvas ledger/state injected into
+    /// turns as surface context", CLAUDE.md). A compact semantic summary
+    /// ([`CanvasContext`]) of what the operator's canvas render currently shows:
+    /// per-canvas component ids/kinds/text-slots/rects plus edges, folded from
+    /// the same recorded patch log (`Daemon::canvas_patches`) the render derives
+    /// from — so operator-won merges are visible to the next turn. `None`
+    /// whenever no canvas holds a placed component, keeping the wire payload
+    /// byte-for-byte unchanged for non-canvas sessions; daemons that don't know
+    /// the field yet ignore it (the SDK's `AgentTurnRequest` sets no
+    /// `deny_unknown_fields`). Daemon-side consumption spec lives with the
+    /// ocean-os team (inject as turn context, never as the prompt itself).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    canvas: Option<CanvasContext>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2111,6 +2126,15 @@ impl Daemon {
         // only after the turn POST succeeds (below), so a failed send keeps the
         // attachment around to retry rather than silently dropping it.
         let pending_images = self.pending_images.get_untracked();
+        // Canvas ledger snapshot for this turn. Read untracked at dispatch time
+        // — the same shape as the other per-turn signals above — and folded
+        // through the identical merge-gated `MultiCanvasLedger` path the render
+        // uses, so the agent sees exactly the converged state on screen.
+        // `None` (the overwhelmingly common case: no canvas, or no placed
+        // components) omits the field entirely, so non-canvas sessions keep a
+        // byte-for-byte unchanged wire payload.
+        let canvas_context =
+            self.canvas_patches.with_untracked(|p| CanvasContext::from_entries(p));
         // Mint a fresh per-turn decision token (OCEAN-185 / OCEAN-314). Store
         // it in the signal so `decide_permission` can replay the same value.
         // Must be minted BEFORE the spawn so the same token covers both the
@@ -2258,6 +2282,10 @@ impl Daemon {
                 // prompt and the wire shape is unchanged; a value flows straight
                 // through to `<agents_root>/<agent>/instructions.md` once set.
                 agent: agent_override.as_deref(),
+                // Live canvas state as surface context. Only present when the
+                // canvas actually holds placed components (see the field doc
+                // and `CanvasContext::from_entries`).
+                canvas: canvas_context,
             };
             let post_url = format!("{}/v1/agent/turns", url.trim_end_matches('/'));
             let res = Request::post(&post_url)
@@ -5589,6 +5617,7 @@ mod tests {
             decision_token: None,
             client_context: None,
             agent: None,
+            canvas: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         assert!(!json.contains("thinking_level"));
@@ -5618,6 +5647,7 @@ mod tests {
             decision_token: None,
             client_context: None,
             agent: Some("foo"),
+            canvas: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         assert!(json.contains(r#""agent":"foo""#));
@@ -5641,6 +5671,7 @@ mod tests {
             decision_token: None,
             client_context: None,
             agent: None,
+            canvas: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         assert!(!json.contains("agent"));
@@ -5662,6 +5693,7 @@ mod tests {
             decision_token: None,
             client_context: None,
             agent: None,
+            canvas: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         assert!(json.contains(r#""thinking_level":"high""#));
@@ -5687,6 +5719,7 @@ mod tests {
             decision_token: None,
             client_context: None,
             agent: None,
+            canvas: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         assert!(!json.contains("images"));
@@ -5714,6 +5747,7 @@ mod tests {
             decision_token: None,
             client_context: None,
             agent: None,
+            canvas: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         // Round-trip through serde_json::Value to assert structure exactly.
@@ -5794,6 +5828,7 @@ mod tests {
             decision_token: None,
             client_context: None,
             agent: None,
+            canvas: None,
         };
         let v: Value = serde_json::from_str(&serde_json::to_string(&body).unwrap()).unwrap();
         assert_eq!(v["client_type"], "leo-voice");
@@ -5820,6 +5855,7 @@ mod tests {
             decision_token: None,
             client_context: None,
             agent: None,
+            canvas: None,
         };
         let v: Value = serde_json::from_str(&serde_json::to_string(&body).unwrap()).unwrap();
         assert_eq!(v["client_type"], "surface-web");
@@ -5872,6 +5908,7 @@ mod tests {
             decision_token: Some(&token),
             client_context: None,
             agent: None,
+            canvas: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         assert!(
@@ -5896,6 +5933,7 @@ mod tests {
             decision_token: None,
             client_context: None,
             agent: None,
+            canvas: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         assert!(
@@ -5949,6 +5987,7 @@ mod tests {
                 }),
             }),
             agent: None,
+            canvas: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         let v: Value = serde_json::from_str(&json).unwrap();
