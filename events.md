@@ -1480,3 +1480,11 @@ area:      [infra]
 
 Removed the silent main-to-live deployment gap behind localhost:8790 drift. Added a launchd auto-deploy job that polls origin/main, builds each new revision in a disposable detached worktree, runs proxy and WASM tests/checks/strict Clippy/fmt plus the deployment contract, validates the release HTML and wasm magic, then atomically advances an immutable `current` release symlink and exact `deployed-rev` marker. Any fetch, build, test, validation, or restart failure leaves the last-known-good release selected. Updated the proxy to serve `current`, made the installer build/promote and install both jobs, made uninstall remove both jobs, documented the live contract, and put the 9-assertion promotion/no-op/failure-preservation test in CI. Local contract, shell syntax, and both plist validations passed before landing.
 _________________________________________________________________________________
+time:      [06:54pm] [07-11-26]
+agent:     [omp] [gpt-5.6-sol]
+worktree:  /tmp/ocean-autodeploy (origin/main detached)
+type:      [bug-report]
+area:      [infra]
+
+Closed a post-install bootstrap defect caught on the real machine: both plist ProgramArguments originally referenced launchers inside the shared GitButler checkout, whose stale/dirty base did not yet contain the newly landed auto-deploy script. The installer now copies both launchers to stable `~/.config/ocean-surface/bin/` paths, the proxy receives its mutable repo path through `OCEAN_SURFACE_REPO`, and both plists execute only the stable copies. Expanded the deployment contract to 12 assertions so CI rejects a regression back to shared-checkout launcher paths.
+_________________________________________________________________________________

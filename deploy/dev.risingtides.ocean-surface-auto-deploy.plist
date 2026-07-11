@@ -10,7 +10,7 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/risingtidesdev/dev/ocean-surface/deploy/ocean-surface-auto-deploy.sh</string>
+    <string>/Users/risingtidesdev/.config/ocean-surface/bin/ocean-surface-auto-deploy.sh</string>
   </array>
 
   <key>WorkingDirectory</key>

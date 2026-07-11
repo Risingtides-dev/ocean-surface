@@ -15,8 +15,8 @@
 # or by editing the EnvironmentVariables block in the plist.
 set -euo pipefail
 
-# Repo root = parent of this deploy/ dir, resolved absolutely (symlink-safe).
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Stable installed launchers receive the mutable repo location explicitly.
+REPO="${OCEAN_SURFACE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
 # Toolchain on PATH (launchd starts with a minimal PATH).
 export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$HOME/.cargo/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:$PATH"

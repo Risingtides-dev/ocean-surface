@@ -15,7 +15,7 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/risingtidesdev/dev/ocean-surface/deploy/ocean-surface-proxy.sh</string>
+    <string>/Users/risingtidesdev/.config/ocean-surface/bin/ocean-surface-proxy.sh</string>
   </array>
 
   <key>WorkingDirectory</key>
@@ -44,6 +44,8 @@
 
   <key>EnvironmentVariables</key>
   <dict>
+    <key>OCEAN_SURFACE_REPO</key>
+    <string>/Users/risingtidesdev/dev/ocean-surface</string>
     <!-- LAN/tailnet bind (default). Use 127.0.0.1:8790 to keep it host-local. -->
     <key>OCEAN_SURFACE_BIND</key>
     <string>0.0.0.0:8790</string>

@@ -6,6 +6,8 @@ import { join, resolve } from 'node:path';
 
 const repo = resolve(import.meta.dirname, '..');
 const script = join(repo, 'deploy', 'ocean-surface-auto-deploy.sh');
+const proxyPlist = readFileSync(join(repo, 'deploy', 'dev.risingtides.ocean-surface-proxy.plist'), 'utf8');
+const deployPlist = readFileSync(join(repo, 'deploy', 'dev.risingtides.ocean-surface-auto-deploy.plist'), 'utf8');
 const root = mkdtempSync(join(tmpdir(), 'ocean-surface-promote-'));
 
 function validBundle(path) {
@@ -59,7 +61,11 @@ try {
   assert.equal(noOp.status, 0, noOp.stderr);
   assert.match(noOp.stdout, new RegExp(`CURRENT: ${mainRevision}`));
 
-  console.log('ALL PASS: surface atomic deployment promotion (9 assertions)');
+  assert.ok(proxyPlist.includes('/Users/risingtidesdev/.config/ocean-surface/bin/ocean-surface-proxy.sh'));
+  assert.ok(deployPlist.includes('/Users/risingtidesdev/.config/ocean-surface/bin/ocean-surface-auto-deploy.sh'));
+  assert.ok(!`${proxyPlist}\n${deployPlist}`.includes('/dev/ocean-surface/deploy/ocean-surface-'));
+
+  console.log('ALL PASS: surface atomic deployment promotion (12 assertions)');
 } finally {
   rmSync(root, { recursive: true, force: true });
 }

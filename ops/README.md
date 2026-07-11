@@ -16,7 +16,7 @@ promotes a new release only after a clean detached-main build passes its gates.
 | Proxy launchd label | `dev.risingtides.ocean-surface-proxy` |
 | Deploy launchd label | `dev.risingtides.ocean-surface-auto-deploy` |
 | Version-controlled plists | `deploy/dev.risingtides.ocean-surface-*.plist` |
-| Launchers | `deploy/ocean-surface-proxy.sh`, `deploy/ocean-surface-auto-deploy.sh` |
+| Installed launchers | `~/.config/ocean-surface/bin/ocean-surface-{proxy,auto-deploy}.sh` |
 | Installed plist path | `~/Library/LaunchAgents/dev.risingtides.ocean-surface-*.plist` |
 | Bind address | `0.0.0.0:8790` (env `OCEAN_SURFACE_BIND`) |
 | Bundle served | `~/.config/ocean-surface/current` (atomic symlink; repo `dist/` is dev-only) |
@@ -57,8 +57,9 @@ ops/install-surface-proxy.sh --bootstrap
 The installer hard-fails unless HEAD is `main` or detached exactly at
 `origin/main`; `--allow-non-main` is the explicit escape hatch. It builds the
 proxy and release bundle, seeds the immutable release store and `current`
-symlink, validates both plist files, then either prints the launchctl commands
-or bootstraps both jobs. Later main revisions deploy automatically.
+symlink, copies both launchers out of the mutable shared checkout, validates
+both plist files, then either prints the launchctl commands or bootstraps both
+jobs. Later main revisions deploy automatically.
 
 ### Check status
 

@@ -20,6 +20,7 @@ PROXY_PLIST_SRC="$REPO/deploy/$PROXY_LABEL.plist"
 AUTO_PLIST_SRC="$REPO/deploy/$AUTO_LABEL.plist"
 PROXY_PLIST_DST="$HOME/Library/LaunchAgents/$PROXY_LABEL.plist"
 AUTO_PLIST_DST="$HOME/Library/LaunchAgents/$AUTO_LABEL.plist"
+LAUNCHER_DIR="$HOME/.config/ocean-surface/bin"
 DOMAIN="gui/$(id -u)"
 
 # --bootstrap (off by default) opts in to touching the live launchd domain.
@@ -123,8 +124,11 @@ fi
 OCEAN_SURFACE_NO_RESTART=1 \
   "$REPO/deploy/ocean-surface-auto-deploy.sh" --promote "$REPO/dist" "$deploy_sha"
 
-echo "==> [2/3] installing launch agents"
-mkdir -p "$HOME/Library/LaunchAgents"
+echo "==> [2/3] installing stable launchers and launch agents"
+mkdir -p "$LAUNCHER_DIR" "$HOME/Library/LaunchAgents"
+cp "$REPO/deploy/ocean-surface-proxy.sh" "$LAUNCHER_DIR/ocean-surface-proxy.sh"
+cp "$REPO/deploy/ocean-surface-auto-deploy.sh" "$LAUNCHER_DIR/ocean-surface-auto-deploy.sh"
+chmod 755 "$LAUNCHER_DIR/ocean-surface-proxy.sh" "$LAUNCHER_DIR/ocean-surface-auto-deploy.sh"
 cp "$PROXY_PLIST_SRC" "$PROXY_PLIST_DST"
 cp "$AUTO_PLIST_SRC" "$AUTO_PLIST_DST"
 plutil -lint "$PROXY_PLIST_DST"
