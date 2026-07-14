@@ -12,8 +12,8 @@ Cross-repo routing and ownership map: [`docs/OCEAN_PROJECT_MAP.md`](docs/OCEAN_P
 
 | Target | How | Why |
 |---|---|---|
-| Native desktop (Tauri) | `./run-tauri.sh` (or `cd crates/ocean-tauri && cargo tauri dev`) | Tauri 2.x shell loading the same `dist/` Leptos bundle as the browser |
-| Browser PWA | `trunk serve` or `./run-surface.sh` | desktop/mobile browser access over the daemon API |
+| Native desktop (Tauri) | `./run-tauri.sh` | Tauri 2.x shell loading a freshly built `dist/` Leptos bundle as the browser |
+| Browser PWA | `./run-surface.sh` | builds the shared bundle and release proxy, then serves desktop/mobile browser access over the daemon API |
 | Chrome extension | `extension/` wrapper | browser-side panel with explicit `surface-extension` context |
 | Web proxy | `cargo run -p ocean-surface-proxy` | serves web bundle, config, STT/TTS, and daemon reverse proxy |
 
@@ -102,16 +102,26 @@ permission requests, completion). Surfaces must subscribe scoped to their own
 The daemon must be running (in `../ocean-os`: `cargo run -p ocean-daemon --release`). Then:
 
 ```sh
-# Build the wasm bundle + serve it and the proxy from one binary:
+# Tailnet or trusted LAN: Basic auth is required because the default bind is 0.0.0.0:8790.
+export OCEAN_SURFACE_USER='<user>'
+export OCEAN_SURFACE_PASS='<strong password>'
 ./run-surface.sh
-# → open http://<this-host>:8790  (works on a phone via the tailnet IP)
+# → open http://<this-host>:8790
+
+# Trusted localhost only: explicitly disable auth and restrict the bind.
+OCEAN_SURFACE_BIND=127.0.0.1:18790 OCEAN_SURFACE_AUTH=off ./run-surface.sh
 
 # Or build dist/ + launch the Tauri native desktop shell (loads the same bundle):
 ./run-tauri.sh
 ```
 
-`run-surface.sh` binds `0.0.0.0:8790` by default. Override with
-`OCEAN_SURFACE_BIND`, `OCEAN_DAEMON_URL`, `OCEAN_VOICE_PROFILE`.
+`run-surface.sh` builds both the Trunk release bundle and
+`target/release/ocean-surface-proxy` before serving. It fails before building if
+Basic auth is enabled without nonblank credentials, or if auth is disabled on a
+non-loopback bind. Tailnet traffic is encrypted; direct LAN HTTP should be used
+only on a trusted network because Basic auth does not encrypt transport.
+Override the daemon or voice profile with `OCEAN_DAEMON_URL` and
+`OCEAN_VOICE_PROFILE`.
 
 ### Verify before you open the browser
 
@@ -125,8 +135,12 @@ The daemon must be running (in `../ocean-os`: `cargo run -p ocean-daemon --relea
 
 ```sh
 ./run-tauri.sh                        # build dist/ + launch the Tauri shell
-cd crates/ocean-tauri && cargo tauri dev   # or, run dev mode directly
 ```
+
+Direct `cd crates/ocean-tauri && cargo tauri dev` does not rebuild `dist/`
+because the Tauri config intentionally has no `beforeDevCommand`; use it only
+when a current root `dist/` already exists. `./run-tauri.sh` is the canonical
+fresh-build path.
 
 Tauri loads the same `dist/` Leptos bundle the browser ships; its Rust backend
 adds native folder dialogs and path watcher (replacing the GPUI crate's `rfd`/

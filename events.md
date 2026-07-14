@@ -1512,3 +1512,18 @@ area:      [infra]
 
 Fixed another live-only failure found by exercising the actual launchd watcher after main advanced: killing an in-flight deploy during reinstall could leave the mkdir lock behind, and every later interval exited SKIP forever. The lock now records its owner PID, preserves a lock held by a live process, reclaims a missing/dead-owner lock with race-safe mkdir, and always removes its PID directory on normal cleanup. Added a fail-before/pass-after stale-lock no-op regression (16 total assertions).
 _________________________________________________________________________________
+_________________________________________________________________________________
+
+time:  [14:25] [14-07-26]
+agent: [pi] [gpt-5]
+worktree: [docs/current-state-reset-20260712]
+type:  [bug report]
+area:  [testing]
+
+Verified clean origin/main from a disposable copy: the Leptos WASM target, proxy, Trunk
+release bundle, Tauri check, and Tauri executable build pass; the daemon is healthy on
+:4780. Found that run-surface.sh required a pre-existing release proxy binary and reached
+the proxy's Basic-auth panic only after the expensive frontend build. Updated the launcher
+to validate auth up front and build its required release proxy, then aligned README and
+AGENTS.md with the safe localhost and LAN/tailnet launch contracts.
+_________________________________________________________________________________

@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
-# Launch Ocean Surface: build the wasm bundle, then serve it + the xAI
-# proxy from one binary. Point your browser (or phone) at the printed URL.
+# Launch Ocean Surface: build the WASM bundle and release proxy, then serve
+# both from one process. Point your browser (or phone) at the printed URL.
 #
-# Auth (voice STT/TTS) is preconfigured. The proxy resolves the xAI key from,
-# in order: env XAI_API_KEY → ~/.config/ocean-surface/xai.key → pi settings.
-# The persistent, recommended way (set once, works every launch):
-#   mkdir -p ~/.config/ocean-surface && printf '%s' "sk-..." > ~/.config/ocean-surface/xai.key
-# Or per-run via env:
-#   export XAI_API_KEY=sk-...
+# HTTP Basic auth is enabled by default because the default bind is reachable
+# over the LAN/tailnet. Set OCEAN_SURFACE_USER and OCEAN_SURFACE_PASS, or use
+# OCEAN_SURFACE_AUTH=off only with a trusted localhost bind:
+#   OCEAN_SURFACE_BIND=127.0.0.1:18790 OCEAN_SURFACE_AUTH=off ./run-surface.sh
+#
 # Optional overrides:
 #   export OCEAN_DAEMON_URL=http://<host>:4780   # default 127.0.0.1:4780
-#   export OCEAN_VOICE_PROFILE=leo                # xAI voice
-#   export OCEAN_SURFACE_BIND=0.0.0.0:8790        # LAN/tailnet; default below
+#   export OCEAN_VOICE_PROFILE=leo              # daemon voice profile
+#   export OCEAN_SURFACE_BIND=0.0.0.0:8790      # LAN/tailnet; default below
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
@@ -21,9 +20,33 @@ export CARGO_HOME="$HOME/.cargo"
 
 BIND="${OCEAN_SURFACE_BIND:-0.0.0.0:8790}"
 DAEMON="${OCEAN_DAEMON_URL:-http://127.0.0.1:4780}"
+AUTH="${OCEAN_SURFACE_AUTH:-on}"
+BIND_HOST="${BIND%:*}"
+
+if [[ "$AUTH" == "off" ]] && [[ "$BIND_HOST" != "127.0.0.1" && "$BIND_HOST" != "[::1]" ]]; then
+  echo "FATAL: OCEAN_SURFACE_AUTH=off is allowed only with a loopback bind." >&2
+  echo "       Use OCEAN_SURFACE_BIND=127.0.0.1:18790, or enable Basic auth." >&2
+  exit 1
+fi
+
+USER_COMPACT="${OCEAN_SURFACE_USER:-}"
+USER_COMPACT="${USER_COMPACT//[[:space:]]/}"
+PASS_COMPACT="${OCEAN_SURFACE_PASS:-}"
+PASS_COMPACT="${PASS_COMPACT//[[:space:]]/}"
+if [[ "$AUTH" != "off" ]] && { [[ -z "$USER_COMPACT" ]] || [[ -z "$PASS_COMPACT" ]]; }; then
+  echo "FATAL: HTTP Basic auth is enabled, but OCEAN_SURFACE_USER / OCEAN_SURFACE_PASS are not both set." >&2
+  echo "       Set both for tailnet or trusted-LAN access, or use this trusted-localhost command:" >&2
+  echo "       OCEAN_SURFACE_BIND=127.0.0.1:18790 OCEAN_SURFACE_AUTH=off ./run-surface.sh" >&2
+  exit 1
+fi
 
 echo "==> building wasm bundle (trunk)"
 ( cd "$REPO" && trunk build --release )
+
+echo "==> building surface proxy (release)"
+# Keep the launcher and executable path deterministic even when the caller has
+# a custom CARGO_TARGET_DIR in their shell.
+( cd "$REPO" && cargo build -p ocean-surface-proxy --release --target-dir "$REPO/target" )
 
 # Build-guard (OCEAN-121): trunk can report "✅ success" yet leave a corrupt,
 # all-zero wasm in dist/ (e.g. when its wasm-opt step fails). Shipping that
@@ -48,7 +71,11 @@ for w in "${wasm_files[@]}"; do
   echo "    ok: $(basename "$w") ($magic)"
 done
 
-echo "==> auth: XAI_API_KEY is ${XAI_API_KEY:+SET}${XAI_API_KEY:-UNSET (voice disabled until you export it)}"
+if [[ "$AUTH" == "off" ]]; then
+  echo "==> auth: DISABLED (trusted-localhost use only)"
+else
+  echo "==> auth: HTTP Basic auth enabled"
+fi
 echo "==> daemon: $DAEMON"
 echo "==> serving on http://$BIND   (open this in your browser)"
 
