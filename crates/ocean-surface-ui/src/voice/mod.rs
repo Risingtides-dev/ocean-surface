@@ -16,6 +16,7 @@
 
 pub mod listen;
 pub mod mode;
+pub mod planner;
 pub mod realtime;
 pub mod vad;
 

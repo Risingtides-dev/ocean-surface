@@ -937,6 +937,25 @@ struct AgentTurnRequest<'a> {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct PlannerRealtimeContextRequest<'a> {
+    project_id: &'a str,
+    workspace_root: &'a str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PlannerRealtimeSecretRequest<'a> {
+    purpose: &'static str,
+    planner_context: PlannerRealtimeContextRequest<'a>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PlannerHandoffRequest<'a> {
+    role: &'static str,
+    kind: &'static str,
+    content: &'a str,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct AgentSessionCreateRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     title: Option<&'a str>,
@@ -2965,22 +2984,42 @@ impl Daemon {
             }
         });
     }
-    /// Ask the daemon for an ephemeral OpenAI Realtime client secret (voice
-    /// phases 2/3). Same-origin through the proxy; the API key stays on the
-    /// daemon. `session_id` scopes the voice agent's briefing + handoffs.
+    /// Ask the daemon for an ephemeral OpenAI Realtime client secret for the
+    /// existing conversation mode. Omitted purpose remains byte-compatible.
     pub async fn realtime_client_secret(
         &self,
         session_id: Option<String>,
     ) -> Result<RealtimeSecret, String> {
+        self.post_realtime_secret(&json!({ "session_id": session_id }))
+            .await
+    }
+
+    /// Mint a propose-only planner Realtime secret for daemon-validated frozen
+    /// context. Project names are deliberately absent from the wire request.
+    pub async fn realtime_planner_client_secret(
+        &self,
+        context: &crate::voice::planner::PlannerContext,
+    ) -> Result<RealtimeSecret, String> {
+        context.validate()?;
+        let body = PlannerRealtimeSecretRequest {
+            purpose: "planner",
+            planner_context: PlannerRealtimeContextRequest {
+                project_id: &context.project_id,
+                workspace_root: &context.workspace_root,
+            },
+        };
+        self.post_realtime_secret(&body).await
+    }
+
+    async fn post_realtime_secret(&self, body: &impl Serialize) -> Result<RealtimeSecret, String> {
         let url = self.url.get_untracked();
         let post_url = format!(
             "{}/v1/voice/realtime/client-secret",
             url.trim_end_matches('/')
         );
-        let body = json!({ "session_id": session_id });
         let resp = Request::post(&post_url)
             .header("content-type", "application/json")
-            .json(&body)
+            .json(body)
             .map_err(|e| format!("secret request encode failed: {e}"))?
             .send()
             .await
@@ -2992,6 +3031,147 @@ impl Daemon {
         resp.json::<RealtimeSecret>()
             .await
             .map_err(|e| format!("secret decode failed: {e}"))
+    }
+
+    /// Explicitly create the one session authorized by a planner confirmation.
+    /// Unlike ordinary lazy creation this request never carries a title hint.
+    pub async fn create_planner_session(
+        &self,
+        context: &crate::voice::planner::PlannerContext,
+    ) -> Result<String, String> {
+        context.validate()?;
+        let body = AgentSessionCreateRequest {
+            title: None,
+            workspace_root: &context.workspace_root,
+            project_id: Some(&context.project_id),
+            client_type: Some(surface_client_type()),
+        };
+        let url = self.url.get_untracked();
+        let post_url = format!("{}/v1/agent/sessions", url.trim_end_matches('/'));
+        let resp = Request::post(&post_url)
+            .header("content-type", "application/json")
+            .json(&body)
+            .map_err(|e| format!("session encode failed: {e}"))?
+            .send()
+            .await
+            .map_err(|e| format!("session create failed: {e}"))?;
+        if !resp.ok() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("session create rejected: {}", concise_error(&text)));
+        }
+        let response = resp
+            .json::<AgentSessionCreateResponse>()
+            .await
+            .map_err(|e| format!("session decode failed: {e}"))?;
+        if !response.ok {
+            return Err(response
+                .error
+                .unwrap_or_else(|| "session create failed".into()));
+        }
+        response
+            .session_id
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| "session create failed: missing session id".into())
+    }
+
+    /// Persist the confirmed PRD as a non-executing planner handoff.
+    pub async fn append_planner_handoff(
+        &self,
+        session_id: &str,
+        markdown: &str,
+    ) -> Result<(), String> {
+        let url = self.url.get_untracked();
+        let post_url = format!(
+            "{}/v1/agent/sessions/{session_id}/messages",
+            url.trim_end_matches('/')
+        );
+        let body = PlannerHandoffRequest {
+            role: "user",
+            kind: "planner_handoff",
+            content: markdown,
+        };
+        let resp = Request::post(&post_url)
+            .header("content-type", "application/json")
+            .json(&body)
+            .map_err(|e| format!("append encode failed: {e}"))?
+            .send()
+            .await
+            .map_err(|e| format!("append failed: {e}"))?;
+        if !resp.ok() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("append rejected: {}", concise_error(&text)));
+        }
+        Ok(())
+    }
+
+    /// Submit exactly one normal coding turn to the already-created and adopted
+    /// planner session. No append, voice profile, or optional power controls are
+    /// involved; the fresh token remains available to permission cards.
+    pub async fn start_planner_turn(
+        &self,
+        session_id: &str,
+        context: &crate::voice::planner::PlannerContext,
+        markdown: &str,
+    ) -> Result<(), String> {
+        if self.session_id.get_untracked().as_deref() != Some(session_id) {
+            return Err("created planner session is no longer active".into());
+        }
+        let decision_token = mint_decision_token();
+        if decision_token.len() != 64
+            || !decision_token.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("secure decision token unavailable".into());
+        }
+        self.active_decision_token.set(Some(decision_token.clone()));
+        self.turns.update(|turns| turns.push(Turn::user(markdown)));
+        self.streaming.set(true);
+        let body = AgentTurnRequest {
+            prompt: markdown,
+            cwd: &context.workspace_root,
+            session_id: Some(session_id),
+            project_id: Some(&context.project_id),
+            client_type: Some(surface_client_type()),
+            guidance: None,
+            room_id: None,
+            thinking_level: None,
+            model_id: None,
+            images: None,
+            decision_token: Some(&decision_token),
+            client_context: None,
+            agent: None,
+            canvas: None,
+        };
+        let url = self.url.get_untracked();
+        let post_url = format!("{}/v1/agent/turns", url.trim_end_matches('/'));
+        let result = async {
+            let resp = Request::post(&post_url)
+                .header("content-type", "application/json")
+                .json(&body)
+                .map_err(|e| format!("turn encode failed: {e}"))?
+                .send()
+                .await
+                .map_err(|e| format!("turn failed: {e}"))?;
+            if !resp.ok() {
+                let text = resp.text().await.unwrap_or_default();
+                return Err(format!("turn rejected: {}", concise_error(&text)));
+            }
+            let response = resp
+                .json::<AgentTurnResponse>()
+                .await
+                .map_err(|e| format!("turn decode failed: {e}"))?;
+            if !response.ok {
+                return Err(response.error.unwrap_or_else(|| "turn failed".into()));
+            }
+            if response.session_id != session_id {
+                return Err("turn response returned a different session".into());
+            }
+            Ok(())
+        }
+        .await;
+        if result.is_err() {
+            self.streaming.set(false);
+        }
+        result
     }
 
     /// Append an out-of-turn message to a chat session (the voice agent's
@@ -6279,6 +6459,88 @@ mod tests {
         assert!(d.git);
         assert!(!d.is_repo);
         assert_eq!(d.git_branch, None);
+    }
+
+    #[test]
+    fn planner_wire_requests_are_narrow_and_exact() {
+        let secret = PlannerRealtimeSecretRequest {
+            purpose: "planner",
+            planner_context: PlannerRealtimeContextRequest {
+                project_id: "p1",
+                workspace_root: "/work/tree",
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(secret).unwrap(),
+            json!({
+                "purpose": "planner",
+                "planner_context": {
+                    "project_id": "p1",
+                    "workspace_root": "/work/tree"
+                }
+            })
+        );
+
+        let create = AgentSessionCreateRequest {
+            title: None,
+            workspace_root: "/work/tree",
+            project_id: Some("p1"),
+            client_type: Some("surface-web"),
+        };
+        assert_eq!(
+            serde_json::to_value(create).unwrap(),
+            json!({
+                "workspace_root": "/work/tree",
+                "project_id": "p1",
+                "client_type": "surface-web"
+            })
+        );
+
+        let append = PlannerHandoffRequest {
+            role: "user",
+            kind: "planner_handoff",
+            content: "# Plan",
+        };
+        assert_eq!(
+            serde_json::to_value(append).unwrap(),
+            json!({"role": "user", "kind": "planner_handoff", "content": "# Plan"})
+        );
+    }
+
+    #[test]
+    fn planner_start_turn_wire_has_one_prompt_token_and_no_power_fields() {
+        let token = "ab".repeat(32);
+        let body = AgentTurnRequest {
+            prompt: "# Plan",
+            cwd: "/work/tree",
+            session_id: Some("s1"),
+            project_id: Some("p1"),
+            client_type: Some("surface-extension"),
+            guidance: None,
+            room_id: None,
+            thinking_level: None,
+            model_id: None,
+            images: None,
+            decision_token: Some(&token),
+            client_context: None,
+            agent: None,
+            canvas: None,
+        };
+        let value = serde_json::to_value(body).unwrap();
+        assert_eq!(value["prompt"], "# Plan");
+        assert_eq!(value["decision_token"].as_str().unwrap().len(), 64);
+        assert_eq!(value["client_type"], "surface-extension");
+        for forbidden in [
+            "yolo",
+            "tools",
+            "tool_allowlist",
+            "capabilities",
+            "permissions",
+            "purpose",
+            "kind",
+        ] {
+            assert!(value.get(forbidden).is_none(), "leaked {forbidden}");
+        }
     }
 
     // -- session persistence (should_restore_session pure helper) --

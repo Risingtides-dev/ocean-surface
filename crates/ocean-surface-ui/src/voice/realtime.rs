@@ -34,6 +34,7 @@ use web_sys::{
     RtcSessionDescriptionInit, RtcTrackEvent,
 };
 
+use super::planner::{PlannerContext, VoicePlannerBrief};
 use super::vad;
 use crate::daemon::Daemon;
 use crate::tts;
@@ -51,6 +52,34 @@ pub enum RealtimeStage {
     Live,
 }
 
+/// The transport is shared, but tool authority and secret minting are isolated
+/// by kind. Planner never enters the conversation tool dispatcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RealtimeKind {
+    Conversation,
+    Planner,
+}
+
+#[derive(Clone)]
+enum RealtimeConfig {
+    Conversation {
+        session_id: Option<String>,
+    },
+    Planner {
+        context: PlannerContext,
+        on_proposal: Callback<VoicePlannerBrief>,
+    },
+}
+
+impl RealtimeConfig {
+    fn kind(&self) -> RealtimeKind {
+        match self {
+            Self::Conversation { .. } => RealtimeKind::Conversation,
+            Self::Planner { .. } => RealtimeKind::Planner,
+        }
+    }
+}
+
 /// One entry in the voice-mode menu's realtime section. The menu reads this
 /// to render the right label, show any error, and decide retry vs stop.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +95,7 @@ pub struct RealtimeMenuEntry {
 thread_local! {
     static STAGE: RefCell<Option<ArcRwSignal<RealtimeStage>>> = const { RefCell::new(None) };
     static LEVEL: RefCell<Option<ArcRwSignal<f32>>> = const { RefCell::new(None) };
+    static KIND: RefCell<Option<ArcRwSignal<Option<RealtimeKind>>>> = const { RefCell::new(None) };
     /// The daemon handle, installed once from app.rs so the orb's menu entry
     /// can start a session without threading props through VoiceOrb.
     static DAEMON: RefCell<Option<Daemon>> = const { RefCell::new(None) };
@@ -95,6 +125,14 @@ pub fn level() -> ArcRwSignal<f32> {
     LEVEL.with(|cell| {
         cell.borrow_mut()
             .get_or_insert_with(|| ArcRwSignal::new(0.0))
+            .clone()
+    })
+}
+
+pub fn active_kind() -> ArcRwSignal<Option<RealtimeKind>> {
+    KIND.with(|cell| {
+        cell.borrow_mut()
+            .get_or_insert_with(|| ArcRwSignal::new(None))
             .clone()
     })
 }
@@ -348,6 +386,7 @@ impl Drop for PendingTransport {
 /// Live session state. Dropping this (via [`stop`]) releases the mic, closes
 /// the peer connection, and silences the remote audio element.
 struct RealtimeSession {
+    kind: RealtimeKind,
     pc: RtcPeerConnection,
     channel: RtcDataChannel,
     mic: MediaStream,
@@ -383,25 +422,44 @@ impl Drop for RealtimeSession {
 /// status line. The active chat session (when any) scopes the daemon
 /// briefing and the handoff target.
 pub fn start() {
-    if stage().get_untracked() != RealtimeStage::Off {
-        return;
-    }
-    // Realtime owns the audio path: stop any classic spoken reply before
-    // opening the duplex WebRTC session so the two outputs cannot overlap.
-    if tts::is_playing() {
-        tts::stop();
-    }
     let Some(daemon) = daemon() else {
         super::report_status("voice chat unavailable — daemon handle not installed".into());
         return;
     };
+    let session_id = daemon.session_id.get_untracked();
+    start_with_config(daemon, RealtimeConfig::Conversation { session_id });
+}
+
+/// Start the isolated propose-only planner transport. A valid proposal is
+/// published locally through `on_proposal`; no daemon mutation is reachable.
+pub fn start_planner(context: PlannerContext, on_proposal: Callback<VoicePlannerBrief>) {
+    let Some(daemon) = daemon() else {
+        super::report_status("voice planner unavailable — daemon handle not installed".into());
+        return;
+    };
+    start_with_config(
+        daemon,
+        RealtimeConfig::Planner {
+            context,
+            on_proposal,
+        },
+    );
+}
+
+fn start_with_config(daemon: Daemon, config: RealtimeConfig) {
+    if stage().get_untracked() != RealtimeStage::Off {
+        return;
+    }
+    if tts::is_playing() {
+        tts::stop();
+    }
     cancel_connecting_mic();
     let attempt = begin_connect_attempt();
-    let session_id = daemon.session_id.get_untracked();
     last_error().set(None);
+    active_kind().set(Some(config.kind()));
     stage().set(RealtimeStage::Connecting);
     spawn_local(async move {
-        match connect(daemon, session_id, attempt).await {
+        match connect(daemon, config, attempt).await {
             Ok(session) => {
                 let mut pending = Some(session);
                 let published = CONNECT_GENERATION.with(|generation| {
@@ -425,6 +483,7 @@ pub fn start() {
                 CONNECT_GENERATION.with(|generation| {
                     generation.publish_if_current(attempt, || {
                         stage().set(RealtimeStage::Off);
+                        active_kind().set(None);
                         level().set(0.0);
                         let humanized = user_facing_realtime_error(&msg);
                         last_error().set(Some(humanized));
@@ -443,6 +502,7 @@ pub fn stop() {
     cancel_connecting_mic();
     drop(SESSION.with(|slot| slot.borrow_mut().take()));
     stage().set(RealtimeStage::Off);
+    active_kind().set(None);
     level().set(0.0);
     last_error().set(None);
 }
@@ -450,11 +510,18 @@ pub fn stop() {
 /// Full connect flow: secret → mic → peer connection → SDP round-trip.
 async fn connect(
     daemon: Daemon,
-    session_id: Option<String>,
+    config: RealtimeConfig,
     attempt: u64,
 ) -> Result<RealtimeSession, String> {
     // 1. Ephemeral secret from the daemon (same-origin through the proxy).
-    let secret = daemon.realtime_client_secret(session_id.clone()).await?;
+    let secret = match &config {
+        RealtimeConfig::Conversation { session_id } => {
+            daemon.realtime_client_secret(session_id.clone()).await?
+        }
+        RealtimeConfig::Planner { context, .. } => {
+            daemon.realtime_planner_client_secret(context).await?
+        }
+    };
     ensure_connect_attempt_current(attempt)?;
 
     // 2. Mic with echo cancellation — same constraints as the listen loop, so
@@ -527,11 +594,11 @@ async fn connect(
     closures.push(Box::new(onopen));
 
     let daemon_for_events = daemon.clone();
-    let session_for_events = session_id.clone();
+    let config_for_events = config.clone();
     let onmessage = Closure::wrap(Box::new(move |ev: MessageEvent| {
         if connect_attempt_is_current(attempt) {
             if let Some(text) = ev.data().as_string() {
-                handle_server_event(&daemon_for_events, session_for_events.as_deref(), &text);
+                handle_server_event(&daemon_for_events, &config_for_events, &text);
             }
         }
     }) as Box<dyn FnMut(MessageEvent)>);
@@ -614,6 +681,7 @@ async fn connect(
     transport.disarm();
 
     Ok(RealtimeSession {
+        kind: config.kind(),
         pc,
         channel,
         mic,
@@ -686,7 +754,7 @@ fn start_level_meter(mic: &MediaStream) -> Result<LevelMeterHandles, String> {
 /// One server event off the data channel. Tool calls are dispatched from the
 /// completed response (`response.done` carries every `function_call` output
 /// item with its full `arguments` string — no delta assembly needed).
-fn handle_server_event(daemon: &Daemon, session_id: Option<&str>, text: &str) {
+fn handle_server_event(daemon: &Daemon, config: &RealtimeConfig, text: &str) {
     let Ok(event) = serde_json::from_str::<Value>(text) else {
         return;
     };
@@ -707,12 +775,19 @@ fn handle_server_event(daemon: &Daemon, session_id: Option<&str>, text: &str) {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
-                let args: Value = item
+                let raw_args = item
                     .pointer("/arguments")
                     .and_then(Value::as_str)
-                    .and_then(|raw| serde_json::from_str(raw).ok())
-                    .unwrap_or(Value::Null);
-                dispatch_tool(daemon, session_id, name, call_id, args);
+                    .unwrap_or("");
+                match config {
+                    RealtimeConfig::Conversation { session_id } => {
+                        let args = serde_json::from_str(raw_args).unwrap_or(Value::Null);
+                        dispatch_tool(daemon, session_id.as_deref(), name, call_id, args);
+                    }
+                    RealtimeConfig::Planner { on_proposal, .. } => {
+                        dispatch_planner_tool(name, call_id, raw_args, *on_proposal);
+                    }
+                }
             }
         }
         Some("error") => {
@@ -728,6 +803,34 @@ fn handle_server_event(daemon: &Daemon, session_id: Option<&str>, text: &str) {
 
 /// Run one voice-agent tool call and answer it on the data channel so the
 /// agent can keep talking about what it did.
+fn dispatch_planner_tool(
+    name: &str,
+    call_id: String,
+    raw_args: &str,
+    on_proposal: Callback<VoicePlannerBrief>,
+) {
+    match validate_planner_tool_call(name, raw_args) {
+        Ok(proposal) => {
+            on_proposal.run(proposal);
+            send_tool_output(
+                &call_id,
+                "proposal ready for human review; no session or work was created",
+            );
+        }
+        Err(error) => send_tool_output(
+            &call_id,
+            &format!("proposal rejected: {error}. Revise it and call propose_handoff again"),
+        ),
+    }
+}
+
+fn validate_planner_tool_call(name: &str, raw_args: &str) -> Result<VoicePlannerBrief, String> {
+    if name != "propose_handoff" {
+        return Err(format!("tool `{name}` is unavailable in planner mode"));
+    }
+    VoicePlannerBrief::from_tool_arguments(raw_args)
+}
+
 fn dispatch_tool(
     daemon: &Daemon,
     session_id: Option<&str>,
@@ -978,5 +1081,40 @@ mod tests {
     fn urlencode_passes_model_ids_untouched() {
         assert_eq!(urlencode("gpt-realtime-2"), "gpt-realtime-2");
         assert_eq!(urlencode("a b"), "a%20b");
+    }
+
+    fn valid_planner_args() -> String {
+        json!({
+            "title": "Plan",
+            "problem": "Need a safe plan",
+            "users": [],
+            "goals": ["Review"],
+            "non_goals": [],
+            "requirements": [],
+            "acceptance_criteria": [],
+            "constraints": [],
+            "open_questions": []
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn planner_dispatch_accepts_only_strict_propose_handoff() {
+        let proposal = validate_planner_tool_call("propose_handoff", &valid_planner_args())
+            .expect("valid strict proposal");
+        assert_eq!(proposal.title, "Plan");
+
+        for unavailable in ["render_component", "write_handoff", "", "propose_handofff"] {
+            assert!(validate_planner_tool_call(unavailable, &valid_planner_args()).is_err());
+        }
+        assert!(validate_planner_tool_call("propose_handoff", "not json").is_err());
+        let mut unknown: Value = serde_json::from_str(&valid_planner_args()).unwrap();
+        unknown["unknown"] = json!(true);
+        assert!(validate_planner_tool_call("propose_handoff", &unknown.to_string()).is_err());
+    }
+
+    #[test]
+    fn realtime_kind_signal_is_owner_independent() {
+        assert_arc_rw_signal::<Option<RealtimeKind>>(active_kind());
     }
 }
