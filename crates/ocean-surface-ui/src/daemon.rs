@@ -6044,13 +6044,12 @@ mod tests {
             // on a bare `type`. So: a clean parse to a non-Other variant OR a
             // field-level error both mean "recognized name". Only a clean parse
             // to `Other` means "unknown name".
-            match parsed {
-                Ok(AgentEvent::Other) => panic!(
+            if let Ok(AgentEvent::Other) = parsed {
+                panic!(
                     "AGENT_EVENT_NAMES contains \"{name}\" but it deserializes to \
                      AgentEvent::Other — it matches no variant. Remove it or fix \
                      the spelling so it mirrors the daemon's emitted name.",
-                ),
-                Ok(_) | Err(_) => {}
+                );
             }
         }
 

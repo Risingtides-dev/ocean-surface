@@ -2743,7 +2743,9 @@ mod tests {
     fn planner_picker_uses_only_registered_main_roots_and_worktrees() {
         let project = planner_project("p1", "/main", &["/worktree", "/worktree"]);
         assert_eq!(planner_candidates(&project), vec!["/main", "/worktree"]);
-        assert!(selected_planner_context(&[project.clone()], "p1", "/worktree").is_some());
+        assert!(
+            selected_planner_context(std::slice::from_ref(&project), "p1", "/worktree").is_some()
+        );
         assert!(selected_planner_context(&[project], "p1", "/unrelated").is_none());
     }
 
