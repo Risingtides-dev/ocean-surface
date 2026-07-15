@@ -386,7 +386,6 @@ impl Drop for PendingTransport {
 /// Live session state. Dropping this (via [`stop`]) releases the mic, closes
 /// the peer connection, and silences the remote audio element.
 struct RealtimeSession {
-    kind: RealtimeKind,
     pc: RtcPeerConnection,
     channel: RtcDataChannel,
     mic: MediaStream,
@@ -681,7 +680,6 @@ async fn connect(
     transport.disarm();
 
     Ok(RealtimeSession {
-        kind: config.kind(),
         pc,
         channel,
         mic,

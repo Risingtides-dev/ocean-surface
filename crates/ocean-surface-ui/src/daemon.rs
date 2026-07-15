@@ -12,10 +12,14 @@
 //! turn_id / session_id / status. We push events into a Leptos signal so
 //! the rest of the UI reacts naturally.
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::rc::Rc;
 
-use futures_util::StreamExt;
+use futures_util::future::LocalBoxFuture;
+use futures_util::{FutureExt, StreamExt};
 use gloo_net::eventsource::futures::EventSource;
+use gloo_net::eventsource::State as EventSourceState;
 use gloo_net::http::Request;
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -1206,6 +1210,49 @@ pub struct PinnedWidget {
 
 /// Reactive handle to the daemon. Owns the live turns vec + connection
 /// status; surfaces APIs to send prompts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlannerStreamKind {
+    Agent,
+    Permission,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PlannerStreamLifecycle {
+    agent: EventSourceState,
+    permission: EventSourceState,
+}
+
+impl Default for PlannerStreamLifecycle {
+    fn default() -> Self {
+        Self {
+            agent: EventSourceState::Closed,
+            permission: EventSourceState::Closed,
+        }
+    }
+}
+
+impl PlannerStreamLifecycle {
+    fn transition(&mut self, kind: PlannerStreamKind, state: EventSourceState) {
+        match kind {
+            PlannerStreamKind::Agent => self.agent = state,
+            PlannerStreamKind::Permission => self.permission = state,
+        }
+    }
+
+    fn ready(&self) -> bool {
+        self.agent == EventSourceState::Open && self.permission == EventSourceState::Open
+    }
+}
+
+#[derive(Default)]
+struct PlannerStreamSources {
+    session_id: String,
+    generation: u64,
+    agent: Option<EventSource>,
+    permission: Option<EventSource>,
+    lifecycle: PlannerStreamLifecycle,
+}
+
 #[derive(Clone)]
 pub struct Daemon {
     pub url: RwSignal<String>,
@@ -1238,6 +1285,13 @@ pub struct Daemon {
     /// so reconnect/switch/new-session calls retire older streams instead of
     /// applying every delta multiple times.
     sse_generation: RwSignal<u64>,
+    /// First-open readiness for the active agent and permission streams. Voice
+    /// Planner awaits both before posting its first normal turn, then reconciles
+    /// the durable permission snapshot so no gate can be missed in the handoff.
+    agent_stream_ready: RwSignal<Option<(String, u64)>>,
+    permission_stream_ready: RwSignal<Option<(String, u64)>>,
+    permission_revision: RwSignal<u64>,
+    planner_stream_sources: send_wrapper::SendWrapper<Rc<RefCell<PlannerStreamSources>>>,
     /// Legacy guard retained for older daemon/proxy builds. New surfaces create
     /// sessions explicitly before posting turns, so this should stay false.
     awaiting_session_adoption: RwSignal<bool>,
@@ -1428,6 +1482,28 @@ struct SessionDetail {
     /// vanishing (OCEAN-382).
     #[serde(default)]
     tool_context: Vec<SessionToolContext>,
+    #[serde(default)]
+    pending_permissions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PermissionsResponse {
+    ok: bool,
+    #[serde(default)]
+    permissions: Vec<PermissionStatusWire>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PermissionStatusWire {
+    permission_id: String,
+    #[serde(default)]
+    session_id: Option<String>,
+    tool: String,
+    reason: String,
+    #[serde(default)]
+    args: Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1477,6 +1553,12 @@ impl Daemon {
             livekit_token_path: RwSignal::new(String::new()),
             tldraw_sync_uri: RwSignal::new(String::new()),
             sse_generation: RwSignal::new(0),
+            agent_stream_ready: RwSignal::new(None),
+            permission_stream_ready: RwSignal::new(None),
+            permission_revision: RwSignal::new(0),
+            planner_stream_sources: send_wrapper::SendWrapper::new(Rc::new(RefCell::new(
+                PlannerStreamSources::default(),
+            ))),
             awaiting_session_adoption: RwSignal::new(false),
             session_title: RwSignal::new(String::new()),
             session_list: RwSignal::new(Vec::new()),
@@ -1527,6 +1609,12 @@ impl Daemon {
             livekit_token_path: RwSignal::new(String::new()),
             tldraw_sync_uri: RwSignal::new(String::new()),
             sse_generation: RwSignal::new(0),
+            agent_stream_ready: RwSignal::new(None),
+            permission_stream_ready: RwSignal::new(None),
+            permission_revision: RwSignal::new(0),
+            planner_stream_sources: send_wrapper::SendWrapper::new(Rc::new(RefCell::new(
+                PlannerStreamSources::default(),
+            ))),
             awaiting_session_adoption: RwSignal::new(false),
             session_title: RwSignal::new(String::new()),
             session_list: RwSignal::new(Vec::new()),
@@ -1666,6 +1754,8 @@ impl Daemon {
         let status = self.status;
         let status_detail = self.status_detail;
         let sse_generation = self.sse_generation;
+        let agent_stream_ready = self.agent_stream_ready;
+        let planner_stream_sources = self.planner_stream_sources.clone();
         let last_turn_tokens = self.last_turn_tokens;
         let session_tokens = self.session_tokens;
         let model = self.model;
@@ -1682,9 +1772,18 @@ impl Daemon {
 
         let generation = sse_generation.get_untracked().wrapping_add(1);
         sse_generation.set(generation);
+        self.agent_stream_ready.set(None);
+        self.permission_stream_ready.set(None);
         let Some(active_session_id) = session_id.get_untracked() else {
             status.set("new session".into());
             return;
+        };
+        *planner_stream_sources.borrow_mut() = PlannerStreamSources {
+            session_id: active_session_id.clone(),
+            generation,
+            agent: None,
+            permission: None,
+            lifecycle: PlannerStreamLifecycle::default(),
         };
         let seen_sse_ids: RwSignal<VecDeque<String>> = RwSignal::new(VecDeque::new());
 
@@ -1744,6 +1843,14 @@ impl Daemon {
                     .await;
                 }
 
+                clear_stream_marker(agent_stream_ready, &active_session_id, generation);
+                set_stream_source(
+                    &planner_stream_sources,
+                    &active_session_id,
+                    generation,
+                    false,
+                    None,
+                );
                 let events_url = format!(
                     "{}/v1/agent/events?session_id={}",
                     url.trim_end_matches('/'),
@@ -1797,6 +1904,29 @@ impl Daemon {
                     continue;
                 }
 
+                if !await_event_source_open(&es).await {
+                    status.set("agent stream did not open".into());
+                    continue;
+                }
+                agent_stream_ready.set(stream_marker_for_state(
+                    es.state(),
+                    &active_session_id,
+                    generation,
+                ));
+                set_stream_source(
+                    &planner_stream_sources,
+                    &active_session_id,
+                    generation,
+                    false,
+                    Some(es.clone()),
+                );
+                spawn_local(monitor_stream_open(
+                    planner_stream_sources.clone(),
+                    agent_stream_ready,
+                    active_session_id.clone(),
+                    generation,
+                    false,
+                ));
                 let mut stream = futures_util::stream::select_all(subs);
                 while let Some(msg) = stream.next().await {
                     if sse_generation.get_untracked() != generation {
@@ -1804,7 +1934,7 @@ impl Daemon {
                     }
 
                     let Ok((_event_name, msg)) = msg else {
-                        continue;
+                        break;
                     };
 
                     // Tunnels/proxies can reconnect or replay a frame around
@@ -1879,6 +2009,14 @@ impl Daemon {
                     );
                 }
 
+                clear_stream_marker(agent_stream_ready, &active_session_id, generation);
+                set_stream_source(
+                    &planner_stream_sources,
+                    &active_session_id,
+                    generation,
+                    false,
+                    None,
+                );
                 if sse_generation.get_untracked() != generation {
                     break;
                 }
@@ -1904,6 +2042,9 @@ impl Daemon {
     fn connect_permission_stream(&self, active_session_id: String, generation: u64) {
         let url = self.url.get_untracked();
         let sse_generation = self.sse_generation;
+        let permission_stream_ready = self.permission_stream_ready;
+        let permission_revision = self.permission_revision;
+        let planner_stream_sources = self.planner_stream_sources.clone();
         let pending = self.pending_permissions;
 
         spawn_local(async move {
@@ -1911,6 +2052,14 @@ impl Daemon {
                 if sse_generation.get_untracked() != generation {
                     break;
                 }
+                clear_stream_marker(permission_stream_ready, &active_session_id, generation);
+                set_stream_source(
+                    &planner_stream_sources,
+                    &active_session_id,
+                    generation,
+                    true,
+                    None,
+                );
                 let events_url = format!("{}/v1/events", url.trim_end_matches('/'));
                 let mut es = match EventSource::new(&events_url) {
                     Ok(es) => es,
@@ -1936,13 +2085,35 @@ impl Daemon {
                     continue;
                 }
 
+                if !await_event_source_open(&es).await {
+                    continue;
+                }
+                permission_stream_ready.set(stream_marker_for_state(
+                    es.state(),
+                    &active_session_id,
+                    generation,
+                ));
+                set_stream_source(
+                    &planner_stream_sources,
+                    &active_session_id,
+                    generation,
+                    true,
+                    Some(es.clone()),
+                );
+                spawn_local(monitor_stream_open(
+                    planner_stream_sources.clone(),
+                    permission_stream_ready,
+                    active_session_id.clone(),
+                    generation,
+                    true,
+                ));
                 let mut stream = futures_util::stream::select_all(subs);
                 while let Some(msg) = stream.next().await {
                     if sse_generation.get_untracked() != generation {
                         break;
                     }
                     let Ok((_event_name, msg)) = msg else {
-                        continue;
+                        break;
                     };
                     let Some(data) = msg.data().as_string() else {
                         continue;
@@ -1950,9 +2121,18 @@ impl Daemon {
                     let Ok(evt) = serde_json::from_str::<ControlEvent>(&data) else {
                         continue;
                     };
+                    permission_revision.update(|revision| *revision = revision.wrapping_add(1));
                     apply_control_event(&evt, &active_session_id, pending);
                 }
 
+                clear_stream_marker(permission_stream_ready, &active_session_id, generation);
+                set_stream_source(
+                    &planner_stream_sources,
+                    &active_session_id,
+                    generation,
+                    true,
+                    None,
+                );
                 if sse_generation.get_untracked() != generation {
                     break;
                 }
@@ -1975,6 +2155,7 @@ impl Daemon {
         let url = self.url.get_untracked();
         let status = self.status;
         let pending = self.pending_permissions;
+        let permission_revision = self.permission_revision;
         // Read the token before moving into the async block. `get_untracked`
         // avoids a reactive subscription that isn't needed here.
         let token = self.active_decision_token.get_untracked();
@@ -2024,6 +2205,7 @@ impl Daemon {
             };
             match res {
                 Ok(resp) if resp.ok() => {
+                    permission_revision.update(|revision| *revision = revision.wrapping_add(1));
                     remove_pending_permission(pending, &permission_id);
                     status.set(if allow {
                         "permission allowed".into()
@@ -2672,6 +2854,12 @@ impl Daemon {
     /// SSE stream for any future live events. SSE is a live tail, not historical
     /// replay, so switching sessions must explicitly hydrate from the daemon.
     pub fn switch_session(&self, id: String, title: String) {
+        self.select_session_state(&id, title);
+        self.load_session_snapshot(id);
+        self.connect();
+    }
+
+    fn select_session_state(&self, id: &str, title: String) {
         self.turns.set(Vec::new());
         self.streaming.set(false);
         self.active_turn_id.set(None);
@@ -2682,74 +2870,128 @@ impl Daemon {
         self.pending_images.set(Vec::new());
         self.pending_permissions.set(Vec::new());
         self.active_decision_token.set(None);
-        self.session_id.set(Some(id.clone()));
-        persist_session(&id);
+        self.session_id.set(Some(id.to_string()));
+        persist_session(id);
         self.awaiting_session_adoption.set(false);
         self.session_title.set(title);
         self.status.set("loading session…".into());
         self.status_detail.set(None);
         self.reset_token_stats();
-        self.load_session_snapshot(id);
-        self.connect();
     }
 
     fn load_session_snapshot(&self, id: String) {
-        let url = self.url.get_untracked();
-        let turns = self.turns;
-        let session_id = self.session_id;
-        let session_title = self.session_title;
-        let cwd = self.cwd;
-        let model = self.model;
-        let status = self.status;
-        let pinned_widgets = self.pinned_widgets;
-
+        let daemon = self.clone();
         spawn_local(async move {
-            let get_url = format!("{}/v1/sessions/{id}", url.trim_end_matches('/'));
-            match Request::get(&get_url).send().await {
-                Ok(resp) => match resp.json::<SessionDetailResponse>().await {
-                    Ok(r) if r.ok => {
-                        let Some(detail) = r.session else {
-                            status.set("session snapshot missing".into());
-                            return;
-                        };
-                        // Guard against stale async loads if the user switches
-                        // sessions again before this fetch completes.
-                        if session_id.get_untracked().as_deref() != Some(detail.id.as_str()) {
-                            return;
-                        }
-                        session_title.set(detail.title.clone());
-                        if let Some(root) = detail.workspace_root.or(detail.cwd) {
-                            if !root.is_empty() {
-                                cwd.set(root);
-                            }
-                        }
-                        if !detail.model.is_empty() {
-                            model.set(Some(detail.model));
-                        }
-                        let (rebuilt_turns, rebuilt_pinned) =
-                            turns_from_session_transcript(detail.transcript, &detail.tool_context);
-                        turns.set(rebuilt_turns);
-                        pinned_widgets.set(rebuilt_pinned);
-                        status.set("session loaded".into());
-                    }
-                    Ok(r) => {
-                        let raw = r.error.unwrap_or_else(|| "unknown error".into());
-                        log::error!("session load failed: {raw}");
-                        status.set(format!("session load failed: {}", concise_error(&raw)));
-                    }
-                    Err(err) => {
-                        let raw = err.to_string();
-                        log::error!("session decode error: {raw}");
-                        status.set(format!("session decode error: {}", concise_error(&raw)));
-                    }
-                },
-                Err(err) => {
-                    let raw = err.to_string();
-                    log::error!("session fetch error: {raw}");
-                    status.set(format!("session fetch error: {}", concise_error(&raw)));
+            if let Err(error) = daemon.hydrate_active_session(&id).await {
+                log::error!("session load failed: {error}");
+                if daemon.session_id.get_untracked().as_deref() == Some(id.as_str()) {
+                    daemon
+                        .status
+                        .set(format!("session load failed: {}", concise_error(&error)));
                 }
             }
         });
+    }
+
+    async fn hydrate_active_session(&self, id: &str) -> Result<Vec<String>, String> {
+        let url = self.url.get_untracked();
+        let get_url = format!("{}/v1/sessions/{id}", url.trim_end_matches('/'));
+        let resp = Request::get(&get_url)
+            .send()
+            .await
+            .map_err(|error| format!("session fetch error: {error}"))?;
+        if !resp.ok() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("session fetch rejected: {}", concise_error(&text)));
+        }
+        let response = resp
+            .json::<SessionDetailResponse>()
+            .await
+            .map_err(|error| format!("session decode error: {error}"))?;
+        if !response.ok {
+            return Err(response.error.unwrap_or_else(|| "unknown error".into()));
+        }
+        let detail = response
+            .session
+            .ok_or_else(|| "session snapshot missing".to_string())?;
+        if detail.id != id || self.session_id.get_untracked().as_deref() != Some(id) {
+            return Err("session changed before snapshot hydration completed".into());
+        }
+        self.session_title.set(detail.title.clone());
+        if let Some(root) = detail.workspace_root.or(detail.cwd) {
+            if !root.is_empty() {
+                self.cwd.set(root);
+            }
+        }
+        if !detail.model.is_empty() {
+            self.model.set(Some(detail.model));
+        }
+        let (rebuilt_turns, rebuilt_pinned) =
+            turns_from_session_transcript(detail.transcript, &detail.tool_context);
+        self.turns.set(rebuilt_turns);
+        self.pinned_widgets.set(rebuilt_pinned);
+        self.status.set("session loaded".into());
+        Ok(detail.pending_permissions)
+    }
+
+    /// Adopt a freshly-created planner session without the ordinary spawned
+    /// hydration race. The durable transcript snapshot is applied first; then
+    /// both session-scoped live tails are subscribed; finally the durable
+    /// permission registry is reconciled. The caller may post the first turn
+    /// only after this future resolves and its generation/session guards hold.
+    pub async fn adopt_planner_session(&self, id: &str, title: String) -> Result<u64, String> {
+        self.select_session_state(id, title);
+        self.hydrate_active_session(id).await?;
+        if self.session_id.get_untracked().as_deref() != Some(id) {
+            return Err("planner session changed during adoption".into());
+        }
+        self.connect();
+        let generation = self.sse_generation.get_untracked();
+        for _ in 0..240 {
+            if self.session_id.get_untracked().as_deref() != Some(id)
+                || self.sse_generation.get_untracked() != generation
+            {
+                return Err("planner session changed while streams connected".into());
+            }
+            if planner_streams_ready(
+                id,
+                generation,
+                self.agent_stream_ready.get_untracked().as_ref(),
+                self.permission_stream_ready.get_untracked().as_ref(),
+            ) && planner_sources_open(&self.planner_stream_sources.borrow(), id, generation)
+            {
+                self.reconcile_pending_permissions(id).await?;
+                if self.session_id.get_untracked().as_deref() == Some(id)
+                    && self.sse_generation.get_untracked() == generation
+                    && planner_streams_ready(
+                        id,
+                        generation,
+                        self.agent_stream_ready.get_untracked().as_ref(),
+                        self.permission_stream_ready.get_untracked().as_ref(),
+                    )
+                    && planner_sources_open(&self.planner_stream_sources.borrow(), id, generation)
+                {
+                    return Ok(generation);
+                }
+                return Err("planner session changed during permission reconciliation".into());
+            }
+            // Await an actual OPEN marker from both EventSources. The bounded
+            // delay is only a timeout/yield; correctness comes from state().
+            gloo_timers::future::TimeoutFuture::new(25).await;
+        }
+        Err("planner session streams did not become ready".into())
+    }
+
+    pub async fn refresh_planner_session(&self, id: &str) -> Result<(), String> {
+        self.hydrate_active_session(id).await.map(|_| ())
+    }
+
+    async fn reconcile_pending_permissions(&self, session_id: &str) -> Result<(), String> {
+        let mut source = DaemonPermissionSnapshotSource {
+            daemon: self,
+            session_id,
+        };
+        reconcile_permission_snapshot(&mut source).await
     }
 
     /// Reset to a fresh, not-yet-created session. Clears state and leaves
@@ -3116,6 +3358,19 @@ impl Daemon {
         if self.session_id.get_untracked().as_deref() != Some(session_id) {
             return Err("created planner session is no longer active".into());
         }
+        let generation = self.sse_generation.get_untracked();
+        if !planner_streams_ready(
+            session_id,
+            generation,
+            self.agent_stream_ready.get_untracked().as_ref(),
+            self.permission_stream_ready.get_untracked().as_ref(),
+        ) || !planner_sources_open(
+            &self.planner_stream_sources.borrow(),
+            session_id,
+            generation,
+        ) {
+            return Err("planner session streams are not open".into());
+        }
         let decision_token = mint_decision_token();
         if decision_token.len() != 64
             || !decision_token.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -3123,7 +3378,11 @@ impl Daemon {
             return Err("secure decision token unavailable".into());
         }
         self.active_decision_token.set(Some(decision_token.clone()));
-        self.turns.update(|turns| turns.push(Turn::user(markdown)));
+        self.turns.update(|turns| {
+            if !planner_prompt_already_echoed(turns, markdown) {
+                turns.push(Turn::user(markdown));
+            }
+        });
         self.streaming.set(true);
         let body = AgentTurnRequest {
             prompt: markdown,
@@ -3169,7 +3428,14 @@ impl Daemon {
         }
         .await;
         if result.is_err() {
-            self.streaming.set(false);
+            if self.session_id.get_untracked().as_deref() == Some(session_id) {
+                self.streaming.set(false);
+            }
+            if self.active_decision_token.get_untracked().as_deref()
+                == Some(decision_token.as_str())
+            {
+                self.active_decision_token.set(None);
+            }
         }
         result
     }
@@ -3637,6 +3903,206 @@ fn apply_event(
             log::debug!("ignoring unrecognized agent event type");
         }
     }
+}
+
+async fn await_event_source_open(source: &EventSource) -> bool {
+    for _ in 0..200 {
+        match source.state() {
+            EventSourceState::Open => return true,
+            EventSourceState::Closed => return false,
+            EventSourceState::Connecting => {
+                gloo_timers::future::TimeoutFuture::new(25).await;
+            }
+        }
+    }
+    false
+}
+
+fn stream_marker_for_state(
+    state: EventSourceState,
+    session_id: &str,
+    generation: u64,
+) -> Option<(String, u64)> {
+    (state == EventSourceState::Open).then(|| (session_id.to_string(), generation))
+}
+
+fn set_stream_source(
+    sources: &Rc<RefCell<PlannerStreamSources>>,
+    session_id: &str,
+    generation: u64,
+    permission: bool,
+    source: Option<EventSource>,
+) {
+    let mut sources = sources.borrow_mut();
+    if sources.session_id != session_id || sources.generation != generation {
+        return;
+    }
+    let state = source
+        .as_ref()
+        .map(EventSource::state)
+        .unwrap_or(EventSourceState::Closed);
+    let kind = if permission {
+        sources.permission = source;
+        PlannerStreamKind::Permission
+    } else {
+        sources.agent = source;
+        PlannerStreamKind::Agent
+    };
+    sources.lifecycle.transition(kind, state);
+}
+
+async fn monitor_stream_open(
+    sources: send_wrapper::SendWrapper<Rc<RefCell<PlannerStreamSources>>>,
+    marker: RwSignal<Option<(String, u64)>>,
+    session_id: String,
+    generation: u64,
+    permission: bool,
+) {
+    loop {
+        gloo_timers::future::TimeoutFuture::new(25).await;
+        let state = {
+            let sources = sources.borrow();
+            if sources.session_id != session_id || sources.generation != generation {
+                return;
+            }
+            let source = if permission {
+                sources.permission.as_ref()
+            } else {
+                sources.agent.as_ref()
+            };
+            source.map(EventSource::state)
+        };
+        if state == Some(EventSourceState::Open) {
+            continue;
+        }
+        clear_stream_marker(marker, &session_id, generation);
+        set_stream_source(&sources, &session_id, generation, permission, None);
+        return;
+    }
+}
+
+fn planner_sources_open(sources: &PlannerStreamSources, session_id: &str, generation: u64) -> bool {
+    sources.session_id == session_id
+        && sources.generation == generation
+        && sources.lifecycle.ready()
+        && sources
+            .agent
+            .as_ref()
+            .is_some_and(|source| source.state() == EventSourceState::Open)
+        && sources
+            .permission
+            .as_ref()
+            .is_some_and(|source| source.state() == EventSourceState::Open)
+}
+
+fn clear_stream_marker(marker: RwSignal<Option<(String, u64)>>, session_id: &str, generation: u64) {
+    if marker.with_untracked(|value| {
+        value
+            .as_ref()
+            .is_some_and(|(id, current)| id == session_id && *current == generation)
+    }) {
+        marker.set(None);
+    }
+}
+
+trait PermissionSnapshotSource {
+    fn revision(&self) -> u64;
+    fn fetch<'a>(&'a mut self) -> LocalBoxFuture<'a, Result<Vec<PendingPermission>, String>>;
+    fn apply(&mut self, snapshot: Vec<PendingPermission>);
+}
+
+async fn reconcile_permission_snapshot<S: PermissionSnapshotSource>(
+    source: &mut S,
+) -> Result<(), String> {
+    for _ in 0..4 {
+        let revision = source.revision();
+        let snapshot = source.fetch().await?;
+        if source.revision() != revision {
+            continue;
+        }
+        source.apply(snapshot);
+        return Ok(());
+    }
+    Err("permission snapshot changed repeatedly during reconciliation".into())
+}
+
+struct DaemonPermissionSnapshotSource<'a> {
+    daemon: &'a Daemon,
+    session_id: &'a str,
+}
+
+impl PermissionSnapshotSource for DaemonPermissionSnapshotSource<'_> {
+    fn revision(&self) -> u64 {
+        self.daemon.permission_revision.get_untracked()
+    }
+
+    fn fetch<'a>(&'a mut self) -> LocalBoxFuture<'a, Result<Vec<PendingPermission>, String>> {
+        async move {
+            let url = self.daemon.url.get_untracked();
+            let get_url = format!("{}/v1/permissions", url.trim_end_matches('/'));
+            let resp = Request::get(&get_url)
+                .send()
+                .await
+                .map_err(|error| format!("permission snapshot failed: {error}"))?;
+            if !resp.ok() {
+                let text = resp.text().await.unwrap_or_default();
+                return Err(format!(
+                    "permission snapshot rejected: {}",
+                    concise_error(&text)
+                ));
+            }
+            let response = resp
+                .json::<PermissionsResponse>()
+                .await
+                .map_err(|error| format!("permission snapshot decode failed: {error}"))?;
+            if !response.ok {
+                return Err(response
+                    .error
+                    .unwrap_or_else(|| "permission snapshot failed".into()));
+            }
+            if self.daemon.session_id.get_untracked().as_deref() != Some(self.session_id) {
+                return Err("session changed during permission snapshot".into());
+            }
+            Ok(response
+                .permissions
+                .into_iter()
+                .filter(|permission| permission.session_id.as_deref() == Some(self.session_id))
+                .map(|permission| PendingPermission {
+                    permission_id: permission.permission_id,
+                    session_id: self.session_id.to_string(),
+                    tool: permission.tool,
+                    reason: permission.reason,
+                    args_summary: summarize_args(&permission.args),
+                    deciding: false,
+                })
+                .collect())
+        }
+        .boxed_local()
+    }
+
+    fn apply(&mut self, snapshot: Vec<PendingPermission>) {
+        self.daemon.pending_permissions.set(snapshot);
+    }
+}
+
+fn planner_prompt_already_echoed(turns: &[Turn], markdown: &str) -> bool {
+    turns.iter().any(|turn| {
+        turn.role == Role::User
+            && turn
+                .blocks
+                .iter()
+                .any(|block| matches!(block, Block::Text(text) if text == markdown))
+    })
+}
+
+fn planner_streams_ready(
+    session_id: &str,
+    generation: u64,
+    agent: Option<&(String, u64)>,
+    permission: Option<&(String, u64)>,
+) -> bool {
+    let expected = &(session_id.to_string(), generation);
+    agent == Some(expected) && permission == Some(expected)
 }
 
 /// Apply one control-stream frame to the pending-permission queue, scoped to the
@@ -6541,6 +7007,105 @@ mod tests {
         ] {
             assert!(value.get(forbidden).is_none(), "leaked {forbidden}");
         }
+    }
+
+    #[test]
+    fn production_stream_lifecycle_invalidates_readiness_on_drop() {
+        let mut lifecycle = PlannerStreamLifecycle::default();
+        lifecycle.transition(PlannerStreamKind::Agent, EventSourceState::Open);
+        assert!(!lifecycle.ready());
+        lifecycle.transition(PlannerStreamKind::Permission, EventSourceState::Open);
+        assert!(lifecycle.ready());
+        lifecycle.transition(PlannerStreamKind::Agent, EventSourceState::Connecting);
+        assert!(!lifecycle.ready());
+        lifecycle.transition(PlannerStreamKind::Agent, EventSourceState::Open);
+        assert!(lifecycle.ready());
+        lifecycle.transition(PlannerStreamKind::Permission, EventSourceState::Closed);
+        assert!(!lifecycle.ready());
+    }
+
+    #[test]
+    fn planner_stream_readiness_requires_both_exact_session_generation_markers() {
+        let agent = ("s1".to_string(), 7);
+        let permission = ("s1".to_string(), 7);
+        assert!(planner_streams_ready(
+            "s1",
+            7,
+            Some(&agent),
+            Some(&permission)
+        ));
+        assert!(!planner_streams_ready("s1", 7, Some(&agent), None));
+        assert!(!planner_streams_ready(
+            "s1",
+            8,
+            Some(&agent),
+            Some(&permission)
+        ));
+        let other = ("s2".to_string(), 7);
+        assert!(!planner_streams_ready("s1", 7, Some(&agent), Some(&other)));
+    }
+
+    #[derive(Default)]
+    struct FakePermissionSnapshotSource {
+        revision: u64,
+        fetches: usize,
+        applied: Vec<Vec<String>>,
+    }
+
+    impl PermissionSnapshotSource for FakePermissionSnapshotSource {
+        fn revision(&self) -> u64 {
+            self.revision
+        }
+
+        fn fetch<'a>(&'a mut self) -> LocalBoxFuture<'a, Result<Vec<PendingPermission>, String>> {
+            async move {
+                self.fetches += 1;
+                let id = if self.fetches == 1 {
+                    self.revision += 1;
+                    "stale-decided"
+                } else {
+                    "fresh-pending"
+                };
+                Ok(vec![PendingPermission {
+                    permission_id: id.into(),
+                    session_id: "s1".into(),
+                    tool: "bash".into(),
+                    reason: "test".into(),
+                    args_summary: String::new(),
+                    deciding: false,
+                }])
+            }
+            .boxed_local()
+        }
+
+        fn apply(&mut self, snapshot: Vec<PendingPermission>) {
+            self.applied.push(
+                snapshot
+                    .into_iter()
+                    .map(|permission| permission.permission_id)
+                    .collect(),
+            );
+        }
+    }
+
+    #[test]
+    fn permission_reconciler_refetches_after_revision_change_and_applies_once() {
+        let mut source = FakePermissionSnapshotSource::default();
+        reconcile_permission_snapshot(&mut source)
+            .now_or_never()
+            .expect("fake snapshots are immediately ready")
+            .unwrap();
+        assert_eq!(source.fetches, 2);
+        assert_eq!(source.applied, vec![vec!["fresh-pending".to_string()]]);
+    }
+
+    #[test]
+    fn planner_retry_echoes_confirmed_prompt_only_once() {
+        let mut turns = Vec::new();
+        assert!(!planner_prompt_already_echoed(&turns, "# Plan"));
+        turns.push(Turn::user("# Plan"));
+        assert!(planner_prompt_already_echoed(&turns, "# Plan"));
+        assert!(!planner_prompt_already_echoed(&turns, "# Other"));
     }
 
     // -- session persistence (should_restore_session pure helper) --

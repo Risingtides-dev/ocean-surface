@@ -1,11 +1,13 @@
 //! Top-level app shell. Owns the Daemon, mounts the transcript + composer.
 
+use futures_util::future::LocalBoxFuture;
+use futures_util::FutureExt;
 use leptos::ev::{self, SubmitEvent};
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
 use crate::components::{PermissionPrompts, PinnedRail};
-use crate::daemon::{daemon_url_from_env, Daemon};
+use crate::daemon::{daemon_url_from_env, Daemon, ProjectInfo};
 use crate::deck::browser::BrowserCockpit;
 use crate::deck::files::FilesPanel;
 use crate::deck::repo::RepoPanel;
@@ -17,6 +19,10 @@ use crate::rooms::{RoomStage, Rooms, RoomsPanel};
 use crate::sessions::SessionsPanel;
 use crate::slash_menu::{SlashMenu, SlashRow};
 use crate::transcript::Transcript;
+use crate::voice::planner::{
+    reduce as reduce_planner, PlannerAction, PlannerContext, PlannerEffect, PlannerEvent,
+    PlannerState, VoicePlannerBrief,
+};
 use crate::voice::VoiceOrb;
 use crate::workspace::WorkspaceFocus;
 
@@ -181,12 +187,843 @@ fn run_slash(id: &str, args: &str, daemon: &Daemon, registry: &CommandRegistry) 
     }
 }
 
+fn planner_candidates(project: &ProjectInfo) -> Vec<String> {
+    let mut roots = Vec::with_capacity(project.worktrees.len() + 1);
+    if !project.workspace_root.trim().is_empty() {
+        roots.push(project.workspace_root.clone());
+    }
+    for worktree in &project.worktrees {
+        if !worktree.path.trim().is_empty() && !roots.contains(&worktree.path) {
+            roots.push(worktree.path.clone());
+        }
+    }
+    roots
+}
+
+fn selected_planner_context(
+    projects: &[ProjectInfo],
+    project_id: &str,
+    workspace_root: &str,
+) -> Option<PlannerContext> {
+    let project = projects.iter().find(|project| project.id == project_id)?;
+    planner_candidates(project)
+        .iter()
+        .any(|root| root == workspace_root)
+        .then(|| PlannerContext {
+            project_id: project.id.clone(),
+            project_name: project.name.clone(),
+            workspace_root: workspace_root.to_string(),
+        })
+}
+
+fn initial_planner_context(
+    projects: &[ProjectInfo],
+    ambient_project: Option<&str>,
+    ambient_cwd: &str,
+) -> Option<PlannerContext> {
+    let project = ambient_project
+        .and_then(|id| projects.iter().find(|project| project.id == id))
+        .or_else(|| projects.first())?;
+    let roots = planner_candidates(project);
+    let root = roots
+        .iter()
+        .find(|root| root.as_str() == ambient_cwd)
+        .or_else(|| roots.first())?;
+    selected_planner_context(projects, &project.id, root)
+}
+
+trait PlannerWorkflowOps {
+    fn active_session(&self) -> Option<String>;
+    fn generation_is_current(&self) -> bool;
+    fn create_session<'a>(
+        &'a mut self,
+        context: &'a PlannerContext,
+    ) -> LocalBoxFuture<'a, Result<String, String>>;
+    fn adopt_session<'a>(
+        &'a mut self,
+        session_id: &'a str,
+        context: &'a PlannerContext,
+        title: &'a str,
+    ) -> LocalBoxFuture<'a, Result<(), String>>;
+    fn append_handoff<'a>(
+        &'a mut self,
+        session_id: &'a str,
+        markdown: &'a str,
+    ) -> LocalBoxFuture<'a, Result<(), String>>;
+    fn submit_turn<'a>(
+        &'a mut self,
+        session_id: &'a str,
+        context: &'a PlannerContext,
+        markdown: &'a str,
+    ) -> LocalBoxFuture<'a, Result<(), String>>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlannerWorkflowFailureStage {
+    Create,
+    Adoption,
+    SecondStep,
+    Abandoned,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlannerWorkflowFailure {
+    stage: PlannerWorkflowFailureStage,
+    session_id: Option<String>,
+    created: bool,
+    message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlannerWorkflowSuccess {
+    session_id: String,
+    created: bool,
+}
+
+struct PlannerWorkflowRequest<'a> {
+    context: &'a PlannerContext,
+    title: &'a str,
+    markdown: &'a str,
+    action: PlannerAction,
+    session_id: Option<&'a str>,
+    require_adoption: bool,
+}
+
+async fn execute_planner_workflow<O: PlannerWorkflowOps>(
+    ops: &mut O,
+    request: PlannerWorkflowRequest<'_>,
+) -> Result<PlannerWorkflowSuccess, PlannerWorkflowFailure> {
+    let initial_active = ops.active_session();
+    if !ops.generation_is_current() {
+        return Err(PlannerWorkflowFailure {
+            stage: PlannerWorkflowFailureStage::Abandoned,
+            session_id: request.session_id.map(str::to_string),
+            created: false,
+            message: "planner operation is stale".into(),
+        });
+    }
+    let (session_id, created) = if let Some(session_id) = request.session_id {
+        if initial_active.as_deref() != Some(session_id) {
+            return Err(PlannerWorkflowFailure {
+                stage: PlannerWorkflowFailureStage::Abandoned,
+                session_id: Some(session_id.to_string()),
+                created: false,
+                message: "created planner session is no longer active".into(),
+            });
+        }
+        (session_id.to_string(), false)
+    } else {
+        let session_id = ops
+            .create_session(request.context)
+            .await
+            .map_err(|message| PlannerWorkflowFailure {
+                stage: PlannerWorkflowFailureStage::Create,
+                session_id: None,
+                created: false,
+                message,
+            })?;
+        if !ops.generation_is_current()
+            || !confirmation_session_unchanged(
+                initial_active.as_deref(),
+                ops.active_session().as_deref(),
+            )
+        {
+            return Err(PlannerWorkflowFailure {
+                stage: PlannerWorkflowFailureStage::Abandoned,
+                session_id: Some(session_id),
+                created: true,
+                message: "active session changed while planner session was created".into(),
+            });
+        }
+        (session_id, true)
+    };
+
+    if request.require_adoption {
+        ops.adopt_session(&session_id, request.context, request.title)
+            .await
+            .map_err(|message| PlannerWorkflowFailure {
+                stage: PlannerWorkflowFailureStage::Adoption,
+                session_id: Some(session_id.clone()),
+                created,
+                message,
+            })?;
+    }
+    if !ops.generation_is_current() || ops.active_session().as_deref() != Some(session_id.as_str())
+    {
+        return Err(PlannerWorkflowFailure {
+            stage: PlannerWorkflowFailureStage::Abandoned,
+            session_id: Some(session_id),
+            created,
+            message: "active session changed before planner second step".into(),
+        });
+    }
+
+    let second = match request.action {
+        PlannerAction::CreateDraft => ops.append_handoff(&session_id, request.markdown).await,
+        PlannerAction::CreateAndStart => {
+            ops.submit_turn(&session_id, request.context, request.markdown)
+                .await
+        }
+    };
+    second.map_err(|message| PlannerWorkflowFailure {
+        stage: PlannerWorkflowFailureStage::SecondStep,
+        session_id: Some(session_id.clone()),
+        created,
+        message,
+    })?;
+    if !ops.generation_is_current() || ops.active_session().as_deref() != Some(session_id.as_str())
+    {
+        return Err(PlannerWorkflowFailure {
+            stage: PlannerWorkflowFailureStage::Abandoned,
+            session_id: Some(session_id),
+            created,
+            message: "active session changed before planner completion".into(),
+        });
+    }
+    Ok(PlannerWorkflowSuccess {
+        session_id,
+        created,
+    })
+}
+
+struct DaemonPlannerWorkflowOps {
+    daemon: Daemon,
+    state: RwSignal<PlannerState>,
+    generation: u64,
+}
+
+impl PlannerWorkflowOps for DaemonPlannerWorkflowOps {
+    fn active_session(&self) -> Option<String> {
+        self.daemon.session_id.get_untracked()
+    }
+
+    fn generation_is_current(&self) -> bool {
+        self.state.with_untracked(|state| match state {
+            PlannerState::Gathering { generation, .. }
+            | PlannerState::Confirming { generation, .. }
+            | PlannerState::AdoptionFailure { generation, .. }
+            | PlannerState::PartialFailure { generation, .. } => *generation == self.generation,
+            PlannerState::Idle | PlannerState::Selecting => false,
+        })
+    }
+
+    fn create_session<'a>(
+        &'a mut self,
+        context: &'a PlannerContext,
+    ) -> LocalBoxFuture<'a, Result<String, String>> {
+        self.daemon.create_planner_session(context).boxed_local()
+    }
+
+    fn adopt_session<'a>(
+        &'a mut self,
+        session_id: &'a str,
+        context: &'a PlannerContext,
+        title: &'a str,
+    ) -> LocalBoxFuture<'a, Result<(), String>> {
+        async move {
+            self.daemon.set_project(Some(context.project_id.clone()));
+            self.daemon.cwd.set(context.workspace_root.clone());
+            self.daemon
+                .adopt_planner_session(session_id, title.to_string())
+                .await?;
+            self.daemon.fetch_sessions();
+            Ok(())
+        }
+        .boxed_local()
+    }
+
+    fn append_handoff<'a>(
+        &'a mut self,
+        session_id: &'a str,
+        markdown: &'a str,
+    ) -> LocalBoxFuture<'a, Result<(), String>> {
+        async move {
+            self.daemon
+                .append_planner_handoff(session_id, markdown)
+                .await?;
+            if let Err(refresh_error) = self.daemon.refresh_planner_session(session_id).await {
+                self.daemon
+                    .status
+                    .set(format!("draft created; refresh failed: {refresh_error}"));
+            }
+            Ok(())
+        }
+        .boxed_local()
+    }
+
+    fn submit_turn<'a>(
+        &'a mut self,
+        session_id: &'a str,
+        context: &'a PlannerContext,
+        markdown: &'a str,
+    ) -> LocalBoxFuture<'a, Result<(), String>> {
+        self.daemon
+            .start_planner_turn(session_id, context, markdown)
+            .boxed_local()
+    }
+}
+
+fn confirmation_session_unchanged(at_confirmation: Option<&str>, current: Option<&str>) -> bool {
+    at_confirmation == current
+}
+
+fn apply_planner_workflow_result(
+    state: RwSignal<PlannerState>,
+    error: RwSignal<Option<String>>,
+    generation: u64,
+    result: Result<PlannerWorkflowSuccess, PlannerWorkflowFailure>,
+) {
+    match result {
+        Ok(success) => {
+            if success.created {
+                let _ = state.try_update(|state| {
+                    reduce_planner(
+                        state,
+                        PlannerEvent::SessionCreated {
+                            generation,
+                            session_id: success.session_id.clone(),
+                        },
+                    )
+                });
+            }
+            let _ = state.try_update(|state| {
+                reduce_planner(
+                    state,
+                    PlannerEvent::StepSucceeded {
+                        generation,
+                        session_id: success.session_id,
+                    },
+                )
+            });
+            error.set(None);
+        }
+        Err(failure) => match failure.stage {
+            PlannerWorkflowFailureStage::Create => {
+                let _ = state.try_update(|state| {
+                    reduce_planner(state, PlannerEvent::CreateFailed { generation })
+                });
+                error.set(Some(failure.message));
+            }
+            PlannerWorkflowFailureStage::Abandoned => {
+                let _ = state.try_update(|state| {
+                    reduce_planner(state, PlannerEvent::AbandonGeneration { generation })
+                });
+                error.set(None);
+            }
+            PlannerWorkflowFailureStage::Adoption | PlannerWorkflowFailureStage::SecondStep => {
+                let Some(session_id) = failure.session_id else {
+                    return;
+                };
+                if failure.created {
+                    let _ = state.try_update(|state| {
+                        reduce_planner(
+                            state,
+                            PlannerEvent::SessionCreated {
+                                generation,
+                                session_id: session_id.clone(),
+                            },
+                        )
+                    });
+                }
+                let event = if failure.stage == PlannerWorkflowFailureStage::Adoption {
+                    PlannerEvent::AdoptionFailed {
+                        generation,
+                        session_id,
+                        error: failure.message.clone(),
+                    }
+                } else {
+                    PlannerEvent::StepFailed {
+                        generation,
+                        session_id,
+                        error: failure.message.clone(),
+                    }
+                };
+                let _ = state.try_update(|state| reduce_planner(state, event));
+                error.set(Some(failure.message));
+            }
+        },
+    }
+}
+
+fn confirm_voice_planner(
+    daemon: Daemon,
+    state: RwSignal<PlannerState>,
+    error: RwSignal<Option<String>>,
+    action: PlannerAction,
+) {
+    let effects =
+        match state.try_update(|state| reduce_planner(state, PlannerEvent::Confirm(action))) {
+            Some(Ok(effects)) => effects,
+            Some(Err(message)) => {
+                error.set(Some(message));
+                return;
+            }
+            None => return,
+        };
+    let Some((generation, context)) = effects.iter().find_map(|effect| match effect {
+        PlannerEffect::CreateSession {
+            generation,
+            context,
+        } => Some((*generation, context.clone())),
+        _ => None,
+    }) else {
+        return;
+    };
+    let Some((title, markdown)) = state.with_untracked(|state| match state {
+        PlannerState::Confirming {
+            proposal, markdown, ..
+        } => Some((proposal.title.trim().to_string(), markdown.clone())),
+        _ => None,
+    }) else {
+        return;
+    };
+    crate::voice::realtime::stop();
+    error.set(None);
+    wasm_bindgen_futures::spawn_local(async move {
+        let mut ops = DaemonPlannerWorkflowOps {
+            daemon: daemon.clone(),
+            state,
+            generation,
+        };
+        let result = execute_planner_workflow(
+            &mut ops,
+            PlannerWorkflowRequest {
+                context: &context,
+                title: &title,
+                markdown: &markdown,
+                action,
+                session_id: None,
+                require_adoption: true,
+            },
+        )
+        .await;
+        let succeeded = result.is_ok();
+        apply_planner_workflow_result(state, error, generation, result);
+        if succeeded {
+            daemon.fetch_sessions();
+        }
+    });
+}
+
+fn retry_voice_planner(
+    daemon: Daemon,
+    state: RwSignal<PlannerState>,
+    error: RwSignal<Option<String>>,
+) {
+    let operation = state.with_untracked(|state| match state {
+        PlannerState::AdoptionFailure {
+            generation,
+            session_id,
+            context,
+            proposal,
+            markdown,
+            action,
+            ..
+        } => Some((
+            *generation,
+            session_id.clone(),
+            context.clone(),
+            proposal.title.trim().to_string(),
+            markdown.clone(),
+            *action,
+            true,
+        )),
+        PlannerState::PartialFailure {
+            generation,
+            session_id,
+            context,
+            proposal,
+            markdown,
+            action,
+            ..
+        } => Some((
+            *generation,
+            session_id.clone(),
+            context.clone(),
+            proposal.title.trim().to_string(),
+            markdown.clone(),
+            *action,
+            false,
+        )),
+        _ => None,
+    });
+    let Some((generation, session_id, context, title, markdown, action, require_adoption)) =
+        operation
+    else {
+        return;
+    };
+    let effects = state
+        .try_update(|state| reduce_planner(state, PlannerEvent::Retry))
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    if effects.is_empty() {
+        return;
+    }
+    error.set(None);
+    wasm_bindgen_futures::spawn_local(async move {
+        let mut ops = DaemonPlannerWorkflowOps {
+            daemon: daemon.clone(),
+            state,
+            generation,
+        };
+        let result = execute_planner_workflow(
+            &mut ops,
+            PlannerWorkflowRequest {
+                context: &context,
+                title: &title,
+                markdown: &markdown,
+                action,
+                session_id: Some(&session_id),
+                require_adoption,
+            },
+        )
+        .await;
+        let succeeded = result.is_ok();
+        apply_planner_workflow_result(state, error, generation, result);
+        if succeeded {
+            daemon.fetch_sessions();
+        }
+    });
+}
+
+fn planner_context_from_state(state: &PlannerState) -> Option<PlannerContext> {
+    match state {
+        PlannerState::Gathering { context, .. }
+        | PlannerState::Confirming { context, .. }
+        | PlannerState::AdoptionFailure { context, .. }
+        | PlannerState::PartialFailure { context, .. } => Some(context.clone()),
+        _ => None,
+    }
+}
+
+fn planner_proposal_from_state(state: &PlannerState) -> Option<VoicePlannerBrief> {
+    match state {
+        PlannerState::Gathering { proposal, .. } => proposal.clone(),
+        PlannerState::Confirming { proposal, .. }
+        | PlannerState::AdoptionFailure { proposal, .. }
+        | PlannerState::PartialFailure { proposal, .. } => Some(proposal.clone()),
+        _ => None,
+    }
+}
+
+#[component]
+fn PlannerBriefReview(brief: VoicePlannerBrief) -> impl IntoView {
+    let sections = vec![
+        ("Users", brief.users),
+        ("Goals", brief.goals),
+        ("Non-goals", brief.non_goals),
+        ("Requirements", brief.requirements),
+        ("Acceptance criteria", brief.acceptance_criteria),
+        ("Constraints", brief.constraints),
+        ("Open questions", brief.open_questions),
+    ];
+    view! {
+        <div class="voice-plan__brief">
+            <h3>{brief.title}</h3>
+            <section><h4>"Problem"</h4><p>{brief.problem}</p></section>
+            {sections.into_iter().map(|(heading, values)| view! {
+                <section>
+                    <h4>{heading}</h4>
+                    <ul>{values.into_iter().map(|value| view! { <li>{value}</li> }).collect_view()}</ul>
+                </section>
+            }).collect_view()}
+        </div>
+    }
+}
+
+#[component]
+fn VoicePlannerCard(
+    daemon: Daemon,
+    state: RwSignal<PlannerState>,
+    selected_project: RwSignal<String>,
+    selected_workspace: RwSignal<String>,
+    generation: RwSignal<u64>,
+    error: RwSignal<Option<String>>,
+) -> impl IntoView {
+    let projects = daemon.projects;
+    let daemon_for_project = daemon.clone();
+    let daemon_for_start = daemon.clone();
+    let daemon_for_draft = StoredValue::new(daemon.clone());
+    let daemon_for_start_confirm = StoredValue::new(daemon.clone());
+    let daemon_for_retry = StoredValue::new(daemon.clone());
+
+    let on_project_change = move |ev| {
+        let id = event_target_value(&ev);
+        selected_project.set(id.clone());
+        let root = daemon_for_project
+            .projects
+            .with_untracked(|projects| {
+                projects
+                    .iter()
+                    .find(|project| project.id == id)
+                    .and_then(|project| planner_candidates(project).into_iter().next())
+            })
+            .unwrap_or_default();
+        selected_workspace.set(root);
+    };
+
+    let start = move |_| {
+        let context = daemon_for_start.projects.with_untracked(|projects| {
+            selected_planner_context(
+                projects,
+                &selected_project.get_untracked(),
+                &selected_workspace.get_untracked(),
+            )
+        });
+        let Some(context) = context else {
+            error.set(Some("Choose a registered project and workspace".into()));
+            return;
+        };
+        generation.update(|value| *value = value.wrapping_add(1));
+        let current_generation = generation.get_untracked();
+        let effects = state
+            .try_update(|state| {
+                reduce_planner(
+                    state,
+                    PlannerEvent::Start {
+                        generation: current_generation,
+                        context: context.clone(),
+                    },
+                )
+            })
+            .and_then(Result::ok)
+            .unwrap_or_default();
+        if !effects
+            .iter()
+            .any(|effect| matches!(effect, PlannerEffect::ConnectRealtime { .. }))
+        {
+            return;
+        }
+        error.set(None);
+        crate::voice::realtime::stop();
+        let callback = Callback::new(move |proposal: VoicePlannerBrief| {
+            let result = state.try_update(|state| {
+                reduce_planner(
+                    state,
+                    PlannerEvent::Proposal {
+                        generation: current_generation,
+                        proposal,
+                    },
+                )
+            });
+            if let Some(Err(message)) = result {
+                error.set(Some(message));
+            }
+        });
+        crate::voice::realtime::start_planner(context, callback);
+    };
+
+    let cancel = move |_| {
+        let _ = state.try_update(|state| reduce_planner(state, PlannerEvent::Cancel));
+        crate::voice::realtime::stop();
+        error.set(None);
+    };
+
+    let proposal_focus = NodeRef::<leptos::html::Div>::new();
+    let proposal_announced = RwSignal::new(false);
+    Effect::new(move |_| {
+        let ready = planner_proposal_from_state(&state.get()).is_some();
+        if ready && !proposal_announced.get_untracked() {
+            proposal_announced.set(true);
+            wasm_bindgen_futures::spawn_local(async move {
+                gloo_timers::future::TimeoutFuture::new(0).await;
+                if let Some(element) = proposal_focus.get_untracked() {
+                    let _ = element.focus();
+                }
+            });
+        } else if !ready {
+            proposal_announced.set(false);
+        }
+    });
+
+    let busy_focus = NodeRef::<leptos::html::Div>::new();
+    let was_confirming = RwSignal::new(false);
+    Effect::new(move |_| {
+        let confirming = matches!(state.get(), PlannerState::Confirming { .. });
+        let previous = was_confirming.get_untracked();
+        was_confirming.set(confirming);
+        if confirming && !previous {
+            wasm_bindgen_futures::spawn_local(async move {
+                gloo_timers::future::TimeoutFuture::new(0).await;
+                if let Some(element) = busy_focus.get_untracked() {
+                    let _ = element.focus();
+                }
+            });
+        } else if !confirming && previous {
+            wasm_bindgen_futures::spawn_local(async move {
+                gloo_timers::future::TimeoutFuture::new(0).await;
+                let selector = if matches!(
+                    state.get_untracked(),
+                    PlannerState::Gathering {
+                        proposal: Some(_),
+                        ..
+                    } | PlannerState::AdoptionFailure { .. }
+                        | PlannerState::PartialFailure { .. }
+                ) {
+                    ".voice-plan__actions button"
+                } else {
+                    ".ocean-composer__input"
+                };
+                if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+                    if let Ok(Some(element)) = document.query_selector(selector) {
+                        if let Ok(element) = element.dyn_into::<web_sys::HtmlElement>() {
+                            let _ = element.focus();
+                        }
+                    }
+                }
+            });
+        }
+    });
+
+    view! {
+        <Show when=move || !matches!(state.get(), PlannerState::Idle)>
+            <aside
+                class="voice-plan"
+                aria-label="Voice Planner"
+                aria-busy=move || if matches!(state.get(), PlannerState::Confirming { .. }) { "true" } else { "false" }
+            >
+                <div class="voice-plan__header">
+                    <div>
+                        <h2>"Plan by voice"</h2>
+                        <p>"Nothing is created until you click a create action."</p>
+                    </div>
+                    <Show when=move || !matches!(state.get(), PlannerState::Confirming { .. })>
+                        <button class="voice-plan__close" type="button" on:click=cancel aria-label="End voice planner">"End"</button>
+                    </Show>
+                </div>
+
+                <Show when=move || matches!(state.get(), PlannerState::Selecting)>
+                    <div class="voice-plan__picker">
+                        <label>
+                            <span>"Project"</span>
+                            <select
+                                autofocus=true
+                                prop:value=move || selected_project.get()
+                                on:change=on_project_change
+                                disabled=move || projects.with(|projects| projects.is_empty())
+                            >
+                                <For
+                                    each=move || projects.get()
+                                    key=|project| project.id.clone()
+                                    children=move |project| view! {
+                                        <option value=project.id.clone()>{project.name}</option>
+                                    }
+                                />
+                            </select>
+                        </label>
+                        <label>
+                            <span>"Workspace"</span>
+                            <select
+                                prop:value=move || selected_workspace.get()
+                                on:change=move |ev| selected_workspace.set(event_target_value(&ev))
+                            >
+                                <For
+                                    each=move || {
+                                        let id = selected_project.get();
+                                        projects.with(|projects| {
+                                            projects.iter().find(|project| project.id == id)
+                                                .map(planner_candidates)
+                                                .unwrap_or_default()
+                                        })
+                                    }
+                                    key=|root| root.clone()
+                                    children=move |root| view! { <option value=root.clone()>{root.clone()}</option> }
+                                />
+                            </select>
+                        </label>
+                        <button
+                            class="voice-plan__primary"
+                            type="button"
+                            disabled=move || selected_project.get().is_empty() || selected_workspace.get().is_empty()
+                            on:click=start
+                        >"Start planner"</button>
+                    </div>
+                </Show>
+
+                {move || planner_context_from_state(&state.get()).map(|context| view! {
+                    <dl class="voice-plan__context">
+                        <div><dt>"Project"</dt><dd>{context.project_name}</dd></div>
+                        <div><dt>"Workspace"</dt><dd>{context.workspace_root}</dd></div>
+                    </dl>
+                })}
+
+                {move || planner_proposal_from_state(&state.get()).map(|brief| view! {
+                    <div
+                        class="voice-plan__proposal-ready"
+                        role="status"
+                        aria-live="polite"
+                        tabindex="-1"
+                        node_ref=proposal_focus
+                    >
+                        <span class="voice-plan__sr-status">"Proposal ready for review."</span>
+                        <PlannerBriefReview brief=brief />
+                    </div>
+                })}
+
+                <Show when=move || matches!(state.get(), PlannerState::Gathering { proposal: None, .. })>
+                    <p class="voice-plan__status" role="status" aria-live="polite">"Talk through the work. Ocean will propose a structured brief for review."</p>
+                </Show>
+                <Show when=move || matches!(state.get(), PlannerState::Confirming { .. })>
+                    <div
+                        class="voice-plan__status"
+                        role="status"
+                        aria-live="polite"
+                        tabindex="-1"
+                        node_ref=busy_focus
+                    >"Creating the confirmed session…"</div>
+                </Show>
+                <Show when=move || error.get().is_some()>
+                    <p class="voice-plan__error" role="alert">{move || error.get().unwrap_or_default()}</p>
+                </Show>
+
+                <Show when=move || matches!(state.get(), PlannerState::Gathering { proposal: Some(_), .. })>
+                    <div class="voice-plan__actions">
+                        <button type="button" on:click=move |_| confirm_voice_planner(daemon_for_draft.get_value(), state, error, PlannerAction::CreateDraft)>"Create draft"</button>
+                        <button class="voice-plan__primary" type="button" on:click=move |_| confirm_voice_planner(daemon_for_start_confirm.get_value(), state, error, PlannerAction::CreateAndStart)>"Create & start"</button>
+                    </div>
+                </Show>
+                <Show when=move || matches!(state.get(), PlannerState::AdoptionFailure { .. } | PlannerState::PartialFailure { .. })>
+                    <div class="voice-plan__actions">
+                        <button class="voice-plan__primary" type="button" on:click=move |_| retry_voice_planner(daemon_for_retry.get_value(), state, error)>"Retry remaining step"</button>
+                    </div>
+                </Show>
+            </aside>
+        </Show>
+    }
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     let daemon = Daemon::new(daemon_url_from_env());
+    let planner_state = RwSignal::new(PlannerState::Idle);
+    let planner_project = RwSignal::new(String::new());
+    let planner_workspace = RwSignal::new(String::new());
+    let planner_generation = RwSignal::new(0_u64);
+    let planner_error = RwSignal::new(None::<String>);
     // Voice phases 2/3: hand the realtime voice-chat module its daemon handle
     // once — the orb's menu entry starts sessions without prop-threading.
     crate::voice::realtime::install(daemon.clone());
+    // Planner gathering is truthful only while the isolated planner transport
+    // owns the microphone. Any external stop or switch back to conversation /
+    // classic voice cancels the local pre-session state; it never creates work.
+    {
+        let realtime_stage = crate::voice::realtime::stage();
+        let realtime_kind = crate::voice::realtime::active_kind();
+        Effect::new(move |_| {
+            let stage = realtime_stage.get();
+            let kind = realtime_kind.get();
+            if matches!(
+                planner_state.get(),
+                PlannerState::Gathering { proposal: None, .. }
+            ) && (stage == crate::voice::realtime::RealtimeStage::Off
+                || kind != Some(crate::voice::realtime::RealtimeKind::Planner))
+            {
+                let _ =
+                    planner_state.try_update(|state| reduce_planner(state, PlannerEvent::Cancel));
+                planner_error.set(None);
+            }
+        });
+    }
     // Zero-config boot: fetch /api/config from the same-origin proxy to learn
     // the daemon URL + confirm auth is preconfigured, THEN connect AND fetch the
     // model catalogue — in that order, inside bootstrap. Falls back to
@@ -826,6 +1663,33 @@ pub fn App() -> impl IntoView {
     };
     let on_voice_status = Callback::new(move |msg: String| status.set(msg));
 
+    let daemon_for_plan_open = daemon.clone();
+    let on_plan = Callback::new(move |()| {
+        let projects = daemon_for_plan_open.projects.get_untracked();
+        let initial = initial_planner_context(
+            &projects,
+            daemon_for_plan_open.project.get_untracked().as_deref(),
+            &daemon_for_plan_open.cwd.get_untracked(),
+        );
+        if let Some(context) = initial {
+            planner_project.set(context.project_id);
+            planner_workspace.set(context.workspace_root);
+            planner_error.set(None);
+        } else {
+            planner_project.set(String::new());
+            planner_workspace.set(String::new());
+            planner_error.set(Some(
+                "Register a project with a workspace before starting Voice Planner".into(),
+            ));
+        }
+        let _ = planner_state.try_update(|state| {
+            if !matches!(state, PlannerState::Idle) {
+                let _ = reduce_planner(state, PlannerEvent::Cancel);
+            }
+            reduce_planner(state, PlannerEvent::Open)
+        });
+    });
+
     // Dictate mode: transcript lands in the composer for review rather than
     // auto-sending. VoiceOrb routes to this when Dictate is active.
     let on_dictate = Callback::new(move |text: String| {
@@ -1211,6 +2075,18 @@ pub fn App() -> impl IntoView {
                         // native shell renders the full interactive canvas.
                         <crate::canvas::CanvasRender canvas_patches=canvas_patches />
 
+                        // Voice Planner is pre-session and mounts directly above
+                        // permissions/composer. Only its two explicit create
+                        // buttons can cross the persistence boundary.
+                        <VoicePlannerCard
+                            daemon=daemon.clone()
+                            state=planner_state
+                            selected_project=planner_project
+                            selected_workspace=planner_workspace
+                            generation=planner_generation
+                            error=planner_error
+                        />
+
                         // Blocking permission prompts sit just above the composer
                         // so a gated mutating turn can't be missed or scrolled past.
                         <PermissionPrompts daemon=daemon_for_perms.get_value() />
@@ -1230,7 +2106,7 @@ pub fn App() -> impl IntoView {
                                     </div>
                                 }
                             >
-                                <VoiceOrb on_transcript=on_transcript on_status=on_voice_status muted=muted on_dictate=on_dictate />
+                                <VoiceOrb on_transcript=on_transcript on_status=on_voice_status muted=muted on_dictate=on_dictate on_plan=on_plan />
                             </Show>
                             // Per-turn overrides (OCEAN-79): reasoning effort +
                             // model. Compact pills next to the composer. Both
@@ -1654,9 +2530,243 @@ pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
 #[cfg(test)]
 mod tests {
     use super::{
-        composer_height_px, composer_overflow_y, parse_deep_link, DeepLinkAction,
-        COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX,
+        composer_height_px, composer_overflow_y, execute_planner_workflow, initial_planner_context,
+        parse_deep_link, planner_candidates, selected_planner_context, DeepLinkAction,
+        PlannerAction, PlannerContext, PlannerWorkflowFailureStage, PlannerWorkflowOps,
+        PlannerWorkflowRequest, COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX,
     };
+    use crate::daemon::{ProjectInfo, WorktreeInfo};
+    use futures_util::future::LocalBoxFuture;
+    use futures_util::FutureExt;
+
+    fn planner_project(id: &str, root: &str, worktrees: &[&str]) -> ProjectInfo {
+        ProjectInfo {
+            id: id.into(),
+            name: format!("Project {id}"),
+            workspace_root: root.into(),
+            git_branch: None,
+            git_dirty: None,
+            worktrees: worktrees
+                .iter()
+                .map(|path| WorktreeInfo {
+                    path: (*path).into(),
+                    branch: None,
+                })
+                .collect(),
+        }
+    }
+
+    fn controller_context() -> PlannerContext {
+        PlannerContext {
+            project_id: "p1".into(),
+            project_name: "Project".into(),
+            workspace_root: "/work".into(),
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeWorkflowOps {
+        active: Option<String>,
+        current: bool,
+        switch_after_create: Option<String>,
+        fail_adoption_once: bool,
+        calls: Vec<String>,
+    }
+
+    impl PlannerWorkflowOps for FakeWorkflowOps {
+        fn active_session(&self) -> Option<String> {
+            self.active.clone()
+        }
+
+        fn generation_is_current(&self) -> bool {
+            self.current
+        }
+
+        fn create_session<'a>(
+            &'a mut self,
+            _context: &'a PlannerContext,
+        ) -> LocalBoxFuture<'a, Result<String, String>> {
+            async move {
+                self.calls.push("create".into());
+                if let Some(switched) = self.switch_after_create.take() {
+                    self.active = Some(switched);
+                }
+                Ok("created".into())
+            }
+            .boxed_local()
+        }
+
+        fn adopt_session<'a>(
+            &'a mut self,
+            session_id: &'a str,
+            _context: &'a PlannerContext,
+            _title: &'a str,
+        ) -> LocalBoxFuture<'a, Result<(), String>> {
+            async move {
+                self.calls.push(format!("adopt:{session_id}"));
+                self.active = Some(session_id.to_string());
+                if self.fail_adoption_once {
+                    self.fail_adoption_once = false;
+                    Err("not open".into())
+                } else {
+                    Ok(())
+                }
+            }
+            .boxed_local()
+        }
+
+        fn append_handoff<'a>(
+            &'a mut self,
+            session_id: &'a str,
+            _markdown: &'a str,
+        ) -> LocalBoxFuture<'a, Result<(), String>> {
+            async move {
+                self.calls.push(format!("append:{session_id}"));
+                Ok(())
+            }
+            .boxed_local()
+        }
+
+        fn submit_turn<'a>(
+            &'a mut self,
+            session_id: &'a str,
+            _context: &'a PlannerContext,
+            _markdown: &'a str,
+        ) -> LocalBoxFuture<'a, Result<(), String>> {
+            async move {
+                self.calls.push(format!("turn:{session_id}"));
+                Ok(())
+            }
+            .boxed_local()
+        }
+    }
+
+    fn run_fake(
+        ops: &mut FakeWorkflowOps,
+        action: PlannerAction,
+        session_id: Option<&str>,
+        require_adoption: bool,
+    ) -> Result<super::PlannerWorkflowSuccess, super::PlannerWorkflowFailure> {
+        execute_planner_workflow(
+            ops,
+            PlannerWorkflowRequest {
+                context: &controller_context(),
+                title: "Plan",
+                markdown: "# Plan",
+                action,
+                session_id,
+                require_adoption,
+            },
+        )
+        .now_or_never()
+        .expect("fake operations complete immediately")
+    }
+
+    #[test]
+    fn workflow_sequencer_executes_exact_draft_and_start_call_counts() {
+        let mut draft = FakeWorkflowOps {
+            current: true,
+            ..Default::default()
+        };
+        run_fake(&mut draft, PlannerAction::CreateDraft, None, true).unwrap();
+        assert_eq!(draft.calls, ["create", "adopt:created", "append:created"]);
+        assert!(!draft.calls.iter().any(|call| call.starts_with("turn:")));
+
+        let mut start = FakeWorkflowOps {
+            current: true,
+            ..Default::default()
+        };
+        run_fake(&mut start, PlannerAction::CreateAndStart, None, true).unwrap();
+        assert_eq!(start.calls, ["create", "adopt:created", "turn:created"]);
+        assert!(!start.calls.iter().any(|call| call.starts_with("append:")));
+    }
+
+    #[test]
+    fn workflow_sequencer_stops_delayed_create_after_active_session_switch() {
+        let mut ops = FakeWorkflowOps {
+            current: true,
+            active: Some("original".into()),
+            switch_after_create: Some("other".into()),
+            ..Default::default()
+        };
+        let failure = run_fake(&mut ops, PlannerAction::CreateAndStart, None, true).unwrap_err();
+        assert_eq!(failure.stage, PlannerWorkflowFailureStage::Abandoned);
+        assert_eq!(ops.calls, ["create"]);
+    }
+
+    #[test]
+    fn workflow_sequencer_retries_adoption_before_the_stored_second_step() {
+        let mut ops = FakeWorkflowOps {
+            current: true,
+            fail_adoption_once: true,
+            ..Default::default()
+        };
+        let first = run_fake(&mut ops, PlannerAction::CreateAndStart, None, true).unwrap_err();
+        assert_eq!(first.stage, PlannerWorkflowFailureStage::Adoption);
+        run_fake(
+            &mut ops,
+            PlannerAction::CreateAndStart,
+            Some("created"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            ops.calls,
+            ["create", "adopt:created", "adopt:created", "turn:created"]
+        );
+    }
+
+    #[test]
+    fn workflow_sequencer_rejects_stale_or_double_invocation_before_http() {
+        let mut ops = FakeWorkflowOps {
+            current: false,
+            ..Default::default()
+        };
+        let failure = run_fake(&mut ops, PlannerAction::CreateDraft, None, true).unwrap_err();
+        assert_eq!(failure.stage, PlannerWorkflowFailureStage::Abandoned);
+        assert!(ops.calls.is_empty());
+
+        ops.current = true;
+        run_fake(&mut ops, PlannerAction::CreateDraft, None, true).unwrap();
+        ops.current = false;
+        let _ = run_fake(&mut ops, PlannerAction::CreateDraft, None, true);
+        assert_eq!(
+            ops.calls
+                .iter()
+                .filter(|call| call.as_str() == "create")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn planner_picker_uses_only_registered_main_roots_and_worktrees() {
+        let project = planner_project("p1", "/main", &["/worktree", "/worktree"]);
+        assert_eq!(planner_candidates(&project), vec!["/main", "/worktree"]);
+        assert!(selected_planner_context(&[project.clone()], "p1", "/worktree").is_some());
+        assert!(selected_planner_context(&[project], "p1", "/unrelated").is_none());
+    }
+
+    #[test]
+    fn planner_picker_prefers_exact_ambient_candidate_then_main_root() {
+        let projects = vec![
+            planner_project("p1", "/one", &["/one-wt"]),
+            planner_project("p2", "/two", &["/two-wt"]),
+        ];
+        let exact = initial_planner_context(&projects, Some("p2"), "/two-wt").unwrap();
+        assert_eq!(
+            (exact.project_id.as_str(), exact.workspace_root.as_str()),
+            ("p2", "/two-wt")
+        );
+        let fallback = initial_planner_context(&projects, Some("p2"), "/somewhere-else").unwrap();
+        assert_eq!(
+            (
+                fallback.project_id.as_str(),
+                fallback.workspace_root.as_str()
+            ),
+            ("p2", "/two")
+        );
+    }
 
     #[test]
     fn composer_height_clamps_to_min_and_max() {

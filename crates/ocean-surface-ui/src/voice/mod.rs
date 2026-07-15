@@ -102,6 +102,9 @@ pub fn VoiceOrb(
     /// of `on_transcript` while Dictate mode is active.
     #[prop(optional)]
     on_dictate: Option<Callback<String>>,
+    /// Opens the explicit pre-session Voice Planner picker. This is an action,
+    /// not a persisted VoiceMode and never participates in keyboard cycling.
+    on_plan: Callback<()>,
 ) -> impl IntoView {
     let state = RwSignal::new(RecState::Idle);
     // Shared recorder slot the start/stop handlers both reach into.
@@ -560,6 +563,23 @@ pub fn VoiceOrb(
                             }}
                         }
                     }}
+
+                    <button
+                        class="voice-menu__item"
+                        type="button"
+                        role="menuitem"
+                        on:click=move |_| {
+                            realtime::stop();
+                            voice_mode.set(mode::VoiceMode::Off);
+                            persist_mode(mode::VoiceMode::Off);
+                            on_plan.run(());
+                            show_menu.set(false);
+                        }
+                    >
+                        <span class="voice-menu__item-icon"><crate::icons::Waves /></span>
+                        <span class="voice-menu__item-label">"Plan by voice"</span>
+                        <span class="voice-menu__item-desc">"Describe work; review a proposal before anything is created."</span>
+                    </button>
 
                     <button
                         class=move || mode_classes(mode::VoiceMode::Dictate)
