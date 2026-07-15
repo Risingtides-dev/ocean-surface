@@ -41,11 +41,16 @@ Capability Matrix). The load-bearing rules:
 ## Current Build Focus
 
 ```sh
-# Web/PWA (canonical UI):
-./run-surface.sh         # or: trunk serve --open
-# Native desktop (Tauri, loads the same dist/ bundle):
-./run-tauri.sh           # or: cd crates/ocean-tauri && cargo tauri dev
+# Web/PWA (canonical UI; builds Trunk bundle + release proxy):
+./run-surface.sh
+# Native desktop (Tauri; builds and loads the same dist/ bundle):
+./run-tauri.sh
 ```
+
+`run-surface.sh` requires `OCEAN_SURFACE_USER` and `OCEAN_SURFACE_PASS` for its
+default LAN/tailnet bind. For trusted localhost diagnostics only, bind
+`127.0.0.1` and set `OCEAN_SURFACE_AUTH=off`. Direct `cargo tauri dev` does not
+rebuild `dist/`; use `run-tauri.sh` whenever freshness matters.
 
 Native surface direction:
 
@@ -158,9 +163,12 @@ The GPUI crate still builds but is not the active surface:
 For local web/proxy work:
 
 ```sh
-./run-surface.sh
-trunk serve --open
+OCEAN_SURFACE_BIND=127.0.0.1:18790 OCEAN_SURFACE_AUTH=off ./run-surface.sh
 ```
+
+For LAN/tailnet access, keep the default bind and provide both Basic auth
+environment variables. `trunk serve` exercises the bundle alone, not the
+release proxy or daemon reverse-proxy path.
 
 `localhost:8790` is the operator's live surface and serves the immutable release
 selected by `~/.config/ocean-surface/current`, not the repo's `dist/`. The

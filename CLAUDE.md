@@ -17,11 +17,15 @@ collect intent, attach to sessions, and call the daemon.
 ## Current Build Focus
 
 ```sh
-# Web/PWA (canonical UI):
-./run-surface.sh         # or: trunk serve --open
-# Native desktop (Tauri, loads the same dist/ bundle):
-./run-tauri.sh           # or: cd crates/ocean-tauri && cargo tauri dev
+# Web/PWA (canonical UI; trusted-localhost development):
+OCEAN_SURFACE_BIND=127.0.0.1:18790 OCEAN_SURFACE_AUTH=off ./run-surface.sh
+# Native desktop (Tauri, freshly builds and loads the same dist/ bundle):
+./run-tauri.sh
 ```
+
+For tailnet or trusted-LAN web access, keep the default bind and set both
+`OCEAN_SURFACE_USER` and `OCEAN_SURFACE_PASS`. Direct `cargo tauri dev` does not
+rebuild root `dist/`; use `run-tauri.sh` whenever freshness matters.
 
 Native surface direction:
 
@@ -99,9 +103,11 @@ The GPUI crate still builds but is not the active surface:
 For local web/proxy work:
 
 ```sh
-./run-surface.sh
-trunk serve --open
+OCEAN_SURFACE_BIND=127.0.0.1:18790 OCEAN_SURFACE_AUTH=off ./run-surface.sh
 ```
+
+`trunk serve` exercises the frontend bundle alone; it is not equivalent to the
+release proxy and daemon reverse-proxy path.
 
 Native desktop:
 
