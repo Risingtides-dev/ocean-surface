@@ -84,11 +84,13 @@ impl VoicePlannerBrief {
         self.validate()?;
         context.validate()?;
         let mut out = String::new();
-        push_heading_value(&mut out, 1, &self.title);
-        push_heading_value(&mut out, 2, "Project");
+        out.push_str("# ");
+        out.push_str(&escape_markdown_text(self.title.trim()));
+        out.push_str("\n\n");
+        push_heading(&mut out, 2, "Project");
         out.push_str(&escape_markdown_text(context.project_name.trim()));
         out.push_str("\n\n");
-        push_heading_value(&mut out, 2, "Workspace");
+        push_heading(&mut out, 2, "Workspace");
         out.push_str(&escape_markdown_text(context.workspace_root.trim()));
         out.push_str("\n\n");
         push_text_section(&mut out, "Problem", &self.problem);
@@ -121,33 +123,65 @@ fn validate_required(name: &str, value: &str, max: usize) -> Result<(), String> 
 
 fn escape_markdown_text(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
+    let mut line_start = true;
     for ch in value.chars() {
+        if ch == '\r' {
+            continue;
+        }
+        if ch == '\n' {
+            escaped.push('\n');
+            line_start = true;
+            continue;
+        }
+        // Escape all CommonMark punctuation that can open structure. Leading
+        // spaces are escaped too, preventing indented-code injection on a
+        // continuation line while preserving the visible multiline text.
         if matches!(
             ch,
-            '\\' | '`' | '*' | '_' | '{' | '}' | '[' | ']' | '<' | '>' | '#' | '|' | '~'
-        ) {
+            '\\' | '`'
+                | '*'
+                | '_'
+                | '{'
+                | '}'
+                | '['
+                | ']'
+                | '<'
+                | '>'
+                | '#'
+                | '|'
+                | '~'
+                | '-'
+                | '+'
+                | '!'
+                | '.'
+                | '='
+        ) || (line_start && matches!(ch, ' ' | '\t'))
+        {
             escaped.push('\\');
         }
         escaped.push(ch);
+        if ch != ' ' && ch != '\t' {
+            line_start = false;
+        }
     }
     escaped
 }
 
-fn push_heading_value(out: &mut String, level: usize, value: &str) {
+fn push_heading(out: &mut String, level: usize, value: &str) {
     out.push_str(&"#".repeat(level));
     out.push(' ');
-    out.push_str(&escape_markdown_text(value.trim()));
+    out.push_str(value);
     out.push_str("\n\n");
 }
 
 fn push_text_section(out: &mut String, heading: &str, value: &str) {
-    push_heading_value(out, 2, heading);
+    push_heading(out, 2, heading);
     out.push_str(&escape_markdown_text(value.trim()));
     out.push_str("\n\n");
 }
 
 fn push_list_section(out: &mut String, heading: &str, values: &[String]) {
-    push_heading_value(out, 2, heading);
+    push_heading(out, 2, heading);
     for value in values {
         out.push_str("- ");
         out.push_str(&escape_markdown_text(value.trim()));
@@ -181,6 +215,15 @@ pub enum PlannerState {
         action: PlannerAction,
         session_id: Option<String>,
     },
+    AdoptionFailure {
+        generation: u64,
+        context: PlannerContext,
+        proposal: VoicePlannerBrief,
+        markdown: String,
+        action: PlannerAction,
+        session_id: String,
+        error: String,
+    },
     PartialFailure {
         generation: u64,
         context: PlannerContext,
@@ -208,14 +251,25 @@ pub enum PlannerEvent {
         generation: u64,
         session_id: String,
     },
+    CreateFailed {
+        generation: u64,
+    },
     StepSucceeded {
         generation: u64,
         session_id: String,
+    },
+    AdoptionFailed {
+        generation: u64,
+        session_id: String,
+        error: String,
     },
     StepFailed {
         generation: u64,
         session_id: String,
         error: String,
+    },
+    AbandonGeneration {
+        generation: u64,
     },
     Retry,
     Cancel,
@@ -354,6 +408,56 @@ pub fn reduce(state: &mut PlannerState, event: PlannerEvent) -> Result<Vec<Plann
                 second,
             ])
         }
+        PlannerEvent::CreateFailed { generation } => {
+            let PlannerState::Confirming {
+                generation: current,
+                context,
+                proposal,
+                session_id: None,
+                ..
+            } = state
+            else {
+                return Ok(vec![]);
+            };
+            if *current == generation {
+                *state = PlannerState::Gathering {
+                    generation,
+                    context: context.clone(),
+                    proposal: Some(proposal.clone()),
+                };
+            }
+            Ok(vec![])
+        }
+        PlannerEvent::AdoptionFailed {
+            generation,
+            session_id,
+            error,
+        } => {
+            let PlannerState::Confirming {
+                generation: current,
+                context,
+                proposal,
+                markdown,
+                action,
+                session_id: Some(current_session),
+            } = state
+            else {
+                return Ok(vec![]);
+            };
+            if *current != generation || *current_session != session_id {
+                return Ok(vec![]);
+            }
+            *state = PlannerState::AdoptionFailure {
+                generation,
+                context: context.clone(),
+                proposal: proposal.clone(),
+                markdown: markdown.clone(),
+                action: *action,
+                session_id,
+                error,
+            };
+            Ok(vec![])
+        }
         PlannerEvent::StepFailed {
             generation,
             session_id,
@@ -384,7 +488,73 @@ pub fn reduce(state: &mut PlannerState, event: PlannerEvent) -> Result<Vec<Plann
             };
             Ok(vec![])
         }
+        PlannerEvent::AbandonGeneration { generation } => {
+            let matches = match state {
+                PlannerState::Gathering {
+                    generation: current,
+                    ..
+                }
+                | PlannerState::Confirming {
+                    generation: current,
+                    ..
+                }
+                | PlannerState::AdoptionFailure {
+                    generation: current,
+                    ..
+                }
+                | PlannerState::PartialFailure {
+                    generation: current,
+                    ..
+                } => *current == generation,
+                _ => false,
+            };
+            if matches {
+                *state = PlannerState::Idle;
+            }
+            Ok(vec![])
+        }
         PlannerEvent::Retry => {
+            if let PlannerState::AdoptionFailure {
+                generation,
+                context,
+                proposal,
+                markdown,
+                action,
+                session_id,
+                ..
+            } = state
+            {
+                let second = match action {
+                    PlannerAction::CreateDraft => PlannerEffect::AppendHandoff {
+                        generation: *generation,
+                        session_id: session_id.clone(),
+                        markdown: markdown.clone(),
+                    },
+                    PlannerAction::CreateAndStart => PlannerEffect::SubmitTurn {
+                        generation: *generation,
+                        session_id: session_id.clone(),
+                        context: context.clone(),
+                        markdown: markdown.clone(),
+                    },
+                };
+                let effects = vec![
+                    PlannerEffect::AdoptSession {
+                        generation: *generation,
+                        session_id: session_id.clone(),
+                        title: proposal.title.trim().to_string(),
+                    },
+                    second,
+                ];
+                *state = PlannerState::Confirming {
+                    generation: *generation,
+                    context: context.clone(),
+                    proposal: proposal.clone(),
+                    markdown: markdown.clone(),
+                    action: *action,
+                    session_id: Some(session_id.clone()),
+                };
+                return Ok(effects);
+            }
             let PlannerState::PartialFailure {
                 generation,
                 context,
@@ -499,7 +669,7 @@ mod tests {
     fn markdown_is_stable_escaped_and_keeps_empty_heading_order() {
         let out = brief().render_markdown(&context()).unwrap();
         assert!(out.starts_with("# Ship \\*planner\\*\n\n## Project\n\nOcean \\[Surface\\]"));
-        assert!(out.contains("Users need \\<safe\\> planning."));
+        assert!(out.contains("Users need \\<safe\\> planning\\."));
         let headings = [
             "## Project",
             "## Workspace",
@@ -520,6 +690,21 @@ mod tests {
         }
         assert!(out.contains("## Non-goals\n\n## Requirements"));
         assert!(out.ends_with("Use this confirmed PRD as the planning/implementation brief. Respect its non-goals, constraints, and acceptance criteria."));
+    }
+
+    #[test]
+    fn multiline_values_cannot_inject_lists_headings_or_thematic_breaks() {
+        let mut injected = brief();
+        injected.problem =
+            "first\n---\n- item\n    code\n\tcode tab\n1. numbered\n# heading".into();
+        let out = injected.render_markdown(&context()).unwrap();
+        assert!(out.contains(
+            "first\n\\-\\-\\-\n\\- item\n\\ \\ \\ \\ code\n\\\tcode tab\n1\\. numbered\n\\# heading"
+        ));
+        assert!(!out.contains("\n---\n"));
+        assert!(!out.contains("\n- item\n"));
+        assert!(!out.contains("\n    code\n"));
+        assert!(!out.contains("\n\tcode tab\n"));
     }
 
     #[test]
@@ -615,6 +800,129 @@ mod tests {
             assert_eq!(retry.len(), 1);
             assert!(!matches!(retry[0], PlannerEffect::CreateSession { .. }));
         }
+    }
+
+    #[test]
+    fn create_failure_keeps_frozen_proposal_available_without_a_session() {
+        let mut state = PlannerState::Gathering {
+            generation: 4,
+            context: context(),
+            proposal: Some(brief()),
+        };
+        reduce(
+            &mut state,
+            PlannerEvent::Confirm(PlannerAction::CreateDraft),
+        )
+        .unwrap();
+        reduce(&mut state, PlannerEvent::CreateFailed { generation: 4 }).unwrap();
+        assert!(matches!(
+            state,
+            PlannerState::Gathering {
+                generation: 4,
+                proposal: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn adoption_failure_retry_re_adopts_before_the_stored_second_step() {
+        let mut state = PlannerState::Gathering {
+            generation: 5,
+            context: context(),
+            proposal: Some(brief()),
+        };
+        reduce(
+            &mut state,
+            PlannerEvent::Confirm(PlannerAction::CreateAndStart),
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            PlannerEvent::SessionCreated {
+                generation: 5,
+                session_id: "s5".into(),
+            },
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            PlannerEvent::AdoptionFailed {
+                generation: 5,
+                session_id: "s5".into(),
+                error: "not open".into(),
+            },
+        )
+        .unwrap();
+        let retry = reduce(&mut state, PlannerEvent::Retry).unwrap();
+        assert!(matches!(
+            retry.as_slice(),
+            [
+                PlannerEffect::AdoptSession { session_id, .. },
+                PlannerEffect::SubmitTurn { .. }
+            ] if session_id == "s5"
+        ));
+    }
+
+    #[test]
+    fn abandon_generation_clears_create_in_flight_before_session_id_exists() {
+        let mut state = PlannerState::Gathering {
+            generation: 8,
+            context: context(),
+            proposal: Some(brief()),
+        };
+        reduce(
+            &mut state,
+            PlannerEvent::Confirm(PlannerAction::CreateDraft),
+        )
+        .unwrap();
+        assert!(matches!(
+            state,
+            PlannerState::Confirming {
+                session_id: None,
+                ..
+            }
+        ));
+        reduce(
+            &mut state,
+            PlannerEvent::AbandonGeneration { generation: 8 },
+        )
+        .unwrap();
+        assert!(matches!(state, PlannerState::Idle));
+    }
+
+    #[test]
+    fn matching_session_abandonment_clears_confirming_but_stale_results_do_not() {
+        let mut state = PlannerState::Gathering {
+            generation: 6,
+            context: context(),
+            proposal: Some(brief()),
+        };
+        reduce(
+            &mut state,
+            PlannerEvent::Confirm(PlannerAction::CreateAndStart),
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            PlannerEvent::SessionCreated {
+                generation: 6,
+                session_id: "s6".into(),
+            },
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            PlannerEvent::AbandonGeneration { generation: 5 },
+        )
+        .unwrap();
+        assert!(matches!(state, PlannerState::Confirming { .. }));
+        reduce(
+            &mut state,
+            PlannerEvent::AbandonGeneration { generation: 6 },
+        )
+        .unwrap();
+        assert!(matches!(state, PlannerState::Idle));
     }
 
     #[test]

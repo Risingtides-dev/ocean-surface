@@ -119,7 +119,9 @@ Web surface session UI:
   and put everything else in an explicit `Other` bucket.
 - `New Session` is lazy on the web surface. It resets local transcript/turn
   state and waits for the first prompt to POST a daemon session; do not re-add
-  eager session creation that litters 0-turn drafts.
+  eager session creation that litters 0-turn drafts. The bounded exception is
+  confirmed Voice Planner: the exact `Create draft` or `Create & start` click
+  is itself the explicit product action that creates one session.
 - Idle web/extension headers stay single-bar: project/session context may stay
   visible, but call/join affordances live behind overflow until intentionally
   opened or actively connected.

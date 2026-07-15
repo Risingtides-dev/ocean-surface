@@ -607,3 +607,61 @@
     opacity: 1;
   }
 }
+
+/* Voice Planner keeps frozen roots readable in extension and phone widths. */
+.ocean-surface--extension .voice-plan {
+  max-width: calc(100vw - 20px);
+  margin-right: 10px;
+  margin-left: 10px;
+}
+
+.ocean-surface--extension .voice-plan__picker,
+.ocean-surface--extension .voice-plan__actions {
+  grid-template-columns: minmax(0, 1fr);
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.ocean-surface--extension .voice-plan__context dd,
+.ocean-surface--extension .voice-plan__brief p,
+.ocean-surface--extension .voice-plan__brief li {
+  overflow-wrap: anywhere;
+}
+
+.ocean-surface--extension .voice-plan__actions button {
+  width: 100%;
+}
+
+@media (max-width: 720px) {
+  .voice-plan {
+    max-width: calc(100vw - 20px);
+    margin-right: 10px;
+    margin-left: 10px;
+    padding: 12px;
+  }
+
+  .voice-plan__picker {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .voice-plan__context div {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .voice-plan__context dd,
+  .voice-plan__brief p,
+  .voice-plan__brief li {
+    overflow-wrap: anywhere;
+  }
+
+  .voice-plan__actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .voice-plan__actions button,
+  .voice-plan__picker button {
+    width: 100%;
+    min-height: 44px;
+  }
+}

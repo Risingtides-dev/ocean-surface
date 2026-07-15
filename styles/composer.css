@@ -736,3 +736,189 @@
     box-shadow: 0 0 16px var(--accent-soft);
   }
 }
+
+/* ── Voice Planner review card ─────────────────────────────────────────── */
+.voice-plan {
+  margin: 8px 18px 0;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--sheen), var(--bg-elevated);
+  box-shadow: var(--elev-2);
+  color: var(--fg-2);
+}
+
+.voice-plan__header,
+.voice-plan__actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.voice-plan h2,
+.voice-plan h3,
+.voice-plan h4,
+.voice-plan p {
+  margin: 0;
+}
+
+.voice-plan h2,
+.voice-plan h3 {
+  color: var(--fg);
+}
+
+.voice-plan__header p,
+.voice-plan__status {
+  margin-top: 4px;
+  color: var(--fg-3);
+  font-size: 12px;
+}
+
+.voice-plan__picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto;
+  align-items: end;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.voice-plan__picker label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: var(--fg-3);
+  font-size: 11px;
+}
+
+.voice-plan select,
+.voice-plan button {
+  min-height: var(--ctl-h);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-well);
+  color: var(--fg);
+  font: inherit;
+}
+
+.voice-plan select {
+  width: 100%;
+  min-width: 0;
+  padding: 0 9px;
+}
+
+.voice-plan button {
+  padding: 0 12px;
+  cursor: pointer;
+}
+
+.voice-plan button:focus-visible,
+.voice-plan select:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.voice-plan button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.voice-plan .voice-plan__primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--fg-on-accent);
+}
+
+.voice-plan__close {
+  flex: 0 0 auto;
+  min-height: var(--ctl-h-sm) !important;
+  padding: 0 9px !important;
+  color: var(--fg-3) !important;
+}
+
+.voice-plan__context {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0;
+  padding: 10px;
+  border-radius: var(--radius);
+  background: var(--bg-well);
+  box-shadow: var(--well);
+}
+
+.voice-plan__context div {
+  display: grid;
+  grid-template-columns: 78px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.voice-plan__context dt {
+  color: var(--fg-3);
+  font-size: 11px;
+}
+
+.voice-plan__context dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--fg-2);
+  font-family: var(--mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.voice-plan__brief {
+  display: grid;
+  gap: 10px;
+  max-height: min(46vh, 440px);
+  margin-top: 12px;
+  padding-right: 4px;
+  overflow-y: auto;
+}
+
+.voice-plan__brief section {
+  display: grid;
+  gap: 4px;
+}
+
+.voice-plan__brief h4 {
+  color: var(--fg-3);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.voice-plan__brief p,
+.voice-plan__brief li {
+  color: var(--fg-2);
+  font-size: 13px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.voice-plan__brief ul {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.voice-plan__error {
+  margin-top: 10px !important;
+  color: var(--err);
+  font-size: 12px;
+}
+
+.voice-plan__actions {
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+
+.voice-plan__sr-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
