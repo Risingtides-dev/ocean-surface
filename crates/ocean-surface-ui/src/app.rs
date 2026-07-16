@@ -1131,13 +1131,7 @@ pub fn App() -> impl IntoView {
     };
     // Persistent Rooms panel (OCEAN-108). Shares the Daemon's `url` signal so it
     // targets the same origin; opens a right-hand overlay like Sessions.
-    let rooms = Rooms::new(
-        &daemon,
-        daemon.livekit_room_id,
-        daemon.livekit_token_path,
-        show_livekit_controls,
-        show_rooms,
-    );
+    let rooms = Rooms::new(&daemon, show_rooms);
     // Room mode: a room is a mode of operation you ENTER — opening one from
     // the rooms browser swaps the chat surface for the room's own stage
     // (roster + transcript + composer). Purely daemon-native text; the LiveKit

@@ -11,21 +11,19 @@
 //!   POST   /v1/rooms/persistent/{key}/participants    → join
 //!   DELETE /v1/rooms/persistent/{key}/participants/{id}→ leave
 //!   POST   /v1/rooms/persistent/{key}/messages        → post a message
-//!   GET    /v1/rooms/persistent/{key}/transcript?after_seq=N → live tail
+//!   GET    /v1/rooms/persistent/{key}/events           → live SSE tail (TASK-10)
 //!
-//! Live updates: the daemon emits an unscoped `room_trigger` extension event on
-//! the agent event bus when an @-mention auto-convenes (OCEAN-65). That frame is
-//! council-wide (`scope: None`), so it only reaches the `?all=1` firehose — the
-//! main session stream in `daemon.rs` drops unscoped events on purpose. We open
-//! our own `?all=1` listener here (mirroring `connect_permission_stream`) scoped
-//! to the open room, and additionally poll the transcript on a short interval
-//! while a room is open so new messages from any author tail in even when no
-//! trigger fires. Both paths request `after_seq` so we only append new entries.
+//! Live updates: the daemon's room-scoped SSE (TASK-10, `GET
+//! /v1/rooms/persistent/{key}/events`) streams every transcript row as a
+//! `room_message` frame with `id:=seq`. The surface hydrates once, then tails
+//! live with `Last-Event-ID` resume on reconnect — no poll, no global-stream
+//! workaround (TASK-11).
 //!
 //! The whole module is self-contained — it carries its own request layer rather
 //! than threading rooms state through the `Daemon` handle — so it never touches
 //! the live agent loop / session SSE code.
 
+use futures_util::future::Either;
 use futures_util::StreamExt;
 use gloo_net::eventsource::futures::EventSource;
 use gloo_net::http::Request;
@@ -33,11 +31,16 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen_futures::spawn_local;
 
-/// How often (ms) we re-poll the open room's transcript for new entries. SSE
-/// `room_trigger` only fires on auto-convene; this catches plain messages from
-/// other participants too. Cheap: `after_seq` means each poll returns only the
-/// tail since the last seq we hold.
-const TRANSCRIPT_POLL_MS: u32 = 2_500;
+/// SSE tail connection state for the live indicator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TailState {
+    /// Initial catch-up replay in progress.
+    Replaying,
+    /// Live stream connected, receiving frames in real time.
+    Live,
+    /// Connection dropped, attempting reconnect.
+    Reconnecting,
+}
 
 /// localStorage key for this surface's stable room participant id, so a given
 /// browser keeps the same identity across reloads (join/leave/author are keyed
@@ -223,27 +226,6 @@ struct PostMessageBody<'a> {
     body: &'a str,
 }
 
-/// The unscoped `room_trigger` extension frame the daemon emits on auto-convene
-/// (OCEAN-65). We only need the room key to know which room to re-tail.
-#[derive(Debug, Clone, Deserialize)]
-struct RoomTriggerPayload {
-    #[serde(default)]
-    room: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum AllStreamEvent {
-    Extension {
-        #[serde(default)]
-        extension: String,
-        #[serde(default)]
-        payload: serde_json::Value,
-    },
-    #[serde(other)]
-    Other,
-}
-
 /// Identity of this surface as a room participant. Stable per browser via
 /// localStorage so join/leave/author all key on the same id.
 #[derive(Debug, Clone)]
@@ -273,7 +255,7 @@ impl RoomIdentity {
 }
 
 /// Reactive handle for the rooms panel. Holds the room list, the open room +
-/// its transcript, status text, and the SSE/poll generation counter. Cloned
+/// its transcript, status text, and the SSE-tail generation counter. Cloned
 /// freely (all fields are `Copy` signal handles), like [`crate::daemon::Daemon`].
 #[derive(Clone, Copy)]
 pub struct Rooms {
@@ -298,28 +280,21 @@ pub struct Rooms {
     pub identity_id: RwSignal<&'static str>,
     /// This browser's display name.
     pub identity_name: RwSignal<&'static str>,
-    /// The LiveKit room id for the current call (shared with Daemon/LiveKitPanel).
-    pub livekit_room_id: RwSignal<String>,
-    /// The LiveKit token path for the current call (shared with Daemon/LiveKitPanel).
-    pub livekit_token_path: RwSignal<String>,
-    /// Whether the LiveKit controls utility row / room stage is visible.
-    pub show_livekit_controls: RwSignal<bool>,
     /// Whether the rooms browse panel itself is open.
     pub panel_open: RwSignal<bool>,
+    /// Tail state for the live connection indicator. Starts as Replaying during
+    /// initial catch-up, switches to Live once connected, and to Reconnecting on
+    /// drop/retry. The view reads this to render the status bar indicator.
+    tail_state: RwSignal<TailState>,
+    /// Available agent names fetched from GET /v1/agents (TASK-9/TASK-11).
+    pub available_agents: RwSignal<Vec<String>>,
 }
 
 impl Rooms {
     /// Construct a rooms handle that shares the live `Daemon::url` signal, so it
-    /// always targets the origin resolved by bootstrap. Accepts the shared
-    /// LiveKit signals from the daemon + app shell so room join/leave/close can
-    /// route calls and toggle the utility row.
-    pub fn new(
-        daemon: &crate::daemon::Daemon,
-        livekit_room_id: RwSignal<String>,
-        livekit_token_path: RwSignal<String>,
-        show_livekit_controls: RwSignal<bool>,
-        panel_open: RwSignal<bool>,
-    ) -> Self {
+    /// always targets the origin resolved by bootstrap. Room collaboration is
+    /// daemon-native text; LiveKit state is intentionally outside this type.
+    pub fn new(daemon: &crate::daemon::Daemon, panel_open: RwSignal<bool>) -> Self {
         let identity = RoomIdentity::current();
         // Leak the small, app-lifetime identity strings to obtain `&'static str`
         // signals, so the panel can pass them into request closures without a
@@ -336,10 +311,9 @@ impl Rooms {
             generation: RwSignal::new(0),
             identity_id: RwSignal::new(id_static),
             identity_name: RwSignal::new(name_static),
-            livekit_room_id,
-            livekit_token_path,
-            show_livekit_controls,
             panel_open,
+            tail_state: RwSignal::new(TailState::Replaying),
+            available_agents: RwSignal::new(Vec::new()),
         }
     }
 
@@ -373,6 +347,39 @@ impl Rooms {
                     Err(err) => status.set(format!("rooms decode error: {err}")),
                 },
                 Err(err) => status.set(format!("rooms fetch error: {err}")),
+            }
+        });
+    }
+
+    /// Fetch available agent names from GET /v1/agents (TASK-9/TASK-11).
+    /// The daemon returns `{ "ok": true, "agents": [{"name":"flux", ...}, ...] }`.
+    /// We extract just the names for the room agent picker.
+    pub fn fetch_agents(&self) {
+        let base = self.base();
+        let agents_sig = self.available_agents;
+        spawn_local(async move {
+            let url = format!("{base}/v1/agents");
+            match Request::get(&url).send().await {
+                Ok(resp) => {
+                    if let Ok(json) = resp.json::<serde_json::Value>().await {
+                        if let Some(agents) = json.get("agents").and_then(|a| a.as_array()) {
+                            let ids: Vec<String> = agents
+                                .iter()
+                                .filter_map(|a| {
+                                    a.get("name")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string())
+                                })
+                                .collect();
+                            agents_sig.set(ids);
+                        } else {
+                            agents_sig.set(Vec::new());
+                        }
+                    }
+                }
+                Err(_) => {
+                    agents_sig.set(Vec::new());
+                }
             }
         });
     }
@@ -431,7 +438,7 @@ impl Rooms {
     }
 
     /// Open a room: load its record + full transcript, bump the generation, and
-    /// start the live tail (SSE `?all=1` + transcript poll).
+    /// start the room-scoped SSE live tail (TASK-10/TASK-11).
     pub fn open_room(&self, key: String) {
         let base = self.base();
         let me = *self;
@@ -464,6 +471,8 @@ impl Rooms {
                         open_room.set(r.room);
                         transcript.set(r.transcript);
                         status.set(String::new());
+                        // Pre-fetch agent list for the picker (TASK-11).
+                        me.fetch_agents();
                         // Start live updates for this generation.
                         me.start_live_tail(key.clone(), gen);
                     }
@@ -479,21 +488,10 @@ impl Rooms {
     }
     /// Close the open room and stop its live loops.
     pub fn close_room(&self) {
-        let closing_key = self.open_key.get_untracked();
         self.generation.update(|g| *g = g.wrapping_add(1));
         self.open_key.set(None);
         self.open_room.set(None);
         self.transcript.set(Vec::new());
-        if let Some(key) = &closing_key {
-            if clear_livekit_room_call_if_current(
-                key,
-                &self.livekit_room_id,
-                &self.livekit_token_path,
-            ) {
-                self.show_livekit_controls.set(false);
-                crate::livekit::disconnect_livekit_bridge();
-            }
-        }
     }
 
     /// Join the open room as the current identity
@@ -525,12 +523,6 @@ impl Rooms {
                             status.set("joined".into());
                             me.refresh_open_transcript(&key);
                             me.fetch_rooms();
-                            route_livekit_room_call(
-                                &key,
-                                &me.livekit_room_id,
-                                &me.livekit_token_path,
-                            );
-                            me.show_livekit_controls.set(true);
                             me.panel_open.set(false);
                         }
                         Ok(r) => status.set(format!(
@@ -546,26 +538,18 @@ impl Rooms {
         });
     }
 
-    /// Add an **agent** participant to the open room
-    /// (`POST .../participants` with `kind = agent`). Once present, the agent's
-    /// id is mentionable (`@id`) and — if the room's trigger policy has
-    /// `on_mention` — auto-convenes when mentioned (OCEAN-111). The daemon's
-    /// `room_join` route accepts the `kind` field directly, so this needs no
-    /// daemon change.
-    pub fn add_agent(&self, agent_id: String, display_name: String) {
+    /// Add a real named agent to the open room via the daemon's validated join
+    /// (`POST .../participants` with `kind = agent`). TASK-9/TASK-11: the daemon
+    /// resolves `agent_id` against `agentdir::resolve` and rejects bogus ids
+    /// with a typed 400. The surface picks from `available_agents` (fetched via
+    /// `GET /v1/agents`) — free-text fake agents are gone. Once joined, the
+    /// agent is mentionable and auto-convenes per the room's trigger policy.
+    pub fn add_agent(&self, agent_id: String) {
         let agent_id = agent_id.trim().to_string();
         if agent_id.is_empty() {
             self.status.set("agent id required".into());
             return;
         }
-        let display_name = {
-            let trimmed = display_name.trim();
-            if trimmed.is_empty() {
-                agent_id.clone()
-            } else {
-                trimmed.to_string()
-            }
-        };
         let Some(key) = self.open_key.get_untracked() else {
             return;
         };
@@ -575,7 +559,7 @@ impl Rooms {
         spawn_local(async move {
             let body = JoinBody {
                 id: &agent_id,
-                display_name: &display_name,
+                display_name: &agent_id,
                 kind: RoomParticipantKind::Agent,
             };
             let post_url = format!("{base}/v1/rooms/persistent/{}/participants", encode(&key));
@@ -642,14 +626,6 @@ impl Rooms {
                         status.set("left".into());
                         me.refresh_open_transcript(&key);
                         me.fetch_rooms();
-                        if clear_livekit_room_call_if_current(
-                            &key,
-                            &me.livekit_room_id,
-                            &me.livekit_token_path,
-                        ) {
-                            me.show_livekit_controls.set(false);
-                            crate::livekit::disconnect_livekit_bridge();
-                        }
                     }
                     Ok(r) => status.set(format!(
                         "leave failed: {}",
@@ -705,8 +681,8 @@ impl Rooms {
     }
 
     /// Re-fetch the open room's transcript tail (`after_seq` = our highest seq)
-    /// and append only new entries. Used after our own writes and by the poll /
-    /// SSE live tail.
+    /// and append only new entries. Used after our own writes; the SSE stream
+    /// remains the primary source for remote updates.
     fn refresh_open_transcript(&self, key: &str) {
         let base = self.base();
         let transcript = self.transcript;
@@ -746,87 +722,160 @@ impl Rooms {
         });
     }
 
-    /// Start the live tail for `key` at generation `gen`: a transcript poll loop
-    /// and an `?all=1` SSE listener for `room_trigger`. Both stop when the
-    /// generation advances (room change / panel close).
+    /// Start the live tail for `key` at generation `gen`: room-scoped SSE
+    /// (`GET /v1/rooms/persistent/{key}/events`) with Last-Event-ID resume
+    /// (TASK-10/TASK-11). Replaces the 2.5s poll workaround.
     fn start_live_tail(&self, key: String, gen: u64) {
-        // 1) Transcript poll — catches every author's messages, not just
-        //    auto-convene. Cheap via `after_seq`.
-        {
-            let me = *self;
-            let generation = self.generation;
-            let key = key.clone();
-            spawn_local(async move {
-                loop {
-                    gloo_timers::future::TimeoutFuture::new(TRANSCRIPT_POLL_MS).await;
-                    if generation.get_untracked() != gen {
-                        break;
-                    }
-                    me.refresh_open_transcript(&key);
-                }
-            });
-        }
+        let me = *self;
+        let generation = self.generation;
+        let base = self.base();
+        let last_seq = RwSignal::new(0u64);
+        let tail_state = self.tail_state;
 
-        // 2) `?all=1` SSE — the daemon's unscoped `room_trigger` frame fires on
-        //    @-mention auto-convene. When one names our open room, re-tail
-        //    immediately (don't wait for the poll). Mirrors the per-name
-        //    subscription pattern in daemon.rs's permission stream.
-        {
-            let me = *self;
-            let generation = self.generation;
-            let base = self.base();
-            let key = key.clone();
-            spawn_local(async move {
-                let events_url = format!("{base}/v1/agent/events?all=1");
+        spawn_local(async move {
+            tail_state.set(TailState::Replaying);
+            let events_url = format!("{base}/v1/rooms/persistent/{}/events", encode(&key));
+            let mut resume_seq: Option<u64> = None;
+
+            loop {
+                if generation.get_untracked() != gen {
+                    break;
+                }
+                tail_state.set(if resume_seq.is_some() {
+                    TailState::Reconnecting
+                } else {
+                    TailState::Replaying
+                });
+
+                let url = if let Some(after) = resume_seq {
+                    format!("{events_url}?after_seq={after}")
+                } else {
+                    events_url.clone()
+                };
+                let mut es = match EventSource::new(&url) {
+                    Ok(es) => es,
+                    Err(_) => {
+                        gloo_timers::future::TimeoutFuture::new(2_000).await;
+                        continue;
+                    }
+                };
+                let sub = match es.subscribe("room_message") {
+                    Ok(s) => s,
+                    Err(_) => {
+                        gloo_timers::future::TimeoutFuture::new(2_000).await;
+                        continue;
+                    }
+                };
+                tail_state.set(match es.state() {
+                    gloo_net::eventsource::State::Open => TailState::Live,
+                    gloo_net::eventsource::State::Connecting if resume_seq.is_some() => {
+                        TailState::Reconnecting
+                    }
+                    gloo_net::eventsource::State::Connecting => TailState::Replaying,
+                    gloo_net::eventsource::State::Closed => TailState::Reconnecting,
+                });
+                let mut stream = sub;
+                // Race stream.next() against a 2 s timeout so room close/switch
+                // can cancel a stalled connection (blame: gloo EventSource errors
+                // are suppressed during CONNECTING, so Reconnecting never fires
+                // without an explicit timeout-pump — codex TASK-11 review).
                 loop {
                     if generation.get_untracked() != gen {
                         break;
                     }
-                    let mut es = match EventSource::new(&events_url) {
-                        Ok(es) => es,
-                        Err(_) => {
-                            gloo_timers::future::TimeoutFuture::new(2_000).await;
-                            continue;
-                        }
-                    };
-                    let sub = match es.subscribe("extension") {
-                        Ok(s) => s,
-                        Err(_) => {
-                            gloo_timers::future::TimeoutFuture::new(2_000).await;
-                            continue;
-                        }
-                    };
-                    let mut stream = sub;
-                    while let Some(msg) = stream.next().await {
-                        if generation.get_untracked() != gen {
-                            break;
-                        }
-                        let Ok((_name, msg)) = msg else { continue };
-                        let Some(data) = msg.data().as_string() else {
-                            continue;
-                        };
-                        let Ok(evt) = serde_json::from_str::<AllStreamEvent>(&data) else {
-                            continue;
-                        };
-                        if let AllStreamEvent::Extension { extension, payload } = evt {
-                            if extension != "room_trigger" {
-                                continue;
-                            }
-                            // Only react to triggers for the open room.
-                            if let Ok(p) = serde_json::from_value::<RoomTriggerPayload>(payload) {
-                                if p.room == key {
-                                    me.refresh_open_transcript(&key);
+                    let next = stream.next();
+                    let timeout = gloo_timers::future::TimeoutFuture::new(2_000);
+                    let msg = match futures_util::future::select(Box::pin(next), Box::pin(timeout))
+                        .await
+                    {
+                        Either::Left((Some(msg), _)) => msg,
+                        Either::Left((None, _)) => break, // stream ended
+                        Either::Right(_) => {
+                            // Timeout fired — poll the native connection to
+                            // distinguish a quiet stream from a dead one.
+                            // gloo wraps web_sys::EventSource; State mirrors
+                            // the underlying readyState constants.
+                            match es.state() {
+                                gloo_net::eventsource::State::Open => {
+                                    tail_state.set(TailState::Live);
+                                }
+                                gloo_net::eventsource::State::Connecting => {
+                                    tail_state.set(TailState::Reconnecting);
+                                }
+                                gloo_net::eventsource::State::Closed => {
+                                    tail_state.set(TailState::Reconnecting);
+                                    break; // fall through to outer reconnect loop
                                 }
                             }
+                            continue;
                         }
+                    };
+                    let Ok((_name, msg)) = msg else { continue };
+                    let Some(data) = msg.data().as_string() else {
+                        continue;
+                    };
+                    let Ok(entry) = serde_json::from_str::<RoomMessage>(&data) else {
+                        continue;
+                    };
+                    tail_state.set(TailState::Live);
+                    if entry.seq > last_seq.get_untracked() {
+                        last_seq.set(entry.seq);
                     }
-                    if generation.get_untracked() != gen {
-                        break;
+                    let is_roster_change = matches!(
+                        entry.kind,
+                        RoomMessageKind::ParticipantJoined | RoomMessageKind::ParticipantLeft
+                    );
+                    me.transcript.update(|t| {
+                        if t.iter().any(|m| m.seq == entry.seq) {
+                            return;
+                        }
+                        t.push(entry);
+                    });
+                    // Refresh the room record (roster) on join/leave frames
+                    // so other clients see an accurate participant list
+                    // (codex TASK-11 review). Guarded by generation + open_key
+                    // so a stale response can't overwrite a newly selected room.
+                    if is_roster_change {
+                        let base = base.clone();
+                        let key = key.clone();
+                        let open_room = me.open_room;
+                        spawn_local(async move {
+                            if generation.get_untracked() != gen
+                                || me.open_key.get_untracked().as_deref() != Some(&key)
+                            {
+                                return;
+                            }
+                            if let Ok(resp) = Request::get(&format!(
+                                "{base}/v1/rooms/persistent/{}",
+                                encode(&key)
+                            ))
+                            .send()
+                            .await
+                            {
+                                if let Ok(r) = resp.json::<RoomMutateResponse>().await {
+                                    if r.ok {
+                                        if generation.get_untracked() != gen
+                                            || me.open_key.get_untracked().as_deref()
+                                                != Some(key.as_str())
+                                        {
+                                            return;
+                                        }
+                                        if let Some(room) = r.room {
+                                            open_room.set(Some(room));
+                                        }
+                                    }
+                                }
+                            }
+                        });
                     }
-                    gloo_timers::future::TimeoutFuture::new(1_000).await;
                 }
-            });
-        }
+                resume_seq = Some(last_seq.get_untracked());
+                if generation.get_untracked() != gen {
+                    break;
+                }
+                gloo_timers::future::TimeoutFuture::new(1_000).await;
+            }
+        });
     }
 }
 
@@ -893,38 +942,15 @@ fn short_time(ts: &str) -> String {
     trimmed.chars().take(16).collect()
 }
 
-// ---- LiveKit room-call routing helpers ------------------------------------
-
-/// Build the per-room LiveKit token path, percent-encoding the room key
-/// exactly like the proxy: `/v1/rooms/{encoded}/livekit-token`.
+/// Build the per-room LiveKit token path, percent-encoding the room key.
+/// Pure utility used by `daemon.rs` bootstrap; rooms G1 does not call it.
 pub(crate) fn livekit_token_path_for_room(key: &str) -> String {
     format!("/v1/rooms/{}/livekit-token", encode(key))
 }
 
-/// Set the LiveKit room id + token path signals for a room key.
-fn route_livekit_room_call(key: &str, room_id: &RwSignal<String>, token_path: &RwSignal<String>) {
-    room_id.set(key.to_string());
-    token_path.set(livekit_token_path_for_room(key));
-}
-
-/// Clear the LiveKit room id + token path signals only if they match `key`.
-fn clear_livekit_room_call_if_current(
-    key: &str,
-    room_id: &RwSignal<String>,
-    token_path: &RwSignal<String>,
-) -> bool {
-    if room_id.get_untracked() == key {
-        room_id.set(String::new());
-        token_path.set(String::new());
-        true
-    } else {
-        false
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leptos::prelude::{Get, RwSignal};
 
     #[test]
     fn slugify_lowercases_and_dashes() {
@@ -952,38 +978,6 @@ mod tests {
             livekit_token_path_for_room("project/surface demo"),
             "/v1/rooms/project%2Fsurface%20demo/livekit-token"
         );
-    }
-    #[test]
-    fn route_livekit_room_call_sets_room_key_and_token_path_signals() {
-        let room_key: RwSignal<String> = RwSignal::new(String::new());
-        let token_path: RwSignal<String> = RwSignal::new(String::new());
-
-        route_livekit_room_call("my-room", &room_key, &token_path);
-
-        assert_eq!(room_key.get(), "my-room");
-        assert_eq!(token_path.get(), livekit_token_path_for_room("my-room"));
-    }
-
-    #[test]
-    fn clear_livekit_room_call_clears_matching_room() {
-        let room_key: RwSignal<String> = RwSignal::new("room-a".to_string());
-        let token_path: RwSignal<String> = RwSignal::new(livekit_token_path_for_room("room-a"));
-
-        clear_livekit_room_call_if_current("room-a", &room_key, &token_path);
-
-        assert_eq!(room_key.get(), "");
-        assert_eq!(token_path.get(), "");
-    }
-
-    #[test]
-    fn clear_livekit_room_call_preserves_non_matching_room() {
-        let room_key: RwSignal<String> = RwSignal::new("room-a".to_string());
-        let token_path: RwSignal<String> = RwSignal::new(livekit_token_path_for_room("room-a"));
-
-        clear_livekit_room_call_if_current("room-b", &room_key, &token_path);
-
-        assert_eq!(room_key.get(), "room-a");
-        assert_eq!(token_path.get(), livekit_token_path_for_room("room-a"));
     }
 }
 
@@ -1190,22 +1184,13 @@ pub fn RoomsPanel(rooms: Rooms, open: RwSignal<bool>) -> impl IntoView {
 #[component]
 pub fn RoomStage(rooms: Rooms) -> impl IntoView {
     let composer = RwSignal::new(String::new());
-    let new_agent_id = RwSignal::new(String::new());
-    let new_agent_name = RwSignal::new(String::new());
-    // Add-agent inputs are power-user chrome: hidden behind the "+ agent"
-    // ghost chip until asked for (control density: reveal-on-intent).
+    // Add-agent picker (TASK-9/TASK-11): reveal-on-intent ghost chip,
+    // choices populated from `GET /v1/agents` → `available_agents`.
     let show_add_agent = RwSignal::new(false);
 
     let open_room = rooms.open_room;
     let transcript = rooms.transcript;
     let status = rooms.status;
-
-    let submit_agent = move || {
-        rooms.add_agent(new_agent_id.get_untracked(), new_agent_name.get_untracked());
-        new_agent_id.set(String::new());
-        new_agent_name.set(String::new());
-        show_add_agent.set(false);
-    };
 
     // Keep the transcript pinned to the newest message: jump to the bottom
     // when the room's history first fills, and follow new messages tailing in
@@ -1244,6 +1229,13 @@ pub fn RoomStage(rooms: Rooms) -> impl IntoView {
                 <h2 class="room-stage__title">
                     {move || open_room.get().map(|r| r.name).unwrap_or_default()}
                 </h2>
+                <span class="room-stage__tail-state">
+                    {move || match rooms.tail_state.get() {
+                        TailState::Replaying => "● replaying",
+                        TailState::Live => "● live",
+                        TailState::Reconnecting => "○ reconnecting",
+                    }}
+                </span>
                 <Show
                     when=move || rooms.joined_open()
                     fallback=move || view! {
@@ -1298,34 +1290,41 @@ pub fn RoomStage(rooms: Rooms) -> impl IntoView {
 
             <Show when=move || show_add_agent.get()>
                 <div class="rooms-addagent">
-                    <input
+                    <select
                         class="rooms-addagent__input"
-                        type="text"
-                        placeholder="agent id (e.g. flux)"
-                        prop:value=move || new_agent_id.get()
-                        on:input=move |ev| new_agent_id.set(event_target_value(&ev))
-                        on:keydown=move |ev| {
-                            if ev.key() == "Enter" {
-                                ev.prevent_default();
-                                submit_agent();
+                        on:change=move |ev| {
+                            let val = event_target_value(&ev);
+                            if !val.is_empty() {
+                                rooms.add_agent(val);
+                                show_add_agent.set(false);
                             }
                         }
-                    />
-                    <input
-                        class="rooms-addagent__input"
-                        type="text"
-                        placeholder="display name (optional)"
-                        prop:value=move || new_agent_name.get()
-                        on:input=move |ev| new_agent_name.set(event_target_value(&ev))
-                    />
-                    <button
-                        class="rooms-addagent__btn"
-                        type="button"
-                        disabled=move || new_agent_id.get().trim().is_empty()
-                        on:click=move |_| submit_agent()
                     >
-                        "Add agent"
-                    </button>
+                        <option value="" selected=move || {
+                            // Keep "pick an agent" as the visible label whenever
+                            // the picker opens — the select isn't controlled.
+                            true
+                        }>
+                            "-- pick an agent --"
+                        </option>
+                        <For
+                            each=move || rooms.available_agents.get()
+                            key=|id: &String| id.clone()
+                            children=move |agent_id: String| {
+                                let id = agent_id.clone();
+                                view! {
+                                    <option value=agent_id>
+                                        {id}
+                                    </option>
+                                }
+                            }
+                        />
+                    </select>
+                    <Show when=move || rooms.available_agents.get().is_empty()>
+                        <span class="rooms-addagent__empty">
+                            "No agents"
+                        </span>
+                    </Show>
                 </div>
             </Show>
 

@@ -109,17 +109,6 @@ fn status_ok(js: &JsValue) -> (bool, Option<String>) {
     (ok, err)
 }
 
-/// Disconnect the singleton LiveKit bridge. Safe to call even when not connected
-/// (the JS bridge is a no-op then). Intended for room leave/close paths that
-/// need to tear down the call without going through LiveKitPanel's leave button
-/// handler. Does NOT reset panel-local signals (join_state, roster, etc.) —
-/// callers relying on those should set them separately or hide the panel.
-pub fn disconnect_livekit_bridge() {
-    spawn_local(async move {
-        let _ = ocean_livekit_disconnect().await;
-    });
-}
-
 /// The collaboration presence panel: Join/Leave, mic + camera toggles, and a
 /// live participant roster. Renders nothing until the config bootstrap has
 /// supplied a `livekit_token_path` (i.e. a room is configured for this surface).

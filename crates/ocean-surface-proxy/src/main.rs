@@ -198,6 +198,9 @@ async fn main() -> anyhow::Result<()> {
         // Model picker + halt button reach the daemon through this origin too.
         .route("/v1/models", get(proxy_models))
         .route("/v1/model", get(proxy_model_get).post(proxy_model_set))
+        // Agent identity picker (TASK-9/TASK-11): surfaces call GET /v1/agents
+        // same-origin; the proxy forwards to the daemon and returns the JSON list.
+        .route("/v1/agents", get(proxy_agents))
         .route("/v1/fs/dirs", get(proxy_fs_dirs))
         .route(
             "/v1/projects",
@@ -215,12 +218,14 @@ async fn main() -> anyhow::Result<()> {
         // resp.json() choked with "EOF while parsing a value" and the whole
         // Rooms feature was dead on web. The `/persistent` literal route covers
         // list (GET) + create (POST); the wildcard catch-all covers every
-        // sub-path (room get, participants join/leave, messages, transcript)
-        // forwarding method + body + query (the transcript tail uses
-        // ?after_seq=). Declared BEFORE the livekit-token route so the
-        // `persistent` segment is matched as a literal, never swallowed by the
-        // `{room_id}` capture — though the two are distinct subtrees either way
-        // (`/v1/rooms/persistent/...` vs `/v1/rooms/{id}/livekit-token`).
+        // sub-path (room get, participants join/leave, messages, transcript,
+        // event stream) forwarding method + body + query. The handler internally
+        // branches on the exact GET `{key}/events` shape to stream through
+        // sse_stream_response rather than buffering (TASK-11 axum route conflict
+        // fix: {key}/events and {*rest} cannot coexist at the same prefix).
+        // Declared BEFORE the livekit-token route so the `persistent` segment is
+        // matched as a literal, never swallowed by the `{room_id}` capture —
+        // though the two are distinct subtrees either way.
         .route(
             "/v1/rooms/persistent",
             get(proxy_rooms_persistent).post(proxy_rooms_persistent),
@@ -690,6 +695,11 @@ async fn proxy_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     proxy_get_json(&state, "/v1/models").await
 }
 
+/// Reverse-proxy GET /v1/agents (named agent identity picker, TASK-9/TASK-11).
+async fn proxy_agents(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    proxy_get_json(&state, "/v1/agents").await
+}
+
 /// Reverse-proxy GET /v1/fs/dirs?path=<path> (filesystem directory listing).
 /// Forwards the full query string so `?path=~/dev` reaches the daemon intact.
 async fn proxy_fs_dirs(State(state): State<Arc<AppState>>, req: Request) -> impl IntoResponse {
@@ -939,24 +949,56 @@ async fn proxy_longhouse(
 /// full path, query string, and body — but also handles DELETE (leave a room:
 /// `DELETE /v1/rooms/persistent/{key}/participants/{id}`). One handler serves
 /// the whole subtree: list (GET) + create (POST) on the bare path, plus room
-/// get (GET), join (POST), leave (DELETE), post-message (POST) and transcript
-/// (GET, `?after_seq=`) on the wildcard paths. We reconstruct the daemon path
-/// from the incoming request URI rather than a captured tail so the same
-/// handler covers both the literal and the wildcard routes verbatim.
+/// get (GET), join (POST), leave (DELETE), post-message (POST), transcript
+/// (GET, `?after_seq=`), and the live event tail (GET, exact `{key}/events`
+/// shape — streamed via sse_stream_response with Last-Event-ID resume).
 async fn proxy_rooms_persistent(
     State(state): State<Arc<AppState>>,
     req: Request,
 ) -> impl IntoResponse {
     let method = req.method().clone();
-    // The path is always under /v1/rooms/persistent (the only routes wired to
-    // this handler); forward it unchanged, with the query string preserved so
-    // the transcript tail's ?after_seq= reaches the daemon.
     let path = req.uri().path().to_string();
     let q = req
         .uri()
         .query()
         .map(|q| format!("?{q}"))
         .unwrap_or_default();
+
+    // TASK-11: GET paths that match the exact shape
+    // `/v1/rooms/persistent/{key}/events` (exactly one key segment before
+    // `/events`) must stream through sse_stream_response rather than buffering
+    // (axum rejects a separate {key}/events route alongside {*rest}).
+    // We reconstruct this from path segments to avoid a loose ends_with.
+    let is_events_tail = method == axum::http::Method::GET && {
+        let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+        segments.len() == 5
+            && segments[0] == "v1"
+            && segments[1] == "rooms"
+            && segments[2] == "persistent"
+            && segments[4] == "events"
+            && !segments[3].is_empty()
+    };
+    if is_events_tail {
+        let url = format!("{}{path}{q}", state.daemon_url.trim_end_matches('/'));
+        let mut upstream = state.http.get(&url);
+        if let Some(last_id) = req.headers().get("last-event-id") {
+            if let Ok(val) = last_id.to_str() {
+                upstream = upstream.header("Last-Event-ID", val);
+            }
+        }
+        return match upstream.send().await {
+            Ok(resp) => sse_stream_response(resp),
+            Err(err) => (
+                StatusCode::BAD_GATEWAY,
+                format!("daemon unreachable: {err}"),
+            )
+                .into_response(),
+        };
+    }
+
+    // The path is always under /v1/rooms/persistent (the only routes wired to
+    // this handler); forward it unchanged, with the query string preserved so
+    // the transcript tail's ?after_seq= reaches the daemon.
     let url = format!("{}{path}{q}", state.daemon_url.trim_end_matches('/'));
     // buffer the (small) body so we can forward it on POST/DELETE
     let body = axum::body::to_bytes(req.into_body(), 1 << 20)

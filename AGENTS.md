@@ -131,6 +131,21 @@ Web surface session UI:
   visible, but call/join affordances live behind overflow until intentionally
   opened or actively connected.
 
+## Rooms Contract
+
+- Room transcripts hydrate once, then tail only the room-scoped SSE endpoint
+  `GET /v1/rooms/persistent/{key}/events` with sequence resume. Do not restore
+  transcript polling or consume the global agent-event stream for Rooms.
+- The browser PWA proxy must forward `/v1/agents` as JSON and stream room SSE
+  unbuffered while preserving `Last-Event-ID`; Tauri reaches the same daemon
+  endpoints directly.
+- Agent participants are selected from daemon-owned `/v1/agents` identities
+  and remain subject to daemon join validation. Free-text agent creation does
+  not belong in the surface.
+- Rooms G1 is daemon-native text collaboration. LiveKit controls stay outside
+  the room join, leave, roster, and transcript lifecycle until explicitly
+  reintroduced behind a reviewed platform contract.
+
 ## Workspace Map
 
 | Path | Role |
