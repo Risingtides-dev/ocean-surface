@@ -443,6 +443,21 @@ pub(crate) fn section_layout_signature(sec: &ProjectSection) -> String {
     };
     format!("F{}{}{}", flat, main_segment, wt_segments)
 }
+
+/// Content-sensitive identity for a rendered project section. Leptos `<For>`
+/// retains the child view for an unchanged key, so the user-visible label must
+/// participate: daemon-side project renames must replace the captured header
+/// even when the section's sessions and layout are otherwise unchanged.
+pub(crate) fn section_render_key(sec: &ProjectSection) -> String {
+    format!(
+        "{}|{}|{}|{}|{}",
+        sec.key,
+        sec.label,
+        section_total_sessions(sec),
+        section_newest_ts(sec),
+        section_layout_signature(sec),
+    )
+}
 /// The surface-origin icon for a session's `[TAG]` title prefix. The tag set
 /// mirrors ocean-agent's `surface_flag` (the canonical client_type → flag
 /// map): BRWSR/TUI/WEB/GUI/CLI/VOX/ACP/SLACK/CNVS/MOBL. Recognized surfaces
@@ -526,10 +541,13 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
     let current_id = daemon.session_id;
     let daemon = StoredValue::new(daemon);
 
-    // Fetch sessions whenever the panel opens.
+    // Refresh both inputs to project grouping whenever the panel opens. The
+    // project catalogue can change outside this surface (for example, an
+    // operator rename), while the session list carries daemon-owned bindings.
     Effect::new(move |_| {
         if open.get() {
             daemon.get_value().fetch_sessions();
+            daemon.get_value().fetch_projects();
         }
     });
 
@@ -776,14 +794,7 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                             // session count + newest-session signature into the key forces a
                             // re-render whenever a section's contents change. Collapse state is
                             // keyed on `sec.key` separately, so it survives.
-                            let ts = section_newest_ts(sec);
-                            format!(
-                                "{}|{}|{}|{}",
-                                sec.key,
-                                section_total_sessions(sec),
-                                ts,
-                                section_layout_signature(sec),
-                            )
+                            section_render_key(sec)
                         }
                         children=move |sec: ProjectSection| {
                             let skey = sec.key.clone();
@@ -1817,6 +1828,38 @@ mod tests {
         assert_ne!(
             sig, sig2,
             "signature must change when sessions move between buckets"
+        );
+    }
+
+    #[test]
+    fn render_key_changes_when_project_label_changes_without_content_change() {
+        let projects = vec![project("owned", "dev", "/repo")];
+        let sessions = vec![session(
+            "s1",
+            "/repo",
+            Some("/repo"),
+            Some(owner("owned", "dev")),
+            None,
+            1,
+            "2026-07-05T12:00:00Z",
+        )];
+        let sections = group_for_panel(&sessions, &projects, None);
+        let original = sections.iter().find(|s| s.key == "owned").unwrap();
+        let mut renamed = original.clone();
+        renamed.label = "ocean-surface".to_string();
+
+        assert_eq!(
+            section_total_sessions(original),
+            section_total_sessions(&renamed)
+        );
+        assert_eq!(
+            section_layout_signature(original),
+            section_layout_signature(&renamed)
+        );
+        assert_ne!(
+            section_render_key(original),
+            section_render_key(&renamed),
+            "a project rename must replace the captured section header"
         );
     }
 }
