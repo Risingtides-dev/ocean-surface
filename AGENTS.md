@@ -136,15 +136,28 @@ Web surface session UI:
 
 ## Rooms Contract
 
+- Every successful `GET /v1/rooms/persistent/{key}` carries a required
+  `RoomAccessProjection`, including explicit `Local` for G1 rooms. Surface
+  `None` means loading or no open room; it is never a local-room discriminator.
 - Room transcripts hydrate once, then tail only the room-scoped SSE endpoint
-  `GET /v1/rooms/persistent/{key}/events` with sequence resume. Do not restore
-  transcript polling or consume the global agent-event stream for Rooms.
+  `GET /v1/rooms/persistent/{key}/events` with sequence resume. Subscribe to
+  both `room_message` and `room_access` immediately: messages alone advance the
+  room sequence cursor; access projections replace state without a sequence.
+  Do not restore transcript polling or consume the global agent-event stream.
 - The browser PWA proxy must forward `/v1/agents` as JSON and stream room SSE
   unbuffered while preserving `Last-Event-ID`; Tauri reaches the same daemon
   endpoints directly.
 - Agent participants are selected from daemon-owned `/v1/agents` identities
   and remain subject to daemon join validation. Free-text agent creation does
   not belong in the surface.
+- Local rosters and mention ids come from `Room.participants`; every non-Local
+  roster and mention id comes only from the safe access member projection.
+  Composer writes are enabled only for `Local` and `Live` access.
+- Federated outbox items render outside the confirmed transcript. Pending items
+  are informational; only failed items expose the daemon retry action, and the
+  returned access projection applies immediately behind the room-generation
+  guard before any duplicate SSE projection arrives.
+- Invite and redeem UI remains absent until daemon-owned outbound routes exist.
 - Rooms G1 is daemon-native text collaboration. LiveKit controls stay outside
   the room join, leave, roster, and transcript lifecycle until explicitly
   reintroduced behind a reviewed platform contract.

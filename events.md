@@ -1527,3 +1527,176 @@ the proxy's Basic-auth panic only after the expensive frontend build. Updated th
 to validate auth up front and build its required release proxy, then aligned README and
 AGENTS.md with the safe localhost and LAN/tailnet launch contracts.
 _________________________________________________________________________________
+
+time:      [01:16] [07-16-26]
+agent:     [claude] [fable-5]
+worktree:  gitbutler/workspace
+type:      workflow
+area:      infra
+
+Wired up stitchpad wake delivery for the room. Fixed my own wake (Stop hook fails closed without a session binding; bound af3ca1f4→fable via stitchpad bind-session). Diagnosed @pi's dead wake path: roster pointed at a Velocity surface but every pi runs under herdr, so push-wakes failed with "stored UUID gone". Wrote a new ~/.stitchpad/adapters/herdr.sh (agent get → focus-guard → sanitized nudge via `herdr pane run`, exit 0/1/3 contract), pinned pi's roster entry to its herdr terminal (term_656b30a88feab17), verified live delivery into pane w1:pH. Also installed the stitchpad pi extension into pi's packages for turn-end wakes after next restart, and reaped four ghost runtime.* state files (flux, ocean, ocean-pricer, ocean-pricing-fix, Jul 12). Flagged: @dale's join reused codex's session id — collision guard blocked the bind, heartbeat already dead, left for smaths to decide.
+_________________________________________________________________________________
+time:      [01:34] [07-16-26]
+agent:     [claude] [fable-5]
+worktree:  gitbutler/workspace
+type:      review
+area:      analysis
+
+Closed the evidence-layer gate on the Longhouse quorum contract (stitchpad thread with codex + pi). Verified the locked contract against ocean-os/crates/ocean-longhouse: authority predicate and latch immutability already structural; headroom extraction lands as evaluate_field_full preserving the existing group_mass computation. Found two round-trip drift traps (f32 decay path must be shared bit-for-bit; HashMap-ordered float summation needs a deterministic contribution sort) and one uncovered behavior (lone-proposal fields can never sequentially converge — burns full deadline; needs a contract decision). Posted a 4-step smallest impl/test sequence (evidence.rs → quorum.rs trajectory/assessment → new planner.rs → convene.rs swap). Edits still held pending codex's lone-proposal call and smaths' go. Also switched my own wake to the herdr push adapter (term_656b323c46b3818) — verified live.
+_________________________________________________________________________________
+
+time:      [06:08] [07-16-26]
+agent:     [claude] [fable 5]
+worktree:  gitbutler/workspace
+type:      goal
+area:      backend
+
+Roles locked by smaths: fable=lead/planner/orchestrator, pi=builder (subagent-driven first passes), codex=refinement/review/CI foreman with merge authority, ocean=frontend design lead + technical visionary (background). Goal set: FINISH ROOMS for ocean Tauri + web app. Boarded the arc: TASK-9 named-agent binding seam (ocean-os, pi), TASK-10 event-API core with room-scoped SSE (ocean-os, pi), TASK-11 rooms UI in ocean-surface-ui for both hosts (pi builds, ocean steers), TASK-12 standing CI/merge gates (codex). Soft-start rule from smaths binds the arc: no sweeping auth/sandbox/YOLO/without_tools deltas; guardrails harden as separate explicit changes post-proof. Also reconciled ocean-os main: 13 Longhouse commits rebased onto origin and pushed (origin/main==1a5d5199), longhouse tests 168/0/1 green post-rebase. Stitchpad MCP say tool found posting literal 'undefined' bodies — using the CLI path until fixed.
+_________________________________________________________________________________
+
+time:      [06:18] [07-16-26]
+agent:     [claude] [fable 5]
+worktree:  gitbutler/workspace
+type:      review
+area:      backend
+
+TASK-9 plan review delivered (approve-with-changes): confirmed option A (unresolved never convenes), promoted join-time agentdir::resolve validation from optional to required, and caught a real gap — the plan asserted room_post_message already runs agentdir::resolve before the convene footprint, but current main only does a roster-kind lookup there (resolve_agent_participant), so an unbound mention would emit room_trigger + the auto-convene audit line with no turn behind it (OCEAN-128 false-footprint class). Amendment: resolve before any footprint, keep execution-time re-resolve. Also accepted codex's four TASK-10 amendments into the SSE contract rev 2 (broadcast as wake-hint with SQLite authority + Lagged gap-paging, enumerated writers with join/leave marker-row adapter assigned to TASK-10, closed rooms 404 in G1, shared keepalive + 400 on bad Last-Event-ID). Ocean's TASK-11 design freeze approved; ocean accepted the TASK-10 client contract. Pipeline: pi amends + builds TASK-9 in /tmp/ocean-rooms-os off main==1a5d5199.
+_________________________________________________________________________________
+
+time:      [07:23] [07-16-26]
+agent:     [claude] [fable 5]
+worktree:  gitbutler/workspace
+type:      release
+area:      backend
+
+TASK-9 closed: named-agent binding seam merged by codex (cdb7c174 + ledger 8dfe99bb on ocean-os main, origin parity), daemon rebuilt, and my live acceptance gate passed 8/8 — bogus agent join rejected 400 with zero false footprint, real agent (context-cartographer) joined, mention convened the real AgentDef which replied as itself. First gate run failed 7/8 from two bugs in MY script (room created without trigger_policy — no policy means convene-off by design; polling POST-only /messages instead of /transcript) — fixed in .stitchpad/artifacts/task9-live-gate.sh. Also this hour: my wake outage root-caused (pull-only roster removed my cold wake) — restored herdr push + added settle-retry Enter to the adapter; ocean stays pull with heartbeat cover. TASK-10 (room-scoped SSE, frozen rev 3 contract) greenlit to pi.
+_________________________________________________________________________________
+
+time:      [07:52] [07-16-26]
+agent:     [claude] [fable 5]
+worktree:  gitbutler/workspace
+type:      release
+area:      backend
+
+TASK-10 closed: room-scoped SSE seam (822e7558 + lifecycle fix b74b3ffc) merged by codex at 4712fdbe, daemon rebuilt, live gate 10/10 on production — replay, live delivery, cross-room isolation, contiguous id:=seq, exact Last-Event-ID resume, typed 404/400, roster markers streaming. Review cycle: my first gate verified contract semantics in code, codex caught an idle-tail disconnect leak (task+receiver retained forever per dropped subscriber), pi's surgical delta selected tx.closed() in both waits with an honest two-state regression. Rooms backend complete (TASK-9 named-agent binding + TASK-10 durable SSE). Ocean's TASK-11 surface wiring unblocked with live wire shapes; that lane is the last seam before the rooms goal closes on web + Tauri.
+_________________________________________________________________________________
+
+time:      [08:44] [07-16-26]
+agent:     [claude] [fable 5]
+worktree:  gitbutler/workspace
+type:      bug-report
+area:      infra
+
+Ocean wake stall root-caused and durably fixed: my earlier pull-mode switch assumed the stitchpad heartbeat covers idle gaps, but the heartbeat is only a presence ticker (writes alive.<name> JSON for the ONLINE indicator; never posts turns) — so pull-mode ocean had no idle wake path and went dark for ~2h, missing the entire TASK-9/10 completion arc until I posted a manual ocean-heartbeat wake. Fix: ocean restored to push, and ocean.sh gained an idle-guard (GET the session, defer with exit 3 when active_turn is set) eliminating both the stale-parked-wake-turn bug and idle deafness. Lesson recorded: pull mode is only safe for agents whose runtime generates its own turns. TASK-11 resumed by ocean with correct preconditions (GitButler base catch-up, isolated proxy SSE route fix, self-run gate).
+_________________________________________________________________________________
+
+time:      [10:25] [07-16-26]
+agent:     [codex] [gpt-5]
+worktree:  [task11-rooms-transplant @ 25009e9]
+type:      [feature-request]
+area:      [frontend]
+
+TASK-11 merged and pushed to ocean-surface main at 25009e9. Rooms now hydrate
+once and tail the durable room-scoped SSE stream with replay/resume and honest
+connection state; the PWA proxy streams that endpoint and forwards /v1/agents;
+the shared web/Tauri surface uses daemon-owned named-agent selection, refreshes
+binding-truth rosters, and keeps LiveKit outside Rooms G1. Refinement fixed the
+Axum wildcard route conflict, idle-tail cancellation, stale-room cross-writes,
+false reconnect indicators, unstyled picker controls, and committed-tree Clippy
+drift. Verified 18/18 contract/boot gate, UI tests 337/0 plus integration 1/0,
+proxy tests 16/0, both denied-warning Clippy gates, and origin/main parity.
+_________________________________________________________________________________
+
+time:      [10:50] [07-16-26]
+agent:     [codex] [gpt-5]
+worktree:  [main]
+type:      [bug report]
+area:      [backend]
+
+TASK-13 session label repaired in the live daemon project catalog. The exact
+workspace root /Users/risingtidesdev/dev/ocean-surface was correctly resolved
+by the Surface but its authoritative project record was misnamed dev. Renamed
+that existing project in place to ocean-surface through PATCH /v1/projects;
+project id, workspace root, and config were preserved. Verified the project
+detail now returns ocean-surface and includes the active Stitchpad session.
+The separate stale record pointing at a nonexistent nested path was not changed.
+_________________________________________________________________________________
+
+time:      [10:59] [07-16-26]
+agent:     [claude] [fable 5]
+worktree:  gitbutler/workspace
+type:      plan
+area:      design
+
+Rooms goal delivery arc complete (TASK-9/10/11 merged + live-verified; web parity fully proven; smaths sighted rooms working with context-cartographer inside, host confirmation pending for TASK-12 closure) — and smaths called the shipped product half-baked against their real vision: coworkers joining rooms with their own agents, specialized rooms as instant-context spaces. Fair: we shipped the Gate-1 plumbing without ever surfacing the roadmap. As lead I convened the product design debate smaths demanded — five questions on the pad (identity/guest-agents, context-capsule rooms, convene model, messaging baseline, shortest path to inviting one real coworker), all agents to post positions, no code until it concludes and smaths rules. This gates the next arc (Gate-2 federation product layer).
+_________________________________________________________________________________
+
+time:      [11:08] [07-16-26]
+agent:     [claude] [fable 5]
+worktree:  gitbutler/workspace
+type:      plan
+area:      design
+
+Rooms Gate-2 design debate converged in under an hour: ocean drafted the synthesis (after dogfooding a real Longhouse council that split-aborted — honest engine, wrong quorum size), codex issued four corrections (invite code = single-use credential not identity; offline-host question already settled by the Bedrock spec; public roster recommendation; fanout mandatory for MVP by definition of a room), ocean folded all four, codex confirmed. Lead consolidation shipped as .stitchpad/artifacts/rooms-gate2-decision-sheet.md: five settled points (Bedrock identity, Context Capsules, Response Policy replacing auto-convene, threads/search/files baseline, S1-S5 fanout-first sequence) + three asks on smaths (bless/veto, roster visibility confirm, TASK-12 host confirmation). Pi's position pending (pane focus-guarded — smaths driving it). No code until smaths rules.
+_________________________________________________________________________________
+
+time:      [11:57] [07-16-26]
+agent:     [codex] [gpt-5]
+worktree:  [task13/session-label-refresh @ 590ff25]
+type:      [bug report]
+area:      [frontend]
+
+TASK-13 closed the durable session-label freshness bug. SessionsPanel now
+refreshes both sessions and the project catalog whenever it opens, and project
+section render identity includes the visible label so a daemon-side rename
+cannot retain stale DOM chrome. Added a regression proving identical section
+contents with a changed label produce a new key. Verified UI tests 338/0 plus
+integration 1/0, wasm check, denied-warning Clippy, fmt/diff-check, and a live
+browser rename round-trip ocean-surface -> task13-live-gate -> ocean-surface.
+Fast-forwarded 590ff25 to main; the daemon project name was restored before
+closeout.
+_________________________________________________________________________________
+
+time:      [12:07] [07-16-26]
+agent:     [codex] [gpt-5]
+worktree:  [main @ 590ff25]
+type:      [handoff]
+area:      [testing]
+
+TASK-12 native parity gate passed without waiting for operator host
+identification. Inspected the running Ocean Desktop/Tauri process and verified
+the Rooms heading, create control, response-policy controls, and empty state in
+the native accessibility tree. Created task12-native-gate through the native UI,
+confirmed daemon persistence, and confirmed the native surface rendered the
+new room as both the selected-room heading and list row. Closed the probe in the
+rooms database, verified it is absent from the open-room API, and left the Rooms
+panel closed. Together with the existing web parity gate, this closes the Rooms
+arc on both supported hosts.
+_________________________________________________________________________________
+
+time:      [12:05] [07-16-26]
+agent:     [claude] [fable 5]
+worktree:  gitbutler/workspace
+type:      release
+area:      frontend
+
+ROOMS ARC CLOSED — smaths's goal ("finish the rooms for ocean tauri and web app") fulfilled end to end. TASK-12's final box settled by codex driving the actual Tauri window natively (created a room through the native UI, daemon persisted, native panel rendered live; probe closed and cleaned). Full arc: TASK-9 named-agent binding (8/8 live), TASK-10 durable room SSE w/ replay (10/10 live), TASK-11 rooms UI web+Tauri (18/18 gate, cross-tab + reconnect/replay + picker proven in-browser, native parity by direct manipulation), TASK-13 sessions-label render-key fix landed same-day. All merged to origin/main with parity. Next arc gated on smaths ruling on the Gate-2 decision sheet (federation: Bedrock identity, context capsules, response policies, fanout-first sequence).
+_________________________________________________________________________________
+
+time:      [22:38] [07-16-26]
+agent:     [codex] [gpt-5]
+worktree:  [feat/s3-federated-room-surface @ 10cc146]
+type:      [feature-request]
+area:      [frontend]
+
+S3's P1-backed federated room surface landed locally as source commit 30e9808
+plus corrective child 10cc146. The shared web/Tauri UI now consumes the required
+room access projection, merges access and message SSE frames without blending
+their cursors, gates writes by access state, renders the safe federated roster
+and separate outbox, retries failed outbox items through the daemon, and labels
+room triggers as Response Policy. A read-only Ocean review found that non-2xx
+room envelopes lost their daemon error text; the child preserved required access
+on success while splitting error decoding by HTTP status. Verified UI tests
+349/0 plus integration 1/0, WASM check, denied-warning Clippy, fmt, and
+diff-check. No push, merge, or deployment was performed.
+_________________________________________________________________________________
