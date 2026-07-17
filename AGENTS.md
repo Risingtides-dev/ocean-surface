@@ -87,6 +87,14 @@ All visual work on the Leptos web surface follows
   chrome, one header overflow (`⋯`) for secondary actions, ghost triggers for
   idle features (dialer, join call), reveal-on-intent for power knobs.
 
+Ocean Floor is the read-only Observatory mode. Its isometric pixel scene,
+semantic list, inspector, and replay rail consume only the typed reducer over
+metadata-safe `/v1/observatory/{snapshot,events,replay}` responses; no mock
+executions, transcript content, inferred activity, or observer write controls.
+The web proxy reads the daemon-minted mode-0600 observer token immediately
+before each upstream request and injects it server-side. Never expose that
+token to browser code, bundle it, or cache it in client storage.
+
 ## Session Contract
 
 The ecosystem invariant is:

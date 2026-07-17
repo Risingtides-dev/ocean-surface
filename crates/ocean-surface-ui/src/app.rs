@@ -1060,6 +1060,7 @@ pub fn App() -> impl IntoView {
     let input = RwSignal::new(String::new());
     let textarea_ref: NodeRef<leptos::html::Textarea> = NodeRef::new();
     let daemon_council = daemon.clone();
+    let daemon_for_floor = StoredValue::new(daemon.clone());
 
     // Daemon holds only Copy signal handles, so cloning per-closure is cheap
     // and avoids fighting the borrow checker over a single moved value.
@@ -1108,6 +1109,10 @@ pub fn App() -> impl IntoView {
     // topics snapshot (GET /v1/longhouse/topics), polled while the deck is
     // open.
     let show_council = RwSignal::new(false);
+    // Ocean Floor is a primary read-only Observatory stage over the daemon's
+    // durable snapshot/live/replay contract. It is mounted only while open so
+    // its single SSE connection and renderer loop tear down deterministically.
+    let show_floor = RwSignal::new(false);
     // Call controls row — created early so Rooms::new can share the signal.
     let show_livekit_controls = RwSignal::new(false);
     let show_rooms = RwSignal::new(false);
@@ -1195,6 +1200,15 @@ pub fn App() -> impl IntoView {
     let never = Signal::derive(|| false);
     {
         let daemon_new_session = daemon.clone();
+        registry.register(Command {
+            id: "open-ocean-floor",
+            title: "Open Ocean Floor".into(),
+            hint: Some("live execution observatory".into()),
+            scope: CommandScope::App,
+            slash: Some("/floor"),
+            enabled: always,
+            run: Callback::new(move |_| show_floor.set(true)),
+        });
         registry.register(Command {
             id: "new-session",
             title: "New Session".into(),
@@ -1968,6 +1982,19 @@ pub fn App() -> impl IntoView {
                                 role="menuitem"
                                 on:click=move |_| {
                                     if let Some(d) = more_ref.get() { let _ = d.remove_attribute("open"); }
+                                    show_sessions.set(false);
+                                    show_rooms.set(false);
+                                    show_floor.set(true);
+                                }
+                            >
+                                "Ocean Floor"
+                            </button>
+                            <button
+                                class="ocean-more__item"
+                                type="button"
+                                role="menuitem"
+                                on:click=move |_| {
+                                    if let Some(d) = more_ref.get() { let _ = d.remove_attribute("open"); }
                                     show_council.set(true);
                                 }
                             >
@@ -2361,6 +2388,13 @@ pub fn App() -> impl IntoView {
                             </Show>
                         </form>
 
+            </Show>
+
+            <Show when=move || show_floor.get()>
+                <crate::observatory::OceanFloor
+                    daemon=daemon_for_floor.get_value()
+                    open=show_floor
+                />
             </Show>
 
             <SessionsPanel daemon=daemon_for_panel open=show_sessions />

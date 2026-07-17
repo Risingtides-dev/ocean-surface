@@ -115,6 +115,29 @@
   --info: #6AA6FF;  --info-soft: rgba(106, 166, 255, 0.12);
   --running: var(--warn);
 
+  /* ── Ocean Floor — limited late-90s simulation palette ──────── */
+  /* Canvas code resolves these variables at paint time. They stay isolated
+     from the ordinary product chrome so the game world can be expressive
+     without turning the surrounding Surface into a themed dashboard. */
+  --floor-water: #101F2C;
+  --floor-water-dither: #16364A;
+  --floor-rock-side: #3D3D46;
+  --floor-rock-top: #5A5C63;
+  --floor-sand: #8E8064;
+  --floor-sand-rim: #6F654F;
+  --floor-metal: #343B4A;
+  --floor-metal-hi: #6F7C91;
+  --floor-screen-off: #07101A;
+  --floor-screen-on: #00D7D7;
+  --floor-lamp-green: #40C060;
+  --floor-lamp-red: #E04A3A;
+  --floor-lamp-amber: #E0A030;
+  --floor-line: #34495A;
+  --floor-packet: #F0E060;
+  --floor-skin: #E8C8A0;
+  --floor-outfit-blue: #4080C0;
+  --floor-ink: #11131A;
+
   /* ── Borders ──────────────────────────────────────────────────── */
   --border-subtle: rgba(255, 255, 255, 0.06);
   --border: rgba(255, 255, 255, 0.10);

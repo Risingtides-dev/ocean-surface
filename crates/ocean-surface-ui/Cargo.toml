@@ -93,6 +93,7 @@ web-sys = { version = "0.3", features = [
   # ── WebGL loader plate (loader.rs) ────────────────────────────────
   "HtmlCanvasElement",
   "CanvasRenderingContext2d",
+  "ResizeObserver",
   "CanvasGradient",
   "TextMetrics",
   "CssStyleDeclaration",

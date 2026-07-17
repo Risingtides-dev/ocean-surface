@@ -1735,3 +1735,27 @@ type:      [feature]
 area:      [frontend], [desktop]
 
 B0: Open Externally (#TASK-23-B0). Tauri shell: +opener crate to Cargo.toml, new open_file(root, path) command (canonicalize both, component-wise prefix gate, opener::open), registered in invoke_handler. Surface: host::open_externally(root, path) fallible wrapper (no Reflect::set unwrap); workspace context menu — right-click/Shift+F10 on file rows and preview tab headers shows portal "Open Externally" action (Esc/outside-click dismiss). Styles: workspace.css context overlay + menu (token-only). Local-only, uncommitted stop at codex gate pending review.
+_________________________________________________________________________________
+
+time:      [18:18] [17-07-26]
+agent:     [pi] [thoth]
+worktree:  [main]
+type:      [feature-request]
+area:      [frontend], [backend], [testing]
+
+Implemented the first real Ocean Floor product surface over the shipped
+Observatory contract. The Surface proxy now reads the daemon's rotating
+mode-0600 token per request, rejects unsafe token files, injects bearer auth
+only on the upstream hop, and streams snapshot/live/replay without exposing the
+credential to browser code. The shared Leptos core now has one typed reducer,
+deterministic shelf/station layout, a resize-aware isometric pixel Canvas,
+truth-driven actors/consoles/tool ports/attention and integrity states, DOM
+station proxies, compact zoom, semantic list, inspector, and cursor replay.
+No mock feed or observer write controls were added. Live browser verification
+rendered 6 durable nodes and 5 recorded edges across 2 root shelves; direct
+unauthenticated daemon access returned 401, proxied snapshot returned 200, SSE
+remained unbuffered, token mode was 0600, and the token was absent from dist.
+Gates passed: 357 UI unit tests + 1 integration test, 17 proxy tests, WASM and
+proxy checks, denied-warning Clippy, format/diff checks, extension release
+build, Tauri cargo check, and Playwright desktop/inspector/list/mobile smoke.
+_________________________________________________________________________________

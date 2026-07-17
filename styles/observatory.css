@@ -1,0 +1,848 @@
+/* Ocean Floor — the read-only, real-event Observatory stage. */
+
+.ocean-floor {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  color: var(--fg);
+  background: var(--floor-water);
+  font-family: var(--font);
+  isolation: isolate;
+}
+
+.ocean-floor__header {
+  display: flex;
+  flex: 0 0 54px;
+  align-items: center;
+  gap: 20px;
+  padding: 0 16px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ocean-floor__identity,
+.ocean-floor__telemetry,
+.ocean-floor__header-actions,
+.ocean-floor__view-switch,
+.ocean-floor__scene-tools,
+.ocean-floor__replay,
+.ocean-floor__status-line,
+.ocean-floor__attention-items {
+  display: flex;
+  align-items: center;
+}
+
+.ocean-floor__identity {
+  gap: 10px;
+  min-width: 210px;
+}
+
+.ocean-floor__identity .wave-badge {
+  width: 28px;
+  height: 28px;
+  font-size: 28px;
+}
+
+.ocean-floor__identity strong,
+.ocean-floor__identity span {
+  display: block;
+}
+
+.ocean-floor__identity strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.ocean-floor__identity span {
+  color: var(--fg-3);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.ocean-floor__telemetry {
+  flex: 1;
+  justify-content: center;
+  gap: 14px;
+  min-width: 0;
+  color: var(--fg-2);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.ocean-floor__connection {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg-2);
+}
+
+.ocean-floor__connection-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: var(--fg-4);
+}
+
+.ocean-floor__connection.is-live .ocean-floor__connection-dot {
+  background: var(--ok);
+}
+
+.ocean-floor__connection.is-connecting .ocean-floor__connection-dot,
+.ocean-floor__connection.is-resyncing .ocean-floor__connection-dot {
+  background: var(--warn);
+}
+
+.ocean-floor__connection.is-offline .ocean-floor__connection-dot {
+  background: var(--err);
+}
+
+.ocean-floor__header-actions {
+  gap: 8px;
+}
+
+.ocean-floor__view-switch,
+.ocean-floor__scene-tools {
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  box-shadow: var(--elev-1);
+}
+
+.ocean-floor button {
+  font-family: var(--font);
+}
+
+.ocean-floor__view-switch button,
+.ocean-floor__scene-tools button,
+.ocean-floor__replay button,
+.ocean-floor__integrity button {
+  min-height: 28px;
+  padding: 0 10px;
+  color: var(--fg-2);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.ocean-floor__view-switch button:hover,
+.ocean-floor__scene-tools button:hover,
+.ocean-floor__replay button:hover,
+.ocean-floor__integrity button:hover,
+.ocean-floor__view-switch button.active,
+.ocean-floor__replay button.active {
+  color: var(--fg);
+  background: var(--bg-hover);
+}
+
+.ocean-floor__icon-button {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  color: var(--fg-3);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.ocean-floor__icon-button:hover {
+  color: var(--fg);
+  background: var(--bg-elevated);
+}
+
+.ocean-floor button:focus-visible,
+.ocean-floor input:focus-visible,
+.ocean-floor__viewport:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.ocean-floor__attention {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 42px;
+  padding: 6px 16px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ocean-floor__attention > strong {
+  flex: none;
+  font-size: 12px;
+}
+
+.ocean-floor__attention-items {
+  gap: 6px;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.ocean-floor__attention-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  padding: 0 9px;
+  color: var(--fg-2);
+  background: var(--bg-elevated);
+  border: 0;
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: var(--elev-1);
+}
+
+.ocean-floor__priority-shape {
+  width: 8px;
+  height: 8px;
+  background: var(--info);
+}
+
+.ocean-floor__attention-item.is-critical .ocean-floor__priority-shape {
+  background: var(--err);
+  transform: rotate(45deg);
+}
+
+.ocean-floor__attention-item.is-high .ocean-floor__priority-shape {
+  width: 0;
+  height: 0;
+  background: transparent;
+  border-right: 5px solid transparent;
+  border-bottom: 9px solid var(--warn);
+  border-left: 5px solid transparent;
+}
+
+.ocean-floor__attention-item.is-medium .ocean-floor__priority-shape {
+  background: var(--warn);
+}
+
+.ocean-floor__attention-item.is-low .ocean-floor__priority-shape {
+  border-radius: var(--radius-pill);
+  background: var(--info);
+}
+
+.ocean-floor__integrity {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 16px;
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 12px;
+}
+
+.ocean-floor__integrity span {
+  flex: 1;
+  color: var(--fg-2);
+}
+
+.ocean-floor__main {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.ocean-floor__scene-shell,
+.ocean-floor__semantic {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.ocean-floor__scene-tools {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 4;
+  color: var(--fg-2);
+  background: var(--bg-raised);
+}
+
+.ocean-floor__scene-tools span {
+  min-width: 44px;
+  font-family: var(--mono);
+  font-size: 11px;
+  text-align: center;
+}
+
+.ocean-floor__viewport {
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  overscroll-behavior: contain;
+  background: var(--floor-water);
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+.ocean-floor__world {
+  position: relative;
+  min-width: 100%;
+  min-height: 100%;
+  image-rendering: pixelated;
+}
+
+.ocean-floor__canvas,
+.ocean-floor__proxies {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.ocean-floor__canvas {
+  display: block;
+  image-rendering: pixelated;
+}
+
+.ocean-floor__proxies {
+  pointer-events: none;
+}
+
+.ocean-floor__shelf-label {
+  position: absolute;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 1px 7px;
+  min-width: 124px;
+  padding: 5px 7px 6px;
+  color: var(--fg);
+  background: var(--floor-ink);
+  border-top: 2px solid var(--floor-metal-hi);
+  border-right: 2px solid var(--floor-rock-side);
+  border-bottom: 2px solid var(--floor-rock-side);
+  border-left: 2px solid var(--floor-metal-hi);
+  font-family: var(--mono);
+  pointer-events: none;
+  box-shadow: 5px 6px 0 var(--floor-ink);
+}
+
+.ocean-floor__shelf-label > span {
+  grid-row: 1 / span 2;
+  align-self: center;
+  color: var(--floor-lamp-amber);
+  font-size: 8px;
+  letter-spacing: 0.12em;
+}
+
+.ocean-floor__shelf-label strong {
+  max-width: 156px;
+  overflow: hidden;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.ocean-floor__shelf-label small {
+  color: var(--floor-metal-hi);
+  font-size: 8px;
+  line-height: 1;
+}
+
+.ocean-floor__station-proxy {
+  position: absolute;
+  pointer-events: auto;
+  color: transparent;
+  background: transparent;
+  border: 2px solid transparent;
+  border-radius: 0;
+  cursor: pointer;
+}
+
+.ocean-floor__station-proxy:hover,
+.ocean-floor__station-proxy.is-selected,
+.ocean-floor__station-proxy.is-attention {
+  border-color: transparent;
+}
+
+.ocean-floor__station-proxy:hover .ocean-floor__station-label,
+.ocean-floor__station-proxy.is-selected .ocean-floor__station-label {
+  outline: 2px solid var(--floor-packet);
+  outline-offset: 1px;
+}
+
+.ocean-floor__station-proxy.is-attention .ocean-floor__station-label {
+  border-left-color: var(--warn);
+  outline: 2px solid var(--warn);
+  outline-offset: 1px;
+}
+
+.ocean-floor__station-label {
+  position: absolute;
+  right: 50%;
+  bottom: var(--floor-label-bottom, -20px);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  width: max-content;
+  max-width: 184px;
+  min-height: 22px;
+  padding: 3px 5px 3px 7px;
+  color: var(--fg);
+  background: var(--floor-ink);
+  border-left: 3px solid var(--floor-metal-hi);
+  font-family: var(--mono);
+  pointer-events: none;
+  transform: translateX(50%);
+  box-shadow: 3px 3px 0 color-mix(in srgb, var(--floor-ink) 70%, transparent);
+}
+
+.ocean-floor__station-label > strong {
+  max-width: 106px;
+  overflow: hidden;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ocean-floor__station-phase {
+  padding: 2px 4px;
+  color: var(--floor-lamp-amber);
+  background: var(--floor-screen-off);
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.ocean-floor__station-phase.is-complete {
+  color: var(--floor-lamp-green);
+}
+
+.ocean-floor__station-phase.is-error,
+.ocean-floor__station-phase.is-timed-out {
+  color: var(--floor-lamp-red);
+}
+
+.ocean-floor__station-phase.is-interrupted {
+  color: var(--floor-metal-hi);
+}
+
+.ocean-floor__inspector {
+  flex: 0 0 330px;
+  min-width: 0;
+  padding: 16px;
+  overflow-y: auto;
+  color: var(--fg-2);
+  background: var(--bg-raised);
+  border-left: 1px solid var(--border-subtle);
+}
+
+.ocean-floor__inspector-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ocean-floor__inspector-kicker {
+  color: var(--fg-3);
+  font-size: 11px;
+}
+
+.ocean-floor__inspector h2,
+.ocean-floor__semantic h2,
+.ocean-floor__activity h3 {
+  margin: 0;
+  color: var(--fg);
+  text-wrap: balance;
+}
+
+.ocean-floor__inspector h2 {
+  margin-top: 3px;
+  font-size: 18px;
+}
+
+.ocean-floor__status-line {
+  gap: 8px;
+  margin: 14px 0;
+  color: var(--fg-3);
+  font-size: 11px;
+}
+
+.ocean-floor__phase,
+.ocean-floor__phase-label {
+  padding: 3px 6px;
+  color: var(--fg-2);
+  background: var(--bg-elevated);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+}
+
+.ocean-floor__phase.is-complete,
+.ocean-floor__phase-label.is-complete {
+  color: var(--ok);
+  background: var(--ok-soft);
+}
+
+.ocean-floor__phase.is-error,
+.ocean-floor__phase.is-timed-out,
+.ocean-floor__phase-label.is-error,
+.ocean-floor__phase-label.is-timed-out {
+  color: var(--err);
+  background: var(--err-soft);
+}
+
+.ocean-floor__facts {
+  margin: 0;
+  padding: 0;
+}
+
+.ocean-floor__facts > div {
+  display: grid;
+  grid-template-columns: 86px minmax(0, 1fr);
+  gap: 8px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ocean-floor__facts dt {
+  color: var(--fg-3);
+  font-size: 11px;
+}
+
+.ocean-floor__facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--fg-2);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ocean-floor__attention-callout {
+  display: grid;
+  gap: 2px;
+  margin-top: 14px;
+  padding: 10px;
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-radius: var(--radius);
+}
+
+.ocean-floor__attention-callout span,
+.ocean-floor__activity p {
+  color: var(--fg-2);
+  font-size: 12px;
+}
+
+.ocean-floor__activity {
+  margin-top: 18px;
+}
+
+.ocean-floor__activity h3 {
+  font-size: 13px;
+}
+
+.ocean-floor__activity ul {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ocean-floor__activity li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 0 8px;
+  background: var(--bg-elevated);
+  border-radius: var(--radius-sm);
+}
+
+.ocean-floor__activity-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--running);
+}
+
+.ocean-floor__activity code {
+  color: var(--fg-3);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.ocean-floor__transcript-link {
+  width: 100%;
+  min-height: 34px;
+  margin-top: 18px;
+  color: var(--fg-on-accent);
+  background: var(--accent);
+  border: 0;
+  border-radius: var(--radius);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ocean-floor__transcript-link:disabled {
+  color: var(--fg-4);
+  background: var(--bg-elevated);
+  cursor: not-allowed;
+}
+
+.ocean-floor__semantic {
+  padding: 18px;
+  overflow-y: auto;
+  background: var(--bg);
+}
+
+.ocean-floor__semantic-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  max-width: 880px;
+  margin: 0 auto 12px;
+}
+
+.ocean-floor__semantic-head h2 {
+  font-size: 18px;
+}
+
+.ocean-floor__semantic-head span {
+  color: var(--fg-3);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.ocean-floor__execution-list {
+  display: grid;
+  gap: 2px;
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 0;
+  list-style: none;
+}
+
+.ocean-floor__execution-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  min-height: 48px;
+  padding: 7px 10px;
+  color: var(--fg-2);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.ocean-floor__execution-row:hover,
+.ocean-floor__execution-row.is-selected {
+  background: var(--bg-elevated);
+}
+
+.ocean-floor__lamp {
+  width: 8px;
+  height: 8px;
+  background: var(--warn);
+  border-radius: var(--radius-pill);
+}
+
+.ocean-floor__lamp.is-complete {
+  background: var(--ok);
+}
+
+.ocean-floor__lamp.is-error,
+.ocean-floor__lamp.is-timed-out {
+  background: var(--err);
+}
+
+.ocean-floor__lamp.is-interrupted {
+  background: var(--fg-4);
+}
+
+.ocean-floor__execution-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ocean-floor__execution-copy strong {
+  overflow: hidden;
+  color: var(--fg);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ocean-floor__execution-copy span {
+  color: var(--fg-3);
+  font-size: 11px;
+}
+
+.ocean-floor__phase-label {
+  font-size: 10px;
+}
+
+.ocean-floor__empty {
+  display: grid;
+  place-content: center;
+  gap: 5px;
+  min-height: 280px;
+  color: var(--fg-3);
+  text-align: center;
+}
+
+.ocean-floor__empty strong {
+  color: var(--fg);
+}
+
+.ocean-floor__replay {
+  flex: 0 0 54px;
+  gap: 10px;
+  padding: 0 16px;
+  color: var(--fg-3);
+  background: var(--bg-raised);
+  border-top: 1px solid var(--border-subtle);
+  font-size: 11px;
+}
+
+.ocean-floor__replay input {
+  flex: 1;
+  accent-color: var(--accent);
+}
+
+.ocean-floor__replay output {
+  min-width: 48px;
+  color: var(--fg-2);
+  font-family: var(--mono);
+  text-align: right;
+}
+
+.ocean-floor__loading {
+  position: absolute;
+  inset: 54px 0 54px;
+  z-index: 8;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 14px;
+  color: var(--fg-2);
+  background: var(--floor-water);
+}
+
+.ocean-floor__loading .wave-badge {
+  width: 64px;
+  height: 64px;
+  font-size: 64px;
+}
+
+@media (max-width: 760px), (pointer: coarse) {
+  .ocean-floor__header,
+  .ocean-floor__replay {
+    flex-basis: 48px;
+  }
+
+  .ocean-floor__identity {
+    min-width: 0;
+  }
+
+  .ocean-floor__identity span,
+  .ocean-floor__telemetry span:not(:first-child),
+  .ocean-floor__scene-tools span {
+    display: none;
+  }
+
+  .ocean-floor__telemetry {
+    justify-content: flex-end;
+  }
+
+  .ocean-floor__view-switch button {
+    padding-inline: 7px;
+  }
+
+  .ocean-floor__shelf-label {
+    transform: scale(0.84);
+    transform-origin: left top;
+  }
+
+  .ocean-floor__station-label {
+    grid-template-columns: minmax(0, 1fr);
+    width: 60px;
+    min-height: 19px;
+    padding: 3px 5px;
+  }
+
+  .ocean-floor__station-label > strong {
+    max-width: 50px;
+    font-size: 8px;
+  }
+
+  .ocean-floor__station-phase {
+    display: none;
+  }
+
+  .ocean-floor__inspector {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 6;
+    max-height: 58%;
+    border-top: 1px solid var(--border-subtle);
+    border-left: 0;
+  }
+
+  .ocean-floor__attention {
+    align-items: flex-start;
+  }
+
+  .ocean-floor__attention > strong {
+    padding-top: 5px;
+  }
+
+  .ocean-floor__replay {
+    padding-inline: 8px;
+  }
+
+  .ocean-floor__replay > span,
+  .ocean-floor__replay output {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ocean-floor *,
+  .ocean-floor *::before,
+  .ocean-floor *::after {
+    scroll-behavior: auto !important;
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+@media (forced-colors: active) {
+  .ocean-floor__canvas,
+  .ocean-floor__proxies,
+  .ocean-floor__scene-tools {
+    display: none;
+  }
+}

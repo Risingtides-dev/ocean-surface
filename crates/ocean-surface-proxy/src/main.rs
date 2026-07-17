@@ -13,8 +13,11 @@
 //! Run: `cargo run -p ocean-surface-proxy -- --dist ./dist --bind 0.0.0.0:8790`
 //! Then point a browser at http://<host>:8790/.
 
+use std::fs::OpenOptions;
+use std::io::Read;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -64,6 +67,9 @@ struct AppState {
     /// except /health. `None` = open (local dev). Set via OCEAN_SURFACE_USER
     /// + OCEAN_SURFACE_PASS.
     basic_auth: Option<(String, String)>,
+    /// Mode-0600 boot-bound credential minted and rotated by ocean-daemon.
+    /// Read immediately before each Observatory request; never sent to the browser.
+    observer_token_path: PathBuf,
 }
 
 impl AppState {
@@ -73,6 +79,48 @@ impl AppState {
     fn has_auth(&self) -> bool {
         true
     }
+}
+
+fn ocean_config_dir() -> PathBuf {
+    if let Some(path) = std::env::var_os("OCEAN_CONFIG_DIR") {
+        return PathBuf::from(path);
+    }
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        return PathBuf::from(xdg).join("ocean-rs");
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home).join(".config").join("ocean-rs");
+    }
+    PathBuf::from(".ocean-rs")
+}
+
+/// Read the daemon-minted observer token without following symlinks. The
+/// complete credential stays on the proxy side of the browser boundary.
+fn read_observer_token(path: &FsPath) -> Result<String, String> {
+    let link = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("observer credential unavailable: {error}"))?;
+    if link.file_type().is_symlink() || !link.is_file() {
+        return Err("observer credential must be a regular file".to_owned());
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|error| format!("observer credential unavailable: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("observer credential unavailable: {error}"))?;
+    if !metadata.is_file() || metadata.mode() & 0o777 != 0o600 {
+        return Err("observer credential must be a mode-0600 regular file".to_owned());
+    }
+    let mut token = String::new();
+    file.read_to_string(&mut token)
+        .map_err(|error| format!("observer credential unavailable: {error}"))?;
+    let token = token.trim();
+    if token.is_empty() {
+        return Err("observer credential is empty".to_owned());
+    }
+    Ok(token.to_owned())
 }
 
 #[tokio::main]
@@ -154,6 +202,10 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    let observer_token_path = std::env::var_os("OCEAN_OBSERVER_TOKEN_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| ocean_config_dir().join("observatory-token"));
+
     let state = Arc::new(AppState {
         http: reqwest::Client::new(),
         voice_profile,
@@ -163,6 +215,7 @@ async fn main() -> anyhow::Result<()> {
         basic_auth,
         maps_key,
         maps_map_id,
+        observer_token_path,
     });
 
     let app = Router::new()
@@ -176,6 +229,12 @@ async fn main() -> anyhow::Result<()> {
         // 127.0.0.1 and is never exposed directly.
         .route("/v1/agent/turns", post(proxy_turns))
         .route("/v1/agent/events", get(proxy_events))
+        // Read-only, metadata-safe Observatory contract. The proxy injects the
+        // daemon's rotating local credential on the server-side hop; browsers
+        // never receive the token or signing secret.
+        .route("/v1/observatory/snapshot", get(proxy_observatory))
+        .route("/v1/observatory/events", get(proxy_observatory))
+        .route("/v1/observatory/replay", get(proxy_observatory))
         // Control stream + permission decision (OCEAN-135/136). The web UI opens
         // GET /v1/events (the CONTROL stream that carries permission_request
         // cards) and answers a prompt by POSTing
@@ -1049,11 +1108,23 @@ async fn proxy_rooms_persistent(
 ///     compress (no-transform stops Cloudflare from holding the stream to gzip it)
 fn sse_stream_response(resp: reqwest::Response) -> Response {
     let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::OK);
+    let upstream_headers = resp.headers().clone();
+    let mut headers = sse_no_buffer_headers();
+    for name in [
+        header::PRAGMA,
+        header::EXPIRES,
+        HeaderName::from_static("x-observatory-cursor"),
+        HeaderName::from_static("x-observatory-instance"),
+    ] {
+        if let Some(value) = upstream_headers.get(&name) {
+            headers.insert(name, value.clone());
+        }
+    }
     // Pipe the upstream byte stream into the response body unchanged so deltas
     // arrive in real time.
     let stream = resp.bytes_stream();
     let body = axum::body::Body::from_stream(stream);
-    (status, sse_no_buffer_headers(), body).into_response()
+    (status, headers, body).into_response()
 }
 
 /// The header set that makes an SSE response flush immediately end-to-end:
@@ -1142,6 +1213,65 @@ async fn proxy_events(State(state): State<Arc<AppState>>, req: Request) -> impl 
         )
             .into_response(),
     }
+}
+
+/// Reverse-proxy all read-only Observatory routes with the current daemon-minted
+/// credential. Snapshot/replay are buffered JSON; events remains an unbuffered
+/// SSE byte stream with Last-Event-ID resume preserved end to end.
+async fn proxy_observatory(State(state): State<Arc<AppState>>, req: Request) -> Response {
+    let token = match read_observer_token(&state.observer_token_path) {
+        Ok(token) => token,
+        Err(error) => {
+            tracing::warn!(%error, path = %state.observer_token_path.display(), "observatory credential unavailable");
+            return (StatusCode::SERVICE_UNAVAILABLE, error).into_response();
+        }
+    };
+    let path = req.uri().path();
+    let query = req
+        .uri()
+        .query()
+        .map(|query| format!("?{query}"))
+        .unwrap_or_default();
+    let url = format!("{}{path}{query}", state.daemon_url.trim_end_matches('/'));
+    let mut upstream = state.http.get(&url).bearer_auth(token);
+    if let Some(last_event_id) = req.headers().get("last-event-id") {
+        if let Ok(last_event_id) = last_event_id.to_str() {
+            upstream = upstream.header("Last-Event-ID", last_event_id);
+        }
+    }
+
+    let response = match upstream.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("daemon unreachable: {error}"),
+            )
+                .into_response();
+        }
+    };
+    if path.ends_with("/events") {
+        return sse_stream_response(response);
+    }
+
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let upstream_headers = response.headers().clone();
+    let body = response.bytes().await.unwrap_or_default();
+    let mut response = (status, body).into_response();
+    for name in [
+        header::CONTENT_TYPE,
+        header::CACHE_CONTROL,
+        header::PRAGMA,
+        header::EXPIRES,
+        HeaderName::from_static("x-observatory-cursor"),
+        HeaderName::from_static("x-observatory-instance"),
+    ] {
+        if let Some(value) = upstream_headers.get(&name) {
+            response.headers_mut().insert(name, value.clone());
+        }
+    }
+    response
 }
 
 /// POST /api/stt — forward raw audio bytes to the daemon's voice STT endpoint.
@@ -1272,9 +1402,11 @@ async fn tts(
 mod tests {
     use super::{
         basic_auth_gate, config_payload, is_hashed_asset, livekit_token_daemon_path,
-        percent_encode_path_segment, sse_no_buffer_headers, wasm_headers, AppState,
-        CALL_PLACE_DAEMON_PATH, WASM_CACHE_CONTROL,
+        percent_encode_path_segment, read_observer_token, sse_no_buffer_headers, wasm_headers,
+        AppState, CALL_PLACE_DAEMON_PATH, WASM_CACHE_CONTROL,
     };
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     use axum::{
@@ -1312,7 +1444,25 @@ mod tests {
             maps_key: None,
             maps_map_id: "DEMO_MAP_ID".to_string(),
             basic_auth: Some(("ocean".to_string(), "surface".to_string())),
+            observer_token_path: PathBuf::from("/not-used-in-auth-tests"),
         })
+    }
+
+    #[test]
+    fn observer_token_reader_requires_mode_0600_regular_file() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let token_path = directory.path().join("observatory-token");
+        std::fs::write(&token_path, "signed-token\n").expect("write token");
+        std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600))
+            .expect("chmod");
+        assert_eq!(
+            read_observer_token(&token_path).expect("read token"),
+            "signed-token"
+        );
+
+        std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod unsafe");
+        assert!(read_observer_token(&token_path).is_err());
     }
 
     fn auth_gate_test_router() -> Router {
@@ -1546,6 +1696,7 @@ mod tests {
             maps_key: Some("maps".to_string()),
             maps_map_id: "DEMO_MAP_ID".to_string(),
             basic_auth: None,
+            observer_token_path: PathBuf::from("/not-used-in-config-tests"),
         };
 
         let payload = config_payload(&state);

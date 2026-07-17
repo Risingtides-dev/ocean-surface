@@ -22,6 +22,7 @@ mod livekit;
 mod loader;
 mod markdown;
 mod model;
+mod observatory;
 mod palette;
 mod place_call;
 mod rooms;
