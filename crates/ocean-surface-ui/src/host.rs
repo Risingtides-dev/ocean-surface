@@ -329,6 +329,26 @@ pub fn on_daemon_status(cb: impl Fn(DaemonStatus) + 'static) {
     }));
 }
 
+// ── open_externally (B0: Open Externally) ───────────────────────────────
+
+/// Open a file with the OS default application (Tauri only).
+/// Returns `false` on non-Tauri hosts (no-op).
+///
+/// * `root` — session workspace root, used by the shell to gate path escape.
+/// * `path` — absolute path of the file to open.
+pub async fn open_externally(root: &str, path: &str) -> bool {
+    if !running_in_tauri() {
+        return false;
+    }
+    let args = Object::new();
+    if Reflect::set(&args, &JsValue::from_str("root"), &JsValue::from_str(root)).is_err()
+        || Reflect::set(&args, &JsValue::from_str("path"), &JsValue::from_str(path)).is_err()
+    {
+        return false;
+    }
+    tauri_invoke("open_file", &args).await.is_ok()
+}
+
 // ── internals ───────────────────────────────────────────────────────────
 
 /// Low-level: call `__TAURI_INTERNALS__.invoke(cmd, args)` and await the

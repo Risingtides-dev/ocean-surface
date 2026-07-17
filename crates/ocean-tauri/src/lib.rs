@@ -242,6 +242,34 @@ fn set_badge(app: AppHandle, count: Option<i64>) -> Result<(), String> {
     win.set_badge_count(count).map_err(|e| e.to_string())
 }
 
+// ── open_file (B0: Open Externally) ───────────────────────────────────────
+
+/// Open a file with the OS default application.
+///
+/// * `root` — session workspace root (canonical).
+/// * `path` — absolute path of the file to open.
+///
+/// Safety: `path` must be under `root` component-wise. Only regular files
+/// are opened (directories pass through to the OS but are not the intended
+/// use).
+#[tauri::command]
+fn open_file(root: String, path: String) -> Result<(), String> {
+    let root = Path::new(&root)
+        .canonicalize()
+        .map_err(|e| format!("canonicalize root: {e}"))?;
+    let target = Path::new(&path)
+        .canonicalize()
+        .map_err(|e| format!("canonicalize path: {e}"))?;
+    // Component-wise prefix check: target must start with root.
+    if !target.starts_with(&root) {
+        return Err("path escapes workspace root".into());
+    }
+    if !target.is_file() {
+        return Err("path is not a regular file".into());
+    }
+    opener::open(&target).map_err(|e| e.to_string())
+}
+
 /// Mark the webview's `menu-command` listener as attached and replay any
 /// native app-menu selections that fired before it registered. Called once
 /// from the wasm bundle (host::notify_ui_ready) right after `on_menu_command`
@@ -1207,6 +1235,7 @@ pub fn run() {
             unwatch_paths,
             repo_state,
             set_badge,
+            open_file,
             daemon_status,
             daemon_start,
             daemon_stop,

@@ -500,3 +500,50 @@ html.is-resizing {
 .workspace-tree.is-collapsed .workspace-tree-toggle {
   margin: 4px auto;
 }
+
+/* ── Context menu (B0: Open Externally) ──────────────────────────────────── */
+
+.workspace-context-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: transparent;
+  /* Absorbs clicks and key events while the menu is open. */
+}
+
+.workspace-context-menu {
+  position: fixed;
+  z-index: 201;
+  min-width: 180px;
+  padding: 4px;
+  background: var(--bg-elevated);
+  border-radius: var(--radius);
+  /* Elevation, never border — an element takes the border recipe
+     OR the elevation recipe, never both (tokens.css material rule). */
+  box-shadow: var(--elev-2);
+}
+
+.workspace-context-menu__item {
+  display: block;
+  width: 100%;
+  padding: 6px 12px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.workspace-context-menu__item:hover,
+.workspace-context-menu__item:focus-visible {
+  background: var(--bg-hover);
+  outline: none;
+}
+
+.workspace-context-menu__item:active {
+  background: var(--bg-hover);
+  box-shadow: var(--pressed);
+}

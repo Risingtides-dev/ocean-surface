@@ -1726,3 +1726,12 @@ area:      [frontend]
 
 Fixed the mobile landing hero (smaths screenshot: ocean.agentsworld.org rendered "C E A" — O and N missing). Root cause: SoundingsLanding letter quads position at uPos.x = 2·x/aspect with the word's p-space half-width fixed at 0.605 (2·L_GAP + L_HALF), so any canvas narrower than aspect ≈ 1.21 clips the outer letters off-screen — every portrait phone. Fix in loader.rs: aspect-fit scale (aspect/1.32, capped at 1) compresses letter gap and glyph half-size together in both the etch-physics and draw paths, so the wordmark fits any aspect with ~8% margin; wide viewports are byte-identical (fit=1). Gates: 349/349 workspace tests, wasm check, clippy -D warnings. This commit also lands thoth's stranded 01:05 events.md entry (TASK-15/16, announced on the pad, uncommitted in the canonical checkout).
 _________________________________________________________________________________
+_________________________________________________________________________________
+
+time:      [07:30] [17-07-26]
+agent:     [claude] [ocean]
+worktree:  [main]
+type:      [feature]
+area:      [frontend], [desktop]
+
+B0: Open Externally (#TASK-23-B0). Tauri shell: +opener crate to Cargo.toml, new open_file(root, path) command (canonicalize both, component-wise prefix gate, opener::open), registered in invoke_handler. Surface: host::open_externally(root, path) fallible wrapper (no Reflect::set unwrap); workspace context menu — right-click/Shift+F10 on file rows and preview tab headers shows portal "Open Externally" action (Esc/outside-click dismiss). Styles: workspace.css context overlay + menu (token-only). Local-only, uncommitted stop at codex gate pending review.

@@ -21,6 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use leptos::ev;
+use leptos::portal::Portal;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
@@ -37,6 +38,10 @@ use crate::deck::files::{basename, browsable_root, is_secret_file, refresh_targe
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+
+/// Callback: open a file path with the OS default application.
+/// Takes (path, pointer_x, pointer_y) — the root is baked in at the call site.
+type OpenExternallyCb = Arc<dyn Fn(String, f64, f64) + Send + Sync>;
 
 /// Which kind of content a workspace tab shows.
 #[derive(Clone, Debug, PartialEq)]
@@ -291,6 +296,25 @@ pub fn WorkspacePane(
     let preview_loading: RwSignal<Option<String>> = RwSignal::new(None);
     let preview_error: RwSignal<Option<(String, String)>> = RwSignal::new(None);
 
+    // Context menu (B0: Open Externally). (path, pointer_x, pointer_y).
+    // Root is resolved from tree_root at render time.
+    let context_menu: RwSignal<Option<(String, f64, f64)>> = RwSignal::new(None);
+    let context_menu_item_ref = NodeRef::<leptos::html::Button>::new();
+
+    // Auto-focus the first menuitem when the portal appears so Esc/Enter
+    // work without an extra click.
+    {
+        let cm = context_menu;
+        let item_ref = context_menu_item_ref;
+        Effect::new(move |_| {
+            if cm.get().is_some() {
+                if let Some(el) = item_ref.get() {
+                    let _ = el.focus();
+                }
+            }
+        });
+    }
+
     // ---- Tree load / expand / collapse (mirror deck::files::FilesPanel) ----
 
     let load_dir: DirCallback = {
@@ -470,6 +494,12 @@ pub fn WorkspacePane(
     let ed_tree = Arc::clone(&expand_dir);
     let cd_tree = Arc::clone(&collapse_dir);
     let of_tree = Arc::clone(&open_file);
+    let ctx_menu_cb: OpenExternallyCb = {
+        let cm = context_menu;
+        Arc::new(move |path, x, y| {
+            cm.set(Some((path, x, y)));
+        })
+    };
     // Hoisted out of `view!`: a turbofish (`collect::<Vec<_>>()`) inside an
     // RSX attribute position parses `<Vec<_>>` as a tag opener.
     let tab_entries = move || tabs.get().into_iter().enumerate().collect::<Vec<_>>();
@@ -682,6 +712,10 @@ pub fn WorkspacePane(
                         let tab_id = tab.id.clone();
                         let tab_title = tab.title.clone();
                         let closable = matches!(tab.kind, TabKind::Preview(_));
+                        let preview_path = match &tab.kind {
+                            TabKind::Preview(p) => Some(p.clone()),
+                            _ => None,
+                        };
                         view! {
                             <button
                                 class="workspace-tab"
@@ -689,6 +723,19 @@ pub fn WorkspacePane(
                                 type="button"
                                 title=tab_title.clone()
                                 on:click=move |_| active_tab.set(index)
+                                on:contextmenu={
+                                    let p = preview_path.clone();
+                                    move |ev| {
+                                        if let Some(ref path) = p {
+                                            ev.prevent_default();
+                                            context_menu.set(Some((
+                                                path.clone(),
+                                                ev.client_x() as f64,
+                                                ev.client_y() as f64,
+                                            )));
+                                        }
+                                    }
+                                }
                             >
                                 <span class="workspace-tab__title">{tab_title.clone()}</span>
                                 {closable.then(|| {
@@ -879,6 +926,7 @@ pub fn WorkspacePane(
                                                         Arc::clone(&ld_tree),
                                                         Arc::clone(&ed_tree),
                                                         Arc::clone(&cd_tree),
+                                                        Some(ctx_menu_cb.clone()),
                                                     )
                                                 })
                                                 .collect::<Vec<_>>()}
@@ -886,7 +934,7 @@ pub fn WorkspacePane(
                                                 .into_iter()
                                                 .filter(|f| !is_secret_file(&f.name))
                                                 .filter(|f| name_matches(&f.name, &filter))
-                                                .map(|f| file_row(f, 1, Arc::clone(&of_tree)))
+                                                .map(|f| file_row(f, 1, Arc::clone(&of_tree), Some(ctx_menu_cb.clone())))
                                                 .collect::<Vec<_>>()}
                                         </ul>
                                     }
@@ -904,6 +952,87 @@ pub fn WorkspacePane(
                 </aside>
             </div>
         </aside>
+
+        // ── Context menu (B0: Open Externally) ──────────────────────────
+        // Portal to document.body so it escapes the tree's scroll clipping
+        // and z-index stacking.
+        {move || {
+            let Some((path, x, y)) = context_menu.get() else {
+                return ().into_any();
+            };
+            // Clamp to viewport so the menu never bleeds off-screen.
+            let vw = web_sys::window()
+                .and_then(|w| w.inner_width().ok().map(|w| w.as_f64().unwrap_or(1024.0)))
+                .unwrap_or(1024.0);
+            let vh = web_sys::window()
+                .and_then(|w| w.inner_height().ok().map(|h| h.as_f64().unwrap_or(768.0)))
+                .unwrap_or(768.0);
+            let clamped_x = x.max(4.0).min(vw - 188.0);
+            let clamped_y = y.max(4.0).min(vh - 40.0);
+            let root = tree_root.get();
+            let body = web_sys::window()
+                .and_then(|w| w.document())
+                .and_then(|d| d.body())
+                .unwrap();
+            let item_ref = context_menu_item_ref;
+            view! {
+                <Portal mount=body>
+                    // Invisible backdrop captures outside clicks + Esc.
+                    <div
+                        class="workspace-context-overlay"
+                        on:click=move |_| context_menu.set(None)
+                        on:contextmenu=move |ev| {
+                            ev.prevent_default();
+                            context_menu.set(None);
+                        }
+                        on:keydown=move |ev| {
+                            if ev.key() == "Escape" {
+                                ev.prevent_default();
+                                context_menu.set(None);
+                            }
+                        }
+                    >
+                        <div
+                            class="workspace-context-menu"
+                            style=format!("left: {clamped_x}px; top: {clamped_y}px")
+                            role="menu"
+                            aria-label="File actions"
+                        >
+                            <button
+                                node_ref=item_ref
+                                class="workspace-context-menu__item"
+                                type="button"
+                                role="menuitem"
+                                on:click={
+                                    let context_root = root.clone();
+                                    let context_path = path.clone();
+                                    move |_| {
+                                        context_menu.set(None);
+                                        let r = context_root.clone();
+                                        let p = context_path.clone();
+                                        spawn_local(async move {
+                                            if let Some(ref rr) = r {
+                                                let _ = crate::host::open_externally(rr, &p).await;
+                                            }
+                                        });
+                                    }
+                                }
+                                on:keydown=move |ev| {
+                                    if ev.key() == "Escape" {
+                                        ev.prevent_default();
+                                        context_menu.set(None);
+                                    }
+                                }
+                            >
+                                Open Externally
+                            </button>
+                        </div>
+                    </div>
+                </Portal>
+            }
+            .into_any()
+        }}
+
     }
 }
 
@@ -922,6 +1051,7 @@ fn dir_row(
     load_dir: DirCallback,
     expand_dir: DirCallback,
     collapse_dir: DirCallback,
+    open_externally: Option<OpenExternallyCb>,
 ) -> impl IntoView {
     let entry_path = entry.path.clone();
     let entry_name = entry.name.clone();
@@ -1005,6 +1135,7 @@ fn dir_row(
                                     Arc::clone(&load_dir),
                                     Arc::clone(&expand_dir),
                                     Arc::clone(&collapse_dir),
+                                    open_externally.clone(),
                                 )
                             })
                             .collect::<Vec<_>>()}
@@ -1012,7 +1143,7 @@ fn dir_row(
                             .into_iter()
                             .filter(|f| !is_secret_file(&f.name))
                             .filter(|f| name_matches(&f.name, &filter))
-                            .map(|f| file_row(f, depth + 1, Arc::clone(&open_file)))
+                            .map(|f| file_row(f, depth + 1, Arc::clone(&open_file), open_externally.clone()))
                             .collect::<Vec<_>>()}
                     </ul>
                 }
@@ -1027,7 +1158,12 @@ fn dir_row(
 // file_row — a single file; click opens/focuses a Preview tab
 // ---------------------------------------------------------------------------
 
-fn file_row(file: FsFileEntry, depth: usize, open_file: FileCallback) -> impl IntoView {
+fn file_row(
+    file: FsFileEntry,
+    depth: usize,
+    open_file: FileCallback,
+    open_externally: Option<OpenExternallyCb>,
+) -> impl IntoView {
     let path = file.path.clone();
     let name = file.name.clone();
     view! {
@@ -1041,6 +1177,16 @@ fn file_row(file: FsFileEntry, depth: usize, open_file: FileCallback) -> impl In
                     let p = path.clone();
                     let of = Arc::clone(&open_file);
                     move |_| of(p.clone())
+                }
+                on:contextmenu={
+                    let p = path.clone();
+                    let oe = open_externally.clone();
+                    move |ev| {
+                        ev.prevent_default();
+                        if let Some(ref cb) = oe {
+                            cb(p.clone(), ev.client_x() as f64, ev.client_y() as f64);
+                        }
+                    }
                 }
             >
                 <span class="workspace-tree__icon"><crate::icons::Code /></span>

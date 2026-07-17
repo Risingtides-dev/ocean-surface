@@ -44,6 +44,8 @@ tokio = { version = "1", features = ["sync", "time", "macros"] }
 # Local git repository inspection (repo_state command).  `vendored-libgit2`
 # bundles libgit2 so we don't depend on the system package.
 git2 = { version = "0.20", features = ["vendored-libgit2"] }
+# Open a file with the OS default application (B0: Open Externally).
+opener = "0.7"
 
 [dev-dependencies]
 tempfile = "3"
