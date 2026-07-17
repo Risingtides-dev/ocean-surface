@@ -16,8 +16,8 @@
 //! Live updates: the daemon's room-scoped SSE (TASK-10, `GET
 //! /v1/rooms/persistent/{key}/events`) streams every transcript row as a
 //! `room_message` frame with `id:=seq`. The surface hydrates once, then tails
-//! live with `Last-Event-ID` resume on reconnect — no poll, no global-stream
-//! workaround (TASK-11).
+//! live with sequence resume (`?after_seq=` on each newly constructed browser
+//! connection) — no poll, no global-stream workaround (TASK-11).
 //!
 //! The whole module is self-contained — it carries its own request layer rather
 //! than threading rooms state through the `Daemon` handle — so it never touches
@@ -117,6 +117,124 @@ pub struct RoomMessage {
     pub body: String,
     #[serde(default)]
     pub created_at: String,
+    /// Confirmed-federation metadata. `None` for local-only rooms and G1
+    /// messages. Present only after Bedrock confirms.
+    #[serde(default)]
+    pub federated: Option<FederatedMessageMeta>,
+}
+
+// ---- Federated wire types (exact mirror of ocean-core 786c6ba4) -------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FederatedMessageMeta {
+    pub ledger_event_id: String,
+    pub global_sequence: u64,
+    pub source_id: String,
+    pub source_sequence: u64,
+    pub client_event_id: String,
+    pub origin_principal_id: String,
+    pub origin_member_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FederatedRoomMemberProjection {
+    pub member_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_member_id: Option<String>,
+    pub actor_type: FederatedActorType,
+    pub role_in_room: FederatedRoomRole,
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_agent_descriptor: Option<PublicAgentDescriptor>,
+    pub joined_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_presence: Option<MemberPresence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_binding_available: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FederatedActorType {
+    User,
+    Agent,
+}
+
+impl FederatedActorType {
+    fn icon(self) -> AnyView {
+        match self {
+            Self::User => view! { <crate::icons::Person /> }.into_any(),
+            Self::Agent => view! { <crate::icons::Robot /> }.into_any(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FederatedRoomRole {
+    Owner,
+    Member,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemberPresence {
+    Live,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicAgentDescriptor {
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_alias: Option<String>,
+    #[serde(default)]
+    pub skills_count: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subagent_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomOutboxItem {
+    pub client_event_id: String,
+    pub source_id: String,
+    pub source_sequence: u64,
+    pub author_member_id: String,
+    pub event_type: String,
+    pub payload: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mention_member_ids: Vec<String>,
+    pub state: OutboxItemState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutboxItemState {
+    Pending,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomAccessProjection {
+    pub state: RoomAccessState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_confirmed_global_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<FederatedRoomMemberProjection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outbox: Vec<RoomOutboxItem>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoomAccessState {
+    Local,
+    Connecting,
+    Live,
+    Recovering,
+    Revoked,
 }
 
 /// How a room's agents are auto-woken. Mirrors `ocean_core::RoomTriggerPolicy`.
@@ -178,6 +296,8 @@ struct RoomGetResponse {
     room: Option<Room>,
     #[serde(default)]
     transcript: Vec<RoomMessage>,
+    /// Required on every successful room open, including local rooms.
+    access: RoomAccessProjection,
     #[serde(default)]
     error: Option<String>,
 }
@@ -224,6 +344,25 @@ struct PostMessageBody<'a> {
     author_id: &'a str,
     author_kind: RoomParticipantKind,
     body: &'a str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RetryOutboxBody<'a> {
+    client_event_id: &'a str,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RetryOutboxSuccess {
+    ok: bool,
+    access: RoomAccessProjection,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RetryOutboxErrorResponse {
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
 }
 
 /// Identity of this surface as a room participant. Stable per browser via
@@ -288,6 +427,9 @@ pub struct Rooms {
     tail_state: RwSignal<TailState>,
     /// Available agent names fetched from GET /v1/agents (TASK-9/TASK-11).
     pub available_agents: RwSignal<Vec<String>>,
+    /// Required access projection for the open room. `None` means loading or
+    /// no room is open; local rooms carry `Some(state = Local)`.
+    pub access: RwSignal<Option<RoomAccessProjection>>,
 }
 
 impl Rooms {
@@ -314,6 +456,7 @@ impl Rooms {
             panel_open,
             tail_state: RwSignal::new(TailState::Replaying),
             available_agents: RwSignal::new(Vec::new()),
+            access: RwSignal::new(None),
         }
     }
 
@@ -449,11 +592,12 @@ impl Rooms {
         let generation = self.generation;
 
         // Retire any prior room's live loops.
-        let gen = generation.get_untracked().wrapping_add(1);
-        generation.set(gen);
+        let generation_id = generation.get_untracked().wrapping_add(1);
+        generation.set(generation_id);
         open_key.set(Some(key.clone()));
         open_room.set(None);
         transcript.set(Vec::new());
+        me.access.set(None);
         status.set("loading room…".into());
         // Entering a room takes the stage (RoomStage swaps in for the chat
         // surface), so the browser panel folds away.
@@ -465,16 +609,17 @@ impl Rooms {
                 Ok(resp) => match resp.json::<RoomGetResponse>().await {
                     Ok(r) if r.ok => {
                         // Guard against a fast re-select before this landed.
-                        if generation.get_untracked() != gen {
+                        if generation.get_untracked() != generation_id {
                             return;
                         }
                         open_room.set(r.room);
                         transcript.set(r.transcript);
+                        me.access.set(Some(r.access));
                         status.set(String::new());
                         // Pre-fetch agent list for the picker (TASK-11).
                         me.fetch_agents();
                         // Start live updates for this generation.
-                        me.start_live_tail(key.clone(), gen);
+                        me.start_live_tail(key.clone(), generation_id);
                     }
                     Ok(r) => status.set(format!(
                         "room load failed: {}",
@@ -492,6 +637,7 @@ impl Rooms {
         self.open_key.set(None);
         self.open_room.set(None);
         self.transcript.set(Vec::new());
+        self.access.set(None);
     }
 
     /// Join the open room as the current identity
@@ -592,16 +738,9 @@ impl Rooms {
     /// `@mention` to auto-convene. Used to render the composer's discoverability
     /// hint.
     pub fn agent_ids(&self) -> Vec<String> {
-        self.open_room
-            .get()
-            .map(|r| {
-                r.participants
-                    .iter()
-                    .filter(|p| p.kind == RoomParticipantKind::Agent)
-                    .map(|p| p.id.clone())
-                    .collect()
-            })
-            .unwrap_or_default()
+        let access = self.access.get();
+        let room = self.open_room.get();
+        agent_ids_for(access.as_ref(), room.as_ref())
     }
 
     /// Leave the open room (`DELETE .../participants/{id}`).
@@ -641,6 +780,9 @@ impl Rooms {
     /// Post a message to the open room (`POST .../messages`). `@id` mentions in
     /// the body drive the daemon's trigger-policy auto-convene.
     pub fn post_message(&self, body: String) {
+        if !access_allows_writes(self.access.get_untracked().as_ref()) {
+            return;
+        }
         let body = body.trim().to_string();
         if body.is_empty() {
             return;
@@ -676,6 +818,79 @@ impl Rooms {
                     Err(err) => status.set(format!("message post error: {err}")),
                 },
                 Err(err) => status.set(format!("message encode error: {err}")),
+            }
+        });
+    }
+
+    /// Retry a failed outbox item (`POST …/outbox/retry`). On 202 the daemon
+    /// returns the fresh access projection; apply it immediately with
+    /// generation + open_key guard, then idempotently accept the duplicate SSE
+    /// `room_access` wake when it arrives later.
+    pub fn retry_outbox(&self, client_event_id: String) {
+        let Some(key) = self.open_key.get_untracked() else {
+            return;
+        };
+        let base = self.base();
+        let me = *self;
+        let status = self.status;
+        let generation_id = self.generation.get_untracked();
+        spawn_local(async move {
+            let payload = RetryOutboxBody {
+                client_event_id: &client_event_id,
+            };
+            let post_url = format!("{base}/v1/rooms/persistent/{}/outbox/retry", encode(&key));
+            let res = Request::post(&post_url)
+                .header("content-type", "application/json")
+                .json(&payload);
+            match res {
+                Ok(req) => match req.send().await {
+                    Ok(resp) if resp.status() == 202 => {
+                        match resp.json::<RetryOutboxSuccess>().await {
+                            Ok(r) if r.ok => {
+                                if !room_request_is_current(
+                                    generation_id,
+                                    me.generation.get_untracked(),
+                                    &key,
+                                    me.open_key.get_untracked().as_deref(),
+                                ) {
+                                    return;
+                                }
+                                apply_access_projection(&me.access, r.access);
+                                status.set("retry queued".into());
+                            }
+                            Ok(_) => status.set("retry response invalid".into()),
+                            Err(err) => status.set(format!("retry decode error: {err}")),
+                        }
+                    }
+                    Ok(resp) => {
+                        let http_status = resp.status();
+                        let error = resp.json::<RetryOutboxErrorResponse>().await;
+                        if !room_request_is_current(
+                            generation_id,
+                            me.generation.get_untracked(),
+                            &key,
+                            me.open_key.get_untracked().as_deref(),
+                        ) {
+                            return;
+                        }
+                        match error {
+                            Ok(r) => {
+                                let detail = match (r.code, r.error) {
+                                    (Some(code), Some(error)) => format!("{code}: {error}"),
+                                    (Some(code), None) => code,
+                                    (None, Some(error)) => error,
+                                    (None, None) => format!("HTTP {http_status}"),
+                                };
+                                status.set(format!("retry failed: {detail}"));
+                            }
+                            Err(err) => {
+                                status.set(format!("retry failed: HTTP {http_status} ({err})"))
+                            }
+                        }
+                    }
+                    Err(err) => status.set(format!("retry post error: {err}")),
+                },
+                Err(err) => status.set(format!("retry encode error: {err}")),
             }
         });
     }
@@ -722,36 +937,34 @@ impl Rooms {
         });
     }
 
-    /// Start the live tail for `key` at generation `gen`: room-scoped SSE
-    /// (`GET /v1/rooms/persistent/{key}/events`) with Last-Event-ID resume
-    /// (TASK-10/TASK-11). Replaces the 2.5s poll workaround.
-    fn start_live_tail(&self, key: String, gen: u64) {
+    /// Start the live tail for `key` at `generation_id`: room-scoped SSE
+    /// (`GET /v1/rooms/persistent/{key}/events`) with `?after_seq=` resume for
+    /// newly constructed browser connections (TASK-10/TASK-11). Replaces the
+    /// 2.5s poll workaround.
+    fn start_live_tail(&self, key: String, generation_id: u64) {
         let me = *self;
         let generation = self.generation;
         let base = self.base();
-        let last_seq = RwSignal::new(0u64);
+        let last_seq = RwSignal::new(last_transcript_seq(&self.transcript.get_untracked()));
         let tail_state = self.tail_state;
 
         spawn_local(async move {
             tail_state.set(TailState::Replaying);
             let events_url = format!("{base}/v1/rooms/persistent/{}/events", encode(&key));
-            let mut resume_seq: Option<u64> = None;
+            let mut resume_seq = last_seq.get_untracked();
+            let mut reconnecting = false;
 
             loop {
-                if generation.get_untracked() != gen {
+                if generation.get_untracked() != generation_id {
                     break;
                 }
-                tail_state.set(if resume_seq.is_some() {
+                tail_state.set(if reconnecting {
                     TailState::Reconnecting
                 } else {
                     TailState::Replaying
                 });
 
-                let url = if let Some(after) = resume_seq {
-                    format!("{events_url}?after_seq={after}")
-                } else {
-                    events_url.clone()
-                };
+                let url = format!("{events_url}?after_seq={resume_seq}");
                 let mut es = match EventSource::new(&url) {
                     Ok(es) => es,
                     Err(_) => {
@@ -759,7 +972,14 @@ impl Rooms {
                         continue;
                     }
                 };
-                let sub = match es.subscribe("room_message") {
+                let message_sub = match es.subscribe("room_message") {
+                    Ok(s) => s,
+                    Err(_) => {
+                        gloo_timers::future::TimeoutFuture::new(2_000).await;
+                        continue;
+                    }
+                };
+                let access_sub = match es.subscribe("room_access") {
                     Ok(s) => s,
                     Err(_) => {
                         gloo_timers::future::TimeoutFuture::new(2_000).await;
@@ -768,19 +988,19 @@ impl Rooms {
                 };
                 tail_state.set(match es.state() {
                     gloo_net::eventsource::State::Open => TailState::Live,
-                    gloo_net::eventsource::State::Connecting if resume_seq.is_some() => {
+                    gloo_net::eventsource::State::Connecting if reconnecting => {
                         TailState::Reconnecting
                     }
                     gloo_net::eventsource::State::Connecting => TailState::Replaying,
                     gloo_net::eventsource::State::Closed => TailState::Reconnecting,
                 });
-                let mut stream = sub;
+                let mut stream = futures_util::stream::select(message_sub, access_sub);
                 // Race stream.next() against a 2 s timeout so room close/switch
                 // can cancel a stalled connection (blame: gloo EventSource errors
                 // are suppressed during CONNECTING, so Reconnecting never fires
                 // without an explicit timeout-pump — codex TASK-11 review).
                 loop {
-                    if generation.get_untracked() != gen {
+                    if generation.get_untracked() != generation_id {
                         break;
                     }
                     let next = stream.next();
@@ -810,67 +1030,74 @@ impl Rooms {
                             continue;
                         }
                     };
-                    let Ok((_name, msg)) = msg else { continue };
+                    let Ok((name, msg)) = msg else { continue };
                     let Some(data) = msg.data().as_string() else {
                         continue;
                     };
-                    let Ok(entry) = serde_json::from_str::<RoomMessage>(&data) else {
+                    let Some(frame) = decode_room_tail_frame(&name, &data) else {
                         continue;
                     };
                     tail_state.set(TailState::Live);
-                    if entry.seq > last_seq.get_untracked() {
-                        last_seq.set(entry.seq);
-                    }
-                    let is_roster_change = matches!(
-                        entry.kind,
-                        RoomMessageKind::ParticipantJoined | RoomMessageKind::ParticipantLeft
-                    );
-                    me.transcript.update(|t| {
-                        if t.iter().any(|m| m.seq == entry.seq) {
-                            return;
+                    match frame {
+                        RoomTailFrame::Access(access) => {
+                            apply_access_projection(&me.access, access);
                         }
-                        t.push(entry);
-                    });
-                    // Refresh the room record (roster) on join/leave frames
-                    // so other clients see an accurate participant list
-                    // (codex TASK-11 review). Guarded by generation + open_key
-                    // so a stale response can't overwrite a newly selected room.
-                    if is_roster_change {
-                        let base = base.clone();
-                        let key = key.clone();
-                        let open_room = me.open_room;
-                        spawn_local(async move {
-                            if generation.get_untracked() != gen
-                                || me.open_key.get_untracked().as_deref() != Some(&key)
-                            {
-                                return;
+                        RoomTailFrame::Message(entry) => {
+                            if entry.seq > last_seq.get_untracked() {
+                                last_seq.set(entry.seq);
                             }
-                            if let Ok(resp) = Request::get(&format!(
-                                "{base}/v1/rooms/persistent/{}",
-                                encode(&key)
-                            ))
-                            .send()
-                            .await
-                            {
-                                if let Ok(r) = resp.json::<RoomMutateResponse>().await {
-                                    if r.ok {
-                                        if generation.get_untracked() != gen
-                                            || me.open_key.get_untracked().as_deref()
-                                                != Some(key.as_str())
-                                        {
-                                            return;
-                                        }
-                                        if let Some(room) = r.room {
-                                            open_room.set(Some(room));
+                            let is_roster_change = matches!(
+                                entry.kind,
+                                RoomMessageKind::ParticipantJoined
+                                    | RoomMessageKind::ParticipantLeft
+                            );
+                            me.transcript.update(|t| {
+                                if t.iter().any(|m| m.seq == entry.seq) {
+                                    return;
+                                }
+                                t.push(entry);
+                            });
+                            // Refresh the room record (roster) on join/leave frames
+                            // so other clients see an accurate participant list.
+                            if is_roster_change {
+                                let base = base.clone();
+                                let key = key.clone();
+                                let open_room = me.open_room;
+                                spawn_local(async move {
+                                    if generation.get_untracked() != generation_id
+                                        || me.open_key.get_untracked().as_deref() != Some(&key)
+                                    {
+                                        return;
+                                    }
+                                    if let Ok(resp) = Request::get(&format!(
+                                        "{base}/v1/rooms/persistent/{}",
+                                        encode(&key)
+                                    ))
+                                    .send()
+                                    .await
+                                    {
+                                        if let Ok(r) = resp.json::<RoomMutateResponse>().await {
+                                            if r.ok {
+                                                if generation.get_untracked() != generation_id
+                                                    || me.open_key.get_untracked().as_deref()
+                                                        != Some(key.as_str())
+                                                {
+                                                    return;
+                                                }
+                                                if let Some(room) = r.room {
+                                                    open_room.set(Some(room));
+                                                }
+                                            }
                                         }
                                     }
-                                }
+                                });
                             }
-                        });
+                        }
                     }
                 }
-                resume_seq = Some(last_seq.get_untracked());
-                if generation.get_untracked() != gen {
+                resume_seq = last_seq.get_untracked();
+                reconnecting = true;
+                if generation.get_untracked() != generation_id {
                     break;
                 }
                 gloo_timers::future::TimeoutFuture::new(1_000).await;
@@ -880,6 +1107,94 @@ impl Rooms {
 }
 
 // ---- Helpers ----------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RoomTailFrame {
+    Message(RoomMessage),
+    Access(RoomAccessProjection),
+}
+
+fn decode_room_tail_frame(name: &str, data: &str) -> Option<RoomTailFrame> {
+    match name {
+        "room_message" => serde_json::from_str(data).ok().map(RoomTailFrame::Message),
+        "room_access" => serde_json::from_str(data).ok().map(RoomTailFrame::Access),
+        _ => None,
+    }
+}
+
+fn apply_access_projection(
+    signal: &RwSignal<Option<RoomAccessProjection>>,
+    next: RoomAccessProjection,
+) -> bool {
+    let mut current = signal.get_untracked();
+    let changed = replace_access_projection(&mut current, next);
+    if changed {
+        signal.set(current);
+    }
+    changed
+}
+
+fn replace_access_projection(
+    current: &mut Option<RoomAccessProjection>,
+    next: RoomAccessProjection,
+) -> bool {
+    if current.as_ref() == Some(&next) {
+        return false;
+    }
+    *current = Some(next);
+    true
+}
+
+fn last_transcript_seq(transcript: &[RoomMessage]) -> u64 {
+    transcript.last().map(|message| message.seq).unwrap_or(0)
+}
+
+fn room_request_is_current(
+    expected_generation: u64,
+    current_generation: u64,
+    expected_key: &str,
+    current_key: Option<&str>,
+) -> bool {
+    expected_generation == current_generation && current_key == Some(expected_key)
+}
+
+fn access_allows_writes(access: Option<&RoomAccessProjection>) -> bool {
+    matches!(
+        access.map(|projection| projection.state),
+        Some(RoomAccessState::Local | RoomAccessState::Live)
+    )
+}
+
+fn access_banner(access: Option<&RoomAccessProjection>) -> Option<&'static str> {
+    match access.map(|projection| projection.state) {
+        Some(RoomAccessState::Connecting) => Some("Connecting"),
+        Some(RoomAccessState::Recovering) => Some("Recovering"),
+        Some(RoomAccessState::Revoked) => Some("Access revoked"),
+        None | Some(RoomAccessState::Local | RoomAccessState::Live) => None,
+    }
+}
+
+fn agent_ids_for(access: Option<&RoomAccessProjection>, room: Option<&Room>) -> Vec<String> {
+    let Some(access) = access else {
+        return Vec::new();
+    };
+    if access.state != RoomAccessState::Local {
+        return access
+            .members
+            .iter()
+            .filter(|member| member.actor_type == FederatedActorType::Agent)
+            .map(|member| member.member_id.clone())
+            .collect();
+    }
+    room.map(|room| {
+        room.participants
+            .iter()
+            .filter(|participant| participant.kind == RoomParticipantKind::Agent)
+            .map(|participant| participant.id.clone())
+            .collect()
+    })
+    .unwrap_or_default()
+}
 
 fn local_storage() -> Option<web_sys::Storage> {
     web_sys::window().and_then(|w| w.local_storage().ok().flatten())
@@ -952,6 +1267,49 @@ pub(crate) fn livekit_token_path_for_room(key: &str) -> String {
 mod tests {
     use super::*;
 
+    fn access_projection(state: RoomAccessState) -> RoomAccessProjection {
+        RoomAccessProjection {
+            state,
+            last_confirmed_global_sequence: None,
+            members: Vec::new(),
+            outbox: Vec::new(),
+        }
+    }
+
+    fn message(seq: u64) -> RoomMessage {
+        RoomMessage {
+            seq,
+            author_id: "member-1".into(),
+            author_kind: RoomParticipantKind::Human,
+            kind: RoomMessageKind::Message,
+            body: format!("message {seq}"),
+            created_at: "2026-07-16T22:00:00Z".into(),
+            federated: None,
+        }
+    }
+
+    fn local_room() -> Room {
+        Room {
+            id: "room-1".into(),
+            name: "Room One".into(),
+            participants: vec![
+                RoomParticipant {
+                    id: "local-agent".into(),
+                    kind: RoomParticipantKind::Agent,
+                    display_name: "Local Agent".into(),
+                },
+                RoomParticipant {
+                    id: "local-human".into(),
+                    kind: RoomParticipantKind::Human,
+                    display_name: "Local Human".into(),
+                },
+            ],
+            created_at: String::new(),
+            updated_at: String::new(),
+            trigger_policy: None,
+        }
+    }
+
     #[test]
     fn slugify_lowercases_and_dashes() {
         assert_eq!(slugify("Map Fix"), "map-fix");
@@ -977,6 +1335,275 @@ mod tests {
         assert_eq!(
             livekit_token_path_for_room("project/surface demo"),
             "/v1/rooms/project%2Fsurface%20demo/livekit-token"
+        );
+    }
+
+    #[test]
+    fn g1_room_message_without_federation_metadata_decodes_as_none() {
+        let message: RoomMessage = serde_json::from_value(serde_json::json!({
+            "seq": 1,
+            "author_id": "local-human",
+            "author_kind": "human",
+            "kind": "message",
+            "body": "hello",
+            "created_at": "2026-07-16T22:00:00Z"
+        }))
+        .expect("G1 message should decode");
+
+        assert_eq!(message.federated, None);
+    }
+
+    #[test]
+    fn room_get_requires_access_and_local_projection_is_exact() {
+        let response: RoomGetResponse = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "room": null,
+            "transcript": [],
+            "access": { "state": "local" }
+        }))
+        .expect("P1 room envelope should decode");
+        assert_eq!(response.access, access_projection(RoomAccessState::Local));
+
+        let missing = serde_json::from_value::<RoomGetResponse>(serde_json::json!({
+            "ok": true,
+            "room": null,
+            "transcript": []
+        }));
+        assert!(missing.is_err(), "access must remain required");
+
+        assert_eq!(
+            serde_json::to_value(access_projection(RoomAccessState::Local)).unwrap(),
+            serde_json::json!({ "state": "local" })
+        );
+    }
+
+    #[test]
+    fn federated_access_projection_uses_only_safe_exact_wire_fields() {
+        let projection: RoomAccessProjection = serde_json::from_value(serde_json::json!({
+            "state": "live",
+            "last_confirmed_global_sequence": 44,
+            "members": [{
+                "member_id": "member-agent",
+                "owner_member_id": "member-owner",
+                "actor_type": "agent",
+                "role_in_room": "member",
+                "display_name": "Fable",
+                "public_agent_descriptor": {
+                    "display_name": "Fable",
+                    "description": "reviewer",
+                    "model_alias": "fable",
+                    "skills_count": 2,
+                    "subagent_names": ["research", "review"]
+                },
+                "joined_at": "2026-07-16T22:00:00Z",
+                "derived_presence": "live",
+                "local_binding_available": false
+            }],
+            "outbox": [{
+                "client_event_id": "client-1",
+                "source_id": "surface-web",
+                "source_sequence": 7,
+                "author_member_id": "member-owner",
+                "event_type": "room_message",
+                "payload": { "body": "hello" },
+                "mention_member_ids": ["member-agent"],
+                "state": "failed"
+            }]
+        }))
+        .expect("full safe projection should decode");
+
+        let wire = serde_json::to_value(&projection).unwrap();
+        assert_eq!(
+            wire["members"][0],
+            serde_json::json!({
+                "member_id": "member-agent",
+                "owner_member_id": "member-owner",
+                "actor_type": "agent",
+                "role_in_room": "member",
+                "display_name": "Fable",
+                "public_agent_descriptor": {
+                    "display_name": "Fable",
+                    "description": "reviewer",
+                    "model_alias": "fable",
+                    "skills_count": 2,
+                    "subagent_names": ["research", "review"]
+                },
+                "joined_at": "2026-07-16T22:00:00Z",
+                "derived_presence": "live",
+                "local_binding_available": false
+            })
+        );
+        let member = wire["members"][0].as_object().unwrap();
+        for secret in [
+            "owner_principal_token_id",
+            "registration_key",
+            "bearer_token",
+            "access_token",
+        ] {
+            assert!(!member.contains_key(secret));
+        }
+        assert_eq!(
+            wire["outbox"][0],
+            serde_json::json!({
+                "client_event_id": "client-1",
+                "source_id": "surface-web",
+                "source_sequence": 7,
+                "author_member_id": "member-owner",
+                "event_type": "room_message",
+                "payload": { "body": "hello" },
+                "mention_member_ids": ["member-agent"],
+                "state": "failed"
+            })
+        );
+    }
+
+    #[test]
+    fn all_access_states_pin_write_and_banner_policy() {
+        let cases = [
+            (RoomAccessState::Local, true, None),
+            (RoomAccessState::Connecting, false, Some("Connecting")),
+            (RoomAccessState::Live, true, None),
+            (RoomAccessState::Recovering, false, Some("Recovering")),
+            (RoomAccessState::Revoked, false, Some("Access revoked")),
+        ];
+
+        assert!(!access_allows_writes(None));
+        assert_eq!(access_banner(None), None);
+        for (state, writes, banner) in cases {
+            let access = access_projection(state);
+            assert_eq!(access_allows_writes(Some(&access)), writes);
+            assert_eq!(access_banner(Some(&access)), banner);
+        }
+    }
+
+    #[test]
+    fn tail_frame_decoder_tags_access_and_messages_without_cursor_blending() {
+        let access =
+            serde_json::to_string(&access_projection(RoomAccessState::Recovering)).unwrap();
+        let frame = decode_room_tail_frame("room_access", &access).unwrap();
+        assert_eq!(
+            frame,
+            RoomTailFrame::Access(access_projection(RoomAccessState::Recovering))
+        );
+
+        let frame = decode_room_tail_frame(
+            "room_message",
+            r#"{"seq":8,"author_id":"member-1","author_kind":"human","kind":"message","body":"hello","created_at":"2026-07-16T22:00:00Z"}"#,
+        )
+        .unwrap();
+        match frame {
+            RoomTailFrame::Message(message) => assert_eq!(message.seq, 8),
+            RoomTailFrame::Access(_) => panic!("message frame decoded as access"),
+        }
+        assert!(decode_room_tail_frame("unknown", "{}").is_none());
+    }
+
+    #[test]
+    fn access_projection_replacement_is_idempotent() {
+        let live = access_projection(RoomAccessState::Live);
+        let mut current = Some(live.clone());
+        assert!(!replace_access_projection(&mut current, live));
+
+        let recovering = access_projection(RoomAccessState::Recovering);
+        assert!(replace_access_projection(&mut current, recovering.clone()));
+        assert_eq!(current, Some(recovering));
+    }
+
+    #[test]
+    fn transcript_cursor_is_seeded_from_last_hydrated_sequence() {
+        assert_eq!(last_transcript_seq(&[]), 0);
+        assert_eq!(last_transcript_seq(&[message(3), message(9)]), 9);
+    }
+
+    #[test]
+    fn retry_wire_requires_exact_body_and_success_access_envelope() {
+        assert_eq!(
+            serde_json::to_value(RetryOutboxBody {
+                client_event_id: "client-1"
+            })
+            .unwrap(),
+            serde_json::json!({ "client_event_id": "client-1" })
+        );
+
+        let success: RetryOutboxSuccess = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "access": { "state": "live" }
+        }))
+        .expect("202 envelope should decode");
+        assert!(success.ok);
+        assert_eq!(success.access.state, RoomAccessState::Live);
+        assert!(
+            serde_json::from_value::<RetryOutboxSuccess>(serde_json::json!({ "ok": true }))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn retry_projection_guard_requires_generation_and_room_match() {
+        assert!(room_request_is_current(4, 4, "room-1", Some("room-1")));
+        assert!(!room_request_is_current(4, 5, "room-1", Some("room-1")));
+        assert!(!room_request_is_current(4, 4, "room-1", Some("room-2")));
+        assert!(!room_request_is_current(4, 4, "room-1", None));
+    }
+
+    #[test]
+    fn agent_ids_switch_strictly_between_local_and_federated_rosters() {
+        let room = local_room();
+        let local = access_projection(RoomAccessState::Local);
+        assert_eq!(
+            agent_ids_for(Some(&local), Some(&room)),
+            vec!["local-agent"]
+        );
+        assert!(agent_ids_for(None, Some(&room)).is_empty());
+
+        let mut federated = access_projection(RoomAccessState::Live);
+        federated.members = vec![
+            FederatedRoomMemberProjection {
+                member_id: "opaque-agent".into(),
+                owner_member_id: None,
+                actor_type: FederatedActorType::Agent,
+                role_in_room: FederatedRoomRole::Member,
+                display_name: "Remote Agent".into(),
+                public_agent_descriptor: None,
+                joined_at: String::new(),
+                derived_presence: None,
+                local_binding_available: Some(false),
+            },
+            FederatedRoomMemberProjection {
+                member_id: "opaque-user".into(),
+                owner_member_id: None,
+                actor_type: FederatedActorType::User,
+                role_in_room: FederatedRoomRole::Owner,
+                display_name: "User".into(),
+                public_agent_descriptor: None,
+                joined_at: String::new(),
+                derived_presence: None,
+                local_binding_available: Some(true),
+            },
+        ];
+        assert_eq!(
+            agent_ids_for(Some(&federated), Some(&room)),
+            vec!["opaque-agent"]
+        );
+    }
+
+    #[test]
+    fn outbox_states_keep_pending_and_failed_distinct() {
+        assert_eq!(
+            serde_json::from_str::<OutboxItemState>(r#""pending""#).unwrap(),
+            OutboxItemState::Pending
+        );
+        assert_eq!(
+            serde_json::from_str::<OutboxItemState>(r#""failed""#).unwrap(),
+            OutboxItemState::Failed
+        );
+        assert_eq!(
+            serde_json::to_string(&OutboxItemState::Pending).unwrap(),
+            r#""pending""#
+        );
+        assert_eq!(
+            serde_json::to_string(&OutboxItemState::Failed).unwrap(),
+            r#""failed""#
         );
     }
 }
@@ -1087,7 +1714,7 @@ pub fn RoomsPanel(rooms: Rooms, open: RwSignal<bool>) -> impl IntoView {
                     // room-update route yet, so policy is set once at create time.
                     <div class="rooms-policy">
                         <div class="rooms-policy__title">
-                            "Auto-convene triggers"
+                            "Response Policy"
                         </div>
                         <label class="rooms-policy__row">
                             <input
@@ -1095,7 +1722,7 @@ pub fn RoomsPanel(rooms: Rooms, open: RwSignal<bool>) -> impl IntoView {
                                 prop:checked=move || policy_on_mention.get()
                                 on:change=move |ev| policy_on_mention.set(event_target_checked(&ev))
                             />
-                            <span>"On @mention"</span>
+                            <span>"On mention"</span>
                             <span class="rooms-policy__hint">"wake a mentioned agent"</span>
                         </label>
                         <label class="rooms-policy__row">
@@ -1112,10 +1739,10 @@ pub fn RoomsPanel(rooms: Rooms, open: RwSignal<bool>) -> impl IntoView {
                                 prop:checked=move || policy_on_component_event.get()
                                 on:change=move |ev| policy_on_component_event.set(event_target_checked(&ev))
                             />
-                            <span>"On component event"</span>
+                            <span>"On interaction"</span>
                         </label>
                         <label class="rooms-policy__row rooms-policy__row--cron">
-                            <span>"On schedule (cron)"</span>
+                            <span>"On schedule"</span>
                             <input
                                 class="rooms-policy__cron"
                                 type="text"
@@ -1258,37 +1885,134 @@ pub fn RoomStage(rooms: Rooms) -> impl IntoView {
                 </Show>
             </div>
 
-            // Roster: kind-tinted chips + reveal-on-intent add-agent.
-            <div class="room-stage__roster">
-                <For
-                    each=move || open_room.get().map(|r| r.participants).unwrap_or_default()
-                    key=|p| p.id.clone()
-                    children=move |p: RoomParticipant| {
-                        let is_agent = p.kind == RoomParticipantKind::Agent;
-                        view! {
-                            <span
-                                class="rooms-chip"
-                                class:rooms-chip--agent=is_agent
-                                title=format!("{} ({})", p.id, p.kind.label())
-                            >
-                                <span class="rooms-chip__glyph">{p.kind.icon()}</span>
-                                {p.display_name.clone()}
-                                <span class="rooms-chip__kind">{p.kind.label()}</span>
-                            </span>
-                        }
-                    }
-                />
-                <button
-                    class="room-stage__addagent-toggle"
-                    type="button"
-                    title="Add an agent participant"
-                    on:click=move |_| show_add_agent.update(|v| *v = !*v)
+            <Show when=move || access_banner(rooms.access.get().as_ref()).is_some()>
+                <div
+                    class="room-stage__access-state"
+                    class:room-stage__access-state--connecting=move || matches!(
+                        rooms.access.get().map(|access| access.state),
+                        Some(RoomAccessState::Connecting)
+                    )
+                    class:room-stage__access-state--recovering=move || matches!(
+                        rooms.access.get().map(|access| access.state),
+                        Some(RoomAccessState::Recovering)
+                    )
+                    class:room-stage__access-state--revoked=move || matches!(
+                        rooms.access.get().map(|access| access.state),
+                        Some(RoomAccessState::Revoked)
+                    )
                 >
-                    "+ agent"
-                </button>
+                    {move || access_banner(rooms.access.get().as_ref()).unwrap_or_default()}
+                </div>
+            </Show>
+
+            // Local rooms retain the daemon roster. Federated rooms render only
+            // the safe access projection, with binding locality applied to
+            // agents (never humans) and no role or secret-bearing fallback.
+            <div class="room-stage__roster">
+                <Show when=move || matches!(
+                    rooms.access.get().map(|access| access.state),
+                    Some(RoomAccessState::Local)
+                )>
+                    <For
+                        each=move || open_room.get().map(|r| r.participants).unwrap_or_default()
+                        key=|p| p.id.clone()
+                        children=move |p: RoomParticipant| {
+                            let is_agent = p.kind == RoomParticipantKind::Agent;
+                            view! {
+                                <span
+                                    class="rooms-chip"
+                                    class:rooms-chip--agent=is_agent
+                                    title=format!("{} ({})", p.id, p.kind.label())
+                                >
+                                    <span class="rooms-chip__glyph">{p.kind.icon()}</span>
+                                    {p.display_name.clone()}
+                                    <span class="rooms-chip__kind">{p.kind.label()}</span>
+                                </span>
+                            }
+                        }
+                    />
+                    <button
+                        class="room-stage__addagent-toggle"
+                        type="button"
+                        title="Add an agent participant"
+                        on:click=move |_| show_add_agent.update(|v| *v = !*v)
+                    >
+                        "+ agent"
+                    </button>
+                </Show>
+                <Show
+                    when=move || matches!(
+                        rooms.access.get().map(|access| access.state),
+                        Some(
+                            RoomAccessState::Connecting
+                                | RoomAccessState::Live
+                                | RoomAccessState::Recovering
+                                | RoomAccessState::Revoked
+                        )
+                    )
+                >
+                    <For
+                        each=move || rooms.access.get()
+                            .map(|access| access.members)
+                            .unwrap_or_default()
+                        key=|member| member.member_id.clone()
+                        children=move |member: FederatedRoomMemberProjection| {
+                            let actor_type = member.actor_type;
+                            let presence = member.derived_presence;
+                            let presence_label = match presence {
+                                Some(MemberPresence::Live) => "live",
+                                Some(MemberPresence::Unavailable) => "unavailable",
+                                None => "",
+                            };
+                            let local_agent = actor_type == FederatedActorType::Agent
+                                && member.local_binding_available == Some(true);
+                            let remote_agent = actor_type == FederatedActorType::Agent
+                                && member.local_binding_available == Some(false);
+                            view! {
+                                <span
+                                    class="rooms-chip rooms-chip--federated"
+                                    class:rooms-chip--local=local_agent
+                                    class:rooms-chip--remote=remote_agent
+                                    title=member.member_id.clone()
+                                >
+                                    <Show when=move || presence.is_some()>
+                                        <span
+                                            class="rooms-chip__presence"
+                                            class:rooms-chip__presence--live=move || {
+                                                presence == Some(MemberPresence::Live)
+                                            }
+                                            class:rooms-chip__presence--unavailable=move || {
+                                                presence == Some(MemberPresence::Unavailable)
+                                            }
+                                            aria-label=presence_label
+                                            title=presence_label
+                                        ></span>
+                                    </Show>
+                                    <span class="rooms-chip__glyph">{actor_type.icon()}</span>
+                                    {member.display_name.clone()}
+                                    <Show when=move || remote_agent>
+                                        <span
+                                            class="rooms-chip__remote"
+                                            aria-label="remote agent"
+                                            title="remote agent"
+                                        >
+                                            <crate::icons::Globe />
+                                        </span>
+                                    </Show>
+                                </span>
+                            }
+                        }
+                    />
+                </Show>
             </div>
 
-            <Show when=move || show_add_agent.get()>
+            <Show when=move || {
+                show_add_agent.get()
+                    && matches!(
+                        rooms.access.get().map(|access| access.state),
+                        Some(RoomAccessState::Local)
+                    )
+            }>
                 <div class="rooms-addagent">
                     <select
                         class="rooms-addagent__input"
@@ -1337,16 +2061,16 @@ pub fn RoomStage(rooms: Rooms) -> impl IntoView {
                         let p = open_room.get().and_then(|r| r.trigger_policy)
                             .unwrap_or_default();
                         let mut on: Vec<&str> = Vec::new();
-                        if p.on_mention { on.push("@mention"); }
-                        if p.on_thread_reply { on.push("thread-reply"); }
-                        if p.on_component_event { on.push("component-event"); }
+                        if p.on_mention { on.push("mention"); }
+                        if p.on_thread_reply { on.push("thread reply"); }
+                        if p.on_component_event { on.push("interaction"); }
                         if p.on_schedule.is_some() { on.push("schedule"); }
                         let triggers = if on.is_empty() {
                             "none".to_string()
                         } else {
                             on.join(", ")
                         };
-                        format!("Auto-convene: {triggers}")
+                        format!("Response Policy: {triggers}")
                     }}
                 </div>
             </Show>
@@ -1388,6 +2112,52 @@ pub fn RoomStage(rooms: Rooms) -> impl IntoView {
                 </Show>
             </div>
 
+            <Show when=move || rooms.access.get()
+                .map(|access| !access.outbox.is_empty())
+                .unwrap_or(false)
+            >
+                <div class="rooms-outbox" aria-label="Room outbox">
+                    <For
+                        each=move || rooms.access.get()
+                            .map(|access| access.outbox)
+                            .unwrap_or_default()
+                        key=|item| item.client_event_id.clone()
+                        children=move |item: RoomOutboxItem| {
+                            let failed = item.state == OutboxItemState::Failed;
+                            let retry_id = item.client_event_id.clone();
+                            let state_label = match item.state {
+                                OutboxItemState::Pending => "pending",
+                                OutboxItemState::Failed => "failed",
+                            };
+                            let retry_button = failed.then(|| {
+                                let retry_id = retry_id.clone();
+                                view! {
+                                    <button
+                                        class="rooms-outbox__retry"
+                                        type="button"
+                                        aria-label="Retry failed outbox item"
+                                        title="Retry failed outbox item"
+                                        on:click=move |_| rooms.retry_outbox(retry_id.clone())
+                                    >
+                                        <crate::icons::Refresh />
+                                    </button>
+                                }
+                            });
+                            view! {
+                                <div
+                                    class="rooms-outbox__item"
+                                    class:rooms-outbox__item--failed=failed
+                                >
+                                    <span class="rooms-outbox__event">{item.event_type}</span>
+                                    <span class="rooms-outbox__state">{state_label}</span>
+                                    {retry_button}
+                                </div>
+                            }
+                        }
+                    />
+                </div>
+            </Show>
+
             <div class="room-stage__foot">
                 // @mention discoverability: click a chip to insert `@id `.
                 <Show when=move || !rooms.agent_ids().is_empty()>
@@ -1403,6 +2173,9 @@ pub fn RoomStage(rooms: Rooms) -> impl IntoView {
                                         class="rooms-mention-hint__chip"
                                         type="button"
                                         title="insert mention"
+                                        disabled=move || !access_allows_writes(
+                                            rooms.access.get().as_ref()
+                                        )
                                         on:click=move |_| {
                                             composer.update(|c| {
                                                 if !c.is_empty() && !c.ends_with(' ') {
@@ -1426,7 +2199,13 @@ pub fn RoomStage(rooms: Rooms) -> impl IntoView {
                     class="rooms-composer"
                     on:submit=move |ev| {
                         ev.prevent_default();
+                        if !access_allows_writes(rooms.access.get_untracked().as_ref()) {
+                            return;
+                        }
                         let text = composer.get_untracked();
+                        if text.trim().is_empty() {
+                            return;
+                        }
                         rooms.post_message(text);
                         composer.set(String::new());
                     }
@@ -1437,11 +2216,15 @@ pub fn RoomStage(rooms: Rooms) -> impl IntoView {
                         placeholder="Message… (@id to mention)"
                         prop:value=move || composer.get()
                         on:input=move |ev| composer.set(event_target_value(&ev))
+                        disabled=move || !access_allows_writes(rooms.access.get().as_ref())
                     />
                     <button
                         class="rooms-composer__send"
                         type="submit"
-                        disabled=move || composer.get().trim().is_empty()
+                        disabled=move || {
+                            composer.get().trim().is_empty()
+                                || !access_allows_writes(rooms.access.get().as_ref())
+                        }
                     >
                         "Send"
                     </button>

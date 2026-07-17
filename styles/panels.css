@@ -1030,6 +1030,48 @@
   color: var(--accent);
 }
 
+.rooms-chip--federated {
+  padding-left: 8px;
+}
+
+.rooms-chip--local {
+  border-color: var(--border-strong);
+  background: var(--accent-soft);
+  color: var(--fg);
+}
+
+.rooms-chip--local .rooms-chip__glyph {
+  color: var(--accent);
+}
+
+.rooms-chip__presence {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--fg-4);
+}
+
+.rooms-chip__presence--live {
+  background: var(--ok);
+}
+
+.rooms-chip__presence--unavailable {
+  background: var(--fg-4);
+}
+
+.rooms-chip__remote {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  color: var(--fg-3);
+}
+
+.rooms-chip__remote svg {
+  width: 12px;
+  height: 12px;
+}
+
 .rooms-addagent {
   display: flex;
   flex-wrap: wrap;
@@ -1092,6 +1134,85 @@
 .rooms-msg--system .rooms-msg__body {
   font-size: 12px;
   font-style: italic;
+}
+
+.rooms-outbox {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rooms-outbox__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 5px 7px 5px 9px;
+  border-left: 2px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--fg-3);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.rooms-outbox__item--failed {
+  border-left-color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.rooms-outbox__event {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-2);
+  font-family: var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rooms-outbox__state {
+  flex: 0 0 auto;
+  color: var(--fg-4);
+  text-transform: lowercase;
+}
+
+.rooms-outbox__item--failed .rooms-outbox__state {
+  color: var(--warn);
+}
+
+.rooms-outbox__retry {
+  appearance: none;
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--warn);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+}
+
+.rooms-outbox__retry:hover {
+  background: var(--bg-hover);
+}
+
+.rooms-outbox__retry:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.rooms-outbox__retry:active {
+  transform: scale(0.985);
+}
+
+.rooms-outbox__retry svg {
+  width: 14px;
+  height: 14px;
 }
 
 /* ═══════════════════════════════════════════════════════════════════
