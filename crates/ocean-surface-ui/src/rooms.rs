@@ -303,6 +303,12 @@ struct RoomGetResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct RoomErrorResponse {
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct RoomMutateResponse {
     #[serde(default)]
     ok: bool,
@@ -606,7 +612,7 @@ impl Rooms {
         spawn_local(async move {
             let get_url = format!("{base}/v1/rooms/persistent/{}", encode(&key));
             match Request::get(&get_url).send().await {
-                Ok(resp) => match resp.json::<RoomGetResponse>().await {
+                Ok(resp) if resp.ok() => match resp.json::<RoomGetResponse>().await {
                     Ok(r) if r.ok => {
                         // Guard against a fast re-select before this landed.
                         if generation.get_untracked() != generation_id {
@@ -627,6 +633,18 @@ impl Rooms {
                     )),
                     Err(err) => status.set(format!("room decode error: {err}")),
                 },
+                Ok(resp) => {
+                    let http_status = resp.status();
+                    match resp.json::<RoomErrorResponse>().await {
+                        Ok(r) => status.set(format!(
+                            "room load failed: {}",
+                            r.error.unwrap_or_else(|| format!("HTTP {http_status}"))
+                        )),
+                        Err(err) => {
+                            status.set(format!("room load failed: HTTP {http_status} ({err})"))
+                        }
+                    }
+                }
                 Err(err) => status.set(format!("room fetch error: {err}")),
             }
         });
@@ -1370,6 +1388,13 @@ mod tests {
             "transcript": []
         }));
         assert!(missing.is_err(), "access must remain required");
+
+        let error: RoomErrorResponse = serde_json::from_value(serde_json::json!({
+            "ok": false,
+            "error": "no room with key 'missing'"
+        }))
+        .expect("non-success responses use the separate error envelope");
+        assert_eq!(error.error.as_deref(), Some("no room with key 'missing'"));
 
         assert_eq!(
             serde_json::to_value(access_projection(RoomAccessState::Local)).unwrap(),
