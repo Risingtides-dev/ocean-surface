@@ -883,6 +883,9 @@ const BTN_P: (f32, f32) = (0.0, -0.27);
 const L_GAP: f32 = 0.245;
 const L_Y: f32 = 0.16;
 const L_HALF: f32 = 0.115;
+/// Canvas aspect below which the wordmark layout compresses to fit:
+/// full word half-width (2·L_GAP + L_HALF = 0.605) plus ~8% margin.
+const L_FIT_ASPECT: f32 = 1.32;
 
 fn warp_p(x: f32, y: f32) -> (f32, f32) {
     (x * (1.0 + y * 0.45), y * 1.35)
@@ -1146,12 +1149,19 @@ impl SoundingsLandingEngine {
         self.events.retain(|e| t - e.t0 < 9.0);
 
         // ── letter etches ────────────────────────────────────────────
+        // Visible p-space spans ±aspect/2, but the word's half-width is
+        // 2·L_GAP + L_HALF = 0.605 — wider than a portrait canvas can show
+        // (uPos.x = 2·x/aspect clips O and N off narrow phones). Compress
+        // gap and glyph size together so the word always fits with margin.
+        let aspect = self.canvas.width().max(1) as f32 / self.canvas.height().max(1) as f32;
+        let fit = (aspect / L_FIT_ASPECT).min(1.0);
+        let gap = L_GAP * fit;
         let letter_p: [(f32, f32); 5] = [
-            (-2.0 * L_GAP, L_Y),
-            (-L_GAP, L_Y),
+            (-2.0 * gap, L_Y),
+            (-gap, L_Y),
             (0.0, L_Y),
-            (1.0 * L_GAP, L_Y),
-            (2.0 * L_GAP, L_Y),
+            (1.0 * gap, L_Y),
+            (2.0 * gap, L_Y),
         ];
 
         let mut ring_backs: Vec<Evt> = Vec::new();
@@ -1332,7 +1342,6 @@ impl SoundingsLandingEngine {
         );
         gl.use_program(Some(&self.letter_prog));
 
-        let aspect = w as f32 / h as f32;
         for (i, &(lpx, lpy)) in letter_p.iter().enumerate() {
             let l = &self.letters[i];
             let d = if l.etch_t >= 0.0 { t - l.etch_t } else { -1.0 };
@@ -1358,7 +1367,7 @@ impl SoundingsLandingEngine {
             } else {
                 0.0
             };
-            let half = L_HALF * pop;
+            let half = L_HALF * fit * pop;
 
             macro_rules! letter_u1f {
                 ($name:expr, $val:expr) => {

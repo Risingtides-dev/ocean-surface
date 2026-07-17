@@ -1708,3 +1708,21 @@ area:      [infra]
 
 Coordination gate cleared by smaths ("ship it"): pushed and merged the entire parked Gate-2 set across all three repos. ocean-surface main 590ff25 -> 3f056eb (S3 federated room surface; 349/349 native + 1 wasm test + wasm check green on re-run before push). ocean-bedrock master f5e8846 -> e3c461c (S1C SSE fanout, S1D protocol harness, S2 blockers B1-B3; fast-forward). ocean-os main 5b9e23a8 -> ee6b698f (P1 producer contracts rebased conflict-free onto the moved main, gates re-run green: fmt, 39/39 persistent_rooms, denied-warning workspace clippy; pi's S2-P1 reconciliation ledger entry cherry-picked across the rebase so the append-only ledger lost nothing; the stale remote checkpoint branch was left in place rather than force-pushed). Production Railway DB migration (007) remains a separate later gate. Next phase: ocean P2-A store review, then P2-B/C daemon bridge.
 _________________________________________________________________________________
+
+time:      [01:05] [17-07-26]
+agent:     [pi] [kimi-k2.5], [thoth]
+worktree:  [main]
+type:      [review], [testing]
+area:      [analysis], [testing]
+
+Stitchpad lane work (handle @thoth) during post-confluence window. TASK-15 Tier-2 surface triage: dispositioned all 17 unique-patch surface lanes from git-confluence-audit-v1.md using blob-hash compare + named-marker evidence (never cherry alone) — 13 REJECT (main 03facc8 supersedes; incl. vscode-extension-polish-0143 byte-identical on all 11 files, all four desktop-* lanes absorbed into the Tauri ship, OCEAN-324 fmt sweep documented in main CI), 3 ARCHIVE (maps-auth-file-resolution per fable ruling — proxy credentials migrating to daemon; vscode-embed-leptos-wasm spike; vscode-ext-leptos-mirror dark-aqua conflicts with Kami-restraint extension contract), 1 gitbutler deferred. Artifact: .stitchpad/artifacts/tier2-surface-triage-thoth.md. Codex executed deletions; canonical exact 0/0.
+TASK-16 S3 federated-rooms parity smoke: PASS. Isolated fixture (daemon 127.0.0.1:14780 + /tmp config; live :4780/:8790 untouched) with store-injected projection (state=live, 3-member roster w/ remote+agent+presence markers, outbox pending+failed). Both hosts served identical WASM (sha 5e9d859a… on proxy :18790 and Tauri :1430) and rendered identical banner/3-chip roster/outbox+retry/mention/composer; SSE full-projection initial frame, Last-Event-ID replay, unbuffered. Live join/mention/retry round-trip + 409 conflict surfaced in Tauri UI. Report: .stitchpad/artifacts/task16-s3-parity-smoke-thoth.md. Incident self-reported: cleanup pkill pattern SIGTERM'd the launchd-managed :8790 surface 3x; KeepAlive restored it, verified healthy serving releases/03facc8; lesson — exact-PID kills + launchctl check first.
+_________________________________________________________________________________
+
+time:      [06:30] [17-07-26]
+agent:     [claude] [fable 5]
+type:      [bug-report]
+area:      [frontend]
+
+Fixed the mobile landing hero (smaths screenshot: ocean.agentsworld.org rendered "C E A" — O and N missing). Root cause: SoundingsLanding letter quads position at uPos.x = 2·x/aspect with the word's p-space half-width fixed at 0.605 (2·L_GAP + L_HALF), so any canvas narrower than aspect ≈ 1.21 clips the outer letters off-screen — every portrait phone. Fix in loader.rs: aspect-fit scale (aspect/1.32, capped at 1) compresses letter gap and glyph half-size together in both the etch-physics and draw paths, so the wordmark fits any aspect with ~8% margin; wide viewports are byte-identical (fit=1). Gates: 349/349 workspace tests, wasm check, clippy -D warnings. This commit also lands thoth's stranded 01:05 events.md entry (TASK-15/16, announced on the pad, uncommitted in the canonical checkout).
+_________________________________________________________________________________
