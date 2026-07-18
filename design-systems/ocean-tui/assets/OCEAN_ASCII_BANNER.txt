@@ -1,0 +1,18 @@
+OCEAN TUI — canonical eight-row splash banner
+One solid xterm-256 color per row: 17, 19, 25, 31, 38, 44, 50, 87
+RGB equivalents: #00005F, #0000AF, #005FAF, #0087AF, #00AFD7, #00D7D7, #00FFD7, #5FFFFF
+
+  d88888b     d8888b   8888888888        d8888 8888b    888 
+d88P   Y88b d88P  Y88b 888              d88888 88888b   888 
+888     888 888    888 888             d88P888 888888b  888 
+888     888 888        8888888        d88P 888 8888Y88b 888 
+888     888 888        888           d88P  888 8888 Y88b888 
+888     888 888    888 888          d88P   888 8888  Y88888 
+Y88b   d88P Y88b  d88P 888         d8888888888 8888   Y8888 
+  Y88888P     Y8888P   8888888888 d88P     888 8888    Y888 
+
+Usage rules:
+- Preserve the exact eight lines and one-color-per-row mapping.
+- Center only when the terminal can contain the complete banner.
+- Never crop, wrap, add a slogan, or combine with the circular web mark.
+- Any key may skip the splash; undersized terminals omit it.

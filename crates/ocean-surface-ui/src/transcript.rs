@@ -600,7 +600,11 @@ fn BlockView(
         let daemon = daemon.clone();
         match block() {
             Some(Block::Text(text)) => view! {
-                <div class="block block--text" inner_html=render_md(&text)></div>
+                <div
+                    class="block block--text"
+                    inner_html=render_md(&text)
+                    on:click=crate::host::open_external_link_click
+                ></div>
             }
             .into_any(),
 

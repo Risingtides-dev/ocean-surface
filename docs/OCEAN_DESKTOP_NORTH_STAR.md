@@ -1,247 +1,448 @@
 # Ocean Desktop — North Star Design
 
-> The Tauri desktop app's product design: information architecture, deep-menu
-> system, facet functionality, and build orchestration. Grounded in the
-> 2026-07 competitive research pass (Claude Desktop, Codex/ChatGPT desktop,
-> Cursor 3.x) and the existing Ocean specs
+> The Tauri desktop app's product design: information architecture, native-shell
+> posture, workspace evolution, and execution sequencing. Grounded in the
+> 2026-07 competitive research pass across Cursor, ChatGPT desktop + Codex,
+> Claude Code / Claude Desktop, and Factory, plus the existing Ocean specs
 > (`../ocean-os/docs/OCEAN_BROWSER_CONTROL_SURFACE.md`,
 > `../ocean-os/docs/AGENT_RENDER_PROTOCOL.md`).
 >
 > Contract recap: ONE canonical Leptos WASM bundle, two hosts (browser PWA,
 > Tauri shell). The daemon is the authority; every surface steers. Native
-> affordances are host-gated behind `running_as_tauri()` and degrade cleanly
-> in the browser. Design language: OCEAN depth ramp, conditional rendering
-> over permanent chrome, reveal-on-intent (`docs/OCEAN_WEB_SURFACE_DESIGN.md`).
+> affordances are host-gated behind `running_as_tauri()` and degrade cleanly in
+> the browser. Design language: OCEAN depth ramp, conditional rendering over
+> permanent chrome, reveal-on-intent (`docs/OCEAN_WEB_SURFACE_DESIGN.md`).
+>
+> Implementation detail for the first desktop slice lives in
+> [`OCEAN_DYNAMIC_ISLAND_IMPLEMENTATION.md`](OCEAN_DYNAMIC_ISLAND_IMPLEMENTATION.md).
+
+## North Star
+
+**Ocean Desktop is the native cockpit for persistent agent work.**
+
+Not a wrapped web chat app. Not merely an IDE plugin. Not a second product that
+forks away from web/mobile.
+
+On desktop, Ocean should feel like a serious native shell for:
+
+- projects
+- sessions
+- agents
+- files and editing
+- browser/computer-use work
+- repo + GitHub workflows
+- approvals, artifacts, and long-running automation
+
+The differentiator is structural:
+
+- **shared Leptos product core**
+- **Tauri-native machine hands**
+- **daemon-owned runtime authority**
+- **one session model across desktop, web, extension, and future mobile**
 
 ## Strategic position (from the comp research)
 
-- **Codex Remote proved our thesis**: files/creds/permissions stay on the
-  host; satellites steer over a paired relay. Codex is one-phone-one-host;
-  Ocean is many-surfaces-one-daemon. We extend a validated pattern.
-- **Claude Desktop's weakness is fragmentation**: Claude Code desktop sessions
-  are isolated from web/mobile; Cowork projects don't sync. Ocean's
-  daemon-owned session contract fixes this *by construction*. Never break it.
-- **Cursor sets the GitHub bar**: agents-as-sessions listed in one window
-  regardless of origin, branch-per-agent, PR results, Bugbot auto-review,
-  event automations. We match the *orchestration UX*, not the cloud-VM
-  execution model.
-- **Nobody has an agent-native browser.** Codex fled to cloud VMs, Claude is a
-  screenshot loop, Cursor only drives localhost. Layer 6 of the browser spec
-  (tab-as-task, omnibox-as-intent, record/replay, audit) is the long-game
-  differentiator. The cockpit (below) is the first step that requires zero
-  daemon changes.
+- **Cursor sets the orchestration bar**: one window for agents, coding,
+  reviews, automation, and repo-aware work. Ocean should match the
+  *project/session/workflow coherence*, not copy the cloud execution model.
+- **ChatGPT desktop + Codex validate the command-center thesis**: desktop AI is
+  moving beyond chat into delegated work, parallel agents, worktrees, and rich
+  ambient context (files, screenshots, screen state).
+- **Claude Code proves the appetite for agent management surfaces**: Agent view,
+  routines, dynamic workflows, and computer use all point toward persistent,
+  multi-session work management. Claude still fragments state across surfaces;
+  Ocean must not.
+- **Factory proves the SDLC-cockpit opportunity**: there is real demand above
+  the editor layer for triage, validation, review, release, and operational
+  visibility in one system.
+- **Ocean's advantage is many-surfaces-one-daemon**: where competitors sync or
+  duplicate work across desktop/web/mobile, Ocean can let every surface attach
+  to the same live session/runtime authority.
+- **Native value is context + action, not packaging**: the desktop shell wins
+  when it can see more of the machine, act through OS affordances, and keep
+  that capability behind one explicit host seam.
+
+## Product thesis shift
+
+A plain left rail is useful, but it is no longer enough to differentiate Ocean.
+If desktop begins and ends with "sidebar + center chat + right tools," Ocean
+risks becoming another competent agent shell that still feels formulaic.
+
+The more distinctive desktop-native move is:
+
+> **Ocean uses a Dynamic Island as the live surface for agent work. `⌘P`
+> turns it into a dedicated session switcher; `⌘⇧F` turns it into transcript
+> Recall. Those intents replace one another rather than stacking into one
+> dashboard.**
+
+That means:
+
+- **Island Agent mode = living work object and immediate interaction**
+- **Island Sessions mode = focused session switching only**
+- **Island Recall mode = transcript-content retrieval only**
+- **Center = focused transcript**
+- **Workbench = tools and authoring**
+- **Rail / palette / modal = utility browse surfaces, not the signature move**
 
 ## Information architecture
 
-Three vertical zones plus a command layer. Idle state stays a single bar +
-transcript — every zone below is reveal-on-intent.
+On Tauri desktop, Ocean should resolve into three primary zones plus two command
+layers:
 
 ```text
-┌──────────────────────────────────────────────────────────────┐
-│ header: project/session context · daemon dot · ⋯ overflow    │
-├──────────┬──────────────────────────────────┬────────────────┤
-│ RAIL     │ TRANSCRIPT                       │ CONTEXT DECK   │
-│ projects │ turns · streaming · render-      │ Files          │
-│ sessions │ protocol components · permission │ Repo           │
-│ agents   │ prompts · composer               │ Browser        │
-│          │                                  │ (Council)      │
-└──────────┴──────────────────────────────────┴────────────────┘
-                 ⌘K command palette (the deep menu)
+┌────────────────────────────────────────────────────────────────────┐
+│ header/titlebar: brand · Dynamic Island · daemon/runtime · ⋯      │
+├───────────────────────────────────────┬────────────────────────────┤
+│ FOCUSED TRANSCRIPT / ACTIVE WORK      │ RIGHT WORKBENCH            │
+│ turns · streaming · permissions       │ Files · Editor             │
+│ artifacts · composer                  │ Browser · Repo · GitHub    │
+└───────────────────────────────────────┴────────────────────────────┘
+   click = agent   ·   ⌘P = sessions   ·   ⌘⇧F = Recall   ·   ⌘K = actions
 ```
 
-### The Rail (left, collapsible, project-first)
+A browse surface (rail, modal, or richer palette results) still exists, but it
+is not the hero. The hero is the titlebar-adjacent Island that represents work
+in motion.
 
-Extends the existing sessions panel into the Cursor "Agents Window" pattern
-mapped onto Ocean's real hierarchy:
+### The Dynamic Island (desktop-native, ambient, alive)
 
-- **Projects** (bound to repos when a binding exists) → sessions grouped
-  under them; `Other` bucket per the existing session contract.
-- Session rows: status glyph (running / idle / needs-approval), origin badge
-  (`surface-web` / `surface-tauri` / `surface-extension` / TUI), branch chip
-  when the project has a repo binding.
-- No new chrome when idle: the rail is the existing sessions panel, richer.
+The Island is a compact, persistent surface in the header/titlebar zone.
 
-### The Context Deck (right, one panel visible at a time)
+Its job is to show **active work that may need attention**:
 
-Deck tabs are ghost triggers; nothing renders until opened. Each panel is a
-self-contained Leptos module with a single mount point (see Orchestration).
+- active sessions
+- sessions waiting on a user reply
+- permission / approval requests
+- browser-driving state
+- call / room state
+- CI / GitHub runs later
+- longhouse / council work later
+
+The Island is not just a status chip. It is the desktop-native **attention
+router**.
+
+#### Island behavior
+
+- Quiet when nothing is urgent.
+- Glows / pulses when a session or job needs attention.
+- Expands on click into one direct agent-work object, never an Activity feed.
+- Exposes the state-relevant action without an accordion disclosure.
+- Replaces Agent with Sessions or Recall when those explicit tools are invoked.
+- Lets the operator switch the focused session in one move from Sessions.
+- Later waves can add background reply only after daemon request/token authority exists.
+
+#### What the compact Island shows first
+
+V1 should keep the model small and legible:
+
+- the currently focused session
+- one or more active-background sessions
+- a simple state badge (`active`, `needs reply`, `approval`, `running`)
+- a compact count for additional active items
+
+### The Focused Center (transcript-native)
+
+Ocean remains transcript-first in the middle:
+
+- user prompts
+- assistant turns
+- streaming work
+- permission prompts
+- render-protocol artifacts
+- room/call state
+- composer and slash commands
+
+This is not an IDE center pane with a chat sidebar bolted on. The conversation
+and work log remain central because they are the daemon's primary record of
+intent, action, and result.
+
+The key desktop rule is:
+
+> **one session owns the center at a time; the others orbit in the Island.**
+
+### The Right Workbench (desktop-native work surface)
+
+The right side is a real workbench on Tauri and a reveal-on-intent deck on the
+web/extension. Same conceptual modules, different host posture.
 
 1. **Files** — persistent explorer for the session cwd. Native root pick
-   (Tauri `pick_folder`), live updates (`watch_paths` → `path-changed`),
-   collapsible tree reusing `file_tree` styling, click → preview (read via
-   daemon tools, permission-gated). Browser host: read-only tree from the
-   agent-emitted `file_tree` components; picker and watcher hidden.
-2. **Repo** — local-first repo state: current branch, dirty/staged counts,
-   ahead/behind, recent commits. Sourced natively (git2 in the Tauri backend,
-   watching `.git/HEAD` + refs via the existing watcher) — this is *local
-   file reading*, not a provider call, so it belongs in the shell. GH-API
-   depth (PRs, CI, reviews) lands later behind daemon tools; the panel's
-   schema reserves space for it. Actions (commit/push/PR) stay behind
-   reveal-on-intent and route through the daemon as agent turns.
-3. **Browser** — the agent-browser cockpit, v1 built *entirely from the
-   existing event stream*: a reducer over `browser_*` tool calls in the
-   session's turns (navigate/click/type actions → action timeline;
-   `browser_read_page` results → current PageRead card with url/title/elements;
-   `browser_screenshot` results → latest screenshot). Zero daemon changes.
-   v2 (later, ocean-os work): `ClientContext.browser` + dedicated events per
-   the control-plane doc; v3 is the embedded-Chromium decision (Phase B:
-   WRY vs CEF spike — deliberately deferred; the cockpit teaches us what the
-   embed must do).
-4. **Council** — longhouse surface; owned by the concurrent session's work.
-   The deck reserves the slot; we do not touch `council_events` code.
+   (`pick_folder`), live updates (`watch_paths` → `path-changed`), collapsible
+   tree, click → preview/open.
+2. **Editor** — evolves the current preview tabs into a true editing surface:
+   buffers, dirty state, save flows, search, diffs, and eventually splits /
+   diagnostics.
+3. **Browser** — the agent-browser cockpit. v1 can continue to derive from the
+   existing browser event stream and screencast path; later waves deepen this.
+4. **Repo** — local-first git state from the Tauri shell: branch,
+   ahead/behind, dirty/staged, recent commits.
+5. **GitHub** — PRs, checks, Actions, reviews, issue context, and merge flows.
+   Remote authority belongs to daemon tools; the shell contributes local repo
+   facts and native affordances.
+6. **Council / Canvas / Artifacts** — specialized surfaces mounted when the
+   session's work requires them.
 
-### The Command Layer (the "deep menus")
+### Browse surfaces (utility, not hero)
 
-Deep functionality without chrome sprawl — three entry points, one registry:
+Ocean still needs a way to browse older or inactive work. That can be supplied
+by one or more utility surfaces:
 
-- **⌘K command palette**: fuzzy command list, the primary deep menu. Commands
-  are a typed registry (id, title, scope, availability predicate, action).
-  Scopes: session (new/switch/approve), files (pick root, reveal), repo
-  (copy branch, view diff), browser (open cockpit, screenshot), app (toggle
-  deck, daemon status). Availability predicates gate on host + panel state —
-  browser-host shows only what works there.
-- **Native menubar** (Tauri Menu API, macOS-first): File / Session / View /
-  Help mirroring palette commands. Menubar is Tauri-only by definition.
-- **Header ⋯ overflow**: unchanged — secondary actions per the design system.
+- existing Sessions modal
+- a future slim rail
+- the bounded Sessions switcher opened by `⌘P`
+- project/session browsing via the palette
 
-One registry drives all three; a command added once appears everywhere.
+The important rule is that **browsing is not the signature interaction**.
+The signature interaction is the Island + focus switching.
+
+### Command layers
+
+Ocean should separate **agent interaction**, **session switching**, **history
+Recall**, and **actions**.
+
+#### Click — Agent
+
+Clicking the compact object opens the focused agent or the single authoritative
+work item that currently needs attention. It never appends a session catalogue.
+
+#### `⌘P` — Sessions
+
+`⌘P` opens the Island as a keyboard-first session switcher. It searches session
+metadata and answers one question: **which session should own the center?**
+
+#### `⌘⇧F` — Recall
+
+`⌘⇧F` opens daemon-owned transcript Recall. It searches inside prior user and
+assistant turns and returns bounded excerpts with provenance. It never mixes in
+agent actions or metadata-only session rows.
+
+#### `⌘K` — commands and actions
+
+`⌘K` remains the action layer:
+
+- new session
+- open workbench views
+- start daemon
+- reveal browser tooling
+- trigger workflows
+- app-level actions
+
+One host can expose both surfaces without confusing them because they serve
+clearly different jobs.
+
+## Discovery model
+
+Discovery grows through separate tools rather than heterogeneous result groups.
+
+### Sessions — local metadata fuzzy search
+
+Search sessions by title, project, cwd, branch, origin, recency, and turn count.
+Focused-session and authoritative work state may influence ordering, but the
+result remains a session.
+
+### Agent — authoritative work routing
+
+Requests, approvals, browser work, calls/rooms, CI, and GitHub jobs appear as
+one selected work object in Agent mode. They are not search results or drawers.
+
+### Recall — transcript and memory retrieval
+
+Initial Recall searches persisted user/assistant display transcript text using
+truthful exact, lexical, and fuzzy ranking. Later daemon/Bedrock work may fuse
+semantic retrieval over assistant summaries, files mentioned, recurring topics,
+unresolved threads, and durable memory. The Surface never performs embeddings or
+labels fuzzy results semantic.
+
+This separation upgrades Ocean from "chat with history" to a memoryful native
+workspace without turning the Island into a universal list.
 
 ## Host bridge (the enabling slice)
 
 A single `src/host.rs` module in `ocean-surface-ui` owns ALL Tauri interop:
 
-- `invoke(cmd, args) -> Future<Result<JsValue>>` via `__TAURI_INTERNALS__`,
-  compiled for wasm, runtime-gated on `running_as_tauri()`.
-- `listen(event, cb)` for `path-changed` (and future shell events).
-- Typed wrappers: `pick_folder()`, `watch_paths(paths)`, `unwatch_paths`,
-  `repo_state(root)`.
-- Every wrapper returns `None`/no-op on non-Tauri hosts — panels never call
-  `__TAURI_INTERNALS__` directly. This is the only file that knows Tauri
-  exists.
+- `invoke(cmd, args) -> Future<Result<JsValue>>` via `__TAURI_INTERNALS__`
+- `listen(event, cb)` for shell-emitted events
+- typed wrappers: `pick_folder()`, `watch_paths(paths)`, `unwatch_paths`,
+  `repo_state(root)`, daemon supervision, notifications, badge, deep links
 
-Backend additions in `crates/ocean-tauri`: `repo_state` command (git2:
-branch, ahead/behind vs upstream, dirty/staged counts, last N commits) and a
-`menu` setup. `pick_folder`/`watch_paths` already exist.
+Rules:
 
-## Surface Capability Matrix
+- Nothing outside `host.rs` references Tauri APIs directly.
+- Every wrapper returns `None` / `false` / no-op on non-Tauri hosts.
+- Desktop-only capability is additive; it never forks the product model.
 
-The information architecture says *what* each piece is; this matrix says
-*where it runs*. The split is structural, not a porting decision: the daemon
-owns all state, so anything daemon-backed crosses over to every surface for
-free, and the desktop bundle contributes only native hands. One Leptos bundle,
-one gate — `host::running_in_tauri()` — and native affordances degrade to
-`None`/`false`/no-op on the browser and extension. That gate *is* the
-capability axis; there is no second codebase to keep aligned.
+## Surface capability matrix
 
-The comps leak at exactly this seam. Claude Desktop's Cowork sessions are
-stranded off web/mobile; Codex keeps IDE and web history unsynced; Cursor had
-to bolt on an Agents Window to reconcile cloud sessions with local ones. Each
-failure is a capability that didn't cross surfaces. Codex Remote inverts
-Ocean's topology yet confirms it — files, creds, and permissions stay on the
-host while the phone steers over a paired relay, i.e. daemon-authority with a
-thinner satellite (fuller argument in "Strategic position" above).
+The split is structural, not a porting decision: the daemon owns all state, so
+anything daemon-backed crosses to every surface for free, and the desktop bundle
+contributes only native hands.
 
 ### Crosses over (daemon-backed → every surface)
 
 These port for free because they read state any client can already see:
 
-- Transcript, sessions, projects — the session contract itself.
-- ⌘K command palette — registry + scoring, host-agnostic.
-- Permission prompts and voice — daemon-mediated, surfaced identically
-  everywhere.
-- Render-protocol components and the Council deck — turn and `council_events`
-  data.
-- Browser cockpit — a reducer over `browser_*` tool events; the browser lives
-  in the daemon via CDP, so any surface watches the same action /
-  `browser_read_page` / screenshot stream.
-- Files panel listing — daemon `/v1/fs/dirs`, readable from any host.
+- transcript, sessions, projects
+- command palette registry + scoring
+- permission prompts and voice
+- render-protocol components and Council data
+- browser activity/cockpit reducers over `browser_*` tool events
+- files listing when sourced from daemon APIs
+- GitHub/PR/checks data once it lands behind daemon tools
+- Island/search results derived from daemon-visible session/activity state
 
 ### Desktop-only (native hands)
 
 These exist only because they need the OS; each is one gated wrapper, never a
 feature fork:
 
-- **Daemon supervision** — the desktop app is the daemon's home: sidecar
-  spawn, health, restart. Web connects; desktop runs.
-- **OS presence** — menubar/tray, a global hotkey that summons the app, a dock
-  badge for pending permissions, native notifications on turn-complete and
-  permission-request, launch-at-login, keep-awake.
-- **Native menus** projected from the single `CommandRegistry` — palette and
-  menubar share one command source (see Command Layer).
-- **Local FS hands** — `pick_folder`, `watch_paths`, and the git2 `repo_state`.
-  Shipped; local file reading that belongs in the shell.
-- **Deep links, Keychain creds, QR pairing host** — `ocean://session/<id>`
-  entry, OS credential storage, and the desktop acting as the relay host
-  web/phone pairs against.
-- **Multi-window** — session pop-outs and an always-on-top companion.
+- daemon supervision
+- native notifications, dock/taskbar badge, tray/menubar, global shortcuts
+- local FS affordances (`pick_folder`, `watch_paths`)
+- local git state (`repo_state`)
+- deep links, keychain storage, pairing host, launch-at-login
+- multi-window and pop-out utility surfaces
 
 ### Web/PWA distinctive edge
 
-The web surface is not a degraded desktop — reachability is its native
-advantage: zero-install, open from anywhere, PWA install, web push. It is the
-remote control that sees the *same* session state the desktop does, which beats
-every comp's remote: they sync a copy, Ocean reads the original.
+The web surface is not a degraded desktop. Its native advantage is reachability:
+zero-install, remote control, mobile availability, PWA install, web push, and
+shared access to the exact same daemon-owned session state.
 
-### Flagged decision — repo panel
+### GitHub boundary (binding decision)
 
-Repo state is native-git2 today, so the browser shows a native-shell-only empty
-state. Wave 2 adds a daemon-side repo-state tool as the web fallback and the
-shared depth source (PRs / CI / reviews) for both surfaces; the panel schema
-already reserves the space. This is the one panel deliberately not yet
-crossover-complete.
+Remote repo authority does **not** belong in the Tauri shell.
 
-## Orchestration & worktree protocol
+- **Shell owns**: local repo discovery, branch/worktree facts, reveal/open,
+  native file and OS affordances.
+- **Daemon owns**: GitHub auth, PR/review/checks/Actions queries, mutations,
+  automation, auditability, and permission gating.
 
-The main checkout is shared with concurrent council/longhouse work
-(uncommitted edits to `daemon.rs`, `sessions.rs`, `proxy/main.rs`,
-`panels.css`). Build isolation rules:
+This boundary is what lets Ocean gain GitHub depth without corrupting the
+shared-core model.
 
-1. **Every workstream builds in its own git worktree** off `main`, branch
-   `feat/desktop-<stream>`. Nobody edits the shared checkout directly.
-2. **Collision files are integrator-owned.** `app.rs` (mounts), `daemon.rs`,
-   `index.html` / `extension/sidepanel.html` / `scripts/build-extension.sh`
-   (the stylesheet 3-place rule) are touched only by the integrator (Main) at
-   merge time. Subagents deliver self-contained modules + a documented mount
-   hook, never the mount edit itself.
-3. **One new stylesheet** `styles/deck.css` covers all deck panels + palette
-   (one 3-place wiring edit, done once by the integrator). Colors only from
-   `styles/tokens.css`.
-4. **Merges are serialized** through the integrator: review in worktree →
-   rebase on main → gates (`cargo check -p ocean-surface-ui --target
-   wasm32-unknown-unknown`, `cargo test -p ocean-surface-ui`, tauri crate
-   check from its own dir) → land → next stream rebases.
-5. **Never touch** the concurrent session's files beyond mechanical rebase;
-   their work lands on their schedule.
+## Current implementation status
 
-### Workstreams
+The scaffold is already real:
 
-| Stream | Branch | Scope (files) | Depends on |
-|---|---|---|---|
-| HostBridge | `feat/desktop-host-bridge` | NEW `ocean-surface-ui/src/host.rs`; `ocean-tauri/src/lib.rs` (+git2 `repo_state`, menu scaffold) | — |
-| FilesPanel | `feat/desktop-files-panel` | NEW `src/deck/files.rs` (+`deck/mod.rs`) | HostBridge contract |
-| RepoPanel | `feat/desktop-repo-panel` | NEW `src/deck/repo.rs` | HostBridge contract |
-| Cockpit | `feat/desktop-cockpit` | NEW `src/deck/browser.rs` (event reducer) | — (reads existing turn stream) |
-| Palette | `feat/desktop-palette` | NEW `src/palette.rs` (registry + ⌘K UI) | — (commands wired at integration) |
-| Integration | (main, integrator only) | `app.rs` mounts, `deck.css` wiring, menubar wiring, rail grouping polish | all above |
+- `src/host.rs` exists and already carries core Tauri affordances.
+- `src/workspace.rs` already mounts a desktop right-side workspace pane.
+- files / repo / browser workspace surfaces already exist in some form.
+- palette/command-registry work exists.
+- session grouping logic already exists.
+- browser activity and session metadata already provide enough state to drive an
+  Island v1 without daemon architecture changes.
 
-Panels code against the HostBridge *contract* (function signatures above),
-not its implementation — streams run in parallel from the start.
+The biggest remaining product gap is **desktop information architecture**, not
+foundational plumbing.
 
-## Sequencing
+## Implementation slices (current recommendation)
 
-1. **Wave 1 (parallel)**: HostBridge, Cockpit, Palette, FilesPanel, RepoPanel.
-2. **Integration pass** (integrator): mounts, deck.css 3-place wiring, palette
-   command registry filled with real actions, menubar → palette registry.
-3. **Wave 2** (after user look): rail regrouping by repo/branch/origin
-   (touches `sessions.rs` — deliberately deferred until the concurrent
-   session's `sessions.rs` work lands), GH-API depth via daemon tools,
-   streaming-diff review affordance, checkpoint/rollback.
-4. **Wave 3**: embedded-browser spike (WRY vs CEF), `ClientContext.browser`
-   daemon events, Layer-6 primitives.
+### Slice 1 — Dynamic Island shell
 
-### Native-feel priorities
+This is the immediate priority.
 
-The OS-presence slice, sequenced by feel-impact: **P1** tray + menubar +
-global hotkey · **P2** native notifications + dock badge · **P3** native menus
-from the registry · **P4** daemon-supervision sidecar · **P5** deep links /
-Keychain / QR pairing · **P6** multi-window.
+Goals:
+
+- mount a compact Island in the Tauri header/titlebar zone
+- show the focused session and authoritative agent-work state
+- reflect simple live states (`ready`, `needs you`, `running`)
+- expand on click into one direct Agent object
+- keep the browser/web model intact
+
+Success condition: Ocean stops reading as a web chat in a native window and
+starts reading as a native workspace with a living attention surface.
+
+### Slice 1.5 — Focus switching
+
+Goals:
+
+- selecting an Island item promotes that session into the center transcript
+- the previously focused session slots back into the Island
+- preserve room/call/browser and workbench behavior
+
+Success condition: one session is foreground and the rest orbit naturally.
+
+### Slice 2 — `⌘P` Sessions mode
+
+Goals:
+
+- open the Island as a keyboard-first session switcher
+- search session metadata: title, project, path, branch, origin, recency
+- bound and rank focus results
+- Enter focuses, arrow keys navigate, Esc collapses
+
+Success condition: `⌘P` answers which session should own the center without
+mixing in agent work or transcript passages.
+
+### Slice 3 — `⌘⇧F` Recall
+
+Goals:
+
+- search persisted user/assistant transcript content through daemon authority
+- return bounded excerpts with session, role, workspace, and match provenance
+- begin with truthful exact/lexical/fuzzy ranking
+- add semantic fusion through daemon/Bedrock later, never in Surface code
+
+Success condition: Ocean becomes a memoryful workspace without turning the
+Island into one heterogeneous result list.
+
+### Slice 4 — Editor-grade workbench
+
+Goals:
+
+- evolve preview tabs into editable buffers
+- dirty state + save/save-all
+- search/find-in-file
+- syntax highlighting and stable tab behavior
+- diff/review affordances
+- command-palette integration for editor actions
+
+Success condition: the right workbench becomes a place to *author*, not merely
+preview.
+
+### Slice 5 — Repo + GitHub cockpit
+
+Goals:
+
+- keep local git state strong on desktop
+- add daemon-backed GitHub views: PRs, checks, Actions, reviews, issues
+- connect session/worktree/branch/PR as one visible thread of work
+- let actions route through daemon tools, not shell-only code
+- surface CI / GitHub runs in the Island when relevant
+
+Success condition: Ocean can manage real engineering workflow inside one shell.
+
+### Slice 6 — OS presence and browser/multi-agent expansion
+
+Goals:
+
+- native menubar from the command registry
+- notifications + dock badge polish
+- global hotkey
+- deep-link routing
+- launch-at-login / keep-awake / utility pop-outs
+- deepen the browser cockpit and multi-agent orchestration surfaces
+
+Success condition: the app feels at home on the OS, not merely hosted by it,
+and Ocean's long-game differentiator becomes visible without sacrificing the
+current daemon/session model.
+
+## Native-feel priorities
+
+Ordered by operator impact:
+
+1. **Dynamic Island Agent interaction**
+2. **`⌘P` Sessions + `⌘⇧F` Recall**
+3. **Editor-grade workbench**
+4. **Repo + GitHub cockpit**
+5. **Notifications / badge / menubar / hotkey**
+6. **Deep links / keychain / pairing / multi-window**
+7. **Embedded-browser / Layer-6 browser primitives**
+
+## Execution rules
+
+- Keep one canonical Leptos bundle.
+- Keep `host.rs` as the only Tauri seam.
+- Prefer mounting/refining existing modules over inventing parallel systems.
+- Do the desktop shell as additive host posture, not a divergent product.
+- Separate Agent interaction, `⌘P` Sessions, `⌘⇧F` Recall, and `⌘K` actions.
+- Land the work in slices; **Dynamic Island first**.

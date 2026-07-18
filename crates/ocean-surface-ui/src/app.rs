@@ -13,6 +13,7 @@ use crate::deck::files::FilesPanel;
 use crate::deck::repo::RepoPanel;
 use crate::deck::DeckPanel;
 use crate::host::DaemonStatus;
+use crate::island_dynamic::{DynamicIsland, IslandMode};
 use crate::model::{Block, Role, Turn};
 use crate::palette::{Command, CommandRegistry, CommandScope, PaletteView};
 use crate::rooms::{RoomStage, Rooms, RoomsPanel};
@@ -26,7 +27,7 @@ use crate::voice::planner::{
 use crate::voice::VoiceOrb;
 use crate::workspace::WorkspaceFocus;
 
-const COMPOSER_MIN_HEIGHT_PX: i32 = 40;
+const COMPOSER_MIN_HEIGHT_PX: i32 = 32;
 const COMPOSER_MAX_HEIGHT_PX: i32 = 240;
 
 /// localStorage key for the workspace pane's open/collapse state ("1" open,
@@ -46,6 +47,10 @@ fn composer_overflow_y(scroll_height: i32) -> &'static str {
     }
 }
 
+fn should_submit_composer_key(key: &str, shift: bool, is_composing: bool) -> bool {
+    key == "Enter" && !shift && !is_composing
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SurfaceVoiceLayout {
     center_stage: bool,
@@ -55,6 +60,7 @@ struct SurfaceVoiceLayout {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct RevealVisibility {
     council: bool,
+    island: bool,
     rooms: bool,
     sessions: bool,
     floor: bool,
@@ -66,6 +72,7 @@ struct RevealVisibility {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RevealSurface {
     Council,
+    Island,
     Rooms,
     Sessions,
     Floor,
@@ -87,6 +94,8 @@ fn council_open_visibility() -> RevealVisibility {
 fn topmost_reveal(visibility: RevealVisibility) -> Option<RevealSurface> {
     if visibility.council {
         Some(RevealSurface::Council)
+    } else if visibility.island {
+        Some(RevealSurface::Island)
     } else if visibility.rooms {
         Some(RevealSurface::Rooms)
     } else if visibility.sessions {
@@ -1159,6 +1168,8 @@ pub fn App() -> impl IntoView {
 
     // Sessions panel overlay.
     let show_sessions = RwSignal::new(false);
+    let island_mode: RwSignal<IslandMode> = RwSignal::new(IslandMode::Closed);
+    let island_focus_request = RwSignal::new(0u64);
     // Council/quorum observability deck overlay (OCEAN-96). A native Leptos
     // stage (crate::council::CouncilStage) inside a full-screen modal — no
     // iframe, no proxied static page. It reads the daemon's folded Longhouse
@@ -1215,6 +1226,9 @@ pub fn App() -> impl IntoView {
     let open_council = Callback::new(move |()| {
         let next = council_open_visibility();
         show_council.set(next.council);
+        if !next.island {
+            island_mode.set(IslandMode::Closed);
+        }
         show_rooms.set(next.rooms);
         show_sessions.set(next.sessions);
         show_floor.set(next.floor);
@@ -1238,6 +1252,32 @@ pub fn App() -> impl IntoView {
     // restores it, defaulting open when the key is absent. Off-Tauri the pane
     // never mounts, so this is inert there.
     let in_tauri = crate::host::running_in_tauri();
+    let daemon_for_island = StoredValue::new(daemon.clone());
+    let palette_open = RwSignal::new(false);
+    // Every Island entry point shares one overlay policy. Agent interaction,
+    // session switching, and history Recall are mutually exclusive modes of one
+    // titlebar object; they never stack into one dashboard or hide behind peers.
+    let open_island = Callback::new(move |next: IslandMode| {
+        palette_open.set(false);
+        show_council.set(false);
+        show_rooms.set(false);
+        show_sessions.set(false);
+        if next != IslandMode::Closed {
+            island_focus_request.update(|request| *request = request.wrapping_add(1));
+        }
+        island_mode.set(next);
+    });
+    // Preserve mutual exclusion when another entry point (native menu, room
+    // navigation, or a future deep link) opens a sibling overlay directly.
+    // `open_island` clears those signals before setting the Island, so the
+    // latest explicit opener wins without surfaces stacking invisibly.
+    Effect::new(move |_| {
+        if island_mode.get() != IslandMode::Closed
+            && (show_council.get() || show_rooms.get() || show_sessions.get())
+        {
+            island_mode.set(IslandMode::Closed);
+        }
+    });
     let workspace_open: RwSignal<bool> = RwSignal::new(
         // Default OPEN when the key is absent; only an explicit "0" starts
         // collapsed (the pane is the shell's primary surface).
@@ -1344,6 +1384,24 @@ pub fn App() -> impl IntoView {
             slash: Some("/sessions"),
             enabled: always,
             run: Callback::new(move |_| toggle_sessions()),
+        });
+        registry.register(Command {
+            id: "focus-search",
+            title: "Switch Session…".into(),
+            hint: Some("⌘P".into()),
+            scope: CommandScope::App,
+            slash: None,
+            enabled: Signal::derive(move || in_tauri),
+            run: Callback::new(move |_| open_island.run(IslandMode::Sessions)),
+        });
+        registry.register(Command {
+            id: "recall-history",
+            title: "Recall History…".into(),
+            hint: Some("⌘⇧F".into()),
+            scope: CommandScope::App,
+            slash: None,
+            enabled: Signal::derive(move || in_tauri),
+            run: Callback::new(move |_| open_island.run(IslandMode::Recall)),
         });
         registry.register(Command {
             id: "toggle-rooms",
@@ -1649,15 +1707,56 @@ pub fn App() -> impl IntoView {
     });
     on_cleanup(move || _pointer_light.remove());
 
+    // Desktop Island shortcuts. Cmd/Ctrl+P opens the dedicated session
+    // switcher; Cmd/Ctrl+Shift+F opens transcript Recall. Both are Tauri-only,
+    // preserving browser/PWA Print and Find. Cmd/Ctrl+K closes the Island before
+    // PaletteView handles the same event.
+    let _island_shortcut = window_event_listener(ev::keydown, move |e: ev::KeyboardEvent| {
+        if e.is_composing() {
+            return;
+        }
+        let command = e.meta_key() || e.ctrl_key();
+        if command
+            && !e.shift_key()
+            && !e.alt_key()
+            && e.key().eq_ignore_ascii_case("k")
+            && island_mode.get_untracked() != IslandMode::Closed
+        {
+            island_mode.set(IslandMode::Closed);
+        }
+        if in_tauri
+            && command
+            && !e.shift_key()
+            && !e.alt_key()
+            && e.key().eq_ignore_ascii_case("p")
+        {
+            e.prevent_default();
+            e.stop_propagation();
+            open_island.run(IslandMode::Sessions);
+        } else if in_tauri
+            && command
+            && e.shift_key()
+            && !e.alt_key()
+            && e.key().eq_ignore_ascii_case("f")
+        {
+            e.prevent_default();
+            e.stop_propagation();
+            open_island.run(IslandMode::Recall);
+        }
+    });
+    on_cleanup(move || _island_shortcut.remove());
+
     // Window-level Escape closes exactly one topmost reveal. Priority follows
-    // visual layering: council > browse overlays > Floor > deck > inline call
-    // reveals. Palette/slash Escape stops propagation before reaching this rail.
+    // visual layering: council > Island > browse overlays > Floor > deck >
+    // inline call reveals. Palette/slash Escape stops propagation before
+    // reaching this rail.
     let _overlay_escape = window_event_listener(ev::keydown, move |e: ev::KeyboardEvent| {
         if !window_escape_should_handle(&e.key(), e.default_prevented()) {
             return;
         }
         let topmost = topmost_reveal(RevealVisibility {
             council: show_council.get(),
+            island: island_mode.get() != IslandMode::Closed,
             rooms: show_rooms.get(),
             sessions: show_sessions.get(),
             floor: show_floor.get(),
@@ -1667,6 +1766,7 @@ pub fn App() -> impl IntoView {
         });
         match topmost {
             Some(RevealSurface::Council) => show_council.set(false),
+            Some(RevealSurface::Island) => island_mode.set(IslandMode::Closed),
             Some(RevealSurface::Rooms) => show_rooms.set(false),
             Some(RevealSurface::Sessions) => show_sessions.set(false),
             Some(RevealSurface::Floor) => show_floor.set(false),
@@ -1897,26 +1997,37 @@ pub fn App() -> impl IntoView {
             // (not descendants): set it on both the header and the brand so
             // the whole left zone drags the window on desktop; inert on web.
             <header class="ocean-header" data-tauri-drag-region="">
-                <div class="ocean-brand" aria-label="Ocean" data-tauri-drag-region="">
-                    <crate::icons::WaveBadge spinning=false compact=true />
-                    <span class="ocean-brand__word" aria-hidden="true">
-                        <crate::icons::OceanWordmark />
-                    </span>
+                <div class="ocean-header__left" data-tauri-drag-region="">
+                    <div class="ocean-brand" aria-label="Ocean" data-tauri-drag-region="">
+                        <crate::icons::WaveBadge spinning=false compact=true />
+                        <span class="ocean-brand__word" aria-hidden="true">
+                            <crate::icons::OceanWordmark />
+                        </span>
+                    </div>
                 </div>
+                <Show when=move || in_tauri>
+                    <DynamicIsland
+                        daemon=daemon_for_island.get_value()
+                        mode=island_mode
+                        focus_request=island_focus_request
+                        on_open=open_island
+                    />
+                </Show>
                 <div class="ocean-header__right">
-                    // Sessions is the single header affordance — opens the
-                    // centered sessions modal (chat / create project / resume).
-                    // No project picker, active-session title, or cwd lives in
-                    // the chrome; all session control moved into the modal.
-                    <button
-                        class="ocean-sessions-trigger"
-                        type="button"
-                        aria-label="sessions"
-                        title="Sessions"
-                        on:click=move |_| toggle_sessions()
-                    >
-                        "Sessions"
-                    </button>
+                    // Web and extension keep the existing Sessions modal entry;
+                    // Tauri uses the centered Island while the registry command
+                    // remains the deep-browse fallback on every host.
+                    <Show when=move || !in_tauri>
+                        <button
+                            class="ocean-sessions-trigger"
+                            type="button"
+                            aria-label="sessions"
+                            title="Sessions"
+                            on:click=move |_| toggle_sessions()
+                        >
+                            "Sessions"
+                        </button>
+                    </Show>
                     // Ambient runtime readouts — token usage, the browser-driving
                     // cue, and connection status — grouped into one demoted cluster
                     // so they read as secondary telemetry, not equal-weight peers
@@ -2333,6 +2444,7 @@ pub fn App() -> impl IntoView {
                             }}
                             <textarea
                                 class="ocean-composer__input"
+                                rows="1"
                                 placeholder="message Ocean…"
                                 node_ref=textarea_ref
                                 prop:value=move || input.get()
@@ -2349,6 +2461,12 @@ pub fn App() -> impl IntoView {
                                     let registry = registry.clone();
                                     move |ev| {
                                         let key = ev.key();
+                                        // IME candidate navigation owns every key
+                                        // while composition is active, including
+                                        // slash-menu arrows, Enter, and Tab.
+                                        if ev.is_composing() {
+                                            return;
+                                        }
                                         let text = input.get_untracked();
                                         let items = slash_items.get_untracked();
                                         // While the input is a leading-slash line
@@ -2418,8 +2536,15 @@ pub fn App() -> impl IntoView {
                                                 _ => {}
                                             }
                                         }
-                                        // Enter to submit, Shift+Enter for newline.
-                                        if key == "Enter" && !ev.shift_key() {
+                                        // Enter submits and Shift+Enter inserts a
+                                        // newline, but composition Enter belongs to
+                                        // the IME candidate picker and must never
+                                        // leak through as a form submission.
+                                        if should_submit_composer_key(
+                                            &key,
+                                            ev.shift_key(),
+                                            ev.is_composing(),
+                                        ) {
                                             ev.prevent_default();
                                             if let Some(target) = ev.target() {
                                                 if let Ok(el) = target.dyn_into::<web_sys::HtmlElement>() {
@@ -2540,7 +2665,7 @@ pub fn App() -> impl IntoView {
             <PinnedRail daemon=daemon_for_pinned.get_value() />
 
             // ⌘K command palette — the deep-menu engine over the registry.
-            <PaletteView registry=registry_for_view />
+            <PaletteView registry=registry_for_view open=palette_open />
 
             // Council/quorum observability deck (OCEAN-96). Native workflow
             // stage now lives inside the surface instead of an iframe.
@@ -2636,9 +2761,10 @@ mod tests {
     use super::{
         composer_height_px, composer_overflow_y, council_open_visibility, execute_planner_workflow,
         initial_planner_context, parse_deep_link, planner_candidates, selected_planner_context,
-        topmost_reveal, window_escape_should_handle, DeepLinkAction, PlannerAction, PlannerContext,
-        PlannerWorkflowFailureStage, PlannerWorkflowOps, PlannerWorkflowRequest, RevealSurface,
-        RevealVisibility, COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX,
+        should_submit_composer_key, topmost_reveal, window_escape_should_handle, DeepLinkAction,
+        PlannerAction, PlannerContext, PlannerWorkflowFailureStage, PlannerWorkflowOps,
+        PlannerWorkflowRequest, RevealSurface, RevealVisibility, COMPOSER_MAX_HEIGHT_PX,
+        COMPOSER_MIN_HEIGHT_PX,
     };
     use crate::daemon::{ProjectInfo, WorktreeInfo};
     use futures_util::future::LocalBoxFuture;
@@ -2891,6 +3017,7 @@ mod tests {
     fn escape_closes_one_topmost_reveal_in_visual_order() {
         let all = RevealVisibility {
             council: true,
+            island: true,
             rooms: true,
             sessions: true,
             floor: true,
@@ -2904,11 +3031,20 @@ mod tests {
                 council: false,
                 ..all
             }),
+            Some(RevealSurface::Island)
+        );
+        assert_eq!(
+            topmost_reveal(RevealVisibility {
+                council: false,
+                island: false,
+                ..all
+            }),
             Some(RevealSurface::Rooms)
         );
         assert_eq!(
             topmost_reveal(RevealVisibility {
                 council: false,
+                island: false,
                 rooms: false,
                 ..all
             }),
@@ -2917,6 +3053,7 @@ mod tests {
         assert_eq!(
             topmost_reveal(RevealVisibility {
                 council: false,
+                island: false,
                 rooms: false,
                 sessions: false,
                 ..all
@@ -2926,6 +3063,7 @@ mod tests {
         assert_eq!(
             topmost_reveal(RevealVisibility {
                 council: false,
+                island: false,
                 rooms: false,
                 sessions: false,
                 floor: false,
@@ -2936,6 +3074,7 @@ mod tests {
         assert_eq!(
             topmost_reveal(RevealVisibility {
                 council: false,
+                island: false,
                 rooms: false,
                 sessions: false,
                 floor: false,
@@ -2947,6 +3086,7 @@ mod tests {
         assert_eq!(
             topmost_reveal(RevealVisibility {
                 council: false,
+                island: false,
                 rooms: false,
                 sessions: false,
                 floor: false,
@@ -2984,6 +3124,14 @@ mod tests {
     fn composer_overflow_switches_only_past_max_height() {
         assert_eq!(composer_overflow_y(COMPOSER_MAX_HEIGHT_PX), "hidden");
         assert_eq!(composer_overflow_y(COMPOSER_MAX_HEIGHT_PX + 1), "auto");
+    }
+
+    #[test]
+    fn composer_enter_respects_newlines_and_ime_composition() {
+        assert!(should_submit_composer_key("Enter", false, false));
+        assert!(!should_submit_composer_key("Enter", true, false));
+        assert!(!should_submit_composer_key("Enter", false, true));
+        assert!(!should_submit_composer_key("a", false, false));
     }
 
     #[test]

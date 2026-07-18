@@ -21,6 +21,17 @@
   padding-left: var(--titlebar-inset);
 }
 
+/* Native chrome spans the actual window even when the readable product shell
+   is capped at --shell-max. Without this, wide collapsed-workspace windows
+   strand the overflow and workspace controls at the shell edge and leave a
+   dead titlebar strip before the rounded window edge. The open workspace path
+   already widens the root and intentionally ends the header at the pane. */
+.ocean-surface.is-titlebar:not(.has-workspace-open) .ocean-header {
+  width: 100vw;
+  margin-left: calc((100% - 100vw) / 2);
+  flex: 0 0 auto;
+}
+
 .ocean-header__right {
   display: flex;
   align-items: center;

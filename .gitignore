@@ -40,3 +40,5 @@ vscode-extension/.vscode/
 vscode-extension/node_modules/
 vscode-extension/dist/
 vscode-extension/*.vsix
+.stitchpad/
+.pi-subagents/

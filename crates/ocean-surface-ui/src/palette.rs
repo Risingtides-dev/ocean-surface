@@ -7,6 +7,8 @@
 use leptos::ev::{self, KeyboardEvent};
 use leptos::prelude::*;
 
+use crate::search::fuzzy_score;
+
 // ── Types ──────────────────────────────────────────────────────────────────
 
 /// The scope a command belongs to — used for grouping and as a visible tag
@@ -188,83 +190,6 @@ fn slash_subseq(target: &str, query: &str) -> bool {
     true
 }
 
-fn fuzzy_score(query: &str, target: &str) -> Option<f64> {
-    if query.is_empty() {
-        return Some(0.0);
-    }
-
-    let query_lower = query.to_lowercase();
-    let target_lower = target.to_lowercase();
-    let query_chars: Vec<char> = query_lower.chars().collect();
-    let target_chars: Vec<char> = target_lower.chars().collect();
-    // Boundary detection needs the ORIGINAL case — lowercasing erases
-    // camelCase transitions. (Assumes 1:1 char mapping under to_lowercase;
-    // command titles are ASCII, and a drift would only skew a bonus.)
-    let target_orig: Vec<char> = target.chars().collect();
-
-    let mut score: f64 = 0.0;
-    let mut qi: usize = 0; // cursor in query
-    let mut prev_match: Option<usize> = None;
-    let mut consecutive: usize = 0;
-
-    for (ti, tc) in target_chars.iter().enumerate() {
-        if qi >= query_chars.len() {
-            break;
-        }
-        if *tc != query_chars[qi] {
-            continue;
-        }
-
-        let mut char_score: f64 = 1.0;
-
-        // Start-of-target bonus: the very first character matched at position 0.
-        if ti == 0 {
-            char_score += 10.0;
-        }
-        // Word-boundary bonus: after a separator or camelCase transition.
-        if ti < target_orig.len() && is_word_boundary(&target_orig, ti) {
-            char_score += 5.0;
-        }
-        // Consecutive bonus: adjacent matches in target.
-        if let Some(prev) = prev_match {
-            if ti == prev + 1 {
-                consecutive += 1;
-                char_score += 2.0 * consecutive as f64;
-            } else {
-                consecutive = 0;
-            }
-        }
-        // Prefix bonus: the first N chars of query match the first N of target.
-        if qi == ti {
-            char_score += 3.0;
-        }
-
-        score += char_score;
-        prev_match = Some(ti);
-        qi += 1;
-    }
-
-    if qi == query_chars.len() {
-        Some(score)
-    } else {
-        None
-    }
-}
-
-/// True when `chars[idx]` is at a word boundary: index 0, after a separator
-/// (` `, `-`, `_`, `/`, `.`), or at a camelCase transition (lower→upper).
-fn is_word_boundary(chars: &[char], idx: usize) -> bool {
-    if idx == 0 {
-        return true;
-    }
-    let prev = chars[idx - 1];
-    let curr = chars[idx];
-    if matches!(prev, ' ' | '-' | '_' | '/' | '.') {
-        return true;
-    }
-    prev.is_lowercase() && curr.is_uppercase()
-}
-
 // ── Selection helpers ──────────────────────────────────────────────────────
 
 /// Wrap-forward: `(idx + 1) % len`. Returns 0 for empty lists.
@@ -316,8 +241,7 @@ impl PartialEq for ScoredCommand {
 /// | Enter        | Run selected command, close palette          |
 /// | Backdrop     | click closes palette                         |
 #[component]
-pub fn PaletteView(registry: CommandRegistry) -> impl IntoView {
-    let open = RwSignal::new(false);
+pub fn PaletteView(registry: CommandRegistry, open: RwSignal<bool>) -> impl IntoView {
     let query = RwSignal::new(String::new());
     let selected_index = RwSignal::new(0usize);
     let input_ref: NodeRef<leptos::html::Input> = NodeRef::new();
@@ -326,7 +250,12 @@ pub fn PaletteView(registry: CommandRegistry) -> impl IntoView {
     let _key_listener = window_event_listener(ev::keydown, move |e: KeyboardEvent| {
         // metaKey on macOS, ctrlKey elsewhere. We check both so Cmd+K works
         // on Mac and Ctrl+K works everywhere else.
-        if (e.meta_key() || e.ctrl_key()) && e.key().to_lowercase() == "k" {
+        if !e.is_composing()
+            && (e.meta_key() || e.ctrl_key())
+            && !e.shift_key()
+            && !e.alt_key()
+            && e.key().eq_ignore_ascii_case("k")
+        {
             e.prevent_default();
             query.set(String::new());
             selected_index.set(0);
@@ -338,9 +267,12 @@ pub fn PaletteView(registry: CommandRegistry) -> impl IntoView {
     // ── Auto-focus the input when the palette opens ──────────────────────
     Effect::new(move |_| {
         if open.get() {
-            if let Some(el) = input_ref.get() {
-                let _ = el.focus();
-            }
+            request_animation_frame(move || {
+                if let Some(el) = input_ref.get() {
+                    let _ = el.focus();
+                    el.select();
+                }
+            });
         }
     });
 
@@ -412,30 +344,35 @@ pub fn PaletteView(registry: CommandRegistry) -> impl IntoView {
     let total_count = move || flat_commands.get().len();
 
     // ── Keyboard navigation inside the palette ───────────────────────────
-    let on_input_keydown = move |ev: KeyboardEvent| match ev.key().as_str() {
-        "Escape" => {
-            ev.prevent_default();
-            ev.stop_propagation();
-            open.set(false);
+    let on_input_keydown = move |ev: KeyboardEvent| {
+        if ev.is_composing() {
+            return;
         }
-        "ArrowDown" => {
-            ev.prevent_default();
-            selected_index.update(|i| *i = next_index(*i, total_count()));
-        }
-        "ArrowUp" => {
-            ev.prevent_default();
-            selected_index.update(|i| *i = prev_index(*i, total_count()));
-        }
-        "Enter" => {
-            ev.prevent_default();
-            let idx = selected_index.get_untracked();
-            let cmds = flat_commands.get_untracked();
-            if let Some(sc) = cmds.get(idx) {
-                sc.command.run.run(());
+        match ev.key().as_str() {
+            "Escape" => {
+                ev.prevent_default();
+                ev.stop_propagation();
                 open.set(false);
             }
+            "ArrowDown" => {
+                ev.prevent_default();
+                selected_index.update(|i| *i = next_index(*i, total_count()));
+            }
+            "ArrowUp" => {
+                ev.prevent_default();
+                selected_index.update(|i| *i = prev_index(*i, total_count()));
+            }
+            "Enter" => {
+                ev.prevent_default();
+                let idx = selected_index.get_untracked();
+                let cmds = flat_commands.get_untracked();
+                if let Some(sc) = cmds.get(idx) {
+                    sc.command.run.run(());
+                    open.set(false);
+                }
+            }
+            _ => {}
         }
-        _ => {}
     };
 
     // ── View ─────────────────────────────────────────────────────────────
@@ -538,84 +475,6 @@ pub fn PaletteView(registry: CommandRegistry) -> impl IntoView {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── fuzzy_score ─────────────────────────────────────────────────────
-
-    #[test]
-    fn empty_query_scores_zero() {
-        assert_eq!(fuzzy_score("", "anything"), Some(0.0));
-    }
-
-    #[test]
-    fn exact_match_scores_positive() {
-        let score = fuzzy_score("files", "files").expect("should match");
-        assert!(score > 0.0);
-    }
-
-    #[test]
-    fn exact_prefix_scores_higher_than_word_boundary() {
-        // "fp" against "FilesPanel" — 'F' is prefix + start, 'P' is camelCase.
-        // "fp" against "SomeFilePanel" — 'f' is camelCase, 'p' is camelCase.
-        let prefix_score = fuzzy_score("fp", "FilesPanel").expect("should match");
-        let boundary_score = fuzzy_score("fp", "SomeFilePanel").expect("should match");
-
-        assert!(
-            prefix_score > boundary_score,
-            "exact prefix ({prefix_score}) should outscore word-boundary-only ({boundary_score})"
-        );
-    }
-
-    #[test]
-    fn word_boundary_scores_higher_than_scattered() {
-        // "fp" hits camelCase boundaries in "SomeFilePanel" (F, P).
-        let boundary = fuzzy_score("fp", "SomeFilePanel").expect("should match");
-        // "mp" in "somefilepanel" — mid-word, no boundaries, no start anchor.
-        // (A start-anchored control like "sp" would reap start+prefix+idx-0
-        // bonuses and test anchoring, not scatter.)
-        let scattered = fuzzy_score("mp", "somefilepanel").expect("should match");
-
-        assert!(
-            boundary > scattered,
-            "word boundary ({boundary}) should outscore scattered ({scattered})"
-        );
-    }
-
-    #[test]
-    fn scattered_subsequence_still_matches() {
-        // Every char of query appears in target but spread apart.
-        let score = fuzzy_score("smp", "somefilepanel").expect("should match");
-        assert!(score > 0.0);
-    }
-
-    #[test]
-    fn missing_char_returns_none() {
-        assert_eq!(fuzzy_score("xyz", "abcdef"), None);
-    }
-
-    #[test]
-    fn case_insensitive() {
-        let lower = fuzzy_score("files", "FILES").expect("should match");
-        let upper = fuzzy_score("FILES", "files").expect("should match");
-        assert_eq!(lower, upper);
-    }
-
-    #[test]
-    fn consecutive_bonus_compounds() {
-        // "fil" all consecutive in "files" — should score higher than "fls" scattered.
-        let consecutive_score = fuzzy_score("fil", "files").expect("should match");
-        let scattered_score = fuzzy_score("fls", "files").expect("should match");
-        assert!(
-            consecutive_score > scattered_score,
-            "consecutive ({consecutive_score}) > scattered ({scattered_score})"
-        );
-    }
-
-    #[test]
-    fn camelcase_boundary_detected() {
-        let score = fuzzy_score("fp", "FilePanel").expect("should match");
-        // 'f' at start (start+prefix+word_boundary), 'p' at camelCase boundary
-        assert!(score > 10.0); // start(10) + prefix(3) + word_boundary(5) + base(1) = 19 minimum
-    }
 
     // ── selection helpers ────────────────────────────────────────────────
 
@@ -764,40 +623,6 @@ mod tests {
         enabled.set(true);
         assert!(registry.run("open-council"));
         assert_eq!(fired.get_untracked(), 1);
-    }
-
-    // ── is_word_boundary ─────────────────────────────────────────────────
-
-    #[test]
-    fn word_boundary_at_start() {
-        assert!(is_word_boundary(&['a', 'b'], 0));
-    }
-
-    #[test]
-    fn word_boundary_after_space() {
-        assert!(is_word_boundary(&['a', ' ', 'b'], 2));
-    }
-
-    #[test]
-    fn word_boundary_after_hyphen() {
-        assert!(is_word_boundary(&['a', '-', 'b'], 2));
-    }
-
-    #[test]
-    fn word_boundary_after_underscore() {
-        assert!(is_word_boundary(&['a', '_', 'b'], 2));
-    }
-
-    #[test]
-    fn word_boundary_camelcase() {
-        // 'a' (lowercase) → 'B' (uppercase)
-        assert!(is_word_boundary(&['a', 'B'], 1));
-    }
-
-    #[test]
-    fn no_boundary_mid_word() {
-        assert!(!is_word_boundary(&['a', 'b', 'c'], 1));
-        assert!(!is_word_boundary(&['A', 'B', 'C'], 1)); // all uppercase = acronym
     }
 
     #[test]

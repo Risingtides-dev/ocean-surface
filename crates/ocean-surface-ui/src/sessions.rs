@@ -12,10 +12,8 @@
 //! `ProjectInfo`, component-boundary prefix match) group under that worktree
 //! sub-row; the rest stay in the project's flat list.
 //!
-//! Zero-turn drafts are filtered out unless they're the active session (the
-//! lazy session creation approach no longer POSTs on "New Session" click, so
-//! empty sessions no longer accumulate in the store; historical litter is
-//! pruned from the display).
+//! Every session returned by the daemon is shown, including zero-turn drafts,
+//! matching the TUI's persisted-session discovery.
 
 use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
@@ -180,25 +178,21 @@ fn project_section_session_cwd(
         })
 }
 
-/// Group + filter sessions for the panel display: project-first, newest
-/// sessions first, "Other" last. Zero-turn drafts filtered unless they are
-/// the active session. Pure — no WASM, testable with `cargo test`.
+/// Group sessions for the panel display: project-first, newest sessions
+/// first, "Other" last. Every daemon-catalogued session is retained so the
+/// desktop panel stays in parity with the TUI's persisted-session discovery.
+/// Pure — no WASM, testable with `cargo test`.
 pub(crate) fn group_for_panel(
     sessions: &[SessionSummary],
     projects: &[ProjectInfo],
-    active_id: Option<&str>,
+    _active_id: Option<&str>,
 ) -> Vec<ProjectSection> {
-    let active_id = active_id.map(|s| s.to_string());
-
-    // Prune: skip 0-turn drafts except the active session itself.
-    let filtered: Vec<&SessionSummary> = sessions
-        .iter()
-        .filter(|s| s.turn_count > 0 || active_id.as_deref() == Some(s.id.as_str()))
-        .collect();
+    // The TUI includes persisted zero-turn drafts. Do not silently hide them
+    // here: a session returned by the daemon belongs in the desktop catalogue.
 
     // Collect into sections by project membership.
     let mut sections: Vec<ProjectSection> = Vec::new();
-    for s in &filtered {
+    for s in sessions {
         let (key, label, is_proj) = if let Some(op) = &s.owning_project {
             let label = if op.name.trim().is_empty() {
                 op.id.clone()
@@ -221,7 +215,7 @@ pub(crate) fn group_for_panel(
             .iter_mut()
             .find(|sec: &&mut ProjectSection| sec.key == key)
         {
-            Some(sec) => sec.sessions.push((*s).clone()),
+            Some(sec) => sec.sessions.push(s.clone()),
             None => {
                 let is_git = if is_proj {
                     projects
@@ -236,7 +230,7 @@ pub(crate) fn group_for_panel(
                     label,
                     is_project: is_proj,
                     is_git,
-                    sessions: vec![(*s).clone()],
+                    sessions: vec![s.clone()],
                     worktrees: None,
                     main_group: None,
                     new_session_cwd: None,
@@ -1511,7 +1505,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_turn_sessions_are_pruned_unless_active() {
+    fn zero_turn_sessions_remain_visible_for_tui_parity() {
         let projects = vec![project("repo", "Repo", "/repo")];
         let sessions = vec![
             session(
@@ -1547,7 +1541,7 @@ mod tests {
 
         assert_eq!(sections.len(), 1);
         let ids: Vec<&str> = sections[0].sessions.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids, vec!["active-zero", "with-turn"]);
+        assert_eq!(ids, vec!["active-zero", "stale-zero", "with-turn"]);
     }
 
     #[test]

@@ -1,0 +1,841 @@
+/* Dynamic Island — native agent interaction, Sessions, and Recall. Tauri-only
+   in the component tree; these selectors remain inert on web/extension hosts. */
+
+:root {
+  --island-compact-w: 380px;
+  --island-top: 64px;
+}
+
+.ocean-header {
+  position: relative;
+}
+
+.ocean-header__left {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+/* Center inside the real header/content column without transform. Fixed
+   descendants therefore stay viewport-fixed instead of inheriting a new
+   containing block. The percentage cap reserves both titlebar control zones. */
+.island-host {
+  position: absolute;
+  inset-inline: 0;
+  top: 11px;
+  width: min(var(--island-compact-w), 44%);
+  height: var(--ctl-h);
+  margin-inline: auto;
+  z-index: 122;
+}
+
+.island-chip {
+  box-sizing: border-box;
+  position: relative;
+  z-index: 122;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  max-width: 100%;
+  height: var(--ctl-h);
+  min-width: 0;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  box-shadow: var(--elev-1);
+  color: var(--fg);
+  font: 500 12px/1 var(--font);
+  cursor: pointer;
+  overflow: hidden;
+  transition: background var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
+}
+
+.island-chip:hover {
+  background: var(--bg-hover);
+}
+
+/* Once expanded, the compact control becomes the stage's top rail instead of
+   remaining a raised pill on top of a second surface. Keeping its hit target
+   and text while dissolving its own fill/elevation makes the Island read as
+   one object changing shape. */
+.island-chip[aria-expanded="true"],
+.island-chip[aria-expanded="true"]:hover {
+  background: transparent;
+  box-shadow: none;
+}
+
+.island-chip:focus-visible {
+  box-shadow: var(--elev-1), var(--focus-ring);
+}
+
+.island-chip__dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: var(--radius-pill);
+  background: var(--fg-3);
+}
+
+.island-chip__dot.is-empty {
+  background: var(--fg-4);
+}
+
+.island-chip.is-attention .island-chip__count {
+  color: var(--warn);
+}
+
+.island-chip__dot.is-attention {
+  background: var(--warn);
+}
+
+.island-chip.is-running .island-chip__count {
+  color: var(--accent);
+}
+
+.island-chip__dot.is-running {
+  background: var(--accent);
+}
+
+.island-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+.island-chip__title,
+.island-chip__project,
+.island-chip__count {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.island-chip__title {
+  flex: 1 1 auto;
+  text-align: left;
+}
+
+.island-chip__project {
+  flex: 0 1 auto;
+  color: var(--fg-2);
+}
+
+.island-chip__count,
+.island-chip__separator {
+  flex: 0 0 auto;
+  color: var(--fg-2);
+}
+
+.island-search {
+  flex: 0 0 auto;
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  box-shadow: var(--well);
+}
+
+.island-search__input {
+  appearance: none;
+  display: block;
+  width: 100%;
+  min-height: 40px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: var(--radius);
+  outline: 0;
+  background: transparent;
+  color: var(--fg);
+  caret-color: var(--accent);
+  font: 400 13px/1.4 var(--font);
+}
+
+.island-search__input::placeholder {
+  color: var(--fg-3);
+}
+
+.island-search__input:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+
+.island-results {
+  min-height: 0;
+  max-height: min(464px, calc(100vh - var(--island-top) - 72px));
+  overflow-y: auto;
+  padding: 4px 0 0;
+  border-radius: var(--radius);
+}
+
+.island-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.island-result {
+  appearance: none;
+  width: 100%;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--fg-2);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.island-result:hover,
+.island-result--selected {
+  background: var(--bg-hover);
+}
+
+.island-result:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+
+.island-result__primary,
+.island-result__meta {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.island-result__primary {
+  gap: 8px;
+}
+
+.island-result__title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+  font: 500 13px/1.35 var(--font);
+}
+
+.island-result__focused {
+  flex: 0 0 auto;
+  padding: 2px 5px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent-bright);
+  font: 600 9px/1.3 var(--font);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.island-result__meta {
+  gap: 0;
+  margin-top: 3px;
+  color: var(--fg-3);
+  font: 400 10px/1.4 var(--font);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.island-result__meta > span {
+  min-width: 0;
+  max-width: 18ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.island-result__meta > span:empty {
+  display: none;
+}
+
+.island-result__meta > span:not(:empty) ~ span:not(:empty)::before {
+  content: "·";
+  padding: 0 5px;
+  color: var(--fg-4);
+}
+
+.island-result__path {
+  font-family: var(--mono);
+}
+
+.island-empty {
+  padding: 28px 16px;
+  color: var(--fg-3);
+  font: 400 12px/1.4 var(--font);
+  text-align: center;
+}
+
+/* The workspace becomes a split column at 900px and may consume up to 65%
+   of the window. Keep the remaining header to the identity dot/state dots so
+   the centered Island has stable reserved tracks even at that maximum. */
+@media (min-width: 900px) {
+  .has-workspace-open .ocean-brand__word,
+  .has-workspace-open .ocean-tokens,
+  .has-workspace-open .ocean-status__text,
+  .has-workspace-open .ocean-browser-control__label {
+    display: none;
+  }
+}
+
+@media (min-width: 900px) and (max-width: 1100px) {
+  .has-workspace-open .ocean-brand {
+    display: none;
+  }
+}
+
+@media (max-width: 1000px) {
+  .island-host {
+    width: min(300px, 42%);
+  }
+
+  .island-chip__project,
+  .island-chip__separator {
+    display: none;
+  }
+}
+
+/* Below the split-view breakpoint the workspace overlays from the right.
+   Center the chip in the still-visible transcript column so workspace tabs
+   never paint through the titlebar control. The popover remains viewport-wide
+   and above the workspace, preserving the compact overlay behavior. */
+@media (max-width: 899px) {
+  .has-workspace-open .island-host {
+    right: var(--workspace-w);
+    /* The workspace resizer may intentionally leave only a 48px context
+       sliver. Collapse rather than painting through traffic lights or tabs
+       when that sliver cannot safely hold the interactive titlebar control. */
+    max-width: max(0px, calc(100vw - var(--workspace-w) - 160px));
+  }
+}
+
+@media (min-width: 721px) and (max-width: 840px) {
+  .has-workspace-open .island-host {
+    max-width: max(0px, calc(100vw - var(--workspace-w) - 220px));
+  }
+}
+
+@media (min-width: 841px) and (max-width: 899px) {
+  .has-workspace-open .island-host {
+    max-width: max(0px, calc(100vw - var(--workspace-w) - 300px));
+  }
+}
+
+@media (max-width: 840px) {
+  .is-titlebar .ocean-brand__word {
+    display: none;
+  }
+
+  .island-host {
+    width: min(240px, 38%);
+  }
+
+  .island-chip {
+    padding-inline: 9px;
+  }
+
+}
+
+@media (max-width: 720px) {
+  /* compact.css is later in the cascade; this higher-specificity titlebar
+     rule keeps the native traffic-light inset at the supported minimum. */
+  main.ocean-surface.is-titlebar .ocean-header {
+    padding-left: var(--titlebar-inset);
+  }
+
+  .island-host {
+    width: min(210px, 36%);
+  }
+
+  .has-workspace-open .ocean-brand {
+    display: none;
+  }
+
+}
+
+/* Dynamic Island v2 — one titlebar object, three mutually exclusive tools.
+   The fixed outer stage begins behind the compact capsule so opening reads as
+   the object changing shape, not a button spawning a detached modal. */
+.island-dismiss-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  background: transparent;
+}
+
+.island-stage {
+  --island-stage-radius: 22px;
+  --island-stage-pad: 6px;
+  position: fixed;
+  top: 8px;
+  left: 16px;
+  right: 16px;
+  z-index: 121;
+  box-sizing: border-box;
+  width: min(520px, calc(100vw - 32px));
+  max-height: min(520px, calc(100vh - 24px));
+  margin-inline: auto;
+  padding: 48px var(--island-stage-pad) var(--island-stage-pad);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--island-stage-radius);
+  outline: none;
+  background: var(--sheen), var(--bg-raised);
+  box-shadow: var(--elev-3);
+  overflow: hidden;
+  transform-origin: top center;
+  transition: width var(--dur-fast) var(--ease), max-height var(--dur-fast) var(--ease);
+  animation: island-stage-open var(--dur-fast) var(--ease);
+}
+
+.island-stage--agent {
+  width: min(460px, calc(100vw - 32px));
+  max-height: min(330px, calc(100vh - 24px));
+}
+
+.island-stage--sessions {
+  width: min(560px, calc(100vw - 32px));
+}
+
+.island-stage--recall {
+  width: min(620px, calc(100vw - 32px));
+}
+
+.island-stage:focus-visible {
+  box-shadow: var(--elev-3), var(--focus-ring);
+}
+
+.island-stage > section {
+  border-radius: calc(var(--island-stage-radius) - var(--island-stage-pad));
+}
+
+@keyframes island-stage-open {
+  from {
+    opacity: 0;
+    transform: scale(0.94, 0.72);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.island-stage__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 42px;
+  padding: 7px 10px 9px;
+}
+
+.island-stage__identity {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.island-stage__identity strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg);
+  font: 600 13px/1.25 var(--font);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.island-stage__eyebrow,
+.island-stage__hint,
+.island-agent__position {
+  color: var(--fg-3);
+  font: 600 9px/1.2 var(--font);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.island-stage__routes {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.island-stage__routes button,
+.island-agent__stepper button {
+  appearance: none;
+  min-height: var(--ctl-h-sm);
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-3);
+  font: 500 10px/1 var(--font);
+  cursor: pointer;
+}
+
+.island-stage__routes button:hover,
+.island-agent__stepper button:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.island-stage__routes button:focus-visible,
+.island-agent__stepper button:focus-visible,
+.island-agent__composer input:focus-visible,
+.island-agent__composer button:focus-visible,
+.island-agent__actions button:focus-visible,
+.island-recall__input:focus-visible,
+.island-recall__result:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.island-agent,
+.island-sessions,
+.island-recall {
+  min-height: 0;
+  background: var(--bg-raised);
+  overflow: hidden;
+}
+
+.island-agent__idle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 2px 4px 6px;
+  padding: 12px;
+  border-radius: calc(var(--island-stage-radius) - var(--island-stage-pad) - 4px);
+  background: var(--bg-elevated);
+}
+
+.island-agent__pulse {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 9px;
+  border-radius: var(--radius-pill);
+  background: var(--ok);
+  box-shadow: 0 0 0 5px var(--ok-soft);
+}
+
+.island-agent__idle strong,
+.island-agent__idle p {
+  display: block;
+  margin: 0;
+}
+
+.island-agent__idle strong {
+  color: var(--fg);
+  font: 600 12px/1.4 var(--font);
+}
+
+.island-agent__idle p {
+  margin-top: 2px;
+  color: var(--fg-3);
+  font: 400 10px/1.35 var(--font);
+}
+
+.island-agent__composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  padding: 4px;
+  border-radius: calc(var(--island-stage-radius) - var(--island-stage-pad));
+  background: var(--bg-elevated);
+  box-shadow: var(--well);
+}
+
+.island-agent__composer input {
+  min-width: 0;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: calc(var(--island-stage-radius) - var(--island-stage-pad) - 4px);
+  outline: none;
+  background: transparent;
+  color: var(--fg);
+  font: 400 12px/1.4 var(--font);
+}
+
+.island-agent__composer button,
+.island-agent__actions button {
+  appearance: none;
+  min-height: var(--ctl-h-sm);
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius);
+  font: 600 10px/1 var(--font);
+  cursor: pointer;
+}
+
+.island-agent__composer button,
+.island-agent__approve {
+  background: var(--accent);
+  color: var(--fg-on-accent);
+}
+
+.island-agent__composer button:disabled,
+.island-agent__actions button:disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.island-agent__position {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 28px;
+  padding: 0 10px;
+}
+
+.island-agent__stepper {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.island-agent__work {
+  margin: 0 4px 4px;
+  padding: 12px;
+  border-radius: calc(var(--island-stage-radius) - var(--island-stage-pad) - 4px);
+  background: var(--bg-elevated);
+}
+
+.island-agent__work-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.island-agent__work-head strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg);
+  font: 600 12px/1.3 var(--font);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.island-agent__state {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg-3);
+  font: 600 10px/1.3 var(--font);
+}
+
+.island-agent__state i {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: currentColor;
+}
+
+.island-agent__work.is-needs-human .island-agent__state,
+.island-agent__work.is-cancelling .island-agent__state {
+  color: var(--warn);
+}
+
+.island-agent__work.is-running .island-agent__state {
+  color: var(--accent);
+}
+
+.island-agent__work.is-failed .island-agent__state {
+  color: var(--err);
+}
+
+.island-agent__detail {
+  margin: 10px 0 7px;
+  color: var(--fg-2);
+  font: 400 12px/1.5 var(--font);
+  overflow-wrap: anywhere;
+}
+
+.island-agent__meta,
+.island-recall__meta {
+  display: flex;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-3);
+  font: 400 9px/1.4 var(--font);
+  white-space: nowrap;
+}
+
+.island-agent__meta > span,
+.island-recall__meta > span {
+  min-width: 0;
+  max-width: 24ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.island-agent__meta > span:empty,
+.island-recall__meta > span:empty {
+  display: none;
+}
+
+.island-agent__meta > span:not(:empty) ~ span:not(:empty)::before,
+.island-recall__meta > span:not(:empty) ~ span:not(:empty)::before {
+  content: "·";
+  padding: 0 5px;
+  color: var(--fg-4);
+}
+
+.island-agent__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.island-agent__open {
+  margin-right: auto;
+  background: transparent;
+  color: var(--fg-2);
+}
+
+.island-agent__open:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.island-agent__stop,
+.island-agent__deny {
+  background: transparent;
+  color: var(--err);
+}
+
+.island-agent__stop:hover,
+.island-agent__deny:hover {
+  background: var(--err-soft);
+}
+
+.island-sessions .island-search,
+.island-recall__search {
+  margin: 0 4px 4px;
+}
+
+.island-sessions .island-results {
+  max-height: min(370px, calc(100vh - 132px));
+}
+
+.island-recall__search {
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  box-shadow: var(--well);
+}
+
+.island-recall__input {
+  appearance: none;
+  display: block;
+  width: 100%;
+  min-height: 42px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: var(--radius);
+  outline: 0;
+  background: transparent;
+  color: var(--fg);
+  caret-color: var(--accent);
+  font: 400 13px/1.4 var(--font);
+}
+
+.island-recall__results {
+  max-height: min(360px, calc(100vh - 132px));
+  overflow-y: auto;
+  padding: 2px 4px 4px;
+}
+
+.island-recall__prompt,
+.island-recall__error {
+  padding: 28px 14px;
+  color: var(--fg-3);
+  font: 400 11px/1.5 var(--font);
+  text-align: center;
+}
+
+.island-recall__error {
+  color: var(--err);
+}
+
+.island-recall__result {
+  appearance: none;
+  display: block;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--fg-2);
+  text-align: left;
+  cursor: pointer;
+}
+
+.island-recall__result:hover,
+.island-recall__result--selected {
+  background: var(--bg-hover);
+}
+
+.island-recall__excerpt {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--fg);
+  font: 500 12px/1.45 var(--font);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.island-recall__meta {
+  margin-top: 5px;
+}
+
+@media (min-width: 900px) {
+  .has-workspace-open .island-stage {
+    right: calc(var(--workspace-w) + 16px);
+    width: min(520px, calc(100vw - var(--workspace-w) - 32px));
+  }
+
+  .has-workspace-open .island-stage--agent {
+    width: min(460px, calc(100vw - var(--workspace-w) - 32px));
+  }
+
+  .has-workspace-open .island-stage--sessions {
+    width: min(560px, calc(100vw - var(--workspace-w) - 32px));
+  }
+
+  .has-workspace-open .island-stage--recall {
+    width: min(620px, calc(100vw - var(--workspace-w) - 32px));
+  }
+}
+
+@media (max-width: 720px) {
+  .island-stage {
+    left: 10px;
+    right: 10px;
+    width: calc(100vw - 20px);
+    max-height: min(520px, calc(100vh - 18px));
+  }
+
+  .island-stage__header {
+    padding-inline: 8px;
+  }
+
+  .island-stage__routes {
+    gap: 0;
+  }
+
+  .island-stage__routes button {
+    padding-inline: 6px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .island-chip,
+  .island-result,
+  .island-stage {
+    animation: none;
+    transition: none;
+  }
+}

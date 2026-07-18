@@ -75,6 +75,42 @@ pub struct RepoState {
 pub fn running_in_tauri() -> bool {
     crate::daemon::running_as_tauri()
 }
+/// Intercept a rendered Markdown link inside the native shell and hand it to
+/// the OS default browser. WKWebView does not reliably honor `target="_blank"`
+/// for these dynamically injected anchors. Browser/PWA hosts keep their normal
+/// anchor behavior because this handler is a no-op outside Tauri.
+pub fn open_external_link_click(event: web_sys::MouseEvent) {
+    if !running_in_tauri()
+        || event.button() != 0
+        || event.meta_key()
+        || event.ctrl_key()
+        || event.shift_key()
+        || event.alt_key()
+    {
+        return;
+    }
+
+    let Some(target) = event.target() else { return };
+    let Ok(element) = target.dyn_into::<web_sys::Element>() else {
+        return;
+    };
+    let Ok(Some(anchor)) = element.closest("a[href]") else {
+        return;
+    };
+    let Some(url) = anchor.get_attribute("href") else {
+        return;
+    };
+    if url.is_empty() {
+        return;
+    }
+
+    event.prevent_default();
+    wasm_bindgen_futures::spawn_local(async move {
+        let args = Object::new();
+        let _ = Reflect::set(&args, &JsValue::from_str("url"), &JsValue::from_str(&url));
+        let _ = tauri_invoke("open_external_url", &args).await;
+    });
+}
 
 /// Open the native folder picker. `None` on non-Tauri hosts or user cancel.
 pub async fn pick_folder() -> Option<String> {

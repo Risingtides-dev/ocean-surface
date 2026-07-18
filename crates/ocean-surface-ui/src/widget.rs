@@ -219,7 +219,10 @@ fn FloatAssistant(idx: usize, turns: RwSignal<Vec<Turn>>) -> impl IntoView {
         <div class="ocean-float__msg ocean-float__msg--agent">
             <Show when=has_text>
                 <div class="ocean-float__bubble">
-                    <span inner_html=move || render_md(&text())></span>
+                    <span
+                        inner_html=move || render_md(&text())
+                        on:click=crate::host::open_external_link_click
+                    ></span>
                 </div>
             </Show>
             <For
