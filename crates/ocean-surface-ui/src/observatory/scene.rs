@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use leptos::prelude::*;
@@ -13,6 +14,25 @@ use super::layout::{
 
 type RafHolder = Rc<RefCell<Option<Closure<dyn FnMut(f64)>>>>;
 type ResizeHolder = Rc<RefCell<Option<Closure<dyn FnMut(js_sys::Array, web_sys::ResizeObserver)>>>>;
+type ArrivalLog = Rc<RefCell<ArrivalState>>;
+
+/// Presentation-only memory of when executions first appeared in this mounted
+/// scene. It stores no operational facts — it only times the walk-in animation
+/// for admissions that arrive while the observer is watching.
+#[derive(Default)]
+struct ArrivalState {
+    hydrated: bool,
+    first_seen_ms: HashMap<String, f64>,
+}
+
+const ARRIVAL_WALK_MS: f64 = 900.0;
+
+fn now_ms() -> f64 {
+    web_sys::window()
+        .and_then(|window| window.performance())
+        .map(|performance| performance.now())
+        .unwrap_or(0.0)
+}
 
 #[derive(Clone)]
 struct Palette {
@@ -22,6 +42,10 @@ struct Palette {
     rock_top: String,
     deck_a: String,
     deck_b: String,
+    deck_lit_a: String,
+    deck_lit_b: String,
+    corridor: String,
+    corridor_mark: String,
     wall_top: String,
     wall_face: String,
     wall_dark: String,
@@ -52,6 +76,10 @@ impl Palette {
             rock_top: css_token("--floor-rock-top"),
             deck_a: css_token("--floor-deck-a"),
             deck_b: css_token("--floor-deck-b"),
+            deck_lit_a: css_token("--floor-deck-lit-a"),
+            deck_lit_b: css_token("--floor-deck-lit-b"),
+            corridor: css_token("--floor-corridor"),
+            corridor_mark: css_token("--floor-corridor-mark"),
             wall_top: css_token("--floor-wall-top"),
             wall_face: css_token("--floor-wall-face"),
             wall_dark: css_token("--floor-wall-dark"),
@@ -99,6 +127,12 @@ pub fn FloorScene(
     let raf_id = Rc::new(RefCell::new(0_i32));
     let holder: RafHolder = Rc::new(RefCell::new(None));
     let running = Rc::new(Cell::new(false));
+    // Client-side presentation memory: when each execution was first seen in
+    // this mounted scene. Executions present at hydration are already "home";
+    // ones that appear later walk in — a truthful visualization of the real
+    // admission event that just arrived.
+    let arrivals: ArrivalLog = Rc::new(RefCell::new(ArrivalState::default()));
+    let last_frame = Rc::new(Cell::new(0.0_f64));
 
     let resize_observer = Rc::new(RefCell::new(None::<ResizeObserver>));
     let resize_callback: ResizeHolder = Rc::new(RefCell::new(None));
@@ -161,17 +195,31 @@ pub fn FloorScene(
     let loop_raf = raf_id.clone();
     let loop_running = running.clone();
     let loop_palette = palette.clone();
+    let loop_arrivals = arrivals.clone();
+    let loop_last_frame = last_frame.clone();
     let callback = Closure::wrap(Box::new(move |timestamp: f64| {
-        draw_current(
-            loop_canvas,
-            state,
-            selected,
-            zoom,
-            layout,
-            &loop_palette,
-            timestamp,
-        );
-        if state.get_untracked().needs_animation() && !prefers_reduced_motion() {
+        // The floor is a continuously living scene while open: active state
+        // animates at full cadence, an idle office keeps a slow ambient tick
+        // (blinks, beacon lamps). Reduced motion stops the loop entirely.
+        let interval = if state.get_untracked().needs_animation() {
+            33.0
+        } else {
+            125.0
+        };
+        if timestamp - loop_last_frame.get() >= interval {
+            loop_last_frame.set(timestamp);
+            draw_current(
+                loop_canvas,
+                state,
+                selected,
+                zoom,
+                layout,
+                &loop_palette,
+                &loop_arrivals,
+                timestamp,
+            );
+        }
+        if !prefers_reduced_motion() {
             if let (Some(window), Some(callback)) =
                 (web_sys::window(), loop_holder.borrow().as_ref())
             {
@@ -189,12 +237,31 @@ pub fn FloorScene(
     let effect_raf = raf_id.clone();
     let effect_running = running.clone();
     let effect_palette = palette.clone();
+    let effect_arrivals = arrivals.clone();
+    let centered_once = Rc::new(Cell::new(false));
     Effect::new(move |_| {
-        let current = state.get();
+        let _ = state.get();
         let _ = selected.get();
         let _ = zoom.get();
         let _ = layout.get();
         let _ = viewport_size.get();
+        // One-shot framing: once the populated world exists, scroll to its
+        // middle. Never re-center afterwards — the viewport belongs to the
+        // operator once they can see the facility.
+        if !centered_once.get() && !layout.get_untracked().stations.is_empty() {
+            if let Some(viewport) = viewport_ref.get() {
+                let element: &web_sys::Element = viewport.as_ref();
+                let dx = (element.scroll_width() - element.client_width()).max(0) / 2;
+                let dy = (element.scroll_height() - element.client_height()).max(0) / 2;
+                if dx > 0 || dy > 0 {
+                    // Only latch once the world div has real oversize; a
+                    // stale pre-layout DOM keeps retrying harmlessly.
+                    element.set_scroll_left(dx);
+                    element.set_scroll_top(dy);
+                    centered_once.set(true);
+                }
+            }
+        }
         draw_current(
             canvas_ref,
             state,
@@ -202,9 +269,10 @@ pub fn FloorScene(
             zoom,
             layout,
             &effect_palette,
-            0.0,
+            &effect_arrivals,
+            now_ms(),
         );
-        if current.needs_animation() && !prefers_reduced_motion() && !effect_running.replace(true) {
+        if !prefers_reduced_motion() && !effect_running.replace(true) {
             if let (Some(window), Some(callback)) =
                 (web_sys::window(), effect_holder.borrow().as_ref())
             {
@@ -325,6 +393,7 @@ fn phase_class(phase: ExecutionPhase) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_current(
     canvas_ref: NodeRef<leptos::html::Canvas>,
     state: RwSignal<ObservatoryState>,
@@ -332,6 +401,7 @@ fn draw_current(
     zoom: RwSignal<f64>,
     layout: Memo<FloorLayout>,
     palette: &Palette,
+    arrivals: &ArrivalLog,
     timestamp: f64,
 ) {
     let Some(canvas) = canvas_ref.get() else {
@@ -364,6 +434,28 @@ fn draw_current(
     let state = state.get_untracked();
     let layout = layout.get_untracked();
     let zoom = zoom.get_untracked();
+    {
+        // Track first appearance for the walk-in animation. Nodes present at
+        // hydration are seated immediately; later admissions walk in once.
+        let mut log = arrivals.borrow_mut();
+        if !log.hydrated {
+            if !state.nodes.is_empty() {
+                for id in state.nodes.keys() {
+                    log.first_seen_ms.insert(id.clone(), f64::NEG_INFINITY);
+                }
+                log.hydrated = true;
+            }
+        } else {
+            let now = now_ms();
+            for id in state.nodes.keys() {
+                log.first_seen_ms.entry(id.clone()).or_insert(now);
+            }
+        }
+        if log.first_seen_ms.len() > state.nodes.len().saturating_mul(4) + 64 {
+            log.first_seen_ms
+                .retain(|id, _| state.nodes.contains_key(id));
+        }
+    }
     draw_scene(
         &context,
         &state,
@@ -374,6 +466,7 @@ fn draw_current(
         css_width,
         css_height,
         palette,
+        &arrivals.borrow(),
     );
 }
 
@@ -388,6 +481,7 @@ fn draw_scene(
     viewport_width: f64,
     viewport_height: f64,
     palette: &Palette,
+    arrivals: &ArrivalState,
 ) {
     draw_water(context, viewport_width, viewport_height, palette);
 
@@ -398,10 +492,17 @@ fn draw_scene(
     let _ = context.scale(zoom, zoom);
     let _ = context.translate(-layout.min_x, -layout.min_y);
 
+    draw_corridor(context, layout, palette);
     draw_cubicle_modules(context, state, layout, palette);
     draw_tethers(context, state, layout, palette);
+    let now = now_ms();
     for station in &layout.stations {
         if let Some(node) = state.nodes.get(&station.execution_id) {
+            let arrival = arrivals
+                .first_seen_ms
+                .get(&station.execution_id)
+                .map(|first| ((now - first) / ARRIVAL_WALK_MS).clamp(0.0, 1.0))
+                .unwrap_or(1.0);
             draw_station(
                 context,
                 station,
@@ -409,6 +510,7 @@ fn draw_scene(
                 selected == Some(station.execution_id.as_str()),
                 state.integrity,
                 timestamp,
+                arrival,
                 palette,
             );
         }
@@ -416,22 +518,34 @@ fn draw_scene(
     context.restore();
 }
 
+/// Walkways knit the modules into one facility. Corridor tiles are owned by
+/// present cubicles in the layout, so the building silhouette is always the
+/// truthful union of admitted executions.
+fn draw_corridor(context: &CanvasRenderingContext2d, layout: &FloorLayout, palette: &Palette) {
+    for (gx, gy) in &layout.corridor {
+        let (x, y) = grid_to_screen(*gx, *gy);
+        diamond(context, x, y, TILE_W / 2.0, TILE_H / 2.0, &palette.corridor);
+        if (gx + gy).rem_euclid(4) == 0 {
+            context.set_fill_style_str(&palette.corridor_mark);
+            context.fill_rect(x - 1.0, y - 1.0, 3.0, 2.0);
+        }
+    }
+}
+
 fn draw_water(context: &CanvasRenderingContext2d, width: f64, height: f64, palette: &Palette) {
     context.set_fill_style_str(&palette.water);
     context.fill_rect(0.0, 0.0, width, height);
+    // Sparse, dim shimmer only — the facility is the subject, not the water.
     context.set_fill_style_str(&palette.water_dither);
-    let mut y = 8_i32;
+    let mut y = 14_i32;
     while f64::from(y) < height {
-        let stagger = if (y / 16) % 2 == 0 { 8 } else { 20 };
+        let stagger = if (y / 36) % 2 == 0 { 18 } else { 48 };
         let mut x = stagger;
         while f64::from(x) < width {
-            context.fill_rect(f64::from(x), f64::from(y), 2.0, 2.0);
-            if (x / 24 + y / 16) % 5 == 0 {
-                context.fill_rect(f64::from(x + 3), f64::from(y), 4.0, 1.0);
-            }
-            x += 32;
+            context.fill_rect(f64::from(x), f64::from(y), 2.0, 1.0);
+            x += 64;
         }
-        y += 20;
+        y += 36;
     }
 }
 
@@ -448,68 +562,66 @@ fn draw_cubicle_modules(
     }
 }
 
-/// Paint one self-contained cubicle. Its constant 5x5 footprint is the visual
-/// module added when an execution is admitted; no neighboring cubicle geometry
-/// is consulted, so existing modules never resize when the floor grows.
+/// Paint one cubicle inside the connected facility. Interior sides shared with
+/// present neighbors get low partitions; sides facing open water get the tall
+/// building envelope and a foundation skirt. The footprint never resizes.
 fn draw_cubicle_module(
     context: &CanvasRenderingContext2d,
     cubicle: &CubicleLayout,
     node: &ExecutionState,
     palette: &Palette,
 ) {
-    let [top, right, bottom, left] = cubicle_outline(cubicle);
-    context.set_global_alpha(0.58);
-    polygon(
-        context,
-        &[
-            (top.0 + 12.0, top.1 + 18.0),
-            (right.0 + 16.0, right.1 + 18.0),
-            (bottom.0 + 16.0, bottom.1 + CUBICLE_DEPTH + 28.0),
-            (left.0 + 12.0, left.1 + CUBICLE_DEPTH + 28.0),
-        ],
-        &palette.ink,
-    );
-    context.set_global_alpha(1.0);
+    let [_top, right, bottom, left] = cubicle_outline(cubicle);
 
-    polygon(
-        context,
-        &[
-            right,
-            bottom,
-            (bottom.0, bottom.1 + CUBICLE_DEPTH),
-            (right.0, right.1 + CUBICLE_DEPTH),
-        ],
-        &palette.rock_side,
-    );
-    polygon(
-        context,
-        &[
-            bottom,
-            left,
-            (left.0, left.1 + CUBICLE_DEPTH),
-            (bottom.0, bottom.1 + CUBICLE_DEPTH),
-        ],
-        &palette.wall_dark,
-    );
+    // Foundation skirts only on true building edges — interior edges continue
+    // into corridor floor, so the facility reads as one structure.
+    if !cubicle.neighbor_right {
+        polygon(
+            context,
+            &[
+                right,
+                bottom,
+                (bottom.0, bottom.1 + CUBICLE_DEPTH),
+                (right.0, right.1 + CUBICLE_DEPTH),
+            ],
+            &palette.rock_side,
+        );
+    }
+    if !cubicle.neighbor_down {
+        polygon(
+            context,
+            &[
+                bottom,
+                left,
+                (left.0, left.1 + CUBICLE_DEPTH),
+                (bottom.0, bottom.1 + CUBICLE_DEPTH),
+            ],
+            &palette.wall_dark,
+        );
+    }
 
+    // Active rooms read brighter — driven only by recorded phase/tool state.
+    let lit = node.is_active() || node.permission_waiting;
     for local_y in 0..cubicle.tiles_h {
         for local_x in 0..cubicle.tiles_w {
             let (x, y) = grid_to_screen(cubicle.grid_x + local_x, cubicle.grid_y + local_y);
-            let color = if (local_x + local_y) % 2 == 0 {
-                &palette.deck_a
-            } else {
-                &palette.deck_b
+            let color = match ((local_x + local_y) % 2 == 0, lit) {
+                (true, true) => &palette.deck_lit_a,
+                (false, true) => &palette.deck_lit_b,
+                (true, false) => &palette.deck_a,
+                (false, false) => &palette.deck_b,
             };
             diamond(context, x, y, TILE_W / 2.0, TILE_H / 2.0, color);
-            if local_x == cubicle.tiles_w - 1 || local_y == cubicle.tiles_h - 1 {
-                context.set_fill_style_str(&palette.wall_dark);
-                context.fill_rect(x - 1.0, y + TILE_H / 2.0 - 2.0, 3.0, 3.0);
-            }
         }
     }
 
     let root_accent = cubicle_root_accent(cubicle, palette);
+    // North wall: tall envelope on the building boundary, low partition with a
+    // doorway gap toward an interior corridor.
     for local_x in 0..cubicle.tiles_w {
+        if cubicle.neighbor_up && local_x == cubicle.tiles_w - 1 {
+            continue; // doorway into the corridor
+        }
         let (x, y) = grid_to_screen(cubicle.grid_x + local_x, cubicle.grid_y);
         draw_wall_segment(
             context,
@@ -517,10 +629,15 @@ fn draw_cubicle_module(
             (x + TILE_W / 2.0, y),
             &palette.wall_face,
             root_accent,
+            if cubicle.neighbor_up { 22.0 } else { 44.0 },
             palette,
         );
     }
+    // West wall: same rule.
     for local_y in 0..cubicle.tiles_h {
+        if cubicle.neighbor_left && local_y == cubicle.tiles_h - 1 {
+            continue; // doorway
+        }
         let (x, y) = grid_to_screen(cubicle.grid_x, cubicle.grid_y + local_y);
         draw_wall_segment(
             context,
@@ -528,6 +645,7 @@ fn draw_cubicle_module(
             (x - TILE_W / 2.0, y),
             &palette.wall_dark,
             root_accent,
+            if cubicle.neighbor_left { 22.0 } else { 44.0 },
             palette,
         );
     }
@@ -541,15 +659,6 @@ fn draw_cubicle_module(
     draw_storage(context, storage_x, storage_y - 5.0, cubicle.slot, palette);
     let (plant_x, plant_y) = grid_to_screen(cubicle.grid_x + 1, cubicle.grid_y + 3);
     draw_planter(context, plant_x, plant_y - 2.0, palette);
-
-    for fraction in [0.25, 0.5, 0.75] {
-        let x = left.0 + (bottom.0 - left.0) * fraction;
-        let y = left.1 + (bottom.1 - left.1) * fraction;
-        context.set_fill_style_str(&palette.metal);
-        context.fill_rect(x - 3.0, y + 2.0, 6.0, CUBICLE_DEPTH - 4.0);
-        context.set_fill_style_str(&palette.metal_hi);
-        context.fill_rect(x - 3.0, y + 2.0, 2.0, CUBICLE_DEPTH - 4.0);
-    }
 }
 
 fn cubicle_outline(cubicle: &CubicleLayout) -> [(f64, f64); 4] {
@@ -574,14 +683,14 @@ fn draw_wall_segment(
     end: (f64, f64),
     face: &str,
     accent: &str,
+    wall_h: f64,
     palette: &Palette,
 ) {
-    const WALL_H: f64 = 46.0;
     polygon(
         context,
         &[
-            (start.0, start.1 - WALL_H),
-            (end.0, end.1 - WALL_H),
+            (start.0, start.1 - wall_h),
+            (end.0, end.1 - wall_h),
             end,
             start,
         ],
@@ -590,10 +699,10 @@ fn draw_wall_segment(
     polygon(
         context,
         &[
-            (start.0, start.1 - WALL_H - 4.0),
-            (end.0, end.1 - WALL_H - 4.0),
-            (end.0, end.1 - WALL_H),
-            (start.0, start.1 - WALL_H),
+            (start.0, start.1 - wall_h - 4.0),
+            (end.0, end.1 - wall_h - 4.0),
+            (end.0, end.1 - wall_h),
+            (start.0, start.1 - wall_h),
         ],
         &palette.wall_top,
     );
@@ -708,6 +817,7 @@ fn draw_tethers(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_station(
     context: &CanvasRenderingContext2d,
     station: &StationLayout,
@@ -715,11 +825,13 @@ fn draw_station(
     selected: bool,
     integrity: IntegrityState,
     timestamp: f64,
+    arrival: f64,
     palette: &Palette,
 ) {
     let x = station.screen_x;
     let y = station.screen_y;
     let reduced_motion = prefers_reduced_motion();
+    let seed = (station.slot as f64) * 137.0;
     let faded = node.phase == ExecutionPhase::Canceled;
     if faded {
         context.set_global_alpha(0.5);
@@ -751,10 +863,37 @@ fn draw_station(
         y - 45.0,
         node,
         timestamp,
+        seed,
         reduced_motion,
         palette,
     );
-    draw_actor(context, x, y - 5.0, node, palette);
+    let walking = arrival < 1.0 && !reduced_motion;
+    if walking {
+        // Walk in through the doorway: a one-shot visualization of the real
+        // admission event that just arrived on the stream.
+        let eased = 1.0 - (1.0 - arrival) * (1.0 - arrival);
+        let door_x = x + 96.0;
+        let door_y = y - 53.0;
+        let walk_x = door_x + (x - door_x) * eased;
+        let walk_y = door_y + ((y - 5.0) - door_y) * eased;
+        let step_bob = if ((timestamp / 130.0) as i32) & 1 == 0 {
+            0.0
+        } else {
+            -2.0
+        };
+        draw_walking_actor(context, walk_x, walk_y + step_bob, timestamp, palette);
+    } else {
+        draw_actor(
+            context,
+            x,
+            y - 5.0,
+            node,
+            timestamp,
+            seed,
+            reduced_motion,
+            palette,
+        );
+    }
     draw_tool_ports(context, x, y, node, timestamp, reduced_motion, palette);
 
     if node.phase == ExecutionPhase::Finished {
@@ -792,12 +931,14 @@ fn draw_chair(context: &CanvasRenderingContext2d, x: f64, y: f64, palette: &Pale
     context.fill_rect(x - 3.0, y + 1.0, 6.0, 9.0);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_console(
     context: &CanvasRenderingContext2d,
     x: f64,
     y: f64,
     node: &ExecutionState,
     timestamp: f64,
+    seed: f64,
     reduced_motion: bool,
     palette: &Palette,
 ) {
@@ -828,12 +969,28 @@ fn draw_console(
     context.fill_rect(x - 16.0, y - 25.0, 32.0, 14.0);
     context.set_global_alpha(1.0);
     if node.phase == ExecutionPhase::Running {
-        // Static traces communicate an active screen without inventing progress.
-        // Only luminance pulses while the recorded running state holds.
+        // Scrolling terminal lines while the recorded running state holds.
+        // The motion communicates "the screen is alive", not fake progress:
+        // line lengths derive from a stable per-station seed.
+        let scroll = if reduced_motion {
+            0.0
+        } else {
+            ((timestamp + seed) / 240.0) % 5.0
+        };
         context.set_fill_style_str(&palette.packet);
-        context.fill_rect(x - 12.0, y - 21.0, 22.0, 2.0);
-        context.fill_rect(x - 12.0, y - 16.0, 14.0, 2.0);
-        context.fill_rect(x + 5.0, y - 16.0, 5.0, 2.0);
+        for line in 0..4 {
+            let line_y = y - 24.0 + f64::from(line) * 4.0 + scroll;
+            if line_y < y - 24.0 || line_y > y - 13.0 {
+                continue;
+            }
+            let width = 8.0 + ((seed / 7.0 + f64::from(line) * 31.0) % 14.0);
+            context.fill_rect(x - 12.0, line_y, width, 2.0);
+        }
+        // Blinking caret.
+        if reduced_motion || ((timestamp / 450.0) as i32) & 1 == 0 {
+            context.set_fill_style_str(&palette.screen_on);
+            context.fill_rect(x + 8.0, y - 15.0, 3.0, 2.0);
+        }
     }
 
     let lamp = match node.phase {
@@ -881,52 +1038,124 @@ fn draw_console(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_actor(
     context: &CanvasRenderingContext2d,
     x: f64,
     y: f64,
     node: &ExecutionState,
+    timestamp: f64,
+    seed: f64,
+    reduced_motion: bool,
     palette: &Palette,
 ) {
     let slumped = matches!(node.phase, ExecutionPhase::Error | ExecutionPhase::TimedOut);
-    let lean = node.phase == ExecutionPhase::Running;
-    let offset_x = if lean { 2.0 } else { 0.0 };
-    let offset_y = if slumped { 5.0 } else { 0.0 };
+    let running = node.phase == ExecutionPhase::Running;
+    let offset_x = if running { 2.0 } else { 0.0 };
+    // Recorded running phase drives a typing posture: a subtle body bob and
+    // alternating hands on the keyboard. No pacing or progress is invented.
+    let typing_frame = if running && !reduced_motion {
+        (((timestamp + seed * 90.0) / 150.0) as i32) & 1
+    } else {
+        0
+    };
+    let bob = if running && !reduced_motion && typing_frame == 1 {
+        1.0
+    } else {
+        0.0
+    };
+    let offset_y = if slumped { 5.0 } else { bob };
 
     // Boots and seated legs.
     context.set_fill_style_str(&palette.ink);
-    context.fill_rect(x - 9.0 + offset_x, y - 4.0 + offset_y, 7.0, 12.0);
-    context.fill_rect(x + 2.0 + offset_x, y - 4.0 + offset_y, 7.0, 12.0);
+    context.fill_rect(x - 9.0 + offset_x, y - 4.0, 7.0, 12.0);
+    context.fill_rect(x + 2.0 + offset_x, y - 4.0, 7.0, 12.0);
     context.set_fill_style_str(&palette.outfit);
     context.fill_rect(x - 11.0 + offset_x, y - 20.0 + offset_y, 22.0, 18.0);
     context.set_fill_style_str(&palette.metal_hi);
     context.fill_rect(x - 8.0 + offset_x, y - 17.0 + offset_y, 3.0, 11.0);
 
-    // Head, hair, face, and one-pixel eyes keep the sprite readable at 50%.
+    // Head, hair, face. Eyes blink on a slow per-station cadence so an idle
+    // office still reads as inhabited rather than mannequins.
     context.set_fill_style_str(&palette.ink);
     context.fill_rect(x - 8.0 + offset_x, y - 34.0 + offset_y, 16.0, 6.0);
     context.fill_rect(x - 9.0 + offset_x, y - 30.0 + offset_y, 18.0, 5.0);
     context.set_fill_style_str(&palette.skin);
     context.fill_rect(x - 7.0 + offset_x, y - 27.0 + offset_y, 14.0, 10.0);
+    let blink =
+        !reduced_motion && !slumped && (((timestamp / 110.0 + seed) as i32).rem_euclid(41)) < 2;
     context.set_fill_style_str(&palette.ink);
-    context.fill_rect(x - 4.0 + offset_x, y - 24.0 + offset_y, 2.0, 2.0);
-    context.fill_rect(x + 3.0 + offset_x, y - 24.0 + offset_y, 2.0, 2.0);
+    if blink {
+        context.fill_rect(x - 4.0 + offset_x, y - 23.0 + offset_y, 2.0, 1.0);
+        context.fill_rect(x + 3.0 + offset_x, y - 23.0 + offset_y, 2.0, 1.0);
+    } else {
+        context.fill_rect(x - 4.0 + offset_x, y - 24.0 + offset_y, 2.0, 2.0);
+        context.fill_rect(x + 3.0 + offset_x, y - 24.0 + offset_y, 2.0, 2.0);
+    }
 
     if node.permission_waiting {
+        // Raised waving hand while the recorded permission wait holds.
+        let wave = if reduced_motion {
+            0.0
+        } else {
+            ((timestamp / 180.0).sin() * 2.0).round()
+        };
         context.set_fill_style_str(&palette.outfit);
         context.fill_rect(x + 9.0, y - 31.0, 5.0, 16.0);
         context.set_fill_style_str(&palette.skin);
-        context.fill_rect(x + 9.0, y - 39.0, 6.0, 9.0);
+        context.fill_rect(x + 9.0, y - 39.0 + wave, 6.0, 9.0);
     } else if node.phase == ExecutionPhase::Finished {
         context.set_fill_style_str(&palette.skin);
         context.fill_rect(x + 8.0, y - 16.0, 9.0, 5.0);
         context.set_fill_style_str(&palette.green);
         context.fill_rect(x + 14.0, y - 18.0, 5.0, 8.0);
+    } else if running {
+        // Hands over the keyboard, alternating with the typing frame.
+        let (left_dy, right_dy) = if typing_frame == 0 {
+            (0.0, 2.0)
+        } else {
+            (2.0, 0.0)
+        };
+        context.set_fill_style_str(&palette.skin);
+        context.fill_rect(x - 15.0 + offset_x, y - 15.0 + left_dy, 6.0, 5.0);
+        context.fill_rect(x + 9.0 + offset_x, y - 15.0 + right_dy, 6.0, 5.0);
     } else {
         context.set_fill_style_str(&palette.skin);
         context.fill_rect(x - 15.0 + offset_x, y - 17.0 + offset_y, 6.0, 5.0);
         context.fill_rect(x + 9.0 + offset_x, y - 17.0 + offset_y, 6.0, 5.0);
     }
+}
+
+/// Side-stepping sprite used for the one-shot admission walk-in.
+fn draw_walking_actor(
+    context: &CanvasRenderingContext2d,
+    x: f64,
+    y: f64,
+    timestamp: f64,
+    palette: &Palette,
+) {
+    let stride = if ((timestamp / 130.0) as i32) & 1 == 0 {
+        3.0
+    } else {
+        -3.0
+    };
+    // Legs mid-stride.
+    context.set_fill_style_str(&palette.ink);
+    context.fill_rect(x - 7.0 - stride, y - 6.0, 6.0, 14.0);
+    context.fill_rect(x + 1.0 + stride, y - 6.0, 6.0, 14.0);
+    context.set_fill_style_str(&palette.outfit);
+    context.fill_rect(x - 10.0, y - 22.0, 20.0, 17.0);
+    context.set_fill_style_str(&palette.skin);
+    context.fill_rect(x - 14.0, y - 19.0, 5.0, 5.0);
+    context.fill_rect(x + 9.0, y - 19.0, 5.0, 5.0);
+    context.set_fill_style_str(&palette.ink);
+    context.fill_rect(x - 8.0, y - 36.0, 16.0, 6.0);
+    context.fill_rect(x - 9.0, y - 32.0, 18.0, 5.0);
+    context.set_fill_style_str(&palette.skin);
+    context.fill_rect(x - 7.0, y - 29.0, 14.0, 10.0);
+    context.set_fill_style_str(&palette.ink);
+    context.fill_rect(x - 4.0, y - 26.0, 2.0, 2.0);
+    context.fill_rect(x + 3.0, y - 26.0, 2.0, 2.0);
 }
 
 fn draw_tool_ports(

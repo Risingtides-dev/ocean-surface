@@ -93,8 +93,13 @@ metadata-safe `/v1/observatory/{snapshot,events,replay}` responses; no mock
 executions, transcript content, inferred activity, or observer write controls.
 Every reducer execution owns one constant-footprint cubicle with a stable slot:
 snapshot rows preserve server admission order, and a live admission appends the
-next slot without resizing or repacking existing modules. Furnishings are static architecture, while actor, tool,
-attention, status, and topology treatments come only from real reducer state.
+next slot without resizing or repacking existing modules. Modules pack
+grid-adjacent into one connected facility — corridors, doorway partitions, and
+the tall boundary envelope derive from present slots only. Furnishings are
+static architecture; actor, tool, attention, status, room lighting, and
+topology treatments come only from real reducer state. Animation is truthful:
+typing/blink/wave and screen activity render recorded phases, the one-shot
+walk-in visualizes a live admission event, and reduced motion stops the loop.
 The web proxy reads the daemon-minted mode-0600 observer token immediately
 before each upstream request and injects it server-side. Never expose that
 token to browser code, bundle it, or cache it in client storage.

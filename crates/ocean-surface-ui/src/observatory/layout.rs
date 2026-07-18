@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use super::domain::ObservatoryState;
 
 pub const TILE_W: f64 = 64.0;
@@ -21,6 +23,12 @@ pub struct CubicleLayout {
     pub tiles_w: i32,
     pub tiles_h: i32,
     pub accent_index: u8,
+    /// A present module in the neighboring slot turns that side into an
+    /// interior partition; absent neighbors get the tall building envelope.
+    pub neighbor_left: bool,
+    pub neighbor_up: bool,
+    pub neighbor_right: bool,
+    pub neighbor_down: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -38,6 +46,10 @@ pub struct StationLayout {
 pub struct FloorLayout {
     pub cubicles: Vec<CubicleLayout>,
     pub stations: Vec<StationLayout>,
+    /// Walkway tiles connecting present modules into one facility. Each tile
+    /// is owned by exactly one present cubicle, so evicted slots leave honest
+    /// holes instead of phantom corridors.
+    pub corridor: Vec<(i32, i32)>,
     pub width: f64,
     pub height: f64,
     pub min_x: f64,
@@ -66,6 +78,7 @@ pub fn build_layout(state: &ObservatoryState) -> FloorLayout {
         return FloorLayout {
             cubicles: Vec::new(),
             stations: Vec::new(),
+            corridor: Vec::new(),
             width: 920.0,
             height: 540.0,
             min_x: -460.0,
@@ -73,20 +86,49 @@ pub fn build_layout(state: &ObservatoryState) -> FloorLayout {
         };
     }
 
+    let present: BTreeSet<usize> = nodes.iter().map(|node| node.floor_slot).collect();
     let mut cubicles = Vec::with_capacity(nodes.len());
     let mut stations = Vec::with_capacity(nodes.len());
+    let mut corridor = Vec::with_capacity(nodes.len() * 24);
     for node in nodes {
         let slot = node.floor_slot;
         let column = (slot % CUBICLE_COLUMNS) as i32;
         let row = (slot / CUBICLE_COLUMNS) as i32;
 
-        // Opposite gx/gy movement creates a screen-horizontal row; advancing
-        // both creates the next screen row. Every module stays on whole tiles.
-        let base_x = column * CUBICLE_STRIDE + row * CUBICLE_STRIDE;
-        let base_y = -column * CUBICLE_STRIDE + row * CUBICLE_STRIDE;
+        // Grid-adjacent packing: modules sit shoulder to shoulder with one
+        // corridor tile between footprints, so the floor reads as one
+        // connected facility (a classic isometric diamond) instead of
+        // detached islands.
+        let base_x = column * CUBICLE_STRIDE;
+        let base_y = row * CUBICLE_STRIDE;
         let station_grid_x = base_x + CUBICLE_TILES_W / 2;
         let station_grid_y = base_y + CUBICLE_TILES_H / 2;
         let (screen_x, screen_y) = grid_to_screen(station_grid_x, station_grid_y);
+
+        let neighbor_left = column > 0 && present.contains(&(slot - 1));
+        let neighbor_up = slot >= CUBICLE_COLUMNS && present.contains(&(slot - CUBICLE_COLUMNS));
+        let neighbor_right = column + 1 < CUBICLE_COLUMNS as i32 && present.contains(&(slot + 1));
+        let neighbor_down = present.contains(&(slot + CUBICLE_COLUMNS));
+
+        // Corridor ownership: every present module paves the band east and
+        // south of its footprint (shared with the next module), and boundary
+        // modules pave the outer ring on their west/north sides.
+        for k in -1..=CUBICLE_TILES_H {
+            corridor.push((base_x + CUBICLE_TILES_W, base_y + k));
+        }
+        for k in -1..CUBICLE_TILES_W {
+            corridor.push((base_x + k, base_y + CUBICLE_TILES_H));
+        }
+        if column == 0 {
+            for k in -1..CUBICLE_TILES_H {
+                corridor.push((base_x - 1, base_y + k));
+            }
+        }
+        if row == 0 {
+            for k in 0..CUBICLE_TILES_W {
+                corridor.push((base_x + k, base_y - 1));
+            }
+        }
 
         cubicles.push(CubicleLayout {
             execution_id: node.execution_id.clone(),
@@ -97,6 +139,10 @@ pub fn build_layout(state: &ObservatoryState) -> FloorLayout {
             tiles_w: CUBICLE_TILES_W,
             tiles_h: CUBICLE_TILES_H,
             accent_index: (stable_hash(&node.root_execution_id) % 3) as u8,
+            neighbor_left,
+            neighbor_up,
+            neighbor_right,
+            neighbor_down,
         });
         stations.push(StationLayout {
             execution_id: node.execution_id.clone(),
@@ -108,6 +154,8 @@ pub fn build_layout(state: &ObservatoryState) -> FloorLayout {
             screen_y,
         });
     }
+    corridor.sort_unstable();
+    corridor.dedup();
 
     cubicles.sort_by(|left, right| {
         (left.grid_x + left.grid_y)
@@ -120,16 +168,22 @@ pub fn build_layout(state: &ObservatoryState) -> FloorLayout {
             .then_with(|| left.slot.cmp(&right.slot))
     });
 
-    // Keep slot zero in the world bounds after reducer-cap eviction. Vacated
-    // early slots become honest gaps instead of shifting every retained module.
+    // Keep slot zero (plus its corridor ring) in the world bounds after
+    // reducer-cap eviction. Vacated early slots become honest gaps instead of
+    // shifting every retained module.
     let (origin_left, origin_right, origin_top, origin_bottom) =
-        footprint_bounds(0, 0, CUBICLE_TILES_W, CUBICLE_TILES_H);
+        footprint_bounds(-1, -1, CUBICLE_TILES_W + 2, CUBICLE_TILES_H + 2);
     let mut min_x = origin_left;
     let mut max_x = origin_right;
     let mut min_y = origin_top - 62.0;
     let mut max_y = origin_bottom + CUBICLE_DEPTH + 54.0;
     for cubicle in &cubicles {
-        let (left, right, top, bottom) = cubicle_bounds(cubicle);
+        let (left, right, top, bottom) = footprint_bounds(
+            cubicle.grid_x - 1,
+            cubicle.grid_y - 1,
+            cubicle.tiles_w + 2,
+            cubicle.tiles_h + 2,
+        );
         min_x = min_x.min(left);
         max_x = max_x.max(right);
         min_y = min_y.min(top - 62.0);
@@ -161,20 +215,12 @@ pub fn build_layout(state: &ObservatoryState) -> FloorLayout {
     FloorLayout {
         cubicles,
         stations,
+        corridor,
         width,
         height,
         min_x,
         min_y,
     }
-}
-
-pub fn cubicle_bounds(cubicle: &CubicleLayout) -> (f64, f64, f64, f64) {
-    footprint_bounds(
-        cubicle.grid_x,
-        cubicle.grid_y,
-        cubicle.tiles_w,
-        cubicle.tiles_h,
-    )
 }
 
 fn footprint_bounds(grid_x: i32, grid_y: i32, tiles_w: i32, tiles_h: i32) -> (f64, f64, f64, f64) {

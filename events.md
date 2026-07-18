@@ -1787,3 +1787,30 @@ at desktop or mobile widths. Verified 363 UI tests + 1 integration test,
 denied-warning WASM Clippy, release Trunk/extension builds, Tauri and proxy
 checks, WASM magic, Playwright smoke, and diff hygiene.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+
+time:      [20:41] [17-07-26]
+agent:     [pi] [thoth]
+worktree:  [main]
+type:      [feature-request]
+area:      [frontend], [design]
+
+Operator rejected the shipped floor as lifeless islands on a dot field. Rebuilt
+Ocean Floor into one connected animated facility: cubicles now pack
+grid-adjacent with real corridor tiles, doorway gaps in interior partitions,
+tall boundary envelope walls, and foundation skirts only on true building
+edges — all derived from present reducer slots, so eviction still leaves honest
+holes. Water dither reduced to a sparse margin shimmer. The scene is now alive
+and truthful: running actors type with alternating hands and body bob over
+scrolling terminal lines with a blinking caret, everyone blinks on per-station
+cadences, permission waits wave a raised hand, active rooms lift their deck
+lighting, and a live execution.admitted event plays a one-shot walk-in through
+the doorway (presentation memory only; snapshot hydration seats everyone
+directly). Continuous RAF at ~30fps active / ~8fps ambient idle; reduced motion
+stops the loop entirely. First open auto-centers the facility once and never
+steals the viewport again. Verified 363+1 tests, denied-warning WASM Clippy,
+release Trunk/extension builds, Tauri check, WASM magic, live desktop/mobile
+Playwright (20 real stations, zero page errors, animation frames confirmed
+differing).
+_________________________________________________________________________________

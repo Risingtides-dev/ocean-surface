@@ -120,11 +120,15 @@
      from the ordinary product chrome so the game world can be expressive
      without turning the surrounding Surface into a themed dashboard. */
   --floor-water: #101F2C;
-  --floor-water-dither: #16364A;
+  --floor-water-dither: #14293A;
   --floor-rock-side: #3D3D46;
   --floor-rock-top: #5A5C63;
   --floor-deck-a: #262B44;
   --floor-deck-b: #212639;
+  --floor-deck-lit-a: #2E3452;
+  --floor-deck-lit-b: #292E47;
+  --floor-corridor: #1B2032;
+  --floor-corridor-mark: #2A314E;
   --floor-wall-top: #3A4466;
   --floor-wall-face: #262B44;
   --floor-wall-dark: #1F2337;
