@@ -188,8 +188,11 @@ Web surface session UI:
   Project-form focus refs belong on the actual first inputs (existing path and
   new-project name), not container elements.
 - Reveal lifecycle is deterministic: opening Council closes every competing
-  reveal; window Escape closes exactly one topmost surface in visual z-order,
-  including Ocean Floor, deck, phone dialer, and LiveKit controls.
+  reveal; opening the Island closes every non-Island reveal; every peer reveal
+  open (Council, Rooms, Sessions, Floor, deck, phone dialer, LiveKit controls)
+  closes the Island. Window Escape closes exactly one topmost surface in visual
+  z-order: Council → Island → Rooms → Sessions → Floor → deck → phone dialer →
+  LiveKit.
 
 ## Rooms Contract
 

@@ -89,6 +89,31 @@ fn council_open_visibility() -> RevealVisibility {
     }
 }
 
+/// Island is the desktop workspace surface: opening it closes every competing
+/// reveal (Council, Rooms, Sessions, Floor, deck, phone, LiveKit). The reverse
+/// is also true — every peer reveal open closes the Island via the app-level
+/// Effect guard.
+fn island_open_visibility() -> RevealVisibility {
+    RevealVisibility {
+        island: true,
+        ..RevealVisibility::default()
+    }
+}
+
+/// Does any non-Island peer reveal own the screen? Pure predicate used by the
+/// Effect guard to close the Island when a competing surface opens (native
+/// menu, room navigation, deep link, etc.). Regression-tested directly so a
+/// peer-surface addition that forgets this predicate fails the build.
+fn competing_reveal_open(visibility: RevealVisibility) -> bool {
+    visibility.council
+        || visibility.rooms
+        || visibility.sessions
+        || visibility.floor
+        || visibility.deck
+        || visibility.phone_dialer
+        || visibility.livekit
+}
+
 /// Return exactly one reveal to close for Escape, ordered by visual z-layer.
 /// Palette/slash popovers stop propagation before this app-level rail.
 fn topmost_reveal(visibility: RevealVisibility) -> Option<RevealSurface> {
@@ -1257,11 +1282,31 @@ pub fn App() -> impl IntoView {
     // Every Island entry point shares one overlay policy. Agent interaction,
     // session switching, and history Recall are mutually exclusive modes of one
     // titlebar object; they never stack into one dashboard or hide behind peers.
+    // Apply a RevealVisibility snapshot directly — single source of truth for
+    // the mapping between the typed visibility contract and the discrete signals.
+    let apply_reveal_visibility = {
+        let c = show_council.clone();
+        let r = show_rooms.clone();
+        let s = show_sessions.clone();
+        let f = show_floor.clone();
+        let d = deck_panel.clone();
+        let p = show_phone_dialer.clone();
+        let l = show_livekit_controls.clone();
+        move |vis: RevealVisibility| {
+            c.set(vis.council);
+            r.set(vis.rooms);
+            s.set(vis.sessions);
+            f.set(vis.floor);
+            // deck is a DeckPanel enum — the only production caller
+            // (island_open_visibility) sets deck:false so we always clear it.
+            d.set(None);
+            p.set(vis.phone_dialer);
+            l.set(vis.livekit);
+        }
+    };
     let open_island = Callback::new(move |next: IslandMode| {
         palette_open.set(false);
-        show_council.set(false);
-        show_rooms.set(false);
-        show_sessions.set(false);
+        apply_reveal_visibility(island_open_visibility());
         if next != IslandMode::Closed {
             island_focus_request.update(|request| *request = request.wrapping_add(1));
         }
@@ -1272,9 +1317,17 @@ pub fn App() -> impl IntoView {
     // `open_island` clears those signals before setting the Island, so the
     // latest explicit opener wins without surfaces stacking invisibly.
     Effect::new(move |_| {
-        if island_mode.get() != IslandMode::Closed
-            && (show_council.get() || show_rooms.get() || show_sessions.get())
-        {
+        let vis = RevealVisibility {
+            council: show_council.get(),
+            island: island_mode.get() != IslandMode::Closed,
+            rooms: show_rooms.get(),
+            sessions: show_sessions.get(),
+            floor: show_floor.get(),
+            deck: deck_panel.get().is_some(),
+            phone_dialer: show_phone_dialer.get(),
+            livekit: show_livekit_controls.get(),
+        };
+        if vis.island && competing_reveal_open(vis) {
             island_mode.set(IslandMode::Closed);
         }
     });
@@ -2759,12 +2812,12 @@ pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
 #[cfg(test)]
 mod tests {
     use super::{
-        composer_height_px, composer_overflow_y, council_open_visibility, execute_planner_workflow,
-        initial_planner_context, parse_deep_link, planner_candidates, selected_planner_context,
-        should_submit_composer_key, topmost_reveal, window_escape_should_handle, DeepLinkAction,
-        PlannerAction, PlannerContext, PlannerWorkflowFailureStage, PlannerWorkflowOps,
-        PlannerWorkflowRequest, RevealSurface, RevealVisibility, COMPOSER_MAX_HEIGHT_PX,
-        COMPOSER_MIN_HEIGHT_PX,
+        competing_reveal_open, composer_height_px, composer_overflow_y, council_open_visibility,
+        execute_planner_workflow, initial_planner_context, island_open_visibility, parse_deep_link,
+        planner_candidates, selected_planner_context, should_submit_composer_key, topmost_reveal,
+        window_escape_should_handle, DeepLinkAction, PlannerAction, PlannerContext,
+        PlannerWorkflowFailureStage, PlannerWorkflowOps, PlannerWorkflowRequest, RevealSurface,
+        RevealVisibility, COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX,
     };
     use crate::daemon::{ProjectInfo, WorktreeInfo};
     use futures_util::future::LocalBoxFuture;
@@ -3010,6 +3063,94 @@ mod tests {
                 council: true,
                 ..RevealVisibility::default()
             }
+        );
+    }
+
+    #[test]
+    fn island_open_visibility_clears_every_peer() {
+        // Production: island_open_visibility() produces the snapshot that
+        // apply_reveal_visibility drives inside open_island. Every peer must
+        // be false so the Island owns the screen alone.
+        let vis = island_open_visibility();
+        assert!(vis.island, "Island itself must be true");
+        assert!(!vis.council, "Council must be false");
+        assert!(!vis.rooms, "Rooms must be false");
+        assert!(!vis.sessions, "Sessions must be false");
+        assert!(!vis.floor, "Floor must be false");
+        assert!(!vis.deck, "Deck must be false");
+        assert!(!vis.phone_dialer, "Phone must be false");
+        assert!(!vis.livekit, "LiveKit must be false");
+    }
+
+    #[test]
+    fn competing_reveal_open_detects_every_peer() {
+        // Every peer surfacing alone (island=false) must be detected by the
+        // predicate the Effect guard calls.
+        assert!(
+            competing_reveal_open(RevealVisibility {
+                council: true,
+                ..RevealVisibility::default()
+            }),
+            "Council must be detected"
+        );
+        assert!(
+            competing_reveal_open(RevealVisibility {
+                rooms: true,
+                ..RevealVisibility::default()
+            }),
+            "Rooms must be detected"
+        );
+        assert!(
+            competing_reveal_open(RevealVisibility {
+                sessions: true,
+                ..RevealVisibility::default()
+            }),
+            "Sessions must be detected"
+        );
+        assert!(
+            competing_reveal_open(RevealVisibility {
+                floor: true,
+                ..RevealVisibility::default()
+            }),
+            "Floor must be detected"
+        );
+        assert!(
+            competing_reveal_open(RevealVisibility {
+                deck: true,
+                ..RevealVisibility::default()
+            }),
+            "Deck must be detected"
+        );
+        assert!(
+            competing_reveal_open(RevealVisibility {
+                phone_dialer: true,
+                ..RevealVisibility::default()
+            }),
+            "Phone must be detected"
+        );
+        assert!(
+            competing_reveal_open(RevealVisibility {
+                livekit: true,
+                ..RevealVisibility::default()
+            }),
+            "LiveKit must be detected"
+        );
+    }
+
+    #[test]
+    fn competing_reveal_open_is_false_for_island_only() {
+        // The Island alone must not trigger the guard that closes itself.
+        assert!(
+            !competing_reveal_open(RevealVisibility {
+                island: true,
+                ..RevealVisibility::default()
+            }),
+            "Island-only must not trigger the guard"
+        );
+        // Default (all-closed) must also be false.
+        assert!(
+            !competing_reveal_open(RevealVisibility::default()),
+            "All-closed must be false"
         );
     }
 
