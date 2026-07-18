@@ -1846,3 +1846,30 @@ release-guard matrix + 1 Abortable poll (feeds old `Err(Aborted)` through
 unified `poll_release_in_flight` with actual `in_flight` value, proves stale
 task does not clear it) + 6 dot-state contract.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+
+time:      [23:32] [17-07-26]
+agent:     [pi] [thoth]
+worktree:  [main]
+type:      [refactor]
+area:      [frontend]
+
+Completed the intent-aware transcript live-follow that an earlier session
+drafted but reverted before committing (its ledger entry was also reverted;
+nothing phantom shipped). Base near-bottom stickiness already existed on main;
+this closes the two real gaps. (1) Session switch now re-pins and jumps, so
+opening another session while scrolled up in history no longer strands the
+viewport at the old offset — previously a switch between two tall transcripts
+opened at the top. (2) While unpinned with content growing below, a quiet
+zero-height sticky "↓ latest" affordance appears (no layout shift, never
+scrolls on its own); clicking returns to the bottom and re-pins. Scroll jumps
+settle over two animation frames to absorb late layout. Verified live against
+real streaming daemon turns: pinned follow tracked the stream at distance 0;
+scrollTop held exactly during 2.5s of mid-stream history reading; the
+affordance appeared, returned, cleared, and follow resumed; and an in-app
+switch from top-of-history into a second tall session opened at its latest
+turn. 363+1 tests, denied-warning WASM Clippy, release Trunk/extension builds,
+Tauri check, zero page errors. AGENTS.md now locks the contract. Test residue:
+one throwaway session in project OCEAN plus unlisted chats.
+_________________________________________________________________________________

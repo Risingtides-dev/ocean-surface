@@ -87,6 +87,9 @@ pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoVie
     // scroll handler so the effect can decide *before* the DOM grows.
     let container: NodeRef<leptos::html::Div> = NodeRef::new();
     let pinned = RwSignal::new(true);
+    // Content grew below the viewport while the user was reading history.
+    // Drives the quiet "latest" return affordance; never scrolls on its own.
+    let new_below = RwSignal::new(false);
 
     // px from the bottom within which we still consider the user "pinned".
     // Generous enough to survive a streaming delta landing between frames.
@@ -97,7 +100,11 @@ pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoVie
             let el: &web_sys::Element = el.as_ref();
             let distance =
                 el.scroll_height() as f64 - el.scroll_top() as f64 - el.client_height() as f64;
-            pinned.set(distance <= STICK_THRESHOLD);
+            let now_pinned = distance <= STICK_THRESHOLD;
+            pinned.set(now_pinned);
+            if now_pinned {
+                new_below.set(false);
+            }
         }
     };
 
@@ -109,14 +116,25 @@ pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoVie
             let _total_blocks: usize = t.iter().map(|turn| turn.blocks.len()).sum();
         });
         if pinned.get_untracked() {
-            if let Some(el) = container.get() {
-                let el: web_sys::Element = el.unchecked_into();
-                // Defer to next frame so the just-appended DOM has laid out and
-                // scroll_height reflects the new content before we jump.
-                let scroll = move || el.set_scroll_top(el.scroll_height());
-                request_animation_frame(scroll);
+            scroll_to_bottom(container);
+        } else if turns.with_untracked(|t| !t.is_empty()) {
+            new_below.set(true);
+        }
+    });
+
+    // Switching sessions is a fresh read, not history-reading: re-pin and jump
+    // so the new transcript opens at its latest turn instead of stranding the
+    // viewport wherever the previous session left it.
+    Effect::new(move |previous: Option<Option<String>>| {
+        let current = daemon.session_id.get();
+        if let Some(previous) = previous {
+            if previous != current {
+                pinned.set(true);
+                new_below.set(false);
+                scroll_to_bottom(container);
             }
         }
+        current
     });
 
     // Empty until the first turn lands. On a fresh load (no session, no
@@ -136,6 +154,12 @@ pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoVie
                 t.last()
                     .is_some_and(|x| matches!(x.role, crate::model::Role::User))
             })
+    };
+
+    let return_to_latest = move |_| {
+        pinned.set(true);
+        new_below.set(false);
+        scroll_to_bottom(container);
     };
 
     view! {
@@ -179,7 +203,31 @@ pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoVie
                 // rises — pending gap between send and first token.
                 <crate::loader::SoundingsThinking />
             </Show>
+            // Quiet return affordance: content is growing below while the
+            // user reads history. Zero-height sticky dock — no layout shift,
+            // never scrolls the viewport on its own.
+            <Show when=move || new_below.get()>
+                <div class="transcript__latest-dock">
+                    <button class="transcript__latest" on:click=return_to_latest>
+                        "↓ latest"
+                    </button>
+                </div>
+            </Show>
         </div>
+    }
+}
+
+/// Jump the transcript scroll container to its bottom. Deferred a frame so
+/// just-appended DOM has laid out, then settled one more frame to absorb late
+/// layout (images, fonts) that grows `scroll_height` after the first jump.
+fn scroll_to_bottom(container: NodeRef<leptos::html::Div>) {
+    if let Some(el) = container.get_untracked() {
+        let el: web_sys::Element = el.unchecked_into();
+        request_animation_frame(move || {
+            el.set_scroll_top(el.scroll_height());
+            let settle = el.clone();
+            request_animation_frame(move || settle.set_scroll_top(settle.scroll_height()));
+        });
     }
 }
 

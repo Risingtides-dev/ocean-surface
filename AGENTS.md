@@ -171,6 +171,11 @@ Web surface session UI:
   `--accent`/`--warn`; `prefers-reduced-motion` sits
   after the state selectors so it wins. Unknown daemon variants are
   `#[serde(other)]` and render idle/recent.
+- Transcript live-follow is intent-aware: follow streams only while the reader
+  is at (or near) the bottom; scrolled-up history reading is never yanked, a
+  quiet zero-height sticky `↓ latest` affordance returns and re-pins, and a
+  session switch always re-pins so the new transcript opens at its latest
+  turn. Do not re-add unconditional scroll-to-bottom on stream deltas.
 
 ## Rooms Contract
 

@@ -949,3 +949,37 @@
     pointer-events: auto;
   }
 }
+
+/* ── Return-to-latest affordance ─────────────────────────────────────────
+   Zero-height sticky dock at the end of the scroll content: sticks above the
+   container's bottom edge only while the user is scrolled up, occupies no
+   layout space, and never moves the viewport on its own. */
+.transcript__latest-dock {
+  position: sticky;
+  bottom: 14px;
+  z-index: 3;
+  display: flex;
+  justify-content: center;
+  height: 0;
+  overflow: visible;
+}
+
+.transcript__latest {
+  padding: 5px 11px 6px;
+  color: var(--fg-3);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  transform: translateY(-100%);
+  box-shadow: 0 3px 10px color-mix(in srgb, var(--bg) 55%, transparent);
+  transition: color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+
+.transcript__latest:hover {
+  color: var(--fg);
+  border-color: var(--border);
+}
