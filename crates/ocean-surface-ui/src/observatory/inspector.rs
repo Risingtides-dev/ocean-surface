@@ -206,6 +206,8 @@ mod tests {
             permission_waiting: false,
             permission_reason: None,
             model_alias: None,
+            floor_slot: 0,
+            started_at: "2026-07-17T00:00:00Z".into(),
             last_cursor: 1,
             duration_millis,
         }

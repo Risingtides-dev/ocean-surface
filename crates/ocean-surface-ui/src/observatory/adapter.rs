@@ -5,7 +5,7 @@ use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
 use super::domain::{EventEnvelope, IntegrityState, ObservatorySnapshot, ObservatoryState};
-use super::reducer::{apply, from_snapshot};
+use super::reducer::{apply, from_snapshot_preserving_slots};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConnectionState {
@@ -188,7 +188,11 @@ impl ObservatoryClient {
             .json::<ObservatorySnapshot>()
             .await
             .map_err(|error| format!("snapshot invalid: {error}"))?;
-        self.state.set(from_snapshot(snapshot));
+        // Preserve the session-local slot registry across refreshes, resyncs,
+        // and replay scrubbing so existing cubicles never move.
+        let previous = self.state.get_untracked();
+        self.state
+            .set(from_snapshot_preserving_slots(snapshot, &previous));
         self.loading.set(false);
         Ok(())
     }

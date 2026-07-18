@@ -325,6 +325,10 @@ pub struct ExecutionState {
     pub permission_waiting: bool,
     pub permission_reason: Option<String>,
     pub model_alias: Option<String>,
+    /// Stable client projection order. Initial snapshot rows receive response
+    /// order; subsequent admissions receive the next slot and never repack it.
+    pub floor_slot: usize,
+    pub started_at: String,
     pub last_cursor: Cursor,
     pub duration_millis: Option<u64>,
 }
@@ -374,6 +378,10 @@ pub struct ObservatoryState {
     pub cursor: Cursor,
     pub earliest_cursor: Cursor,
     pub nodes: BTreeMap<String, ExecutionState>,
+    /// Session-local slot registry survives snapshot refreshes, replay, and
+    /// reducer eviction so retained execution modules never move.
+    pub floor_slots: BTreeMap<String, usize>,
+    pub next_floor_slot: usize,
     pub edges: BTreeMap<String, SnapshotEdge>,
     pub attention: Vec<AttentionItem>,
     pub seen_event_ids: BTreeSet<String>,

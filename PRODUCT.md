@@ -34,6 +34,7 @@ Operational, oceanic, alive. Familiar product controls should feel trustworthy a
 3. One core, many shells: browser, PWA, extension, Tauri, and compact layouts consume the same reducer and product mode.
 4. Observation never becomes hidden authority: Ocean Floor is read-only in v1 and links to existing transcript/control surfaces.
 5. Degrade honestly: gaps, disconnects, retention limits, reduced motion, and renderer fallback stay visible and useful.
+6. The facility grows with the work: every real execution owns one fixed cubicle, and new admissions append modules without repacking the agents already on the floor.
 
 ## Accessibility & Inclusion
 

@@ -1,35 +1,42 @@
-use std::collections::BTreeMap;
-
 use super::domain::ObservatoryState;
 
 pub const TILE_W: f64 = 64.0;
 pub const TILE_H: f64 = 32.0;
-pub const SHELF_DEPTH: f64 = 22.0;
+pub const CUBICLE_DEPTH: f64 = 22.0;
+pub const CUBICLE_TILES_W: i32 = 5;
+pub const CUBICLE_TILES_H: i32 = 5;
+pub const CUBICLE_COLUMNS: usize = 3;
+const CUBICLE_STRIDE: i32 = 6;
+
+/// One immutable slot in the reactive floor plan. A cubicle owns a constant
+/// footprint; adding another execution appends one more module and never
+/// resizes or repacks modules that are already present.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CubicleLayout {
+    pub execution_id: String,
+    pub root_execution_id: String,
+    pub slot: usize,
+    pub grid_x: i32,
+    pub grid_y: i32,
+    pub tiles_w: i32,
+    pub tiles_h: i32,
+    pub accent_index: u8,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StationLayout {
     pub execution_id: String,
     pub root_execution_id: String,
+    pub slot: usize,
     pub grid_x: i32,
     pub grid_y: i32,
-    pub screen_x: f64,
-    pub screen_y: f64,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ShelfLayout {
-    pub root_execution_id: String,
-    pub grid_x: i32,
-    pub grid_y: i32,
-    pub tiles_w: i32,
-    pub tiles_h: i32,
     pub screen_x: f64,
     pub screen_y: f64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FloorLayout {
-    pub shelves: Vec<ShelfLayout>,
+    pub cubicles: Vec<CubicleLayout>,
     pub stations: Vec<StationLayout>,
     pub width: f64,
     pub height: f64,
@@ -44,32 +51,20 @@ pub fn grid_to_screen(grid_x: i32, grid_y: i32) -> (f64, f64) {
     )
 }
 
+/// Derive the whole facility from reducer state. The reducer owns stable slot
+/// assignment, so layout is a pure projection: a live admission receives the
+/// next slot while every existing module remains fixed.
 pub fn build_layout(state: &ObservatoryState) -> FloorLayout {
-    let mut grouped: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for node in state.nodes.values() {
-        grouped
-            .entry(node.root_execution_id.clone())
-            .or_default()
-            .push(node.execution_id.clone());
-    }
-
-    let mut roots: Vec<_> = grouped.into_iter().collect();
-    roots.sort_by(|(left, _), (right, _)| {
-        stable_hash(left)
-            .cmp(&stable_hash(right))
-            .then_with(|| left.cmp(right))
+    let mut nodes: Vec<_> = state.nodes.values().collect();
+    nodes.sort_by(|left, right| {
+        left.floor_slot
+            .cmp(&right.floor_slot)
+            .then_with(|| left.execution_id.cmp(&right.execution_id))
     });
-    for (_, ids) in &mut roots {
-        ids.sort_by(|left, right| {
-            stable_hash(left)
-                .cmp(&stable_hash(right))
-                .then_with(|| left.cmp(right))
-        });
-    }
 
-    if roots.is_empty() {
+    if nodes.is_empty() {
         return FloorLayout {
-            shelves: Vec::new(),
+            cubicles: Vec::new(),
             stations: Vec::new(),
             width: 920.0,
             height: 540.0,
@@ -78,89 +73,79 @@ pub fn build_layout(state: &ObservatoryState) -> FloorLayout {
         };
     }
 
-    let root_columns = match roots.len() {
-        0 | 1 => 1,
-        2 => 2,
-        3..=6 => 3,
-        _ => 4,
-    };
-    let mut shelves = Vec::with_capacity(roots.len());
-    let mut stations = Vec::new();
+    let mut cubicles = Vec::with_capacity(nodes.len());
+    let mut stations = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        let slot = node.floor_slot;
+        let column = (slot % CUBICLE_COLUMNS) as i32;
+        let row = (slot / CUBICLE_COLUMNS) as i32;
 
-    for (shelf_index, (root_id, ids)) in roots.into_iter().enumerate() {
-        let shelf_column = (shelf_index % root_columns) as i32;
-        let shelf_row = (shelf_index / root_columns) as i32;
+        // Opposite gx/gy movement creates a screen-horizontal row; advancing
+        // both creates the next screen row. Every module stays on whole tiles.
+        let base_x = column * CUBICLE_STRIDE + row * CUBICLE_STRIDE;
+        let base_y = -column * CUBICLE_STRIDE + row * CUBICLE_STRIDE;
+        let station_grid_x = base_x + CUBICLE_TILES_W / 2;
+        let station_grid_y = base_y + CUBICLE_TILES_H / 2;
+        let (screen_x, screen_y) = grid_to_screen(station_grid_x, station_grid_y);
 
-        // Moving gx and gy in opposite directions lays shelves out horizontally;
-        // moving both together creates the next screen row. Positions remain
-        // deterministic and integer-tile aligned across reconnects and replay.
-        let base_x = shelf_column * 8 + shelf_row * 9;
-        let base_y = -shelf_column * 8 + shelf_row * 9;
-        let local_columns = ids.len().clamp(1, 3);
-        let local_rows = ids.len().div_ceil(local_columns);
-        let tiles_w = (((local_columns - 1) * 3 + 5) as i32).max(7);
-        let tiles_h = (((local_rows - 1) * 3 + 5) as i32).max(6);
-        let (screen_x, screen_y) = grid_to_screen(base_x, base_y);
-
-        shelves.push(ShelfLayout {
-            root_execution_id: root_id.clone(),
+        cubicles.push(CubicleLayout {
+            execution_id: node.execution_id.clone(),
+            root_execution_id: node.root_execution_id.clone(),
+            slot,
             grid_x: base_x,
             grid_y: base_y,
-            tiles_w,
-            tiles_h,
+            tiles_w: CUBICLE_TILES_W,
+            tiles_h: CUBICLE_TILES_H,
+            accent_index: (stable_hash(&node.root_execution_id) % 3) as u8,
+        });
+        stations.push(StationLayout {
+            execution_id: node.execution_id.clone(),
+            root_execution_id: node.root_execution_id.clone(),
+            slot,
+            grid_x: station_grid_x,
+            grid_y: station_grid_y,
             screen_x,
             screen_y,
         });
-
-        let span_x = (local_columns.saturating_sub(1) * 3) as i32;
-        let span_y = (local_rows.saturating_sub(1) * 3) as i32;
-        let start_x = (tiles_w - 1 - span_x) / 2;
-        let start_y = (tiles_h - 1 - span_y) / 2;
-        for (station_index, execution_id) in ids.into_iter().enumerate() {
-            let local_column = (station_index % local_columns) as i32;
-            let local_row = (station_index / local_columns) as i32;
-            let grid_x = base_x + start_x + local_column * 3;
-            let grid_y = base_y + start_y + local_row * 3;
-            let (screen_x, screen_y) = grid_to_screen(grid_x, grid_y);
-            stations.push(StationLayout {
-                execution_id,
-                root_execution_id: root_id.clone(),
-                grid_x,
-                grid_y,
-                screen_x,
-                screen_y,
-            });
-        }
     }
 
+    cubicles.sort_by(|left, right| {
+        (left.grid_x + left.grid_y)
+            .cmp(&(right.grid_x + right.grid_y))
+            .then_with(|| left.slot.cmp(&right.slot))
+    });
     stations.sort_by(|left, right| {
         (left.grid_x + left.grid_y)
             .cmp(&(right.grid_x + right.grid_y))
-            .then_with(|| left.execution_id.cmp(&right.execution_id))
+            .then_with(|| left.slot.cmp(&right.slot))
     });
 
-    let mut min_x = f64::INFINITY;
-    let mut max_x = f64::NEG_INFINITY;
-    let mut min_y = f64::INFINITY;
-    let mut max_y = f64::NEG_INFINITY;
-    for shelf in &shelves {
-        let (left, right, top, bottom) = shelf_bounds(shelf);
+    // Keep slot zero in the world bounds after reducer-cap eviction. Vacated
+    // early slots become honest gaps instead of shifting every retained module.
+    let (origin_left, origin_right, origin_top, origin_bottom) =
+        footprint_bounds(0, 0, CUBICLE_TILES_W, CUBICLE_TILES_H);
+    let mut min_x = origin_left;
+    let mut max_x = origin_right;
+    let mut min_y = origin_top - 62.0;
+    let mut max_y = origin_bottom + CUBICLE_DEPTH + 54.0;
+    for cubicle in &cubicles {
+        let (left, right, top, bottom) = cubicle_bounds(cubicle);
         min_x = min_x.min(left);
         max_x = max_x.max(right);
-        min_y = min_y.min(top - 34.0);
-        max_y = max_y.max(bottom + SHELF_DEPTH + 54.0);
+        min_y = min_y.min(top - 62.0);
+        max_y = max_y.max(bottom + CUBICLE_DEPTH + 54.0);
     }
     for station in &stations {
         min_x = min_x.min(station.screen_x - 72.0);
         max_x = max_x.max(station.screen_x + 72.0);
         min_y = min_y.min(station.screen_y - 108.0);
-        max_y = max_y.max(station.screen_y + 72.0);
+        max_y = max_y.max(station.screen_y + 76.0);
     }
 
     min_x -= 72.0;
     max_x += 72.0;
-    min_y -= 58.0;
-    max_y += 64.0;
+    min_y -= 54.0;
+    max_y += 68.0;
 
     let mut width = max_x - min_x;
     let mut height = max_y - min_y;
@@ -174,7 +159,7 @@ pub fn build_layout(state: &ObservatoryState) -> FloorLayout {
     }
 
     FloorLayout {
-        shelves,
+        cubicles,
         stations,
         width,
         height,
@@ -183,19 +168,25 @@ pub fn build_layout(state: &ObservatoryState) -> FloorLayout {
     }
 }
 
-pub fn shelf_bounds(shelf: &ShelfLayout) -> (f64, f64, f64, f64) {
+pub fn cubicle_bounds(cubicle: &CubicleLayout) -> (f64, f64, f64, f64) {
+    footprint_bounds(
+        cubicle.grid_x,
+        cubicle.grid_y,
+        cubicle.tiles_w,
+        cubicle.tiles_h,
+    )
+}
+
+fn footprint_bounds(grid_x: i32, grid_y: i32, tiles_w: i32, tiles_h: i32) -> (f64, f64, f64, f64) {
     let mut min_x = f64::INFINITY;
     let mut max_x = f64::NEG_INFINITY;
     let mut min_y = f64::INFINITY;
     let mut max_y = f64::NEG_INFINITY;
     for (gx, gy) in [
-        (shelf.grid_x, shelf.grid_y),
-        (shelf.grid_x + shelf.tiles_w - 1, shelf.grid_y),
-        (
-            shelf.grid_x + shelf.tiles_w - 1,
-            shelf.grid_y + shelf.tiles_h - 1,
-        ),
-        (shelf.grid_x, shelf.grid_y + shelf.tiles_h - 1),
+        (grid_x, grid_y),
+        (grid_x + tiles_w - 1, grid_y),
+        (grid_x + tiles_w - 1, grid_y + tiles_h - 1),
+        (grid_x, grid_y + tiles_h - 1),
     ] {
         let (x, y) = grid_to_screen(gx, gy);
         min_x = min_x.min(x - TILE_W / 2.0);
@@ -214,10 +205,12 @@ fn stable_hash(value: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::observatory::domain::{ExecutionPhase, ExecutionState, TruthProvenance};
 
-    fn node(id: &str, root: &str) -> ExecutionState {
+    fn node(id: &str, root: &str, floor_slot: usize, started_at: &str) -> ExecutionState {
         ExecutionState {
             execution_id: id.into(),
             root_execution_id: root.into(),
@@ -231,36 +224,119 @@ mod tests {
             permission_waiting: false,
             permission_reason: None,
             model_alias: None,
+            floor_slot,
+            started_at: started_at.into(),
             last_cursor: 1,
             duration_millis: None,
         }
     }
 
+    fn station_positions(layout: &FloorLayout) -> BTreeMap<String, (i32, i32, usize)> {
+        layout
+            .stations
+            .iter()
+            .map(|station| {
+                (
+                    station.execution_id.clone(),
+                    (station.grid_x, station.grid_y, station.slot),
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn placement_is_stable_across_input_insertion_order() {
         let mut left = ObservatoryState::default();
-        left.nodes.insert("b".into(), node("b", "root"));
-        left.nodes.insert("a".into(), node("a", "root"));
+        left.nodes
+            .insert("b".into(), node("b", "root", 1, "2026-07-17T00:00:01Z"));
+        left.nodes
+            .insert("a".into(), node("a", "root", 0, "2026-07-17T00:00:02Z"));
         let mut right = ObservatoryState::default();
-        right.nodes.insert("a".into(), node("a", "root"));
-        right.nodes.insert("b".into(), node("b", "root"));
+        right
+            .nodes
+            .insert("a".into(), node("a", "root", 0, "2026-07-17T00:00:02Z"));
+        right
+            .nodes
+            .insert("b".into(), node("b", "root", 1, "2026-07-17T00:00:01Z"));
         assert_eq!(build_layout(&left), build_layout(&right));
     }
 
     #[test]
-    fn every_station_is_inside_its_own_shelf() {
+    fn a_new_admission_appends_one_cubicle_without_moving_existing_modules() {
+        let mut state = ObservatoryState::default();
+        for (index, id) in ["alpha", "beta", "gamma"].into_iter().enumerate() {
+            state.nodes.insert(
+                id.into(),
+                node(
+                    id,
+                    "root",
+                    index,
+                    &format!("2026-07-17T00:00:0{}Z", 3 - index),
+                ),
+            );
+        }
+        let before = build_layout(&state);
+        let before_positions = station_positions(&before);
+
+        state.nodes.insert(
+            "delta".into(),
+            node("delta", "root", 3, "2020-01-01T00:00:00Z"),
+        );
+        let after = build_layout(&state);
+        let after_positions = station_positions(&after);
+
+        assert_eq!(after.cubicles.len(), before.cubicles.len() + 1);
+        for (id, position) in before_positions {
+            assert_eq!(after_positions.get(&id), Some(&position));
+        }
+        assert_eq!(after_positions.get("delta").map(|slot| slot.2), Some(3));
+    }
+
+    #[test]
+    fn removing_an_early_slot_leaves_retained_modules_and_world_origin_fixed() {
+        let mut state = ObservatoryState::default();
+        for (slot, id) in ["alpha", "beta", "gamma", "delta"].into_iter().enumerate() {
+            state
+                .nodes
+                .insert(id.into(), node(id, "root", slot, "2026-07-17T00:00:00Z"));
+        }
+        let before = build_layout(&state);
+        let delta_before = station_positions(&before)["delta"];
+
+        state.nodes.remove("alpha");
+        let after = build_layout(&state);
+
+        assert_eq!(station_positions(&after)["delta"], delta_before);
+        assert_eq!(after.min_x, before.min_x);
+        assert_eq!(after.min_y, before.min_y);
+        assert_eq!(after.width, before.width);
+        assert_eq!(after.height, before.height);
+    }
+
+    #[test]
+    fn every_execution_owns_one_constant_footprint_cubicle() {
         let mut state = ObservatoryState::default();
         for index in 0..8 {
             let id = format!("node-{index}");
-            state.nodes.insert(id.clone(), node(&id, "root"));
+            state.nodes.insert(
+                id.clone(),
+                node(&id, "root", index, &format!("2026-07-17T00:00:{index:02}Z")),
+            );
         }
         let layout = build_layout(&state);
-        let shelf = &layout.shelves[0];
-        for station in &layout.stations {
-            assert!(station.grid_x >= shelf.grid_x);
-            assert!(station.grid_x < shelf.grid_x + shelf.tiles_w);
-            assert!(station.grid_y >= shelf.grid_y);
-            assert!(station.grid_y < shelf.grid_y + shelf.tiles_h);
+        assert_eq!(layout.cubicles.len(), state.nodes.len());
+        for cubicle in &layout.cubicles {
+            assert_eq!(cubicle.tiles_w, CUBICLE_TILES_W);
+            assert_eq!(cubicle.tiles_h, CUBICLE_TILES_H);
+            let station = layout
+                .stations
+                .iter()
+                .find(|station| station.execution_id == cubicle.execution_id)
+                .expect("cubicle station");
+            assert!(station.grid_x >= cubicle.grid_x);
+            assert!(station.grid_x < cubicle.grid_x + cubicle.tiles_w);
+            assert!(station.grid_y >= cubicle.grid_y);
+            assert!(station.grid_y < cubicle.grid_y + cubicle.tiles_h);
         }
     }
 }

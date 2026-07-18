@@ -7,8 +7,8 @@ use web_sys::{CanvasRenderingContext2d, ResizeObserver};
 
 use super::domain::{short_id, ExecutionPhase, ExecutionState, IntegrityState, ObservatoryState};
 use super::layout::{
-    build_layout, grid_to_screen, shelf_bounds, FloorLayout, ShelfLayout, StationLayout,
-    SHELF_DEPTH, TILE_H, TILE_W,
+    build_layout, grid_to_screen, CubicleLayout, FloorLayout, StationLayout, CUBICLE_DEPTH, TILE_H,
+    TILE_W,
 };
 
 type RafHolder = Rc<RefCell<Option<Closure<dyn FnMut(f64)>>>>;
@@ -20,8 +20,15 @@ struct Palette {
     water_dither: String,
     rock_side: String,
     rock_top: String,
-    sand: String,
-    sand_rim: String,
+    deck_a: String,
+    deck_b: String,
+    wall_top: String,
+    wall_face: String,
+    wall_dark: String,
+    desk_top: String,
+    desk_side: String,
+    wood: String,
+    plant: String,
     metal: String,
     metal_hi: String,
     screen_off: String,
@@ -43,8 +50,15 @@ impl Palette {
             water_dither: css_token("--floor-water-dither"),
             rock_side: css_token("--floor-rock-side"),
             rock_top: css_token("--floor-rock-top"),
-            sand: css_token("--floor-sand"),
-            sand_rim: css_token("--floor-sand-rim"),
+            deck_a: css_token("--floor-deck-a"),
+            deck_b: css_token("--floor-deck-b"),
+            wall_top: css_token("--floor-wall-top"),
+            wall_face: css_token("--floor-wall-face"),
+            wall_dark: css_token("--floor-wall-dark"),
+            desk_top: css_token("--floor-desk-top"),
+            desk_side: css_token("--floor-desk-side"),
+            wood: css_token("--floor-wood"),
+            plant: css_token("--floor-plant"),
             metal: css_token("--floor-metal"),
             metal_hi: css_token("--floor-metal-hi"),
             screen_off: css_token("--floor-screen-off"),
@@ -81,6 +95,7 @@ pub fn FloorScene(
     let canvas_ref: NodeRef<leptos::html::Canvas> = NodeRef::new();
     let viewport_size = RwSignal::new((0_i32, 0_i32));
     let layout = Memo::new(move |_| build_layout(&state.get()));
+    let palette = Rc::new(Palette::load());
     let raf_id = Rc::new(RefCell::new(0_i32));
     let holder: RafHolder = Rc::new(RefCell::new(None));
     let running = Rc::new(Cell::new(false));
@@ -145,8 +160,17 @@ pub fn FloorScene(
     let loop_holder = holder.clone();
     let loop_raf = raf_id.clone();
     let loop_running = running.clone();
+    let loop_palette = palette.clone();
     let callback = Closure::wrap(Box::new(move |timestamp: f64| {
-        draw_current(loop_canvas, state, selected, zoom, timestamp);
+        draw_current(
+            loop_canvas,
+            state,
+            selected,
+            zoom,
+            layout,
+            &loop_palette,
+            timestamp,
+        );
         if state.get_untracked().needs_animation() && !prefers_reduced_motion() {
             if let (Some(window), Some(callback)) =
                 (web_sys::window(), loop_holder.borrow().as_ref())
@@ -164,13 +188,22 @@ pub fn FloorScene(
     let effect_holder = holder.clone();
     let effect_raf = raf_id.clone();
     let effect_running = running.clone();
+    let effect_palette = palette.clone();
     Effect::new(move |_| {
         let current = state.get();
         let _ = selected.get();
         let _ = zoom.get();
         let _ = layout.get();
         let _ = viewport_size.get();
-        draw_current(canvas_ref, state, selected, zoom, 0.0);
+        draw_current(
+            canvas_ref,
+            state,
+            selected,
+            zoom,
+            layout,
+            &effect_palette,
+            0.0,
+        );
         if current.needs_animation() && !prefers_reduced_motion() && !effect_running.replace(true) {
             if let (Some(window), Some(callback)) =
                 (web_sys::window(), effect_holder.borrow().as_ref())
@@ -204,30 +237,7 @@ pub fn FloorScene(
                 }
             >
                 <canvas node_ref=canvas_ref class="ocean-floor__canvas" aria-hidden="true" tabindex="-1"></canvas>
-                <div class="ocean-floor__proxies" aria-label="Execution stations">
-                    <For
-                        each=move || layout.get().shelves
-                        key=|shelf| shelf.root_execution_id.clone()
-                        children=move |shelf| {
-                            let root_for_label = shelf.root_execution_id.clone();
-                            let root_for_meta = shelf.root_execution_id.clone();
-                            let shelf_position = shelf.clone();
-                            view! {
-                                <div
-                                    class="ocean-floor__shelf-label"
-                                    style=move || shelf_label_style(&layout.get(), &shelf_position, zoom.get())
-                                >
-                                    <span>"ROOT"</span>
-                                    <strong>{move || state.get().nodes.get(&root_for_label).map(ExecutionState::label).unwrap_or_else(|| short_id(&root_for_label))}</strong>
-                                    <small>{move || {
-                                        let current = state.get();
-                                        let count = current.nodes.values().filter(|node| node.root_execution_id == root_for_meta).count();
-                                        format!("{count} station{}", if count == 1 { "" } else { "s" })
-                                    }}</small>
-                                </div>
-                            }
-                        }
-                    />
+                <div class="ocean-floor__proxies" aria-label="Reactive execution cubicles">
                     <For
                         each=move || layout.get().stations
                         key=|station| station.execution_id.clone()
@@ -239,6 +249,7 @@ pub fn FloorScene(
                             let station_id_name = station.execution_id.clone();
                             let station_id_phase = station.execution_id.clone();
                             let station_id_phase_class = station.execution_id.clone();
+                            let station_slot = station.slot;
                             let station_pos = station.clone();
                             view! {
                                 <button
@@ -247,11 +258,14 @@ pub fn FloorScene(
                                     class:is-attention=move || state.get().nodes.get(&station_id_attention).is_some_and(|node| node.permission_waiting || matches!(node.phase, ExecutionPhase::Error | ExecutionPhase::TimedOut))
                                     type="button"
                                     style=move || proxy_style(&layout.get(), &station_pos, zoom.get())
-                                    aria-label=move || state.get().nodes.get(&station_id_label).map(station_aria_label).unwrap_or_else(|| "execution station".into())
+                                    aria-label=move || state.get().nodes.get(&station_id_label).map(|node| station_aria_label(node, station_slot)).unwrap_or_else(|| format!("cubicle {}", station_slot + 1))
                                     on:click=move |_| selected.set(Some(station_id.clone()))
                                 >
                                     <span class="ocean-floor__station-label" aria-hidden="true">
-                                        <strong>{move || state.get().nodes.get(&station_id_name).map(ExecutionState::label).unwrap_or_else(|| short_id(&station_id_name))}</strong>
+                                        <strong>{move || {
+                                            let label = state.get().nodes.get(&station_id_name).map(ExecutionState::label).unwrap_or_else(|| short_id(&station_id_name));
+                                            format!("C-{:02} · {label}", station_slot + 1)
+                                        }}</strong>
                                         <span
                                             class=move || state.get().nodes.get(&station_id_phase_class).map(|node| format!("ocean-floor__station-phase is-{}", phase_class(node.phase))).unwrap_or_else(|| "ocean-floor__station-phase".into())
                                         >
@@ -289,14 +303,7 @@ fn proxy_style(layout: &FloorLayout, station: &StationLayout, zoom: f64) -> Stri
     )
 }
 
-fn shelf_label_style(layout: &FloorLayout, shelf: &ShelfLayout, zoom: f64) -> String {
-    let (left_edge, _, top_edge, _) = shelf_bounds(shelf);
-    let left = centered_axis(layout.width, left_edge + 18.0, layout.min_x, zoom);
-    let top = centered_axis(layout.height, top_edge + 16.0, layout.min_y, zoom);
-    format!("left:{left};top:{top}")
-}
-
-fn station_aria_label(node: &ExecutionState) -> String {
+fn station_aria_label(node: &ExecutionState, slot: usize) -> String {
     let activity = if node.permission_waiting {
         "permission waiting".to_owned()
     } else if node.tools.is_empty() {
@@ -304,7 +311,7 @@ fn station_aria_label(node: &ExecutionState) -> String {
     } else {
         format!("{}; {} tools running", node.phase.label(), node.tools.len())
     };
-    format!("{}; {activity}", node.label())
+    format!("cubicle {}; {}; {activity}", slot + 1, node.label())
 }
 
 fn phase_class(phase: ExecutionPhase) -> &'static str {
@@ -323,6 +330,8 @@ fn draw_current(
     state: RwSignal<ObservatoryState>,
     selected: RwSignal<Option<String>>,
     zoom: RwSignal<f64>,
+    layout: Memo<FloorLayout>,
+    palette: &Palette,
     timestamp: f64,
 ) {
     let Some(canvas) = canvas_ref.get() else {
@@ -353,9 +362,8 @@ fn draw_current(
     let _ = context.scale(pixel_ratio, pixel_ratio);
 
     let state = state.get_untracked();
-    let layout = build_layout(&state);
+    let layout = layout.get_untracked();
     let zoom = zoom.get_untracked();
-    let palette = Palette::load();
     draw_scene(
         &context,
         &state,
@@ -365,7 +373,7 @@ fn draw_current(
         timestamp,
         css_width,
         css_height,
-        &palette,
+        palette,
     );
 }
 
@@ -390,7 +398,7 @@ fn draw_scene(
     let _ = context.scale(zoom, zoom);
     let _ = context.translate(-layout.min_x, -layout.min_y);
 
-    draw_shelves(context, state, layout, palette);
+    draw_cubicle_modules(context, state, layout, palette);
     draw_tethers(context, state, layout, palette);
     for station in &layout.stations {
         if let Some(node) = state.nodes.get(&station.execution_id) {
@@ -427,32 +435,37 @@ fn draw_water(context: &CanvasRenderingContext2d, width: f64, height: f64, palet
     }
 }
 
-fn draw_shelves(
+fn draw_cubicle_modules(
     context: &CanvasRenderingContext2d,
     state: &ObservatoryState,
     layout: &FloorLayout,
     palette: &Palette,
 ) {
-    for shelf in &layout.shelves {
-        draw_shelf(context, state, shelf, palette);
+    for cubicle in &layout.cubicles {
+        if let Some(node) = state.nodes.get(&cubicle.execution_id) {
+            draw_cubicle_module(context, cubicle, node, palette);
+        }
     }
 }
 
-fn draw_shelf(
+/// Paint one self-contained cubicle. Its constant 5x5 footprint is the visual
+/// module added when an execution is admitted; no neighboring cubicle geometry
+/// is consulted, so existing modules never resize when the floor grows.
+fn draw_cubicle_module(
     context: &CanvasRenderingContext2d,
-    state: &ObservatoryState,
-    shelf: &ShelfLayout,
+    cubicle: &CubicleLayout,
+    node: &ExecutionState,
     palette: &Palette,
 ) {
-    let [top, right, bottom, left] = shelf_outline(shelf);
+    let [top, right, bottom, left] = cubicle_outline(cubicle);
     context.set_global_alpha(0.58);
     polygon(
         context,
         &[
             (top.0 + 12.0, top.1 + 18.0),
             (right.0 + 16.0, right.1 + 18.0),
-            (bottom.0 + 16.0, bottom.1 + SHELF_DEPTH + 28.0),
-            (left.0 + 12.0, left.1 + SHELF_DEPTH + 28.0),
+            (bottom.0 + 16.0, bottom.1 + CUBICLE_DEPTH + 28.0),
+            (left.0 + 12.0, left.1 + CUBICLE_DEPTH + 28.0),
         ],
         &palette.ink,
     );
@@ -463,89 +476,188 @@ fn draw_shelf(
         &[
             right,
             bottom,
-            (bottom.0, bottom.1 + SHELF_DEPTH),
-            (right.0, right.1 + SHELF_DEPTH),
+            (bottom.0, bottom.1 + CUBICLE_DEPTH),
+            (right.0, right.1 + CUBICLE_DEPTH),
         ],
         &palette.rock_side,
     );
-    context.set_global_alpha(0.78);
     polygon(
         context,
         &[
             bottom,
             left,
-            (left.0, left.1 + SHELF_DEPTH),
-            (bottom.0, bottom.1 + SHELF_DEPTH),
+            (left.0, left.1 + CUBICLE_DEPTH),
+            (bottom.0, bottom.1 + CUBICLE_DEPTH),
         ],
-        &palette.rock_side,
+        &palette.wall_dark,
     );
-    context.set_global_alpha(1.0);
 
-    for local_y in 0..shelf.tiles_h {
-        for local_x in 0..shelf.tiles_w {
-            let (x, y) = grid_to_screen(shelf.grid_x + local_x, shelf.grid_y + local_y);
-            let rim = local_x == 0
-                || local_y == 0
-                || local_x == shelf.tiles_w - 1
-                || local_y == shelf.tiles_h - 1;
-            let color = if rim {
-                &palette.rock_top
-            } else if (local_x + local_y) % 2 == 0 {
-                &palette.sand
+    for local_y in 0..cubicle.tiles_h {
+        for local_x in 0..cubicle.tiles_w {
+            let (x, y) = grid_to_screen(cubicle.grid_x + local_x, cubicle.grid_y + local_y);
+            let color = if (local_x + local_y) % 2 == 0 {
+                &palette.deck_a
             } else {
-                &palette.sand_rim
+                &palette.deck_b
             };
             diamond(context, x, y, TILE_W / 2.0, TILE_H / 2.0, color);
+            if local_x == cubicle.tiles_w - 1 || local_y == cubicle.tiles_h - 1 {
+                context.set_fill_style_str(&palette.wall_dark);
+                context.fill_rect(x - 1.0, y + TILE_H / 2.0 - 2.0, 3.0, 3.0);
+            }
         }
     }
 
-    // A real aggregate beacon: red for failed stations, amber for running or
-    // waiting stations, green only when the entire root is terminal-successful.
-    let root_nodes: Vec<_> = state
-        .nodes
-        .values()
-        .filter(|node| node.root_execution_id == shelf.root_execution_id)
-        .collect();
-    let beacon = if root_nodes
-        .iter()
-        .any(|node| matches!(node.phase, ExecutionPhase::Error | ExecutionPhase::TimedOut))
-    {
-        &palette.red
-    } else if root_nodes
-        .iter()
-        .any(|node| node.permission_waiting || node.is_active())
-    {
-        &palette.amber
-    } else {
-        &palette.green
-    };
-    draw_beacon(context, right.0 - 15.0, right.1 - 8.0, beacon, palette);
+    let root_accent = cubicle_root_accent(cubicle, palette);
+    for local_x in 0..cubicle.tiles_w {
+        let (x, y) = grid_to_screen(cubicle.grid_x + local_x, cubicle.grid_y);
+        draw_wall_segment(
+            context,
+            (x, y - TILE_H / 2.0),
+            (x + TILE_W / 2.0, y),
+            &palette.wall_face,
+            root_accent,
+            palette,
+        );
+    }
+    for local_y in 0..cubicle.tiles_h {
+        let (x, y) = grid_to_screen(cubicle.grid_x, cubicle.grid_y + local_y);
+        draw_wall_segment(
+            context,
+            (x, y - TILE_H / 2.0),
+            (x - TILE_W / 2.0, y),
+            &palette.wall_dark,
+            root_accent,
+            palette,
+        );
+    }
 
-    // Static edge braces make the containment boundary read at a glance.
+    let status = node_status_color(node, palette);
+    draw_beacon(context, right.0 - 13.0, right.1 - 7.0, status, palette);
+
+    // Deterministic furnishings increase visual density without inventing
+    // behavior. They are architecture, not activity indicators.
+    let (storage_x, storage_y) = grid_to_screen(cubicle.grid_x + 3, cubicle.grid_y + 1);
+    draw_storage(context, storage_x, storage_y - 5.0, cubicle.slot, palette);
+    let (plant_x, plant_y) = grid_to_screen(cubicle.grid_x + 1, cubicle.grid_y + 3);
+    draw_planter(context, plant_x, plant_y - 2.0, palette);
+
     for fraction in [0.25, 0.5, 0.75] {
         let x = left.0 + (bottom.0 - left.0) * fraction;
         let y = left.1 + (bottom.1 - left.1) * fraction;
         context.set_fill_style_str(&palette.metal);
-        context.fill_rect(x - 3.0, y + 2.0, 6.0, SHELF_DEPTH - 4.0);
+        context.fill_rect(x - 3.0, y + 2.0, 6.0, CUBICLE_DEPTH - 4.0);
         context.set_fill_style_str(&palette.metal_hi);
-        context.fill_rect(x - 3.0, y + 2.0, 2.0, SHELF_DEPTH - 4.0);
+        context.fill_rect(x - 3.0, y + 2.0, 2.0, CUBICLE_DEPTH - 4.0);
     }
 }
 
-fn shelf_outline(shelf: &ShelfLayout) -> [(f64, f64); 4] {
-    let (top_x, top_y) = grid_to_screen(shelf.grid_x, shelf.grid_y);
-    let (right_x, right_y) = grid_to_screen(shelf.grid_x + shelf.tiles_w - 1, shelf.grid_y);
+fn cubicle_outline(cubicle: &CubicleLayout) -> [(f64, f64); 4] {
+    let (top_x, top_y) = grid_to_screen(cubicle.grid_x, cubicle.grid_y);
+    let (right_x, right_y) = grid_to_screen(cubicle.grid_x + cubicle.tiles_w - 1, cubicle.grid_y);
     let (bottom_x, bottom_y) = grid_to_screen(
-        shelf.grid_x + shelf.tiles_w - 1,
-        shelf.grid_y + shelf.tiles_h - 1,
+        cubicle.grid_x + cubicle.tiles_w - 1,
+        cubicle.grid_y + cubicle.tiles_h - 1,
     );
-    let (left_x, left_y) = grid_to_screen(shelf.grid_x, shelf.grid_y + shelf.tiles_h - 1);
+    let (left_x, left_y) = grid_to_screen(cubicle.grid_x, cubicle.grid_y + cubicle.tiles_h - 1);
     [
         (top_x, top_y - TILE_H / 2.0),
         (right_x + TILE_W / 2.0, right_y),
         (bottom_x, bottom_y + TILE_H / 2.0),
         (left_x - TILE_W / 2.0, left_y),
     ]
+}
+
+fn draw_wall_segment(
+    context: &CanvasRenderingContext2d,
+    start: (f64, f64),
+    end: (f64, f64),
+    face: &str,
+    accent: &str,
+    palette: &Palette,
+) {
+    const WALL_H: f64 = 46.0;
+    polygon(
+        context,
+        &[
+            (start.0, start.1 - WALL_H),
+            (end.0, end.1 - WALL_H),
+            end,
+            start,
+        ],
+        face,
+    );
+    polygon(
+        context,
+        &[
+            (start.0, start.1 - WALL_H - 4.0),
+            (end.0, end.1 - WALL_H - 4.0),
+            (end.0, end.1 - WALL_H),
+            (start.0, start.1 - WALL_H),
+        ],
+        &palette.wall_top,
+    );
+    polygon(
+        context,
+        &[
+            (start.0, start.1 - 12.0),
+            (end.0, end.1 - 12.0),
+            (end.0, end.1 - 9.0),
+            (start.0, start.1 - 9.0),
+        ],
+        accent,
+    );
+}
+
+fn cubicle_root_accent<'a>(cubicle: &CubicleLayout, palette: &'a Palette) -> &'a str {
+    match cubicle.accent_index {
+        0 => &palette.screen_on,
+        1 => &palette.outfit,
+        _ => &palette.wood,
+    }
+}
+
+fn node_status_color<'a>(node: &ExecutionState, palette: &'a Palette) -> &'a str {
+    if node.permission_waiting {
+        return &palette.amber;
+    }
+    match node.phase {
+        ExecutionPhase::Finished => &palette.green,
+        ExecutionPhase::Error | ExecutionPhase::TimedOut => &palette.red,
+        ExecutionPhase::Canceled => &palette.tether,
+        ExecutionPhase::Running | ExecutionPhase::Admitted => &palette.amber,
+    }
+}
+
+fn draw_storage(
+    context: &CanvasRenderingContext2d,
+    x: f64,
+    y: f64,
+    slot: usize,
+    palette: &Palette,
+) {
+    diamond(context, x, y, 18.0, 9.0, &palette.wood);
+    context.set_fill_style_str(&palette.wood);
+    context.fill_rect(x - 15.0, y, 30.0, 24.0);
+    context.set_fill_style_str(&palette.wall_dark);
+    context.fill_rect(x - 12.0, y + 5.0, 24.0, 3.0);
+    context.fill_rect(x - 12.0, y + 12.0, 24.0, 3.0);
+    context.set_fill_style_str(if slot % 2 == 0 {
+        &palette.screen_on
+    } else {
+        &palette.packet
+    });
+    context.fill_rect(x + 7.0, y + 18.0, 3.0, 3.0);
+}
+
+fn draw_planter(context: &CanvasRenderingContext2d, x: f64, y: f64, palette: &Palette) {
+    diamond(context, x, y, 11.0, 6.0, &palette.wood);
+    context.set_fill_style_str(&palette.wood);
+    context.fill_rect(x - 7.0, y, 14.0, 11.0);
+    context.set_fill_style_str(&palette.plant);
+    context.fill_rect(x - 2.0, y - 16.0, 5.0, 16.0);
+    context.fill_rect(x - 8.0, y - 13.0, 7.0, 5.0);
+    context.fill_rect(x + 2.0, y - 10.0, 8.0, 5.0);
 }
 
 fn draw_beacon(context: &CanvasRenderingContext2d, x: f64, y: f64, color: &str, palette: &Palette) {
@@ -735,7 +847,7 @@ fn draw_console(
     context.set_fill_style_str(lamp);
     context.fill_rect(x + 19.0, y - 29.0, 4.0, 4.0);
 
-    diamond(context, x, y + 2.0, 36.0, 18.0, &palette.metal_hi);
+    diamond(context, x, y + 2.0, 36.0, 18.0, &palette.desk_top);
     polygon(
         context,
         &[
@@ -744,7 +856,7 @@ fn draw_console(
             (x, y + 27.0),
             (x - 36.0, y + 9.0),
         ],
-        &palette.metal,
+        &palette.desk_side,
     );
     polygon(
         context,
@@ -754,7 +866,7 @@ fn draw_console(
             (x, y + 27.0),
             (x + 36.0, y + 9.0),
         ],
-        &palette.ink,
+        &palette.wall_dark,
     );
     context.set_fill_style_str(&palette.screen_off);
     for key_y in 0..2 {

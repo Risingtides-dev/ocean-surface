@@ -310,49 +310,6 @@
   pointer-events: none;
 }
 
-.ocean-floor__shelf-label {
-  position: absolute;
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 1px 7px;
-  min-width: 124px;
-  padding: 5px 7px 6px;
-  color: var(--fg);
-  background: var(--floor-ink);
-  border-top: 2px solid var(--floor-metal-hi);
-  border-right: 2px solid var(--floor-rock-side);
-  border-bottom: 2px solid var(--floor-rock-side);
-  border-left: 2px solid var(--floor-metal-hi);
-  font-family: var(--mono);
-  pointer-events: none;
-  box-shadow: 5px 6px 0 var(--floor-ink);
-}
-
-.ocean-floor__shelf-label > span {
-  grid-row: 1 / span 2;
-  align-self: center;
-  color: var(--floor-lamp-amber);
-  font-size: 8px;
-  letter-spacing: 0.12em;
-}
-
-.ocean-floor__shelf-label strong {
-  max-width: 156px;
-  overflow: hidden;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-overflow: ellipsis;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-
-.ocean-floor__shelf-label small {
-  color: var(--floor-metal-hi);
-  font-size: 8px;
-  line-height: 1;
-}
-
 .ocean-floor__station-proxy {
   position: absolute;
   pointer-events: auto;
@@ -376,7 +333,7 @@
 }
 
 .ocean-floor__station-proxy.is-attention .ocean-floor__station-label {
-  border-left-color: var(--warn);
+  border-color: var(--warn);
   outline: 2px solid var(--warn);
   outline-offset: 1px;
 }
@@ -395,7 +352,7 @@
   padding: 3px 5px 3px 7px;
   color: var(--fg);
   background: var(--floor-ink);
-  border-left: 3px solid var(--floor-metal-hi);
+  border: 2px solid var(--floor-metal-hi);
   font-family: var(--mono);
   pointer-events: none;
   transform: translateX(50%);
@@ -777,11 +734,6 @@
 
   .ocean-floor__view-switch button {
     padding-inline: 7px;
-  }
-
-  .ocean-floor__shelf-label {
-    transform: scale(0.84);
-    transform-origin: left top;
   }
 
   .ocean-floor__station-label {

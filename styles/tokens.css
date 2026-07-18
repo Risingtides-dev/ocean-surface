@@ -123,8 +123,15 @@
   --floor-water-dither: #16364A;
   --floor-rock-side: #3D3D46;
   --floor-rock-top: #5A5C63;
-  --floor-sand: #8E8064;
-  --floor-sand-rim: #6F654F;
+  --floor-deck-a: #262B44;
+  --floor-deck-b: #212639;
+  --floor-wall-top: #3A4466;
+  --floor-wall-face: #262B44;
+  --floor-wall-dark: #1F2337;
+  --floor-desk-top: #124E89;
+  --floor-desk-side: #0D3A66;
+  --floor-wood: #B86F50;
+  --floor-plant: #3E8948;
   --floor-metal: #343B4A;
   --floor-metal-hi: #6F7C91;
   --floor-screen-off: #07101A;

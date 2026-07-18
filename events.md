@@ -1759,3 +1759,31 @@ Gates passed: 357 UI unit tests + 1 integration test, 17 proxy tests, WASM and
 proxy checks, denied-warning Clippy, format/diff checks, extension release
 build, Tauri cargo check, and Playwright desktop/inspector/list/mobile smoke.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+
+time:      [20:12] [17-07-26]
+agent:     [pi] [thoth]
+worktree:  [main]
+type:      [feature-request]
+area:      [frontend], [design], [testing]
+
+Replaced Ocean Floor's expanding root shelves with a reactive modular facility:
+every durable execution now owns one fixed 5x5-tile isometric cubicle in a
+three-column append-only grid. The reducer owns a session-local slot registry:
+initial snapshot rows take response order, every later admission takes the next
+slot, refreshes/resyncs/replay preserve existing slots, cap-evicted executions
+leave honest gaps and return to their original module, and only an observatory
+authority change resets the registry. Layout is a pure slot projection with a
+fixed slot-zero world origin, so retained cubicles never move; the scene now
+reuses the memoized layout and a mount-time palette instead of rebuilding both
+every animation frame. Cubicles draw independent walls, deck, status beacon,
+console, actor, storage, and planter as static architecture while activity,
+status, attention, topology, and tool signals stay grounded in real Observatory
+facts. Two fresh adversarial reviews flagged timestamp-derived ordering; fixed
+by the reducer-owned registry above. Live smoke rendered 16 durable executions,
+replay scrub plus return-to-live moved 0 cubicles, and no page errors appeared
+at desktop or mobile widths. Verified 363 UI tests + 1 integration test,
+denied-warning WASM Clippy, release Trunk/extension builds, Tauri and proxy
+checks, WASM magic, Playwright smoke, and diff hygiene.
+_________________________________________________________________________________

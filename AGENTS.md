@@ -91,6 +91,10 @@ Ocean Floor is the read-only Observatory mode. Its isometric pixel scene,
 semantic list, inspector, and replay rail consume only the typed reducer over
 metadata-safe `/v1/observatory/{snapshot,events,replay}` responses; no mock
 executions, transcript content, inferred activity, or observer write controls.
+Every reducer execution owns one constant-footprint cubicle with a stable slot:
+snapshot rows preserve server admission order, and a live admission appends the
+next slot without resizing or repacking existing modules. Furnishings are static architecture, while actor, tool,
+attention, status, and topology treatments come only from real reducer state.
 The web proxy reads the daemon-minted mode-0600 observer token immediately
 before each upstream request and injects it server-side. Never expose that
 token to browser code, bundle it, or cache it in client storage.
