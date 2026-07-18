@@ -470,6 +470,28 @@ impl Rooms {
         self.url.get_untracked().trim_end_matches('/').to_string()
     }
 
+    /// Current-room predicate over the live `generation` and `open_key`
+    /// signals. Async tail work checks it before any non-frame state write;
+    /// decoded frames pass through `accept_room_tail_frame` below.
+    fn room_is_current(&self, generation_id: u64, key: &str) -> bool {
+        room_request_is_current(
+            generation_id,
+            self.generation.get_untracked(),
+            key,
+            self.open_key.get_untracked().as_deref(),
+        )
+    }
+
+    /// Synchronously clear the open-room signals and pin `tail_state` to
+    /// `Replaying` so no prior room state leaks into the next open. Shared
+    /// by `open_room` (pre-hydrate) and `close_room`.
+    fn reset_room_state(&self) {
+        self.open_room.set(None);
+        self.transcript.set(Vec::new());
+        self.access.set(None);
+        self.tail_state.set(TailState::Replaying);
+    }
+
     /// Whether the current identity is in the open room's roster.
     pub fn joined_open(&self) -> bool {
         let me = self.identity_id.get();
@@ -597,13 +619,11 @@ impl Rooms {
         let status = self.status;
         let generation = self.generation;
 
-        // Retire any prior room's live loops.
+        // Retire any prior room's live loops and reset state synchronously.
         let generation_id = generation.get_untracked().wrapping_add(1);
         generation.set(generation_id);
         open_key.set(Some(key.clone()));
-        open_room.set(None);
-        transcript.set(Vec::new());
-        me.access.set(None);
+        me.reset_room_state();
         status.set("loading room…".into());
         // Entering a room takes the stage (RoomStage swaps in for the chat
         // surface), so the browser panel folds away.
@@ -653,9 +673,7 @@ impl Rooms {
     pub fn close_room(&self) {
         self.generation.update(|g| *g = g.wrapping_add(1));
         self.open_key.set(None);
-        self.open_room.set(None);
-        self.transcript.set(Vec::new());
-        self.access.set(None);
+        self.reset_room_state();
     }
 
     /// Join the open room as the current identity
@@ -961,19 +979,17 @@ impl Rooms {
     /// 2.5s poll workaround.
     fn start_live_tail(&self, key: String, generation_id: u64) {
         let me = *self;
-        let generation = self.generation;
         let base = self.base();
         let last_seq = RwSignal::new(last_transcript_seq(&self.transcript.get_untracked()));
         let tail_state = self.tail_state;
 
         spawn_local(async move {
-            tail_state.set(TailState::Replaying);
             let events_url = format!("{base}/v1/rooms/persistent/{}/events", encode(&key));
             let mut resume_seq = last_seq.get_untracked();
             let mut reconnecting = false;
 
             loop {
-                if generation.get_untracked() != generation_id {
+                if !me.room_is_current(generation_id, &key) {
                     break;
                 }
                 tail_state.set(if reconnecting {
@@ -1004,21 +1020,24 @@ impl Rooms {
                         continue;
                     }
                 };
-                tail_state.set(match es.state() {
-                    gloo_net::eventsource::State::Open => TailState::Live,
-                    gloo_net::eventsource::State::Connecting if reconnecting => {
-                        TailState::Reconnecting
-                    }
-                    gloo_net::eventsource::State::Connecting => TailState::Replaying,
-                    gloo_net::eventsource::State::Closed => TailState::Reconnecting,
-                });
+                // Only write connection state if this room+generation is still current.
+                if me.room_is_current(generation_id, &key) {
+                    tail_state.set(match es.state() {
+                        gloo_net::eventsource::State::Open => TailState::Live,
+                        gloo_net::eventsource::State::Connecting if reconnecting => {
+                            TailState::Reconnecting
+                        }
+                        gloo_net::eventsource::State::Connecting => TailState::Replaying,
+                        gloo_net::eventsource::State::Closed => TailState::Reconnecting,
+                    });
+                }
                 let mut stream = futures_util::stream::select(message_sub, access_sub);
                 // Race stream.next() against a 2 s timeout so room close/switch
                 // can cancel a stalled connection (blame: gloo EventSource errors
                 // are suppressed during CONNECTING, so Reconnecting never fires
                 // without an explicit timeout-pump — codex TASK-11 review).
                 loop {
-                    if generation.get_untracked() != generation_id {
+                    if !me.room_is_current(generation_id, &key) {
                         break;
                     }
                     let next = stream.next();
@@ -1033,17 +1052,22 @@ impl Rooms {
                             // distinguish a quiet stream from a dead one.
                             // gloo wraps web_sys::EventSource; State mirrors
                             // the underlying readyState constants.
-                            match es.state() {
-                                gloo_net::eventsource::State::Open => {
-                                    tail_state.set(TailState::Live);
+                            // Only write tail_state if this room+gen is still current.
+                            if me.room_is_current(generation_id, &key) {
+                                match es.state() {
+                                    gloo_net::eventsource::State::Open => {
+                                        tail_state.set(TailState::Live);
+                                    }
+                                    gloo_net::eventsource::State::Connecting => {
+                                        tail_state.set(TailState::Reconnecting);
+                                    }
+                                    gloo_net::eventsource::State::Closed => {
+                                        tail_state.set(TailState::Reconnecting);
+                                        break; // fall through to outer reconnect loop
+                                    }
                                 }
-                                gloo_net::eventsource::State::Connecting => {
-                                    tail_state.set(TailState::Reconnecting);
-                                }
-                                gloo_net::eventsource::State::Closed => {
-                                    tail_state.set(TailState::Reconnecting);
-                                    break; // fall through to outer reconnect loop
-                                }
+                            } else {
+                                break;
                             }
                             continue;
                         }
@@ -1054,6 +1078,15 @@ impl Rooms {
                     };
                     let Some(frame) = decode_room_tail_frame(&name, &data) else {
                         continue;
+                    };
+                    let Some(frame) = accept_room_tail_frame(
+                        frame,
+                        generation_id,
+                        me.generation.get_untracked(),
+                        &key,
+                        me.open_key.get_untracked().as_deref(),
+                    ) else {
+                        break;
                     };
                     tail_state.set(TailState::Live);
                     match frame {
@@ -1082,9 +1115,7 @@ impl Rooms {
                                 let key = key.clone();
                                 let open_room = me.open_room;
                                 spawn_local(async move {
-                                    if generation.get_untracked() != generation_id
-                                        || me.open_key.get_untracked().as_deref() != Some(&key)
-                                    {
+                                    if !me.room_is_current(generation_id, &key) {
                                         return;
                                     }
                                     if let Ok(resp) = Request::get(&format!(
@@ -1096,10 +1127,7 @@ impl Rooms {
                                     {
                                         if let Ok(r) = resp.json::<RoomMutateResponse>().await {
                                             if r.ok {
-                                                if generation.get_untracked() != generation_id
-                                                    || me.open_key.get_untracked().as_deref()
-                                                        != Some(key.as_str())
-                                                {
+                                                if !me.room_is_current(generation_id, &key) {
                                                     return;
                                                 }
                                                 if let Some(room) = r.room {
@@ -1115,7 +1143,7 @@ impl Rooms {
                 }
                 resume_seq = last_seq.get_untracked();
                 reconnecting = true;
-                if generation.get_untracked() != generation_id {
+                if !me.room_is_current(generation_id, &key) {
                     break;
                 }
                 gloo_timers::future::TimeoutFuture::new(1_000).await;
@@ -1138,6 +1166,25 @@ fn decode_room_tail_frame(name: &str, data: &str) -> Option<RoomTailFrame> {
         "room_access" => serde_json::from_str(data).ok().map(RoomTailFrame::Access),
         _ => None,
     }
+}
+
+/// Admit a decoded SSE frame only while its captured room generation and key
+/// still own the open room. This is the single production boundary before any
+/// frame-driven tail state, access, cursor, or transcript mutation.
+fn accept_room_tail_frame(
+    frame: RoomTailFrame,
+    expected_generation: u64,
+    current_generation: u64,
+    expected_key: &str,
+    current_key: Option<&str>,
+) -> Option<RoomTailFrame> {
+    room_request_is_current(
+        expected_generation,
+        current_generation,
+        expected_key,
+        current_key,
+    )
+    .then_some(frame)
 }
 
 fn apply_access_projection(
@@ -1629,6 +1676,86 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&OutboxItemState::Failed).unwrap(),
             r#""failed""#
+        );
+    }
+
+    // ── TASK-21 tail guard: stale SSE frames after close/switch ────────
+    #[test]
+    fn production_frame_boundary_accepts_only_the_current_room_for_both_variants() {
+        let frames = [
+            RoomTailFrame::Message(message(8)),
+            RoomTailFrame::Access(access_projection(RoomAccessState::Recovering)),
+        ];
+
+        for frame in frames {
+            assert_eq!(
+                accept_room_tail_frame(frame.clone(), 4, 4, "room-a", Some("room-a")),
+                Some(frame.clone()),
+                "current frame must be admitted"
+            );
+            assert_eq!(
+                accept_room_tail_frame(frame.clone(), 4, 5, "room-a", Some("room-a")),
+                None,
+                "generation-stale frame must be a total no-op"
+            );
+            assert_eq!(
+                accept_room_tail_frame(frame.clone(), 4, 4, "room-a", Some("room-b")),
+                None,
+                "wrong-room frame must be a total no-op"
+            );
+            assert_eq!(
+                accept_room_tail_frame(frame, 4, 4, "room-a", None),
+                None,
+                "closed-room frame must be a total no-op"
+            );
+        }
+    }
+
+    #[test]
+    fn production_room_is_current_and_reset_use_shared_predicate() {
+        let rooms = Rooms {
+            url: RwSignal::new(String::new()),
+            list: RwSignal::new(Vec::new()),
+            open_key: RwSignal::new(None),
+            open_room: RwSignal::new(None),
+            transcript: RwSignal::new(Vec::new()),
+            status: RwSignal::new(String::new()),
+            generation: RwSignal::new(0),
+            identity_id: RwSignal::new("test-member"),
+            identity_name: RwSignal::new("Test Member"),
+            panel_open: RwSignal::new(false),
+            tail_state: RwSignal::new(TailState::Replaying),
+            available_agents: RwSignal::new(Vec::new()),
+            access: RwSignal::new(None),
+        };
+
+        // Not-yet-opened: no key, gen=0 → room_is_current rejects.
+        assert!(!rooms.room_is_current(0, "room-1"));
+        assert!(!rooms.room_is_current(13, "room-1"));
+
+        // Manually set open_key + gen to simulate an open room.
+        rooms.generation.set(42);
+        rooms.open_key.set(Some("room-1".into()));
+        assert!(rooms.room_is_current(42, "room-1"));
+        assert!(!rooms.room_is_current(41, "room-1")); // wrong gen
+        assert!(!rooms.room_is_current(42, "room-2")); // wrong key
+
+        // Seed some state, then call reset_room_state and assert it's cleared.
+        rooms.open_room.set(Some(local_room()));
+        rooms.transcript.set(vec![message(1)]);
+        rooms
+            .access
+            .set(Some(access_projection(RoomAccessState::Local)));
+        rooms.tail_state.set(TailState::Live);
+
+        rooms.reset_room_state();
+        assert!(rooms.open_room.get_untracked().is_none());
+        assert!(rooms.transcript.get_untracked().is_empty());
+        assert!(rooms.access.get_untracked().is_none());
+        assert_eq!(
+            rooms.tail_state.get_untracked(),
+            TailState::Replaying,
+            "reset_room_state must pin tail_state to Replaying"
         );
     }
 }
