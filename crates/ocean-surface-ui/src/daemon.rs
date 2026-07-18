@@ -1431,6 +1431,30 @@ pub struct OwningProjectRef {
     pub name: String,
 }
 
+/// Client-facing run state of an active turn, mirrored from
+/// `ocean_core::SessionRunState`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionRunState {
+    /// No active turn (or stored/archived session).
+    Stored,
+    /// Agent is actively generating a response.
+    Running,
+    /// Turn paused — waiting for operator permission on a tool.
+    WaitingForPermission,
+    /// Operator requested cancel; the turn is winding down.
+    Cancelling,
+    /// Turn was cancelled before completion.
+    Cancelled,
+    /// Turn completed successfully.
+    Completed,
+    /// Turn terminated with an error.
+    Errored,
+    /// Future variant from a newer daemon — treat as idle/unknown.
+    #[serde(other)]
+    Unknown,
+}
+
 /// Summary of a session, matching the daemon's AgentSessionSummary. `cwd`,
 /// `workspace_root`, and `owning_project` are all `#[serde(default)]` — an
 /// old daemon serves only `cwd`, and the sessions panel groups on whatever
@@ -1449,6 +1473,14 @@ pub struct SessionSummary {
     pub git_branch: Option<String>,
     #[serde(default)]
     pub turn_count: u32,
+    /// Active turn id, present when an agent turn is in-flight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_turn: Option<String>,
+    /// Run state of active_turn, derived atomically by the daemon.
+    /// None when active_turn is None. Old daemons omit it —
+    /// `#[serde(default)]` ensures backward compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_state: Option<SessionRunState>,
     #[serde(default)]
     pub updated_at: String,
 }
@@ -2607,64 +2639,68 @@ impl Daemon {
     }
 
     /// Fetch session list from the daemon and store in session_list signal.
+    /// Owned by the sessions-panel abortable poll rail; the panel calls
+    /// `fetch_all_sessions` directly via its abortable wrappers rather than
+    /// going through this thin spawner.
     pub fn fetch_sessions(&self) {
-        let url = self.url.get_untracked();
-        let session_list = self.session_list;
+        let daemon = self.clone();
         spawn_local(async move {
-            let base = url.trim_end_matches('/').to_string();
-            // The daemon paginates: each page caps at DEFAULT_LIST_LIMIT (100)
-            // and returns `next_cursor` while `has_more` (OCEAN-250). The panel
-            // groups by project and sessions come back sorted by workspace
-            // root, so a project's sessions can sit ANYWHERE in the list, well
-            // past the first 100 — fetching one page left every deeper-nested
-            // project (OCEAN, ocean-os, …) invisible once the store grew past
-            // ~100 sessions. Request the max page size to keep round-trips low,
-            // then drain the cursor. Bounded at 50 pages so a stuck cursor can
-            // never spin forever.
-            #[derive(Deserialize)]
-            struct SessionsResponse {
-                ok: bool,
-                #[serde(default)]
-                sessions: Vec<SessionSummary>,
-                #[serde(default)]
-                next_cursor: Option<String>,
-                #[serde(default)]
-                has_more: bool,
+            match daemon.fetch_all_sessions().await {
+                Ok(all) => daemon.session_list.set(all),
+                Err(e) => log::warn!("sessions fetch error: {e}"),
             }
-            let mut all: Vec<SessionSummary> = Vec::new();
-            let mut cursor: Option<String> = None;
-            for _ in 0..50 {
-                let mut get_url = format!("{base}/v1/agent/sessions?limit=1000");
-                if let Some(c) = &cursor {
-                    get_url.push_str("&cursor=");
-                    get_url.push_str(c);
-                }
-                match Request::get(&get_url).send().await {
-                    Ok(resp) => match resp.json::<SessionsResponse>().await {
-                        Ok(r) if r.ok => {
-                            all.extend(r.sessions);
-                            match r.next_cursor.filter(|_| r.has_more) {
-                                Some(next) if !next.is_empty() => cursor = Some(next),
-                                _ => break,
-                            }
-                        }
-                        Ok(_) => {
-                            log::warn!("sessions fetch not ok");
-                            break;
-                        }
-                        Err(err) => {
-                            log::warn!("sessions decode error: {err}");
-                            break;
-                        }
-                    },
-                    Err(err) => {
-                        log::warn!("sessions fetch error: {err}");
-                        break;
-                    }
-                }
-            }
-            session_list.set(all);
         });
+    }
+
+    /// Async pagination rail: drain all pages from the daemon and return the
+    /// full session list. Owned by `async move` so the panel's 2s interval
+    /// callback can clone the daemon and await this directly.
+    ///
+    /// Returns `Err(msg)` on network/parse failure so callers can decide
+    /// whether to retry or suppress a stale write.
+    ///
+    /// The daemon paginates: each page caps at DEFAULT_LIST_LIMIT (100) and
+    /// returns `next_cursor` while `has_more` (OCEAN-250). The panel groups
+    /// by project and sessions come back sorted by workspace root, so a
+    /// project's sessions can sit ANYWHERE in the list, well past the first
+    /// 100 — fetching one page left every deeper-nested project invisible
+    /// once the store grew past ~100 sessions. Bounded at 50 pages so a
+    /// stuck cursor can never spin forever.
+    pub async fn fetch_all_sessions(&self) -> Result<Vec<SessionSummary>, String> {
+        let base = self.url.get_untracked().trim_end_matches('/').to_string();
+        #[derive(Deserialize)]
+        struct SessionsResponse {
+            ok: bool,
+            #[serde(default)]
+            sessions: Vec<SessionSummary>,
+            #[serde(default)]
+            next_cursor: Option<String>,
+            #[serde(default)]
+            has_more: bool,
+        }
+        let mut all: Vec<SessionSummary> = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..50 {
+            let mut get_url = format!("{base}/v1/agent/sessions?limit=1000");
+            if let Some(c) = &cursor {
+                get_url.push_str("&cursor=");
+                get_url.push_str(c);
+            }
+            let resp = Request::get(&get_url)
+                .send()
+                .await
+                .map_err(|e| format!("fetch: {e}"))?;
+            let r: SessionsResponse = resp.json().await.map_err(|e| format!("decode: {e}"))?;
+            if !r.ok {
+                return Err("sessions fetch not ok".into());
+            }
+            all.extend(r.sessions);
+            match r.next_cursor.filter(|_| r.has_more) {
+                Some(next) if !next.is_empty() => cursor = Some(next),
+                _ => break,
+            }
+        }
+        Ok(all)
     }
 
     /// Fetch the model catalogue + current selection from the daemon.

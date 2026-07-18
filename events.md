@@ -1814,3 +1814,35 @@ release Trunk/extension builds, Tauri check, WASM magic, live desktop/mobile
 Playwright (20 real stations, zero page errors, animation frames confirmed
 differing).
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+
+time:      [19:15] [17-07-26]
+agent:     [ocean] [surface]
+worktree:  [detached a7a4883] /tmp/ocean-surface-a1
+type:      [feature]
+area:      [frontend]
+
+A1 Sessions live-state dot (v7). daemon.rs: `SessionRunState` enum (8 variants
+incl `#[serde(other)] Unknown`); `active_turn` + `active_state` on `SessionSummary`;
+`fetch_all_sessions(&self) -> Result<Vec<_>, String>` returns `Err` on
+network/parse failure. sessions.rs: abortable poll rail — only
+`fetch_all_sessions().await` is inside `abortable()`. `poll_guard_write(current_gen,
+my_gen, panel_open)` is called before every `session_list.set()` — gen match +
+panel open required, so a settled stale fetch after close/reopen can never write
+unconditionally. After matching all three outcomes, ONE unified
+`poll_release_in_flight` gen-gated guard releases `in_flight` (reads the actual
+`poll_in_flight.get_untracked()`, not a literal `true`). Interval via
+`leptos::prelude::set_interval_with_handle(_, Duration::from_secs(2))` →
+`RwSignal<Option<IntervalHandle>>` (thin i32 Copy+Send+Sync wrapper, no raw
+Closure/i32/forget leak). `handle.clear()` in `stop_polling`.
+`poll_guard_write`, `poll_should_skip`, and `poll_release_in_flight` are
+file-scope production deciders called from real sites. Dot: 5-state contract
+(permission|cancelling|running|recent|idle) always rendered with `role="img"`,
+`aria-label`. panels.css: 5 `[data-state]` selectors on
+`--fg-4`/`--fg-3`/`--accent`/`--warn` tokens; `sessions-dot-fade` keyframe;
+`prefers-reduced-motion` after state rules. 14 tests: 6 gen/panel lifecycle + 1
+release-guard matrix + 1 Abortable poll (feeds old `Err(Aborted)` through
+unified `poll_release_in_flight` with actual `in_flight` value, proves stale
+task does not clear it) + 6 dot-state contract.
+_________________________________________________________________________________

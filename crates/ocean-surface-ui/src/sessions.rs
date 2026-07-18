@@ -21,8 +21,10 @@ use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
 use std::collections::HashSet;
 use wasm_bindgen::JsCast;
+use wasm_bindgen_futures::spawn_local;
 
-use crate::daemon::{is_path_prefix, Daemon, ProjectInfo, SessionSummary};
+use crate::daemon::{is_path_prefix, Daemon, ProjectInfo, SessionRunState, SessionSummary};
+use futures_util::future::{abortable, AbortHandle};
 
 // ---------------------------------------------------------------------------
 // Pure helpers — unit-testable without WASM
@@ -530,6 +532,33 @@ pub(crate) fn split_origin(title: &str) -> (Option<String>, String) {
 }
 
 // ---------------------------------------------------------------------------
+// Poll lifecycle deciders (Stream A1, v6) — production helpers
+// ---------------------------------------------------------------------------
+// Called from the poll rail at every guard site. Extracted so lifecycle
+// scenarios can be tested without a browser.
+
+/// Guard for the write site called before every `session_list.set()`.
+/// Enforces captured generation match so a stale task cannot write after
+/// close/reopen. Also checks the panel is still open (defensive: a settle
+/// after close should never land).
+fn poll_guard_write(current_gen: u64, my_gen: u64, panel_open: bool) -> bool {
+    current_gen == my_gen && panel_open
+}
+
+/// Guard for the tick site: skip if in_flight or gen changed.
+fn poll_should_skip(current_gen: u64, my_gen: u64, in_flight: bool) -> bool {
+    in_flight || current_gen != my_gen
+}
+
+/// ONE shared release guard called after every outcome (Ok fresh, Ok error,
+/// Err aborted). Only clears in_flight if this task still owns it — gen match
+/// AND still in_flight. All three outcomes in the production poll rail call
+/// this once, after the match.
+fn poll_release_in_flight(current_gen: u64, my_gen: u64, in_flight: bool) -> bool {
+    current_gen == my_gen && in_flight
+}
+
+// ---------------------------------------------------------------------------
 // SessionsPanel component
 // ---------------------------------------------------------------------------
 
@@ -541,15 +570,154 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
     let current_id = daemon.session_id;
     let daemon = StoredValue::new(daemon);
 
-    // Refresh both inputs to project grouping whenever the panel opens. The
-    // project catalogue can change outside this surface (for example, an
-    // operator rename), while the session list carries daemon-owned bindings.
+    // ── Abortable poll rail (Stream A1, v6) ──────────────────────────
+    // Every fetch is wrapped in abortable(); the AbortHandle is stored so
+    // stop() can cancel in-flight HTTP. Gen counter prevents stale writes;
+    // in_flight prevents concurrent ticks. Shared stop_polling aborts the
+    // fetch + clears the interval + bumps gen + clears in_flight, and is
+    // called on close, reopen, and on_cleanup (destruction).
+    //
+    // IntervalHandle is leptos::helpers::IntervalHandle — a Copy i32 wrapper
+    // with clear(). Created via set_interval_with_handle(fn, Duration).
+    // No raw Closure/i32/forget — leptos owns the JS-side lifecycle.
+    let poll_gen: RwSignal<u64> = RwSignal::new(0);
+    let poll_in_flight: RwSignal<bool> = RwSignal::new(false);
+    let poll_fetch_abort: RwSignal<Option<AbortHandle>> = RwSignal::new(None);
+    let poll_interval: RwSignal<Option<IntervalHandle>> = RwSignal::new(None);
+
+    // Shared stop: abort in-flight fetch + clear interval + bump gen + clear
+    // in_flight. Called on close, reopen (before starting a new cycle), and
+    // on_cleanup (component destruction).
+    let stop_polling = {
+        move || {
+            // Abort any in-flight fetch so it can't write after close.
+            if let Some(h) = poll_fetch_abort.get_untracked() {
+                h.abort(); // AbortHandle::abort is idempotent
+                poll_fetch_abort.set(None);
+            }
+            // Clear the interval handle — no more ticks.
+            if let Some(handle) = poll_interval.get_untracked() {
+                handle.clear();
+                poll_interval.set(None);
+            }
+            // Bump generation: all in-flight writes from the old cycle are
+            // now stale and will be rejected by the gen guard.
+            poll_gen.update(|g| *g += 1);
+            // Clear in_flight so reopen doesn't see a poisoned flag.
+            poll_in_flight.set(false);
+        }
+    };
+
+    // The closure captures only Copy signals — it is Copy itself.
+    // Just assign; no clone needed.
+    let stop_for_effect = stop_polling;
+
+    // Initial fetch + open/close lifecycle.
     Effect::new(move |_| {
+        let d = daemon.get_value();
         if open.get() {
-            daemon.get_value().fetch_sessions();
-            daemon.get_value().fetch_projects();
+            // Stop any prior cycle (singleton).
+            stop_for_effect();
+
+            // Seed project catalogue.
+            d.fetch_projects();
+
+            // Fresh generation: any prior in-flight writes become stale.
+            poll_gen.update(|g| *g += 1);
+            let my_gen = poll_gen.get_untracked();
+
+            // ── Immediate abortable fetch ──
+            // Only the fetch itself is wrapped in abortable(). The outer
+            // spawn_local matches all outcomes, then calls ONE unified
+            // poll_release_in_flight guard after the match.
+            poll_in_flight.set(true);
+            let d_immediate = d.clone();
+            let (immediate_fut, immediate_handle) =
+                abortable(async move { d_immediate.fetch_all_sessions().await });
+            poll_fetch_abort.set(Some(immediate_handle));
+            spawn_local(async move {
+                let outcome = immediate_fut.await;
+                match outcome {
+                    Ok(Ok(fresh)) => {
+                        if poll_guard_write(poll_gen.get_untracked(), my_gen, open.get_untracked())
+                        {
+                            d.session_list.set(fresh);
+                        }
+                    }
+                    Ok(Err(e)) => log::warn!("sessions poll error: {e}"),
+                    Err(_aborted) => { /* no-op: fetch never ran */ }
+                }
+                // ONE captured-gen ownership guard after every outcome.
+                // Passes the actual in_flight value, not a literal.
+                if poll_release_in_flight(
+                    poll_gen.get_untracked(),
+                    my_gen,
+                    poll_in_flight.get_untracked(),
+                ) {
+                    poll_in_flight.set(false);
+                }
+            });
+
+            // ── 2-second Interval tick rail ──
+            // Uses leptos::helpers::set_interval_with_handle. IntervalHandle
+            // is a Copy i32 wrapper — store directly in RwSignal. No raw
+            // Closure/i32/forget.
+            let d_tick = d.clone();
+            match set_interval_with_handle(
+                move || {
+                    // Skip if handle was cleared (stop_polling ran).
+                    if poll_interval.get_untracked().is_none() {
+                        return;
+                    }
+                    // Skip if a prior tick is still running or gen changed.
+                    if poll_should_skip(
+                        poll_gen.get_untracked(),
+                        my_gen,
+                        poll_in_flight.get_untracked(),
+                    ) {
+                        return;
+                    }
+                    poll_in_flight.set(true);
+                    let d_fetch = d_tick.clone();
+                    let (tick_fut, tick_handle) =
+                        abortable(async move { d_fetch.fetch_all_sessions().await });
+                    poll_fetch_abort.set(Some(tick_handle));
+                    spawn_local(async move {
+                        let outcome = tick_fut.await;
+                        match outcome {
+                            Ok(Ok(fresh)) => {
+                                if poll_guard_write(
+                                    poll_gen.get_untracked(),
+                                    my_gen,
+                                    open.get_untracked(),
+                                ) {
+                                    d_tick.session_list.set(fresh);
+                                }
+                            }
+                            Ok(Err(e)) => log::warn!("sessions poll error: {e}"),
+                            Err(_aborted) => { /* no-op */ }
+                        }
+                        if poll_release_in_flight(
+                            poll_gen.get_untracked(),
+                            my_gen,
+                            poll_in_flight.get_untracked(),
+                        ) {
+                            poll_in_flight.set(false);
+                        }
+                    });
+                },
+                std::time::Duration::from_secs(2),
+            ) {
+                Ok(handle) => poll_interval.set(Some(handle)),
+                Err(e) => log::error!("sessions poll interval creation failed: {:?}", e),
+            }
+        } else {
+            stop_for_effect();
         }
     });
+
+    // on_cleanup: stop everything when the component unmounts.
+    on_cleanup(stop_polling);
 
     // Derived: grouped sections (recomputes on session_list or projects change).
     let sections = move || {
@@ -1078,6 +1246,34 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
     }
 }
 
+/// Derive dot `data-state` for a session row. v4.5 contract:
+/// `permission` > `cancelling` > `running` > `recent` (≤10 min) > `idle`.
+fn dot_state(active_state: Option<SessionRunState>, fresh: bool) -> &'static str {
+    match active_state {
+        Some(SessionRunState::WaitingForPermission) => "permission",
+        Some(SessionRunState::Cancelling) => "cancelling",
+        Some(SessionRunState::Running) => "running",
+        _ => {
+            if fresh {
+                "recent"
+            } else {
+                "idle"
+            }
+        }
+    }
+}
+
+/// aria-label for the session dot based on its `data-state`.
+fn dot_label(state: &str) -> &'static str {
+    match state {
+        "permission" => "Waiting for permission",
+        "cancelling" => "Cancelling",
+        "running" => "Running",
+        "recent" => "Recent activity",
+        _ => "Idle",
+    }
+}
+
 /// One session row rendered in the panel. Extracted to avoid closure-in-view
 /// borrow issues and keep the nested For stable.
 fn session_row(
@@ -1126,6 +1322,10 @@ fn session_row(
     };
     let row_id = session_id.clone();
 
+    // Dot state: computed once from active_state + freshness.
+    let dot_state_val = dot_state(session.active_state, fresh);
+    let dot_aria = dot_label(dot_state_val);
+
     view! {
         <button
             class="sessions-item"
@@ -1141,9 +1341,12 @@ fn session_row(
             }
         >
             <div class="sessions-item__title">
-                {fresh.then(|| view! {
-                    <span class="sessions-item__dot" title="active in the last 10 minutes"></span>
-                })}
+                <span
+                    class="sessions-item__dot"
+                    data-state=dot_state_val
+                    role="img"
+                    aria-label=dot_aria
+                ></span>
                 {origin.map(|o| match origin_icon(&o) {
                     Some(icon) => view! {
                         <span class="sessions-item__origin" title=format!("{o} session")>{icon}</span>
@@ -1246,6 +1449,8 @@ mod tests {
             owning_project,
             git_branch: git_branch.map(str::to_string),
             turn_count,
+            active_turn: None,
+            active_state: None,
             updated_at: updated_at.to_string(),
         }
     }
@@ -1860,6 +2065,193 @@ mod tests {
             section_render_key(original),
             section_render_key(&renamed),
             "a project rename must replace the captured section header"
+        );
+    }
+
+    // ── Poll lifecycle & dot state (Stream A1, v7) ──
+    // Decision helpers `poll_guard_write`, `poll_should_skip`, and
+    // `poll_release_in_flight` live at file scope (production).
+    // The tests below exercise them directly.
+
+    // ── Lifecycle tests ──
+
+    #[test]
+    fn poll_lifecycle_close_stale_write_rejected() {
+        // gen bumped by close → old my_gen can't write, even if panel open.
+        assert!(!poll_guard_write(2, 1, true));
+        // Still matches if gen didn't move and panel open.
+        assert!(poll_guard_write(2, 2, true));
+        // Panel closed blocks write even when gen matches.
+        assert!(!poll_guard_write(2, 2, false));
+    }
+
+    #[test]
+    fn poll_lifecycle_reopen_fresh_write_allowed() {
+        assert!(poll_guard_write(2, 2, true));
+    }
+
+    #[test]
+    fn poll_lifecycle_in_flight_skip() {
+        assert!(poll_should_skip(1, 1, true), "in_flight must skip");
+        assert!(!poll_should_skip(1, 1, false), "no in_flight must fire");
+    }
+
+    #[test]
+    fn poll_lifecycle_gen_mismatch_skip() {
+        assert!(poll_should_skip(2, 1, false));
+    }
+
+    #[test]
+    fn poll_lifecycle_destruction_rejects_write() {
+        // gen bumped, panel closed.
+        assert!(!poll_guard_write(2, 1, true), "stale write rejected");
+        assert!(!poll_guard_write(2, 1, false), "stale + closed rejected");
+    }
+
+    #[test]
+    fn poll_lifecycle_aba_gen_wraparound_rejected() {
+        assert!(!poll_guard_write(0, u64::MAX, true));
+    }
+
+    // ── Unified release guard ──
+
+    #[test]
+    fn poll_release_gen_match_still_in_flight() {
+        // gen matches + still in_flight → release allowed.
+        assert!(poll_release_in_flight(2, 2, true));
+        // gen matches + already cleared → no release.
+        assert!(!poll_release_in_flight(2, 2, false));
+        // gen moved + still in_flight → no release (stale task).
+        assert!(!poll_release_in_flight(2, 1, true));
+        // gen moved + already cleared → no release.
+        assert!(!poll_release_in_flight(2, 1, false));
+    }
+
+    // ── Actual Abortable integration ──
+
+    #[test]
+    fn old_aborted_passes_through_unified_cleanup_does_not_clear_new_in_flight() {
+        use futures_util::Future;
+        use std::task::Poll;
+
+        // Production flow:
+        //   1. gen=1 task starts, in_flight=true (my_gen=1, panel open).
+        //   2. close/reopen → stop_polling aborts fetch, bumps gen to 2.
+        //   3. New task sets in_flight=true (my_gen=2).
+        //   4. Old task's Abortable resolves Err(Aborted).
+        //   5. Unified poll_release_in_flight(gen=2, my_gen=1, in_flight=true)
+        //      → false (gen mismatch) → does NOT clear in_flight.
+        //
+        // Same as the production release guard: read the actual in_flight
+        // value, not a literal true.
+
+        let current_gen = std::cell::Cell::new(2u64); // after close/reopen
+        let new_in_flight = std::cell::Cell::new(true);
+
+        let my_gen = 1u64;
+        let (fut, handle) = abortable(async {
+            let _result: Result<Vec<SessionSummary>, String> =
+                Err("simulated network error".into());
+        });
+
+        handle.abort();
+
+        let mut fut = Box::pin(fut);
+        let waker = futures_util::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        match fut.as_mut().poll(&mut cx) {
+            Poll::Ready(Err(_aborted)) => {} // expected
+            other => panic!("expected Poll::Ready(Err(Aborted)), got {other:?}"),
+        }
+
+        // Old task runs unified cleanup with actual in_flight value:
+        let should_clear = poll_release_in_flight(current_gen.get(), my_gen, new_in_flight.get());
+        assert!(
+            !should_clear,
+            "gen mismatch: stale task must not release in_flight"
+        );
+
+        assert!(
+            new_in_flight.get(),
+            "old abort must not clear new in_flight"
+        );
+
+        assert!(
+            poll_release_in_flight(1, 1, true),
+            "same gen: current owner must be allowed to release"
+        );
+    }
+
+    // ── Dot state precedence (exact 5-state contract) ──
+
+    #[test]
+    fn dot_state_permission_steady() {
+        assert_eq!(
+            super::dot_state(Some(SessionRunState::WaitingForPermission), true),
+            "permission"
+        );
+        assert_eq!(
+            super::dot_state(Some(SessionRunState::WaitingForPermission), false),
+            "permission"
+        );
+    }
+
+    #[test]
+    fn dot_state_cancelling_beats_running() {
+        assert_eq!(
+            super::dot_state(Some(SessionRunState::Cancelling), true),
+            "cancelling"
+        );
+        assert_eq!(
+            super::dot_state(Some(SessionRunState::Running), true),
+            "running"
+        );
+    }
+
+    #[test]
+    fn dot_state_running_beats_recent() {
+        assert_eq!(
+            super::dot_state(Some(SessionRunState::Running), true),
+            "running"
+        );
+        assert_eq!(super::dot_state(None, true), "recent");
+    }
+
+    #[test]
+    fn dot_state_recent_beats_idle() {
+        assert_eq!(super::dot_state(None, false), "idle");
+        assert_eq!(super::dot_state(None, true), "recent");
+    }
+
+    #[test]
+    fn dot_state_errored_completed_stored_fall_back() {
+        assert_eq!(
+            super::dot_state(Some(SessionRunState::Errored), true),
+            "recent"
+        );
+        assert_eq!(
+            super::dot_state(Some(SessionRunState::Errored), false),
+            "idle"
+        );
+        assert_eq!(
+            super::dot_state(Some(SessionRunState::Completed), false),
+            "idle"
+        );
+        assert_eq!(
+            super::dot_state(Some(SessionRunState::Unknown), true),
+            "recent"
+        );
+    }
+
+    #[test]
+    fn dot_state_stored_is_idle_or_recent() {
+        assert_eq!(
+            super::dot_state(Some(SessionRunState::Stored), false),
+            "idle"
+        );
+        assert_eq!(
+            super::dot_state(Some(SessionRunState::Stored), true),
+            "recent"
         );
     }
 }

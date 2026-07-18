@@ -150,6 +150,27 @@ Web surface session UI:
 - Idle web/extension headers stay single-bar: project/session context may stay
   visible, but call/join affordances live behind overflow until intentionally
   opened or actively connected.
+- Sessions-panel live state (OCEAN A1 / v7): abortable poll rail — every
+  async fetch is wrapped in `abortable()` with the `AbortHandle` stored in
+  `RwSignal<Option<AbortHandle>>`. Only `fetch_all_sessions().await` lives
+  inside abortable. `poll_guard_write(current_gen, my_gen, panel_open)` is
+  called before every `session_list.set()` — gen match + panel open required,
+  so a settled stale fetch after close/reopen can never write. After matching
+  all three outcomes, ONE unified `poll_release_in_flight` gen-gated guard
+  releases `in_flight` (reads the actual `poll_in_flight.get_untracked()`, not
+  a literal). Interval uses `leptos::prelude::set_interval_with_handle(_, Duration::from_secs(2))`
+  → `RwSignal<Option<IntervalHandle>>` (thin i32 Copy+Send+Sync wrapper, no raw
+  Closure/i32/forget leak). `handle.clear()` in `stop_polling`. The three
+  production deciders (`poll_guard_write`, `poll_should_skip`,
+  `poll_release_in_flight`) are file-scope fns; the Abortable test feeds old
+  `Err(Aborted)` through the unified cleanup after the new task sets
+  `in_flight=true` and proves the stale task does not clear it. The session
+  dot renders `data-state` (permission → cancelling → running → recent → idle)
+  with colour-keyed breathing/fade animations, `role="img"`, and
+  `aria-label`; CSS tokens are `--fg-4` (idle), `--fg-3` (cancelling),
+  `--accent`/`--warn`; `prefers-reduced-motion` sits
+  after the state selectors so it wins. Unknown daemon variants are
+  `#[serde(other)]` and render idle/recent.
 
 ## Rooms Contract
 
