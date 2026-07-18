@@ -1873,3 +1873,28 @@ turn. 363+1 tests, denied-warning WASM Clippy, release Trunk/extension builds,
 Tauri check, zero page errors. AGENTS.md now locks the contract. Test residue:
 one throwaway session in project OCEAN plus unlisted chats.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+
+time:      [23:34] [17-07-26]
+agent:     [codex]
+worktree:  [detached ebdeb5c..4f39b91] /private/tmp/ocean-surface-task21-integrate
+type:      [refactor]
+area:      [frontend], [review], [testing]
+
+Completed TASK-21's bounded Surface correctives across the room tail, sessions
+panel, and reveal lifecycle. Room Message and Access frames now pass one
+generation-plus-room admission boundary before any cursor, transcript, access,
+or tail-state mutation; room open/close share one synchronous reset path.
+All complete session-list drains share newest-request write authority and
+pagination cursors are query-component encoded. Project-section session
+creation pins a real catalogue/session cwd and stays absent without one;
+project form NodeRefs sit on the actual inputs. Council opening closes competing
+reveals, Escape closes one topmost reveal, Sessions and the command palette
+consume their local Escape, and long room lists shrink-scroll in the panel.
+Integrated held commits 621d595 and da9100c onto origin/main ebdeb5c as
+d9150ca and 4f39b91 with source blobs preserved; retained the concurrent
+transcript devlog contract during the sole AGENTS.md conflict. Verified format,
+diff hygiene, WASM check and denied-warning Clippy, native all-target
+denied-warning Clippy, 389 UI tests plus 1 integration test, and proxy check.
+_________________________________________________________________________________
