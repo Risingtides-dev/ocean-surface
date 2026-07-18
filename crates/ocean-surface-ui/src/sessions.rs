@@ -141,6 +141,10 @@ pub(crate) struct ProjectSection {
     /// matching — sessions whose root lives under the project's workspace_root.
     /// Only set when the project has registered worktrees and >=1 session qualifies.
     pub main_group: Option<WorktreeGroup>,
+    /// Explicit cwd for this section's lazy new-session action. Catalogue root
+    /// wins; otherwise a real session root is captured before bucketing. `None`
+    /// suppresses the action rather than inheriting ambient cwd or using `/tmp`.
+    pub new_session_cwd: Option<String>,
 }
 
 /// A worktree section inside a project: sessions sharing one workspace root.
@@ -149,6 +153,31 @@ pub(crate) struct WorktreeGroup {
     pub root: String,
     pub branch: Option<String>,
     pub sessions: Vec<SessionSummary>,
+}
+
+/// Resolve the explicit cwd for a project section's new-session action.
+/// Catalogue authority wins; daemon-owned orphan sections fall back to their
+/// newest concrete session root. Empty projections return `None`, which keeps
+/// the action absent rather than inheriting a prior session's cwd.
+fn project_section_session_cwd(
+    section: &ProjectSection,
+    projects: &[ProjectInfo],
+) -> Option<String> {
+    projects
+        .iter()
+        .find(|project| project.id == section.key)
+        .map(|project| project.workspace_root.trim())
+        .filter(|root| !root.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            section
+                .sessions
+                .iter()
+                .map(session_root)
+                .map(str::trim)
+                .find(|root| !root.is_empty())
+                .map(str::to_string)
+        })
 }
 
 /// Group + filter sessions for the panel display: project-first, newest
@@ -210,6 +239,7 @@ pub(crate) fn group_for_panel(
                     sessions: vec![(*s).clone()],
                     worktrees: None,
                     main_group: None,
+                    new_session_cwd: None,
                 })
             }
         }
@@ -240,12 +270,16 @@ pub(crate) fn group_for_panel(
             sessions: Vec::new(),
             worktrees: None,
             main_group: None,
+            new_session_cwd: None,
         });
     }
 
-    // Sort sessions inside each group: newest first (ISO-8601 lexicographic cmp).
+    // Sort sessions inside each group: newest first (ISO-8601 lexicographic cmp),
+    // then freeze the section's explicit new-session cwd before worktree/main
+    // bucketing moves those sessions into nested groups.
     for sec in &mut sections {
         sec.sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        sec.new_session_cwd = project_section_session_cwd(sec, projects);
     }
     // Worktree + main-group bucketing: second pass inside each project section.
     // Sessions whose workspace root sits under a project worktree's path
@@ -447,17 +481,18 @@ pub(crate) fn section_layout_signature(sec: &ProjectSection) -> String {
 }
 
 /// Content-sensitive identity for a rendered project section. Leptos `<For>`
-/// retains the child view for an unchanged key, so the user-visible label must
-/// participate: daemon-side project renames must replace the captured header
-/// even when the section's sessions and layout are otherwise unchanged.
+/// retains the child view for an unchanged key, so both the user-visible label
+/// and explicit new-session cwd participate: daemon-side project rename/root
+/// changes must replace captured actions even when contents stay unchanged.
 pub(crate) fn section_render_key(sec: &ProjectSection) -> String {
     format!(
-        "{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}",
         sec.key,
         sec.label,
         section_total_sessions(sec),
         section_newest_ts(sec),
         section_layout_signature(sec),
+        sec.new_session_cwd.as_deref().unwrap_or("<none>"),
     )
 }
 /// The surface-origin icon for a session's `[TAG]` title prefix. The tag set
@@ -631,7 +666,9 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
             // spawn_local matches all outcomes, then calls ONE unified
             // poll_release_in_flight guard after the match.
             poll_in_flight.set(true);
+            let fetch_ticket = d.claim_session_fetch_ticket();
             let d_immediate = d.clone();
+            let d_commit = d.clone();
             let (immediate_fut, immediate_handle) =
                 abortable(async move { d_immediate.fetch_all_sessions().await });
             poll_fetch_abort.set(Some(immediate_handle));
@@ -641,7 +678,7 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                     Ok(Ok(fresh)) => {
                         if poll_guard_write(poll_gen.get_untracked(), my_gen, open.get_untracked())
                         {
-                            d.session_list.set(fresh);
+                            let _ = d_commit.store_sessions_if_current(fetch_ticket, fresh);
                         }
                     }
                     Ok(Err(e)) => log::warn!("sessions poll error: {e}"),
@@ -678,7 +715,9 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                         return;
                     }
                     poll_in_flight.set(true);
+                    let fetch_ticket = d_tick.claim_session_fetch_ticket();
                     let d_fetch = d_tick.clone();
+                    let d_commit = d_tick.clone();
                     let (tick_fut, tick_handle) =
                         abortable(async move { d_fetch.fetch_all_sessions().await });
                     poll_fetch_abort.set(Some(tick_handle));
@@ -691,7 +730,7 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                     my_gen,
                                     open.get_untracked(),
                                 ) {
-                                    d_tick.session_list.set(fresh);
+                                    let _ = d_commit.store_sessions_if_current(fetch_ticket, fresh);
                                 }
                             }
                             Ok(Err(e)) => log::warn!("sessions poll error: {e}"),
@@ -925,9 +964,15 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
         >
             <div class="sessions-panel ocean-lit" role="dialog" aria-modal="true" aria-label="Sessions"
                 on:keydown=move |ev: web_sys::KeyboardEvent| {
-                    if ev.key() == "Escape" && !daemon.get_value().project_create_pending.get_untracked() {
-                        ev.prevent_default();
-                        open.set(false);
+                    if ev.key() == "Escape" {
+                        // This panel owns the bubbled Escape. Stop it even while
+                        // project creation is pending so the window rail cannot
+                        // close Sessions and then a second reveal on one key.
+                        ev.stop_propagation();
+                        if !daemon.get_value().project_create_pending.get_untracked() {
+                            ev.prevent_default();
+                            open.set(false);
+                        }
                     }
                 }
             >
@@ -977,6 +1022,9 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                             let show_key = skey.clone();
                             let click_key = skey.clone();
                             let new_key = skey.clone();
+                            let new_session_cwd = sec.new_session_cwd.clone();
+                            let can_start_project_session =
+                                s_is_project && new_session_cwd.is_some();
 
                             let body_id = format!("sessions-group-body-{}", skey);
                             let aria_key = glyph_key.clone();
@@ -1020,15 +1068,20 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                         </button>
 
                                         // ── Per-project new session (real projects only) ──
-                                        <Show when=move || s_is_project>
+                                        <Show when=move || can_start_project_session>
                                             <button
                                                 class="sessions-group__new-btn"
                                                 type="button"
                                                 on:click={
                                                     let k = new_key.clone();
+                                                    let cwd = new_session_cwd.clone();
                                                     move |_| {
-                                                        daemon.get_value().begin_project_session(k.clone());
-                                                        open.set(false);
+                                                        if let Some(cwd) = cwd.clone() {
+                                                            daemon
+                                                                .get_value()
+                                                                .begin_project_session(k.clone(), cwd);
+                                                            open.set(false);
+                                                        }
                                                     }
                                                 }
                                             >
@@ -1158,9 +1211,10 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                 <button class="sessions-create__cancel" type="button" disabled=move || daemon.get_value().project_create_pending.get() on:click=move |_| cancel_project()>
                                     "Cancel"
                                 </button>
-                            </div> node_ref=existing_input_ref
+                            </div>
                             <div class="sessions-create__inputs">
                                 <input
+                                    node_ref=existing_input_ref
                                     class="sessions-create__input"
                                     type="text"
                                     placeholder="Existing project folder path"
@@ -1198,9 +1252,10 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                 <button class="sessions-create__cancel" type="button" disabled=move || daemon.get_value().project_create_pending.get() on:click=move |_| cancel_project()>
                                     "Cancel"
                                 </button>
-                            </div> node_ref=new_input_ref
+                            </div>
                             <div class="sessions-create__inputs">
                                 <input
+                                    node_ref=new_input_ref
                                     class="sessions-create__input"
                                     type="text"
                                     placeholder="Project name"
@@ -1905,6 +1960,103 @@ mod tests {
     }
 
     #[test]
+    fn project_section_new_session_cwd_prefers_catalogue_then_explicit_fallback() {
+        let catalog_projects = vec![project("owned", "Owned", "/catalog-root")];
+        let catalog_sessions = vec![session(
+            "catalog-session",
+            "/session-root",
+            Some("/session-root"),
+            Some(owner("owned", "Owned")),
+            None,
+            1,
+            "2026-07-17T12:00:00Z",
+        )];
+        let catalog_sections = group_for_panel(&catalog_sessions, &catalog_projects, None);
+        assert_eq!(
+            catalog_sections[0].new_session_cwd.as_deref(),
+            Some("/catalog-root")
+        );
+
+        let orphan_sessions = vec![session(
+            "orphan-session",
+            "/orphan-cwd",
+            Some("/orphan-workspace"),
+            Some(owner("orphan", "Orphan")),
+            None,
+            1,
+            "2026-07-17T12:00:00Z",
+        )];
+        let orphan_sections = group_for_panel(&orphan_sessions, &[], None);
+        assert_eq!(
+            orphan_sections[0].new_session_cwd.as_deref(),
+            Some("/orphan-workspace")
+        );
+
+        let blank_projects = vec![project("blank", "Blank", "")];
+        let blank_sessions = vec![session(
+            "blank-session",
+            "/section-fallback",
+            None,
+            Some(owner("blank", "Blank")),
+            None,
+            1,
+            "2026-07-17T12:00:00Z",
+        )];
+        let blank_sections = group_for_panel(&blank_sessions, &blank_projects, None);
+        assert_eq!(
+            blank_sections[0].new_session_cwd.as_deref(),
+            Some("/section-fallback")
+        );
+
+        let empty_sections = group_for_panel(&[], &blank_projects, None);
+        assert_eq!(empty_sections[0].new_session_cwd, None);
+    }
+
+    #[test]
+    fn sessions_escape_site_stops_bubbling_before_local_close() {
+        let source = include_str!("sessions.rs");
+        let handler_start = source
+            .find("on:keydown=move |ev: web_sys::KeyboardEvent|")
+            .expect("Sessions Escape production handler");
+        let handler = &source[handler_start..handler_start + 900];
+        let stop = handler
+            .find("ev.stop_propagation()")
+            .expect("Sessions Escape must stop propagation");
+        let close = handler
+            .find("open.set(false)")
+            .expect("Sessions Escape local close");
+        assert!(stop < close, "propagation must stop before local close");
+    }
+
+    #[test]
+    fn project_form_focus_refs_are_attached_to_the_actual_first_inputs() {
+        let source = include_str!("sessions.rs");
+        let invalid_existing = ["</div>", " node_ref=existing_input_ref"].concat();
+        let invalid_new = ["</div>", " node_ref=new_input_ref"].concat();
+        assert!(!source.contains(&invalid_existing));
+        assert!(!source.contains(&invalid_new));
+
+        for node_ref in ["node_ref=existing_input_ref", "node_ref=new_input_ref"] {
+            let ref_pos = source
+                .find(node_ref)
+                .expect("focus NodeRef production site");
+            let input_pos = source[..ref_pos]
+                .rfind("<input")
+                .expect("NodeRef must follow an input opening tag");
+            let close_pos = source[..ref_pos].rfind("</div>").unwrap_or(0);
+            assert!(
+                input_pos > close_pos,
+                "{node_ref} must be an attribute of the first input"
+            );
+            let input_end = ref_pos
+                + source[ref_pos..]
+                    .find("/>")
+                    .expect("NodeRef input must self-close");
+            assert!(input_end > ref_pos);
+        }
+    }
+
+    #[test]
     fn derive_project_name_uses_final_non_empty_path_segment() {
         for (path, expected_name) in [
             ("/Users/smaths/dev/ocean-surface", "ocean-surface"),
@@ -2065,6 +2217,14 @@ mod tests {
             section_render_key(original),
             section_render_key(&renamed),
             "a project rename must replace the captured section header"
+        );
+
+        let mut moved = original.clone();
+        moved.new_session_cwd = Some("/repo-moved".to_string());
+        assert_ne!(
+            section_render_key(original),
+            section_render_key(&moved),
+            "a project-root change must replace the captured new-session cwd"
         );
     }
 

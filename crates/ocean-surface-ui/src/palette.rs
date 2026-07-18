@@ -414,6 +414,8 @@ pub fn PaletteView(registry: CommandRegistry) -> impl IntoView {
     // ── Keyboard navigation inside the palette ───────────────────────────
     let on_input_keydown = move |ev: KeyboardEvent| match ev.key().as_str() {
         "Escape" => {
+            ev.prevent_default();
+            ev.stop_propagation();
             open.set(false);
         }
         "ArrowDown" => {
@@ -651,6 +653,27 @@ mod tests {
     #[test]
     fn next_index_single_item() {
         assert_eq!(next_index(0, 1), 0);
+    }
+
+    #[test]
+    fn palette_escape_consumes_the_event_before_closing() {
+        let source = include_str!("palette.rs");
+        let handler_start = source
+            .find("let on_input_keydown = move |ev: KeyboardEvent|")
+            .expect("palette production key handler");
+        let handler = &source[handler_start..handler_start + 500];
+        let escape = handler.find("\"Escape\"").expect("Escape arm");
+        let prevent = handler[escape..]
+            .find("ev.prevent_default()")
+            .expect("palette Escape prevents default");
+        let stop = handler[escape..]
+            .find("ev.stop_propagation()")
+            .expect("palette Escape stops propagation");
+        let close = handler[escape..]
+            .find("open.set(false)")
+            .expect("palette Escape closes locally");
+        assert!(prevent < close);
+        assert!(stop < close);
     }
 
     // ── CommandScope ordering ────────────────────────────────────────────

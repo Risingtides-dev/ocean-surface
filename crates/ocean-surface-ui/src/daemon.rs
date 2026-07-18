@@ -36,11 +36,61 @@ pub const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:4780";
 /// deliberately NOT a project: it clears the project selection and pins the
 /// next lazy session's cwd to `/tmp` so the agent runs in a real directory
 /// without claiming ownership of one. A project session is the opposite — it
-/// keeps cwd untouched and lets the daemon resolve the project's
-/// `workspace_root` from the selected `project_id`. Keeping this as a named
-/// constant (rather than a bare literal) pins the distinction at the type
-/// level and lets the wire-helper test assert it.
+/// explicitly pins the catalogue or section/session fallback root alongside
+/// the selected `project_id`. Keeping this as a named constant (rather than a
+/// bare literal) pins the projectless fallback at the type level.
 pub const CHAT_WORKSPACE_ROOT: &str = "/tmp";
+
+/// Advance the shared session-list request ticket. Equality against the latest
+/// claimed ticket is the write authority for every session-list fetch path.
+fn next_session_fetch_ticket(current: u64) -> u64 {
+    current.wrapping_add(1)
+}
+
+fn session_fetch_ticket_is_current(current: u64, claimed: u64) -> bool {
+    current == claimed
+}
+
+/// RFC 3986 query-component encoding for daemon-owned pagination cursors.
+/// Keeping this pure makes reserved-character behavior testable off-WASM.
+fn percent_encode_query_component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    encoded
+}
+
+fn sessions_page_url(base: &str, cursor: Option<&str>) -> String {
+    let mut url = format!(
+        "{}/v1/agent/sessions?limit=1000",
+        base.trim_end_matches('/')
+    );
+    if let Some(cursor) = cursor {
+        url.push_str("&cursor=");
+        url.push_str(&percent_encode_query_component(cursor));
+    }
+    url
+}
+
+/// Normalize an explicit project-session root. Empty roots have no authority:
+/// callers must suppress the action instead of inheriting ambient cwd or
+/// silently creating a project session under `/tmp`.
+fn project_session_cwd(root: &str) -> Option<String> {
+    let root = root.trim();
+    if root.is_empty() {
+        None
+    } else {
+        Some(root.to_string())
+    }
+}
 
 /// Default LiveKit room the header "Join room call" entry targets when no
 /// proxy config seeded one (native shell has no proxy in front). Mirrors the
@@ -1299,6 +1349,10 @@ pub struct Daemon {
     pub session_title: RwSignal<String>,
     /// Fetched session list from the daemon.
     pub session_list: RwSignal<Vec<SessionSummary>>,
+    /// Global newest-request generation shared by the thin refresh spawner and the
+    /// sessions-panel A1 poll rail. Only the latest claimant may replace
+    /// `session_list`, so overlapping paginated drains cannot land out of order.
+    session_fetch_ticket: RwSignal<u64>,
     /// Token usage from the most recently finished turn (real provider numbers
     /// when available). `None` until the first turn finishes.
     pub last_turn_tokens: RwSignal<Option<TokenStats>>,
@@ -1594,6 +1648,7 @@ impl Daemon {
             awaiting_session_adoption: RwSignal::new(false),
             session_title: RwSignal::new(String::new()),
             session_list: RwSignal::new(Vec::new()),
+            session_fetch_ticket: RwSignal::new(0),
             last_turn_tokens: RwSignal::new(None),
             session_tokens: RwSignal::new(TokenStats::default()),
             model: RwSignal::new(None),
@@ -1650,6 +1705,7 @@ impl Daemon {
             awaiting_session_adoption: RwSignal::new(false),
             session_title: RwSignal::new(String::new()),
             session_list: RwSignal::new(Vec::new()),
+            session_fetch_ticket: RwSignal::new(0),
             last_turn_tokens: RwSignal::new(None),
             session_tokens: RwSignal::new(TokenStats::default()),
             model: RwSignal::new(None),
@@ -2638,15 +2694,41 @@ impl Daemon {
         });
     }
 
-    /// Fetch session list from the daemon and store in session_list signal.
-    /// Owned by the sessions-panel abortable poll rail; the panel calls
-    /// `fetch_all_sessions` directly via its abortable wrappers rather than
-    /// going through this thin spawner.
+    /// Claim the global session-list request ticket before starting a complete
+    /// paginated drain. The thin spawner and A1 panel share this authority.
+    pub(crate) fn claim_session_fetch_ticket(&self) -> u64 {
+        let mut claimed = 0;
+        self.session_fetch_ticket.update(|current| {
+            *current = next_session_fetch_ticket(*current);
+            claimed = *current;
+        });
+        claimed
+    }
+
+    /// Replace `session_list` only when `claimed` is still the newest global
+    /// request. This check and write are synchronous on the WASM event loop.
+    pub(crate) fn store_sessions_if_current(
+        &self,
+        claimed: u64,
+        sessions: Vec<SessionSummary>,
+    ) -> bool {
+        if !session_fetch_ticket_is_current(self.session_fetch_ticket.get_untracked(), claimed) {
+            return false;
+        }
+        self.session_list.set(sessions);
+        true
+    }
+
+    /// Fetch the complete session list through the thin refresh spawner. It
+    /// claims the same global write ticket as the sessions-panel A1 poll rail.
     pub fn fetch_sessions(&self) {
+        let claimed = self.claim_session_fetch_ticket();
         let daemon = self.clone();
         spawn_local(async move {
             match daemon.fetch_all_sessions().await {
-                Ok(all) => daemon.session_list.set(all),
+                Ok(all) => {
+                    let _ = daemon.store_sessions_if_current(claimed, all);
+                }
                 Err(e) => log::warn!("sessions fetch error: {e}"),
             }
         });
@@ -2667,7 +2749,7 @@ impl Daemon {
     /// once the store grew past ~100 sessions. Bounded at 50 pages so a
     /// stuck cursor can never spin forever.
     pub async fn fetch_all_sessions(&self) -> Result<Vec<SessionSummary>, String> {
-        let base = self.url.get_untracked().trim_end_matches('/').to_string();
+        let base = self.url.get_untracked();
         #[derive(Deserialize)]
         struct SessionsResponse {
             ok: bool,
@@ -2681,11 +2763,7 @@ impl Daemon {
         let mut all: Vec<SessionSummary> = Vec::new();
         let mut cursor: Option<String> = None;
         for _ in 0..50 {
-            let mut get_url = format!("{base}/v1/agent/sessions?limit=1000");
-            if let Some(c) = &cursor {
-                get_url.push_str("&cursor=");
-                get_url.push_str(c);
-            }
+            let get_url = sessions_page_url(&base, cursor.as_deref());
             let resp = Request::get(&get_url)
                 .send()
                 .await
@@ -3057,21 +3135,17 @@ impl Daemon {
         self.connect();
     }
 
-    /// Select project `id`, pin the working directory to that project's
-    /// catalogue `workspace_root`, then reset to a lazy new session. This
-    /// mirrors [`begin_chat_session`] (which pins `/tmp`) so the first prompt
-    /// carries the real project directory instead of the surface default.
-    pub fn begin_project_session(&self, id: String) {
-        self.set_project(Some(id.clone()));
-        let root = self.projects.with_untracked(|projects| {
-            projects
-                .iter()
-                .find(|project| project.id == id)
-                .map(|project| project.workspace_root.clone())
-        });
-        if let Some(root) = root.filter(|root| !root.trim().is_empty()) {
-            self.cwd.set(root);
-        }
+    /// Select project `id`, pin the working directory to the explicit section
+    /// root resolved by the sessions panel, then reset to a lazy new session.
+    /// The caller supplies catalogue root first and a session-derived fallback
+    /// otherwise. Empty roots are rejected before project or cwd state changes.
+    pub fn begin_project_session(&self, id: String, workspace_root: String) {
+        let Some(workspace_root) = project_session_cwd(&workspace_root) else {
+            log::warn!("project session requires a nonempty workspace root");
+            return;
+        };
+        self.set_project(Some(id));
+        self.cwd.set(workspace_root);
         self.new_session();
     }
 
@@ -6858,6 +6932,64 @@ mod tests {
     }
 
     #[test]
+    fn newest_global_session_fetch_ticket_alone_can_replace_the_list() {
+        let daemon = Daemon::dummy();
+        let sentinel = SessionSummary {
+            id: "sentinel".into(),
+            title: "Sentinel".into(),
+            cwd: "/sentinel".into(),
+            workspace_root: Some("/sentinel".into()),
+            owning_project: None,
+            git_branch: None,
+            turn_count: 1,
+            active_turn: None,
+            active_state: None,
+            updated_at: "2026-07-17T00:00:00Z".into(),
+        };
+        daemon.session_list.set(vec![sentinel.clone()]);
+
+        let thin_spawner_ticket = daemon.claim_session_fetch_ticket();
+        let panel = daemon.clone();
+        let panel_ticket = panel.claim_session_fetch_ticket();
+
+        assert!(!daemon.store_sessions_if_current(thin_spawner_ticket, Vec::new()));
+        assert_eq!(daemon.session_list.get_untracked()[0].id, "sentinel");
+        assert!(panel.store_sessions_if_current(panel_ticket, Vec::new()));
+        assert!(daemon.session_list.get_untracked().is_empty());
+
+        let panel_ticket = panel.claim_session_fetch_ticket();
+        let thin_spawner_ticket = daemon.claim_session_fetch_ticket();
+        assert!(!panel.store_sessions_if_current(panel_ticket, vec![sentinel.clone()]));
+        assert!(panel.session_list.get_untracked().is_empty());
+        assert!(daemon.store_sessions_if_current(thin_spawner_ticket, vec![sentinel]));
+        assert_eq!(panel.session_list.get_untracked()[0].id, "sentinel");
+    }
+
+    #[test]
+    fn session_page_url_percent_encodes_reserved_cursor_bytes() {
+        assert_eq!(
+            sessions_page_url(
+                "https://surface.test/",
+                Some("a&b=c+d/e?f#g %z"),
+            ),
+            "https://surface.test/v1/agent/sessions?limit=1000&cursor=a%26b%3Dc%2Bd%2Fe%3Ff%23g%20%25z",
+        );
+        assert_eq!(
+            sessions_page_url("https://surface.test/", None),
+            "https://surface.test/v1/agent/sessions?limit=1000",
+        );
+    }
+
+    #[test]
+    fn explicit_project_session_cwd_never_inherits_ambient_state() {
+        assert_eq!(
+            project_session_cwd(" /srv/project ").as_deref(),
+            Some("/srv/project")
+        );
+        assert_eq!(project_session_cwd("  "), None);
+    }
+
+    #[test]
     fn project_create_request_serializes_name_and_workspace_root_exactly() {
         // The daemon's `CreateProjectRequest` deserializes `name` +
         // `workspace_root` verbatim (plain snake_case Rust field names, no
@@ -6887,55 +7019,25 @@ mod tests {
 
     #[test]
     fn chat_workspace_root_is_tmp_and_distinct_from_project_sessions() {
-        // Chat is PROJECTLESS: it runs in a throwaway `/tmp` workspace so the
-        // agent has a real cwd without pretending to own a project. A project
-        // session is the opposite — it selects a project and leaves cwd for the
-        // daemon to resolve from the project's workspace_root. The two entry
-        // points must not collapse: if chat ever pinned a project, or a project
-        // session ever pinned `/tmp`, the agent would run in the wrong place.
-        //
-        // We exercise the signal transitions directly rather than calling
-        // `begin_chat_session`/`begin_project_session` because those route
-        // through `set_project` → `persist_project`/`clear_persisted_project`
-        // → `web_sys::window()`, which panics off-wasm. The observable contract
-        // — which signals end up set — is identical: `set_project`'s only extra
-        // effect is localStorage persistence (a wasm-only side effect). A
-        // `Daemon::dummy()` already starts with `project = None`, matching
-        // chat's cleared state, and `new_session` is native-safe (it returns at
-        // the `session_id is None` guard before any web access).
+        // Chat is projectless and explicitly pins `/tmp`; a project session
+        // explicitly pins its resolved section root. Neither path may inherit
+        // the cwd of the previously active session.
         assert_eq!(CHAT_WORKSPACE_ROOT, "/tmp");
 
-        // Chat: project cleared, cwd pinned to /tmp, then new_session.
         let chat = Daemon::dummy();
         chat.cwd.set(CHAT_WORKSPACE_ROOT.to_string());
         chat.new_session();
-        assert_eq!(
-            chat.project.get_untracked(),
-            None,
-            "chat is projectless — project stays cleared",
-        );
-        assert_eq!(
-            chat.cwd.get_untracked(),
-            "/tmp",
-            "chat pins cwd to /tmp and new_session preserves it (new_session \
-             does not reset cwd), so the daemon lands the session in /tmp",
-        );
+        assert_eq!(chat.project.get_untracked(), None);
+        assert_eq!(chat.cwd.get_untracked(), "/tmp");
 
-        // Project session: project selected, cwd NOT pinned to /tmp.
-        let proj = Daemon::dummy();
-        proj.project.set(Some("p1".into()));
-        proj.new_session();
-        assert_eq!(
-            proj.project.get_untracked(),
-            Some("p1".to_string()),
-            "project session selects the project id and new_session preserves it",
-        );
-        assert_ne!(
-            proj.cwd.get_untracked(),
-            "/tmp",
-            "project session does NOT pin /tmp — the daemon resolves the \
-             project's real workspace_root server-side from the project_id",
-        );
+        let project = Daemon::dummy();
+        project.project.set(Some("p1".into()));
+        project
+            .cwd
+            .set(project_session_cwd("/srv/p1").expect("nonempty root"));
+        project.new_session();
+        assert_eq!(project.project.get_untracked(), Some("p1".to_string()));
+        assert_eq!(project.cwd.get_untracked(), "/srv/p1");
     }
 
     #[test]

@@ -52,6 +52,62 @@ struct SurfaceVoiceLayout {
     docked: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RevealVisibility {
+    council: bool,
+    rooms: bool,
+    sessions: bool,
+    floor: bool,
+    deck: bool,
+    phone_dialer: bool,
+    livekit: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RevealSurface {
+    Council,
+    Rooms,
+    Sessions,
+    Floor,
+    Deck,
+    PhoneDialer,
+    LiveKit,
+}
+
+/// Council is modal authority: opening it closes every competing reveal.
+fn council_open_visibility() -> RevealVisibility {
+    RevealVisibility {
+        council: true,
+        ..RevealVisibility::default()
+    }
+}
+
+/// Return exactly one reveal to close for Escape, ordered by visual z-layer.
+/// Palette/slash popovers stop propagation before this app-level rail.
+fn topmost_reveal(visibility: RevealVisibility) -> Option<RevealSurface> {
+    if visibility.council {
+        Some(RevealSurface::Council)
+    } else if visibility.rooms {
+        Some(RevealSurface::Rooms)
+    } else if visibility.sessions {
+        Some(RevealSurface::Sessions)
+    } else if visibility.floor {
+        Some(RevealSurface::Floor)
+    } else if visibility.deck {
+        Some(RevealSurface::Deck)
+    } else if visibility.phone_dialer {
+        Some(RevealSurface::PhoneDialer)
+    } else if visibility.livekit {
+        Some(RevealSurface::LiveKit)
+    } else {
+        None
+    }
+}
+
+fn window_escape_should_handle(key: &str, default_prevented: bool) -> bool {
+    key == "Escape" && !default_prevented
+}
+
 /// Compute the voice-chat root classes from stage and component counts.
 /// Baseline is the component count captured when voice started; current is
 /// the live count. A pre-existing card must not pre-dock a new session.
@@ -1113,8 +1169,10 @@ pub fn App() -> impl IntoView {
     // durable snapshot/live/replay contract. It is mounted only while open so
     // its single SSE connection and renderer loop tear down deterministically.
     let show_floor = RwSignal::new(false);
-    // Call controls row — created early so Rooms::new can share the signal.
+    // Call controls — created early so reveal ordering and Rooms share the
+    // same signals. They remain absent while false.
     let show_livekit_controls = RwSignal::new(false);
+    let show_phone_dialer = RwSignal::new(false);
     let show_rooms = RwSignal::new(false);
     // Sessions and Rooms are sibling browse overlays (same right-hand modal
     // pattern) — opening one closes the other so they never stack. Every
@@ -1154,6 +1212,18 @@ pub fn App() -> impl IntoView {
     let toggle_deck = move |p: DeckPanel| {
         deck_panel.update(|cur| *cur = if *cur == Some(p) { None } else { Some(p) })
     };
+    let open_council = Callback::new(move |()| {
+        let next = council_open_visibility();
+        show_council.set(next.council);
+        show_rooms.set(next.rooms);
+        show_sessions.set(next.sessions);
+        show_floor.set(next.floor);
+        if !next.deck {
+            deck_panel.set(None);
+        }
+        show_phone_dialer.set(next.phone_dialer);
+        show_livekit_controls.set(next.livekit);
+    });
     // Panels mount inside a reactive match arm that re-runs on panel switch,
     // so the Daemon clone lives in a StoredValue (same pattern as
     // daemon_for_perms below).
@@ -1291,7 +1361,7 @@ pub fn App() -> impl IntoView {
             scope: CommandScope::App,
             slash: Some("/council"),
             enabled: always,
-            run: Callback::new(move |_| show_council.set(true)),
+            run: open_council,
         });
         // Daemon supervision (Tauri shell only): start/restart the supervised
         // ocean-daemon. Hidden off-Tauri via the enabled predicate (the palette
@@ -1579,24 +1649,31 @@ pub fn App() -> impl IntoView {
     });
     on_cleanup(move || _pointer_light.remove());
 
-    // Window-level Escape closes the topmost open reveal — priority follows
-    // the z-order: council stage (full-screen modal) over the rooms/sessions
-    // browse overlays over the deck rail (web/extension only — the Show gate
-    // keeps the deck off Tauri). The palette's and slash-menu's own Escape
-    // arms call stop_propagation(), so an Escape they handle never bubbles
-    // here: one Escape closes exactly one surface, never a cascade.
+    // Window-level Escape closes exactly one topmost reveal. Priority follows
+    // visual layering: council > browse overlays > Floor > deck > inline call
+    // reveals. Palette/slash Escape stops propagation before reaching this rail.
     let _overlay_escape = window_event_listener(ev::keydown, move |e: ev::KeyboardEvent| {
-        if e.key() != "Escape" {
+        if !window_escape_should_handle(&e.key(), e.default_prevented()) {
             return;
         }
-        if show_council.get() {
-            show_council.set(false);
-        } else if show_rooms.get() {
-            show_rooms.set(false);
-        } else if show_sessions.get() {
-            show_sessions.set(false);
-        } else if deck_panel.get().is_some() {
-            deck_panel.set(None);
+        let topmost = topmost_reveal(RevealVisibility {
+            council: show_council.get(),
+            rooms: show_rooms.get(),
+            sessions: show_sessions.get(),
+            floor: show_floor.get(),
+            deck: deck_panel.get().is_some(),
+            phone_dialer: show_phone_dialer.get(),
+            livekit: show_livekit_controls.get(),
+        });
+        match topmost {
+            Some(RevealSurface::Council) => show_council.set(false),
+            Some(RevealSurface::Rooms) => show_rooms.set(false),
+            Some(RevealSurface::Sessions) => show_sessions.set(false),
+            Some(RevealSurface::Floor) => show_floor.set(false),
+            Some(RevealSurface::Deck) => deck_panel.set(None),
+            Some(RevealSurface::PhoneDialer) => show_phone_dialer.set(false),
+            Some(RevealSurface::LiveKit) => show_livekit_controls.set(false),
+            None => {}
         }
     });
     on_cleanup(move || _overlay_escape.remove());
@@ -1732,7 +1809,6 @@ pub fn App() -> impl IntoView {
     // Call/collaboration controls are explicit reveals, not permanent top
     // chrome. The overflow menu opens them; the row below the header exists only
     // while one is intentionally active.
-    let show_phone_dialer = RwSignal::new(false);
     let daemon_livekit = StoredValue::new(daemon.clone());
     let daemon_phone_call = StoredValue::new(daemon.clone());
 
@@ -1995,7 +2071,7 @@ pub fn App() -> impl IntoView {
                                 role="menuitem"
                                 on:click=move |_| {
                                     if let Some(d) = more_ref.get() { let _ = d.remove_attribute("open"); }
-                                    show_council.set(true);
+                                    open_council.run(());
                                 }
                             >
                                 "Council deck"
@@ -2558,10 +2634,11 @@ pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
 #[cfg(test)]
 mod tests {
     use super::{
-        composer_height_px, composer_overflow_y, execute_planner_workflow, initial_planner_context,
-        parse_deep_link, planner_candidates, selected_planner_context, DeepLinkAction,
-        PlannerAction, PlannerContext, PlannerWorkflowFailureStage, PlannerWorkflowOps,
-        PlannerWorkflowRequest, COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX,
+        composer_height_px, composer_overflow_y, council_open_visibility, execute_planner_workflow,
+        initial_planner_context, parse_deep_link, planner_candidates, selected_planner_context,
+        topmost_reveal, window_escape_should_handle, DeepLinkAction, PlannerAction, PlannerContext,
+        PlannerWorkflowFailureStage, PlannerWorkflowOps, PlannerWorkflowRequest, RevealSurface,
+        RevealVisibility, COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX,
     };
     use crate::daemon::{ProjectInfo, WorktreeInfo};
     use futures_util::future::LocalBoxFuture;
@@ -2796,6 +2873,104 @@ mod tests {
             ),
             ("p2", "/two")
         );
+    }
+
+    #[test]
+    fn council_open_transition_closes_every_competing_reveal() {
+        let next = council_open_visibility();
+        assert_eq!(
+            next,
+            RevealVisibility {
+                council: true,
+                ..RevealVisibility::default()
+            }
+        );
+    }
+
+    #[test]
+    fn escape_closes_one_topmost_reveal_in_visual_order() {
+        let all = RevealVisibility {
+            council: true,
+            rooms: true,
+            sessions: true,
+            floor: true,
+            deck: true,
+            phone_dialer: true,
+            livekit: true,
+        };
+        assert_eq!(topmost_reveal(all), Some(RevealSurface::Council));
+        assert_eq!(
+            topmost_reveal(RevealVisibility {
+                council: false,
+                ..all
+            }),
+            Some(RevealSurface::Rooms)
+        );
+        assert_eq!(
+            topmost_reveal(RevealVisibility {
+                council: false,
+                rooms: false,
+                ..all
+            }),
+            Some(RevealSurface::Sessions)
+        );
+        assert_eq!(
+            topmost_reveal(RevealVisibility {
+                council: false,
+                rooms: false,
+                sessions: false,
+                ..all
+            }),
+            Some(RevealSurface::Floor)
+        );
+        assert_eq!(
+            topmost_reveal(RevealVisibility {
+                council: false,
+                rooms: false,
+                sessions: false,
+                floor: false,
+                ..all
+            }),
+            Some(RevealSurface::Deck)
+        );
+        assert_eq!(
+            topmost_reveal(RevealVisibility {
+                council: false,
+                rooms: false,
+                sessions: false,
+                floor: false,
+                deck: false,
+                ..all
+            }),
+            Some(RevealSurface::PhoneDialer)
+        );
+        assert_eq!(
+            topmost_reveal(RevealVisibility {
+                council: false,
+                rooms: false,
+                sessions: false,
+                floor: false,
+                deck: false,
+                phone_dialer: false,
+                ..all
+            }),
+            Some(RevealSurface::LiveKit)
+        );
+        assert_eq!(topmost_reveal(RevealVisibility::default()), None);
+        assert!(window_escape_should_handle("Escape", false));
+        assert!(!window_escape_should_handle("Escape", true));
+        assert!(!window_escape_should_handle("Enter", false));
+    }
+
+    #[test]
+    fn rooms_list_flex_child_can_shrink_and_scroll() {
+        let css = include_str!("../../../styles/panels.css");
+        let start = css
+            .find(".rooms-panel__list {")
+            .expect("rooms list production selector");
+        let block = &css[start..start + css[start..].find('}').expect("selector closes")];
+        assert!(block.contains("min-height: 0;"));
+        assert!(block.contains("overflow-y: auto;"));
     }
 
     #[test]

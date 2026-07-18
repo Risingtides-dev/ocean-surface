@@ -176,6 +176,20 @@ Web surface session UI:
   quiet zero-height sticky `↓ latest` affordance returns and re-pins, and a
   session switch always re-pins so the new transcript opens at its latest
   turn. Do not re-add unconditional scroll-to-bottom on stream deltas.
+- Every complete session-list request—thin daemon spawner or A1 panel
+  poll—claims the same daemon-owned generation ticket. Only the latest claimant
+  may replace `session_list`; panel-local generation/open guards still protect
+  lifecycle writes and cleanup. Pagination cursors are RFC 3986-encoded as one
+  query-component value before daemon requests.
+- A project-section `+ new session` always passes an explicit cwd: catalogue
+  `workspace_root` first, otherwise the section's newest concrete session root,
+  and the action stays absent when neither root exists. It must never inherit
+  the previously active session's cwd or silently fall back to `/tmp`.
+  Project-form focus refs belong on the actual first inputs (existing path and
+  new-project name), not container elements.
+- Reveal lifecycle is deterministic: opening Council closes every competing
+  reveal; window Escape closes exactly one topmost surface in visual z-order,
+  including Ocean Floor, deck, phone dialer, and LiveKit controls.
 
 ## Rooms Contract
 
@@ -187,6 +201,9 @@ Web surface session UI:
   both `room_message` and `room_access` immediately: messages alone advance the
   room sequence cursor; access projections replace state without a sequence.
   Do not restore transcript polling or consume the global agent-event stream.
+- Decoded room-tail frames mutate state only after one shared generation+room
+  admission check. Opening and closing a room share one synchronous reset path
+  so stale transcript, access, and tail state cannot leak across room identity.
 - The browser PWA proxy must forward `/v1/agents` as JSON and stream room SSE
   unbuffered while preserving `Last-Event-ID`; Tauri reaches the same daemon
   endpoints directly.
@@ -204,6 +221,9 @@ Web surface session UI:
 - Rooms G1 is daemon-native text collaboration. LiveKit controls stay outside
   the room join, leave, roster, and transcript lifecycle until explicitly
   reintroduced behind a reviewed platform contract.
+- The rooms browser is a flex column; `.rooms-panel__list` keeps
+  `min-height: 0` with vertical overflow so long room lists scroll instead of
+  pushing status/actions outside the viewport.
 
 ## Workspace Map
 
