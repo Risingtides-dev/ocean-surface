@@ -78,6 +78,7 @@ fn realtime_active_css_hides_all_composer_controls_in_one_completed_rule() {
     let expected_selectors = BTreeSet::from([
         ".voice-chat-active .ocean-composer__input".to_string(),
         ".voice-chat-active .ocean-composer__send".to_string(),
+        ".voice-chat-active .ocean-composer__halt".to_string(),
         ".voice-chat-active .ocean-turn-controls".to_string(),
         ".voice-chat-active .ocean-slash-menu".to_string(),
     ]);
@@ -90,6 +91,6 @@ fn realtime_active_css_hides_all_composer_controls_in_one_completed_rule() {
         matching_rule
             .and_then(|rule| rule.declarations.get("display"))
             .is_some_and(|value| value == "none"),
-        "expected one completed .voice-chat-active rule with selectors {expected_selectors:?} and display:none so the composer input, send button, turn controls, and slash menu all hide together; parsed realtime rules were {rules:#?}"
+        "expected one completed .voice-chat-active rule with selectors {expected_selectors:?} and display:none so the composer input, Send/Stop action slot, turn controls, and slash menu all hide together; parsed realtime rules were {rules:#?}"
     );
 }

@@ -1,0 +1,18 @@
+## Review
+
+- **Correct:** Journal append and folded state update are atomic in one SQLite transaction (`crates/ocean-daemon/src/session_projection.rs:307-329`). The database is owner-only on Unix and uses WAL (`:217-227`).
+- **Correct:** Bus hooks journal before legacy/live broadcast (`crates/ocean-daemon/src/bus.rs:130-139`, `:281-290`).
+- **Correct:** Tail setup subscribes before its first durable page (`crates/ocean-daemon/src/main.rs:6886-6890`). Cursor validation covers epoch, session, future and retention boundaries (`crates/ocean-daemon/src/session_projection.rs:420-450`).
+- **Correct:** `SurfacePatch`, Slack Canvas, and extensions are explicitly excluded (`crates/ocean-daemon/src/session_projection.rs:251-261`). Permission requests/decisions are the only control events admitted (`:273-295`).
+- **Correct:** Persistence revisions advance on a candidate and become visible only after successful rename; checkpoints are emitted after successful saves (`crates/ocean-agent/src/session/mod.rs:364-406`, `crates/ocean-agent/src/lib.rs:1556-1571`, `:1775-1793`, `:1830-1841`).
+- **Correct:** Focused and full crate tests pass, including concurrency, restart epoch, cursor isolation, compaction, permissions, exclusions, and database permissions.
+
+- **Blocker:** Projection SSE can prevent graceful shutdown when replay backpressure fills its 64-item channel. The producer awaits `tx.send()` without racing shutdown (`crates/ocean-daemon/src/main.rs:6870`, `:6898-6904`); shutdown is only selected after the page finishes (`:6925-6934`), and the returned `ReceiverStream` is not wrapped by the existing shutdown stream (`:6938`). A connected client that stops reading while at least 65 frames are replayed can therefore pin Axum graceful shutdown.
+- **Blocker:** Leases grow without a bound or idle cleanup. Every snapshot/page appends a new `Lease` to `HashMap<String, Vec<Lease>>` (`crates/ocean-daemon/src/session_projection.rs:188`, `:402`, `:467`, `:487-496`). Expired entries are removed only when compaction happens (`:499-510`), which is triggered by pressure or a persistence checkpoint (`:337-338`, `:363`). Repeated reads of an idle session can grow process memory indefinitely, and disconnecting a client does not retire or coalesce its lease.
+- **Blocker:** Cancelled permission waiters remain permanently present in folded projection state. Folding removes a request only upon `PermissionDecision` (`crates/ocean-daemon/src/session_projection.rs:97-108`), but cancellation removes the waiter and emits `Cancelled`, not a permission decision (`crates/ocean-daemon/src/main.rs:1772-1788`). `TurnFinished` also does not clear permissions. Consequently, a later snapshot can advertise an approval that no longer exists or can be answered.
+
+- **Note:** Cursor parsing checks only a nonempty epoch and a 16-character hash (`crates/ocean-daemon/src/session_projection.rs:130-148`); non-UUID epochs and non-hex hashes are classified as epoch/session mismatch rather than malformed.
+- **Note:** The 256 MiB setting is documented and implemented as a logical target, not a hard ceiling. Uncheckpointed rows are retained for continuity, and physical SQLite/WAL size is not bounded by the logical byte counter.
+- **Note:** There are no HTTP-level tests for the additive GET projection, projection reset/close behavior, stalled-client shutdown, or disconnect/lease cleanup.
+- **Note:** Requested `plan.md` and `progress.md` were absent from the worktree, so review relied on the code, diff, repository contracts, and updated architecture documentation.
+- **Fixed:** None; review was read-only.

@@ -19,7 +19,7 @@ mkdir -p "$DIST"
 cp dist/ocean-surface-ui.js     "$DIST/ocean-surface-ui.js"
 cp dist/ocean-surface-ui_bg.wasm "$DIST/ocean-surface-ui_bg.wasm"
 
-# Stylesheets: every dist/*.css (tokens/base/chrome/transcript/components/
+# Stylesheets: every dist/*.css (tokens/base/chrome/island/transcript/components/
 # composer/panels/deck/workspace/council/call/canvas/compact/float —
 # sidepanel.html links relatively (dist/fonts/ must sit beside the CSS).
 cp dist/*.css "$DIST/"

@@ -13,13 +13,17 @@
 //! the rest of the UI reacts naturally.
 
 use std::collections::VecDeque;
+#[cfg(target_arch = "wasm32")]
+use std::sync::{Arc, Mutex};
 
 use futures_util::StreamExt;
 use gloo_net::eventsource::futures::EventSource;
 use gloo_net::http::Request;
 use leptos::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use send_wrapper::SendWrapper;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
@@ -27,6 +31,34 @@ use crate::canvas::CanvasContext;
 use crate::model::{Block, ComponentPlacement, Role, ToolStatus, Turn};
 
 pub const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:4780";
+
+// Browsers cap concurrent HTTP/1.1 connections per origin. Each focused
+// session owns two long-lived EventSource requests (agent events + permission
+// events), so merely generation-gating stale readers is not enough: an idle
+// stale stream never yields another frame, remains open, and eventually blocks
+// the snapshot request for a later session. Keep explicit handles so every
+// focus change can close both transports before opening their replacements.
+#[cfg(target_arch = "wasm32")]
+type EventSourceSlot = Arc<Mutex<Option<SendWrapper<EventSource>>>>;
+
+#[cfg(target_arch = "wasm32")]
+fn replace_event_source(slot: &EventSourceSlot, next: EventSource) {
+    let previous = slot
+        .lock()
+        .expect("event source slot poisoned")
+        .replace(SendWrapper::new(next));
+    if let Some(previous) = previous {
+        previous.take().close();
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn close_event_source(slot: &EventSourceSlot) {
+    let previous = slot.lock().expect("event source slot poisoned").take();
+    if let Some(previous) = previous {
+        previous.take().close();
+    }
+}
 
 /// The throwaway working directory for a projectless Chat session. Chat is
 /// deliberately NOT a project: it clears the project selection and pins the
@@ -732,6 +764,91 @@ pub struct ToolCallSummary {
     pub args_json: Value,
 }
 
+/// Authoritative cross-session request state from `GET /v1/requests`.
+/// Kept separate from the focused session's live `active_turn_id`: the Island
+/// uses this read-only snapshot to show work elsewhere without opening one SSE
+/// connection per background session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestSnapshotState {
+    Queued,
+    Running,
+    WaitingForPermission,
+    Cancelling,
+    Cancelled,
+    Completed,
+    Errored,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RequestSnapshot {
+    pub request_id: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    pub state: RequestSnapshotState,
+    #[serde(default)]
+    pub permission_id: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+    #[serde(default)]
+    pub finished_at: Option<String>,
+}
+
+/// Pending cross-session permission metadata from `GET /v1/permissions`.
+/// Deliberately omits the daemon's raw `args` payload: the Island is a compact
+/// read-only signal, while the focused transcript permission card remains the
+/// detail and decision authority.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PermissionSnapshot {
+    pub permission_id: String,
+    pub request_id: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub tool: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub created_at: String,
+}
+
+/// One bounded transcript-history match from the daemon-owned Recall search.
+/// The daemon searches persisted display transcript text; the Surface only
+/// renders results and opens their source session.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct HistorySearchHit {
+    pub hit_id: String,
+    pub session_id: String,
+    #[serde(default)]
+    pub session_title: String,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub excerpt: String,
+    #[serde(default)]
+    pub timestamp_ms: Option<i64>,
+    #[serde(default)]
+    pub workspace_root: Option<String>,
+    #[serde(default)]
+    pub score: f64,
+    #[serde(default)]
+    pub match_kind: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct HistorySearchResponse {
+    #[serde(default)]
+    ok: bool,
+    #[serde(default)]
+    hits: Vec<HistorySearchHit>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
 /// A pending permission request awaiting the operator's allow/deny.
 ///
 /// Mirrors the daemon's `OceanEvent::PermissionRequest` plus the envelope's
@@ -785,6 +902,30 @@ pub struct ToolResult {
     pub ok: bool,
     #[serde(default)]
     pub output: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RequestCancelResponse {
+    #[serde(default)]
+    ok: bool,
+    #[serde(default)]
+    message: String,
+}
+
+fn request_cancel_result(http_ok: bool, raw: &str) -> Result<(), String> {
+    match serde_json::from_str::<RequestCancelResponse>(raw) {
+        Ok(response) if http_ok && response.ok => Ok(()),
+        Ok(response) => Err(if response.message.trim().is_empty() {
+            "request cancellation rejected".to_string()
+        } else {
+            response.message
+        }),
+        Err(_) => Err(if raw.trim().is_empty() {
+            "unreadable cancellation response".to_string()
+        } else {
+            raw.to_string()
+        }),
+    }
 }
 
 /// One image attached to a turn (OCEAN-138). Serializes to the exact wire shape
@@ -1219,6 +1360,14 @@ pub struct Daemon {
     /// so reconnect/switch/new-session calls retire older streams instead of
     /// applying every delta multiple times.
     sse_generation: RwSignal<u64>,
+    /// Explicit handles for the two browser EventSource transports. A generation
+    /// guard prevents stale events from mutating state, but cannot wake an idle
+    /// stream; closing these on focus change releases the browser connection
+    /// slots immediately.
+    #[cfg(target_arch = "wasm32")]
+    agent_event_source: EventSourceSlot,
+    #[cfg(target_arch = "wasm32")]
+    permission_event_source: EventSourceSlot,
     /// Legacy guard retained for older daemon/proxy builds. New surfaces create
     /// sessions explicitly before posting turns, so this should stay false.
     awaiting_session_adoption: RwSignal<bool>,
@@ -1226,6 +1375,24 @@ pub struct Daemon {
     pub session_title: RwSignal<String>,
     /// Fetched session list from the daemon.
     pub session_list: RwSignal<Vec<SessionSummary>>,
+    /// Cross-session runtime snapshots used by the read-only Island activity
+    /// projection. The daemon remains authoritative; these are replaced only
+    /// after a successful snapshot decode.
+    pub request_list: RwSignal<Vec<RequestSnapshot>>,
+    pub permission_list: RwSignal<Vec<PermissionSnapshot>>,
+    /// Daemon-owned transcript recall results. A monotonically increasing
+    /// generation prevents a slow older query from replacing a newer one.
+    pub history_results: RwSignal<Vec<HistorySearchHit>>,
+    pub history_searching: RwSignal<bool>,
+    pub history_error: RwSignal<Option<String>>,
+    history_search_generation: RwSignal<u64>,
+    /// Prevent the ambient three-second refresh from stacking requests when a
+    /// slow/offline daemon has not completed the previous snapshot yet.
+    attention_fetching: RwSignal<bool>,
+    /// Request ids whose explicit cancel POST is in flight. This is transport
+    /// state only; the rendered lifecycle state still comes from the daemon's
+    /// request snapshot.
+    pub request_cancellations: RwSignal<Vec<String>>,
     /// Token usage from the most recently finished turn (real provider numbers
     /// when available). `None` until the first turn finishes.
     pub last_turn_tokens: RwSignal<Option<TokenStats>>,
@@ -1458,9 +1625,21 @@ impl Daemon {
             livekit_token_path: RwSignal::new(String::new()),
             tldraw_sync_uri: RwSignal::new(String::new()),
             sse_generation: RwSignal::new(0),
+            #[cfg(target_arch = "wasm32")]
+            agent_event_source: Arc::new(Mutex::new(None)),
+            #[cfg(target_arch = "wasm32")]
+            permission_event_source: Arc::new(Mutex::new(None)),
             awaiting_session_adoption: RwSignal::new(false),
             session_title: RwSignal::new(String::new()),
             session_list: RwSignal::new(Vec::new()),
+            request_list: RwSignal::new(Vec::new()),
+            permission_list: RwSignal::new(Vec::new()),
+            history_results: RwSignal::new(Vec::new()),
+            history_searching: RwSignal::new(false),
+            history_error: RwSignal::new(None),
+            history_search_generation: RwSignal::new(0),
+            attention_fetching: RwSignal::new(false),
+            request_cancellations: RwSignal::new(Vec::new()),
             last_turn_tokens: RwSignal::new(None),
             session_tokens: RwSignal::new(TokenStats::default()),
             model: RwSignal::new(None),
@@ -1508,9 +1687,21 @@ impl Daemon {
             livekit_token_path: RwSignal::new(String::new()),
             tldraw_sync_uri: RwSignal::new(String::new()),
             sse_generation: RwSignal::new(0),
+            #[cfg(target_arch = "wasm32")]
+            agent_event_source: Arc::new(Mutex::new(None)),
+            #[cfg(target_arch = "wasm32")]
+            permission_event_source: Arc::new(Mutex::new(None)),
             awaiting_session_adoption: RwSignal::new(false),
             session_title: RwSignal::new(String::new()),
             session_list: RwSignal::new(Vec::new()),
+            request_list: RwSignal::new(Vec::new()),
+            permission_list: RwSignal::new(Vec::new()),
+            history_results: RwSignal::new(Vec::new()),
+            history_searching: RwSignal::new(false),
+            history_error: RwSignal::new(None),
+            history_search_generation: RwSignal::new(0),
+            attention_fetching: RwSignal::new(false),
+            request_cancellations: RwSignal::new(Vec::new()),
             last_turn_tokens: RwSignal::new(None),
             session_tokens: RwSignal::new(TokenStats::default()),
             model: RwSignal::new(None),
@@ -1660,9 +1851,16 @@ impl Daemon {
         let session_title = self.session_title;
         let cwd = self.cwd;
         let pinned_widgets = self.pinned_widgets;
+        #[cfg(target_arch = "wasm32")]
+        let agent_event_source = Arc::clone(&self.agent_event_source);
 
         let generation = sse_generation.get_untracked().wrapping_add(1);
         sse_generation.set(generation);
+        #[cfg(target_arch = "wasm32")]
+        {
+            close_event_source(&self.agent_event_source);
+            close_event_source(&self.permission_event_source);
+        }
         let Some(active_session_id) = session_id.get_untracked() else {
             status.set("new session".into());
             return;
@@ -1723,6 +1921,13 @@ impl Daemon {
                         pinned_widgets,
                     )
                     .await;
+                    // A session switch can land while the reconnect snapshot is
+                    // awaiting HTTP. Do not let that stale task install its old
+                    // session EventSource into the shared slot and close the new
+                    // generation's live stream.
+                    if sse_generation.get_untracked() != generation {
+                        break;
+                    }
                 }
 
                 let events_url = format!(
@@ -1745,6 +1950,8 @@ impl Daemon {
                         continue;
                     }
                 };
+                #[cfg(target_arch = "wasm32")]
+                replace_event_source(&agent_event_source, es.clone());
                 status.set("connected".into());
                 status_detail.set(None);
                 // Mark that we have opened the stream at least once for this
@@ -1886,6 +2093,8 @@ impl Daemon {
         let url = self.url.get_untracked();
         let sse_generation = self.sse_generation;
         let pending = self.pending_permissions;
+        #[cfg(target_arch = "wasm32")]
+        let permission_event_source = Arc::clone(&self.permission_event_source);
 
         spawn_local(async move {
             loop {
@@ -1900,6 +2109,8 @@ impl Daemon {
                         continue;
                     }
                 };
+                #[cfg(target_arch = "wasm32")]
+                replace_event_source(&permission_event_source, es.clone());
 
                 let mut subs = Vec::new();
                 let mut sub_err = false;
@@ -2466,6 +2677,145 @@ impl Daemon {
         });
     }
 
+    /// Refresh the daemon's authoritative cross-session work snapshots.
+    ///
+    /// This intentionally polls the existing read-only request and permission
+    /// registries instead of opening an SSE pair per background session. Each
+    /// signal keeps its last good value when its endpoint or decoder fails, so
+    /// a transient poll cannot erase real attention from the Island.
+    pub fn fetch_attention(&self) {
+        if self.attention_fetching.get_untracked() {
+            return;
+        }
+        self.attention_fetching.set(true);
+        let base = self.url.get_untracked().trim_end_matches('/').to_string();
+        let request_list = self.request_list;
+        let permission_list = self.permission_list;
+        let attention_fetching = self.attention_fetching;
+        let request_cancellations = self.request_cancellations;
+        spawn_local(async move {
+            #[derive(Deserialize)]
+            struct RequestsResponse {
+                ok: bool,
+                #[serde(default)]
+                requests: Vec<RequestSnapshot>,
+            }
+            #[derive(Deserialize)]
+            struct PermissionsResponse {
+                ok: bool,
+                #[serde(default)]
+                permissions: Vec<PermissionSnapshot>,
+            }
+
+            let (requests_response, permissions_response) = futures_util::join!(
+                Request::get(&format!("{base}/v1/requests")).send(),
+                Request::get(&format!("{base}/v1/permissions")).send(),
+            );
+
+            match requests_response {
+                Ok(resp) => match resp.json::<RequestsResponse>().await {
+                    Ok(snapshot) if snapshot.ok => {
+                        request_cancellations.update(|pending| {
+                            pending.retain(|request_id| {
+                                snapshot.requests.iter().any(|request| {
+                                    request.request_id == *request_id
+                                        && matches!(
+                                            request.state,
+                                            RequestSnapshotState::Queued
+                                                | RequestSnapshotState::Running
+                                        )
+                                })
+                            })
+                        });
+                        request_list.set(snapshot.requests);
+                    }
+                    Ok(_) => log::warn!("attention requests fetch not ok"),
+                    Err(err) => log::warn!("attention requests decode error: {err}"),
+                },
+                Err(err) => log::warn!("attention requests fetch error: {err}"),
+            }
+
+            match permissions_response {
+                Ok(resp) => match resp.json::<PermissionsResponse>().await {
+                    Ok(snapshot) if snapshot.ok => permission_list.set(snapshot.permissions),
+                    Ok(_) => log::warn!("attention permissions fetch not ok"),
+                    Err(err) => log::warn!("attention permissions decode error: {err}"),
+                },
+                Err(err) => log::warn!("attention permissions fetch error: {err}"),
+            }
+            attention_fetching.set(false);
+        });
+    }
+
+    /// Invalidate any in-flight/debounced Recall query immediately. Input
+    /// handlers call this before their debounce so stale query-A results cannot
+    /// become actionable while query B is already visible in the field.
+    pub fn invalidate_history_search(&self) {
+        self.history_search_generation
+            .update(|generation| *generation = generation.wrapping_add(1));
+        self.history_results.set(Vec::new());
+        self.history_error.set(None);
+        self.history_searching.set(false);
+    }
+
+    /// Search persisted user/assistant transcript text through the daemon-owned
+    /// Recall endpoint. Empty queries clear the view locally. Generation checks
+    /// ensure an older, slower request can never replace newer results.
+    pub fn search_history(&self, query: String) {
+        let query = query.trim().to_string();
+        let generation = self
+            .history_search_generation
+            .get_untracked()
+            .wrapping_add(1);
+        self.history_search_generation.set(generation);
+        if query.is_empty() {
+            self.history_results.set(Vec::new());
+            self.history_error.set(None);
+            self.history_searching.set(false);
+            return;
+        }
+
+        self.history_searching.set(true);
+        self.history_error.set(None);
+        self.history_results.set(Vec::new());
+        let base = self.url.get_untracked().trim_end_matches('/').to_string();
+        let encoded = js_sys::encode_uri_component(&query)
+            .as_string()
+            .unwrap_or_else(|| query.clone());
+        let url = format!("{base}/v1/agent/history/search?q={encoded}&limit=20");
+        let active_generation = self.history_search_generation;
+        let history_results = self.history_results;
+        let history_searching = self.history_searching;
+        let history_error = self.history_error;
+        spawn_local(async move {
+            let result = match Request::get(&url).send().await {
+                Ok(response) => match response.json::<HistorySearchResponse>().await {
+                    Ok(payload) if payload.ok => Ok(payload.hits),
+                    Ok(payload) => Err(payload
+                        .error
+                        .filter(|error| !error.trim().is_empty())
+                        .unwrap_or_else(|| "History search failed".to_string())),
+                    Err(error) => Err(format!("History response was unreadable: {error}")),
+                },
+                Err(error) => Err(format!("History search is unavailable: {error}")),
+            };
+            if active_generation.get_untracked() != generation {
+                return;
+            }
+            match result {
+                Ok(hits) => {
+                    history_results.set(hits);
+                    history_error.set(None);
+                }
+                Err(error) => {
+                    history_results.set(Vec::new());
+                    history_error.set(Some(error));
+                }
+            }
+            history_searching.set(false);
+        });
+    }
+
     /// Fetch the model catalogue + current selection from the daemon.
     pub fn fetch_models(&self) {
         let url = self.url.get_untracked();
@@ -2622,28 +2972,80 @@ impl Daemon {
         });
     }
 
-    /// Halt the in-flight turn, if any, via POST /v1/requests/{turn_id}/cancel.
+    /// Halt the focused in-flight turn, if any. The composer and Island share
+    /// the same explicit request-cancel path so their status/error behavior
+    /// cannot drift.
     pub fn halt(&self) {
         let Some(turn_id) = self.active_turn_id.get_untracked() else {
             return;
         };
+        self.cancel_request(turn_id);
+    }
+
+    /// Request cancellation for any daemon-owned running request. This is the
+    /// mutation seam used by Phase 3B Island cards; the daemon remains the
+    /// lifecycle authority, while `request_cancellations` tracks only the POST
+    /// in flight so the action cannot be double-submitted.
+    pub fn cancel_request(&self, request_id: String) {
+        if self
+            .request_cancellations
+            .with_untracked(|requests| requests.iter().any(|id| id == &request_id))
+        {
+            return;
+        }
+        self.request_cancellations
+            .update(|requests| requests.push(request_id.clone()));
+
         let url = self.url.get_untracked();
         let status = self.status;
+        let status_detail = self.status_detail;
         let streaming = self.streaming;
+        let active_turn_id = self.active_turn_id;
+        let request_cancellations = self.request_cancellations;
+        let daemon = self.clone();
         spawn_local(async move {
-            let post_url = format!("{}/v1/requests/{turn_id}/cancel", url.trim_end_matches('/'));
+            let post_url = format!(
+                "{}/v1/requests/{request_id}/cancel",
+                url.trim_end_matches('/')
+            );
+            let mut accepted = false;
             match Request::post(&post_url).send().await {
-                Ok(_) => {
-                    status.set("halting…".into());
-                    // streaming flips off when turn_finished (failed/cancelled)
-                    // arrives; flip it now too so the UI reacts immediately.
-                    streaming.set(false);
+                Ok(response) => {
+                    let http_ok = response.ok();
+                    let raw = response.text().await.unwrap_or_default();
+                    match request_cancel_result(http_ok, &raw) {
+                        Ok(()) => {
+                            accepted = true;
+                            if active_turn_id.get_untracked().as_deref()
+                                == Some(request_id.as_str())
+                            {
+                                status.set("halting…".into());
+                                status_detail.set(None);
+                                // The terminal SSE frame remains authoritative;
+                                // release the focused composer's Stop state once
+                                // the daemon accepted cancellation.
+                                streaming.set(false);
+                            }
+                            daemon.fetch_attention();
+                        }
+                        Err(message) => {
+                            let concise = format!("stop failed: {}", concise_error(&message));
+                            log::error!("request cancellation failed: {raw}");
+                            status.set(concise.clone());
+                            status_detail.set(Some((concise, raw)));
+                        }
+                    }
                 }
                 Err(err) => {
                     let raw = err.to_string();
-                    log::error!("halt error: {raw}");
-                    status.set(format!("halt error: {}", concise_error(&raw)));
+                    let concise = format!("stop failed: {}", concise_error(&raw));
+                    log::error!("request cancellation error: {raw}");
+                    status.set(concise.clone());
+                    status_detail.set(Some((concise, raw)));
                 }
+            }
+            if !accepted {
+                request_cancellations.update(|requests| requests.retain(|id| id != &request_id));
             }
         });
     }
@@ -4650,6 +5052,108 @@ mod tests {
     }
 
     #[test]
+    fn attention_request_snapshot_decodes_daemon_wire_state() {
+        let snapshot: RequestSnapshot = serde_json::from_value(serde_json::json!({
+            "request_id": "request-a",
+            "session_id": "session-a",
+            "state": "waiting_for_permission",
+            "permission_id": "permission-a",
+            "message": "waiting",
+            "updated_at": "2026-07-14T12:00:00Z"
+        }))
+        .expect("request snapshot decodes");
+        assert_eq!(snapshot.state, RequestSnapshotState::WaitingForPermission);
+        assert_eq!(snapshot.session_id.as_deref(), Some("session-a"));
+    }
+
+    #[test]
+    fn cancel_response_requires_body_ok_not_only_http_success() {
+        assert_eq!(
+            request_cancel_result(
+                true,
+                r#"{"ok":true,"request_id":"request-a","state":"cancelling","message":"accepted"}"#,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            request_cancel_result(
+                true,
+                r#"{"ok":false,"request_id":"request-a","state":"completed","message":"request already terminal"}"#,
+            ),
+            Err("request already terminal".into())
+        );
+        assert!(request_cancel_result(false, r#"{"ok":true,"message":"unexpected"}"#).is_err());
+    }
+
+    #[test]
+    fn recall_input_change_invalidates_stale_results_before_debounce() {
+        let daemon = Daemon::dummy();
+        daemon.history_results.set(vec![HistorySearchHit {
+            hit_id: "query-a-hit".into(),
+            session_id: "session-a".into(),
+            session_title: "Old result".into(),
+            role: "assistant".into(),
+            excerpt: "stale".into(),
+            timestamp_ms: None,
+            workspace_root: None,
+            score: 1.0,
+            match_kind: "fuzzy".into(),
+        }]);
+        daemon.history_searching.set(true);
+        let previous_generation = daemon.history_search_generation.get_untracked();
+
+        daemon.invalidate_history_search();
+
+        assert!(daemon.history_results.get_untracked().is_empty());
+        assert!(!daemon.history_searching.get_untracked());
+        assert_eq!(
+            daemon.history_search_generation.get_untracked(),
+            previous_generation.wrapping_add(1),
+        );
+    }
+
+    #[test]
+    fn history_search_response_decodes_bounded_daemon_hits() {
+        let response: HistorySearchResponse = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "query": "dynamic island",
+            "hits": [{
+                "hit_id": "session-a:2",
+                "session_id": "session-a",
+                "session_title": "Island direction",
+                "role": "assistant",
+                "excerpt": "The Island should change shape around one intent.",
+                "timestamp_ms": 1784100000000_i64,
+                "workspace_root": "/workspace/ocean",
+                "score": 3.25,
+                "match_kind": "exact"
+            }],
+            "error": null
+        }))
+        .expect("history response decodes");
+        assert!(response.ok);
+        assert_eq!(response.hits.len(), 1);
+        assert_eq!(response.hits[0].session_id, "session-a");
+        assert_eq!(response.hits[0].match_kind, "exact");
+    }
+
+    #[test]
+    fn attention_permission_snapshot_ignores_raw_args() {
+        let snapshot: PermissionSnapshot = serde_json::from_value(serde_json::json!({
+            "permission_id": "permission-a",
+            "request_id": "request-a",
+            "session_id": "session-a",
+            "tool": "bash",
+            "reason": "run a check",
+            "args": { "command": "private payload stays outside the Island DTO" },
+            "created_at": "2026-07-14T12:00:00Z"
+        }))
+        .expect("permission snapshot decodes while ignoring args");
+        assert_eq!(snapshot.tool, "bash");
+        assert_eq!(snapshot.reason, "run a check");
+    }
+
+    #[test]
     fn component_render_attaches_to_active_turn_not_a_new_one() {
         // The agent streamed text on turn "t1", then renders a card. The card
         // must fold into t1, not splinter into a separate synthetic turn.
@@ -5398,13 +5902,12 @@ mod tests {
             // on a bare `type`. So: a clean parse to a non-Other variant OR a
             // field-level error both mean "recognized name". Only a clean parse
             // to `Other` means "unknown name".
-            match parsed {
-                Ok(AgentEvent::Other) => panic!(
+            if let Ok(AgentEvent::Other) = parsed {
+                panic!(
                     "AGENT_EVENT_NAMES contains \"{name}\" but it deserializes to \
                      AgentEvent::Other — it matches no variant. Remove it or fix \
                      the spelling so it mirrors the daemon's emitted name.",
-                ),
-                Ok(_) | Err(_) => {}
+                );
             }
         }
 

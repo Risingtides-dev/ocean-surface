@@ -1,0 +1,16 @@
+## Review
+- **Correct:** `src/game/difficulty.ts` clamps normalized progress and all difficulty inputs; envelope clamps are consistently applied to player targets, formations, and predicted aim.
+- **Correct:** Teammate threats are explicitly tagged in `Game.tsx`; killing a threat restores `ready`, while expiry marks the teammate `down`.
+- **Correct:** `buildWave` uses `floor((density - 1) * count)`, keeping total waves at or below `floor(count * density)`.
+
+- **Blocker (P0):** `src/game/Game.tsx` — the carrier is mathematically unwinnable. It spawns at distance 378 with `z = -96`, expires at `z > 12` after 108m, or **4.5 seconds** unboosted. Its scaled health is `ceil(22 * (1 + 0.9 × 0.9)) = 40`; player fire cadence permits at most ~28 shots, and projectile travel reduces actual impacts to ~22. Boost makes expiry faster. Bombs explicitly exclude carriers.
+- **High:** `src/game/Laser.tsx`, `src/game/Game.tsx` (`Simulation`) — collision uses only the projectile’s sampled point, with no swept segment. At 100ms frame delay, player lasers move 7.6m while collision depth is only 3.8m; enemy lasers can similarly skip the player. Simulation also checks before `Laser` updates its position, adding one-frame staleness. Implement continuous segment/capsule collision.
+- **High:** `src/game/Enemy.tsx` — turrets are explicitly excluded from firing (`spawn.variant !== 'turret'`), and there is no enemy-body/player collision in `Simulation`. Turret encounters therefore create shootable scenery rather than threats.
+- **High:** `src/game/Enemy.tsx` — the carrier has no phases: only one generic health pool, fixed sinusoidal motion, and one cadence. The README describes a staged carrier boss, but no phase transitions, expiry warning, retreat state, or final attack exists.
+- **Medium:** `src/game/difficulty.ts` — `predictAimTarget` is an approximation, not a true intercept. It uses `range / projectileSpeed`, then applies lateral lead, but does not solve `|r + v·t| = speed·t`; moving players can be systematically under-/over-led. Use a bounded quadratic intercept and then apply difficulty damping/error.
+- **Medium:** `src/game/Arwing.tsx`, `src/game/Game.tsx` — player velocity is written by `Arwing` after `Simulation` runs, so enemy targeting always consumes the prior frame’s velocity. This is acceptable at stable FPS but worsens prediction during frame-rate changes.
+- **Medium:** `src/game/Enemy.tsx` — seeded aim error is correlated: the seed uses only `spawn.id.length`, so same-length enemy IDs and equal shot counts receive identical offsets. The sequence also repeats every 100 shots. Use a deterministic hash of the full ID and shot index.
+- **Low:** `src/game/difficulty.ts`, `src/game/Game.tsx` — density mathematically escalates to 1.5×, but encounter sizes plus flooring produce no added members at distances 0, 42, 88, 148, or 226; only the 314m encounter gets one extra. HUD density therefore overstates realized wave-density escalation.
+- **Note:** No automated tests cover difficulty boundaries, intercept accuracy, collision continuity, carrier killability, or rescue/expiry outcomes.
+
+- **Fixed:** None; this was a read-only audit.

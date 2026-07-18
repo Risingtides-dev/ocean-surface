@@ -1,0 +1,37 @@
+{
+  "runId": "421a3371",
+  "agent": "researcher",
+  "task": "Research the original Nintendo 64 Star Fox 64 / Lylat Wars Level 1 (Corneria) for gameplay structure, team-mate roles, enemies, milestones, mechanics, and visual references. Focus on facts useful for a legally safer homage/remake spec; clearly separate documented facts from uncertain details. Do not write code.",
+  "exitCode": 0,
+  "usage": {
+    "input": 8392,
+    "output": 3102,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "cost": 0.027004,
+    "turns": 2
+  },
+  "model": "openai-codex/gpt-5.6-luna:medium",
+  "attemptedModels": [
+    "openai-codex/gpt-5.6-luna:medium"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openai-codex/gpt-5.6-luna:medium",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 8392,
+        "output": 3102,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "cost": 0.027004,
+        "turns": 2
+      }
+    }
+  ],
+  "durationMs": 81960,
+  "toolCount": 4,
+  "transcriptPath": "/Users/smathdaddy-macbook/ocean-surface/.pi-subagents/artifacts/421a3371_researcher_0_transcript.jsonl",
+  "timestamp": 1784279053730
+}

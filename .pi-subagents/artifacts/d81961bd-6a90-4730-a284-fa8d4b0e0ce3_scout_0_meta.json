@@ -1,0 +1,28 @@
+{
+  "runId": "d81961bd-6a90-4730-a284-fa8d4b0e0ce3",
+  "agent": "scout",
+  "task": "Read-only recon for rebasing the reviewed Tauri candidate from /private/tmp/ocean-surface-tauri-integrate-20260715 onto clean current origin/main at /private/tmp/ocean-surface-tauri-integrate-20260716-v2. Inspect commits 25009e9 and 590ff25, candidate diff, and overlap in AGENTS.md, app.rs, sessions.rs plus any semantic dependencies from rooms/livekit/proxy. Determine exact safe port/merge guidance, conflicts, tests, and whether candidate fixes must adapt to new session project-label behavior. Do not modify files.\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: required by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 0,
+  "model": "openai-codex/gpt-5.6-sol:low",
+  "attemptedModels": [
+    "openai-codex/gpt-5.6-sol:low"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openai-codex/gpt-5.6-sol:low",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 45530,
+        "output": 4787,
+        "cacheRead": 125952,
+        "cacheWrite": 0,
+        "cost": 0.43423599999999996,
+        "turns": 7
+      }
+    }
+  ],
+  "transcriptPath": "/Users/smathdaddy-macbook/ocean-surface/.pi-subagents/artifacts/d81961bd-6a90-4730-a284-fa8d4b0e0ce3_scout_0_transcript.jsonl",
+  "skills": [],
+  "timestamp": 1784223625978
+}

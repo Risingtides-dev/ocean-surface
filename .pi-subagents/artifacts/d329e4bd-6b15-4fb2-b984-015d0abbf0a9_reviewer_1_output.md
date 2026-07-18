@@ -1,0 +1,12 @@
+## Review
+- **Correct:** No blocker/high-severity correctness regressions identified in the reviewed diffs.
+- **Correct:** Snapshot alignment, typed checkpoint replacement, contiguous cursor validation, and lease-backed tailing are enforced in `crates/ocean-daemon/src/session_projection.rs:466-652`.
+- **Correct:** Surface snapshot reduction validates session scope and authoritative folded state separately from content frames in `crates/ocean-surface-ui/src/daemon.rs:1957-2083`.
+- **Correct:** Live projection frames require contiguous cursors and matching SSE/body IDs; reset/refetch paths restart rather than silently downgrade in `crates/ocean-surface-ui/src/daemon.rs:3740-3954`.
+- **Correct:** Completed thinking blocks remain typed through persistence and hydration in `crates/ocean-agent/src/session/mod.rs:990-1079` and `crates/ocean-surface-ui/src/daemon.rs:5705-5784`.
+- **Correct:** Component restoration requires ordered, explicitly successful call/result pairing in `crates/ocean-surface-ui/src/daemon.rs:5647-5703`.
+- **Correct:** Permission cancellation is request-scoped, with legacy session-wide fallback only for envelopes lacking a request ID, in `crates/ocean-daemon/src/session_projection.rs:116-137` and `crates/ocean-surface-ui/src/daemon.rs:5274-5345`.
+- **Correct:** Best-effort canvas events are excluded from the durable projection and consumed only on the isolated canvas tail in `crates/ocean-daemon/src/session_projection.rs:307-322` and `crates/ocean-surface-ui/src/daemon.rs:3958-4027`.
+- **Correct:** Legacy fallback is restricted to responses without `persistence_revision`; projection-capable daemons do not silently downgrade in `crates/ocean-surface-ui/src/daemon.rs:3565-3626`.
+- **Blocker:** None.
+- **Note:** The requested `plan.md` and `progress.md` were absent at the supplied paths. The ocean-os targeted test command was not executed successfully because it was invoked from the surface workspace and that workspace has no `ocean-daemon` package.

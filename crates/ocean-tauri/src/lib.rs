@@ -266,6 +266,23 @@ fn ui_ready(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+/// Resize the native window during an explicitly opted-in UI diagnostic run.
+/// The command is unavailable in ordinary launches even though it remains in
+/// the static invoke table, preventing product code from using test authority.
+#[tauri::command]
+fn ui_debug_resize(
+    window: tauri::WebviewWindow,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    if std::env::var_os("OCEAN_UI_DEBUG_SCRIPT").is_none() {
+        return Err("UI diagnostics are not enabled".into());
+    }
+    window
+        .set_size(tauri::LogicalSize::new(width, height))
+        .map_err(|error| error.to_string())
+}
+
 // ── daemon supervision ───────────────────────────────────────────────────
 //
 // The Tauri shell owns the ocean-daemon lifecycle when nothing else is
@@ -992,6 +1009,53 @@ fn tray_daemon_action(app: &AppHandle, action: DaemonTrayAction) {
     });
 }
 
+/// Only schemes intentionally emitted by Ocean's Markdown renderer may leave
+/// the app. Keep this validation native as a second boundary behind the WASM
+/// renderer's own URL allowlist.
+fn allowed_external_url(url: &str) -> bool {
+    let trimmed = url.trim();
+    if trimmed != url || trimmed.chars().any(char::is_control) {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    lower.starts_with("https://")
+        || lower.starts_with("http://")
+        || lower.starts_with("mailto:")
+        || lower.starts_with("tel:")
+}
+
+/// Open a rendered transcript/component link in the OS default application.
+/// The shared UI calls this only from an explicit primary-button click.
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    if !allowed_external_url(&url) {
+        return Err("unsupported external URL".into());
+    }
+    tauri_plugin_opener::open_url(url, None::<&str>).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod external_url_tests {
+    use super::allowed_external_url;
+
+    #[test]
+    fn accepts_external_schemes_rendered_by_markdown() {
+        assert!(allowed_external_url("https://www.tiktok.com/@creator"));
+        assert!(allowed_external_url("http://localhost:8790"));
+        assert!(allowed_external_url("mailto:creator@example.com"));
+        assert!(allowed_external_url("tel:+15551234567"));
+    }
+
+    #[test]
+    fn rejects_relative_dangerous_and_obfuscated_urls() {
+        assert!(!allowed_external_url("/internal"));
+        assert!(!allowed_external_url("javascript:alert(1)"));
+        assert!(!allowed_external_url("data:text/html,boom"));
+        assert!(!allowed_external_url(" https://example.com"));
+        assert!(!allowed_external_url("https://example.com\n"));
+    }
+}
+
 pub fn run() {
     // Daemon probe target: parse once from `OCEAN_DAEMON_URL` so the shell
     // and the wasm bundle share one configurable origin (default 127.0.0.1:4780).
@@ -1037,6 +1101,32 @@ pub fn run() {
             // boot, before the tray/menu wiring below.
             let daemon_sup = app.state::<AppState>().daemon.clone();
             spawn_daemon_poller(app.handle().clone(), daemon_sup);
+
+            // Opt-in UI diagnostics for native acceptance runs. The script is
+            // loaded only when the operator supplies an explicit path; normal
+            // builds and launches do not evaluate or expose test code.
+            if let Ok(script_path) = std::env::var("OCEAN_UI_DEBUG_SCRIPT") {
+                match (
+                    std::fs::read_to_string(&script_path),
+                    app.get_webview_window("main"),
+                ) {
+                    (Ok(script), Some(webview)) => {
+                        if std::env::var_os("OCEAN_UI_DEBUG_DEVTOOLS").is_some() {
+                            webview.open_devtools();
+                        }
+                        tauri::async_runtime::spawn(async move {
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            if let Err(error) = webview.eval(&script) {
+                                eprintln!("Ocean UI debug script failed: {error}");
+                            }
+                        });
+                    }
+                    (Err(error), _) => {
+                        eprintln!("Ocean UI debug script unreadable ({script_path}): {error}");
+                    }
+                    (_, None) => eprintln!("Ocean UI debug script: main webview unavailable"),
+                }
+            }
             // ocean:// deep links: bring the window forward and forward the
             // URL to the wasm bundle as a `deep-link` event (host::on_deep_link
             // parses `ocean://session/<id>` and switches sessions). OS-level
@@ -1099,14 +1189,91 @@ pub fn run() {
             // Static v1: seven known items, hard-coded here. Dynamic sync from
             // the live registry (add/remove/enabled-state) is a wave-2 TODO —
             // see docs/OCEAN_DESKTOP_NORTH_STAR.md "Sequencing".
+            // Standard macOS application menu. These predefined roles are not
+            // cosmetic: AppKit owns their accelerators and behavior (including
+            // Services, Cmd+H, Cmd+Option+H, and Cmd+Q).
             let about = PredefinedMenuItem::about(app, None, None)?;
-            let app_sep = PredefinedMenuItem::separator(app)?;
+            let app_sep_top = PredefinedMenuItem::separator(app)?;
+            let services = PredefinedMenuItem::services(app, None)?;
+            let app_sep_visibility = PredefinedMenuItem::separator(app)?;
+            let hide = PredefinedMenuItem::hide(app, None)?;
+            let hide_others = PredefinedMenuItem::hide_others(app, None)?;
+            let show_all = PredefinedMenuItem::show_all(app, None)?;
+            let app_sep_quit = PredefinedMenuItem::separator(app)?;
             let app_quit = PredefinedMenuItem::quit(app, None::<&str>)?;
-            let app_submenu =
-                Submenu::with_items(app, "Ocean", true, &[&about, &app_sep, &app_quit])?;
+            let app_submenu = Submenu::with_items(
+                app,
+                "Ocean",
+                true,
+                &[
+                    &about,
+                    &app_sep_top,
+                    &services,
+                    &app_sep_visibility,
+                    &hide,
+                    &hide_others,
+                    &show_all,
+                    &app_sep_quit,
+                    &app_quit,
+                ],
+            )?;
 
+            // File + Edit + Window are required native desktop affordances.
+            // In particular, WebKit text fields do not reliably receive the
+            // standard Cmd+X/C/V/A/Z shortcuts unless the corresponding native
+            // edit roles exist in the application menu.
             let cmd_new_session =
-                MenuItem::with_id(app, "new-session", "New Session", true, None::<&str>)?;
+                MenuItem::with_id(app, "new-session", "New Session", true, Some("CmdOrCtrl+N"))?;
+            let file_sep = PredefinedMenuItem::separator(app)?;
+            let close_window = PredefinedMenuItem::close_window(app, None)?;
+            let file_submenu = Submenu::with_items(
+                app,
+                "File",
+                true,
+                &[&cmd_new_session, &file_sep, &close_window],
+            )?;
+
+            let undo = PredefinedMenuItem::undo(app, None)?;
+            let redo = PredefinedMenuItem::redo(app, None)?;
+            let edit_sep_history = PredefinedMenuItem::separator(app)?;
+            let cut = PredefinedMenuItem::cut(app, None)?;
+            let copy = PredefinedMenuItem::copy(app, None)?;
+            let paste = PredefinedMenuItem::paste(app, None)?;
+            let edit_sep_selection = PredefinedMenuItem::separator(app)?;
+            let select_all = PredefinedMenuItem::select_all(app, None)?;
+            let edit_submenu = Submenu::with_items(
+                app,
+                "Edit",
+                true,
+                &[
+                    &undo,
+                    &redo,
+                    &edit_sep_history,
+                    &cut,
+                    &copy,
+                    &paste,
+                    &edit_sep_selection,
+                    &select_all,
+                ],
+            )?;
+
+            let minimize = PredefinedMenuItem::minimize(app, None)?;
+            let maximize = PredefinedMenuItem::maximize(app, None)?;
+            let fullscreen = PredefinedMenuItem::fullscreen(app, None)?;
+            let window_sep = PredefinedMenuItem::separator(app)?;
+            let bring_all_to_front = PredefinedMenuItem::bring_all_to_front(app, None)?;
+            let window_submenu = Submenu::with_items(
+                app,
+                "Window",
+                true,
+                &[
+                    &minimize,
+                    &maximize,
+                    &fullscreen,
+                    &window_sep,
+                    &bring_all_to_front,
+                ],
+            )?;
             let cmd_files = MenuItem::with_id(
                 app,
                 "toggle-files",
@@ -1142,7 +1309,6 @@ pub fn run() {
                 true,
                 &[
                     &cmd_workspace,
-                    &cmd_new_session,
                     &cmd_files,
                     &cmd_repo,
                     &cmd_browser,
@@ -1152,7 +1318,16 @@ pub fn run() {
                 ],
             )?;
 
-            let main_menu = Menu::with_items(app, &[&app_submenu, &commands_submenu])?;
+            let main_menu = Menu::with_items(
+                app,
+                &[
+                    &app_submenu,
+                    &file_submenu,
+                    &edit_submenu,
+                    &commands_submenu,
+                    &window_submenu,
+                ],
+            )?;
             app.set_menu(main_menu)?;
 
             // Cmd+Shift+Space (macOS "super+shift+space") summons or hides Ocean.
@@ -1211,7 +1386,9 @@ pub fn run() {
             daemon_start,
             daemon_stop,
             daemon_restart,
-            ui_ready
+            ui_ready,
+            ui_debug_resize,
+            open_external_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running ocean-tauri");

@@ -1,0 +1,9 @@
+Turn budget wrap-up was requested after 5 assistant turns (soft limit 5, grace 1). Process-mode live steering is unavailable, so the child was warned at launch to wrap up by this budget. Output may be partial.
+
+## Review
+
+- **No blockers.**
+- **Moderate:** At narrow overlay widths, a maximally widened workspace can leave only a 48px transcript sliver, but the Island retains a 210–240px width and is offset by the workspace width. It will therefore overlap workspace titlebar content rather than remain within the visible transcript column. See `styles/island.css:283-301`, `styles/island.css:304-340`, and the overlay-width contract at `crates/ocean-surface-ui/src/workspace.rs:224-233`. Clamp/hide/reposition the chip when available width is below its minimum.
+- **Low:** The implementation intercepts every `Tab` and keeps focus on the search input, while the specification explicitly says native traversal with no special handling. Reconcile code or documentation so the accessibility contract is unambiguous: `crates/ocean-surface-ui/src/island.rs:381-389`, `docs/OCEAN_DYNAMIC_ISLAND_IMPLEMENTATION.md:443-456`.
+- **Low:** Metadata can render a leading separator when the first populated field follows an empty field. Hidden empty spans still satisfy the sibling selector used to create `·`; sessions without a project can consequently show `· /path…`. See `crates/ocean-surface-ui/src/island.rs:550-556` and `styles/island.css:237-251`.
+- The diagnostics hook is appropriately opt-in: arbitrary script evaluation occurs only when `OCEAN_UI_DEBUG_SCRIPT` is supplied, and resize authority rejects normal launches (`crates/ocean-tauri/src/lib.rs:269-284`, `crates/ocean-tauri/src/lib.rs:1058-1082`).

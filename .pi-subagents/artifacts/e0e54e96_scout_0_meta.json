@@ -1,0 +1,37 @@
+{
+  "runId": "e0e54e96",
+  "agent": "scout",
+  "task": "Read-only speed-run inventory for the current Ocean Surface Tauri UI. Identify the highest-value user-visible functions that can be smoke-tested quickly from the real WebView, with DOM selectors/events if obvious: Dynamic Island/search/activity/permissions/stop, composer, sessions, overlay exclusivity, workspace, voice modes, call/join/dialer, rooms/council/palette. Focus especially on recent voice/call behavior and note anything requiring mic/network credentials or unsafe side effects. Do not edit. Return concise prioritized matrix and likely bugs from static inspection.\n\n---\n**Output:**\nWrite your findings to exactly this path: /tmp/ocean-speedrun-surface-scout.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.",
+  "exitCode": 0,
+  "usage": {
+    "input": 43754,
+    "output": 3948,
+    "cacheRead": 162304,
+    "cacheWrite": 0,
+    "cost": 0.418362,
+    "turns": 8
+  },
+  "model": "openai-codex/gpt-5.6-sol:low",
+  "attemptedModels": [
+    "openai-codex/gpt-5.6-sol:low"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openai-codex/gpt-5.6-sol:low",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 43754,
+        "output": 3948,
+        "cacheRead": 162304,
+        "cacheWrite": 0,
+        "cost": 0.418362,
+        "turns": 8
+      }
+    }
+  ],
+  "durationMs": 113269,
+  "toolCount": 21,
+  "transcriptPath": "/Users/smathdaddy-macbook/ocean-surface/.pi-subagents/artifacts/e0e54e96_scout_0_transcript.jsonl",
+  "timestamp": 1784092249518
+}

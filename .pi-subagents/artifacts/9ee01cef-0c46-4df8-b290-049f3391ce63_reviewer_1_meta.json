@@ -1,0 +1,28 @@
+{
+  "runId": "9ee01cef-0c46-4df8-b290-049f3391ce63",
+  "agent": "reviewer",
+  "task": "[Read from: /private/tmp/ocean-os-session-projection-20260717/plan.md, /private/tmp/ocean-os-session-projection-20260717/progress.md]\n\nFresh read-only protocol/storage re-review of `/private/tmp/ocean-os-session-projection-20260717` after fixes. Verify identified/bounded lease semantics, compaction protection, SSE backpressure/shutdown/client close, subscribe-before-page, reset closure, cursor validation, cancellation permission cleanup, checkpoint source, state folding, 16MiB fault behavior, and SQLite atomicity. Report concrete blockers/fixes with file:line. Assess whether missing full HTTP SSE framing test is blocker. No edits.\n\n## Acceptance Contract\nAcceptance level: attested\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Return concrete findings with file paths and severity when applicable\n\nRequired evidence: review-findings, residual-risks\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 0,
+  "model": "openai-codex/gpt-5.6-sol:high",
+  "attemptedModels": [
+    "openai-codex/gpt-5.6-sol:high"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openai-codex/gpt-5.6-sol:high",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 98092,
+        "output": 6254,
+        "cacheRead": 506368,
+        "cacheWrite": 0,
+        "cost": 0.931264,
+        "turns": 12
+      }
+    }
+  ],
+  "transcriptPath": "/Users/smathdaddy-macbook/ocean-surface/.pi-subagents/artifacts/9ee01cef-0c46-4df8-b290-049f3391ce63_reviewer_1_transcript.jsonl",
+  "skills": [],
+  "timestamp": 1784320022025
+}

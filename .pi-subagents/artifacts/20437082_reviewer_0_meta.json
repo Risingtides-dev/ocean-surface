@@ -1,0 +1,37 @@
+{
+  "runId": "20437082",
+  "agent": "reviewer",
+  "task": "Read-only review of a tightly scoped composer layout patch. Inspect docs/OCEAN_WEB_SURFACE_DESIGN.md composer contract and diffs in styles/composer.css and styles/compact.css. Target: one compact dock, full-width chromeless textarea first row, bottom toolbar with voice/settings left, turn controls middle, Send/Stop right; idle desktop internal height 86px; multiline cap retained; extension/compact coherent; no behavior/markup changes. Check CSS grid behavior, voice modes/menu, realtime voice overrides, narrow layout, accessibility/focus, and cascade conflicts. Do not edit. Return only concrete blockers or risks with file/line references, and say no blockers if clean.",
+  "exitCode": 0,
+  "usage": {
+    "input": 36358,
+    "output": 2288,
+    "cacheRead": 82432,
+    "cacheWrite": 0,
+    "cost": 0.291646,
+    "turns": 5
+  },
+  "model": "openai-codex/gpt-5.6-sol:high",
+  "attemptedModels": [
+    "openai-codex/gpt-5.6-sol:high"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openai-codex/gpt-5.6-sol:high",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 36358,
+        "output": 2288,
+        "cacheRead": 82432,
+        "cacheWrite": 0,
+        "cost": 0.291646,
+        "turns": 5
+      }
+    }
+  ],
+  "durationMs": 62844,
+  "toolCount": 14,
+  "transcriptPath": "/Users/smathdaddy-macbook/ocean-surface/.pi-subagents/artifacts/20437082_reviewer_0_transcript.jsonl",
+  "timestamp": 1784067263768
+}

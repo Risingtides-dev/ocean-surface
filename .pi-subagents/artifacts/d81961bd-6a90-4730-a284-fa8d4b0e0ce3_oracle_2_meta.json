@@ -1,0 +1,28 @@
+{
+  "runId": "d81961bd-6a90-4730-a284-fa8d4b0e0ce3",
+  "agent": "oracle",
+  "task": "Advisory only: challenge and choose the safest cross-repo solution for the pre-existing Ocean Surface switch_session race between GET /v1/sessions/{id} hydration and /v1/agent/events. Inspect current /private/tmp/ocean-os-session-cursor-20260716 and /private/tmp/ocean-surface-tauri-integrate-20260716-v2. Evaluate daemon-issued cursor designs, atomicity with persistence/event emission, per-session lock options, replay eviction, permissions/components/tool ordering, and backwards compatibility. Reject client-only buffering if it cannot prove exactly-once projection. Return a concrete recommended contract, proof sketch, migration plan, and unresolved decisions. Do not modify files or launch subagents.\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: required by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 0,
+  "model": "openai-codex/gpt-5.6-sol:high",
+  "attemptedModels": [
+    "openai-codex/gpt-5.6-sol:high"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openai-codex/gpt-5.6-sol:high",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 116928,
+        "output": 15147,
+        "cacheRead": 392704,
+        "cacheWrite": 0,
+        "cost": 1.235402,
+        "turns": 9
+      }
+    }
+  ],
+  "transcriptPath": "/Users/smathdaddy-macbook/ocean-surface/.pi-subagents/artifacts/d81961bd-6a90-4730-a284-fa8d4b0e0ce3_oracle_2_transcript.jsonl",
+  "skills": [],
+  "timestamp": 1784223883543
+}

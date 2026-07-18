@@ -1,0 +1,11 @@
+## Review
+
+- **Correct:** Production `AppState` wires one shared `SessionProjectionStore` into both buses at `crates/ocean-daemon/src/main.rs:802-830`. Existing test helpers omit it, while focused bus/store tests explicitly opt in.
+- **Correct:** Legacy `/v1/agent/events` and `/v1/events` payload construction remains unchanged. Projection writes are side effects before the existing history/broadcast paths (`crates/ocean-daemon/src/bus.rs:128-150`, `279-303`), and `PersistenceCheckpoint` is consumed internally rather than relayed (`crates/ocean-daemon/src/main.rs:6125-6129`, `6251-6257`).
+- **Correct:** `SurfacePatch`, Slack Canvas, and generic extension events are excluded in `crates/ocean-daemon/src/session_projection.rs:258-265`. No `docs/specs/` files changed and no Observatory persistence integration was introduced.
+- **Correct:** Route source, `banner_routes()`, and operator guide parity passed. Documentation describes the additive snapshot and exclusive projection tail consistently.
+- **Correct:** Current local origin reference has no divergence: `HEAD`, `origin/main`, and merge-base are all `e8f3322c118f140a475df0a1b25afb80033b0857`.
+- **Blocker:** The new HTTP contract itself lacks integration tests. There is no test exercising a projection-enabled `AppState` through successful `GET /v1/sessions/{id}` snapshot alignment or `/v1/agent/projection/events` paging/reset/close behavior. All general `AppState` test helpers use buses without a store (`crates/ocean-daemon/src/main.rs:12033-12037`, `13433-13437`, `13485-13489`, `14254-14258`). Store and bus unit tests are strong, but they do not substantiate the public route claims required by criterion-2.
+- **Note:** The requested `plan.md` and `progress.md` did not exist at the supplied paths, so their prior rationale and validation record could not be reviewed.
+- **Note:** No remote fetch was performed under the read-only constraint; origin-conflict evidence applies to the locally recorded `origin/main`.
+- **Note:** Two initially attempted test filters matched zero tests; corrected filters subsequently passed.

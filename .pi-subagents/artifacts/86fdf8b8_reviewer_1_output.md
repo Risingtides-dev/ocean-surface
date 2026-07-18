@@ -1,0 +1,7 @@
+## Review
+
+- **Blocker — stale Recall results can open the wrong session:** `crates/ocean-surface-ui/src/island_dynamic.rs:799-812` updates the visible query but waits 220 ms before incrementing the daemon search generation or clearing prior results. During that window, an older request may publish results, and Enter/click can open them through `island_dynamic.rs:510-529` and `838-873`. Immediately invalidate/clear daemon search state on every input change, then debounce only the new request. Add a regression test covering query A → query B before both debounce and response completion.
+
+- **Blocker — keyed Leptos rows can retain stale captured content:** the Agent `<For>` key at `crates/ocean-surface-ui/src/island_dynamic.rs:175-207` omits detail, project, tool, session title, and other rendered fields, although children capture those values non-reactively. Recall similarly keys only by `hit_id` at `island_dynamic.rs:838-856`, so the same hit returned for another query can retain its previous excerpt/provenance. Use a key covering all rendered snapshot content or make row fields reactive. Add tests proving same-ID updates refresh visible content.
+
+The corrected product structure itself is clean: Agent, Sessions, and Recall are mutually exclusive modes, daemon authority is preserved, and the rewritten docs accurately distinguish fuzzy metadata search from transcript Recall.

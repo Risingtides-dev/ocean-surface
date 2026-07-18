@@ -310,10 +310,15 @@ CARVED → inset well). The names and recipes travel; only the renderer changes.
 - Voice orb: neutral elevated circle idle; recording = solid accent fill +
   `--glow-brand` + pulse; transcribing = warn tint pulse. Kill pulses under
   reduced-motion.
-- Composer: ONE dock card (the form is the frame; focus ring via
-  `:focus-within`); chromeless textarea; turn-control selects are borderless
-  minis on the dock's bottom row; voice mode switch reveals on orb
-  hover/focus; no permanent captions under controls.
+- Composer: ONE compact dock card; the form is the only frame and owns the
+  `:focus-within` ring. The chromeless textarea occupies the full first row.
+  The second row is one toolbar: voice orb + its settings trigger at left,
+  borderless turn-control minis in the flexible middle, and Send/Stop in one
+  fixed action slot at right. Idle desktop geometry is 8px dock padding, a
+  32px minimum writing row, 4px row gap, and 34px toolbar controls (86px total
+  before external margins). Multiline input grows the first row upward to the
+  existing 240px cap. No inset textarea well, nested input card, detached
+  action button, permanent caption, or control spanning both rows.
 - Slide-overs (sessions/rooms): `--bg-raised` panel, `--shadow-lg`, backdrop
   `rgba(6,6,6,0.72)` + blur(4px); 280ms slide with reduced-motion fallback.
 - Sessions/rooms/call rows follow the plain-row register (§3): title left,

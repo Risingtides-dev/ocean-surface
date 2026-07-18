@@ -11,6 +11,7 @@ use crate::deck::files::FilesPanel;
 use crate::deck::repo::RepoPanel;
 use crate::deck::DeckPanel;
 use crate::host::DaemonStatus;
+use crate::island_dynamic::{DynamicIsland, IslandMode};
 use crate::model::{Block, Role, Turn};
 use crate::palette::{Command, CommandRegistry, CommandScope, PaletteView};
 use crate::rooms::{RoomStage, Rooms, RoomsPanel};
@@ -20,7 +21,7 @@ use crate::transcript::Transcript;
 use crate::voice::VoiceOrb;
 use crate::workspace::WorkspaceFocus;
 
-const COMPOSER_MIN_HEIGHT_PX: i32 = 40;
+const COMPOSER_MIN_HEIGHT_PX: i32 = 32;
 const COMPOSER_MAX_HEIGHT_PX: i32 = 240;
 
 /// localStorage key for the workspace pane's open/collapse state ("1" open,
@@ -38,6 +39,10 @@ fn composer_overflow_y(scroll_height: i32) -> &'static str {
     } else {
         "hidden"
     }
+}
+
+fn should_submit_composer_key(key: &str, shift: bool, is_composing: bool) -> bool {
+    key == "Enter" && !shift && !is_composing
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -265,6 +270,8 @@ pub fn App() -> impl IntoView {
 
     // Sessions panel overlay.
     let show_sessions = RwSignal::new(false);
+    let island_mode: RwSignal<IslandMode> = RwSignal::new(IslandMode::Closed);
+    let island_focus_request = RwSignal::new(0u64);
     // Council/quorum observability deck overlay (OCEAN-96). A native Leptos
     // stage (crate::council::CouncilStage) inside a full-screen modal — no
     // iframe, no proxied static page. It reads the daemon's folded Longhouse
@@ -332,6 +339,32 @@ pub fn App() -> impl IntoView {
     // restores it, defaulting open when the key is absent. Off-Tauri the pane
     // never mounts, so this is inert there.
     let in_tauri = crate::host::running_in_tauri();
+    let daemon_for_island = StoredValue::new(daemon.clone());
+    let palette_open = RwSignal::new(false);
+    // Every Island entry point shares one overlay policy. Agent interaction,
+    // session switching, and history Recall are mutually exclusive modes of one
+    // titlebar object; they never stack into one dashboard or hide behind peers.
+    let open_island = Callback::new(move |next: IslandMode| {
+        palette_open.set(false);
+        show_council.set(false);
+        show_rooms.set(false);
+        show_sessions.set(false);
+        if next != IslandMode::Closed {
+            island_focus_request.update(|request| *request = request.wrapping_add(1));
+        }
+        island_mode.set(next);
+    });
+    // Preserve mutual exclusion when another entry point (native menu, room
+    // navigation, or a future deep link) opens a sibling overlay directly.
+    // `open_island` clears those signals before setting the Island, so the
+    // latest explicit opener wins without surfaces stacking invisibly.
+    Effect::new(move |_| {
+        if island_mode.get() != IslandMode::Closed
+            && (show_council.get() || show_rooms.get() || show_sessions.get())
+        {
+            island_mode.set(IslandMode::Closed);
+        }
+    });
     let workspace_open: RwSignal<bool> = RwSignal::new(
         // Default OPEN when the key is absent; only an explicit "0" starts
         // collapsed (the pane is the shell's primary surface).
@@ -429,6 +462,24 @@ pub fn App() -> impl IntoView {
             slash: Some("/sessions"),
             enabled: always,
             run: Callback::new(move |_| toggle_sessions()),
+        });
+        registry.register(Command {
+            id: "focus-search",
+            title: "Switch Session…".into(),
+            hint: Some("⌘P".into()),
+            scope: CommandScope::App,
+            slash: None,
+            enabled: Signal::derive(move || in_tauri),
+            run: Callback::new(move |_| open_island.run(IslandMode::Sessions)),
+        });
+        registry.register(Command {
+            id: "recall-history",
+            title: "Recall History…".into(),
+            hint: Some("⌘⇧F".into()),
+            scope: CommandScope::App,
+            slash: None,
+            enabled: Signal::derive(move || in_tauri),
+            run: Callback::new(move |_| open_island.run(IslandMode::Recall)),
         });
         registry.register(Command {
             id: "toggle-rooms",
@@ -734,18 +785,61 @@ pub fn App() -> impl IntoView {
     });
     on_cleanup(move || _pointer_light.remove());
 
+    // Desktop Island shortcuts. Cmd/Ctrl+P opens the dedicated session
+    // switcher; Cmd/Ctrl+Shift+F opens transcript Recall. Both are Tauri-only,
+    // preserving browser/PWA Print and Find. Cmd/Ctrl+K closes the Island before
+    // PaletteView handles the same event.
+    let _island_shortcut = window_event_listener(ev::keydown, move |e: ev::KeyboardEvent| {
+        if e.is_composing() {
+            return;
+        }
+        let command = e.meta_key() || e.ctrl_key();
+        if command
+            && !e.shift_key()
+            && !e.alt_key()
+            && e.key().eq_ignore_ascii_case("k")
+            && island_mode.get_untracked() != IslandMode::Closed
+        {
+            island_mode.set(IslandMode::Closed);
+        }
+        if in_tauri
+            && command
+            && !e.shift_key()
+            && !e.alt_key()
+            && e.key().eq_ignore_ascii_case("p")
+        {
+            e.prevent_default();
+            e.stop_propagation();
+            open_island.run(IslandMode::Sessions);
+        } else if in_tauri
+            && command
+            && e.shift_key()
+            && !e.alt_key()
+            && e.key().eq_ignore_ascii_case("f")
+        {
+            e.prevent_default();
+            e.stop_propagation();
+            open_island.run(IslandMode::Recall);
+        }
+    });
+    on_cleanup(move || _island_shortcut.remove());
+
     // Window-level Escape closes the topmost open reveal — priority follows
-    // the z-order: council stage (full-screen modal) over the rooms/sessions
+    // the z-order: council stage (full-screen modal) over the Island and rooms/sessions
     // browse overlays over the deck rail (web/extension only — the Show gate
     // keeps the deck off Tauri). The palette's and slash-menu's own Escape
     // arms call stop_propagation(), so an Escape they handle never bubbles
     // here: one Escape closes exactly one surface, never a cascade.
     let _overlay_escape = window_event_listener(ev::keydown, move |e: ev::KeyboardEvent| {
-        if e.key() != "Escape" {
+        if e.key() != "Escape" || e.is_composing() {
             return;
         }
-        if show_council.get() {
+        if palette_open.get() {
+            palette_open.set(false);
+        } else if show_council.get() {
             show_council.set(false);
+        } else if island_mode.get() != IslandMode::Closed {
+            island_mode.set(IslandMode::Closed);
         } else if show_rooms.get() {
             show_rooms.set(false);
         } else if show_sessions.get() {
@@ -949,26 +1043,37 @@ pub fn App() -> impl IntoView {
             // (not descendants): set it on both the header and the brand so
             // the whole left zone drags the window on desktop; inert on web.
             <header class="ocean-header" data-tauri-drag-region="">
-                <div class="ocean-brand" aria-label="Ocean" data-tauri-drag-region="">
-                    <crate::icons::WaveBadge spinning=false compact=true />
-                    <span class="ocean-brand__word" aria-hidden="true">
-                        <crate::icons::OceanWordmark />
-                    </span>
+                <div class="ocean-header__left" data-tauri-drag-region="">
+                    <div class="ocean-brand" aria-label="Ocean" data-tauri-drag-region="">
+                        <crate::icons::WaveBadge spinning=false compact=true />
+                        <span class="ocean-brand__word" aria-hidden="true">
+                            <crate::icons::OceanWordmark />
+                        </span>
+                    </div>
                 </div>
+                <Show when=move || in_tauri>
+                    <DynamicIsland
+                        daemon=daemon_for_island.get_value()
+                        mode=island_mode
+                        focus_request=island_focus_request
+                        on_open=open_island
+                    />
+                </Show>
                 <div class="ocean-header__right">
-                    // Sessions is the single header affordance — opens the
-                    // centered sessions modal (chat / create project / resume).
-                    // No project picker, active-session title, or cwd lives in
-                    // the chrome; all session control moved into the modal.
-                    <button
-                        class="ocean-sessions-trigger"
-                        type="button"
-                        aria-label="sessions"
-                        title="Sessions"
-                        on:click=move |_| toggle_sessions()
-                    >
-                        "Sessions"
-                    </button>
+                    // Web and extension keep the existing Sessions modal entry;
+                    // Tauri uses the centered Island while the registry command
+                    // remains the deep-browse fallback on every host.
+                    <Show when=move || !in_tauri>
+                        <button
+                            class="ocean-sessions-trigger"
+                            type="button"
+                            aria-label="sessions"
+                            title="Sessions"
+                            on:click=move |_| toggle_sessions()
+                        >
+                            "Sessions"
+                        </button>
+                    </Show>
                     // Ambient runtime readouts — token usage, the browser-driving
                     // cue, and connection status — grouped into one demoted cluster
                     // so they read as secondary telemetry, not equal-weight peers
@@ -1360,6 +1465,7 @@ pub fn App() -> impl IntoView {
                             }}
                             <textarea
                                 class="ocean-composer__input"
+                                rows="1"
                                 placeholder="message Ocean…"
                                 node_ref=textarea_ref
                                 prop:value=move || input.get()
@@ -1376,6 +1482,12 @@ pub fn App() -> impl IntoView {
                                     let registry = registry.clone();
                                     move |ev| {
                                         let key = ev.key();
+                                        // IME candidate navigation owns every key
+                                        // while composition is active, including
+                                        // slash-menu arrows, Enter, and Tab.
+                                        if ev.is_composing() {
+                                            return;
+                                        }
                                         let text = input.get_untracked();
                                         let items = slash_items.get_untracked();
                                         // While the input is a leading-slash line
@@ -1445,8 +1557,15 @@ pub fn App() -> impl IntoView {
                                                 _ => {}
                                             }
                                         }
-                                        // Enter to submit, Shift+Enter for newline.
-                                        if key == "Enter" && !ev.shift_key() {
+                                        // Enter submits and Shift+Enter inserts a
+                                        // newline, but composition Enter belongs to
+                                        // the IME candidate picker and must never
+                                        // leak through as a form submission.
+                                        if should_submit_composer_key(
+                                            &key,
+                                            ev.shift_key(),
+                                            ev.is_composing(),
+                                        ) {
                                             ev.prevent_default();
                                             if let Some(target) = ev.target() {
                                                 if let Ok(el) = target.dyn_into::<web_sys::HtmlElement>() {
@@ -1560,7 +1679,7 @@ pub fn App() -> impl IntoView {
             <PinnedRail daemon=daemon_for_pinned.get_value() />
 
             // ⌘K command palette — the deep-menu engine over the registry.
-            <PaletteView registry=registry_for_view />
+            <PaletteView registry=registry_for_view open=palette_open />
 
             // Council/quorum observability deck (OCEAN-96). Native workflow
             // stage now lives inside the surface instead of an iframe.
@@ -1654,8 +1773,8 @@ pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
 #[cfg(test)]
 mod tests {
     use super::{
-        composer_height_px, composer_overflow_y, parse_deep_link, DeepLinkAction,
-        COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX,
+        composer_height_px, composer_overflow_y, parse_deep_link, should_submit_composer_key,
+        DeepLinkAction, COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX,
     };
 
     #[test]
@@ -1669,6 +1788,14 @@ mod tests {
     fn composer_overflow_switches_only_past_max_height() {
         assert_eq!(composer_overflow_y(COMPOSER_MAX_HEIGHT_PX), "hidden");
         assert_eq!(composer_overflow_y(COMPOSER_MAX_HEIGHT_PX + 1), "auto");
+    }
+
+    #[test]
+    fn composer_enter_respects_newlines_and_ime_composition() {
+        assert!(should_submit_composer_key("Enter", false, false));
+        assert!(!should_submit_composer_key("Enter", true, false));
+        assert!(!should_submit_composer_key("Enter", false, true));
+        assert!(!should_submit_composer_key("a", false, false));
     }
 
     #[test]

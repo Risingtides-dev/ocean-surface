@@ -1,0 +1,28 @@
+{
+  "runId": "d329e4bd-6b15-4fb2-b984-015d0abbf0a9",
+  "agent": "reviewer",
+  "task": "[Read from: /private/tmp/ocean-surface-session-projection-20260717/plan.md, /private/tmp/ocean-surface-session-projection-20260717/progress.md]\n\nFinal fresh read-only integration review of current complete diffs in `/private/tmp/ocean-os-session-projection-20260717` and `/private/tmp/ocean-surface-session-projection-20260717`. Seek any high-confidence correctness regression in snapshot+tail, strict reducers, thinking blocks, component pairing, permission cancellation, leases/reconnect, best-effort canvas isolation, and old-daemon fallback. Visible typed checkpoint frames are an explicitly approved final design. Report blockers/high only, with evidence; no edits.\n\n## Acceptance Contract\nAcceptance level: attested\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Return concrete findings with file paths and severity when applicable\n\nRequired evidence: review-findings, residual-risks\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 0,
+  "model": "openai-codex/gpt-5.6-sol:high",
+  "attemptedModels": [
+    "openai-codex/gpt-5.6-sol:high"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openai-codex/gpt-5.6-sol:high",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 107652,
+        "output": 5097,
+        "cacheRead": 525824,
+        "cacheWrite": 0,
+        "cost": 0.9540819999999999,
+        "turns": 11
+      }
+    }
+  ],
+  "transcriptPath": "/Users/smathdaddy-macbook/ocean-surface/.pi-subagents/artifacts/d329e4bd-6b15-4fb2-b984-015d0abbf0a9_reviewer_1_transcript.jsonl",
+  "skills": [],
+  "timestamp": 1784326842917
+}

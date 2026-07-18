@@ -1,0 +1,12 @@
+## Review
+- **Correct:** No blockers found. The six prior blockers are semantically repaired:
+  - Projection-capable responses never downgrade to legacy (`crates/ocean-surface-ui/src/daemon.rs:3531-3567`).
+  - Projection restarts are bounded and volatile folded state is cleared (`daemon.rs:3424-3458`).
+  - Component reconstruction requires ordered, explicitly successful call/result pairs (`daemon.rs:5599-5667`).
+  - Projection and canvas EventSources are retained while `CONNECTING` and retired by generation reset (`daemon.rs:1264-1288`, `3712-3777`, `3919-3949`). This matches gloo-net 0.6.0, whose `Drop` calls `close()` and whose error callback suppresses transient `CONNECTING` errors.
+  - SSE `last_event_id` must match the body cursor before reduction (`daemon.rs:3794-3828`); the proxy forwards `Last-Event-ID` (`crates/ocean-surface-proxy/src/main.rs:1124-1158`).
+  - Folded fields are decoded as exact expected variants and session-scoped (`daemon.rs:2003-2034`), consistent with the Ocean Core contract at `/private/tmp/ocean-os-session-projection-20260717/crates/ocean-core/src/lib.rs:407-515`.
+- **Correct:** Snapshot reduction precedes tail creation and signal installation is batched (`daemon.rs:1925-2047`, `3603-3709`).
+- **Correct:** Voice Planner retains its two-stream readiness and permission-reconciliation sequence (`daemon.rs:4052-4097`, `5106-5118`).
+- **Blocker:** None.
+- **Note:** No live browser/new-daemon EventSource rotation test was performed. The requested root `plan.md` and `progress.md` were absent; available planner artifact and worker handoff were reviewed instead.

@@ -11,6 +11,9 @@ use wasm_bindgen::prelude::*;
 
 use crate::daemon::{Daemon, PinnedWidget};
 
+mod interactive_plot;
+use interactive_plot::InteractivePlotView;
+
 #[wasm_bindgen]
 extern "C" {
     /// Defined in index.html. Loads the Google Maps JS API + Places UI Kit
@@ -69,6 +72,10 @@ pub fn ComponentView(
         .into_any(),
         "chart" => view! {
             <ChartView kind_props />
+        }
+        .into_any(),
+        "interactive_plot" => view! {
+            <InteractivePlotView component_id kind_props daemon />
         }
         .into_any(),
         "timeline" => view! {
@@ -484,7 +491,11 @@ fn MarkdownView(kind_props: Value) -> impl IntoView {
         .and_then(|v| v.as_str())
         .unwrap_or("");
     view! {
-        <div class="component-markdown" inner_html=crate::markdown::render(content)></div>
+        <div
+            class="component-markdown"
+            inner_html=crate::markdown::render(content)
+            on:click=crate::host::open_external_link_click
+        ></div>
     }
 }
 
@@ -1141,7 +1152,13 @@ fn CalloutView(kind_props: Value) -> impl IntoView {
             <span class="callout__icon">{icon}</span>
             <div class="callout__body">
                 {(!title.is_empty()).then(|| view! { <div class="callout__title">{title.clone()}</div> })}
-                {(!body.is_empty()).then(|| view! { <div class="callout__text" inner_html=crate::markdown::render(&body)></div> })}
+                {(!body.is_empty()).then(|| view! {
+                    <div
+                        class="callout__text"
+                        inner_html=crate::markdown::render(&body)
+                        on:click=crate::host::open_external_link_click
+                    ></div>
+                })}
             </div>
         </div>
     }
@@ -1502,7 +1519,12 @@ fn VideoView(component_id: String, kind_props: Value) -> impl IntoView {
             let href = u.clone();
             view! {
                 <div class="video-embed video-embed--unknown">
-                    <a href=href target="_blank" rel="noopener">{u}</a>
+                    <a
+                        href=href
+                        target="_blank"
+                        rel="noopener"
+                        on:click=crate::host::open_external_link_click
+                    >{u}</a>
                 </div>
             }
             .into_any()

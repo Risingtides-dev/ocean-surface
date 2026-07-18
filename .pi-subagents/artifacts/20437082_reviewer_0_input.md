@@ -1,0 +1,3 @@
+# Task for reviewer
+
+Read-only review of a tightly scoped composer layout patch. Inspect docs/OCEAN_WEB_SURFACE_DESIGN.md composer contract and diffs in styles/composer.css and styles/compact.css. Target: one compact dock, full-width chromeless textarea first row, bottom toolbar with voice/settings left, turn controls middle, Send/Stop right; idle desktop internal height 86px; multiline cap retained; extension/compact coherent; no behavior/markup changes. Check CSS grid behavior, voice modes/menu, realtime voice overrides, narrow layout, accessibility/focus, and cascade conflicts. Do not edit. Return only concrete blockers or risks with file/line references, and say no blockers if clean.

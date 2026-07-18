@@ -1,0 +1,6 @@
+Turn budget wrap-up was requested after 4 assistant turns (soft limit 4, grace 1). Process-mode live steering is unavailable, so the child was warned at launch to wrap up by this budget. Output may be partial.
+
+## Review
+- **Risk:** Compact overrides use `gap: 8px`, replacing the base `row-gap: 4px`. This makes the compact/extension idle dock 90px internally rather than preserving the intended rhythm: `styles/compact.css:96-99`, `styles/compact.css:234-237`, versus `styles/composer.css:16-19`.
+- **Risk:** Mobile web does not collapse the hands-free “listening” chip as the extension does (`styles/compact.css:121-125`). Because the voice group occupies an `auto` grid column (`styles/composer.css:11-14`), the full chip can severely squeeze the two middle selects on very narrow web layouts; no equivalent mobile-web rule exists around `styles/compact.css:253-270`.
+- **Risk:** Realtime voice mode hides Send but not Stop (`styles/composer.css:613-617`). If `streaming` is true while `.voice-chat-active` is present, the halt button remains in the action grid slot, contrary to the realtime override’s stated intent. No blockers otherwise.

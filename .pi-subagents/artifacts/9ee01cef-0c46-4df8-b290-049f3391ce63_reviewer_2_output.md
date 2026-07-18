@@ -1,0 +1,15 @@
+## Review
+
+- **Correct:** Scope remains session-projection focused. The legacy `/v1/agent/events` route and UUID replay contract remain intact; projection hooks are additive in `crates/ocean-daemon/src/bus.rs:72-370`.
+- **Correct:** Observatory separation is explicit and enforced. `SurfacePatch`, `SlackCanvas`, and `Extension` events are excluded in `crates/ocean-daemon/src/session_projection.rs:303-310`; no Observatory implementation references were introduced.
+- **Correct:** Checkpoints are emitted only after successful atomic saves, and failed saves do not advance revisions (`crates/ocean-agent/src/session/mod.rs:361-405`).
+- **Correct:** Current origin alignment is exact: `HEAD` and `origin/main` are both `e8f3322c118f140a475df0a1b25afb80033b0857`.
+- **Correct:** No staged files or commits were created.
+
+- **Blocker:** Lease progress is acknowledged before SSE delivery. `page_after` advances the lease’s `min_seq` to the last frame returned by SQLite (`crates/ocean-daemon/src/session_projection.rs:523-538`), but those frames are only subsequently sent to the client (`crates/ocean-daemon/src/main.rs:6920-6950`). If a 256-frame page is fetched and the connection drops after only part is delivered, reconnecting with the last received cursor is rejected because it is below the prematurely advanced `min_seq`. This breaks the documented exact reconnect contract. Lease progress must advance from a cursor demonstrated by the next client request, not merely from rows fetched server-side. No partial-page disconnect/reconnect test covers this case.
+
+- **Blocker:** The initial Surface reduction contract is ambiguous. `SessionProjection` exposes `checkpoint` and frame payloads as untyped `Value`, plus `pending_events` and independently folded `state` (`crates/ocean-core/src/lib.rs:400-451`). The store includes post-checkpoint component, permission, and turn events in both `pending_events` and folded state (`crates/ocean-daemon/src/session_projection.rs:96-139, 466-497`). Documentation says to install “checkpoint plus pending/folded state” but does not define ordering, precedence, or whether folded entries should be reducer inputs or authoritative replacements. A Surface may therefore apply the same render/permission/turn transition twice. This fails the explicit “implementable by Surface without ambiguity” gate.
+
+- **Note:** Tests are meaningful for persistence revision, normalization, cursor validation, compaction, cancellation, and bus compatibility, but there is no end-to-end HTTP/SSE wire test and no test for partial page delivery followed by reconnect.
+- **Note:** Checkpoints exceeding 16 MiB permanently fault that session’s projection until daemon restart (`crates/ocean-daemon/src/session_projection.rs:31, 397-414, 543-559`). This is bounded and fail-closed, but remains an operational risk for large text/tool transcripts.
+- **Note:** Requested `plan.md` and `progress.md` were absent from the worktree, so their contents could not be reviewed.

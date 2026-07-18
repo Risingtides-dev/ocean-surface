@@ -1,0 +1,13 @@
+## Review
+
+- **Correct:** All 14 project files were inspected. The project uses procedural Three.js geometry/shaders with no bundled external assets. README documents the original, asset-free intent.
+- **Blocker:** `src/game/Game.tsx:184` and `:192` assign through optional chaining (`map.get(id)?.alive = false`). TypeScript rejects this (`TS2779`), so `npm run build` cannot pass. Use an explicit local variable and null check.
+- **Blocker:** `src/game/Laser.tsx:28-36,44-47` moves the mesh in local coordinates but copies that local position into the collision handle. The laser’s rendered origin and collision position diverge. Move the group/world position or use `getWorldPosition()` for collision state.
+- **Blocker:** `src/game/Arwing.tsx:33-41` compares `clock.elapsedTime` with `startedAt` from `performance.now()` in `Game.tsx:145`. Barrel rolls never reach completion. Use one shared clock.
+- **Blocker:** `src/game/Game.tsx:137-142,309-312` memoizes `flight` once, then reset replaces `input`, `world`, and `player` refs. After redeploy, the rendered scene reads stale runtime state and controls can stop working. Preserve object identity or rebuild `flight`.
+- **Blocker:** `src/game/Enemy.tsx:53-56` expires every enemy, including the carrier. `removeEnemy` in `Game.tsx:191-196` does not resolve carrier expiry, leaving the game permanently live if the boss passes the player. Fail the mission or provide a recovery state.
+- **Note:** `teammates` is rendered in `Game.tsx` but never changed except during reset. Targeted encounters cannot actually down or rescue teammates; either implement state transitions or remove the misleading status.
+- **Note:** HUD and overlays lack accessibility semantics: no `aria-live` status, shield progressbar semantics, dialog/modal attributes, focus management, or Canvas fallback. Add these and an error boundary/WebGL failure message.
+- **Note:** Keyboard listeners in `Game.tsx:152-174` are global and do not clear keys on window blur or document visibility changes, allowing stuck movement/boost. Double-tap state is stored as an ad hoc property on the handler and does not track direction, so alternating A/D presses can trigger accidental rolls.
+- **Note:** `package.json` has caret-pinned dependencies but no lockfile, test script, or lint/typecheck-only script. Add a committed lockfile and CI build check using `npm ci`.
+- **Note:** README claims no Nintendo names, but `src/game/Arwing.tsx` and the `Arwing` symbol use a Nintendo trademark, while README repeatedly references Star Fox. Rename public/source terminology to original names and add an explicit asset/provenance notice or license boundary.

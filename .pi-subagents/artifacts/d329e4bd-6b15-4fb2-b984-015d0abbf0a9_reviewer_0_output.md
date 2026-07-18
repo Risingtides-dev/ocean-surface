@@ -1,0 +1,2 @@
+## Review
+- Blocker: None found. The reviewed implementation preserves durable thinking blocks, request-scoped permission cleanup with unscoped legacy cancellation fallback, terminal permission filtering, and documented visible checkpoint ordering across both repositories.

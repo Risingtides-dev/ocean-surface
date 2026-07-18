@@ -1,0 +1,28 @@
+{
+  "runId": "21358f20-3e65-4923-9da7-b8e0a5c6e201",
+  "agent": "reviewer",
+  "task": "Re-review the current Phase 2A Island diff after fixes. Specifically verify: keyed attention rows rerender on same-ID state/detail changes; slash-menu IME keys are ignored; removal of a focused polled row restores focus to the search input; compact counts include only NeedsHuman/Running; narrow widths preserve the count; live region shares chip status; idle dot is neutral; disclosure detail has no inaccessible nested scroll. Also inspect for any new correctness/accessibility regressions in daemon polling and EventSource cancellation. Do not modify files. Report only remaining blockers or important concrete findings; explicitly say clean if none.\n\n---\n**Output:**\nWrite your findings to exactly this path: /tmp/ocean-phase2-final-review.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: optional by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 1,
+  "model": "openai-codex/gpt-5.6-sol:high",
+  "attemptedModels": [
+    "openai-codex/gpt-5.6-sol:high"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openai-codex/gpt-5.6-sol:high",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 147708,
+        "output": 8207,
+        "cacheRead": 829952,
+        "cacheWrite": 0,
+        "cost": 1.3997259999999998,
+        "turns": 11
+      }
+    }
+  ],
+  "transcriptPath": "/Users/smathdaddy-macbook/ocean-surface/.pi-subagents/artifacts/21358f20-3e65-4923-9da7-b8e0a5c6e201_reviewer_transcript.jsonl",
+  "skills": [],
+  "timestamp": 1784077532788
+}

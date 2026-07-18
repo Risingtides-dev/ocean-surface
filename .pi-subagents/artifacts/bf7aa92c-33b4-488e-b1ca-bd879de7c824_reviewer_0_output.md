@@ -1,0 +1,4 @@
+## Review
+- **Blocker — `games/skyline-ace/src/game/Game.tsx:183-185`:** Laser IDs use `world.time` plus `lasers.current.size`. Multiple enemies firing in the same frame receive identical IDs because registration happens after render. Duplicate React keys overwrite `LaserHandle` entries and can remove/collide the wrong projectile.
+- **Medium — `games/skyline-ace/src/game/Game.tsx:159-166,291-318`:** `lastTap` is stored on the event handler and is never reset. The first horizontal key press at startup/reset can incorrectly trigger a barrel roll because `now - last` is less than `0.28`.
+- **Correct:** All `useFrame` hooks are rendered beneath `<Canvas>`. Keyboard listeners have matching cleanup. Laser collision uses the projectile group’s world position. `npm run build` passes.

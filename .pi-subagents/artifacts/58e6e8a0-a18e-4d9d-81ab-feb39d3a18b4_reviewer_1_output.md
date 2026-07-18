@@ -1,0 +1,16 @@
+## Review
+
+- **Correct:** Authority remains daemon-owned. Global request polling exposes status snapshots only (`crates/ocean-surface-ui/src/daemon.rs:2868-2922`), while permission actions require the focused session, exact active request, pending permission, and decision token (`crates/ocean-surface-ui/src/island.rs:248-269`). Cancellation preserves daemon lifecycle authority until terminal SSE (`crates/ocean-surface-ui/src/daemon.rs:3157-3219`).
+- **Correct:** Focused agent and permission EventSources have one explicit owner, are installed while connecting, and are closed on generation/session replacement (`crates/ocean-surface-ui/src/daemon.rs:1909-1928`, `2055-2104`, `2262-2310`, `4300-4389`).
+- **Correct:** Desktop shortcuts are Tauri-only and IME-safe; browser Print/Find remain untouched (`crates/ocean-surface-ui/src/app.rs:1650-1678`). Escape ordering and focus restoration are explicit (`crates/ocean-surface-ui/src/app.rs:1680-1704`, `crates/ocean-surface-ui/src/island_dynamic.rs:522-585`).
+- **Correct:** Session labels prefer authoritative owning-project names, then exact project-root matching, and strip origin prefixes (`crates/ocean-surface-ui/src/island.rs:307-374`). Zero-turn visibility is intentionally limited to the Tauri Island.
+- **Correct:** Recall uses the daemon endpoint with generation invalidation against stale responses (`crates/ocean-surface-ui/src/daemon.rs:2924-2996`), matching the inspected Recall backend contract.
+- **Correct:** `interactive_plot` is locally evaluated, bounded by parameter/series/sample/expression limits, rejects non-finite geometry, and sends only session-scoped component events (`crates/ocean-surface-ui/src/components/interactive_plot.rs:10-14`, `328-464`, `486-551`, `617-760`; `crates/ocean-surface-ui/src/daemon.rs:3536-3599`).
+- **Correct:** Stylesheet order is consistently wired through Trunk and the extension (`index.html:36-50`, `extension/sidepanel.html:9-23`, `scripts/build-extension.sh:22`).
+- **Correct:** Tauri diagnostic script evaluation and resize authority require explicit `OCEAN_UI_DEBUG_SCRIPT`; normal launches cannot invoke resize (`crates/ocean-tauri/src/lib.rs:267-278`, `1061-1084`). Native File/Edit/Window roles and standard accelerators compile (`crates/ocean-tauri/src/lib.rs:1148-1297`).
+- **Blocker:** None found.
+- **Fixed:** None; review was explicitly read-only.
+- **Note:** Requested `plan.md` and `progress.md` were absent at the supplied paths. The review instead used the complete diff and the included Dynamic Island implementation/build documentation.
+- **Note:** Residual manual validation remains for real WebKit focus/shortcut behavior, native menu behavior, live daemon Recall/request cancellation, and interactive plot pointer/input behavior.
+- **Note:** The WASM check could not run because `wasm32-unknown-unknown` is not installed. Native tests still compiled and passed all 374 surface tests.
+- **Note:** Product files remain intentionally untracked pending atomic commit; no files are staged.

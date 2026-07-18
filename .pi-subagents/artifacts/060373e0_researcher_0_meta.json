@@ -1,0 +1,37 @@
+{
+  "runId": "060373e0",
+  "agent": "researcher",
+  "task": "Smoke-test only: research whether the public TikTok URL https://www.tiktok.com/music/Ring-trend-7406721212087241477 is indexed as “Audreyy - Ring trend.” Use web research/search and inspect the source URL if possible. Return a concise finding with confidence and the source URL. Do not modify any project/source files. Do not use Longhouse or quorum.\n\n---\n**Output:**\nWrite your findings to exactly this path: /Users/smathdaddy-macbook/ocean-surface/.pi-subagents/artifacts/outputs/060373e0/research.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.",
+  "exitCode": 0,
+  "usage": {
+    "input": 80327,
+    "output": 1594,
+    "cacheRead": 124928,
+    "cacheWrite": 0,
+    "cost": 0.1023838,
+    "turns": 4
+  },
+  "model": "openai-codex/gpt-5.6-luna:medium",
+  "attemptedModels": [
+    "openai-codex/gpt-5.6-luna:medium"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openai-codex/gpt-5.6-luna:medium",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 80327,
+        "output": 1594,
+        "cacheRead": 124928,
+        "cacheWrite": 0,
+        "cost": 0.1023838,
+        "turns": 4
+      }
+    }
+  ],
+  "durationMs": 37582,
+  "toolCount": 8,
+  "transcriptPath": "/Users/smathdaddy-macbook/ocean-surface/.pi-subagents/artifacts/060373e0_researcher_0_transcript.jsonl",
+  "timestamp": 1784232749263
+}

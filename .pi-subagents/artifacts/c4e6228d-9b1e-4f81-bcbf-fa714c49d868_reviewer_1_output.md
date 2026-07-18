@@ -1,0 +1,11 @@
+## Review
+
+- **Correct:** `src/game/difficulty.ts:27-42` clamps progress and caps all escalation values: health 1.9×, fire interval 0.55×, projectile speed 63, lead 1×, accuracy 94%, density 1.5×, formation scale 1.22×.
+- **Correct:** `src/game/difficulty.ts:80-124` uses bounded quadratic intercept timing, capped to 0.15–1.4s, then clamps aim to the playable envelope.
+- **Correct:** `src/game/difficulty.ts:68-76` deterministically hashes the full enemy ID and shot index, providing repeatable per-enemy shot variation.
+- **Correct:** Carrier phases and killability are implemented in `src/game/Enemy.tsx:51-72` and `src/game/Game.tsx:307-320`. The carrier has three health phases and approximately 4.5 seconds of approach travel before escape.
+- **Correct:** `src/game/Game.tsx:583-611` uses swept projectile and enemy-body collision checks rather than endpoint-only checks.
+- **Blocker (P1):** `src/game/Enemy.tsx:59-62` never uses `spawn.target`; every enemy aims at `player.position`. `src/game/Game.tsx:280-282` only uses target tags for teammate UI/threat bookkeeping. There is no actual enemy target-selection behavior for Lyra, Rook, or Pip. Either implement teammate targeting or rename/document `target` as an objective marker.
+- **Blocker (P1):** `src/game/Laser.tsx:40-54` advances lasers using raw `delta`, while `src/game/Game.tsx:559-563` caps simulation delta. After a dropped/resumed frame, a laser can move beyond `z` bounds and expire before the next simulation sweep, defeating the claimed high-speed collision protection. Use the same bounded delta for laser movement or perform collision checks before expiry.
+- **Note (P2):** `src/game/Enemy.tsx:111-124` renders turrets with a static barrel, but `Enemy` fires in arbitrary lead-intercept directions. The visible turret does not track or indicate its actual shot direction; rotate the barrel toward the computed direction or constrain its firing arc.
+- **Note (P2):** `README.md:34-35` confirms there are no automated tests. The pure difficulty, intercept, wave-density, seed, and swept-collision functions should have unit coverage; `npm run build` cannot prove gameplay correctness.

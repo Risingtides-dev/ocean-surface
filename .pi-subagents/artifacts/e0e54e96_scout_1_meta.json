@@ -1,0 +1,37 @@
+{
+  "runId": "e0e54e96",
+  "agent": "scout",
+  "task": "Read-only inspect the dirty sibling /Users/smathdaddy-macbook/ocean-os changes and current daemon permission/call/voice contracts relevant to a live speed-run. Identify what changed, which endpoints can be safely smoke-tested, current permission gating semantics, and whether restarting/building the daemon would risk stomping active work. Also inspect process expectations if useful. Do not edit or run mutations. Return concise compatibility/risk brief.\n\n---\n**Output:**\nWrite your findings to exactly this path: /tmp/ocean-speedrun-daemon-scout.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.",
+  "exitCode": 0,
+  "usage": {
+    "input": 44415,
+    "output": 4858,
+    "cacheRead": 122880,
+    "cacheWrite": 0,
+    "cost": 0.429255,
+    "turns": 7
+  },
+  "model": "openai-codex/gpt-5.6-sol:low",
+  "attemptedModels": [
+    "openai-codex/gpt-5.6-sol:low"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openai-codex/gpt-5.6-sol:low",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 44415,
+        "output": 4858,
+        "cacheRead": 122880,
+        "cacheWrite": 0,
+        "cost": 0.429255,
+        "turns": 7
+      }
+    }
+  ],
+  "durationMs": 118594,
+  "toolCount": 25,
+  "transcriptPath": "/Users/smathdaddy-macbook/ocean-surface/.pi-subagents/artifacts/e0e54e96_scout_1_transcript.jsonl",
+  "timestamp": 1784092254843
+}

@@ -1,0 +1,28 @@
+{
+  "runId": "194d8f4a-09b2-4536-a37f-0f1076d69ea5",
+  "agent": "reviewer",
+  "task": "[Read from: /Users/smathdaddy-macbook/ocean-surface/plan.md, /Users/smathdaddy-macbook/ocean-surface/progress.md]\n\nReview design-systems/ocean-tui/DESIGN.md as a standalone Google Labs DESIGN.md handoff for Claude Design and ChatGPT image generation. Validate factual fidelity against ../ocean-os/crates/ocean-tui/src/splash.rs and shell/{theme,panel,rail,status,components}. Check YAML references, canonical section order, terminal-specific accuracy, Unicode/ASCII fallbacks, contradictions, and whether AI prompt guidance can actually produce useful TUI assets without inventing web chrome. Do not modify project/source files. Return only concrete findings with severity and smallest safe fix; explicitly say if clean.\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: required by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 0,
+  "model": "openai-codex/gpt-5.6-sol:high",
+  "attemptedModels": [
+    "openai-codex/gpt-5.6-sol:high"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openai-codex/gpt-5.6-sol:high",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 132824,
+        "output": 11259,
+        "cacheRead": 1157120,
+        "cacheWrite": 0,
+        "cost": 1.58045,
+        "turns": 15
+      }
+    }
+  ],
+  "transcriptPath": "/Users/smathdaddy-macbook/ocean-surface/.pi-subagents/artifacts/194d8f4a-09b2-4536-a37f-0f1076d69ea5_reviewer_1_transcript.jsonl",
+  "skills": [],
+  "timestamp": 1784112390931
+}

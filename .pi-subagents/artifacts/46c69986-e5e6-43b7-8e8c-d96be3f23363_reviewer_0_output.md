@@ -1,0 +1,8 @@
+## Review
+- Correct: `npm run build` passes TypeScript and Vite production build.
+- Note (medium): `src/game/Terrain.tsx:21-24,67-73,83-84` computes terrain coordinates with `position.y + uTileZ`, but the `-Math.PI/2` rotation maps local Y to world Z with reversed sign. Adjacent tiles therefore evaluate unrelated heights at seams. Minimal fix: use `uTileZ - position.y` consistently.
+- Note (medium): `src/game/Enemy.tsx:47` explicitly excludes `turret` variants from firing. Turrets in `Game.tsx:61-64,79-80` are therefore inert except for being shootable/expirable. Minimal fix: add turret cadence/fire logic or remove turret encounters.
+- Note (medium): Carrier collision uses its group center (`src/game/Enemy.tsx:43`, `src/game/Game.tsx:535-538`), while the visible red core is offset `z=-4.2` and scaled 1.5 (`src/game/Enemy.tsx:116,125-127`). Shots visually aimed at the core can miss. Minimal fix: register a core position/hitbox or expand the carrier’s Z collision bounds.
+- Note (low): `src/game/Game.tsx:434-436,442-449` schedules uncancelled touch-release timers. A rapid second press/hold can be released by the previous 120ms timer; timers also lack unmount cleanup. Minimal fix: track/cancel timers per control and clear them on cleanup.
+- Residual risk (low): `src/game/Laser.tsx:47-50` advances projectiles before collision is checked on the next frame (`Game.tsx:530-540`), so large frame hitches can tunnel lasers through targets. Use swept-segment collision or move projectile updates into the simulation step.
+- Blocker: none.

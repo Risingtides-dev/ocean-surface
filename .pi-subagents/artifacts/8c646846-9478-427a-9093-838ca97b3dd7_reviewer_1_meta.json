@@ -1,0 +1,28 @@
+{
+  "runId": "8c646846-9478-427a-9093-838ca97b3dd7",
+  "agent": "reviewer",
+  "task": "[Read from: /private/tmp/ocean-surface-session-projection-20260717/plan.md, /private/tmp/ocean-surface-session-projection-20260717/progress.md]\n\nFresh read-only lifecycle review of `/private/tmp/ocean-surface-session-projection-20260717`. Focus PlannerStreamSources ownership/generalization, explicit EventSource close/replace while Connecting, native projection reconnect and reset behavior, Voice Planner readiness preservation, legacy fallback hydration-before-connect, projection retry loops, separate canvas-only rail isolation, cleanup/leaks and IME/Rooms unaffected. Report concrete blockers with file:line; no edits.\n\n## Acceptance Contract\nAcceptance level: attested\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Return concrete findings with file paths and severity when applicable\n\nRequired evidence: review-findings, residual-risks\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 0,
+  "model": "openai-codex/gpt-5.6-sol:high",
+  "attemptedModels": [
+    "openai-codex/gpt-5.6-sol:high"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openai-codex/gpt-5.6-sol:high",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 91845,
+        "output": 6278,
+        "cacheRead": 394752,
+        "cacheWrite": 0,
+        "cost": 0.844941,
+        "turns": 11
+      }
+    }
+  ],
+  "transcriptPath": "/Users/smathdaddy-macbook/ocean-surface/.pi-subagents/artifacts/8c646846-9478-427a-9093-838ca97b3dd7_reviewer_1_transcript.jsonl",
+  "skills": [],
+  "timestamp": 1784324381359
+}

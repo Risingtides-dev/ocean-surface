@@ -1,0 +1,37 @@
+{
+  "runId": "fefaba1b",
+  "agent": "researcher",
+  "task": "Creator discovery frontier 2 (EDM). Before any searching, read /Users/smathdaddy-macbook/ocean-surface/campaign-research/auto-research/excluded-handles.txt and exclude every listed handle; do not return any listed handle. Search broadly with follow-up queries for TikTok creators in EDM, house, festivals, nightlife, DJ personality, festival fashion, and rave humor. Avoid celebrities, mega-creators, labels, publishers, fan/repost/faceless pages, dealerships, and generic brand accounts. Shared gates: candidates must eventually be <=150K followers and average >=3K views across a reasonable sample of recent non-pinned posts; never claim a gate passed without direct visible evidence, and every result remains candidate-for-verification. Each candidate requires a direct TikTok profile URL plus a direct TikTok evidence URL or public search-result URL visibly supporting fit. Return up to 20 NEW handles as JSONL objects only, one per line, exactly keys handle,profile_url,evidence_url,observable_fit,confidence. Do not modify project/source files; write only the configured output artifact.\n\n---\n**Output:**\nWrite your findings to exactly this path: /Users/smathdaddy-macbook/ocean-surface/campaign-research/auto-research/frontier-1/edm.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.",
+  "exitCode": 0,
+  "usage": {
+    "input": 16468,
+    "output": 2560,
+    "cacheRead": 21504,
+    "cacheWrite": 0,
+    "cost": 0.0339784,
+    "turns": 6
+  },
+  "model": "openai-codex/gpt-5.6-luna:medium",
+  "attemptedModels": [
+    "openai-codex/gpt-5.6-luna:medium"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openai-codex/gpt-5.6-luna:medium",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 16468,
+        "output": 2560,
+        "cacheRead": 21504,
+        "cacheWrite": 0,
+        "cost": 0.0339784,
+        "turns": 6
+      }
+    }
+  ],
+  "durationMs": 54616,
+  "toolCount": 8,
+  "transcriptPath": "/Users/smathdaddy-macbook/ocean-surface/.pi-subagents/artifacts/fefaba1b_researcher_1_transcript.jsonl",
+  "timestamp": 1784232885300
+}

@@ -68,6 +68,15 @@
     max-width: var(--workspace-rail);
     margin-inline: auto;
   }
+  /* The pending plate is the component itself, unlike a turn whose card sits
+     inside a full-width rail row. Do not let the generic child-centering rule
+     turn this 150px assistant cue into an orphaned object in the pane center. */
+  .ocean-surface.has-workspace-open .transcript > .soundings-thinking {
+    width: 150px;
+    max-width: 150px;
+    margin-left: max(14px, calc((100% - var(--workspace-rail)) / 2 + 14px));
+    margin-right: 0;
+  }
   .ocean-surface.has-workspace-open .ocean-composer {
     width: min(var(--workspace-rail), calc(100% - 36px));
     margin-inline: auto;

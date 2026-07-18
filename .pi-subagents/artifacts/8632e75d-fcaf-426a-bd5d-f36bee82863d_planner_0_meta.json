@@ -1,0 +1,29 @@
+{
+  "runId": "8632e75d-fcaf-426a-bd5d-f36bee82863d",
+  "agent": "planner",
+  "task": "[Read from: /private/tmp/ocean-os-session-cursor-20260716/context.md]\n\nRead-only implementation architecture and test-first execution plan for the approved session projection cursor contract in /private/tmp/ocean-os-session-cursor-20260716, plus Surface consumer in /private/tmp/ocean-surface-tauri-integrate-20260716-v2. Read /private/tmp/ocean-session-cursor-context-20260716.md and current code. Approved semantics: completed thinking durable/in-progress transient; SurfacePatch separate canvas cursor; old daemons best-effort legacy; configurable 256 MiB global journal, 60s attach lease, checkpoint compaction, explicit reset. Design the smallest correctness-preserving implementation that fixes snapshot/SSE switch race without pretending bus UUIDs are atomic. Give exact structs/files/routes/event integration/test seams, transaction/locking invariants, migration/compatibility plan, wire schema, ordered compilable slices, and hidden risks. Do not edit files.\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: required by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 1,
+  "model": "openai-codex/gpt-5.6-sol:high",
+  "attemptedModels": [
+    "openai-codex/gpt-5.6-sol:high"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openai-codex/gpt-5.6-sol:high",
+      "success": false,
+      "exitCode": 1,
+      "error": "spawn pi ENOENT",
+      "usage": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "cost": 0,
+        "turns": 0
+      }
+    }
+  ],
+  "transcriptPath": "/Users/smathdaddy-macbook/ocean-surface/.pi-subagents/artifacts/8632e75d-fcaf-426a-bd5d-f36bee82863d_planner_0_transcript.jsonl",
+  "skills": [],
+  "timestamp": 1784311421439
+}

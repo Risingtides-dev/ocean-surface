@@ -1,0 +1,7 @@
+## Review
+- Correct: No blocker/high-severity findings.
+- Correct: Projection content is written through `AgentEventBus` separately from the existing broadcast consumed by the metadata-only Observatory adapter (`crates/ocean-daemon/src/bus.rs:279`, `crates/ocean-daemon/src/main.rs:838-865`). The adapter explicitly skips content-bearing and session-config variants (`crates/ocean-daemon/src/observatory_adapter.rs:224-239`).
+- Correct: Post-save `PersistenceCheckpoint` events are filtered from legacy SSE and sent directly to the projection store (`crates/ocean-agent/src/lib.rs:1598-1606`, `crates/ocean-daemon/src/main.rs:6032-6041`). Mutable atomic saves advance revisions only after successful rename (`crates/ocean-agent/src/session/mod.rs:373-410`); session-config RPC uses this save path under the session lock (`crates/ocean-agent/src/lib.rs:1314-1327`).
+- Correct: Projection and Observatory routes coexist in router/banner composition, with the operator guide documenting the projection route (`crates/ocean-daemon/src/main.rs:601-612`, `crates/ocean-daemon/src/main.rs:1323-1332`, `docs/OCEAN_RUNTIME_OPERATOR_GUIDE.md:485-490`).
+- Correct: No staged files or reject/artifact/staging files were found. The sole untracked file is the intended implementation, `crates/ocean-daemon/src/session_projection.rs`.
+- Note: Requested `plan.md` and `progress.md` were absent at the supplied paths. This fresh audit performed source/diff inspection but did not rerun the test suite; test claims in `events.md` were not independently re-attested.

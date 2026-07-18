@@ -1,0 +1,28 @@
+{
+  "runId": "a589143d-d1bf-4324-8116-2e37fba7e24f",
+  "agent": "reviewer",
+  "task": "Fresh read-only review of the newly implemented `interactive_plot` slice. Inspect the actual current diff only in: `crates/ocean-surface-ui/src/components.rs`, `crates/ocean-surface-ui/src/components/interactive_plot.rs`, `styles/components.css`, `../ocean-os/crates/ocean-runtime/src/tools/component.rs`, `../ocean-os/docs/AGENT_RENDER_PROTOCOL.md`, and `../ocean-os/docs/OCEAN_SURFACE_COMPONENT_PROMPT_GUIDE.md`. Do not modify project/source files. Look for concrete correctness, Leptos reactivity/lifecycle, expression parser/evaluation safety, bounded-work, SVG geometry, accessibility/touch, protocol/event, responsive UI, and documentation mismatches. Report only evidence-backed fixes worth doing now, with severity and file/line references; say PASS if none. Existing dirty changes outside this slice are out of scope.\n\n---\n**Output:**\nWrite your findings to exactly this path: /Users/smathdaddy-macbook/ocean-surface/.pi-subagents/artifacts/outputs/a589143d-d1bf-4324-8116-2e37fba7e24f/.pi-subagents/interactive-plot-review.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.\n\n## Acceptance Contract\nAcceptance level: reviewed\nCompletion is not accepted from prose alone. End with a structured acceptance report.\n\nCriteria:\n- criterion-1: Implement the requested change without widening scope\n- criterion-2: Return evidence sufficient for an independent acceptance review\n\nRequired evidence: changed-files, tests-added, commands-run, validation-output, residual-risks, no-staged-files\n\nReview gate: required by reviewer.\n\nFinish with a fenced JSON block tagged `acceptance-report` in this shape:\nUse empty arrays when no items apply; array fields contain strings unless object entries are shown.\n```acceptance-report\n{\n  \"criteriaSatisfied\": [\n    {\n      \"id\": \"criterion-1\",\n      \"status\": \"satisfied\",\n      \"evidence\": \"specific proof\"\n    }\n  ],\n  \"changedFiles\": [\n    \"src/file.ts\"\n  ],\n  \"testsAddedOrUpdated\": [\n    \"test/file.test.ts\"\n  ],\n  \"commandsRun\": [\n    {\n      \"command\": \"command\",\n      \"result\": \"passed\",\n      \"summary\": \"short result\"\n    }\n  ],\n  \"validationOutput\": [\n    \"validation output or concise summary\"\n  ],\n  \"residualRisks\": [\n    \"none\"\n  ],\n  \"noStagedFiles\": true,\n  \"diffSummary\": \"short description of the diff\",\n  \"reviewFindings\": [\n    \"blocker: file.ts:12 - issue found, or no blockers\"\n  ],\n  \"manualNotes\": \"anything else the parent should know\"\n}\n```",
+  "exitCode": 1,
+  "model": "openai-codex/gpt-5.6-sol:high",
+  "attemptedModels": [
+    "openai-codex/gpt-5.6-sol:high"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openai-codex/gpt-5.6-sol:high",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 46364,
+        "output": 7292,
+        "cacheRead": 186880,
+        "cacheWrite": 0,
+        "cost": 0.5440200000000001,
+        "turns": 7
+      }
+    }
+  ],
+  "transcriptPath": "/Users/smathdaddy-macbook/ocean-surface/.pi-subagents/artifacts/a589143d-d1bf-4324-8116-2e37fba7e24f_reviewer_transcript.jsonl",
+  "skills": [],
+  "timestamp": 1784116963831
+}
