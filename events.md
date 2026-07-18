@@ -1898,3 +1898,26 @@ transcript devlog contract during the sole AGENTS.md conflict. Verified format,
 diff hygiene, WASM check and denied-warning Clippy, native all-target
 denied-warning Clippy, 389 UI tests plus 1 integration test, and proxy check.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+
+time:      [17:33] [18-07-26]
+agent:     [claude] [fable 5]
+type:      [merge]
+area:      [frontend], [review]
+
+TASK-25 integration closeout. The Island land (4b7ad46) arrived ungated and its
+post-hoc review found three defects: reveal exclusivity only covered three of
+seven competing overlays, the durable Island contract lacked an AGENTS update,
+and trailing whitespace in the TUI banner failed diff-check (invalidating the
+reported all-green gate). Corrective 82e7ca9: open_island now clears all seven
+reveal signals via a production apply closure, a competing_reveal_open predicate
+drives the peer-close Effect, three regression tests exercise those production
+helpers, AGENTS locks the full Escape z-order, banner whitespace repaired.
+Recorded deviation: the corrective was delivered as an amended replacement of
+reviewed 2b5f754 (sole parent 4b7ad46) instead of the instructed child commit;
+accepted on identical tree content. Gates: wasm check, 420 tests, proxy, tauri,
+fmt, diff-check, plus extension build independently rerun by ocean with the
+competing_reveal_open symbol verified in the compiled bundle. Integration
+sequence: this push, then Lane D rebases once, then TASK-22.
+_________________________________________________________________________________
