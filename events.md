@@ -1,3 +1,15 @@
+time:      [11:52pm] [07-18-26]
+agent:     [ocean] [ocean-prs gate-authority]
+worktree:  [main]
+type:      integration
+area:      frontend
+
+Lane D: file preview intent — resolve, fetch, render (Tauri + web). 7 files,
++1239/-53, 14 production seam tests (3 file-scope helpers shared by Effects),
+462 passed. Frozen gates: fmt, clippy wasm32 -D warnings, check wasm32,
+check proxy, test wasm32 --no-run, test native. Patch-id f2087203bb18cc5c.
+8 review rounds (v1→v8) with independent codex re-trace. Committed 4b932aa.
+
 time:      [11:25pm] [06-26-26]
 agent:     [codex] [gpt-5]
 worktree:  [main]
