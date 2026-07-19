@@ -2170,3 +2170,11 @@ area:      [frontend]
 
 Landed the TASK-41 dedupe follow-up as 31a9d40 on main: the duplicate composer 16px floor is removed from composer.css in favor of the owner-landed compact.css rule (which the builder verified covers the PWA shell — .ocean-surface scope, loads after composer.css, wins the cascade); the regression test now reads compact.css so the owner's previously-untested floor is covered, plus a scoping guard asserting the rule stays app-shell-wide. Cross-reference comments corrected. 596+4+2 tests green. Forward-only on public history — no amends. TASK-41 lane fully closed; worktree pruned next.
 _________________________________________________________________________________
+time:      [14:32] [19-07-26]
+agent:     [claude] [fable 5]
+worktree:  fix/task44-reconciliation
+type:      [merge]
+area:      [frontend]
+
+Landed TASK-44 (atomic session projection — wave-4 task B, the operator-evidenced cluster) as 8012dff on main. Fable builder sub, my review: session-detail DTO gains daemon state + active_requests (serde-defaulted; request id = turn id per daemon minting); one commit_session_projection applies transcript, live-turn id/streaming, and pending permissions with no await between signal writes; runs on switch and both stream reconnects; running/waiting/cancelling never transiently idle. Request-keyed DecisionGrant authority map; remote-origin cards render read-only (components.rs per contract). Pure deciders throughout; all nine contract scenarios tested including two-surface convergence. 608 tests + wasm + fmt green. Ledger entry delayed ~2min: canonical was blocked by an unidentified agent implementing TASK-46's HELD surface half directly in canonical (13-line gap_replay edit with the confirmed first-attach defect, plus broken intermediate saves) — stop order posted 14:31, no identification, edit reverted at 14:32 with the work preserved at artifacts/task46-premature-surface-edit-snapshot.diff (fe3c17a6). TASK-43 dispatched — last daemon.rs slice.
+_________________________________________________________________________________
