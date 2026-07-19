@@ -170,6 +170,18 @@ html.is-resizing {
   background: var(--bg-well);
 }
 
+/* coarse-pointer: extend tab-close 16px → 44×44 via invisible pseudo-element. */
+@media (pointer: coarse) {
+  .workspace-tab__close {
+    position: relative;
+  }
+  .workspace-tab__close::after {
+    content: '';
+    position: absolute;
+    inset: -14px; /* 16px + 28px = 44px */
+  }
+}
+
 /* ── Body: active-tab content + docked tree ────────────────────────── */
 
 .workspace-body {

@@ -95,7 +95,7 @@
    Shared controls, fields, and scroll treatments
    ═══════════════════════════════════════════════════════════════════ */
 
-:is(.sessions-panel__close, .rooms-panel__back, .rooms-panel__close) {
+:is(.sessions-panel__close, .rooms-panel__close) {
   appearance: none;
   display: inline-grid;
   place-items: center;
@@ -114,31 +114,45 @@
   transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
 }
 
-:is(.sessions-panel__close, .rooms-panel__back, .rooms-panel__close):hover {
+:is(.sessions-panel__close, .rooms-panel__close):hover {
   background: var(--bg-elevated);
   color: var(--fg);
 }
 
-:is(.sessions-panel__close, .rooms-panel__back, .rooms-panel__close, .sessions-panel__new-btn, .sessions-item,
+/* coarse-pointer: extend close/back hit area to 44×44 without visible chrome change.
+   The pseudo-element sits behind content and captures taps, leaving focus rings
+   and hover states fully intact. */
+@media (pointer: coarse) {
+  :is(.sessions-panel__close, .rooms-panel__close) {
+    position: relative;
+  }
+  :is(.sessions-panel__close, .rooms-panel__close)::after {
+    content: '';
+    position: absolute;
+    inset: -8px; /* 28px + 16px = 44px */
+  }
+}
+
+:is(.sessions-panel__close, .rooms-panel__close, .sessions-panel__new-btn, .sessions-item,
    .rooms-panel__create-input, .rooms-panel__create-btn, .rooms-policy__row input[type="checkbox"],
    .rooms-policy__cron, .rooms-item, .room-stage__join, .room-stage__leave, .room-stage__back,
    .room-stage__addagent-toggle, .rooms-addagent__input,
-   .rooms-addagent__btn, .rooms-mention-hint__chip, .rooms-composer__input, .rooms-composer__send):focus-visible {
+   .rooms-mention-hint__chip, .rooms-composer__input, .rooms-composer__send):focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
 }
 
-:is(.sessions-panel__close, .rooms-panel__back, .rooms-panel__close, .sessions-panel__new-btn, .sessions-item,
+:is(.sessions-panel__close, .rooms-panel__close, .sessions-panel__new-btn, .sessions-item,
    .rooms-panel__create-btn, .rooms-item, .room-stage__join, .room-stage__leave, .room-stage__back,
-   .room-stage__addagent-toggle, .rooms-addagent__btn,
+   .room-stage__addagent-toggle,
    .rooms-mention-hint__chip, .rooms-composer__send):active {
   transform: scale(0.985);
 }
 
-:is(.sessions-panel__close, .rooms-panel__back, .rooms-panel__close, .sessions-panel__new-btn, .sessions-item,
+:is(.sessions-panel__close, .rooms-panel__close, .sessions-panel__new-btn, .sessions-item,
    .rooms-panel__create-input, .rooms-panel__create-btn, .rooms-policy__row input[type="checkbox"],
    .rooms-policy__cron, .rooms-item, .room-stage__join, .room-stage__leave, .rooms-addagent__input,
-   .rooms-addagent__btn, .rooms-mention-hint__chip, .rooms-composer__input, .rooms-composer__send,
+   .rooms-mention-hint__chip, .rooms-composer__input, .rooms-composer__send,
    .sessions-create__cancel):disabled {
   opacity: 0.45;
   cursor: not-allowed;
@@ -168,8 +182,7 @@
   filter: brightness(1.12);
 }
 
-.room-stage__join,
-.rooms-addagent__btn {
+.room-stage__join {
   appearance: none;
   height: var(--ctl-h);
   padding: 0 14px;
@@ -186,8 +199,7 @@
   transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease);
 }
 
-.room-stage__join:hover:not(:disabled),
-.rooms-addagent__btn:hover:not(:disabled) {
+.room-stage__join:hover:not(:disabled) {
   background: var(--bg-hover);
   border-color: var(--border-strong);
 }
@@ -956,6 +968,15 @@
   line-height: 1.45;
 }
 
+/* coarse-pointer: ensure policy rows + checkbox have 44px touch targets.
+   The label wraps the checkbox so the whole row is tappable; we extend
+   vertical padding without adding visible chrome. */
+@media (pointer: coarse) {
+  .rooms-policy__row {
+    padding-block: 12px; /* ~19px content + 24px padding = ~43px */
+  }
+}
+
 .rooms-policy__row--cron {
   flex-wrap: wrap;
   align-items: center;
@@ -1259,6 +1280,18 @@
 .rooms-outbox__retry svg {
   width: 14px;
   height: 14px;
+}
+
+/* coarse-pointer: extend outbox retry from 26px to 44×44 via invisible pseudo. */
+@media (pointer: coarse) {
+  .rooms-outbox__retry {
+    position: relative;
+  }
+  .rooms-outbox__retry::after {
+    content: '';
+    position: absolute;
+    inset: -9px; /* 26px + 18px = 44px */
+  }
 }
 
 /* ═══════════════════════════════════════════════════════════════════
