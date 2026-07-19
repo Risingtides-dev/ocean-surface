@@ -1730,9 +1730,20 @@ pub struct Daemon {
     /// so reconnect/switch/new-session calls retire older streams instead of
     /// applying every delta multiple times.
     sse_generation: RwSignal<u64>,
+    /// Monotonic session-INTENT generation, distinct from `sse_generation`. It is
+    /// bumped whenever the user establishes a new cockpit focus — a New Session or
+    /// a switch to another session — but NOT by a session's own `connect()`. A
+    /// fresh-session create captures this at submit time and adopts its result
+    /// only while the captured value is still current, so a stale create response
+    /// cannot steal focus from a session started while its POST was in flight
+    /// (TASK-43, finding 1). See [`admit_create_intent`].
+    session_intent_generation: RwSignal<u64>,
     /// First-open readiness for the active agent and permission streams. Voice
     /// Planner awaits both before posting its first normal turn, then reconciles
     /// the durable permission snapshot so no gate can be missed in the handoff.
+    /// The ordinary fresh-session create awaits the same markers before its first
+    /// turn so `turn_started` and early frames are not tailed into the void
+    /// (TASK-43, finding 5).
     agent_stream_ready: RwSignal<Option<(String, u64)>>,
     permission_stream_ready: RwSignal<Option<(String, u64)>>,
     permission_revision: RwSignal<u64>,
@@ -2112,6 +2123,7 @@ impl Daemon {
             livekit_token_path: RwSignal::new(String::new()),
             tldraw_sync_uri: RwSignal::new(String::new()),
             sse_generation: RwSignal::new(0),
+            session_intent_generation: RwSignal::new(0),
             agent_stream_ready: RwSignal::new(None),
             permission_stream_ready: RwSignal::new(None),
             permission_revision: RwSignal::new(0),
@@ -2183,6 +2195,7 @@ impl Daemon {
             livekit_token_path: RwSignal::new(String::new()),
             tldraw_sync_uri: RwSignal::new(String::new()),
             sse_generation: RwSignal::new(0),
+            session_intent_generation: RwSignal::new(0),
             agent_stream_ready: RwSignal::new(None),
             permission_stream_ready: RwSignal::new(None),
             permission_revision: RwSignal::new(0),
@@ -3002,6 +3015,11 @@ impl Daemon {
     fn dispatch_prompt(&self, prompt: String, is_retry: bool, client_type: &'static str) {
         let url = self.url.get_untracked();
         let session_id = self.session_id.get_untracked();
+        // Bind this submit to the current session-intent generation. If we take
+        // the lazy-create path below, the created session is adopted only while
+        // this captured value is still current — a switch or a second New Session
+        // in flight bumps it and retires this create (TASK-43, finding 1).
+        let launch_intent = self.session_intent_generation.get_untracked();
         self.awaiting_session_adoption.set(false);
         let project = self.project.get_untracked();
         // Always send the cwd the surface is displaying. Project sessions pin
@@ -3083,8 +3101,26 @@ impl Daemon {
                                 streaming.set(false);
                                 return;
                             };
+                            // Phase 1 admission: the surface may have switched
+                            // sessions or started a second New Session while this
+                            // create POST was in flight. Adopt only when the
+                            // captured intent is still current AND the active
+                            // session is still empty. A rejected create may refresh
+                            // the list so the new session is discoverable, but must
+                            // not steal focus, dispatch this prompt, or clobber the
+                            // status the newer intent now owns (TASK-43, finding 1).
+                            if admit_create_intent(
+                                launch_intent,
+                                daemon.session_intent_generation.get_untracked(),
+                                None,
+                                daemon.session_id.get_untracked().as_deref(),
+                            ) == CreateAdmission::Reject
+                            {
+                                daemon.fetch_sessions();
+                                return;
+                            }
                             persist_session(&new_session_id);
-                            daemon.session_id.set(Some(new_session_id));
+                            daemon.session_id.set(Some(new_session_id.clone()));
                             if let Some(title) = r.title.filter(|title| !title.trim().is_empty()) {
                                 daemon.session_title.set(title);
                             }
@@ -3094,9 +3130,58 @@ impl Daemon {
                                 }
                             }
                             status.set("session ready".into());
+                            // Connect BOTH live tails (agent + permission) for the
+                            // freshly-installed session, then withhold the first
+                            // turn until both EventSources are OPEN for this
+                            // session+generation. The endpoint is a live tail with
+                            // no replay, so dispatching before the surface is
+                            // listening would lose `turn_started` and early frames
+                            // (TASK-43, finding 5). `connect` bumps `sse_generation`
+                            // and opens the permission stream internally.
                             daemon.connect();
                             daemon.fetch_sessions();
-                            daemon.dispatch_prompt(prompt, is_retry, client_type);
+                            let generation = daemon.sse_generation.get_untracked();
+                            match daemon
+                                .await_streams_ready(&new_session_id, generation)
+                                .await
+                            {
+                                Ok(()) => {
+                                    // Phase 2 admission: a switch or New Session may
+                                    // have settled during the handshake. Dispatch the
+                                    // first turn only while this create still owns the
+                                    // cockpit (intent unchanged, focus still ours).
+                                    if admit_create_intent(
+                                        launch_intent,
+                                        daemon.session_intent_generation.get_untracked(),
+                                        Some(&new_session_id),
+                                        daemon.session_id.get_untracked().as_deref(),
+                                    ) == CreateAdmission::Adopt
+                                    {
+                                        daemon.dispatch_prompt(prompt, is_retry, client_type);
+                                    }
+                                }
+                                Err(error) => {
+                                    // Timeout or focus move before both streams
+                                    // opened. Never dispatch into an unobserved
+                                    // stream. Surface the failure only while this
+                                    // session is still focused, so a newer intent's
+                                    // status is not clobbered (TASK-43, findings 1 + 5).
+                                    if admit_create_intent(
+                                        launch_intent,
+                                        daemon.session_intent_generation.get_untracked(),
+                                        Some(&new_session_id),
+                                        daemon.session_id.get_untracked().as_deref(),
+                                    ) == CreateAdmission::Adopt
+                                    {
+                                        log::error!("session stream not ready: {error}");
+                                        status.set(format!(
+                                            "session stream not ready: {}",
+                                            concise_error(&error)
+                                        ));
+                                        streaming.set(false);
+                                    }
+                                }
+                            }
                         }
                         Ok(r) => {
                             let raw = r.error.unwrap_or_else(|| "unknown error".into());
@@ -3817,6 +3902,10 @@ impl Daemon {
         self.active_decision_token.set(None);
         self.session_id.set(Some(id.to_string()));
         persist_session(id);
+        // Switching focus is a new cockpit intent; retire any in-flight
+        // fresh-session create so its late response cannot yank focus back
+        // (TASK-43, finding 1).
+        self.bump_session_intent();
         self.awaiting_session_adoption.set(false);
         self.session_title.set(title);
         self.status.set("loading session…".into());
@@ -4007,39 +4096,55 @@ impl Daemon {
         }
         self.connect();
         let generation = self.sse_generation.get_untracked();
-        for _ in 0..240 {
-            if self.session_id.get_untracked().as_deref() != Some(id)
-                || self.sse_generation.get_untracked() != generation
-            {
-                return Err("planner session changed while streams connected".into());
-            }
-            if planner_streams_ready(
+        self.await_streams_ready(id, generation).await?;
+        self.reconcile_pending_permissions(id).await?;
+        if self.streams_ready(id, generation) {
+            return Ok(generation);
+        }
+        Err("planner session changed during permission reconciliation".into())
+    }
+
+    /// Are BOTH the agent and permission live tails currently OPEN for exactly
+    /// `(id, generation)` — both readiness markers set and both underlying
+    /// EventSources reporting `Open`? Pure snapshot of the two-stream handshake,
+    /// shared by planner adoption and the fresh-session bootstrap.
+    fn streams_ready(&self, id: &str, generation: u64) -> bool {
+        self.session_id.get_untracked().as_deref() == Some(id)
+            && self.sse_generation.get_untracked() == generation
+            && planner_streams_ready(
                 id,
                 generation,
                 self.agent_stream_ready.get_untracked().as_ref(),
                 self.permission_stream_ready.get_untracked().as_ref(),
-            ) && planner_sources_open(&self.planner_stream_sources.borrow(), id, generation)
+            )
+            && planner_sources_open(&self.planner_stream_sources.borrow(), id, generation)
+    }
+
+    /// Bounded wait for BOTH the agent and permission EventSources to report an
+    /// OPEN marker for `(id, generation)`. Generalized from `adopt_planner_session`
+    /// so an ordinary fresh-session create can withhold its first turn until the
+    /// live tail is actually being observed — the event endpoint has no replay, so
+    /// a turn POSTed before the streams open would drop `turn_started` and early
+    /// frames into the void (TASK-43, finding 5).
+    ///
+    /// Returns `Err` if focus/generation moves off `(id, generation)` while
+    /// waiting, or if the streams do not both open within the bounded window
+    /// (240 × 25ms ≈ 6s). The caller surfaces that visibly and never dispatches
+    /// into an unobserved stream. The bounded delay is only a timeout/yield;
+    /// correctness comes from the EventSource `state()` the markers reflect.
+    async fn await_streams_ready(&self, id: &str, generation: u64) -> Result<(), String> {
+        for _ in 0..240 {
+            if self.session_id.get_untracked().as_deref() != Some(id)
+                || self.sse_generation.get_untracked() != generation
             {
-                self.reconcile_pending_permissions(id).await?;
-                if self.session_id.get_untracked().as_deref() == Some(id)
-                    && self.sse_generation.get_untracked() == generation
-                    && planner_streams_ready(
-                        id,
-                        generation,
-                        self.agent_stream_ready.get_untracked().as_ref(),
-                        self.permission_stream_ready.get_untracked().as_ref(),
-                    )
-                    && planner_sources_open(&self.planner_stream_sources.borrow(), id, generation)
-                {
-                    return Ok(generation);
-                }
-                return Err("planner session changed during permission reconciliation".into());
+                return Err("session changed while streams connected".into());
             }
-            // Await an actual OPEN marker from both EventSources. The bounded
-            // delay is only a timeout/yield; correctness comes from state().
+            if self.streams_ready(id, generation) {
+                return Ok(());
+            }
             gloo_timers::future::TimeoutFuture::new(25).await;
         }
-        Err("planner session streams did not become ready".into())
+        Err("session streams did not become ready".into())
     }
 
     pub async fn refresh_planner_session(&self, id: &str) -> Result<(), String> {
@@ -4060,6 +4165,15 @@ impl Daemon {
     ///
     /// This preserves the default single-session flow: a user who never opens
     /// the session UI still gets a session created on their first message.
+    /// Advance the session-intent generation. Called by every path that
+    /// establishes a new cockpit focus (New Session, session switch) so a
+    /// fresh-session create that captured an earlier generation is retired
+    /// (TASK-43, finding 1).
+    fn bump_session_intent(&self) {
+        self.session_intent_generation
+            .update(|generation| *generation = generation.wrapping_add(1));
+    }
+
     pub fn new_session(&self) {
         self.turns.set(Vec::new());
         self.streaming.set(false);
@@ -4073,6 +4187,11 @@ impl Daemon {
         self.active_decision_token.set(None);
         self.session_id.set(None);
         clear_persisted_session();
+        // A New Session is a fresh cockpit intent. Bump the intent generation so
+        // a still-in-flight fresh-session create — even one that also left the
+        // active session `None` — is retired and cannot adopt over this intent
+        // (TASK-43, finding 1).
+        self.bump_session_intent();
         self.awaiting_session_adoption.set(false);
         self.session_title.set(String::new());
         self.status.set("new session".into());
@@ -4632,6 +4751,57 @@ fn admit_turn_terminal(active_turn_id: Option<&str>, event_turn_id: &str) -> Ter
     match active_turn_id {
         Some(active) if active == event_turn_id => TerminalAdmission::ClearLive,
         _ => TerminalAdmission::KeepLive,
+    }
+}
+
+// ── TASK-43: fresh-session bootstrap admission ────────────────────────────────
+//
+// `dispatch_prompt` creates a session lazily when `session_id` is `None`. Two
+// hazards live in the gap between the create POST leaving and its response
+// landing (findings 1 + 5): the user may switch sessions or start a second New
+// Session while the POST is in flight — a stale response must not yank the
+// cockpit, dispatch its prompt, or clobber status — and, because the event
+// endpoint is a live tail with no replay, the first turn must not be POSTed until
+// both live streams are actually being observed. Both are gated by binding the
+// create to the session-INTENT generation captured when the prompt was
+// submitted; a New Session or switch bumps that generation (see
+// `bump_session_intent`), so even the New-Session case — which also leaves the
+// active session `None` — is caught by the generation alone.
+
+/// Whether a completed fresh-session create (or its post-readiness first-turn
+/// dispatch) may still act on the cockpit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CreateAdmission {
+    /// The captured intent is still current and focus matches the caller's
+    /// expectation — install the created session / dispatch its first turn.
+    Adopt,
+    /// A newer intent (a switch or a second New Session) superseded this create.
+    /// The caller may refresh the session list, but must change no focus,
+    /// dispatch no prompt, and clobber no status.
+    Reject,
+}
+
+/// Pure admission for the fresh-session bootstrap (TASK-43, findings 1 + 5).
+///
+/// `launch_generation` is the session-intent generation captured at submit;
+/// `current_generation` is the surface's intent generation now. `expected_session`
+/// is the focus the caller requires: `None` before the created id is installed
+/// (phase 1, immediately after the create POST returns), `Some(id)` after install
+/// and stream readiness (phase 2, immediately before the first turn POST).
+/// Adoption requires BOTH an unchanged generation AND a matching focus, so a
+/// second New Session (generation bumped, focus back to `None`) is rejected in
+/// phase 1 and a focus/intent move during the stream handshake is rejected in
+/// phase 2.
+fn admit_create_intent(
+    launch_generation: u64,
+    current_generation: u64,
+    expected_session: Option<&str>,
+    current_session: Option<&str>,
+) -> CreateAdmission {
+    if launch_generation == current_generation && current_session == expected_session {
+        CreateAdmission::Adopt
+    } else {
+        CreateAdmission::Reject
     }
 }
 
@@ -6857,6 +7027,154 @@ mod tests {
         assert_eq!(
             admit_turn_terminal(None, "turn-1"),
             TerminalAdmission::KeepLive
+        );
+    }
+
+    // ── TASK-43: fresh-session bootstrap admission + two-stream handshake ──────
+    //
+    // Seven regressions for the create path (verdict TASK A). The admission logic
+    // is a pure decider (`admit_create_intent`); the two-stream handshake gate is
+    // `planner_streams_ready` over the readiness markers. Both are exercised off
+    // the browser, mirroring the other daemon-client deciders.
+
+    fn open_marker(session_id: &str, generation: u64) -> (String, u64) {
+        (session_id.to_string(), generation)
+    }
+
+    // 1. Switch during create: a session switch bumped the intent generation AND
+    // moved focus to another session. The late create response is rejected — no
+    // focus change, no dispatch.
+    #[test]
+    fn switch_during_create_rejects_late_response() {
+        // launch captured intent 5; a switch to "session-b" advanced it to 6.
+        assert_eq!(
+            admit_create_intent(5, 6, None, Some("session-b")),
+            CreateAdmission::Reject
+        );
+    }
+
+    // 2. New Session during create: a second New Session bumped the intent
+    // generation but left the active session `None`. The generation alone must
+    // catch this — the `None` focus check would pass. Load-bearing case.
+    #[test]
+    fn new_session_during_create_rejects_on_generation_alone() {
+        assert_eq!(
+            admit_create_intent(5, 6, None, None),
+            CreateAdmission::Reject
+        );
+        // Sanity: with the generation unchanged, the same `None`/`None` focus is
+        // admitted — proving it is the generation, not the focus, doing the work.
+        assert_eq!(
+            admit_create_intent(5, 5, None, None),
+            CreateAdmission::Adopt
+        );
+    }
+
+    // 3. Agent stream not ready blocks dispatch: permission tail is OPEN but the
+    // agent tail has no marker, so the handshake gate is not satisfied.
+    #[test]
+    fn agent_stream_not_ready_blocks_dispatch() {
+        let permission = open_marker("session-a", 7);
+        assert!(!planner_streams_ready(
+            "session-a",
+            7,
+            None,
+            Some(&permission)
+        ));
+    }
+
+    // 4. Permission stream not ready blocks dispatch: agent tail is OPEN but the
+    // permission tail has no marker.
+    #[test]
+    fn permission_stream_not_ready_blocks_dispatch() {
+        let agent = open_marker("session-a", 7);
+        assert!(!planner_streams_ready("session-a", 7, Some(&agent), None));
+    }
+
+    // 5. Both ready dispatches: both markers OPEN for the exact session+generation
+    // AND the create intent still owns the cockpit → the first turn is dispatched.
+    #[test]
+    fn both_streams_ready_admits_first_turn() {
+        let agent = open_marker("session-a", 7);
+        let permission = open_marker("session-a", 7);
+        assert!(planner_streams_ready(
+            "session-a",
+            7,
+            Some(&agent),
+            Some(&permission)
+        ));
+        assert_eq!(
+            admit_create_intent(5, 5, Some("session-a"), Some("session-a")),
+            CreateAdmission::Adopt
+        );
+    }
+
+    // 6. Stale generation after readiness does not dispatch: the streams opened,
+    // but a newer intent (New Session / switch) settled before the first turn
+    // POST. Focus still points at the created session, yet the generation moved —
+    // phase-2 admission rejects, so no turn is sent.
+    #[test]
+    fn stale_generation_after_readiness_does_not_dispatch() {
+        let agent = open_marker("session-a", 7);
+        let permission = open_marker("session-a", 7);
+        assert!(planner_streams_ready(
+            "session-a",
+            7,
+            Some(&agent),
+            Some(&permission)
+        ));
+        assert_eq!(
+            admit_create_intent(5, 6, Some("session-a"), Some("session-a")),
+            CreateAdmission::Reject
+        );
+    }
+
+    // 7. Timeout leaves a visible failure and sends no turn: the streams never
+    // both opened (agent marker absent), so the handshake gate never admits a
+    // dispatch. While the created session is still focused, the failure IS
+    // surfaced (phase-2 admission Adopt gates the status write); if a newer intent
+    // took over, the failure is swallowed rather than clobbering its status.
+    #[test]
+    fn timeout_surfaces_failure_and_sends_no_turn() {
+        let permission = open_marker("session-a", 7);
+        // Handshake never completed → no dispatch path is ever taken.
+        assert!(!planner_streams_ready(
+            "session-a",
+            7,
+            None,
+            Some(&permission)
+        ));
+        // Still focused on the created session → surface the timeout failure.
+        assert_eq!(
+            admit_create_intent(5, 5, Some("session-a"), Some("session-a")),
+            CreateAdmission::Adopt
+        );
+        // A newer intent settled during the timeout → do not clobber its status.
+        assert_eq!(
+            admit_create_intent(5, 6, Some("session-a"), Some("session-a")),
+            CreateAdmission::Reject
+        );
+    }
+
+    // New Session and session switch must each advance the intent generation —
+    // the mechanism tests 1, 2, and 6 rely on. `new_session` leaves the active
+    // session `None`; both bump the generation. `connect()` early-returns on a
+    // `None` session, so `new_session` is safe to drive off the browser here.
+    #[test]
+    fn focus_changes_bump_session_intent_generation() {
+        let daemon = Daemon::dummy();
+        let before = daemon.session_intent_generation.get_untracked();
+        daemon.new_session();
+        let after_new = daemon.session_intent_generation.get_untracked();
+        assert_eq!(after_new, before.wrapping_add(1));
+        assert!(daemon.session_id.get_untracked().is_none());
+
+        daemon.select_session_state("session-x", "X".into());
+        let after_switch = daemon.session_intent_generation.get_untracked();
+        assert_eq!(after_switch, after_new.wrapping_add(1));
+        assert_eq!(
+            daemon.session_id.get_untracked().as_deref(),
+            Some("session-x")
         );
     }
 
