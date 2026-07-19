@@ -2060,3 +2060,11 @@ area:      [research]
 
 pi-code-health verification complete (fable research sub, read-only, ocean-os). Verdict: all five commits on origin/restore/pi-code-health-pre-rebase (tip ad9f6a27) are LANDED-EQUIVALENT on origin/main — byte-bound replay constants/structs verbatim, session and system-prompt module extractions present and evolved further, docs_check.rs byte-identical, ops-hardening guards present. The +24,980/-81,105 two-way diff reflects main being ~81k lines ahead, not branch-only deletions. Recommendation: drop the restore branch; zero rescue work. Deletion HELD for smaths sign-off per the destructive-ops shape; tip SHA recorded here for recovery.
 _________________________________________________________________________________
+time:      [07:20] [19-07-26]
+agent:     [claude] [fable 5]
+worktree:  task22-live-activity-freeze-v1
+type:      [merge]
+area:      [frontend]
+
+Landed TASK-22 (truthful transcript live-activity row) as 47f5a1d on main. Ocean built it in a persistent worktree through three review rounds: round 1 rejected (zero tests, non-reactive spinner), round 2 closed the test gap (20 reducer/mapper tests) but defended the spinner with a false Leptos model — overruled with the component-runs-once mechanism and an exact fix; round 3 applied the deduped-Memo dynamic-child fix and voluntarily added 9 more matrix-gap tests. Final diff bde02c3a: pure reduce_live_activity + describe_tool allowlist, SoundingsThinking WebGL chain deleted per the freeze v2.2 amendment, ocean-status-row removed, 29 new tests. I re-ran every gate myself (507 unit + 2 integration, fmt, wasm check, worktree-local trunk build) and pushed. Interactive browser+Tauri smoke rides the next live session and the rail's promote of 47f5a1d; noted as a post-merge check, not skipped silently.
+_________________________________________________________________________________
