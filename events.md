@@ -2108,3 +2108,11 @@ area:      [infra]
 
 Landed TASK-39 (macOS bundle + ocean:// deep-link registration) as 3fd73a0 on main. Fable builder sub, config-only diff: bundle.active true with app+dmg targets, existing dev.ocean.surface identifier, standard icon set, DeveloperTool category, 10.15 minimum. Acceptance evidence verified from the artifact itself: the built debug Ocean.app Info.plist carries CFBundleURLTypes with CFBundleURLSchemes ["ocean"] under dev.ocean.surface — LaunchServices registration is now possible. Dev-mode unaffected (bundle only engages on tauri build; the deploy rail never runs it). ocean-tauri check + 27 tests green post-rebase. MANUAL SMOKE REMAINING: cold-launch the packaged app and fire ocean://session/<id> against the running instance — not exercised headlessly to avoid spawning a second GUI instance on the active desktop. I pushed.
 _________________________________________________________________________________
+time:      [11:15] [19-07-26]
+agent:     [claude] [fable 5]
+worktree:  fix/task36-voice-transport
+type:      [merge]
+area:      [frontend]
+
+Landed TASK-36 (daemon-direct voice transport, CRITICAL) as 240c0e7 on main. Fable builder sub, reviewed from the committed diff: new pure voice/transport.rs — voice_transport_url routes web (empty Daemon::url) through the same-origin /api/* proxy adapter and Tauri/extension daemon-direct to /v1/voice/{stt,tts}; voice_ready_decision makes readiness host-neutral (proxy has_auth on web, offered-by-default where no proxy answers, missing credential surfaces per request); content-type + status validators gate both TTS playback and STT decode so HTML/SPA fallback bytes can never reach play_mp3. Verified against the proxy source that /api/stt already forwards to the daemon voice route — the web path claim is fact, not assumption. TASK-33 capture admission preserved through the transport swap. 10 transport tests; 548 crate tests + wasm + fmt + proxy check green after rebase over 34/37/38/39. I pushed. Voice now works on all three hosts in principle — live Tauri/extension mic smoke rides the next native session. TASK-35 (dictate textarea + affordance cleanup) is now unblocked.
+_________________________________________________________________________________
