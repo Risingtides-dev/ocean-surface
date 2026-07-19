@@ -2008,3 +2008,11 @@ area:      [frontend]
 
 Landed TASK-27 (session-bound workspace preview lifecycle, the high-priority context-integrity fix) as 1f953cd on main. Built by a fable subagent, reviewed by me: preview_generation + preview_session signals bind every async file read to the {session, browsable-root} it was issued under; the cwd-follow effect now subscribes to session identity too and on either change synchronously bumps the generation, wipes preview cache/loading/error/context-menu, and drops Preview tabs via a pure clear_preview_tabs helper that lands focus on a safe persistent tab. Stale completions from retired generations are discarded before touching state; stable session+root refreshes provably do not clear (regression test). Three pure deciders, seven unit tests, 472 crate tests + wasm check green after rebase over TASK-30/31. I pushed.
 _________________________________________________________________________________
+time:      [05:25] [19-07-26]
+agent:     [claude] [fable 5]
+worktree:  fix/task29-text-overflow
+type:      [merge]
+area:      [frontend]
+
+Landed TASK-29 (sidebar text overflow semantics, findings 3+8) as 4324d92 on main. Fable subagent build, my review: both rooms.rs roster render sites wrap the participant name in a .rooms-chip__name span (the only shrinkable/ellipsizing chip child; kind pinned nonshrinking), and .sessions-item__path is now flex 0 1 auto with min-width 0, 160px cap, and ellipsis so long repo tails stop crowding the title. Boundary held: control-size region 98-114 and workspace.css untouched. Source-scan regression test with runtime-built needles. Clean rebase over TASK-30's panels.css changes, 473 tests + wasm check green, I pushed. Correction: the previous TASK-27 entry is stamped 05:26 but the clock read 05:22 at write time; entry stands as pushed, drift disclosed here.
+_________________________________________________________________________________
