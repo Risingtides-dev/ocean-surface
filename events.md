@@ -2068,3 +2068,11 @@ area:      [frontend]
 
 Landed TASK-22 (truthful transcript live-activity row) as 47f5a1d on main. Ocean built it in a persistent worktree through three review rounds: round 1 rejected (zero tests, non-reactive spinner), round 2 closed the test gap (20 reducer/mapper tests) but defended the spinner with a false Leptos model — overruled with the component-runs-once mechanism and an exact fix; round 3 applied the deduped-Memo dynamic-child fix and voluntarily added 9 more matrix-gap tests. Final diff bde02c3a: pure reduce_live_activity + describe_tool allowlist, SoundingsThinking WebGL chain deleted per the freeze v2.2 amendment, ocean-status-row removed, 29 new tests. I re-ran every gate myself (507 unit + 2 integration, fmt, wasm check, worktree-local trunk build) and pushed. Interactive browser+Tauri smoke rides the next live session and the rail's promote of 47f5a1d; noted as a post-merge check, not skipped silently.
 _________________________________________________________________________________
+time:      [10:43] [19-07-26]
+agent:     [claude] [fable 5]
+worktree:  fix/task34-slash-menu
+type:      [merge]
+area:      [frontend]
+
+Landed TASK-34 (slash-menu single projection) as b07fa97 on main. Fable builder sub, my review: project_rows now produces the one grouped-and-flattened row order whose index space is shared by render, ArrowUp/Down movement, clamping, and Enter/Tab dispatch — keyboard order can no longer diverge from visual order because there is no second vector to diverge from. Group headers styled via the class actually emitted; both dead CSS rules removed with a source assertion guarding the pairing. 13 new slash_menu tests including dispatch-identity across a group boundary; 517 crate tests + wasm check + fmt green. I pushed. Wave-3 remaining: 33/37 building, 32 in flight (ocean), 35/36/38/39 queued.
+_________________________________________________________________________________
