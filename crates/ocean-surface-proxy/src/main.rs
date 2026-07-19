@@ -215,7 +215,19 @@ async fn main() -> anyhow::Result<()> {
         observer_token_path,
     });
 
-    let app = Router::new()
+    let app = build_app(state, &dist);
+
+    tracing::info!(?bind, dist = %dist.display(), "ocean-surface-proxy listening");
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+/// The full production router. Extracted from `main` so tests can exercise the
+/// REAL route table (a synthetic router that registers routes inside the test
+/// proves nothing — deleting a production route would leave it green).
+fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
+    Router::new()
         .route("/health", get(health))
         .route("/api/config", get(config))
         .route("/api/stt", post(stt))
@@ -363,12 +375,7 @@ async fn main() -> anyhow::Result<()> {
         ))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
-        .with_state(state);
-
-    tracing::info!(?bind, dist = %dist.display(), "ocean-surface-proxy listening");
-    let listener = tokio::net::TcpListener::bind(bind).await?;
-    axum::serve(listener, app).await?;
-    Ok(())
+        .with_state(state)
 }
 
 /// Static resources required to boot the already-authenticated PWA document.
@@ -1406,7 +1413,7 @@ async fn tts(
 #[cfg(test)]
 mod tests {
     use super::{
-        basic_auth_gate, config_payload, is_hashed_asset, livekit_token_daemon_path,
+        basic_auth_gate, build_app, config_payload, is_hashed_asset, livekit_token_daemon_path,
         percent_encode_path_segment, read_observer_token, sse_no_buffer_headers, wasm_headers,
         AppState, CALL_PLACE_DAEMON_PATH, WASM_CACHE_CONTROL,
     };
@@ -1759,18 +1766,31 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    /// GET /v1/permissions must NOT fall through to ServeDir → 404. Prove the
-    /// route is registered by building a minimal router and verifying a GET
-    /// returns something other than the fallback 404.
+    /// GET /v1/permissions must NOT fall through to ServeDir → 404 — proven
+    /// against the PRODUCTION router (`build_app`), not a synthetic one:
+    /// deleting the real route flips this test's 502 into the fallback 404.
+    /// The mock daemon URL points at a closed port, so reaching the forward
+    /// handler yields BAD_GATEWAY — distinct from both the fallback and a
+    /// working daemon, which is exactly the routing proof.
     #[tokio::test]
-    async fn permissions_snapshot_route_does_not_fall_through() {
-        use axum::routing::get;
+    async fn permissions_snapshot_routes_through_production_router() {
+        let dist = tempfile::tempdir().expect("tempdir");
+        let state = Arc::new(AppState {
+            http: reqwest::Client::new(),
+            voice_profile: "leo".to_string(),
+            // Closed port: instant connection refusal, never a real daemon.
+            daemon_url: "http://127.0.0.1:9".to_string(),
+            default_livekit_room_id: "project:surface-test".to_string(),
+            tldraw_sync_uri: None,
+            maps_key: None,
+            maps_map_id: "DEMO_MAP_ID".to_string(),
+            basic_auth: None,
+            observer_token_path: PathBuf::from("/not-used"),
+        });
+        let app = build_app(state, dist.path());
 
-        let app = Router::new()
-            .route("/v1/permissions", get(|| async { "ok" }))
-            .fallback(get(|| async { StatusCode::NOT_FOUND }));
-
-        // Should match the route, not the fallback.
+        // The production route must catch the path: handler reached → 502
+        // (daemon unreachable), NOT the ServeDir fallback's 404.
         let resp = app
             .clone()
             .oneshot(
@@ -1782,14 +1802,15 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
 
-        // A sibling path with extra segment should fall through.
+        // An unregistered sibling path proves the fallback is still 404, so
+        // the assertion above genuinely distinguishes routed from fallthrough.
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/v1/permissions/anything")
+                    .uri("/v1/permissions-nonexistent")
                     .body(Body::empty())
                     .unwrap(),
             )
