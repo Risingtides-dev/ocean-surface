@@ -267,8 +267,12 @@
     font-size: 0;
   }
 
+  /* iOS Safari auto-zooms focused form controls whose computed text size is
+     below 16px, then leaves the transcript/composer viewport enlarged. Keep
+     the mobile composer readable without disabling user pinch zoom. */
   .ocean-surface .ocean-composer__input {
     min-width: 0;
+    font-size: 16px;
   }
 
   .ocean-surface .ocean-composer__halt,
@@ -283,6 +287,18 @@
   .ocean-surface table {
     max-width: 100%;
     overflow-x: auto;
+  }
+}
+
+/* ── Touch-device focus stability ────────────────────────────────────
+   iOS Safari auto-zooms the viewport when a focused control's computed
+   font-size is below 16px, which makes engaging the prompt input lurch
+   instead of feeling native. Touch devices therefore get a 16px floor on
+   the composer input; width is irrelevant (iPads zoom too), so this keys
+   on pointer coarseness, not the compact breakpoint. */
+@media (pointer: coarse) {
+  .ocean-surface .ocean-composer__input {
+    font-size: 16px;
   }
 }
 
