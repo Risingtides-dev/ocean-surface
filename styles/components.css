@@ -148,23 +148,9 @@
   text-align: center;
 }
 
-.ocean-map__panel {
-  position: absolute;
-  top: 10px;
-  bottom: 10px;
-  left: 10px;
-  width: 300px;
-  max-width: min(60%, 360px);
-  overflow: auto;
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-}
-
 /* Places UI Kit theming — keep property names; map values to the new palette. */
 gmp-place-details,
-gmp-place-search,
-.ocean-map__panel gmp-place-search {
+gmp-place-search {
   --gmp-mat-color-surface: #141414;
   --gmp-mat-color-on-surface: #FAFCFF;
   --gmp-mat-color-on-surface-variant: #909098;

@@ -125,9 +125,14 @@ pub fn render(src: &str) -> String {
         "<a href=\"",
         "<a target=\"_blank\" rel=\"noopener noreferrer\" href=\"",
     );
+    // Revert the injection on sanitised (empty-href) links so dead links stay
+    // inert. Match through the empty `href=""` but NOT the character after it,
+    // so a sanitised-unsafe link that carried a `title` (rendered
+    // `<a … href="" title="…">`) is reverted too — matching the trailing `">`
+    // would miss it and leave the injected target/rel on the inert link.
     out = out.replace(
-        "<a target=\"_blank\" rel=\"noopener noreferrer\" href=\"\">",
-        "<a href=\"\">",
+        "<a target=\"_blank\" rel=\"noopener noreferrer\" href=\"\"",
+        "<a href=\"\"",
     );
     out
 }
@@ -238,6 +243,46 @@ mod tests {
                 "link text should remain visible for {source:?}: {html}"
             );
         }
+    }
+
+    #[test]
+    fn sanitised_link_with_title_drops_injected_target_rel() {
+        // A sanitised-unsafe link that carried a title renders as
+        // `<a … href="" title="…">`, so the empty href is NOT immediately
+        // followed by `>`. The revert must still strip the injected target/rel
+        // from it — otherwise an inert dead link keeps target="_blank".
+        let html = render(r#"[x](javascript:alert(1) "t")"#);
+
+        assert!(
+            !html.contains("target=\"_blank\""),
+            "a sanitised (empty-href) link with a title must not keep the \
+             injected target attribute: {html}"
+        );
+        assert!(
+            !html.contains("rel=\"noopener"),
+            "a sanitised (empty-href) link with a title must not keep the \
+             injected rel attribute: {html}"
+        );
+        assert!(
+            html.contains("<a href=\"\" title=\"t\">x</a>"),
+            "the sanitised titled link should revert to a plain inert anchor \
+             preserving its title and text: {html}"
+        );
+    }
+
+    #[test]
+    fn external_link_keeps_target_rel_after_titled_revert() {
+        // The broadened revert must not strip target/rel from a legitimate
+        // external link that happens to carry a title.
+        let html = render(r#"[x](https://example.com "t")"#);
+
+        assert!(
+            html.contains(
+                "<a target=\"_blank\" rel=\"noopener noreferrer\" \
+                 href=\"https://example.com\" title=\"t\">x</a>"
+            ),
+            "a safe external link with a title must keep target/rel: {html}"
+        );
     }
 
     #[test]

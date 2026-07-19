@@ -232,6 +232,11 @@
   color: var(--fg-3);
 }
 .ocean-council-tally__name {
+  /* Grid items default to min-width:auto, which refuses to shrink below the
+     name's content size — a long unbroken name would expand the 1fr track and
+     shove the 90px/auto columns off-row instead of ellipsizing. min-width:0
+     lets the track shrink so overflow/ellipsis actually engages. */
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
