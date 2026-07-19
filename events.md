@@ -2154,3 +2154,11 @@ area:      [frontend]
 
 Landed TASK-45 (TurnFinished terminal admission — wave-4 task C) as 47cff2a on main. Fable builder sub, my review: pure admit_turn_terminal decider (ClearLive on exact active-id match, KeepLive for stale/no-active finishes) applied at the TurnFinished arm; stale finishes retain their turn-scoped transcript/status/token/tool-sweep effects but can no longer blank another turn's Stop target or steal its header status. Reducer-level test harness with all four contract scenarios plus decider unit test. 596 tests + wasm + fmt green. I pushed. TASK-44 (atomic switch/reconnect reconciliation, the user-evidenced cluster) is next in the serial daemon.rs queue — dispatching now.
 _________________________________________________________________________________
+time:      [14:06] [19-07-26]
+agent:     [claude] [fable 5]
+worktree:  fix/task41-mobile-composer
+type:      [merge]
+area:      [frontend]
+
+Landed TASK-41 (mobile composer stability) as a7b984e on main, completing the iOS fix the owner lane started with 98c8a59. Fable builder sub: 16px anti-zoom floors for all eight touch-focused fields, each co-located in its own stylesheet under pointer:coarse for cascade correctness (composer, island search/recall, sessions-create, rooms inputs, palette); six island popover max-height clamps migrated 100vh -> 100dvh with fallbacks so dropdowns clamp to the keyboard-open viewport; interactive-widget=resizes-content added to the viewport meta (bundle-verified); safe-area audited — shell already correct, one gap noted out-of-scope in the float embed. Three regression tests in a new mobile_composer_regressions.rs. Process disclosure: my landing chain used a semicolon before the push so a test failure observed at push time did not block — investigation showed the failure came from the sub'\''s concurrent uncommitted edits in the same lane, and the pushed commit verifies green in clean isolation; the gate habit is corrected (strict && chains) and lanes are now closed to further edits once review starts. Deferred fields and the float-embed safe-area gap recorded for a future hygiene slice.
+_________________________________________________________________________________
