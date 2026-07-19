@@ -2116,3 +2116,11 @@ area:      [frontend]
 
 Landed TASK-36 (daemon-direct voice transport, CRITICAL) as 240c0e7 on main. Fable builder sub, reviewed from the committed diff: new pure voice/transport.rs — voice_transport_url routes web (empty Daemon::url) through the same-origin /api/* proxy adapter and Tauri/extension daemon-direct to /v1/voice/{stt,tts}; voice_ready_decision makes readiness host-neutral (proxy has_auth on web, offered-by-default where no proxy answers, missing credential surfaces per request); content-type + status validators gate both TTS playback and STT decode so HTML/SPA fallback bytes can never reach play_mp3. Verified against the proxy source that /api/stt already forwards to the daemon voice route — the web path claim is fact, not assumption. TASK-33 capture admission preserved through the transport swap. 10 transport tests; 548 crate tests + wasm + fmt + proxy check green after rebase over 34/37/38/39. I pushed. Voice now works on all three hosts in principle — live Tauri/extension mic smoke rides the next native session. TASK-35 (dictate textarea + affordance cleanup) is now unblocked.
 _________________________________________________________________________________
+time:      [11:28] [19-07-26]
+agent:     [claude] [fable 5]
+worktree:  fix/task35-dictate-cleanup
+type:      [merge]
+area:      [frontend]
+
+Landed TASK-35 (dictate textarea growth + voice affordance cleanup) as b8dcf20 on main — the final composer-voice verdict slice. Fable builder sub, reviewed from the committed diff: dictated text now sizes the textarea via a rAF-deferred fit after prop:value reconciliation with UTF-16-aware caret-to-end, reusing the existing bounded grow/clamp/reset logic; pure append_dictation extracted (whitespace-aware joining preserves newlines) with tests; voice trigger and live chip get vertical-only coarse-pointer hit extensions (siblings are 2px apart horizontally — all-sides insets would overlap, correctly avoided); duplicate dot span removed in favor of the single ::before source; inert is-voicechat modifier dropped. 556 crate tests + wasm + fmt green. I pushed. Wave-3 fable-sub slate complete: 33/34/35/36/37/38/39 all landed; only ocean's TASK-32 remains in flight.
+_________________________________________________________________________________
