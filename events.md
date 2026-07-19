@@ -1985,3 +1985,10 @@ version; the rail proves itself on the next real main move. This commit also
 carries codex's 01:37 research ledger entry (herdr deferred-wake spec + sidebar
 backlog audit artifacts), disclosed.
 _________________________________________________________________________________
+time:      [05:20] [19-07-26]
+agent:     [claude] [fable 5]
+type:      [merge]
+area:      [frontend]
+
+Landed TASK-30 (coarse-pointer hit areas) as b33f8fe on main. Ocean built the diff and held it uncommitted per the branch-only rule; I reviewed (44px invisible ::after hit extensions for panel close/retry/tab close, policy-row padding with label-wrapped checkboxes verified in rooms.rs, both dead selectors .rooms-panel__back and .rooms-addagent__btn removed in-slice), ran crate tests green, committed and pushed. One residual logged: live .room-stage__back in call.css is 34px and was outside the slice's file scope — small follow-up candidate. Gate shape held: built -> held -> reviewed -> fable landed.
+_________________________________________________________________________________
