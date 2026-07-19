@@ -20,9 +20,9 @@ use serde::Serialize;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
-use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
-use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_deep_link::DeepLinkExt;
+use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 /// One surfaced filesystem change, serialized to the webview as `path-changed`.
 ///
@@ -78,11 +78,9 @@ async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
     // runs on the app's main thread); bridge into the async command with a
     // oneshot so the caller can `.await` the result.
     let (tx, rx) = tokio::sync::oneshot::channel();
-    app.dialog()
-        .file()
-        .pick_folder(move |folder| {
-            let _ = tx.send(folder);
-        });
+    app.dialog().file().pick_folder(move |folder| {
+        let _ = tx.send(folder);
+    });
     let folder = rx
         .await
         .map_err(|_| "folder picker channel closed".to_string())?;
@@ -584,11 +582,7 @@ fn ui_ready(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
 /// The command is unavailable in ordinary launches even though it remains in
 /// the static invoke table, preventing product code from using test authority.
 #[tauri::command]
-fn ui_debug_resize(
-    window: tauri::WebviewWindow,
-    width: f64,
-    height: f64,
-) -> Result<(), String> {
+fn ui_debug_resize(window: tauri::WebviewWindow, width: f64, height: f64) -> Result<(), String> {
     if std::env::var_os("OCEAN_UI_DEBUG_SCRIPT").is_none() {
         return Err("UI diagnostics are not enabled".into());
     }
@@ -924,9 +918,7 @@ async fn daemon_start(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<DaemonStatusDto, String> {
-    state
-        .daemon
-        .start(&resolve_daemon_bin(bin.as_deref()))?;
+    state.daemon.start(&resolve_daemon_bin(bin.as_deref()))?;
     let snap = state.daemon.snapshot();
     let _ = app.emit("daemon-status", snap.clone());
     Ok(snap)
@@ -935,7 +927,10 @@ async fn daemon_start(
 /// Stop the daemon the shell owns (never an external one). Emits a final
 /// `daemon-status` event.
 #[tauri::command]
-async fn daemon_stop(state: State<'_, AppState>, app: AppHandle) -> Result<DaemonStatusDto, String> {
+async fn daemon_stop(
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<DaemonStatusDto, String> {
     state.daemon.stop();
     let snap = state.daemon.snapshot();
     let _ = app.emit("daemon-status", snap.clone());
@@ -950,9 +945,7 @@ async fn daemon_restart(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<DaemonStatusDto, String> {
-    state
-        .daemon
-        .restart(&resolve_daemon_bin(bin.as_deref()))?;
+    state.daemon.restart(&resolve_daemon_bin(bin.as_deref()))?;
     let snap = state.daemon.snapshot();
     let _ = app.emit("daemon-status", snap.clone());
     Ok(snap)
@@ -1150,8 +1143,7 @@ mod tests {
     #[test]
     fn repo_state_outside_repo_returns_none() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let result = repo_state(dir.path().to_string_lossy().into_owned())
-            .expect("should not err");
+        let result = repo_state(dir.path().to_string_lossy().into_owned()).expect("should not err");
         assert!(result.is_none());
     }
     // ── daemon supervision: pure logic ───────────────────────────────────
@@ -1228,20 +1220,32 @@ mod tests {
         // Reachable is Running regardless of child ownership (pid distinguishes
         // our-child vs external-daemon at the DTO layer, not here).
         assert_eq!(decide_daemon_state(true, true, false), DaemonState::Running);
-        assert_eq!(decide_daemon_state(true, false, false), DaemonState::Running);
+        assert_eq!(
+            decide_daemon_state(true, false, false),
+            DaemonState::Running
+        );
         assert_eq!(decide_daemon_state(true, true, true), DaemonState::Running);
     }
 
     #[test]
     fn decide_state_starting_when_child_alive_but_port_not_up() {
-        assert_eq!(decide_daemon_state(false, true, false), DaemonState::Starting);
-        assert_eq!(decide_daemon_state(false, true, true), DaemonState::Starting);
+        assert_eq!(
+            decide_daemon_state(false, true, false),
+            DaemonState::Starting
+        );
+        assert_eq!(
+            decide_daemon_state(false, true, true),
+            DaemonState::Starting
+        );
     }
 
     #[test]
     fn decide_state_stopped_vs_unreachable_uses_reachable_ever() {
         // Never reached + nothing serving + no child → Stopped.
-        assert_eq!(decide_daemon_state(false, false, false), DaemonState::Stopped);
+        assert_eq!(
+            decide_daemon_state(false, false, false),
+            DaemonState::Stopped
+        );
         // Previously reached + now gone + no child → Unreachable (external daemon stopped).
         assert_eq!(
             decide_daemon_state(false, false, true),
@@ -1603,12 +1607,22 @@ pub fn run() {
                 true,
                 None::<&str>,
             )?;
-            let cmd_sessions =
-                MenuItem::with_id(app, "toggle-sessions", "Toggle Sessions", true, None::<&str>)?;
+            let cmd_sessions = MenuItem::with_id(
+                app,
+                "toggle-sessions",
+                "Toggle Sessions",
+                true,
+                None::<&str>,
+            )?;
             let cmd_rooms =
                 MenuItem::with_id(app, "toggle-rooms", "Toggle Rooms", true, None::<&str>)?;
-            let cmd_council =
-                MenuItem::with_id(app, "open-council", "Open Council Stage", true, None::<&str>)?;
+            let cmd_council = MenuItem::with_id(
+                app,
+                "open-council",
+                "Open Council Stage",
+                true,
+                None::<&str>,
+            )?;
             let cmd_workspace = MenuItem::with_id(
                 app,
                 "workspace-toggle",
@@ -1648,9 +1662,7 @@ pub fn run() {
             // stays the always-available fallback.
             let summon = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Space);
             if let Err(e) = app.global_shortcut().register(summon) {
-                eprintln!(
-                    "[ocean-tauri] could not register Cmd+Shift+Space global shortcut: {e}"
-                );
+                eprintln!("[ocean-tauri] could not register Cmd+Shift+Space global shortcut: {e}");
             }
             Ok(())
         })
