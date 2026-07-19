@@ -379,23 +379,37 @@
   transition: box-shadow 1.2s ease-out, border-color 1.2s ease-out;
 }
 
-/* Status row — tide coin + label while the assistant is working.
-   Appears above the streaming turn body per edgelight.js spec. */
-.ocean-status-row {
+/* Live activity row — one pure reducer-driven row at transcript tail,
+   outside the turn For loop. Shares the transcript rail, flush left,
+   no card chrome. Non-wrapping, ellipsized at narrow widths. */
+.live-activity-row {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 0 2px;
-  margin-bottom: 4px;
+  min-height: 24px;
+  align-self: flex-start;
+  width: min(74ch, 100%);
   font-family: var(--font);
-  font-size: 11px;
-  font-weight: 500;
+  font-size: 12px;
   color: var(--fg-3);
 }
 
-.ocean-status-row .wave-badge {
+.live-activity-row .wave-badge {
   font-size: 20px;
   flex-shrink: 0;
+}
+
+.live-activity-row__label {
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-activity-row .wave-badge canvas {
+    animation: none;
+  }
 }
 
 /* Prose sits FLUSH inside the one reply card — no nested per-message bubbles
@@ -880,15 +894,6 @@
 
 /* ── Soundings hero + thinking plate ─────────────────────────────────
    Geometry/motion live in Rust WebGL (loader.rs); colors arrive as shader
-   uniforms read from the tokens above. The thinking plate keeps a quiet
-   framed slot in the pending gap. */
-.soundings-thinking {
-  display: flex;
-  align-self: flex-start;
-  padding: 6px 0 12px;
-  margin-left: 14px;
-}
-
 /* ── Full-glass landing — the reveal's water floods the whole pane ────
    The scene svg overflows its centered box (water paths span far beyond
    the 600×600 viewBox); the landing clips it at the pane edges, reading

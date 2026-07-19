@@ -7,6 +7,10 @@
 //! live. Turns are keyed by index for stable DOM; within a turn the block
 //! list is rebuilt on each change (cheap for chat-sized content, and avoids
 //! stale snapshots that would freeze streaming text).
+//!
+//! LiveActivity — a pure reducer-driven row at transcript tail (outside the
+//! turn For loop) replaces the heavy SoundingsThinking WebGL plate and the
+//! per-assistant ocean-status-row. Contract: TASK-22 v1.1 freeze.
 
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
@@ -16,6 +20,156 @@ use crate::daemon::Daemon;
 use crate::icons::WaveBadge;
 use crate::markdown::render as render_md;
 use crate::model::{Block, Role, ToolStatus};
+
+/// A single live-activity descriptor from the reducer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveActivity {
+    /// No activity to report (not streaming).
+    Hidden,
+    /// Waiting for the operator to approve a permission request.
+    WaitingForApproval,
+    /// User turn submitted, daemon hasn't returned a first token yet.
+    GettingStarted,
+    /// The agent is reasoning (Thinking block).
+    Reasoning,
+    /// A tool is running — the descriptor comes from the allowlist mapper.
+    Tool(&'static str),
+    /// The agent is composing a text response.
+    Responding,
+    /// A tool completed or errored; next block hasn't arrived yet.
+    Working,
+}
+
+/// Tool-name → descriptor mapper.
+///
+/// Input: normalised lowercase tool name (ASCII, `-`/`.` → `_`). Falls back to
+/// `"Using a tool…"` for invalid or unknown names. Every output ≤ 40 Unicode scalars.
+fn describe_tool(name: &str) -> &'static str {
+    // Validate: 1..=96 ASCII bytes, every byte in the allowed set.
+    if name.is_empty()
+        || name.len() > 96
+        || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        return "Using a tool…";
+    }
+    match name {
+        "read" | "read_file" => "Reading a file…",
+        "ls" | "list_dir" => "Listing files…",
+        "grep" | "glob" | "find" | "search" | "dynamic_search" => "Searching files…",
+        "write" | "write_file" => "Writing a file…",
+        "edit" | "edit_file" | "hashline_edit" | "apply_patch" => "Editing a file…",
+        "bash" | "run_cmd" | "run_command" | "exec" => "Running a command…",
+        "web_search" => "Searching the web…",
+        "web_fetch" | "fetch" => "Reading a web page…",
+        "todo" => "Updating the plan…",
+        "component_render" | "component_unmount" | "surface_patch" => "Updating the interface…",
+        "component_wait" => "Waiting for input…",
+        "slack_canvas" => "Working with a Slack canvas…",
+        "subagent" => "Delegating a task…",
+        "browser_navigate" | "browser_open_tab" => "Opening a web page…",
+        "browser_click" => "Clicking in the browser…",
+        "browser_type" | "browser_key" => "Entering browser input…",
+        "browser_scroll" => "Scrolling the page…",
+        "browser_read_page" => "Reading the page…",
+        "browser_screenshot" => "Capturing the page…",
+        "browser_list_tabs" => "Listing open tabs…",
+        "browser_switch_tab" => "Switching tabs…",
+        "browser_close_tab" => "Closing a tab…",
+        _ if name.starts_with("browser_") => "Using the browser…",
+        _ if name.starts_with("mcp__") => "Using a connected service…",
+        _ if name.starts_with("offshore_") => "Coordinating remote work…",
+        _ => "Using a tool…",
+    }
+}
+
+/// Pure reducer: inspects ONLY the current tail turn to produce one LiveActivity.
+///
+/// Priority (first match wins):
+///   1. focused_permission → WaitingForApproval
+///   2. !streaming → Hidden
+///   3. tail is User (no assistant yet) → GettingStarted
+///   4. latest Running ToolCall → Tool(fixed descriptor)
+///   5. classify newest tail-assistant block → Reasoning / Responding / Working
+///   6. no block → GettingStarted
+fn reduce_live_activity(
+    turns: &[crate::model::Turn],
+    streaming: bool,
+    focused_permission: bool,
+) -> LiveActivity {
+    if focused_permission {
+        return LiveActivity::WaitingForApproval;
+    }
+    if !streaming {
+        return LiveActivity::Hidden;
+    }
+    let Some(tail) = turns.last() else {
+        return LiveActivity::Hidden;
+    };
+    match tail.role {
+        Role::User => return LiveActivity::GettingStarted,
+        Role::Assistant => {}
+    }
+    // Reverse-scan for newest Running ToolCall (priority 4).
+    for block in tail.blocks.iter().rev() {
+        if let Block::ToolCall {
+            name,
+            status: ToolStatus::Running,
+            ..
+        } = block
+        {
+            let normalized = name.to_lowercase().replace(['-', '.'], "_");
+            return LiveActivity::Tool(describe_tool(&normalized));
+        }
+    }
+    // Classify newest block by position (priority 5).
+    match tail.blocks.last() {
+        Some(Block::Thinking { .. }) => LiveActivity::Reasoning,
+        Some(Block::Text(_)) => LiveActivity::Responding,
+        Some(Block::ToolCall { .. }) | Some(Block::Component { .. }) => LiveActivity::Working,
+        None => LiveActivity::GettingStarted,
+    }
+}
+
+/// One live-activity row at transcript tail, outside the turn For loop.
+///
+/// Renders `role="status" aria-live="polite" aria-atomic="true"` with
+/// a WaveBadge + label. Non-wrapping, ellipsized, flush left on the
+/// transcript rail. Stays hidden when the reducer returns `Hidden`.
+#[component]
+fn LiveActivityRow(activity: Signal<LiveActivity>) -> impl IntoView {
+    let label = move || match activity.get() {
+        LiveActivity::Hidden => None,
+        LiveActivity::WaitingForApproval => Some("Waiting for approval…"),
+        LiveActivity::GettingStarted => Some("Getting started…"),
+        LiveActivity::Reasoning => Some("Reasoning…"),
+        LiveActivity::Tool(d) => Some(d),
+        LiveActivity::Responding => Some("Responding…"),
+        LiveActivity::Working => Some("Working…"),
+    };
+    let hidden = move || matches!(activity.get(), LiveActivity::Hidden);
+    let spinning = Memo::new(move |_| {
+        !matches!(
+            activity.get(),
+            LiveActivity::Hidden | LiveActivity::WaitingForApproval
+        )
+    });
+    view! {
+        <Show when=move || !hidden()>
+            <div
+                class="live-activity-row"
+                role="status"
+                aria-live="polite"
+                aria-atomic="true"
+            >
+                // Dynamic child so the badge re-renders when the memo
+                // changes — dedupes so the canvas isn't rebuilt on every
+                // activity tick, only on real spin flips.
+                {move || view! { <WaveBadge spinning=spinning.get() compact=true /> }}
+                <span class="live-activity-row__label">{move || label().unwrap_or("")}</span>
+            </div>
+        </Show>
+    }
+}
 
 /// One renderable item in an assistant turn: a single non-tool/non-thinking
 /// block, the turn's full set of tool calls tucked into one disclosure, or the
@@ -144,17 +298,26 @@ pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoVie
     // composer below, which creates a session on the first message. A selected
     // session always has ≥1 turn, so this never shadows a real transcript.
     let is_empty = move || turns.with(Vec::is_empty);
-    // Send → first token: `streaming` flips on at submit, but the assistant
-    // turn only materializes when the first delta arrives — until then the
-    // last turn is the user's. That window is the pending gap.
-    let streaming = daemon.streaming;
-    let pending_response = move || {
-        streaming.get()
-            && turns.with(|t| {
-                t.last()
-                    .is_some_and(|x| matches!(x.role, crate::model::Role::User))
-            })
-    };
+
+    // Focused permission: true iff daemon.session_id matches active AND
+    // pending_permissions contains an entry for that session.
+    let focused_permission = Signal::derive(move || {
+        let active = daemon.session_id.get();
+        let Some(ref active) = active else {
+            return false;
+        };
+        daemon
+            .pending_permissions
+            .with(|pp| pp.iter().any(|p| p.session_id == *active))
+    });
+
+    // LiveActivity reducer: inspects ONLY current tail turn + streaming +
+    // focused_permission. Re-evaluates on every turn/block signal change.
+    let live_activity = Signal::derive(move || {
+        let streaming = daemon.streaming.get();
+        let focused = focused_permission.get();
+        turns.with(|t| reduce_live_activity(t, streaming, focused))
+    });
 
     let return_to_latest = move |_| {
         pinned.set(true);
@@ -194,15 +357,10 @@ pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoVie
                     view! { <TurnView idx=idx turns=turns daemon=daemon is_new=is_new /> }
                 }
             />
-            // The reply's landing site while the daemon works (send → first
-            // token): the Ocean badge alone, swells churning under a calm rim
-            // where the text is about to appear — never dead air. Per the
-            // logo handoff: no `ocean ▸` proto-header, no prompt-like glyphs.
-            <Show when=pending_response>
-                // Half-filled water card reveals "thinking…" as the tide
-                // rises — pending gap between send and first token.
-                <crate::loader::SoundingsThinking />
-            </Show>
+            // Live activity row: pure reducer-driven, one row at transcript
+            // tail, outside the turn loop. Replaces SoundingsThinking + per-turn
+            // ocean-status-row.
+            <LiveActivityRow activity=live_activity />
             // Quiet return affordance: content is growing below while the
             // user reads history. Zero-height sticky dock — no layout shift,
             // never scrolls the viewport on its own.
@@ -303,14 +461,6 @@ fn AssistantTurn(
 
     view! {
         <div class="turn--assistant" class:is-streaming=is_streaming>
-            // Status row — tide coin + "ocean is working…" per edgelight.js.
-            // Visible only while this turn is the live streaming tail.
-            <Show when=is_streaming>
-                <div class="ocean-status-row">
-                    <WaveBadge spinning=true compact=true />
-                    <span>"ocean is working…"</span>
-                </div>
-            </Show>
             <div class="turn__body">
                 <For
                     each=items
@@ -336,7 +486,7 @@ fn AssistantTurn(
                             // segment collapses into it, a `thinking…` pill
                             // that carries a live dot while reasoning streams.
                             RenderItem::ThinkingGroup(_) => view! {
-                                <ThinkingGroup turn_idx=idx turns=turns streaming=streaming />
+                                <ThinkingGroup turn_idx=idx turns=turns />
                             }
                             .into_any(),
                         }
@@ -488,11 +638,7 @@ fn ToolGroup(
 /// freeze the group at its first segment and miss every later delta. Scanning
 /// the turn's blocks each update keeps the count and body current forever.
 #[component]
-fn ThinkingGroup(
-    turn_idx: usize,
-    turns: RwSignal<Vec<crate::model::Turn>>,
-    streaming: RwSignal<bool>,
-) -> impl IntoView {
+fn ThinkingGroup(turn_idx: usize, turns: RwSignal<Vec<crate::model::Turn>>) -> impl IntoView {
     // Local expand state (collapsed by default). Coalescing many blocks into one
     // disclosure means there's no single model `expanded` field to mirror, so the
     // toggle owns its own state — same shape as `ToolGroup`'s user override.
@@ -512,38 +658,20 @@ fn ThinkingGroup(
         })
     });
     let glyph = move || if open.get() { "▾" } else { "▸" };
-    // Reasoning is ACTIVELY streaming: this turn is still the streaming tail
-    // and its newest block is a Thinking segment. Mirrors AssistantTurn's
-    // is_streaming gate so exactly one disclosure can ever carry the cue.
-    let running = Signal::derive(move || {
-        streaming.get()
-            && turns.with(|t| {
-                t.len() == turn_idx + 1
-                    && t.last().is_some_and(|turn| {
-                        matches!(turn.blocks.last(), Some(Block::Thinking { .. }))
-                    })
-            })
-    });
+    // Thoughts are always past-tense collapsed history — the live activity
+    // row now owns the reasoning indicator. No competing live label or dot.
     view! {
         <div
             class="block block--thinking transcript-disclosure--thinking"
             class:is-open=open
-            class:is-running=running
         >
             <button class="transcript-disclosure__head"
                 aria-expanded=move || open.get().to_string()
                 on:click=move |_| open.set(!open.get())>
                 <span class="transcript-disclosure__tick">{glyph}</span>
-                // Status dot only while reasoning streams — the idle pill
-                // stays a quiet label, never louder than the answer.
-                <Show when=move || running.get()>
-                    <span class="transcript-disclosure__dot"></span>
-                </Show>
-                // Live tail: active present-tense; terminal turn: past-tense,
-                // no dot, collapsed by default while content stays accessible.
-                <span class="transcript-disclosure__label">
-                    {move || if running.get() { "thinking…" } else { "thought" }}
-                </span>
+                // Always past-tense "thought" — the live activity row
+                // now owns the reasoning indicator.
+                <span class="transcript-disclosure__label">"thought"</span>
             </button>
             <Show when=move || open.get()>
                 <For
@@ -669,7 +797,7 @@ fn BlockView(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::ToolStatus;
+    use crate::model::{ToolStatus, Turn};
 
     // Minimal ToolCall block for fixtures — only the fields render_items keys on
     // matter; the rest are inert defaults.
@@ -781,5 +909,447 @@ mod tests {
             RenderItem::ThinkingGroup(idxs) => assert_eq!(idxs.len(), 26),
             other => panic!("expected ThinkingGroup, got {other:?}"),
         }
+    }
+
+    // ── describe_tool ───────────────────────────────────────────────────
+
+    #[test]
+    fn describe_tool_empty_unknown() {
+        assert_eq!(describe_tool(""), "Using a tool…");
+        assert_eq!(describe_tool(""), "Using a tool…");
+    }
+
+    #[test]
+    fn describe_tool_too_long() {
+        let long = "a".repeat(97);
+        assert_eq!(describe_tool(&long), "Using a tool…");
+    }
+
+    #[test]
+    fn describe_tool_invalid_chars() {
+        assert_eq!(describe_tool("bad tool"), "Using a tool…");
+        assert_eq!(describe_tool("tool-name"), "Using a tool…");
+        assert_eq!(describe_tool("tool.name"), "Using a tool…");
+    }
+
+    #[test]
+    fn describe_tool_known_matches() {
+        assert_eq!(describe_tool("read"), "Reading a file…");
+        assert_eq!(describe_tool("read_file"), "Reading a file…");
+        assert_eq!(describe_tool("ls"), "Listing files…");
+        assert_eq!(describe_tool("grep"), "Searching files…");
+        assert_eq!(describe_tool("write"), "Writing a file…");
+        assert_eq!(describe_tool("edit"), "Editing a file…");
+        assert_eq!(describe_tool("bash"), "Running a command…");
+        assert_eq!(describe_tool("web_search"), "Searching the web…");
+        assert_eq!(describe_tool("web_fetch"), "Reading a web page…");
+        assert_eq!(describe_tool("todo"), "Updating the plan…");
+        assert_eq!(describe_tool("subagent"), "Delegating a task…");
+    }
+
+    #[test]
+    fn describe_tool_browser_prefix() {
+        assert_eq!(describe_tool("browser_read_page"), "Reading the page…");
+        assert_eq!(describe_tool("browser_navigate"), "Opening a web page…");
+        assert_eq!(describe_tool("browser_foobar"), "Using the browser…");
+    }
+
+    #[test]
+    fn describe_tool_mcp_prefix() {
+        assert_eq!(describe_tool("mcp__github"), "Using a connected service…");
+    }
+
+    #[test]
+    fn describe_tool_offshore_prefix() {
+        assert_eq!(
+            describe_tool("offshore_delegate"),
+            "Coordinating remote work…"
+        );
+    }
+
+    #[test]
+    fn describe_tool_unknown_name() {
+        assert_eq!(describe_tool("nonexistent_tool"), "Using a tool…");
+    }
+
+    // ── reduce_live_activity ────────────────────────────────────────────
+
+    fn user_turn() -> Turn {
+        Turn {
+            turn_id: None,
+            role: Role::User,
+            blocks: vec![Block::Text("hello".into())],
+        }
+    }
+
+    fn assistant_text_turn() -> Turn {
+        Turn {
+            turn_id: None,
+            role: Role::Assistant,
+            blocks: vec![Block::Text("response".into())],
+        }
+    }
+
+    fn assistant_thinking_turn() -> Turn {
+        Turn {
+            turn_id: None,
+            role: Role::Assistant,
+            blocks: vec![Block::Thinking {
+                content: "reasoning".into(),
+                expanded: false,
+            }],
+        }
+    }
+
+    fn assistant_running_tool_turn(name: &str) -> Turn {
+        Turn {
+            turn_id: None,
+            role: Role::Assistant,
+            blocks: vec![Block::ToolCall {
+                call_id: "c1".into(),
+                name: name.into(),
+                args_preview: String::new(),
+                output: String::new(),
+                status: ToolStatus::Running,
+                expanded: false,
+            }],
+        }
+    }
+
+    fn assistant_completed_tool_turn() -> Turn {
+        Turn {
+            turn_id: None,
+            role: Role::Assistant,
+            blocks: vec![Block::ToolCall {
+                call_id: "c1".into(),
+                name: "read".into(),
+                args_preview: String::new(),
+                output: "file contents".into(),
+                status: ToolStatus::Ok,
+                expanded: false,
+            }],
+        }
+    }
+
+    fn assistant_component_turn() -> Turn {
+        Turn {
+            turn_id: None,
+            role: Role::Assistant,
+            blocks: vec![Block::Component {
+                component_id: "comp-1".into(),
+                kind: "progress".into(),
+                props: serde_json::Value::Object(Default::default()),
+            }],
+        }
+    }
+
+    #[test]
+    fn reduce_focused_permission_wins() {
+        assert_eq!(
+            reduce_live_activity(&[assistant_text_turn()], true, true),
+            LiveActivity::WaitingForApproval
+        );
+    }
+
+    #[test]
+    fn reduce_not_streaming_hidden() {
+        assert_eq!(
+            reduce_live_activity(&[assistant_text_turn()], false, false),
+            LiveActivity::Hidden
+        );
+    }
+
+    #[test]
+    fn reduce_empty_turns_streaming_hidden() {
+        assert_eq!(reduce_live_activity(&[], true, false), LiveActivity::Hidden);
+    }
+
+    #[test]
+    fn reduce_user_tail_getting_started() {
+        assert_eq!(
+            reduce_live_activity(&[user_turn()], true, false),
+            LiveActivity::GettingStarted
+        );
+    }
+
+    #[test]
+    fn reduce_running_tool() {
+        assert_eq!(
+            reduce_live_activity(&[assistant_running_tool_turn("read")], true, false),
+            LiveActivity::Tool("Reading a file…")
+        );
+    }
+
+    #[test]
+    fn reduce_running_tool_normalized() {
+        assert_eq!(
+            reduce_live_activity(&[assistant_running_tool_turn("web-fetch")], true, false),
+            LiveActivity::Tool("Reading a web page…")
+        );
+    }
+
+    #[test]
+    fn reduce_thinking() {
+        assert_eq!(
+            reduce_live_activity(&[assistant_thinking_turn()], true, false),
+            LiveActivity::Reasoning
+        );
+    }
+
+    #[test]
+    fn reduce_text_responding() {
+        assert_eq!(
+            reduce_live_activity(&[assistant_text_turn()], true, false),
+            LiveActivity::Responding
+        );
+    }
+
+    #[test]
+    fn reduce_completed_tool_working() {
+        assert_eq!(
+            reduce_live_activity(&[assistant_completed_tool_turn()], true, false),
+            LiveActivity::Working
+        );
+    }
+
+    #[test]
+    fn reduce_component_working() {
+        assert_eq!(
+            reduce_live_activity(&[assistant_component_turn()], true, false),
+            LiveActivity::Working
+        );
+    }
+
+    #[test]
+    fn reduce_no_blocks_getting_started() {
+        let empty = Turn {
+            turn_id: None,
+            role: Role::Assistant,
+            blocks: vec![],
+        };
+        assert_eq!(
+            reduce_live_activity(&[empty], true, false),
+            LiveActivity::GettingStarted
+        );
+    }
+
+    #[test]
+    fn reduce_running_tool_above_thinking() {
+        // Running tool reverse-scan wins over a later Thinking block.
+        let turn = Turn {
+            turn_id: None,
+            role: Role::Assistant,
+            blocks: vec![
+                Block::ToolCall {
+                    call_id: "c1".into(),
+                    name: "bash".into(),
+                    args_preview: String::new(),
+                    output: String::new(),
+                    status: ToolStatus::Running,
+                    expanded: false,
+                },
+                Block::Thinking {
+                    content: "hmm".into(),
+                    expanded: false,
+                },
+            ],
+        };
+        assert_eq!(
+            reduce_live_activity(&[turn], true, false),
+            LiveActivity::Tool("Running a command…")
+        );
+    }
+
+    // ── priority edge cases ──────────────────────────────────────────
+    /// Permission must win even when streaming is false (priority 1 > 2).
+    #[test]
+    fn reduce_permission_beats_not_streaming() {
+        assert_eq!(
+            reduce_live_activity(&[assistant_text_turn()], false, true),
+            LiveActivity::WaitingForApproval
+        );
+    }
+
+    /// Focused-permission false must not interfere — reducer falls through
+    /// to the normal streaming/tail classification.
+    #[test]
+    fn reduce_permission_false_no_effect() {
+        assert_eq!(
+            reduce_live_activity(&[assistant_thinking_turn()], true, false),
+            LiveActivity::Reasoning
+        );
+    }
+
+    // ── block transitions ────────────────────────────────────────────
+    /// Tail block is Text after a Thinking block: last wins → Responding.
+    #[test]
+    fn reduce_thinking_then_text() {
+        let turn = Turn {
+            turn_id: None,
+            role: Role::Assistant,
+            blocks: vec![
+                Block::Thinking {
+                    content: "hmm".into(),
+                    expanded: false,
+                },
+                Block::Text("final answer".into()),
+            ],
+        };
+        assert_eq!(
+            reduce_live_activity(&[turn], true, false),
+            LiveActivity::Responding
+        );
+    }
+
+    /// Tail block is a Running ToolCall after a Text block: reverse-scan
+    /// finds the Running tool first → Tool(descriptor).
+    #[test]
+    fn reduce_text_then_running_tool() {
+        let turn = Turn {
+            turn_id: None,
+            role: Role::Assistant,
+            blocks: vec![
+                Block::Text("looking into that…".into()),
+                Block::ToolCall {
+                    call_id: "c1".into(),
+                    name: "grep".into(),
+                    args_preview: String::new(),
+                    output: String::new(),
+                    status: ToolStatus::Running,
+                    expanded: false,
+                },
+            ],
+        };
+        assert_eq!(
+            reduce_live_activity(&[turn], true, false),
+            LiveActivity::Tool("Searching files…")
+        );
+    }
+
+    // ── parallel running tools ───────────────────────────────────────
+    /// Reverse-scan finds the LATEST Running ToolCall; an older finished
+    /// tool after a newer running one does not mask it.
+    #[test]
+    fn reduce_latest_running_wins_over_older_finished() {
+        let turn = Turn {
+            turn_id: None,
+            role: Role::Assistant,
+            blocks: vec![
+                Block::ToolCall {
+                    call_id: "c1".into(),
+                    name: "read".into(),
+                    args_preview: String::new(),
+                    output: "done".into(),
+                    status: ToolStatus::Ok,
+                    expanded: false,
+                },
+                Block::ToolCall {
+                    call_id: "c2".into(),
+                    name: "bash".into(),
+                    args_preview: String::new(),
+                    output: String::new(),
+                    status: ToolStatus::Running,
+                    expanded: false,
+                },
+                Block::ToolCall {
+                    call_id: "c3".into(),
+                    name: "ls".into(),
+                    args_preview: String::new(),
+                    output: "done".into(),
+                    status: ToolStatus::Ok,
+                    expanded: false,
+                },
+            ],
+        };
+        // Reverse: c3(Ok), c2(Running)→bingo. c2 is "bash".
+        assert_eq!(
+            reduce_live_activity(&[turn], true, false),
+            LiveActivity::Tool("Running a command…")
+        );
+    }
+
+    /// When every ToolCall is finished, classification falls through to
+    /// the newest-block check (priority 5) → Working.
+    #[test]
+    fn reduce_all_tools_finished_falls_to_working() {
+        let turn = Turn {
+            turn_id: None,
+            role: Role::Assistant,
+            blocks: vec![
+                Block::ToolCall {
+                    call_id: "c1".into(),
+                    name: "read".into(),
+                    args_preview: String::new(),
+                    output: "ok".into(),
+                    status: ToolStatus::Ok,
+                    expanded: false,
+                },
+                Block::ToolCall {
+                    call_id: "c2".into(),
+                    name: "ls".into(),
+                    args_preview: String::new(),
+                    output: "ok".into(),
+                    status: ToolStatus::Ok,
+                    expanded: false,
+                },
+            ],
+        };
+        assert_eq!(
+            reduce_live_activity(&[turn], true, false),
+            LiveActivity::Working
+        );
+    }
+
+    // ── describe_tool additional exacts ──────────────────────────────
+    /// Exact browser match beats the prefix catch-all.
+    #[test]
+    fn describe_tool_browser_exact_beats_prefix() {
+        assert_eq!(describe_tool("browser_click"), "Clicking in the browser…");
+        assert_eq!(describe_tool("browser_type"), "Entering browser input…");
+        assert_eq!(describe_tool("browser_key"), "Entering browser input…");
+        assert_eq!(describe_tool("browser_scroll"), "Scrolling the page…");
+        assert_eq!(describe_tool("browser_screenshot"), "Capturing the page…");
+        assert_eq!(describe_tool("browser_list_tabs"), "Listing open tabs…");
+        assert_eq!(describe_tool("browser_switch_tab"), "Switching tabs…");
+        assert_eq!(describe_tool("browser_close_tab"), "Closing a tab…");
+        assert_eq!(describe_tool("browser_open_tab"), "Opening a web page…");
+    }
+
+    /// Every descriptor output ≤ 40 codepoints — the longest static
+    /// string must stay within the UI budget.
+    #[test]
+    fn describe_tool_all_outputs_fit_40() {
+        let names: &[&str] = &[
+            "",
+            "read",
+            "write",
+            "bash",
+            "web_fetch",
+            "browser_screenshot",
+            "browser_read_page",
+            "browser_switch_tab",
+            "browser_list_tabs",
+            "offshore_delegate",
+            "mcp__github",
+            "browser_unknown_tool",
+            "nonexistent_42",
+        ];
+        for n in names {
+            let out = describe_tool(n);
+            assert!(
+                out.chars().count() <= 40,
+                "describe_tool({n:?}) → {out:?} is {} chars, exceeds 40",
+                out.chars().count()
+            );
+        }
+    }
+
+    /// Non-ASCII raw names must not leak; they fall through to the
+    /// catch-all "Using a tool…".
+    #[test]
+    fn describe_tool_non_ascii_falls_to_unknown() {
+        assert_eq!(describe_tool("工具"), "Using a tool…");
+        assert_eq!(describe_tool("outil"), "Using a tool…");
+        assert_eq!(describe_tool("инструмент"), "Using a tool…");
     }
 }
