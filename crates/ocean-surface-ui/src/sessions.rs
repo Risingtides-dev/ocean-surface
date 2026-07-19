@@ -489,6 +489,139 @@ pub(crate) fn section_render_key(sec: &ProjectSection) -> String {
         sec.new_session_cwd.as_deref().unwrap_or("<none>"),
     )
 }
+
+// ---------------------------------------------------------------------------
+// Collapse priming decider (pure) — one open section per panel generation
+// ---------------------------------------------------------------------------
+// Extracted so the "which section is expanded by default" decision can be
+// unit-tested without the Leptos runtime. Session and project-catalogue fetches
+// settle independently, so an early grouping may not yet contain the active
+// session's final project section. Latching the default on the first nonempty
+// snapshot (the old behavior) could lock an unrelated newest section open while
+// the active session's section stayed collapsed after catalogue regrouping.
+
+/// Whether priming has settled for the current panel-open generation. Priming
+/// only ever *locks* the no-active fallback (`Settled(None)`) so a later poll
+/// cannot make the default jump to a different newest section. When an active
+/// session exists, priming stays `Pending` and keeps re-evaluating so the
+/// default follows the active session onto its final section as the catalogue
+/// settles.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PrimedFor {
+    /// Not settled this generation — the default is still eligible to move.
+    Pending,
+    /// Settled for this active session id (`None` = the no-active fallback).
+    Settled(Option<String>),
+}
+
+/// Priming state carried across regroupings within one panel-open generation.
+/// A fresh `default()` marks a new generation (panel close→reopen resets it).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CollapsePrimingState {
+    primed: PrimedFor,
+    /// Set once the user toggles any section; user state then wins over all
+    /// further priming for the rest of this generation.
+    user_toggled: bool,
+}
+
+impl Default for CollapsePrimingState {
+    fn default() -> Self {
+        Self {
+            primed: PrimedFor::Pending,
+            user_toggled: false,
+        }
+    }
+}
+
+/// Outcome of one priming pass: the collapsed set to apply (or `None` to leave
+/// collapse state untouched) plus the state to carry into the next pass.
+struct CollapsePlan {
+    collapsed: Option<HashSet<String>>,
+    next: CollapsePrimingState,
+}
+
+impl CollapsePlan {
+    fn idle(state: &CollapsePrimingState) -> Self {
+        Self {
+            collapsed: None,
+            next: state.clone(),
+        }
+    }
+}
+
+/// Decide the default collapse set for a priming pass. Pure — no WASM.
+///
+/// - The user owning collapse state (after a toggle) or an already-settled
+///   no-active fallback for the same active id yields an idle plan.
+/// - With an active session located in the layout, its section(s) expand and
+///   priming stays `Pending` so a later catalogue regroup can move the default.
+/// - With no active session at all, the newest section expands and priming
+///   settles so subsequent polls cannot make the default jump.
+/// - With an active id present but not yet in the layout, the newest section
+///   expands provisionally and priming stays `Pending` until the active session
+///   materializes.
+fn plan_collapse_priming(
+    state: &CollapsePrimingState,
+    sections: &[ProjectSection],
+    active_id: Option<&str>,
+) -> CollapsePlan {
+    // User owns collapse state for the rest of this generation.
+    if state.user_toggled {
+        return CollapsePlan::idle(state);
+    }
+    // Already settled for this exact active id — locked until it changes or the
+    // generation resets.
+    if let PrimedFor::Settled(settled) = &state.primed {
+        if settled.as_deref() == active_id {
+            return CollapsePlan::idle(state);
+        }
+    }
+    // No layout yet — stay eligible, touch nothing.
+    if sections.is_empty() {
+        return CollapsePlan::idle(state);
+    }
+
+    let active_keys: Vec<&str> = active_id
+        .map(|id| {
+            sections
+                .iter()
+                .filter(|sec| section_contains_session(sec, id))
+                .map(|sec| sec.key.as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Expand the active session's section(s); otherwise fall back to the first
+    // (newest) section. Only the no-active fallback locks — an active session
+    // keeps priming eligible so the default follows catalogue regrouping.
+    let expanded: Vec<&str> = if !active_keys.is_empty() {
+        active_keys
+    } else {
+        vec![sections[0].key.as_str()]
+    };
+    let settle = active_id.is_none();
+
+    let collapsed: HashSet<String> = sections
+        .iter()
+        .filter(|sec| !expanded.contains(&sec.key.as_str()))
+        .map(|sec| sec.key.clone())
+        .collect();
+
+    let primed = if settle {
+        PrimedFor::Settled(active_id.map(str::to_string))
+    } else {
+        PrimedFor::Pending
+    };
+
+    CollapsePlan {
+        collapsed: Some(collapsed),
+        next: CollapsePrimingState {
+            primed,
+            user_toggled: false,
+        },
+    }
+}
+
 /// The surface-origin icon for a session's `[TAG]` title prefix. The tag set
 /// mirrors ocean-agent's `surface_flag` (the canonical client_type → flag
 /// map): BRWSR/TUI/WEB/GUI/CLI/VOX/ACP/SLACK/CNVS/MOBL. Recognized surfaces
@@ -761,51 +894,42 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
         )
     };
 
-    // Collapse state: default to one open section (active project, else first
-    // section) as soon as panel data materializes. User toggles win afterward.
+    // Collapse state: default to one open section (active project, else newest
+    // section) as soon as panel data materializes. Priming is generation-aware
+    // per panel open — it stays eligible to re-evaluate the default until the
+    // active session is located (or the no-active fallback settles), and a
+    // panel close→reopen resets the generation. The first user toggle wins for
+    // the rest of that generation. See `plan_collapse_priming` for the decider.
     let collapsed: RwSignal<HashSet<String>> = RwSignal::new(HashSet::new());
-    let collapse_primed: RwSignal<bool> = RwSignal::new(false);
+    let priming_state: RwSignal<CollapsePrimingState> = RwSignal::new(CollapsePrimingState::default());
+    let priming_prev_open: RwSignal<bool> = RwSignal::new(false);
     Effect::new(move |_| {
-        if !open.get() || collapse_primed.get_untracked() {
+        let is_open = open.get();
+        // Detect a close→reopen transition and start a fresh priming generation.
+        let was_open = priming_prev_open.get_untracked();
+        priming_prev_open.set(is_open);
+        if is_open && !was_open {
+            priming_state.set(CollapsePrimingState::default());
+        }
+        if !is_open {
             return;
         }
 
-        let secs = group_for_panel(
-            &session_list.get(),
-            &projects.get(),
-            current_id.get().as_deref(),
-        );
-        if secs.is_empty() {
-            return;
+        let active_id = current_id.get();
+        let secs = group_for_panel(&session_list.get(), &projects.get(), active_id.as_deref());
+        let plan = plan_collapse_priming(&priming_state.get_untracked(), &secs, active_id.as_deref());
+        if let Some(next_collapsed) = plan.collapsed {
+            collapsed.set(next_collapsed);
         }
-
-        let active_id = current_id.get_untracked();
-        let mut expanded_keys: Vec<String> = secs
-            .iter()
-            .filter(|sec| {
-                active_id
-                    .as_deref()
-                    .is_some_and(|id| section_contains_session(sec, id))
-            })
-            .map(|sec| sec.key.clone())
-            .collect();
-
-        if expanded_keys.is_empty() {
-            expanded_keys.push(secs[0].key.clone());
-        }
-
-        collapsed.set(
-            secs.iter()
-                .filter(|sec| !expanded_keys.contains(&sec.key))
-                .map(|sec| sec.key.clone())
-                .collect(),
-        );
-        collapse_primed.set(true);
+        priming_state.set(plan.next);
     });
 
     let is_open = move || open.get();
     let is_collapsed = move |key: &str| collapsed.get().contains(key);
     let toggle = move |key: String| {
+        // First user toggle hands collapse ownership to the user for the rest of
+        // this panel-open generation, so later regroupings never re-prime.
+        priming_state.update(|st| st.user_toggled = true);
         collapsed.update(|set| {
             if set.contains(&key) {
                 set.remove(&key);
@@ -2334,6 +2458,191 @@ mod tests {
             poll_release_in_flight(1, 1, true),
             "same gen: current owner must be allowed to release"
         );
+    }
+
+    // ── Collapse priming decider (TASK-28) ──
+    // Pure `plan_collapse_priming` drives the "one open section" default. Tests
+    // thread the returned state across passes to model regroupings and panel
+    // generations without the Leptos runtime.
+
+    #[test]
+    fn collapse_priming_waits_for_active_session_through_catalogue_regroup() {
+        let active = Some("active-sess");
+        // Snapshot A: the session list arrived but the project catalogue and the
+        // active session's row have not. The active id is present yet absent from
+        // the layout → a provisional default that does NOT settle.
+        let decoy = vec![session(
+            "decoy",
+            "/other",
+            Some("/other"),
+            None,
+            None,
+            1,
+            "2026-07-19T12:05:00Z",
+        )];
+        let secs_a = group_for_panel(&decoy, &[], active);
+        let plan_a = plan_collapse_priming(&CollapsePrimingState::default(), &secs_a, active);
+        assert!(plan_a.collapsed.is_some(), "provisional default applied");
+        assert_eq!(
+            plan_a.next.primed,
+            PrimedFor::Pending,
+            "must not latch before the active session is located"
+        );
+
+        // Snapshot B: the catalogue and the active session's row land. It now
+        // groups under its project; priming must move the default onto it and
+        // collapse the unrelated newest section.
+        let projects = vec![project("proj", "Proj", "/proj")];
+        let sessions = vec![
+            session(
+                "decoy",
+                "/other",
+                Some("/other"),
+                None,
+                None,
+                1,
+                "2026-07-19T12:05:00Z",
+            ),
+            session(
+                "active-sess",
+                "/proj",
+                Some("/proj"),
+                None,
+                None,
+                1,
+                "2026-07-19T12:01:00Z",
+            ),
+        ];
+        let secs_b = group_for_panel(&sessions, &projects, active);
+        let plan_b = plan_collapse_priming(&plan_a.next, &secs_b, active);
+        let collapsed = plan_b.collapsed.expect("regroup applies a fresh default");
+        assert!(
+            !collapsed.contains("proj"),
+            "active session's project section is expanded"
+        );
+        assert!(
+            collapsed.contains("__other__"),
+            "unrelated newest section is collapsed"
+        );
+    }
+
+    #[test]
+    fn collapse_priming_follows_active_session_change_before_user_input() {
+        let projects = vec![project("a", "A", "/a"), project("b", "B", "/b")];
+        let sessions = vec![
+            session("sa", "/a", Some("/a"), None, None, 1, "2026-07-19T12:00:00Z"),
+            session("sb", "/b", Some("/b"), None, None, 1, "2026-07-19T12:01:00Z"),
+        ];
+
+        let secs = group_for_panel(&sessions, &projects, Some("sa"));
+        let plan1 = plan_collapse_priming(&CollapsePrimingState::default(), &secs, Some("sa"));
+        let c1 = plan1.collapsed.expect("initial prime");
+        assert!(!c1.contains("a"), "active session's section expanded");
+        assert!(c1.contains("b"));
+
+        // Active switches before any user toggle → the default follows to B.
+        let secs2 = group_for_panel(&sessions, &projects, Some("sb"));
+        let plan2 = plan_collapse_priming(&plan1.next, &secs2, Some("sb"));
+        let c2 = plan2.collapsed.expect("re-prime on active-id change");
+        assert!(!c2.contains("b"), "default followed the active session");
+        assert!(c2.contains("a"));
+    }
+
+    #[test]
+    fn collapse_priming_generation_resets_on_panel_reopen() {
+        let projects = vec![project("a", "A", "/a"), project("b", "B", "/b")];
+        let sessions = vec![
+            session("sa", "/a", Some("/a"), None, None, 1, "2026-07-19T12:00:00Z"),
+            session("sb", "/b", Some("/b"), None, None, 1, "2026-07-19T12:01:00Z"),
+        ];
+        let secs = group_for_panel(&sessions, &projects, Some("sa"));
+
+        let plan = plan_collapse_priming(&CollapsePrimingState::default(), &secs, Some("sa"));
+        let mut state = plan.next;
+        state.user_toggled = true;
+        // Same generation: the user now owns collapse state, so no re-prime.
+        let idle = plan_collapse_priming(&state, &secs, Some("sa"));
+        assert!(
+            idle.collapsed.is_none(),
+            "user owns collapse until the panel reopens"
+        );
+        // Close→reopen resets the generation (fresh default state) → eligible again.
+        let reopened = plan_collapse_priming(&CollapsePrimingState::default(), &secs, Some("sa"));
+        assert!(
+            reopened.collapsed.is_some(),
+            "reopen re-primes the default"
+        );
+    }
+
+    #[test]
+    fn collapse_priming_user_toggle_survives_later_regroupings() {
+        let projects = vec![project("a", "A", "/a"), project("b", "B", "/b")];
+        let sessions = vec![
+            session("sa", "/a", Some("/a"), None, None, 1, "2026-07-19T12:00:00Z"),
+            session("sb", "/b", Some("/b"), None, None, 1, "2026-07-19T12:01:00Z"),
+        ];
+        let secs = group_for_panel(&sessions, &projects, Some("sa"));
+        let plan = plan_collapse_priming(&CollapsePrimingState::default(), &secs, Some("sa"));
+        let mut state = plan.next;
+        state.user_toggled = true;
+
+        // A later regroup grows the layout with a brand-new project/section.
+        let projects2 = vec![
+            project("a", "A", "/a"),
+            project("b", "B", "/b"),
+            project("c", "C", "/c"),
+        ];
+        let mut sessions2 = sessions.clone();
+        sessions2.push(session(
+            "sc",
+            "/c",
+            Some("/c"),
+            None,
+            None,
+            1,
+            "2026-07-19T12:09:00Z",
+        ));
+        let secs2 = group_for_panel(&sessions2, &projects2, Some("sa"));
+        let plan2 = plan_collapse_priming(&state, &secs2, Some("sa"));
+        assert!(
+            plan2.collapsed.is_none(),
+            "user toggle preserved across regrouping"
+        );
+    }
+
+    #[test]
+    fn collapse_priming_no_active_fallback_settles_and_reprimes_on_active() {
+        let projects = vec![project("a", "A", "/a"), project("b", "B", "/b")];
+        let sessions = vec![
+            session("sa", "/a", Some("/a"), None, None, 1, "2026-07-19T12:00:00Z"),
+            session("sb", "/b", Some("/b"), None, None, 1, "2026-07-19T12:01:00Z"),
+        ];
+        // No active session: fall back to the newest section and settle so a
+        // later poll cannot make the default jump.
+        let secs = group_for_panel(&sessions, &projects, None);
+        let plan = plan_collapse_priming(&CollapsePrimingState::default(), &secs, None);
+        let c = plan.collapsed.expect("no-active prime");
+        assert!(!c.contains("b"), "newest section expanded");
+        assert!(c.contains("a"));
+        assert_eq!(plan.next.primed, PrimedFor::Settled(None));
+
+        // A regroup where a different section is now newest must NOT re-prime.
+        let sessions2 = vec![
+            session("sa", "/a", Some("/a"), None, None, 1, "2026-07-19T12:09:00Z"),
+            session("sb", "/b", Some("/b"), None, None, 1, "2026-07-19T12:01:00Z"),
+        ];
+        let secs2 = group_for_panel(&sessions2, &projects, None);
+        let plan2 = plan_collapse_priming(&plan.next, &secs2, None);
+        assert!(
+            plan2.collapsed.is_none(),
+            "settled no-active fallback does not jump between newest sections"
+        );
+
+        // Once an active session appears, priming re-evaluates onto it.
+        let secs3 = group_for_panel(&sessions2, &projects, Some("sb"));
+        let plan3 = plan_collapse_priming(&plan.next, &secs3, Some("sb"));
+        let c3 = plan3.collapsed.expect("active appearance re-primes");
+        assert!(!c3.contains("b"), "default moved onto the now-active session");
     }
 
     // ── Dot state precedence (exact 5-state contract) ──
