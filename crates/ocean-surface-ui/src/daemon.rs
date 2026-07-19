@@ -3970,19 +3970,39 @@ impl Daemon {
             daemon: self,
             session_id: id,
         };
+        // The card snapshot is AUXILIARY: a failure here (route missing on a
+        // host, daemon hiccup, revision churn) must degrade to an empty card
+        // set — never fail the whole session projection. Cards self-heal from
+        // the live control stream (`permission_request` frames re-enqueue), so
+        // the worst case is a briefly missing card, not a dead transcript.
         let cards = {
             let mut settled = None;
             for _ in 0..4 {
                 let revision = source.revision();
-                let snapshot = source.fetch().await?;
-                if source.revision() == revision {
-                    settled = Some(snapshot);
-                    break;
+                match source.fetch().await {
+                    Ok(snapshot) => {
+                        if source.revision() == revision {
+                            settled = Some(snapshot);
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "session projection: permission snapshot degraded \
+                             to empty for {id}: {error}"
+                        );
+                        settled = Some(Vec::new());
+                        break;
+                    }
                 }
             }
-            settled.ok_or_else(|| {
-                "permission snapshot changed repeatedly during reconciliation".to_string()
-            })?
+            settled.unwrap_or_else(|| {
+                log::warn!(
+                    "session projection: permission snapshot for {id} kept \
+                     changing; degrading to empty (control stream will refill)"
+                );
+                Vec::new()
+            })
         };
 
         // 3. Re-admit after the second await: focus/generation may have moved.

@@ -244,6 +244,7 @@ async fn main() -> anyhow::Result<()> {
         // arrived) and Allow/Deny never reached the daemon. /v1/events streams
         // like /v1/agent/events; the decision route forwards body + the {id}.
         .route("/v1/events", get(proxy_control_events))
+        .route("/v1/permissions", get(proxy_permissions))
         .route(
             "/v1/permissions/{id}/decision",
             post(proxy_permission_decision),
@@ -632,6 +633,39 @@ async fn proxy_sessions_post(State(state): State<Arc<AppState>>, body: Bytes) ->
         .send()
         .await
     {
+        Ok(resp) => {
+            let status = resp.status();
+            let bytes = resp.bytes().await.unwrap_or_default();
+            (
+                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                [(header::CONTENT_TYPE, "application/json")],
+                bytes,
+            )
+                .into_response()
+        }
+        Err(err) => (
+            StatusCode::BAD_GATEWAY,
+            format!("daemon unreachable: {err}"),
+        )
+            .into_response(),
+    }
+}
+
+/// Reverse-proxy GET /v1/permissions to the local daemon. The web surface's
+/// session projection (TASK-44) reconciles pending-permission cards from this
+/// list on every session load/reconnect; without the forward it fell through
+/// to ServeDir and the projection saw a non-2xx.
+async fn proxy_permissions(State(state): State<Arc<AppState>>, req: Request) -> impl IntoResponse {
+    let q = req
+        .uri()
+        .query()
+        .map(|q| format!("?{q}"))
+        .unwrap_or_default();
+    let url = format!(
+        "{}/v1/permissions{q}",
+        state.daemon_url.trim_end_matches('/')
+    );
+    match state.http.get(&url).send().await {
         Ok(resp) => {
             let status = resp.status();
             let bytes = resp.bytes().await.unwrap_or_default();
