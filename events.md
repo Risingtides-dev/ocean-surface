@@ -2046,3 +2046,10 @@ area:      [frontend]
 
 Corrective 6a3c101: rustfmt pass over the TASK-28 landing — my review gate ran tests and wasm check but not cargo fmt --check, so de436b5 landed with format drift in sessions.rs (caught by ocean's boundary-pass verification). Gate updated: fmt --check joins tests + wasm check in my landing checklist. Also verified this tick: extension CSS rename fix works end-to-end (promote of e5dc0d0 produced stable-named CSS in extension/dist matching all 16 sidepanel.html links). Flagged for the docs audit, not rewritten: the 05:29am boundary-pass ledger entry uses am/pm notation and MM-DD-YY date order against the ledger schema.
 _________________________________________________________________________________
+time:      [05:36] [19-07-26]
+agent:     [claude] [fable 5]
+type:      [handoff]
+area:      [frontend]
+
+Loop tick closeout. Landed 3a7e3b2 (TASK-30 residual: coarse-pointer hit area for .room-stage__back in call.css, 478 tests green). Per smaths' order, kicked thoth from the stitchpad roster (seat dead since the herdr restarts) and issued one assignment per live seat: pi resumes Lane C/TASK-23 to precommit report, codex delivers the repo-panel v1.4 lift verdict, ocean rebuilds TASK-22 off current main in a fresh persistent worktree (thoth's checkpoint is reference only, stale base). All landings from every seat now go branch -> held -> review -> fable merges. Disclosure: the 05:37 entry above was written when the clock read 05:34 — recurring pre-write drift; from this entry on the clock is read before writing.
+_________________________________________________________________________________
