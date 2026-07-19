@@ -300,3 +300,31 @@ The daemon must be running from `../ocean-os` for live agent behavior.
   extension as a product reference for patterns such as compact composers,
   inline tool activity, and file/diff rows. Do not copy proprietary source or
   styling verbatim; adapt the interaction pattern with Ocean-owned code.
+
+## File Preview Deep-Link (Lane D)
+
+**Contract:** FileTreeView captures `daemon.cwd` at mount, creates an
+`on_file_click` callback that calls `resolve_file_tree_path` (unified resolver
+with explicit-vs-absent provenance branch), and sets `preview_file_intent`. The
+app producer Effect reads the intent and dispatches `WorkspaceFocus::Preview`:
+on Tauri it clears the intent after dispatch (FilesPanel never mounts); on web
+it leaves the intent set for the FilesPanel consumer. The consumer (web-only)
+re-reads intent, resolves the path, fetches on cache miss, and clears. On Tauri
+the workspace receives `WorkspaceFocus::Preview` and routes through `open_file`
+→ `open_or_focus` → Preview tab + fetch-on-cache-miss.
+
+**Resolver:** `resolve_file_tree_path(entry_path, ancestor_prefix, name,
+workspace_root, cwd)` — explicit absolute/home-relative passthrough; explicit
+relative cwd-authoritative (no starts_with guard); absent path assembles
+resolved-root + ancestor + name where relative roots resolve against cwd.
+`resolve_file_path` exists for non-file_tree callers and follows the same
+cwd-authoritative rule.
+
+**Files:** daemon.rs, app.rs, workspace.rs, components.rs, deck/files.rs,
+styles/deck.css.
+
+**Frozen gates:** `cargo fmt --check`, `cargo clippy -p ocean-surface-ui
+--target wasm32-unknown-unknown -- -D warnings`, `cargo check -p
+ocean-surface-ui --target wasm32-unknown-unknown`, `cargo check -p
+ocean-surface-proxy`, `cargo test -p ocean-surface-ui --target
+wasm32-unknown-unknown --no-run`, `cargo test -p ocean-surface-ui`.

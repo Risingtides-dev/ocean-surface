@@ -72,11 +72,18 @@ pub struct WorkspaceTab {
 /// The pane's Effect opens or focuses the matching persistent tab, makes it
 /// active, then resets the signal to `None` so a repeat of the same intent
 /// re-fires.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkspaceFocus {
     Files,
     Browser,
     Repo,
+    /// File-preview intent from a file-tree click or host deep-link. The
+    /// workspace rail opens the deck, selects the Files tab, and the
+    /// FilesPanel picks up the preview from the daemon's intent signal.
+    Preview {
+        path: String,
+        generation: u64,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +250,17 @@ pub(crate) fn effective_width(desired: f64, vw: f64) -> f64 {
 // ---------------------------------------------------------------------------
 // WorkspacePane component
 // ---------------------------------------------------------------------------
+
+/// Map a WorkspaceFocus intent to its canonical TabKind.
+/// Shared by the production Effect and its unit tests.
+fn workspace_focus_tab_kind(focus: &WorkspaceFocus) -> TabKind {
+    match focus {
+        WorkspaceFocus::Files => TabKind::Files,
+        WorkspaceFocus::Browser => TabKind::Browser,
+        WorkspaceFocus::Repo => TabKind::Repo,
+        WorkspaceFocus::Preview { path, .. } => TabKind::Preview(path.clone()),
+    }
+}
 
 /// The permanent right-side desktop pane. `open` is the shared collapse state
 /// owned by the app shell (header toggle + ⌘K command flip the same signal);
@@ -471,22 +489,29 @@ pub fn WorkspacePane(
     // ---- Command-layer focus intent (one-shot) ----
     // app.rs sets focus_intent when a toggle-* command fires on Tauri (where
     // the Files/Browser/Repo surfaces live in THIS pane, not the deck).
-    // Some(f) opens/focuses the matching persistent tab and makes it active,
-    // then resets the signal to None so the same intent re-fires next time.
-    Effect::new(move |_| {
-        let Some(f) = focus_intent.get() else {
-            return;
-        };
-        let kind = match f {
-            WorkspaceFocus::Files => TabKind::Files,
-            WorkspaceFocus::Browser => TabKind::Browser,
-            WorkspaceFocus::Repo => TabKind::Repo,
-        };
-        let mut t = tabs.get();
-        let idx = open_or_focus(&mut t, &kind);
-        tabs.set(t);
-        active_tab.set(idx);
-        focus_intent.set(None);
+    // Routes through workspace_focus_tab_kind (shared helper) so the
+    // WorkspaceFocus → TabKind mapping is unit-testable.
+    Effect::new({
+        let open_file = Arc::clone(&open_file);
+        move |_| {
+            let Some(f) = focus_intent.get() else {
+                return;
+            };
+            let kind = workspace_focus_tab_kind(&f);
+            match kind {
+                TabKind::Preview(path) => {
+                    // Route through open_file for cache-miss fetch.
+                    open_file(path);
+                }
+                _ => {
+                    let mut t = tabs.get();
+                    let idx = open_or_focus(&mut t, &kind);
+                    tabs.set(t);
+                    active_tab.set(idx);
+                }
+            }
+            focus_intent.set(None);
+        }
     });
 
     // Pre-clone for the view's render closures.
@@ -1220,6 +1245,46 @@ mod tests {
             kind,
         }
     }
+
+    // -- workspace_focus_tab_kind (shared helper, production + tests) ---------
+
+    #[test]
+    fn focus_tab_kind_files() {
+        assert_eq!(
+            super::workspace_focus_tab_kind(&WorkspaceFocus::Files),
+            TabKind::Files
+        );
+    }
+
+    #[test]
+    fn focus_tab_kind_browser() {
+        assert_eq!(
+            super::workspace_focus_tab_kind(&WorkspaceFocus::Browser),
+            TabKind::Browser
+        );
+    }
+
+    #[test]
+    fn focus_tab_kind_repo() {
+        assert_eq!(
+            super::workspace_focus_tab_kind(&WorkspaceFocus::Repo),
+            TabKind::Repo
+        );
+    }
+
+    #[test]
+    fn focus_tab_kind_preview_maps_path() {
+        let kind = super::workspace_focus_tab_kind(&WorkspaceFocus::Preview {
+            path: "/home/project/src/main.rs".into(),
+            generation: 5,
+        });
+        assert_eq!(kind, TabKind::Preview("/home/project/src/main.rs".into()));
+    }
+
+    // The existing open_or_focus tests (below) prove that
+    // TabKind::Preview(path) → open_or_focus → correct insertion/focus.
+    // Together these two sets prove the full chain:
+    // WorkspaceFocus::Preview{path} → TabKind::Preview(path) → open_or_focus
 
     #[test]
     fn name_matches_empty_filter_passes_all() {

@@ -1326,6 +1326,11 @@ pub struct FsDirsResponse {
 /// Fetch a directory listing from the daemon. `path` may include a leading
 /// `~` for home-relative requests. Returns `None` on network or decode
 /// errors — the caller handles the empty state.
+///
+/// Retained for historical compatibility; callers should prefer
+/// `fetch_fs_dirs_with_files` which returns both dirs and files in one
+/// daemon round-trip.
+#[allow(dead_code)]
 pub async fn fetch_fs_dirs(base_url: &str, path: &str) -> Option<FsDirsResponse> {
     let encoded = js_sys::encode_uri_component(path);
     let url = format!(
@@ -1611,6 +1616,10 @@ pub struct Daemon {
     /// Inline error for the Sessions create form. `Some(msg)` keeps the form
     /// open with the error rendered under the inputs; `None` otherwise.
     pub project_create_error: RwSignal<Option<String>>,
+    /// File-preview intent routed from the host (Tauri file-open, transcript
+    /// path-click, or a future deep link). `(path, generation)` — the workspace
+    /// rail consumes this once, then resets to None so it cannot re-fire.
+    pub preview_file_intent: RwSignal<Option<(String, u64)>>,
 }
 
 /// A selectable model, mirroring the daemon's KnownModel.
@@ -1853,6 +1862,7 @@ impl Daemon {
             active_decision_token: RwSignal::new(None),
             project_create_pending: RwSignal::new(false),
             project_create_error: RwSignal::new(None),
+            preview_file_intent: RwSignal::new(None),
         }
     }
 
@@ -1916,6 +1926,7 @@ impl Daemon {
             active_decision_token: RwSignal::new(None),
             project_create_pending: RwSignal::new(false),
             project_create_error: RwSignal::new(None),
+            preview_file_intent: RwSignal::new(None),
         }
     }
 

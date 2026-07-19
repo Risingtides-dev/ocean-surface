@@ -10,7 +10,7 @@ use std::sync::Arc;
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
-use crate::daemon::{fetch_fs_dirs, Daemon, FsDirEntry};
+use crate::daemon::{fetch_fs_dirs_with_files, Daemon, FsDirEntry, FsFileEntry, FsFileResponse};
 
 // ---------------------------------------------------------------------------
 // Pure helpers — unit-testable without WASM
@@ -94,6 +94,66 @@ pub(crate) fn is_secret_file(name: &str) -> bool {
 type DirCallback = Arc<dyn Fn(String) + Send + Sync>;
 
 // ---------------------------------------------------------------------------
+// File preview state
+// ---------------------------------------------------------------------------
+
+/// Owns the file-preview lifecycle inside the Files panel. A monotonically
+/// increasing generation counter rejects stale fetches when the user clicks
+/// through files rapidly. Stale-fetch rejection is per-preview, not global:
+/// every new path bumps the generation; only the matching generation may write.
+#[derive(Debug, Clone)]
+enum PreviewState {
+    Closed,
+    Loading {
+        path: String,
+        generation: u64,
+    },
+    Ready(FsFileResponse),
+    Error {
+        path: String,
+        message: String,
+        #[allow(dead_code)]
+        generation: u64,
+    },
+}
+
+/// Production admission check: only admit a preview completion when the
+/// current state is still `Loading { same path, same generation }`.
+/// Shared by async fetch completion, close, and root-change invalidation.
+fn admit_preview(state: &PreviewState, expected_path: &str, expected_gen: u64) -> bool {
+    matches!(state, PreviewState::Loading { path, generation } if path == expected_path && *generation == expected_gen)
+}
+
+/// Consumer result for one preview_file_intent read + resolve.
+/// Shared by the production Effect and its unit tests.
+#[derive(Debug, PartialEq, Eq)]
+struct ConsumePreviewResult {
+    resolved_path: String,
+}
+
+/// Pure consumer: reads preview_file_intent, resolves the path against
+/// workspace_root (via panel_root or cwd fallback) and session cwd, and
+/// returns the resolved path. The caller (production Effect) then invokes
+/// the actual preview_file fetch + clears the daemon intent signal.
+fn consume_preview_intent(
+    intent: Option<(String, u64)>,
+    panel_root: Option<String>,
+    cwd: String,
+) -> Option<ConsumePreviewResult> {
+    let (path, _gen) = intent?;
+    let workspace_root = panel_root.unwrap_or_else(|| cwd.clone());
+    let cwd_opt = if cwd.is_empty() {
+        None
+    } else {
+        Some(cwd.as_str())
+    };
+    let resolved = crate::components::resolve_file_path(&workspace_root, cwd_opt, &path);
+    Some(ConsumePreviewResult {
+        resolved_path: resolved,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // FilesPanel component
 // ---------------------------------------------------------------------------
 
@@ -104,6 +164,7 @@ pub fn FilesPanel(daemon: Daemon) -> impl IntoView {
     let daemon_url = daemon.url;
 
     let dir_cache: RwSignal<HashMap<String, Vec<FsDirEntry>>> = RwSignal::new(HashMap::new());
+    let file_cache: RwSignal<HashMap<String, Vec<FsFileEntry>>> = RwSignal::new(HashMap::new());
     let loading_path: RwSignal<Option<String>> = RwSignal::new(None);
     let load_error: RwSignal<Option<String>> = RwSignal::new(None);
     let expanded: RwSignal<HashSet<String>> = RwSignal::new(HashSet::new());
@@ -111,6 +172,69 @@ pub fn FilesPanel(daemon: Daemon) -> impl IntoView {
     // True while the root came from an explicit "Choose folder…" pick — a
     // session reset then keeps the user's pick instead of clearing the tree.
     let manual_root: RwSignal<bool> = RwSignal::new(false);
+    // File preview state.
+    let preview_state: RwSignal<PreviewState> = RwSignal::new(PreviewState::Closed);
+    let preview_generation: RwSignal<u64> = RwSignal::new(0);
+    let preview_file: Arc<dyn Fn(String) + Send + Sync> = {
+        Arc::new(move |path: String| {
+            // Same-path+gen admission guard: if we are already loading this
+            // exact path with the same generation, skip the re-fetch.
+            let current_gen = preview_generation.get_untracked();
+            if let PreviewState::Loading {
+                path: ref loading_path,
+                ..
+            } = preview_state.get_untracked()
+            {
+                if loading_path == &path {
+                    return;
+                }
+            }
+            let gen = current_gen.wrapping_add(1);
+            preview_generation.set(gen);
+            preview_state.set(PreviewState::Loading {
+                path: path.clone(),
+                generation: gen,
+            });
+            let url = daemon_url.get_untracked();
+            spawn_local(async move {
+                let response = crate::daemon::fetch_fs_file(&url, &path).await;
+                // Admission: only write result if we are still the current
+                // Loading for this path+generation (close/root-change bumps
+                // preview_generation, which invalidates stale entries via
+                // the admit_preview helper).
+                if !admit_preview(&preview_state.get_untracked(), &path, gen) {
+                    return;
+                }
+                match response {
+                    Some(resp) => {
+                        if resp.error.is_none() {
+                            preview_state.set(PreviewState::Ready(resp));
+                        } else {
+                            let msg = resp.error.unwrap_or_else(|| "Unknown error".into());
+                            preview_state.set(PreviewState::Error {
+                                path,
+                                message: msg,
+                                generation: gen,
+                            });
+                        }
+                    }
+                    None => {
+                        preview_state.set(PreviewState::Error {
+                            path,
+                            message: "Failed to reach daemon".into(),
+                            generation: gen,
+                        });
+                    }
+                }
+            });
+        })
+    };
+    let close_preview: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        // Bump generation so any in-flight fetch cannot overwrite the
+        // next open (close/root-change invalidates stale loads).
+        preview_generation.update(|g| *g = g.wrapping_add(1));
+        preview_state.set(PreviewState::Closed);
+    });
 
     // ---- Shared closures (Arc for Send+Sync, clone before capturing) ----
 
@@ -120,15 +244,20 @@ pub fn FilesPanel(daemon: Daemon) -> impl IntoView {
             loading_path.set(Some(path.clone()));
             load_error.set(None);
             spawn_local(async move {
-                if let Some(resp) = fetch_fs_dirs(&url, &path).await {
+                if let Some(resp) = fetch_fs_dirs_with_files(&url, &path).await {
                     // The daemon's success responses carry no `ok` field
                     // (serde default = false) — failure is signalled by
                     // `error`, so THAT is the success predicate.
                     if resp.error.is_none() {
                         let mut entries = resp.dirs;
                         sort_entries(&mut entries);
+                        let mut files = resp.files;
+                        files.sort_by(|a, b| a.name.cmp(&b.name));
                         dir_cache.update(|cache| {
-                            cache.insert(path, entries);
+                            cache.insert(path.clone(), entries);
+                        });
+                        file_cache.update(|cache| {
+                            cache.insert(path.clone(), files);
                         });
                     } else {
                         load_error.set(resp.error);
@@ -223,6 +352,10 @@ pub fn FilesPanel(daemon: Daemon) -> impl IntoView {
                 load_error.set(None);
                 if !manual_root.get_untracked() && panel_root.get_untracked().is_some() {
                     panel_root.set(None);
+                    // Root cleared: close any open preview so stale content
+                    // doesn't survive the workspace switch.
+                    preview_state.set(PreviewState::Closed);
+                    preview_generation.update(|g| *g = g.wrapping_add(1));
                 }
                 return;
             };
@@ -230,10 +363,53 @@ pub fn FilesPanel(daemon: Daemon) -> impl IntoView {
                 panel_root.set(Some(root.clone()));
                 manual_root.set(false);
                 load_error.set(None);
+                // Root changed: close any open preview so stale content
+                // doesn't survive the workspace switch.
+                preview_state.set(PreviewState::Closed);
+                preview_generation.update(|g| *g = g.wrapping_add(1));
             }
             if !dir_cache.with_untracked(|c| c.contains_key(&root)) {
                 load_dir(root);
             }
+        });
+    }
+
+    // ---- Preview-intent consumer: transcript deep-link / Tauri file-open ----
+    // app.rs opens the deck/workspace and sets WorkspaceFocus::Preview;
+    // this Effect is the FilesPanel-side consumer that resolves the path,
+    // fetches, and clears the intent. Routes through the shared
+    // consume_preview_intent helper so the resolve chain is unit-testable.
+    {
+        let preview_file = Arc::clone(&preview_file);
+        Effect::new(move |_| {
+            let result = consume_preview_intent(
+                daemon.preview_file_intent.get(),
+                panel_root.get_untracked(),
+                daemon.cwd.get_untracked(),
+            );
+            let Some(resolved) = result else {
+                return;
+            };
+            // Close any currently-open preview first (bumps generation).
+            preview_state.set(PreviewState::Closed);
+            preview_generation.update(|g| *g = g.wrapping_add(1));
+            // Fire the resolved path.
+            preview_file(resolved.resolved_path.clone());
+            // Tauri: also open the file in the OS default app.
+            // Only spawn the async host call when we are actually in a
+            // Tauri shell; on web, open_externally returns false immediately,
+            // so the spawn is wasted (HOLD #2 — Tauri-only intent clear).
+            if crate::host::running_in_tauri() {
+                let workspace_root = panel_root
+                    .get_untracked()
+                    .unwrap_or_else(|| daemon.cwd.get_untracked());
+                let resolved_for_os = resolved.resolved_path.clone();
+                spawn_local(async move {
+                    crate::host::open_externally(&workspace_root, &resolved_for_os).await;
+                });
+            }
+            // One-shot: clear so it cannot re-fire.
+            daemon.preview_file_intent.set(None);
         });
     }
 
@@ -257,6 +433,8 @@ pub fn FilesPanel(daemon: Daemon) -> impl IntoView {
     let ld_tree = Arc::clone(&load_dir);
     let ed_tree = Arc::clone(&expand_dir);
     let cd_tree = Arc::clone(&collapse_dir);
+    let pf_tree = Arc::clone(&preview_file);
+    let cp_tree = Arc::clone(&close_preview);
 
     view! {
         <div class="deck-files-panel">
@@ -346,25 +524,36 @@ pub fn FilesPanel(daemon: Daemon) -> impl IntoView {
                     let ld = Arc::clone(&ld_tree);
                     let ed = Arc::clone(&ed_tree);
                     let cd = Arc::clone(&cd_tree);
+                    let pf = Arc::clone(&pf_tree);
+                    let _cp = Arc::clone(&cp_tree);
                     move || match panel_root.get() {
                         Some(ref root_path) => {
-                            let entries = dir_cache.with(|c| c.get(root_path).cloned());
-                            match entries {
-                                Some(entries) => view! {
-                                    <ul class="deck-files-list">
-                                        {entries.into_iter().map(|entry| {
-                                            dir_row(
-                                                entry,
-                                                1,
-                                                dir_cache,
-                                                expanded,
-                                                Arc::clone(&ld),
-                                                Arc::clone(&ed),
-                                                Arc::clone(&cd),
-                                            )
-                                        }).collect::<Vec<_>>()}
-                                    </ul>
-                                }.into_any(),
+                            let dentries = dir_cache.with(|c| c.get(root_path).cloned());
+                            let fentries = file_cache.with(|c| c.get(root_path).cloned());
+                            match dentries {
+                                Some(entries) => {
+                                    let file_entries = fentries.unwrap_or_default();
+                                    view! {
+                                        <ul class="deck-files-list">
+                                            {entries.into_iter().map(|entry| {
+                                                dir_row(
+                                                    entry,
+                                                    1,
+                                                    dir_cache,
+                                                    file_cache,
+                                                    expanded,
+                                                    Arc::clone(&ld),
+                                                    Arc::clone(&ed),
+                                                    Arc::clone(&cd),
+                                                    Some(Arc::clone(&pf)),
+                                                )
+                                            }).collect::<Vec<_>>()}
+                                            {file_entries.into_iter().map(|file| {
+                                                file_row(file, 1, Arc::clone(&pf))
+                                            }).collect::<Vec<_>>()}
+                                        </ul>
+                                    }.into_any()
+                                },
                                 None => view! { <div></div> }.into_any(),
                             }
                         }
@@ -372,6 +561,83 @@ pub fn FilesPanel(daemon: Daemon) -> impl IntoView {
                     }
                 }}
             </div>
+
+            // ---- Preview pane ----
+            {move || {
+                let state = preview_state.get();
+                let close = Arc::clone(&close_preview);
+                match state {
+                    PreviewState::Closed => view! { <div></div> }.into_any(),
+                    PreviewState::Loading { path, .. } => {
+                        let title = path.clone();
+                        view! {
+                            <section class="deck-files-preview" aria-label="File preview">
+                                <header class="deck-files-preview__header">
+                                    <span class="deck-files-preview__path" title=title>{path}</span>
+                                    <button class="deck-files-preview__close" type="button" aria-label="Close preview"
+                                        on:click=move |_| close()>
+                                        "×"
+                                    </button>
+                                </header>
+                                <div class="deck-files-preview__status">"Loading preview…"</div>
+                            </section>
+                        }.into_any()
+                    }
+                    PreviewState::Ready(response) => {
+                        let path = response.path.clone();
+                        let path_title = path.clone();
+                        let path_display = path.clone();
+                        let body = if response.binary {
+                            view! {
+                                <div class="deck-files-preview__status">
+                                    {format!("Binary file · {} bytes", response.size)}
+                                </div>
+                            }.into_any()
+                        } else {
+                            let truncated = response.truncated.then(|| {
+                                view! {
+                                    <div class="deck-files-preview__warning">
+                                        {format!("Preview truncated · {} bytes total", response.size)}
+                                    </div>
+                                }
+                            });
+                            view! {
+                                <div class="deck-files-preview__body">
+                                    {truncated}
+                                    <pre class="deck-files-preview__content">{response.content}</pre>
+                                </div>
+                            }.into_any()
+                        };
+                        view! {
+                            <section class="deck-files-preview" aria-label="File preview">
+                                <header class="deck-files-preview__header">
+                                    <span class="deck-files-preview__path" title=path_title>{path_display}</span>
+                                    <button class="deck-files-preview__close" type="button" aria-label="Close preview"
+                                        on:click=move |_| close()>
+                                        "×"
+                                    </button>
+                                </header>
+                                {body}
+                            </section>
+                        }.into_any()
+                    }
+                    PreviewState::Error { path, message, .. } => {
+                        let title = path.clone();
+                        view! {
+                            <section class="deck-files-preview" aria-label="File preview">
+                                <header class="deck-files-preview__header">
+                                    <span class="deck-files-preview__path" title=title>{path}</span>
+                                    <button class="deck-files-preview__close" type="button" aria-label="Close preview"
+                                        on:click=move |_| close()>
+                                        "×"
+                                    </button>
+                                </header>
+                                <div class="deck-files-preview__error">{message}</div>
+                            </section>
+                        }.into_any()
+                    }
+                }
+            }}
 
             <span style="display:none">{move || { let _ = &cleanup_watcher; }}</span>
         </div>
@@ -382,14 +648,17 @@ pub fn FilesPanel(daemon: Daemon) -> impl IntoView {
 // dir_row — renders a single directory entry with collapsible children
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn dir_row(
     entry: FsDirEntry,
     depth: usize,
     dir_cache: RwSignal<HashMap<String, Vec<FsDirEntry>>>,
+    file_cache: RwSignal<HashMap<String, Vec<FsFileEntry>>>,
     expanded: RwSignal<HashSet<String>>,
     load_dir: DirCallback,
     expand_dir: DirCallback,
     collapse_dir: DirCallback,
+    preview_file: Option<Arc<dyn Fn(String) + Send + Sync>>,
 ) -> impl IntoView {
     let entry_path = entry.path.clone();
     let entry_name = entry.name.clone();
@@ -447,6 +716,7 @@ fn dir_row(
             {move || if is_expanded() {
                 let p = entry_path.clone();
                 let entries = dir_cache.with(|c| c.get(&p).cloned()).unwrap_or_default();
+                let files = file_cache.with(|c| c.get(&p).cloned()).unwrap_or_default();
                 view! {
                     <ul class="deck-files-list">
                         {entries.into_iter().map(|child| {
@@ -454,17 +724,78 @@ fn dir_row(
                                 child,
                                 depth + 1,
                                 dir_cache,
+                                file_cache,
                                 expanded,
                                 Arc::clone(&load_dir),
                                 Arc::clone(&expand_dir),
                                 Arc::clone(&collapse_dir),
+                                preview_file.clone(),
                             )
+                        }).collect::<Vec<_>>()}
+                        {files.into_iter().map(|file| {
+                            let pf = preview_file.clone();
+                            file_row(file, depth + 1, pf.unwrap_or_else(|| Arc::new(|_| {})))
                         }).collect::<Vec<_>>()}
                     </ul>
                 }.into_any()
             } else {
                 view! { <div></div> }.into_any()
             }}
+        </li>
+    }
+    .into_any()
+}
+
+// ---------------------------------------------------------------------------
+// file_row — renders a single file entry with click-to-preview
+// ---------------------------------------------------------------------------
+
+fn file_row(
+    entry: FsFileEntry,
+    depth: usize,
+    preview_file: Arc<dyn Fn(String) + Send + Sync>,
+) -> impl IntoView {
+    let path = entry.path.clone();
+    let name = entry.name.clone();
+    let size_label = if entry.size > 0 {
+        if entry.size < 1024 {
+            format!("{} B", entry.size)
+        } else if entry.size < 1024 * 1024 {
+            format!("{:.1} KB", entry.size as f64 / 1024.0)
+        } else {
+            format!("{:.1} MB", entry.size as f64 / (1024.0 * 1024.0))
+        }
+    } else {
+        String::new()
+    };
+
+    view! {
+        <li class="deck-files-node deck-files-node--file">
+            <button
+                class="deck-files-row deck-files-row--file"
+                type="button"
+                style=format!("padding-left: {}px", depth * 16 + 8)
+                on:click={
+                    let p = path.clone();
+                    let pf = Arc::clone(&preview_file);
+                    move |_| pf(p.clone())
+                }
+            >
+                <span class="deck-files-row__arrow"></span>
+                <span class="deck-files-icon">
+                    {if crate::components::file_icon_label(&name) == "git" {
+                        view! { <crate::icons::GitBranch /> }.into_any()
+                    } else {
+                        view! { <crate::icons::Code /> }.into_any()
+                    }}
+                </span>
+                <span class="deck-files-name">{name}</span>
+                {if !size_label.is_empty() {
+                    view! { <span class="deck-files-size">{size_label}</span> }.into_any()
+                } else {
+                    view! { <span></span> }.into_any()
+                }}
+            </button>
         </li>
     }
     .into_any()
@@ -601,5 +932,143 @@ mod tests {
         assert!(!is_secret_file("keyboard.rs"));
         assert!(!is_secret_file("monkey.txt"));
         assert!(!is_secret_file("Cargo.toml"));
+    }
+
+    // -- Admission regression tests (pin 4) ---------------------------------
+
+    #[test]
+    fn admit_allows_same_path_and_generation() {
+        // Loading { same path, same gen } → admitted.
+        let state = PreviewState::Loading {
+            path: "/foo.rs".into(),
+            generation: 3,
+        };
+        assert!(admit_preview(&state, "/foo.rs", 3));
+    }
+
+    #[test]
+    fn admit_rejects_different_path() {
+        // Loading { path A, gen 3 } when we asked for path B → rejected.
+        let state = PreviewState::Loading {
+            path: "/bar.rs".into(),
+            generation: 3,
+        };
+        assert!(!admit_preview(&state, "/foo.rs", 3));
+    }
+
+    #[test]
+    fn admit_rejects_different_generation_newer_path() {
+        // Loading { path A, gen 5 } but we dispatched gen 3 → newer load
+        // already claimed the slot, stale completion rejected.
+        let state = PreviewState::Loading {
+            path: "/foo.rs".into(),
+            generation: 5,
+        };
+        assert!(!admit_preview(&state, "/foo.rs", 3));
+    }
+
+    #[test]
+    fn admit_rejects_closed_state_close_invalidation() {
+        // Preview was closed (generation bumped) while fetch was in-flight →
+        // stale completion must be rejected.
+        let state = PreviewState::Closed;
+        assert!(!admit_preview(&state, "/foo.rs", 3));
+    }
+
+    #[test]
+    fn admit_rejects_ready_state_root_invalidation() {
+        // Root/session change already closed and a subsequent open completed →
+        // the stale fetch from the old session must be rejected.
+        let state = PreviewState::Ready(FsFileResponse {
+            content: "new".into(),
+            path: "/foo.rs".into(),
+            error: None,
+            binary: false,
+            size: 3,
+            truncated: false,
+        });
+        assert!(!admit_preview(&state, "/foo.rs", 3));
+    }
+
+    #[test]
+    fn admit_rejects_error_state() {
+        let state = PreviewState::Error {
+            path: "/foo.rs".into(),
+            message: "failed".into(),
+            generation: 1,
+        };
+        assert!(!admit_preview(&state, "/foo.rs", 1));
+    }
+
+    // -- Production routing: consumer resolve + intent consumption -------------
+
+    /// Simulates the FilesPanel consumer's path resolution: given a
+    /// workspace_root from the panel, a session cwd from the daemon, and the
+    /// intent path, resolve_file_path produces the correct absolute path
+    /// (HOLD #3 — production routing tests).
+    #[test]
+    fn consumer_resolve_relative_prefers_cwd_over_root() {
+        // panel_root = /home/project, cwd = /home/project/src/lib
+        let resolved = crate::components::resolve_file_path(
+            "/home/project",
+            Some("/home/project/src"),
+            "mod.rs",
+        );
+        assert_eq!(resolved, "/home/project/src/mod.rs");
+    }
+
+    #[test]
+    fn consumer_resolve_absolute_passthrough() {
+        let resolved = crate::components::resolve_file_path(
+            "/home/project",
+            Some("/home/project/src"),
+            "/absolute/other/file.txt",
+        );
+        assert_eq!(resolved, "/absolute/other/file.txt");
+    }
+
+    #[test]
+    fn consumer_resolve_workspace_root_fallback_when_cwd_empty() {
+        // Simulates "cwd not set" (empty string → None).
+        let resolved = crate::components::resolve_file_path("/home/project", None, "README.md");
+        assert_eq!(resolved, "/home/project/README.md");
+    }
+
+    /// Calls the shared consume_preview_intent helper — the same function
+    /// the production Effect calls — and asserts the resolved path.
+    #[test]
+    fn consumer_chain_resolves_cwd_relative() {
+        let result = super::consume_preview_intent(
+            Some(("main.rs".into(), 0)),
+            Some("/proj".into()),
+            "/proj/src".into(),
+        );
+        let r = result.expect("intent consumed");
+        assert_eq!(r.resolved_path, "/proj/src/main.rs");
+    }
+
+    #[test]
+    fn consumer_chain_absolute_passthrough() {
+        let result = super::consume_preview_intent(
+            Some(("/etc/hosts".into(), 0)),
+            Some("/proj".into()),
+            "/proj/src".into(),
+        );
+        let r = result.expect("intent consumed");
+        assert_eq!(r.resolved_path, "/etc/hosts");
+    }
+
+    #[test]
+    fn consumer_chain_no_intent_returns_none() {
+        let result = super::consume_preview_intent(None, Some("/proj".into()), "/proj/src".into());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn consumer_chain_panel_root_none_falls_back_to_cwd() {
+        let result =
+            super::consume_preview_intent(Some(("README.md".into(), 0)), None, "/tmp/work".into());
+        let r = result.expect("intent consumed");
+        assert_eq!(r.resolved_path, "/tmp/work/README.md");
     }
 }

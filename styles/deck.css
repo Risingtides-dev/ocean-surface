@@ -710,6 +710,131 @@
   }
 }
 
+/* ── Files panel: file preview pane ────────────────────────────────── */
+/* Sits as a full-height overlay inside the deck Files panel. Token-clean:
+   every color is from tokens.css; elevation-only, no border. */
+
+.deck-files-preview {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--sheen-soft), var(--bg-raised);
+  box-shadow: var(--elev-2);
+  z-index: 5;
+}
+
+.deck-files-preview__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  flex-shrink: 0;
+}
+
+.deck-files-preview__path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-2);
+}
+
+.deck-files-preview__close {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  color: var(--fg-3);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 4px;
+}
+
+.deck-files-preview__close:hover {
+  color: var(--fg-2);
+}
+
+.deck-files-preview__status {
+  padding: 40px 14px;
+  font-family: var(--font);
+  font-size: 13px;
+  color: var(--fg-3);
+  text-align: center;
+}
+
+.deck-files-preview__warning {
+  padding: 8px 14px;
+  margin: 0 14px;
+  font-family: var(--font);
+  font-size: 12px;
+  color: var(--warn);
+  background: var(--bg-subtle);
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+
+.deck-files-preview__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 14px 14px;
+}
+
+.deck-files-preview__content {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--fg-2);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.deck-files-preview__error {
+  padding: 40px 14px;
+  font-family: var(--font);
+  font-size: 13px;
+  color: var(--err);
+  text-align: center;
+}
+
+/* Standard file-row arrow placeholder alignment. The existing .deck-files-row
+   already sets display:flex + gap. This overrides the leaf-only tick placement
+   so parent dir rows get a stable 12px leading slot. */
+.deck-files-row__arrow {
+  width: 12px;
+  height: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--fg-3);
+  font-size: 10px;
+}
+
+/* File size label in file rows */
+.deck-files-size {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-3);
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.deck-files-row--file {
+  cursor: pointer;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .deck-files-preview {
+    animation: none;
+  }
+}
+
 /* ── Compact hosts (extension side panel) ──────────────────────────── */
 
 .ocean-surface--extension .deck {

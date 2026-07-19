@@ -1082,6 +1082,36 @@ fn VoicePlannerCard(
     }
 }
 
+/// Producer decision for a preview_file_intent read.
+/// Shared by the production Effect and its unit tests.
+#[derive(Debug, PartialEq, Eq)]
+enum PreviewProducerAction {
+    /// No pending intent.
+    Idle,
+    /// Tauri: workspace opened, focus set, then cleared.
+    TauriClear { path: String, generation: u64 },
+    /// Web: deck toggled (Files), focus set, intent left for consumer.
+    WebRetain { path: String, generation: u64 },
+}
+
+fn producer_decide(intent: Option<(String, u64)>, in_tauri: bool) -> PreviewProducerAction {
+    let (path, gen) = match intent {
+        Some(p) => p,
+        None => return PreviewProducerAction::Idle,
+    };
+    if in_tauri {
+        PreviewProducerAction::TauriClear {
+            path,
+            generation: gen,
+        }
+    } else {
+        PreviewProducerAction::WebRetain {
+            path,
+            generation: gen,
+        }
+    }
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     let daemon = Daemon::new(daemon_url_from_env());
@@ -1285,13 +1315,13 @@ pub fn App() -> impl IntoView {
     // Apply a RevealVisibility snapshot directly — single source of truth for
     // the mapping between the typed visibility contract and the discrete signals.
     let apply_reveal_visibility = {
-        let c = show_council.clone();
-        let r = show_rooms.clone();
-        let s = show_sessions.clone();
-        let f = show_floor.clone();
-        let d = deck_panel.clone();
-        let p = show_phone_dialer.clone();
-        let l = show_livekit_controls.clone();
+        let c = show_council;
+        let r = show_rooms;
+        let s = show_sessions;
+        let f = show_floor;
+        let d = deck_panel;
+        let p = show_phone_dialer;
+        let l = show_livekit_controls;
         move |vis: RevealVisibility| {
             c.set(vis.council);
             r.set(vis.rooms);
@@ -1352,6 +1382,28 @@ pub fn App() -> impl IntoView {
             WORKSPACE_OPEN_KEY,
             if workspace_open.get() { "1" } else { "0" },
         );
+    });
+
+    // File-preview deep-link from host (Tauri file-open, future transcript
+    // path-click). Opens the workspace → Files tab so the FilesPanel can
+    // consume the intent. Routes through the shared producer_decide helper
+    // so the decision table is unit-testable.
+    Effect::new(move |_| {
+        let action = producer_decide(daemon.preview_file_intent.get(), in_tauri);
+        match action {
+            PreviewProducerAction::Idle => {}
+            PreviewProducerAction::TauriClear { path, generation } => {
+                workspace_open.set(true);
+                workspace_focus.set(Some(WorkspaceFocus::Preview { path, generation }));
+                daemon.preview_file_intent.set(None);
+            }
+            PreviewProducerAction::WebRetain { path, generation } => {
+                toggle_deck(DeckPanel::Files);
+                workspace_focus.set(Some(WorkspaceFocus::Preview { path, generation }));
+                // Web: do NOT clear — the FilesPanel consumer Effect
+                // (deck/files.rs) is the sole clearing point on web.
+            }
+        }
     });
 
     // Deep-menu registry (north star command layer): ONE registry drives the
@@ -3362,5 +3414,66 @@ mod tests {
         assert_eq!(parse_deep_link("ocean://session/a/b"), None);
         // Empty input.
         assert_eq!(parse_deep_link(""), None);
+    }
+
+    // -- Preview-intent producer decision table -- tests call the same
+    //    file-scope producer_decide that the production Effect calls.
+
+    #[test]
+    fn producer_idle_when_no_intent_tauri() {
+        assert_eq!(
+            super::producer_decide(None, true),
+            super::PreviewProducerAction::Idle
+        );
+    }
+
+    #[test]
+    fn producer_idle_when_no_intent_web() {
+        assert_eq!(
+            super::producer_decide(None, false),
+            super::PreviewProducerAction::Idle
+        );
+    }
+
+    #[test]
+    fn producer_tauri_clears_after_dispatch() {
+        let action = super::producer_decide(Some(("/a/b.rs".into(), 3)), true);
+        assert_eq!(
+            action,
+            super::PreviewProducerAction::TauriClear {
+                path: "/a/b.rs".into(),
+                generation: 3
+            }
+        );
+    }
+
+    #[test]
+    fn producer_web_retains_for_consumer() {
+        let action = super::producer_decide(Some(("/x/y.rs".into(), 7)), false);
+        assert_eq!(
+            action,
+            super::PreviewProducerAction::WebRetain {
+                path: "/x/y.rs".into(),
+                generation: 7
+            }
+        );
+    }
+
+    #[test]
+    fn producer_web_never_produces_clear() {
+        let action = super::producer_decide(Some(("/any".into(), 0)), false);
+        assert!(matches!(
+            action,
+            super::PreviewProducerAction::WebRetain { .. }
+        ));
+    }
+
+    #[test]
+    fn producer_tauri_never_produces_retain() {
+        let action = super::producer_decide(Some(("/any".into(), 0)), true);
+        assert!(matches!(
+            action,
+            super::PreviewProducerAction::TauriClear { .. }
+        ));
     }
 }

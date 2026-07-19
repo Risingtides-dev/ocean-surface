@@ -7,6 +7,7 @@
 
 use leptos::prelude::*;
 use serde_json::{json, Value};
+use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 
 use crate::daemon::{Daemon, PinnedWidget};
@@ -35,6 +36,158 @@ extern "C" {
     /// renders. `platform` is "tiktok" | "instagram".
     #[wasm_bindgen(js_name = oceanRenderSocialVideo)]
     fn ocean_render_social_video(container_id: &str, platform: &str, url: &str);
+}
+
+// ---------------------------------------------------------------------------
+// Path resolver — resolves file paths relative to cwd and workspace root.
+// ---------------------------------------------------------------------------
+
+/// Map a file extension to an icon label. Used by the deck file-tree rows.
+/// Returns `"code"` for most extensions, `"folder"` for directories, and
+/// `"git"` for git-related names.
+pub fn file_icon_label(name: &str) -> &'static str {
+    // Check for git-related files.
+    if name == ".gitignore" || name == ".gitattributes" || name == ".gitmodules" {
+        return "git";
+    }
+    // Code extensions.
+    if let Some(dot) = name.rfind('.') {
+        let ext = &name[dot + 1..];
+        match ext {
+            "rs" | "toml" | "lock" | "md" | "json" | "yaml" | "yml" | "css" | "html" | "js"
+            | "ts" | "jsx" | "tsx" | "py" | "go" | "c" | "h" | "cpp" | "hpp" | "java" | "kt"
+            | "swift" | "rb" | "pl" | "sh" | "bash" | "zsh" | "fish" | "Dockerfile" | "sql"
+            | "graphql" | "proto" | "xml" | "svg" | "txt" => "code",
+            _ => "code",
+        }
+    } else {
+        "code"
+    }
+}
+
+/// Resolve a relative or absolute file path. Rules:
+///   1. Absolute path → returned as-is.
+///   2. Path starting with `~` → home-relative, returned as-is (daemon resolves `~`).
+///   3. Relative path: join with `cwd` first; if that doesn't start with
+///      `workspace_root`, join with `workspace_root` instead.
+///   4. Fallback: join with `workspace_root`.
+pub fn resolve_file_path(workspace_root: &str, cwd: Option<&str>, file_path: &str) -> String {
+    // Rule 1: absolute.
+    if file_path.starts_with('/') {
+        return file_path.to_string();
+    }
+    // Rule 2: home-relative.
+    if file_path.starts_with('~') {
+        return file_path.to_string();
+    }
+    // Rule 3: cwd-first for relative paths (authoritative; no starts_with guard).
+    if let Some(cwd) = cwd {
+        return join_path(cwd.trim_end_matches('/'), file_path);
+    }
+    // Rule 4: fallback to workspace_root when cwd is absent.
+    join_path(workspace_root.trim_end_matches('/'), file_path)
+}
+
+/// Join a base path and a relative segment, normalizing `..` and `.`.
+/// Does not resolve symlinks — purely syntactic.
+pub fn join_path(base: &str, segment: &str) -> String {
+    if base.is_empty() {
+        return normalize_path(segment);
+    }
+    if segment.is_empty() {
+        return normalize_path(base);
+    }
+    let combined = if base.ends_with('/') {
+        format!("{}{}", base, segment)
+    } else {
+        format!("{}/{}", base, segment)
+    };
+    normalize_path(&combined)
+}
+
+/// Normalize a path by collapsing `..` and `.` segments syntactically.
+fn normalize_path(path: &str) -> String {
+    let is_absolute = path.starts_with('/');
+    let mut components: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => continue,
+            ".." => {
+                if is_absolute {
+                    // For absolute paths, don't pop past root.
+                    if !components.is_empty() {
+                        components.pop();
+                    }
+                } else {
+                    components.pop();
+                }
+            }
+            _ => components.push(part),
+        }
+    }
+    if is_absolute {
+        format!("/{}", components.join("/"))
+    } else if components.is_empty() {
+        ".".to_string()
+    } else {
+        components.join("/")
+    }
+}
+
+/// Unified production resolver for agent-emitted file-tree entry paths.
+///
+/// Branches on whether the agent provided an explicit `path` field:
+/// - **Explicit absolute or home-relative** → passthrough unchanged.
+/// - **Explicit relative** → resolved against the session cwd (authoritative);
+///   falls back to workspace_root when cwd is absent.
+/// - **Absent path** (only `name`) → assembled as
+///   `resolve_root(workspace_root, cwd) + "/" + ancestor_prefix + "/" + name`,
+///   where `resolve_root` makes workspace_root absolute via cwd when root is
+///   relative.
+///
+/// This is the pure function backing the FileTreeNode on-click callback.
+/// It replaces the split `ancestor_path` + `resolve_file_path` so the
+/// explicit-vs-absent provenance is not lost before resolution.
+pub fn resolve_file_tree_path(
+    entry_path: Option<&str>,
+    ancestor_prefix: &str,
+    name: &str,
+    workspace_root: &str,
+    cwd: Option<&str>,
+) -> String {
+    let explicit = entry_path.filter(|p| !p.is_empty());
+
+    if let Some(path) = explicit {
+        // Agent-provided explicit path.
+        if path.starts_with('/') || path.starts_with('~') {
+            return path.to_string();
+        }
+        // Relative explicit: resolve against cwd (authoritative).
+        if let Some(cwd) = cwd {
+            return join_path(cwd.trim_end_matches('/'), path);
+        }
+        // No cwd: fall back to workspace_root.
+        return join_path(workspace_root.trim_end_matches('/'), path);
+    }
+
+    // Absent explicit path — assemble from ancestor chain + name, then
+    // prepend the resolved workspace_root.
+    let rel = if ancestor_prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{}/{}", ancestor_prefix, name)
+    };
+    let root = if workspace_root.starts_with('/') || workspace_root.starts_with('~') {
+        workspace_root.trim_end_matches('/').to_string()
+    } else if let Some(cwd) = cwd {
+        join_path(
+            cwd.trim_end_matches('/'),
+            workspace_root.trim_end_matches('/'),
+        )
+    } else {
+        workspace_root.trim_end_matches('/').to_string()
+    };
+    join_path(&root, &rel)
 }
 
 /// Dispatch to the right component renderer based on `kind`.
@@ -897,12 +1050,33 @@ fn FileTreeView(component_id: String, kind_props: Value, daemon: Daemon) -> impl
         .cloned()
         .unwrap_or_default();
 
+    // When a file is clicked in the transcript, resolve the relative path
+    // against the workspace root and set preview_file_intent so the deck
+    // FilesPanel opens a preview (or Tauri opens the file externally).
+    let on_file_click: Arc<dyn Fn(Option<String>, String, String) + Send + Sync> = {
+        let daemon = daemon.clone();
+        let workspace_root = root.clone();
+        let cwd = daemon.cwd.get_untracked();
+        Arc::new(
+            move |entry_path: Option<String>, ancestor_prefix: String, name: String| {
+                let resolved = resolve_file_tree_path(
+                    entry_path.as_deref(),
+                    &ancestor_prefix,
+                    &name,
+                    &workspace_root,
+                    if cwd.is_empty() { None } else { Some(&cwd) },
+                );
+                daemon.preview_file_intent.set(Some((resolved, 0)));
+            },
+        )
+    };
+
     view! {
         <div class="component-filetree">
             {(!root.is_empty()).then(|| view! { <div class="filetree__root">{root.clone()}</div> })}
             <ul class="filetree__list">
                 {entries.into_iter().map(|e| {
-                    view! { <FileTreeNode entry=e depth=0 component_id=component_id.clone() daemon=daemon.clone() /> }
+                    view! { <FileTreeNode entry=e depth=0 component_id=component_id.clone() daemon=daemon.clone() on_file_click=Arc::clone(&on_file_click) ancestor_prefix=String::new() /> }
                 }).collect::<Vec<_>>()}
             </ul>
         </div>
@@ -910,7 +1084,19 @@ fn FileTreeView(component_id: String, kind_props: Value, daemon: Daemon) -> impl
 }
 
 #[component]
-fn FileTreeNode(entry: Value, depth: usize, component_id: String, daemon: Daemon) -> impl IntoView {
+fn FileTreeNode(
+    entry: Value,
+    depth: usize,
+    component_id: String,
+    daemon: Daemon,
+    on_file_click: Arc<dyn Fn(Option<String>, String, String) + Send + Sync>,
+    /// Accumulated relative path from the file_tree root down to this node's
+    /// parent directory (e.g. "src/lib"). Empty at root level. Threaded through
+    /// recursion so every node can reconstruct the full relative path even when
+    /// the agent only emits `name` without a `path` field.
+    #[prop(default=String::new())]
+    ancestor_prefix: String,
+) -> impl IntoView {
     let name = entry
         .get("name")
         .and_then(|v| v.as_str())
@@ -942,6 +1128,11 @@ fn FileTreeNode(entry: Value, depth: usize, component_id: String, daemon: Daemon
                 "transform: rotate(-90deg)"
             }
         };
+        let child_prefix = if ancestor_prefix.is_empty() {
+            name_c.clone()
+        } else {
+            format!("{}/{}", ancestor_prefix, name_c.clone())
+        };
         view! {
             <li class="filetree__node filetree__node--dir">
                 <button class="filetree__row filetree__row--dir" type="button" style=indent
@@ -952,8 +1143,14 @@ fn FileTreeNode(entry: Value, depth: usize, component_id: String, daemon: Daemon
                 </button>
                 <Show when=move || open.get()>
                     <ul class="filetree__list">
-                        {children.clone().into_iter().map(|c| {
-                            view! { <FileTreeNode entry=c depth=depth+1 component_id=component_id.clone() daemon=daemon.clone() /> }
+                        {children.clone().into_iter().map({
+                            let cp = child_prefix.clone();
+                            let cid = component_id.clone();
+                            let d = daemon.clone();
+                            let ofc = Arc::clone(&on_file_click);
+                            move |c| {
+                                view! { <FileTreeNode entry=c depth=depth+1 component_id=cid.clone() daemon=d.clone() on_file_click=Arc::clone(&ofc) ancestor_prefix=cp.clone() /> }
+                            }
                         }).collect::<Vec<_>>()}
                     </ul>
                 </Show>
@@ -961,20 +1158,32 @@ fn FileTreeNode(entry: Value, depth: usize, component_id: String, daemon: Daemon
         }
         .into_any()
     } else {
-        let path = entry
+        let entry_path_opt = entry
             .get("path")
             .and_then(|v| v.as_str())
-            .unwrap_or(&name)
-            .to_string();
+            .map(|s| s.to_string());
         let on_click = {
             let component_id = component_id.clone();
             let daemon = daemon.clone();
-            let path = path.clone();
+            let on_file_click = Arc::clone(&on_file_click);
+            let ep = entry_path_opt.clone();
+            let ap = ancestor_prefix.clone();
+            let nm = name.clone();
+            let path_for_event = ep.clone().unwrap_or_else(|| {
+                if ap.is_empty() {
+                    nm.clone()
+                } else {
+                    format!("{}/{}", ap, nm)
+                }
+            });
             move |_| {
                 daemon.send_component_event(
                     component_id.clone(),
-                    serde_json::json!({ "type": "file_clicked", "payload": { "path": path } }),
+                    serde_json::json!({ "type": "file_clicked", "payload": { "path": path_for_event } }),
                 );
+                // Deep-link: pass raw provenance to the unified resolver via
+                // the callback so the resolver can branch on explicit vs absent.
+                on_file_click(ep.clone(), ap.clone(), nm.clone());
             }
         };
         view! {
@@ -1835,5 +2044,171 @@ mod tests {
         // Rounds to zero magnitude -> plain "0", never "-0".
         assert_eq!(compact_format(-0.001), "0");
         assert_eq!(compact_format(-0.0), "0");
+    }
+
+    // ── Path resolver tests ───────────────────────────────────────────
+
+    #[test]
+    fn resolve_absolute_path_returns_as_is() {
+        assert_eq!(
+            resolve_file_path("/workspace", Some("/workspace"), "/home/user/file.rs"),
+            "/home/user/file.rs"
+        );
+    }
+
+    #[test]
+    fn resolve_home_relative_returns_as_is() {
+        assert_eq!(
+            resolve_file_path("/workspace", Some("/workspace"), "~/file.rs"),
+            "~/file.rs"
+        );
+    }
+
+    #[test]
+    fn resolve_relative_with_cwd_match() {
+        assert_eq!(
+            resolve_file_path("/workspace", Some("/workspace/src"), "main.rs"),
+            "/workspace/src/main.rs"
+        );
+    }
+
+    #[test]
+    fn resolve_relative_cwd_authoritative_even_outside_root() {
+        // cwd is somewhere outside workspace_root — cwd is still authoritative
+        // for relative paths per the frozen contract.
+        assert_eq!(
+            resolve_file_path("/workspace", Some("/other/project"), "lib.rs"),
+            "/other/project/lib.rs"
+        );
+    }
+
+    #[test]
+    fn resolve_relative_no_cwd_uses_workspace_root() {
+        assert_eq!(
+            resolve_file_path("/workspace", None, "lib.rs"),
+            "/workspace/lib.rs"
+        );
+    }
+
+    #[test]
+    fn normalize_path_collapses_dot_segments() {
+        assert_eq!(normalize_path("/a/b/./c"), "/a/b/c");
+        assert_eq!(normalize_path("/a/./b/./c"), "/a/b/c");
+    }
+
+    #[test]
+    fn normalize_path_collapses_parent_segments() {
+        assert_eq!(normalize_path("/a/b/../c"), "/a/c");
+        assert_eq!(normalize_path("/a/b/c/../../d"), "/a/d");
+    }
+
+    #[test]
+    fn normalize_path_parent_past_root_stays_at_root() {
+        assert_eq!(normalize_path("/.."), "/");
+        assert_eq!(normalize_path("/a/../../.."), "/");
+    }
+
+    #[test]
+    fn normalize_relative_path() {
+        assert_eq!(normalize_path("a/b/c"), "a/b/c");
+        assert_eq!(normalize_path("a/b/../c"), "a/c");
+        assert_eq!(normalize_path("a/../.."), ".");
+        assert_eq!(normalize_path("."), ".");
+    }
+
+    #[test]
+    fn join_path_simple() {
+        assert_eq!(join_path("/a/b", "c"), "/a/b/c");
+        assert_eq!(join_path("/a/b/", "c"), "/a/b/c");
+        assert_eq!(join_path("/a", "b/../c"), "/a/c");
+    }
+
+    #[test]
+    fn file_icon_labels() {
+        assert_eq!(file_icon_label("main.rs"), "code");
+        assert_eq!(file_icon_label("Cargo.toml"), "code");
+        assert_eq!(file_icon_label("README.md"), "code");
+        assert_eq!(file_icon_label(".gitignore"), "git");
+        assert_eq!(file_icon_label("Dockerfile"), "code");
+        assert_eq!(file_icon_label("unknown.xyz"), "code");
+    }
+
+    // -- Production routing: resolve_file_tree_path (unified) -------------------
+
+    // Vector A (Codex): absent path — root=src, cwd=/proj, no entry.path,
+    // ancestor=tools, name=mod.rs → /proj/src/tools/mod.rs
+    #[test]
+    fn resolve_absent_path_assemble_chain_with_relative_root() {
+        let resolved = resolve_file_tree_path(
+            None,     // no entry.path
+            "tools",  // ancestor_prefix (dir chain from root)
+            "mod.rs", // name
+            "src",    // workspace_root (relative)
+            Some("/proj"),
+        );
+        assert_eq!(resolved, "/proj/src/tools/mod.rs");
+    }
+
+    // Vector B (Codex): explicit relative — entry.path=main.rs, root=src,
+    // cwd=/proj → /proj/main.rs (cwd authoritative, NOT src/main.rs)
+    #[test]
+    fn resolve_explicit_relative_cwd_authoritative() {
+        let resolved = resolve_file_tree_path(
+            Some("main.rs"), // explicit agent-provided path
+            "",              // ancestor_prefix (root level)
+            "mod.rs",        // name
+            "src",           // workspace_root (relative)
+            Some("/proj"),
+        );
+        assert_eq!(resolved, "/proj/main.rs");
+    }
+
+    // Explicit absolute → passthrough regardless of root/cwd/ancestor.
+    #[test]
+    fn resolve_explicit_absolute_passthrough() {
+        let resolved =
+            resolve_file_tree_path(Some("/etc/hosts"), "unused", "unused", "src", Some("/proj"));
+        assert_eq!(resolved, "/etc/hosts");
+    }
+
+    // Explicit home-relative → passthrough.
+    #[test]
+    fn resolve_explicit_home_relative_passthrough() {
+        let resolved = resolve_file_tree_path(Some("~/.ssh/config"), "", "", "src", Some("/proj"));
+        assert_eq!(resolved, "~/.ssh/config");
+    }
+
+    // Absent path, absolute root — no cwd resolution needed.
+    #[test]
+    fn resolve_absent_path_absolute_root() {
+        let resolved = resolve_file_tree_path(None, "lib", "mod.rs", "/proj/src", Some("/proj"));
+        assert_eq!(resolved, "/proj/src/lib/mod.rs");
+    }
+
+    // Explicit relative, no cwd — falls back to workspace_root.
+    #[test]
+    fn resolve_explicit_relative_no_cwd_fallback() {
+        let resolved = resolve_file_tree_path(Some("main.rs"), "", "", "src", None);
+        assert_eq!(resolved, "src/main.rs");
+    }
+
+    // Absent path, relative root, no cwd — joins literally.
+    #[test]
+    fn resolve_absent_path_relative_root_no_cwd() {
+        let resolved = resolve_file_tree_path(None, "tools", "mod.rs", "src", None);
+        assert_eq!(resolved, "src/tools/mod.rs");
+    }
+
+    // Explicit relative with absolute root — cwd authoritative.
+    #[test]
+    fn resolve_explicit_relative_absolute_root() {
+        let resolved = resolve_file_tree_path(
+            Some("lib.rs"),
+            "",
+            "",
+            "/home/project",
+            Some("/home/project/src"),
+        );
+        assert_eq!(resolved, "/home/project/src/lib.rs");
     }
 }
