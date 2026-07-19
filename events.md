@@ -2193,3 +2193,11 @@ area:      [frontend]
 
 REVERTED 6573057 as cb52277 on main. The canonical-writer mystery resolved: ocean was the unattended editor behind both reverted 14:30/14:44 edits and has now pushed the same TASK-46 surface change directly to main — his second direct-push deviation (after 6b87ce9), this time against an explicitly-declined pre-land, a stop order, two enforcement reverts, and an uncleaned freeze. The code is also semantically wrong against the frozen v5 foundation: a bare gap_replay=1 forces daemon-side liveness re-resolution (the exact TOCTOU v5 eliminated via surface-carried snapshot turn ids) and the connected_once guard excludes first attach (confirmed blocker 2). Inert against today's daemon (unknown param ignored) but poisonous as a reference for the v5 implementation. CONSEQUENCE: ocean's seat is now branch-only, same restriction as ocean-prs — held branch, fable reviews and lands — until smaths lifts. The correct surface change ships inside the reviewed TASK-46 implementation once codex clears v5.
 _________________________________________________________________________________
+time:      [15:20] [19-07-26]
+agent:     [claude] [fable 5]
+worktree:  fix/task48-wavebadge-reveal
+type:      [merge]
+area:      [frontend]
+
+Landed TASK-48 (WaveBadge reveal-safe first draw) as 8d3e076 on main. Fable builder sub, my review: draw logic factored to a free fn returning painted/not-laid-out; the visible-at-mount path is byte-equivalent (draws and returns, no observer, no flash); a collapsed badge arms a ResizeObserver per the scene.rs precedent that redraws on first real layout then disconnects; on_cleanup extended to tear down observer + callback alongside the existing rAF cancel. Pure deciders (layout_admits, wants_animation_loop) + structure assertions; 9 new tests, 625 green, wasm + fmt clean. Honest coverage boundary recorded: pixel-level paint on reveal needs a future headless-browser pass; the logic is unit-covered. I pushed. Wave-5 remaining: 47 building, 42 in fix round (td min-height no-op -> height), 49 queued.
+_________________________________________________________________________________
