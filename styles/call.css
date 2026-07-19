@@ -1083,6 +1083,18 @@
   color: var(--fg);
 }
 
+/* coarse-pointer: extend back control 34px → 44px tall via invisible pseudo. */
+@media (pointer: coarse) {
+  .room-stage__back {
+    position: relative;
+  }
+  .room-stage__back::after {
+    content: '';
+    position: absolute;
+    inset: -5px;
+  }
+}
+
 .room-stage__title {
   flex: 1 1 auto;
   min-width: 0;
