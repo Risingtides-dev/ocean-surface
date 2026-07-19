@@ -706,7 +706,14 @@
 
 /* Repo tail + branch — quiet mono context ahead of time/turns. */
 .sessions-item__path {
-  flex: 0 0 auto;
+  /* Shrinkable and capped so a long repo tail ellipsizes instead of widening
+     the nonshrinking meta group and stealing width from the flexible title. */
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: var(--mono);
   font-size: 11px;
   line-height: 1.35;
@@ -1078,7 +1085,17 @@
   font-size: 11px;
 }
 
+/* Only the display name shrinks and ellipsizes; glyph/kind/presence/remote
+   markers stay fixed so they are never clipped by a long participant name. */
+.rooms-chip__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .rooms-chip__kind {
+  flex: 0 0 auto;
   color: var(--fg-3);
   font-size: 11px;
   font-weight: 600;

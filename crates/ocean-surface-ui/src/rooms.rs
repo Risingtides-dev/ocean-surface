@@ -1758,6 +1758,29 @@ mod tests {
             "reset_room_state must pin tail_state to Replaying"
         );
     }
+
+    // Regression for TASK-29 finding 3: participant display names must render
+    // inside a `.rooms-chip__name` child (the only shrinkable/ellipsizing part
+    // of the chip), not as bare flex text nodes that clip the fixed suffixes.
+    // The needles are assembled at runtime so this test's own literals cannot
+    // self-satisfy the assertions against the source.
+    #[test]
+    fn participant_display_names_render_inside_shrinkable_name_span() {
+        let compact: String = include_str!("rooms.rs")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let name_span = |expr: &str| format!("class=\"rooms-chip__name\">{{{expr}}}</span>");
+
+        assert!(
+            compact.contains(&name_span("p.display_name.clone()")),
+            "local roster participant name must render inside a .rooms-chip__name child span"
+        );
+        assert!(
+            compact.contains(&name_span("member.display_name.clone()")),
+            "federated roster member name must render inside a .rooms-chip__name child span"
+        );
+    }
 }
 
 // ---- View -------------------------------------------------------------------
@@ -2077,7 +2100,7 @@ pub fn RoomStage(rooms: Rooms) -> impl IntoView {
                                     title=format!("{} ({})", p.id, p.kind.label())
                                 >
                                     <span class="rooms-chip__glyph">{p.kind.icon()}</span>
-                                    {p.display_name.clone()}
+                                    <span class="rooms-chip__name">{p.display_name.clone()}</span>
                                     <span class="rooms-chip__kind">{p.kind.label()}</span>
                                 </span>
                             }
@@ -2141,7 +2164,7 @@ pub fn RoomStage(rooms: Rooms) -> impl IntoView {
                                         ></span>
                                     </Show>
                                     <span class="rooms-chip__glyph">{actor_type.icon()}</span>
-                                    {member.display_name.clone()}
+                                    <span class="rooms-chip__name">{member.display_name.clone()}</span>
                                     <Show when=move || remote_agent>
                                         <span
                                             class="rooms-chip__remote"
