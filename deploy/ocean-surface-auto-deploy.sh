@@ -77,8 +77,8 @@ rebuild_extension() {
   # Trunk --release produces hashed names (ocean-surface-ui-HASH.js etc.);
   # map them to the stable names sidepanel.html expects.
   local js_file wasm_file
-  js_file="$(ls "$deployed_dist"/ocean-surface-ui-*.js 2>/dev/null | grep -v '_bg.wasm' | head -1 || true)"
-  wasm_file="$(ls "$deployed_dist"/ocean-surface-ui-*_bg.wasm 2>/dev/null | head -1 || true)"
+  js_file="$(ls "$deployed_dist"/ocean-surface-ui*.js 2>/dev/null | grep -v '_bg.wasm' | head -1 || true)"
+  wasm_file="$(ls "$deployed_dist"/ocean-surface-ui*_bg.wasm 2>/dev/null | head -1 || true)"
   [[ -n "$js_file" && -f "$js_file" ]] || fail "cannot locate wasm-bindgen JS in $deployed_dist"
   [[ -n "$wasm_file" && -f "$wasm_file" ]] || fail "cannot locate wasm in $deployed_dist"
   cp "$js_file"   "$ext_dist/ocean-surface-ui.js"
