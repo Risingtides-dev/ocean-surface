@@ -653,10 +653,9 @@ pub enum AgentEvent {
     TurnFinished {
         #[serde(default)]
         session_id: String,
-        // Parsed to mirror the daemon's wire shape; the reducer keys turns off the
-        // running `active_turn_id`, not this id. Kept for the drift-guard + future
-        // per-turn views (OCEAN-236).
-        #[allow(dead_code)]
+        // The reducer compares this against the running `active_turn_id` for
+        // terminal admission (TASK-45): only a matching id clears the live turn
+        // state, and it also scopes the per-turn transcript/tool sweep.
         turn_id: String,
         status: String,
         #[serde(default)]
@@ -4314,6 +4313,40 @@ pub struct RealtimeSecret {
 /// content into Text / Thinking / ToolCall blocks under one Turn per turn_id,
 /// matching the TUI's `pm_*_assistant_turn_mut` logic.
 #[allow(clippy::too_many_arguments)]
+/// Whether a `TurnFinished` frame may clear the session's live turn state
+/// (`streaming` + `active_turn_id`) and write the header status line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalAdmission {
+    /// The finishing turn is the active one — clear the live Stop target and
+    /// running projection, and let it own the header status.
+    ClearLive,
+    /// A stale/superseded finish: a different turn than the active one, or a
+    /// finish arriving with no active turn. Its own turn-scoped effects still
+    /// apply, but it must not blank another turn's live state or steal its
+    /// header status.
+    KeepLive,
+}
+
+/// Decide whether a `TurnFinished` for `event_turn_id` may clear the live turn
+/// state, given the currently-active `active_turn_id` (TASK-45).
+///
+/// A session transcript legitimately carries multiple turn ids (the turn-scoped
+/// tool sweep below already relies on this), so a finish frame is not proof that
+/// the *current* turn ended. Clear the live Stop target and running projection
+/// only on an exact id match. A finish for any other turn — or one that arrives
+/// when no turn is active — keeps the live state intact; its transcript block,
+/// token accounting, and turn-scoped tool sweep remain scoped to
+/// `event_turn_id` at the call site.
+///
+/// Pure over its two inputs (no signals, no `web-sys`) so it is unit-tested off
+/// the browser, mirroring the voice capture-admission decider.
+fn admit_turn_terminal(active_turn_id: Option<&str>, event_turn_id: &str) -> TerminalAdmission {
+    match active_turn_id {
+        Some(active) if active == event_turn_id => TerminalAdmission::ClearLive,
+        _ => TerminalAdmission::KeepLive,
+    }
+}
+
 fn apply_event(
     event: &AgentEvent,
     turns: RwSignal<Vec<Turn>>,
@@ -4495,24 +4528,58 @@ fn apply_event(
             tokens_per_second,
             ..
         } => {
-            streaming.set(false);
+            // Terminal-admission gate (TASK-45): only the finish for the
+            // *active* turn may clear the live Stop target / running projection
+            // and own the header status. A stale/superseded finish (a different
+            // turn, or one arriving with no active turn) keeps its own scoped
+            // effects below but must not blank another turn's live state.
+            let admission = admit_turn_terminal(active_turn_id.get_untracked().as_deref(), turn_id);
+            if admission == TerminalAdmission::ClearLive {
+                streaming.set(false);
+                active_turn_id.set(None);
+            }
+            // Adoption is session-scoped, not turn-scoped: the frame is already
+            // gated to the active session above, so any finish for it resolves a
+            // pending adoption regardless of which turn ended.
             awaiting_session_adoption.set(false);
-            active_turn_id.set(None);
             // Surface a failed turn instead of silently flipping `streaming`
             // off. The daemon reports `status`/`error` on the finish frame; a
             // turn that errored or was cancelled previously just stopped with no
             // feedback, leaving the user staring at a dead composer. Mirror the
             // GPUI shell, which puts the error in its status line (OCEAN-100).
             // Daemon `AgentTurnStatus` is one of completed/failed/cancelled.
-            if let Some(err) = error {
-                surface_turn_failure(turns, status, status_detail, turn_id, "turn failed", err);
-            } else if turn_status != "completed" {
-                // A non-success status with no error string (e.g. "cancelled").
-                status_detail.set(None);
-                status.set(format!("turn {turn_status}"));
-            } else {
-                status.set("connected".into());
-                status_detail.set(None);
+            //
+            // The header status line is part of the live-turn projection, so
+            // only the admitted (active-turn) finish writes it — a stale
+            // failed/cancelled frame must not steal the current turn's status.
+            // A stale finish still records its OWN transcript error block
+            // (scoped to `turn_id`); it just cannot touch the header.
+            match admission {
+                TerminalAdmission::ClearLive => {
+                    if let Some(err) = error {
+                        surface_turn_failure(
+                            turns,
+                            status,
+                            status_detail,
+                            turn_id,
+                            "turn failed",
+                            err,
+                        );
+                    } else if turn_status != "completed" {
+                        // A non-success status with no error string (e.g. "cancelled").
+                        status_detail.set(None);
+                        status.set(format!("turn {turn_status}"));
+                    } else {
+                        status.set("connected".into());
+                        status_detail.set(None);
+                    }
+                }
+                TerminalAdmission::KeepLive => {
+                    if let Some(err) = error {
+                        log::error!("stale turn failed: {err}");
+                        append_turn_error(turns, turn_id, err);
+                    }
+                }
             }
             // Sweep (OCEAN-319, mirrors the TUI): a cancelled/failed turn can
             // stop mid-tool without ever emitting ToolCallFinished, leaving a
@@ -6380,6 +6447,176 @@ mod tests {
             tool_state(&daemon, turn_b, call_b),
             (ToolStatus::Running, false),
             "sibling turn's still-running tool must not be swept"
+        );
+    }
+
+    // TASK-45: terminal-admission decider + reducer regressions. A stale or
+    // superseded `TurnFinished` must not blank the live turn's Stop target,
+    // running projection, or header status.
+
+    fn start_turn(daemon: &Daemon, session_id: &str, turn_id: &str) {
+        apply_test_event(
+            daemon,
+            AgentEvent::TurnStarted {
+                turn_id: turn_id.to_string(),
+                session_id: session_id.to_string(),
+                model: None,
+            },
+        );
+    }
+
+    fn finish_turn_failed(daemon: &Daemon, session_id: &str, turn_id: &str, err: &str) {
+        apply_test_event(
+            daemon,
+            AgentEvent::TurnFinished {
+                session_id: session_id.to_string(),
+                turn_id: turn_id.to_string(),
+                status: "failed".to_string(),
+                error: Some(err.to_string()),
+                wall_ms: Some(120),
+                output_tokens: None,
+                input_tokens: None,
+                cache_read_tokens: None,
+                tokens_per_second: None,
+            },
+        );
+    }
+
+    #[test]
+    fn admit_turn_terminal_clears_only_on_exact_match() {
+        assert_eq!(
+            admit_turn_terminal(Some("turn-1"), "turn-1"),
+            TerminalAdmission::ClearLive
+        );
+        assert_eq!(
+            admit_turn_terminal(Some("turn-1"), "turn-2"),
+            TerminalAdmission::KeepLive
+        );
+        assert_eq!(
+            admit_turn_terminal(None, "turn-1"),
+            TerminalAdmission::KeepLive
+        );
+    }
+
+    #[test]
+    fn matching_finish_clears_live_state() {
+        let session_id = "session-task45-match";
+        let turn_id = "turn-live";
+        let daemon = daemon_with_session(session_id);
+
+        start_turn(&daemon, session_id, turn_id);
+        daemon.streaming.set(true);
+        assert_eq!(
+            daemon.active_turn_id.get_untracked().as_deref(),
+            Some(turn_id)
+        );
+
+        finish_turn(&daemon, session_id, turn_id, "completed");
+
+        assert!(
+            !daemon.streaming.get_untracked(),
+            "matching finish stops streaming"
+        );
+        assert_eq!(
+            daemon.active_turn_id.get_untracked(),
+            None,
+            "matching finish clears the Stop target"
+        );
+        assert_eq!(daemon.status.get_untracked(), "connected");
+    }
+
+    #[test]
+    fn stale_finish_does_not_clear_live_turn() {
+        let session_id = "session-task45-stale";
+        let live_turn = "turn-live";
+        let stale_turn = "turn-stale";
+        let daemon = daemon_with_session(session_id);
+
+        // The current, live turn owns the Stop target and running projection.
+        start_turn(&daemon, session_id, live_turn);
+        daemon.streaming.set(true);
+
+        // A superseded earlier turn finishes late.
+        finish_turn(&daemon, session_id, stale_turn, "completed");
+
+        assert!(
+            daemon.streaming.get_untracked(),
+            "stale finish must not stop the live turn's streaming"
+        );
+        assert_eq!(
+            daemon.active_turn_id.get_untracked().as_deref(),
+            Some(live_turn),
+            "stale finish must not blank the live turn's Stop target"
+        );
+    }
+
+    #[test]
+    fn finish_with_no_active_turn_is_unchanged() {
+        let session_id = "session-task45-noactive";
+        let daemon = daemon_with_session(session_id);
+
+        // No turn is live: active_turn_id is None and streaming is false.
+        assert_eq!(daemon.active_turn_id.get_untracked(), None);
+        assert!(!daemon.streaming.get_untracked());
+
+        finish_turn(&daemon, session_id, "turn-ghost", "completed");
+
+        assert_eq!(
+            daemon.active_turn_id.get_untracked(),
+            None,
+            "a finish with no active turn leaves active_turn_id None"
+        );
+        assert!(
+            !daemon.streaming.get_untracked(),
+            "a finish with no active turn leaves streaming false"
+        );
+    }
+
+    #[test]
+    fn stale_failed_finish_does_not_steal_status() {
+        let session_id = "session-task45-status";
+        let live_turn = "turn-live";
+        let stale_turn = "turn-stale";
+        let daemon = daemon_with_session(session_id);
+
+        start_turn(&daemon, session_id, live_turn);
+        daemon.streaming.set(true);
+        daemon.status.set("connected".into());
+
+        // A stale turn fails late; it must not hijack the header status chip or
+        // detail tooltip away from the still-live current turn.
+        finish_turn_failed(&daemon, session_id, stale_turn, "provider error: boom");
+
+        assert_eq!(
+            daemon.status.get_untracked(),
+            "connected",
+            "stale failed finish must not steal the header status"
+        );
+        assert_eq!(
+            daemon.status_detail.get_untracked(),
+            None,
+            "stale failed finish must not plant a status detail tooltip"
+        );
+        assert!(
+            daemon.streaming.get_untracked(),
+            "stale failed finish must not stop the live turn"
+        );
+        assert_eq!(
+            daemon.active_turn_id.get_untracked().as_deref(),
+            Some(live_turn),
+            "stale failed finish must not blank the live Stop target"
+        );
+        // The stale turn still records its OWN transcript error block.
+        let has_stale_error = daemon.turns.get_untracked().iter().any(|turn| {
+            turn.turn_id.as_deref() == Some(stale_turn)
+                && turn.blocks.iter().any(|b| {
+                    matches!(b, Block::ToolCall { name, output, .. }
+                        if name == "assistant_error" && output.contains("boom"))
+                })
+        });
+        assert!(
+            has_stale_error,
+            "stale failed finish must still append its own transcript error block"
         );
     }
 
