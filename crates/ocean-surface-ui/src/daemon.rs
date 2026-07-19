@@ -1946,6 +1946,13 @@ impl Daemon {
             let is_extension = running_as_extension();
             if is_extension {
                 daemon.url.set(DEFAULT_DAEMON_URL.to_string());
+                // No proxy fronts the side panel: voice goes daemon-direct to
+                // `/v1/voice/*`, so readiness is host-neutral (offered) and any
+                // missing-credential state surfaces per request. There is no
+                // `/api/config` here to seed it from.
+                daemon
+                    .voice_ready
+                    .set(crate::voice::transport::voice_ready_decision(None));
                 // Restore persisted session before connecting fresh.
                 if let Some(id) = should_restore_session(
                     load_persisted_session().as_deref(),
@@ -1962,6 +1969,13 @@ impl Daemon {
                 daemon.fetch_projects();
                 return;
             }
+            // Voice readiness is host-neutral: `Some(has_auth)` when the proxy
+            // answers `/api/config` (web/PWA), `None` when there's no proxy to
+            // ask (Tauri, or proxy-less web) — in which case voice goes
+            // daemon-direct and is offered, with credential state surfacing per
+            // request. Seeded once after the config attempt so it never depends
+            // on a proxy-only route.
+            let mut proxy_has_auth: Option<bool> = None;
             match Request::get("/api/config").send().await {
                 Ok(resp) => match resp.json::<ProxyConfig>().await {
                     Ok(cfg) => {
@@ -1973,7 +1987,7 @@ impl Daemon {
                         daemon.url.set(cfg.daemon_url.trim().to_string());
                         // Record voice readiness in its own signal so the SSE
                         // status transitions in connect() don't clobber it.
-                        daemon.voice_ready.set(cfg.has_auth);
+                        proxy_has_auth = Some(cfg.has_auth);
                         daemon.maps_key.set(cfg.maps_key.trim().to_string());
                         daemon.maps_map_id.set(cfg.maps_map_id.trim().to_string());
                         daemon
@@ -1994,6 +2008,14 @@ impl Daemon {
                     // No proxy in front (e.g. trunk serve direct). Keep fallback.
                 }
             }
+            // Seed voice readiness from the host-neutral decision. Web with a
+            // proxy honors its `has_auth`; Tauri and proxy-less web fall through
+            // to `None` → offered (daemon-direct), credential state per request.
+            daemon
+                .voice_ready
+                .set(crate::voice::transport::voice_ready_decision(
+                    proxy_has_auth,
+                ));
             // Native shell: no proxy fronts tauri://localhost, so the
             // `/api/config` fetch above lands on the SPA fallback and the
             // LiveKit signals stay empty, hiding the header "Join room call"

@@ -1,9 +1,13 @@
 //! Text-to-speech playback of assistant replies.
 //!
-//! When an assistant turn finishes, POST `{text}` to `/api/tts`, receive mp3
-//! bytes, wrap them in a Blob, `URL.createObjectURL` it, and play through a
-//! **persistent** `<audio>` element mounted in the DOM. A reactive `muted`
-//! signal gates the whole thing.
+//! When an assistant turn finishes, POST `{text}` to the voice transport
+//! resolved by [`crate::voice::transport`] — the same-origin proxy adapter
+//! (`/api/tts`) on web, or the daemon's `/v1/voice/tts` directly on Tauri and
+//! the extension — receive mp3 bytes, wrap them in a Blob, `URL.createObjectURL`
+//! it, and play through a **persistent** `<audio>` element mounted in the DOM.
+//! A reactive `muted` signal gates the whole thing. The response is validated
+//! (2xx + audio content type) before any bytes reach the element, so a
+//! missing-credential JSON error or an HTML fallback is never decoded as audio.
 //!
 //! Mobile autoplay: iOS Safari blocks `audio.play()` from async callbacks.
 //! We get around this by calling `prime()` from a user-gesture handler
@@ -67,8 +71,11 @@ pub fn speak(text: String, muted: RwSignal<bool>) {
         return;
     }
     spawn_local(async move {
+        use crate::voice::transport;
+        let url =
+            transport::voice_transport_url(&transport::daemon_base(), transport::VoiceRoute::Tts);
         let body = TtsRequest { text: &text };
-        let req = Request::post("/api/tts")
+        let req = Request::post(&url)
             .header("content-type", "application/json")
             .json(&body);
         let resp = match req {
@@ -79,16 +86,24 @@ pub fn speak(text: String, muted: RwSignal<bool>) {
             }
         };
         let resp = match resp {
-            Ok(r) if r.ok() => r,
-            Ok(r) => {
-                log::warn!("tts http {}", r.status());
-                return;
-            }
+            Ok(r) => r,
             Err(err) => {
                 log::warn!("tts request failed: {err}");
                 return;
             }
         };
+        // Validate status AND content type BEFORE reading the body: a missing
+        // credential (JSON error) or an HTML/SPA fallback from the shell or
+        // extension origin must never be decoded as mp3 and handed to <audio>.
+        let content_type = resp.headers().get("content-type");
+        if !transport::should_play_tts(resp.ok(), content_type.as_deref()) {
+            log::warn!(
+                "tts: non-audio response (status {}, type {:?})",
+                resp.status(),
+                content_type
+            );
+            return;
+        }
         let bytes = match resp.binary().await {
             Ok(b) => b,
             Err(err) => {
@@ -191,4 +206,22 @@ pub fn stop() {
             let _ = Url::revoke_object_url(&old);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tts_request_body_carries_only_text_no_provider_secret() {
+        // The daemon owns the xAI credential; the surface must never send (or be
+        // handed) a provider secret. The outbound TTS body is exactly the user
+        // text — nothing else can ride along.
+        let body = TtsRequest { text: "hello" };
+        let json = serde_json::to_value(&body).expect("serialize tts body");
+        assert_eq!(json, serde_json::json!({ "text": "hello" }));
+        let obj = json.as_object().expect("tts body is an object");
+        assert_eq!(obj.len(), 1);
+        assert!(obj.contains_key("text"));
+    }
 }

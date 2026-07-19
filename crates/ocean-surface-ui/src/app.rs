@@ -1125,6 +1125,10 @@ pub fn App() -> impl IntoView {
     // Voice phases 2/3: hand the realtime voice-chat module its daemon handle
     // once — the orb's menu entry starts sessions without prop-threading.
     crate::voice::realtime::install(daemon.clone());
+    // Give the STT/TTS transport the live daemon-URL signal so it can build a
+    // host-neutral voice URL (same-origin proxy adapter on web, daemon-direct on
+    // Tauri/extension) at call time, after bootstrap resolves the origin.
+    crate::voice::transport::install_daemon_url(daemon.url);
     // Planner gathering is truthful only while the isolated planner transport
     // owns the microphone. Any external stop or switch back to conversation /
     // classic voice cancels the local pre-session state; it never creates work.

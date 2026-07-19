@@ -19,6 +19,7 @@ pub mod listen;
 pub mod mode;
 pub mod planner;
 pub mod realtime;
+pub mod transport;
 pub mod vad;
 
 use std::cell::{Cell, RefCell};
@@ -26,7 +27,6 @@ use std::rc::Rc;
 
 use gloo_net::http::Request;
 use leptos::prelude::*;
-use serde::Deserialize;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::{spawn_local, JsFuture};
@@ -61,16 +61,6 @@ pub enum HandsFreeStatus {
     Transcribing,
     /// Last utterance's final transcript (kept briefly for visual confirmation).
     Final(String),
-}
-
-#[derive(Deserialize)]
-struct SttResponse {
-    #[serde(default)]
-    ok: bool,
-    #[serde(default)]
-    text: String,
-    #[serde(default)]
-    error: Option<String>,
 }
 
 /// Live recorder handles we must hold onto for the lifetime of a capture.
@@ -987,7 +977,8 @@ async fn upload_blob(blob: Blob, state: RwSignal<RecState>, capture: admit::Capt
         mime
     };
 
-    let req = Request::post("/api/stt")
+    let url = transport::voice_transport_url(&transport::daemon_base(), transport::VoiceRoute::Stt);
+    let req = Request::post(&url)
         .header("content-type", &content_type)
         .body(bytes);
     let resp = match req {
@@ -999,18 +990,25 @@ async fn upload_blob(blob: Blob, state: RwSignal<RecState>, capture: admit::Capt
         }
     };
     match resp {
-        Ok(r) => match r.json::<SttResponse>().await {
-            Ok(s) if s.ok && !s.text.trim().is_empty() => {
-                deliver_transcript(s.text.trim().to_string(), capture);
+        Ok(r) => {
+            // Reject a non-JSON body (an HTML/SPA fallback from the shell or
+            // extension origin) before serde ever touches it, then reconcile
+            // status + body across the proxy and daemon-direct shapes.
+            let content_type = r.headers().get("content-type");
+            if !transport::is_json_content_type(content_type.as_deref()) {
+                report_status_if_current(capture, "voice service unavailable".into());
+                state.set(RecState::Idle);
+                return;
             }
-            Ok(s) => {
-                report_status_if_current(
-                    capture,
-                    s.error.unwrap_or_else(|| "no transcript heard".into()),
-                );
+            let status_ok = r.ok();
+            match r.json::<transport::SttBody>().await {
+                Ok(body) => match transport::interpret_stt(status_ok, &body) {
+                    transport::SttOutcome::Transcript(text) => deliver_transcript(text, capture),
+                    transport::SttOutcome::Report(msg) => report_status_if_current(capture, msg),
+                },
+                Err(err) => report_status_if_current(capture, format!("stt decode error: {err}")),
             }
-            Err(err) => report_status_if_current(capture, format!("stt decode error: {err}")),
-        },
+        }
         Err(err) => report_status_if_current(capture, format!("stt request failed: {err}")),
     }
     state.set(RecState::Idle);
@@ -1129,7 +1127,8 @@ async fn upload_segment(blob: Blob, capture: admit::CaptureId) {
     } else {
         mime
     };
-    let req = Request::post("/api/stt")
+    let url = transport::voice_transport_url(&transport::daemon_base(), transport::VoiceRoute::Stt);
+    let req = Request::post(&url)
         .header("content-type", &content_type)
         .body(bytes);
     let resp = match req {
@@ -1140,9 +1139,18 @@ async fn upload_segment(blob: Blob, capture: admit::CaptureId) {
         }
     };
     if let Ok(r) = resp {
-        if let Ok(s) = r.json::<SttResponse>().await {
-            if s.ok && !s.text.trim().is_empty() {
-                deliver_transcript(s.text.trim().to_string(), capture);
+        // Same JSON guard as `upload_blob`; hands-free drops failures silently
+        // (only an admitted transcript advances the listen loop).
+        let content_type = r.headers().get("content-type");
+        if !transport::is_json_content_type(content_type.as_deref()) {
+            return;
+        }
+        let status_ok = r.ok();
+        if let Ok(body) = r.json::<transport::SttBody>().await {
+            if let transport::SttOutcome::Transcript(text) =
+                transport::interpret_stt(status_ok, &body)
+            {
+                deliver_transcript(text, capture);
             }
         }
     }
