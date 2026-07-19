@@ -901,7 +901,8 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
     // panel close→reopen resets the generation. The first user toggle wins for
     // the rest of that generation. See `plan_collapse_priming` for the decider.
     let collapsed: RwSignal<HashSet<String>> = RwSignal::new(HashSet::new());
-    let priming_state: RwSignal<CollapsePrimingState> = RwSignal::new(CollapsePrimingState::default());
+    let priming_state: RwSignal<CollapsePrimingState> =
+        RwSignal::new(CollapsePrimingState::default());
     let priming_prev_open: RwSignal<bool> = RwSignal::new(false);
     Effect::new(move |_| {
         let is_open = open.get();
@@ -917,7 +918,8 @@ pub fn SessionsPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
 
         let active_id = current_id.get();
         let secs = group_for_panel(&session_list.get(), &projects.get(), active_id.as_deref());
-        let plan = plan_collapse_priming(&priming_state.get_untracked(), &secs, active_id.as_deref());
+        let plan =
+            plan_collapse_priming(&priming_state.get_untracked(), &secs, active_id.as_deref());
         if let Some(next_collapsed) = plan.collapsed {
             collapsed.set(next_collapsed);
         }
@@ -2530,8 +2532,24 @@ mod tests {
     fn collapse_priming_follows_active_session_change_before_user_input() {
         let projects = vec![project("a", "A", "/a"), project("b", "B", "/b")];
         let sessions = vec![
-            session("sa", "/a", Some("/a"), None, None, 1, "2026-07-19T12:00:00Z"),
-            session("sb", "/b", Some("/b"), None, None, 1, "2026-07-19T12:01:00Z"),
+            session(
+                "sa",
+                "/a",
+                Some("/a"),
+                None,
+                None,
+                1,
+                "2026-07-19T12:00:00Z",
+            ),
+            session(
+                "sb",
+                "/b",
+                Some("/b"),
+                None,
+                None,
+                1,
+                "2026-07-19T12:01:00Z",
+            ),
         ];
 
         let secs = group_for_panel(&sessions, &projects, Some("sa"));
@@ -2552,8 +2570,24 @@ mod tests {
     fn collapse_priming_generation_resets_on_panel_reopen() {
         let projects = vec![project("a", "A", "/a"), project("b", "B", "/b")];
         let sessions = vec![
-            session("sa", "/a", Some("/a"), None, None, 1, "2026-07-19T12:00:00Z"),
-            session("sb", "/b", Some("/b"), None, None, 1, "2026-07-19T12:01:00Z"),
+            session(
+                "sa",
+                "/a",
+                Some("/a"),
+                None,
+                None,
+                1,
+                "2026-07-19T12:00:00Z",
+            ),
+            session(
+                "sb",
+                "/b",
+                Some("/b"),
+                None,
+                None,
+                1,
+                "2026-07-19T12:01:00Z",
+            ),
         ];
         let secs = group_for_panel(&sessions, &projects, Some("sa"));
 
@@ -2568,18 +2602,31 @@ mod tests {
         );
         // Close→reopen resets the generation (fresh default state) → eligible again.
         let reopened = plan_collapse_priming(&CollapsePrimingState::default(), &secs, Some("sa"));
-        assert!(
-            reopened.collapsed.is_some(),
-            "reopen re-primes the default"
-        );
+        assert!(reopened.collapsed.is_some(), "reopen re-primes the default");
     }
 
     #[test]
     fn collapse_priming_user_toggle_survives_later_regroupings() {
         let projects = vec![project("a", "A", "/a"), project("b", "B", "/b")];
         let sessions = vec![
-            session("sa", "/a", Some("/a"), None, None, 1, "2026-07-19T12:00:00Z"),
-            session("sb", "/b", Some("/b"), None, None, 1, "2026-07-19T12:01:00Z"),
+            session(
+                "sa",
+                "/a",
+                Some("/a"),
+                None,
+                None,
+                1,
+                "2026-07-19T12:00:00Z",
+            ),
+            session(
+                "sb",
+                "/b",
+                Some("/b"),
+                None,
+                None,
+                1,
+                "2026-07-19T12:01:00Z",
+            ),
         ];
         let secs = group_for_panel(&sessions, &projects, Some("sa"));
         let plan = plan_collapse_priming(&CollapsePrimingState::default(), &secs, Some("sa"));
@@ -2614,8 +2661,24 @@ mod tests {
     fn collapse_priming_no_active_fallback_settles_and_reprimes_on_active() {
         let projects = vec![project("a", "A", "/a"), project("b", "B", "/b")];
         let sessions = vec![
-            session("sa", "/a", Some("/a"), None, None, 1, "2026-07-19T12:00:00Z"),
-            session("sb", "/b", Some("/b"), None, None, 1, "2026-07-19T12:01:00Z"),
+            session(
+                "sa",
+                "/a",
+                Some("/a"),
+                None,
+                None,
+                1,
+                "2026-07-19T12:00:00Z",
+            ),
+            session(
+                "sb",
+                "/b",
+                Some("/b"),
+                None,
+                None,
+                1,
+                "2026-07-19T12:01:00Z",
+            ),
         ];
         // No active session: fall back to the newest section and settle so a
         // later poll cannot make the default jump.
@@ -2628,8 +2691,24 @@ mod tests {
 
         // A regroup where a different section is now newest must NOT re-prime.
         let sessions2 = vec![
-            session("sa", "/a", Some("/a"), None, None, 1, "2026-07-19T12:09:00Z"),
-            session("sb", "/b", Some("/b"), None, None, 1, "2026-07-19T12:01:00Z"),
+            session(
+                "sa",
+                "/a",
+                Some("/a"),
+                None,
+                None,
+                1,
+                "2026-07-19T12:09:00Z",
+            ),
+            session(
+                "sb",
+                "/b",
+                Some("/b"),
+                None,
+                None,
+                1,
+                "2026-07-19T12:01:00Z",
+            ),
         ];
         let secs2 = group_for_panel(&sessions2, &projects, None);
         let plan2 = plan_collapse_priming(&plan.next, &secs2, None);
@@ -2642,7 +2721,10 @@ mod tests {
         let secs3 = group_for_panel(&sessions2, &projects, Some("sb"));
         let plan3 = plan_collapse_priming(&plan.next, &secs3, Some("sb"));
         let c3 = plan3.collapsed.expect("active appearance re-primes");
-        assert!(!c3.contains("b"), "default moved onto the now-active session");
+        assert!(
+            !c3.contains("b"),
+            "default moved onto the now-active session"
+        );
     }
 
     // ── Dot state precedence (exact 5-state contract) ──
