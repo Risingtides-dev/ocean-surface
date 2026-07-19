@@ -362,21 +362,19 @@
 }
 
 .turn--assistant .turn__body {
-  width: auto;
-  max-width: min(74ch, 100%);
-  padding: 10px 16px;
-  background: var(--sheen-soft), var(--bg-raised);
-  /* --bg-raised sits 4 ticks above --bg; without a drawn edge the card's
-     boundary reads as accidental banding ("a gap of pure black to softer
-     black"), not geometry. The hairline makes it a deliberate card — same
-     idiom as .ocean-component. */
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--elev-1);
-  /* Settle/cool: when .is-streaming drops, the specular breath animation
-     stops and the card's box-shadow + border-color transition back from
-     the last animated frame to the cascade values below (~1.2s). */
-  transition: box-shadow 1.2s ease-out, border-color 1.2s ease-out;
+  /* TASK-52 open document flow: the assistant turn is DE-BUBBLED. No card
+     background, border, radius, or shadow — content sits directly on the
+     transcript surface, and turn separation comes from the transcript's
+     vertical rhythm (its 18px flex gap), not chrome. The body spans the full
+     transcript rail so rendered components below can break out to full
+     measure; prose re-imposes its own readable measure (see .block--text). */
+  width: 100%;
+  max-width: 100%;
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
 }
 
 /* Live activity row — one pure reducer-driven row at transcript tail,
@@ -412,10 +410,14 @@
   }
 }
 
-/* Prose sits FLUSH inside the one reply card — no nested per-message bubbles
-   (the old per-`.block--text` bubble fought the card + the cognition glow). */
+/* TASK-52 two-measure layout — the PROSE column. The assistant body is now
+   de-bubbled and full-width, so the readable measure lives HERE on the text
+   block itself: streaming markdown prose is capped at 74ch (the same
+   comfortable measure the old reply card carried) while rendered components
+   below break out to the full rail. No bubble chrome — the de-bubbled turn
+   owns the surface, prose just sits on it flush. */
 .turn--assistant .turn__body .block--text {
-  max-width: none;
+  max-width: 74ch;
   padding: 0;
   background: none;
   border: none;
@@ -776,26 +778,10 @@
   }
 }
 
-/* Specular edge — live-turn signal (replaces the old streaming glow).
-   Top-edge light turns aqua via --specular-live while .is-streaming;
-   6s breath (alpha 0.05→0.16), border warms faintly (0.06→0.11).
-   Settle/cool over ~1.2s when .is-streaming is removed. Pure CSS —
-   no canvas or JS. The base .turn__body carries a matching transition
-   so the edge fades back to neutral when the streaming class drops. */
-@keyframes ocean-specular-breath {
-  0%, 100% {
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 1px 2px rgba(0, 0, 0, 0.50);
-    border-color: rgba(255, 255, 255, 0.06);
-  }
-  50% {
-    box-shadow: inset 0 1px 0 var(--specular-live), 0 1px 2px rgba(0, 0, 0, 0.50);
-    border-color: rgba(95, 255, 255, 0.11);
-  }
-}
-
-.turn--assistant.is-streaming .turn__body {
-  animation: ocean-specular-breath 6s ease-in-out infinite;
-}
+/* TASK-52: the specular-edge streaming breath was removed with the assistant
+   card — a breathing box-shadow/border is exactly the card chrome the
+   de-bubbled open flow drops. The live-activity row (TASK-22) owns the live
+   streaming/reasoning signal now, so the turn body needs no live-edge glow. */
 
 /* Newly-mounted turns materialize from just below the surface — a short
    opacity + 2px rise (the rise-from-depth tide). Gated on .turn.is-new,
@@ -810,27 +796,36 @@
   animation: ocean-turn-materialize var(--dur-fast) var(--ease-tide) both;
 }
 
-/* ── Rich components inside assistant turn body — flat outer roots ──
-   The turn body is THE card; nested .component-* wrappers sit flush. Genuine
-   inner wells/cards keep their elevation; form, semantic callout tint, and
-   interactive confirm distinction are preserved. */
+/* ── TASK-52 full-measure components — the two-measure BREAKOUT ─────────
+   The heart of the ask. The assistant turn is de-bubbled (no parent card), so
+   rendered components are no longer flattened into it: they regain their own
+   native card chrome (components.css elevation/padding) AND break out to the
+   FULL transcript rail width. Prose above holds a 74ch measure; components span
+   the whole rail so dashboards, tables, kanban, stat rows, forms, callouts,
+   confirms, galleries, media and preview cards can breathe.
+   width:100% forces full-rail fill even when intrinsic content is narrow;
+   components.css already caps them at max-width:100% so they never overflow. */
 .turn--assistant .turn__body .component-kanban,
 .turn--assistant .turn__body .component-table,
 .turn--assistant .turn__body .component-progress,
 .turn--assistant .turn__body .component-markdown,
 .turn--assistant .turn__body .component-dashboard,
 .turn--assistant .turn__body .component-chart,
+.turn--assistant .turn__body .component-interactive-plot,
 .turn--assistant .turn__body .component-timeline,
 .turn--assistant .turn__body .component-stats,
 .turn--assistant .turn__body .component-filetree,
 .turn--assistant .turn__body .component-diff,
 .turn--assistant .turn__body .component-code,
 .turn--assistant .turn__body .component-gallery,
+.turn--assistant .turn__body .component-form,
+.turn--assistant .turn__body .component-callout,
+.turn--assistant .turn__body .component-confirm,
+.turn--assistant .turn__body .block--map,
+.turn--assistant .turn__body .block--video,
 .turn--assistant .turn__body .block--component-unknown {
-  background: none;
-  box-shadow: none;
-  border-radius: 0;
-  padding: 0;
+  width: 100%;
+  max-width: 100%;
 }
 
 /* ── Compact containment — large components scroll locally at 380px ──
@@ -885,15 +880,13 @@
 @media (prefers-reduced-motion: reduce) {
   .ocean-perm,
   .transcript-disclosure__body,
-  .turn.is-new,
-  .turn--assistant.is-streaming .turn__body {
+  .turn.is-new {
     animation: none;
   }
 
   .ocean-perm__approve,
   .ocean-perm__deny,
-  .transcript-disclosure__head,
-  .turn--assistant .turn__body {
+  .transcript-disclosure__head {
     transition: none;
   }
 
