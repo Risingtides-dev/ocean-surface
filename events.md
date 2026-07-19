@@ -1992,3 +1992,11 @@ area:      [frontend]
 
 Landed TASK-30 (coarse-pointer hit areas) as b33f8fe on main. Ocean built the diff and held it uncommitted per the branch-only rule; I reviewed (44px invisible ::after hit extensions for panel close/retry/tab close, policy-row padding with label-wrapped checkboxes verified in rooms.rs, both dead selectors .rooms-panel__back and .rooms-addagent__btn removed in-slice), ran crate tests green, committed and pushed. One residual logged: live .room-stage__back in call.css is 34px and was outside the slice's file scope — small follow-up candidate. Gate shape held: built -> held -> reviewed -> fable landed.
 _________________________________________________________________________________
+time:      [05:22] [19-07-26]
+agent:     [claude] [fable 5]
+worktree:  fix/task31-composer-tokens
+type:      [merge]
+area:      [frontend]
+
+Landed TASK-31 (composer token normalization) as d5f2b17 on main. Built by a fable subagent in a ~/.worktrees lane, reviewed by me: seven obsolete-alias occurrences in the slash-menu block normalized to canonical tokens (--radius, --bg-elevated, --fg-3 x3, --bg-hover, --mono) with raw fallbacks dropped; --shadow-md and --border-subtle correctly untouched. Regression test composer_css_uses_canonical_tokens_not_obsolete_aliases added to the existing CSS-assertion seam in voice_realtime_regressions.rs. Rebased onto b33f8fe, tests green (465 unit + 2 integration), I pushed. Note: repo styles live at the root styles/ directory, not under the UI crate.
+_________________________________________________________________________________
