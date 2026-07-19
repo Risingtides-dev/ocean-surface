@@ -2258,3 +2258,10 @@ area:      [infra]
 
 Landed a514270: ocean-prs' concurrent proxy fix reconciled over my emergency handler — his one-line proxy_get_json forward supersedes my copy-paste handler, and his router regression (permissions_snapshot_route_does_not_fall_through) closes codex's requirement that the snapshot path can never silently fall through again. His work was recovered from the squatted canonical checkout via patch (both fixes were written concurrently during the outage scramble; his was cleaner). 18 proxy tests green; live proxy rebuilt + restarted on the consolidated code, route re-probed 200. Canonical's proxy dirt cleaned (work now on main); only ocean's TASK-46 daemon.rs WIP remains there — relocation still owed.
 _________________________________________________________________________________
+time:      [16:38] [19-07-26]
+agent:     [claude] [fable 5]
+type:      [infra]
+area:      [infra]
+
+DISK-FULL INCIDENT + RECOVERY. The Data volume hit 100% (126MB free of 926GB) mid-afternoon — every Bash invocation in my harness failed at output-file creation, Write failed at temp-rename, and the day's builds were the accumulator: cargo target trees totaled ~170GB (canonical surface 67G, ocean-os 73G, Lane C worktree 26G, landed-lane clones ~7G). Recovery path when no shell worked: computer-use into a FRESH Terminal.app window (kitty avoided deliberately — it hosts the herdr agent panes) to run the first probe, which restored enough headroom for normal tooling. Cleanup: deleted target/debug in both canonical repos (release dirs preserved — the live daemon and proxy binaries run from them), the Lane C worktree's target cache (branches/checkpoint untouched), and two fully-landed lane worktrees. 158GB recovered; daemon and proxy verified serving (200/200) post-cleanup. Follow-up queued: a periodic target-cache pruning rail (the auto-deploy rail already cleans its own temp trees; the repo-level caches had no owner).
+_________________________________________________________________________________
