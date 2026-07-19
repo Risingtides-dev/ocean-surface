@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent: dev.risingtides.cargo-cache-prune
+
+  Runs the cargo cache pruner weekly with --apply (Sunday 05:00, a quiet hour).
+  Explicitly invokes Homebrew bash 5.x because the script needs bash >= 4 and
+  macOS /bin/bash is 3.2.
+
+  Install (done by the orchestrator at landing, not by this repo):
+    cp scripts/prune-cargo-caches.plist ~/Library/LaunchAgents/dev.risingtides.cargo-cache-prune.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.risingtides.cargo-cache-prune.plist
+  Uninstall:
+    launchctl bootout gui/$(id -u)/dev.risingtides.cargo-cache-prune
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.risingtides.cargo-cache-prune</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/bash</string>
+    <string>/Users/risingtidesdev/dev/ocean-surface/scripts/prune-cargo-caches.sh</string>
+    <string>--apply</string>
+  </array>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key>
+    <integer>0</integer>
+    <key>Hour</key>
+    <integer>5</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/cargo-cache-prune.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/cargo-cache-prune.log</string>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/risingtidesdev</string>
+</dict>
+</plist>
