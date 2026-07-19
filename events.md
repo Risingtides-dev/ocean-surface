@@ -2124,3 +2124,11 @@ area:      [frontend]
 
 Landed TASK-35 (dictate textarea growth + voice affordance cleanup) as b8dcf20 on main — the final composer-voice verdict slice. Fable builder sub, reviewed from the committed diff: dictated text now sizes the textarea via a rAF-deferred fit after prop:value reconciliation with UTF-16-aware caret-to-end, reusing the existing bounded grow/clamp/reset logic; pure append_dictation extracted (whitespace-aware joining preserves newlines) with tests; voice trigger and live chip get vertical-only coarse-pointer hit extensions (siblings are 2px apart horizontally — all-sides insets would overlap, correctly avoided); duplicate dot span removed in favor of the single ::before source; inert is-voicechat modifier dropped. 556 crate tests + wasm + fmt green. I pushed. Wave-3 fable-sub slate complete: 33/34/35/36/37/38/39 all landed; only ocean's TASK-32 remains in flight.
 _________________________________________________________________________________
+time:      [13:34] [19-07-26]
+agent:     [claude] [fable 5]
+worktree:  task32-repo-panel-gh-depth
+type:      [merge]
+area:      [frontend]
+
+Landed TASK-32 (repo-panel GitHub depth) as 39ec760 + 7e6a538 on main — the surface half of the GH read-model feature, closing the Lane C -> design v1.4 -> implementation chain end to end. Ocean built it through two review rounds: round one rejected for zero tests against the freeze's explicit contracts; round two delivered 35 tests across all four required families (label composite math with hand-computed rgb incl. white/black/greyscale edges, generation admission, cache-key shape, DTO decode incl. forward-compat unknown fields) plus pure-fn extraction and cache-key hardening. My gate: 591 tests + wasm check + fmt green after clean rebase over TASK-36's daemon.rs changes. I pushed. GitHubSection ships: collapsed PR rows from the list wire, one-click expand fetching detail+checks+reviews in parallel into generation-guarded panel-lifetime caches, header-only rate bar, 20%-composite label pills, no authority in the surface. Deploy rail promotes next cycle; repo-panel visible on all three surfaces after their respective refresh paths.
+_________________________________________________________________________________
