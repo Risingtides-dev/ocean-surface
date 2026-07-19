@@ -6,13 +6,17 @@
 //! WebRTC directly to OpenAI: mic track up, agent audio track down, and a
 //! `oai-events` data channel for tool calls.
 //!
-//! Two tools round-trip through that channel:
+//! Conversation mode exposes two tools round-tripped through that channel:
 //! - `render_component` — folded into the transcript locally via
 //!   [`crate::daemon::Daemon::render_local_component`], the same upsert the
 //!   SSE `ComponentRender` reducer performs.
 //! - `write_handoff` — appended to the chat session through the daemon
 //!   (`POST /v1/agent/sessions/{id}/messages`), so the text agent's next turn
 //!   picks the note up.
+//!
+//! Planner mode is isolated from conversation tools. It exposes only bounded
+//! read-only workspace inspection (`list_workspace`, `read_workspace_file`) plus
+//! `propose_handoff`, whose result still waits for explicit human confirmation.
 //!
 //! Layout contract (consumed by app.rs): [`stage`] drives the voice-chat
 //! center-stage classes; [`level`] is a 0..1 mic level the orb's water binds
@@ -782,8 +786,18 @@ fn handle_server_event(daemon: &Daemon, config: &RealtimeConfig, text: &str) {
                         let args = serde_json::from_str(raw_args).unwrap_or(Value::Null);
                         dispatch_tool(daemon, session_id.as_deref(), name, call_id, args);
                     }
-                    RealtimeConfig::Planner { on_proposal, .. } => {
-                        dispatch_planner_tool(name, call_id, raw_args, *on_proposal);
+                    RealtimeConfig::Planner {
+                        context,
+                        on_proposal,
+                    } => {
+                        dispatch_planner_tool(
+                            daemon,
+                            context,
+                            name,
+                            call_id,
+                            raw_args,
+                            *on_proposal,
+                        );
                     }
                 }
             }
@@ -799,25 +813,50 @@ fn handle_server_event(daemon: &Daemon, config: &RealtimeConfig, text: &str) {
     }
 }
 
-/// Run one voice-agent tool call and answer it on the data channel so the
-/// agent can keep talking about what it did.
+/// Run one planner tool call and answer it on the data channel so the planner can
+/// keep talking. Planner tools remain read-only except `propose_handoff`, which
+/// only populates the human review card and creates no session/work.
 fn dispatch_planner_tool(
+    daemon: &Daemon,
+    context: &PlannerContext,
     name: &str,
     call_id: String,
     raw_args: &str,
     on_proposal: Callback<VoicePlannerBrief>,
 ) {
-    match validate_planner_tool_call(name, raw_args) {
-        Ok(proposal) => {
-            on_proposal.run(proposal);
-            send_tool_output(
+    match name {
+        "propose_handoff" => match validate_planner_tool_call(name, raw_args) {
+            Ok(proposal) => {
+                on_proposal.run(proposal);
+                send_tool_output(
+                    &call_id,
+                    "proposal ready for human review; no session or work was created",
+                );
+            }
+            Err(error) => send_tool_output(
                 &call_id,
-                "proposal ready for human review; no session or work was created",
-            );
+                &format!("proposal rejected: {error}. Revise it and call propose_handoff again"),
+            ),
+        },
+        "list_workspace" | "read_workspace_file" => {
+            let daemon = daemon.clone();
+            let context = context.clone();
+            let name = name.to_string();
+            let args = raw_args.to_string();
+            spawn_local(async move {
+                let output = match name.as_str() {
+                    "list_workspace" => planner_list_workspace(&daemon, &context, &args).await,
+                    "read_workspace_file" => {
+                        planner_read_workspace_file(&daemon, &context, &args).await
+                    }
+                    _ => unreachable!("matched planner read-only tool"),
+                };
+                send_tool_output(&call_id, &output);
+            });
         }
-        Err(error) => send_tool_output(
+        _ => send_tool_output(
             &call_id,
-            &format!("proposal rejected: {error}. Revise it and call propose_handoff again"),
+            &format!("tool `{name}` is unavailable in planner mode"),
         ),
     }
 }
@@ -827,6 +866,145 @@ fn validate_planner_tool_call(name: &str, raw_args: &str) -> Result<VoicePlanner
         return Err(format!("tool `{name}` is unavailable in planner mode"));
     }
     VoicePlannerBrief::from_tool_arguments(raw_args)
+}
+
+async fn planner_list_workspace(
+    daemon: &Daemon,
+    context: &PlannerContext,
+    raw_args: &str,
+) -> String {
+    let relative = match planner_relative_path_from_args(raw_args) {
+        Ok(path) => path,
+        Err(error) => return planner_error(&error),
+    };
+    let absolute = planner_workspace_path(&context.workspace_root, &relative);
+    match crate::daemon::fetch_fs_dirs_with_files(&daemon.url.get_untracked(), &absolute).await {
+        Some(resp) if resp.error.is_none() => {
+            if !planner_path_is_within_workspace(&resp.path, &context.workspace_root) {
+                return planner_error("resolved path is outside the validated workspace");
+            }
+            let dirs: Vec<_> = resp
+                .dirs
+                .iter()
+                .take(40)
+                .map(|entry| {
+                    json!({
+                        "name": entry.name,
+                        "git": entry.git,
+                        "is_repo": entry.is_repo,
+                        "git_branch": entry.git_branch,
+                    })
+                })
+                .collect();
+            let files: Vec<_> = resp
+                .files
+                .iter()
+                .take(80)
+                .map(|entry| json!({ "name": entry.name, "size": entry.size }))
+                .collect();
+            json!({
+                "ok": true,
+                "path": if relative.is_empty() { "." } else { relative.as_str() },
+                "dirs": dirs,
+                "files": files,
+                "truncated": resp.dirs.len() > 40 || resp.files.len() > 80,
+            })
+            .to_string()
+        }
+        Some(resp) => planner_error(resp.error.as_deref().unwrap_or("workspace listing failed")),
+        None => planner_error("workspace listing failed"),
+    }
+}
+
+async fn planner_read_workspace_file(
+    daemon: &Daemon,
+    context: &PlannerContext,
+    raw_args: &str,
+) -> String {
+    let relative = match planner_relative_path_from_args(raw_args) {
+        Ok(path) if !path.is_empty() => path,
+        Ok(_) => return planner_error("path must name a file under the workspace"),
+        Err(error) => return planner_error(&error),
+    };
+    let absolute = planner_workspace_path(&context.workspace_root, &relative);
+    match crate::daemon::fetch_fs_file(&daemon.url.get_untracked(), &absolute).await {
+        Some(resp) if resp.error.is_none() => {
+            if !planner_path_is_within_workspace(&resp.path, &context.workspace_root) {
+                return planner_error("resolved path is outside the validated workspace");
+            }
+            if resp.binary {
+                return planner_error("file is binary");
+            }
+            let mut content = resp.content;
+            let locally_truncated = content.chars().count() > 20_000;
+            if locally_truncated {
+                content = content.chars().take(20_000).collect();
+            }
+            json!({
+                "ok": true,
+                "path": relative,
+                "size": resp.size,
+                "truncated": resp.truncated || locally_truncated,
+                "content": content,
+            })
+            .to_string()
+        }
+        Some(resp) => planner_error(resp.error.as_deref().unwrap_or("file read failed")),
+        None => planner_error("file read failed"),
+    }
+}
+
+fn planner_relative_path_from_args(raw_args: &str) -> Result<String, String> {
+    let args: Value = serde_json::from_str(raw_args)
+        .map_err(|error| format!("invalid tool arguments JSON: {error}"))?;
+    let raw = args
+        .pointer("/path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "path is required".to_string())?;
+    normalize_planner_relative_path(raw)
+}
+
+fn normalize_planner_relative_path(raw: &str) -> Result<String, String> {
+    let cleaned = raw.trim().replace('\\', "/");
+    if cleaned.is_empty() || cleaned == "." {
+        return Ok(String::new());
+    }
+    if cleaned.starts_with('/') || cleaned.starts_with('~') || cleaned.contains('\0') {
+        return Err("path must be relative to the validated workspace".into());
+    }
+    let mut parts = Vec::new();
+    for part in cleaned.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            return Err("path must not contain '..'".into());
+        }
+        parts.push(part);
+    }
+    let normalized = parts.join("/");
+    if normalized.chars().count() > 500 {
+        return Err("path exceeds 500 characters".into());
+    }
+    Ok(normalized)
+}
+
+fn planner_workspace_path(workspace_root: &str, relative: &str) -> String {
+    if relative.is_empty() {
+        workspace_root.trim_end_matches('/').to_string()
+    } else {
+        format!("{}/{}", workspace_root.trim_end_matches('/'), relative)
+    }
+}
+
+fn planner_path_is_within_workspace(resolved_path: &str, workspace_root: &str) -> bool {
+    let resolved = std::path::Path::new(resolved_path);
+    let root = std::path::Path::new(workspace_root);
+    !resolved_path.is_empty() && !workspace_root.is_empty() && resolved.starts_with(root)
+}
+
+fn planner_error(error: &str) -> String {
+    json!({ "ok": false, "error": error }).to_string()
 }
 
 fn dispatch_tool(
@@ -1097,7 +1275,7 @@ mod tests {
     }
 
     #[test]
-    fn planner_dispatch_accepts_only_strict_propose_handoff() {
+    fn planner_proposal_validator_accepts_only_strict_propose_handoff() {
         let proposal = validate_planner_tool_call("propose_handoff", &valid_planner_args())
             .expect("valid strict proposal");
         assert_eq!(proposal.title, "Plan");
@@ -1109,6 +1287,56 @@ mod tests {
         let mut unknown: Value = serde_json::from_str(&valid_planner_args()).unwrap();
         unknown["unknown"] = json!(true);
         assert!(validate_planner_tool_call("propose_handoff", &unknown.to_string()).is_err());
+    }
+
+    #[test]
+    fn planner_workspace_paths_are_relative_and_normalized() {
+        assert_eq!(normalize_planner_relative_path("."), Ok(String::new()));
+        assert_eq!(
+            normalize_planner_relative_path("docs/./README.md"),
+            Ok("docs/README.md".into())
+        );
+        assert_eq!(
+            normalize_planner_relative_path("docs\\README.md"),
+            Ok("docs/README.md".into())
+        );
+        assert!(normalize_planner_relative_path("/etc/passwd").is_err());
+        assert!(normalize_planner_relative_path("~/secret").is_err());
+        assert!(normalize_planner_relative_path("docs/../secret").is_err());
+    }
+
+    #[test]
+    fn planner_workspace_tool_args_require_path() {
+        assert_eq!(
+            planner_relative_path_from_args(r#"{"path":"docs"}"#),
+            Ok("docs".into())
+        );
+        assert!(planner_relative_path_from_args(r#"{"path":".."}"#).is_err());
+        assert!(planner_relative_path_from_args(r#"{}"#).is_err());
+        assert!(planner_relative_path_from_args("not json").is_err());
+    }
+
+    #[test]
+    fn planner_workspace_path_stays_under_context_root() {
+        assert_eq!(planner_workspace_path("/repo/", "docs"), "/repo/docs");
+        assert_eq!(planner_workspace_path("/repo/", ""), "/repo");
+        assert!(planner_path_is_within_workspace(
+            "/repo/docs/README.md",
+            "/repo"
+        ));
+        assert!(planner_path_is_within_workspace("/repo", "/repo"));
+        assert!(!planner_path_is_within_workspace("/repo-secret", "/repo"));
+        assert!(!planner_path_is_within_workspace(
+            "/home/user/secret",
+            "/repo"
+        ));
+        assert!(!planner_path_is_within_workspace("", "/repo"));
+    }
+
+    #[test]
+    fn planner_error_output_is_json() {
+        let out: Value = serde_json::from_str(&planner_error("nope")).unwrap();
+        assert_eq!(out, json!({"ok": false, "error": "nope"}));
     }
 
     #[test]

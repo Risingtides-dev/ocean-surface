@@ -1933,3 +1933,11 @@ fmt, diff-check, plus extension build independently rerun by ocean with the
 competing_reveal_open symbol verified in the compiled bundle. Integration
 sequence: this push, then Lane D rebases once, then TASK-22.
 _________________________________________________________________________________
+
+time:  [03:01pm] [19-07-26]
+agent: ocean-tauri, codex
+worktree: [main]
+type:  [feature]
+
+Added bounded read-only Voice Planner fulfillment for daemon-advertised list_workspace and read_workspace_file calls. Planner paths are normalized relative to the frozen daemon-validated workspace, reject absolute/~/'..', and require every daemon-canonicalized response target to remain under the workspace, including against symlink escape. Listings cap at 40 dirs/80 files; file output caps at 20k chars and rejects binary content. propose_handoff still only populates human review; Create draft/Create & start remain the sole session/turn mutation boundary. Verification: cargo fmt -p ocean-surface-ui -- --check; cargo test -p ocean-surface-ui voice::realtime::tests (16 passed); cargo check -p ocean-surface-ui --target wasm32-unknown-unknown; diff-check clean.
+_________________________________________________________________________________

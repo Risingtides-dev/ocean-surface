@@ -147,6 +147,11 @@ Web surface session UI:
   eager session creation that litters 0-turn drafts. The bounded exception is
   confirmed Voice Planner: the exact `Create draft` or `Create & start` click
   is itself the explicit product action that creates one session.
+- The pre-session Voice Planner remains non-executing: its Realtime tool set is
+  limited to bounded `list_workspace` / `read_workspace_file` reads whose
+  normalized and daemon-canonicalized targets stay under the validated workspace
+  plus `propose_handoff`; only the exact `Create draft` or `Create & start` click
+  creates a session or starts a turn.
 - Idle web/extension headers stay single-bar: project/session context may stay
   visible, but call/join affordances live behind overflow until intentionally
   opened or actively connected.
