@@ -1633,3 +1633,41 @@ select.form-field__input {
     transform: none;
   }
 }
+
+/* ---- TASK-42 — mobile component reflow ---------------------------------
+   Narrow-viewport stacking + coarse-pointer tap-target floors. Desktop
+   (fine-pointer) density and appearance are untouched; these rules only add
+   behavior at phone widths and on touch pointers. Tables (.component-table
+   overflow-x + .data-table min-width:max-content) and stat cards
+   (.component-stats auto-fit + .stat-card min-width:0) already reflow — see
+   render-pipeline-audit-verdict-v1 (TASK-42 contract). */
+
+/* Fixed multi-column dashboards stack to a single column at phone widths so
+   they reflow instead of horizontally scrolling the page. The dashboard's
+   grid-template-columns is author/props-supplied inline, so !important is
+   required to override it. Video dashboards are excluded to keep their
+   auto-fit override (:has(.block--video), above) intact — auto-fit already
+   collapses them to one column at narrow width. */
+@media (max-width: 560px) {
+  .component-dashboard:not(:has(.block--video)) {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+}
+
+/* Coarse-pointer tap-target floor: raise component controls to the repo's
+   44px touch minimum on touch pointers only, leaving desktop density
+   unchanged. Mirrors composer.css / compact.css / deck.css / island.css /
+   panels.css. Folds render-pipeline-audit finding 5 (.filetree__row was ~25px
+   effective height). select.form-field__input is listed explicitly so this
+   floor outranks its desktop `min-height: var(--ctl-h)` rule. */
+@media (pointer: coarse) {
+  .filetree__row,
+  .form-field__input,
+  select.form-field__input,
+  .form-submit,
+  .kanban-card,
+  .confirm__btn,
+  .data-table__row td {
+    min-height: 44px;
+  }
+}
