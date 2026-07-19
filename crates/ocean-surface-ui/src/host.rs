@@ -124,11 +124,68 @@ pub async fn pick_folder() -> Option<String> {
     }
 }
 
+/// One requested path the native watcher could not admit, mirroring the
+/// shell's `WatchFailure`. `error` is a human-readable canonicalize/create/
+/// watch reason; it is surfaced only through a quiet `log::warn!`, never as UI
+/// chrome.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct WatchFailure {
+    pub path: String,
+    pub error: String,
+}
+
+/// Wire shape of the shell's `watch_paths` outcome (`WatchOutcome`): the
+/// canonical keys now watched, plus the per-path admission failures.
+#[derive(Clone, Debug, Default, Deserialize)]
+struct WatchReport {
+    #[serde(default)]
+    watched: Vec<String>,
+    #[serde(default)]
+    failed: Vec<WatchFailure>,
+}
+
+/// Classified result of a [`watch_paths`] admission call, so callers react
+/// without re-deriving it from raw vectors. `Zero` is the case worth a quiet
+/// status: at least one path was requested and none could be watched.
+#[derive(Clone, Debug, PartialEq)]
+pub enum WatchAdmission {
+    /// Not a Tauri host — native watching is a browser no-op.
+    Unsupported,
+    /// Every requested path is being watched (also the empty-request no-op).
+    Full,
+    /// Some paths are watched; `failed` could not be admitted.
+    Partial { failed: Vec<WatchFailure> },
+    /// No requested path could be watched; `failed` lists why.
+    Zero { failed: Vec<WatchFailure> },
+}
+
+impl WatchAdmission {
+    /// Classify a decoded shell report. Full when nothing failed (including the
+    /// empty-request no-op); Zero when everything failed; Partial otherwise.
+    fn classify(report: WatchReport) -> Self {
+        if report.failed.is_empty() {
+            WatchAdmission::Full
+        } else if report.watched.is_empty() {
+            WatchAdmission::Zero {
+                failed: report.failed,
+            }
+        } else {
+            WatchAdmission::Partial {
+                failed: report.failed,
+            }
+        }
+    }
+}
+
 /// Start recursive watchers on `paths`; events arrive via `on_path_changed`.
-/// Returns false on non-Tauri hosts.
-pub async fn watch_paths(paths: &[String]) -> bool {
+/// Each path is admitted independently by the shell, so one missing or stale
+/// entry no longer aborts the batch. Returns a [`WatchAdmission`] classifying
+/// the outcome; the zero-watchable case is also surfaced through a quiet
+/// `log::warn!` (no UI chrome). [`WatchAdmission::Unsupported`] on non-Tauri
+/// hosts, where native watching is a no-op.
+pub async fn watch_paths(paths: &[String]) -> WatchAdmission {
     if !running_in_tauri() {
-        return false;
+        return WatchAdmission::Unsupported;
     }
     let args = Object::new();
     let arr = Array::new();
@@ -136,7 +193,24 @@ pub async fn watch_paths(paths: &[String]) -> bool {
         arr.push(&JsValue::from_str(p));
     }
     let _ = Reflect::set(&args, &JsValue::from_str("paths"), &arr);
-    tauri_invoke("watch_paths", &args).await.is_ok()
+
+    let report = match tauri_invoke("watch_paths", &args).await {
+        Ok(val) => jsval_to::<WatchReport>(&val),
+        Err(_) => {
+            log::warn!("native watcher: watch_paths invoke rejected");
+            return WatchAdmission::Zero { failed: Vec::new() };
+        }
+    };
+
+    let admission = WatchAdmission::classify(report);
+    if let WatchAdmission::Zero { failed } = &admission {
+        log::warn!(
+            "native watcher: none of {} requested path(s) could be watched ({} failed)",
+            paths.len(),
+            failed.len(),
+        );
+    }
+    admission
 }
 
 /// Stop watching `paths`. Returns false on non-Tauri hosts.
@@ -461,4 +535,82 @@ fn jsval_to<T: serde::de::DeserializeOwned + Default>(val: &JsValue) -> T {
     // Use a default on parse failure so a single malformed payload
     // doesn't poison the subscriber callback chain.
     serde_json::from_str(&s).unwrap_or_else(|_| serde_json::from_str("null").unwrap_or_default())
+}
+
+#[cfg(test)]
+mod watch_admission_tests {
+    use super::*;
+
+    fn failure(path: &str) -> WatchFailure {
+        WatchFailure {
+            path: path.into(),
+            error: "boom".into(),
+        }
+    }
+
+    #[test]
+    fn empty_report_is_full() {
+        // Empty request (or all-duplicate) => nothing failed => Full no-op.
+        assert_eq!(
+            WatchAdmission::classify(WatchReport::default()),
+            WatchAdmission::Full
+        );
+    }
+
+    #[test]
+    fn all_watched_is_full() {
+        let report = WatchReport {
+            watched: vec!["/a".into(), "/b".into()],
+            failed: vec![],
+        };
+        assert_eq!(WatchAdmission::classify(report), WatchAdmission::Full);
+    }
+
+    #[test]
+    fn mixed_batch_is_partial() {
+        let report = WatchReport {
+            watched: vec!["/a".into()],
+            failed: vec![failure("/missing")],
+        };
+        assert_eq!(
+            WatchAdmission::classify(report),
+            WatchAdmission::Partial {
+                failed: vec![failure("/missing")]
+            }
+        );
+    }
+
+    #[test]
+    fn all_failed_is_zero() {
+        let report = WatchReport {
+            watched: vec![],
+            failed: vec![failure("/x"), failure("/y")],
+        };
+        assert_eq!(
+            WatchAdmission::classify(report),
+            WatchAdmission::Zero {
+                failed: vec![failure("/x"), failure("/y")]
+            }
+        );
+    }
+
+    #[test]
+    fn report_decodes_from_shell_json() {
+        // Guards the wire contract with the shell's `WatchOutcome`.
+        let json = r#"{"watched":["/private/tmp/a"],"failed":[{"path":"/nope","error":"/nope: not found"}]}"#;
+        let report: WatchReport = serde_json::from_str(json).unwrap();
+        assert_eq!(report.watched, vec!["/private/tmp/a".to_string()]);
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].path, "/nope");
+        assert_eq!(report.failed[0].error, "/nope: not found");
+        assert_eq!(
+            WatchAdmission::classify(report),
+            WatchAdmission::Partial {
+                failed: vec![WatchFailure {
+                    path: "/nope".into(),
+                    error: "/nope: not found".into(),
+                }]
+            }
+        );
+    }
 }

@@ -1,13 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capabilities for Ocean's main window: core IPC/events, native open dialog, and fs watch.",
+  "description": "Capabilities for Ocean's main window: core IPC/events and native open dialog.",
   "windows": ["main"],
   "permissions": [
     "core:default",
     "core:event:default",
     "dialog:allow-open",
-    "fs:allow-watch",
     "core:tray:default",
     "core:menu:default",
     "global-shortcut:allow-is-registered",

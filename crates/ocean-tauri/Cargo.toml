@@ -19,7 +19,6 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["devtools", "tray-icon"] }
 tauri-plugin-dialog = "2"
-tauri-plugin-fs = "2"
 tauri-plugin-global-shortcut = "2"
 # Native notifications: polyfills `window.Notification` in the webview so the
 # wasm bundle's standard Web Notifications path routes through macOS natively.

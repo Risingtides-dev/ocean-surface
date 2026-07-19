@@ -89,27 +89,125 @@ async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
     Ok(folder.map(|f| f.to_string()))
 }
 
+/// A requested path that could not be admitted to the watcher set, with the
+/// reason. Serialized to the webview so a partial or zero-watch batch stays
+/// legible instead of collapsing to a single bool.
+#[derive(Clone, Serialize)]
+struct WatchFailure {
+    /// The raw path as requested by the caller.
+    path: String,
+    /// Human-readable admission error (canonicalize / create / watch).
+    error: String,
+}
+
+/// Aggregate outcome of a [`watch_paths`] admission pass. `watched` holds the
+/// canonical keys now actively watched by this call (duplicates collapsed);
+/// `failed` holds the paths that could not be admitted. The two vectors let the
+/// host wrapper distinguish full success (`failed` empty), partial success
+/// (both non-empty), and zero active watchers (`watched` empty, `failed` not).
+#[derive(Clone, Serialize)]
+struct WatchOutcome {
+    watched: Vec<String>,
+    failed: Vec<WatchFailure>,
+}
+
+/// Resolve a request path to the canonical key used in the watcher map. While
+/// the path exists this is a plain `canonicalize`. Once it is deleted (an
+/// unwatch after removal), `canonicalize` fails, so fall back to canonicalizing
+/// the parent and re-joining the final component — that still matches the key
+/// installed while the path existed (e.g. macOS `/tmp` → `/private/tmp` symlink
+/// resolution). Only a path whose parent is also gone degrades to the raw
+/// string.
+fn resolve_watch_key(raw: &str) -> String {
+    let path = Path::new(raw);
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical.to_string_lossy().into_owned();
+    }
+    if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+        if let Ok(canonical_parent) = parent.canonicalize() {
+            return canonical_parent.join(name).to_string_lossy().into_owned();
+        }
+    }
+    raw.to_string()
+}
+
+/// Admit each requested path to the watcher map independently, returning a
+/// typed per-batch outcome. Pure over the handle type `H` and its three
+/// injected effects, so the admission policy is unit-tested without a real
+/// filesystem, notify watcher, or Tauri runtime:
+///
+/// * `canonicalize` — map a raw path to its watcher-map key or an error; a
+///   missing/stale entry fails here and the loop continues to later paths;
+/// * `install` — build and register the watcher for a key, returning its
+///   handle (called at most once per unique key in the batch);
+/// * `retire` — dispose of the handle a successful re-watch replaced.
+///
+/// A replacement never removes the prior watcher until the new one is live, so
+/// a failed `install` leaves the map — and the existing watcher for that key —
+/// untouched.
+fn admit_watches<H>(
+    watchers: &mut HashMap<String, H>,
+    paths: Vec<String>,
+    canonicalize: impl Fn(&str) -> Result<String, String>,
+    mut install: impl FnMut(&str) -> Result<H, String>,
+    mut retire: impl FnMut(H),
+) -> WatchOutcome {
+    let mut watched: Vec<String> = Vec::new();
+    let mut failed: Vec<WatchFailure> = Vec::new();
+    for raw in paths {
+        let key = match canonicalize(&raw) {
+            Ok(key) => key,
+            Err(error) => {
+                failed.push(WatchFailure { path: raw, error });
+                continue;
+            }
+        };
+        // Duplicate within this batch: the first occurrence already installed
+        // (or replaced) the watcher for this key, so don't build a rival.
+        if watched.contains(&key) {
+            continue;
+        }
+        match install(&key) {
+            Ok(handle) => {
+                if let Some(prior) = watchers.insert(key.clone(), handle) {
+                    retire(prior);
+                }
+                watched.push(key);
+            }
+            Err(error) => {
+                // The map was not touched, so any prior watcher for this key is
+                // still installed and running.
+                failed.push(WatchFailure { path: raw, error });
+            }
+        }
+    }
+    WatchOutcome { watched, failed }
+}
+
 /// Watch the given paths recursively, emitting `path-changed` events to the
 /// webview, coalesced to a 200ms quiet window so editor saves don't fan out
 /// into a burst. Replaces `ocean-gui/src/shell/watcher.rs`.
+///
+/// Each path is admitted independently (see [`admit_watches`]): a missing or
+/// stale entry is recorded and skipped rather than aborting the batch, so later
+/// valid paths are still watched. Returns a [`WatchOutcome`] the host wrapper
+/// classifies into full / partial / zero-watchable.
 #[tauri::command]
 async fn watch_paths(
     paths: Vec<String>,
     state: State<'_, AppState>,
     app: AppHandle,
-) -> Result<(), String> {
+) -> Result<WatchOutcome, String> {
     let mut watchers = state.watchers.lock();
-    for raw in paths {
-        let canonical = Path::new(&raw)
+
+    let canonicalize = |raw: &str| -> Result<String, String> {
+        Path::new(raw)
             .canonicalize()
-            .map_err(|e| format!("{raw}: {e}"))?;
-        let key = canonical.to_string_lossy().into_owned();
+            .map(|p| p.to_string_lossy().into_owned())
+            .map_err(|e| format!("{raw}: {e}"))
+    };
 
-        // Re-watching a path replaces the prior watcher rather than leaking it.
-        if let Some(stale) = watchers.remove(&key) {
-            stale.abort();
-        }
-
+    let install = |key: &str| -> Result<tauri::async_runtime::JoinHandle<()>, String> {
         // notify's callback runs on its own thread, so bridge into the async
         // world with a bounded channel; try_send keeps that thread non-blocking
         // (drops under backpressure, which the debounce absorbs anyway).
@@ -130,7 +228,7 @@ async fn watch_paths(
         .map_err(|e| e.to_string())?;
 
         watcher
-            .watch(&canonical, RecursiveMode::Recursive)
+            .watch(Path::new(key), RecursiveMode::Recursive)
             .map_err(|e| format!("{key}: {e}"))?;
 
         let emit_app = app.clone();
@@ -154,27 +252,215 @@ async fn watch_paths(
                 }
             }
         });
+        Ok(handle)
+    };
 
-        watchers.insert(key, handle);
-    }
-    Ok(())
+    let outcome = admit_watches(&mut *watchers, paths, canonicalize, install, |handle| {
+        handle.abort()
+    });
+    Ok(outcome)
 }
 
-/// Stop watching the given paths. Paths are canonicalized best-effort — a path
-/// that no longer exists is matched by its raw form.
+/// Stop watching the given paths. Paths resolve to the same canonical key the
+/// watcher was installed under — including after the path has been deleted (see
+/// [`resolve_watch_key`]) — so an unwatch that follows a removal still tears the
+/// watcher down instead of leaking it.
 #[tauri::command]
 async fn unwatch_paths(paths: Vec<String>, state: State<'_, AppState>) -> Result<(), String> {
     let mut watchers = state.watchers.lock();
     for raw in paths {
-        let key = match Path::new(&raw).canonicalize() {
-            Ok(p) => p.to_string_lossy().into_owned(),
-            Err(_) => raw,
-        };
+        let key = resolve_watch_key(&raw);
         if let Some(handle) = watchers.remove(&key) {
             handle.abort();
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod watch_admission_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    /// Canonicalize stub: identity, but any path containing "missing" fails —
+    /// the pure stand-in for a stale/absent entry.
+    fn canon(raw: &str) -> Result<String, String> {
+        if raw.contains("missing") {
+            Err(format!("{raw}: not found"))
+        } else {
+            Ok(raw.to_string())
+        }
+    }
+
+    #[test]
+    fn mixed_batch_watches_valid_and_records_missing() {
+        // [valid, missing, valid] must install both valid paths and record the
+        // one failure — the earlier bug returned on the missing entry.
+        let mut map: HashMap<String, u32> = HashMap::new();
+        let mut next = 0u32;
+        let outcome = admit_watches(
+            &mut map,
+            vec!["/a".into(), "/missing".into(), "/b".into()],
+            canon,
+            |_key| {
+                next += 1;
+                Ok(next)
+            },
+            |_h| {},
+        );
+        assert_eq!(outcome.watched, vec!["/a".to_string(), "/b".to_string()]);
+        assert_eq!(outcome.failed.len(), 1);
+        assert_eq!(outcome.failed[0].path, "/missing");
+        assert_eq!(map.len(), 2);
+        assert!(map.contains_key("/a") && map.contains_key("/b"));
+    }
+
+    #[test]
+    fn install_failure_after_canonicalize_is_recorded_not_fatal() {
+        // A watcher-construction failure for one key is captured; later keys
+        // are still attempted.
+        let mut map: HashMap<String, u32> = HashMap::new();
+        let outcome = admit_watches(
+            &mut map,
+            vec!["/a".into(), "/b".into(), "/c".into()],
+            canon,
+            |key| {
+                if key == "/b" {
+                    Err("watch construction failed".into())
+                } else {
+                    Ok(1)
+                }
+            },
+            |_h| {},
+        );
+        assert_eq!(outcome.watched, vec!["/a".to_string(), "/c".to_string()]);
+        assert_eq!(outcome.failed.len(), 1);
+        assert_eq!(outcome.failed[0].path, "/b");
+        assert!(map.contains_key("/a") && map.contains_key("/c"));
+        assert!(!map.contains_key("/b"));
+    }
+
+    #[test]
+    fn replacement_failure_preserves_prior_watcher() {
+        // A re-watch whose install fails must leave the prior handle installed
+        // and un-retired — the map stays consistent.
+        let mut map: HashMap<String, u32> = HashMap::new();
+        map.insert("/a".into(), 111);
+        let retired = RefCell::new(Vec::new());
+        let outcome = admit_watches(
+            &mut map,
+            vec!["/a".into()],
+            canon,
+            |_key| Err("could not build watcher".into()),
+            |h| retired.borrow_mut().push(h),
+        );
+        assert!(outcome.watched.is_empty());
+        assert_eq!(outcome.failed.len(), 1);
+        assert_eq!(map.get("/a"), Some(&111));
+        assert!(retired.borrow().is_empty());
+    }
+
+    #[test]
+    fn successful_replacement_retires_prior_handle() {
+        // A re-watch that succeeds installs the new handle and retires the old.
+        let mut map: HashMap<String, u32> = HashMap::new();
+        map.insert("/a".into(), 111);
+        let retired = RefCell::new(Vec::new());
+        let outcome = admit_watches(
+            &mut map,
+            vec!["/a".into()],
+            canon,
+            |_key| Ok(222),
+            |h| retired.borrow_mut().push(h),
+        );
+        assert_eq!(outcome.watched, vec!["/a".to_string()]);
+        assert_eq!(map.get("/a"), Some(&222));
+        assert_eq!(*retired.borrow(), vec![111]);
+    }
+
+    #[test]
+    fn duplicate_paths_install_once() {
+        // Duplicate keys within a batch install a single watcher.
+        let mut map: HashMap<String, u32> = HashMap::new();
+        let installs = RefCell::new(0u32);
+        let outcome = admit_watches(
+            &mut map,
+            vec!["/a".into(), "/a".into(), "/a".into()],
+            canon,
+            |_key| {
+                *installs.borrow_mut() += 1;
+                Ok(1)
+            },
+            |_h| {},
+        );
+        assert_eq!(outcome.watched, vec!["/a".to_string()]);
+        assert_eq!(*installs.borrow(), 1);
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn zero_paths_is_noop() {
+        // A zero-path call installs nothing and reports an empty outcome.
+        let mut map: HashMap<String, u32> = HashMap::new();
+        let installs = RefCell::new(0u32);
+        let outcome = admit_watches(
+            &mut map,
+            vec![],
+            canon,
+            |_key| {
+                *installs.borrow_mut() += 1;
+                Ok(1)
+            },
+            |_h| {},
+        );
+        assert!(outcome.watched.is_empty());
+        assert!(outcome.failed.is_empty());
+        assert_eq!(*installs.borrow(), 0);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn resolve_watch_key_matches_after_deletion() {
+        // The key an unwatch resolves after deletion must equal the key the
+        // watch installed while the path existed, so the watcher is removed
+        // rather than leaked.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sub = dir.path().join("watched-sub");
+        std::fs::create_dir(&sub).expect("mkdir sub");
+        let raw = sub.to_string_lossy().into_owned();
+
+        let key_when_present = resolve_watch_key(&raw);
+        assert_eq!(
+            key_when_present,
+            sub.canonicalize().unwrap().to_string_lossy()
+        );
+
+        std::fs::remove_dir(&sub).expect("rmdir sub");
+        let key_after_delete = resolve_watch_key(&raw);
+        assert_eq!(
+            key_after_delete, key_when_present,
+            "unwatch must resolve to the same key after deletion"
+        );
+    }
+
+    #[test]
+    fn watch_outcome_serializes_watched_and_failed() {
+        // Wire contract the host wrapper decodes: `watched` + `failed[].path`.
+        let outcome = WatchOutcome {
+            watched: vec!["/private/tmp/a".into()],
+            failed: vec![WatchFailure {
+                path: "/nope".into(),
+                error: "/nope: not found".into(),
+            }],
+        };
+        let json = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(json["watched"][0].as_str(), Some("/private/tmp/a"));
+        assert_eq!(json["failed"][0]["path"].as_str(), Some("/nope"));
+        assert_eq!(
+            json["failed"][0]["error"].as_str(),
+            Some("/nope: not found")
+        );
+    }
 }
 
 // ── repo_state ────────────────────────────────────────────────────────────
@@ -1102,7 +1388,6 @@ pub fn run() {
             show_main_window(app);
         }))
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(
