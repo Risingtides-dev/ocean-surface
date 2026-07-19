@@ -15,6 +15,8 @@ MARKER="$STATE_DIR/deployed-rev"
 LOCK_DIR="$STATE_DIR/auto-deploy.lock"
 WORKTREE_ROOT="${OCEAN_SURFACE_WORKTREE_ROOT:-/private/tmp/ocean-surface-auto-deploy}"
 PROXY_LABEL="dev.risingtides.ocean-surface-proxy"
+TAURI_LABEL="dev.ocean.surface-tauri"
+TAURI_STALE_MARKER="$STATE_DIR/tauri-stale"
 DOMAIN="gui/$(id -u)"
 
 export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$HOME/.cargo/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -48,12 +50,60 @@ restart_proxy() {
   launchctl kickstart -k "$DOMAIN/$PROXY_LABEL"
 }
 
+# Restart Tauri only if it is not currently running — never kill an active
+# operator session. When Tauri IS running, leave a staleness marker so the
+# next Tauri start (or a future surface-side check) can act on it.
+maybe_restart_tauri() {
+  [[ "${OCEAN_SURFACE_NO_RESTART:-0}" == "1" ]] && return 0
+  local pid revision="${1:-}"
+  pid="$(launchctl list "$TAURI_LABEL" 2>/dev/null | awk 'NR>1{print $1}' || true)"
+  if [[ -z "$pid" || "$pid" == "-" ]]; then
+    launchctl kickstart -k "$DOMAIN/$TAURI_LABEL" || true
+    rm -f "$TAURI_STALE_MARKER"
+  else
+    printf '%s\n' "$revision" > "$TAURI_STALE_MARKER"
+    echo "TAURI: running as pid $pid — staleness marker set, restart deferred"
+  fi
+}
+
+rebuild_extension() {
+  local deployed_dist="$1"
+  local ext_dir="$REPO/extension"
+  [[ -d "$ext_dir" && -f "$ext_dir/sidepanel.html" ]] || return 0
+
+  local ext_dist="$ext_dir/dist"
+  rm -rf "$ext_dist"
+  mkdir -p "$ext_dist"
+  # Trunk --release produces hashed names (ocean-surface-ui-HASH.js etc.);
+  # map them to the stable names sidepanel.html expects.
+  local js_file wasm_file
+  js_file="$(ls "$deployed_dist"/ocean-surface-ui-*.js 2>/dev/null | grep -v '_bg.wasm' | head -1 || true)"
+  wasm_file="$(ls "$deployed_dist"/ocean-surface-ui-*_bg.wasm 2>/dev/null | head -1 || true)"
+  [[ -n "$js_file" && -f "$js_file" ]] || fail "cannot locate wasm-bindgen JS in $deployed_dist"
+  [[ -n "$wasm_file" && -f "$wasm_file" ]] || fail "cannot locate wasm in $deployed_dist"
+  cp "$js_file"   "$ext_dist/ocean-surface-ui.js"
+  cp "$wasm_file" "$ext_dist/ocean-surface-ui_bg.wasm"
+  cp "$deployed_dist"/*.css "$ext_dist/" 2>/dev/null || true
+  if [[ -d "$deployed_dist/fonts" ]]; then
+    mkdir -p "$ext_dist/fonts"
+    cp "$deployed_dist/fonts"/* "$ext_dist/fonts/"
+  fi
+  for f in "$deployed_dist"/*.png "$deployed_dist"/*.webmanifest; do
+    [[ -e "$f" ]] && cp "$f" "$ext_dist/" || true
+  done
+  echo "EXTENSION: rebuilt from $deployed_dist"
+}
+
 promote_bundle() {
   local source="$1"
   local revision="$2"
   [[ "$revision" =~ ^[0-9A-Za-z._-]+$ ]] || fail "unsafe revision: $revision"
   validate_bundle "$source"
   mkdir -p "$RELEASES_DIR"
+
+  # Inject freshness marker before atomic promotion so every release carries its
+  # own identity. Surfaces read /.deploy-sha to detect staleness.
+  printf '%s\n' "$revision" > "$source/.deploy-sha"
 
   local release="$RELEASES_DIR/$revision"
   local staged="$RELEASES_DIR/.${revision}.$$"
@@ -76,6 +126,18 @@ promote_bundle() {
   printf '%s\n' "$revision" > "$next_marker"
   mv -f "$next_marker" "$MARKER"
   restart_proxy
+
+  # Sync the deployed dist back to the canonical repo so Tauri (which loads
+  # frontendDist = ../../dist) picks up the current bundle on next restart.
+  # Also rebuild the extension from the deployed dist.
+  local repo_dist="$REPO/dist"
+  rm -rf "$repo_dist"
+  mkdir -p "$repo_dist"
+  rsync -a --delete "$source/" "$repo_dist/"
+  validate_bundle "$repo_dist"
+  rebuild_extension "$source"
+  maybe_restart_tauri "$revision"
+
   echo "DEPLOYED: $revision -> $CURRENT_LINK"
 }
 

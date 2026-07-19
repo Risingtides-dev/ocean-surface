@@ -1934,10 +1934,54 @@ competing_reveal_open symbol verified in the compiled bundle. Integration
 sequence: this push, then Lane D rebases once, then TASK-22.
 _________________________________________________________________________________
 
+_________________________________________________________________________________
+
+time:      [01:37] [19-07-26]
+agent:     [codex] [gpt-5]
+worktree:  [main]
+type:      [plan]
+area:      [research], [analysis]
+
+Produced two read-only research deliverables from current source and recovered
+explorer evidence. The Herdr deferred-wake spec traces the focus-guard exit-3
+path, proves the missing trigger is pane-blur retry rather than cursor
+consumption, and freezes an event-driven, stable-terminal, revalidated delivery
+state machine with bounded diagnostics and tests. The Surface sidebar audit
+reconstructs the eight held backlog items against origin/main 9e3de86, finds six
+task-worthy defects that should become five bounded tasks, and rejects two dead
+selectors as standalone work. Artifacts:
+.stitchpad/artifacts/herdr-deferred-wake-on-blur-spec-v1.md and
+.stitchpad/artifacts/sidebar-backlog-audit-v1.md. No product source changed;
+AGENTS.md remains unchanged because the artifacts propose future work rather
+than altering the current project contract.
+_________________________________________________________________________________
+
 time:  [03:01pm] [19-07-26]
 agent: ocean-tauri, codex
 worktree: [main]
 type:  [feature]
 
 Added bounded read-only Voice Planner fulfillment for daemon-advertised list_workspace and read_workspace_file calls. Planner paths are normalized relative to the frozen daemon-validated workspace, reject absolute/~/'..', and require every daemon-canonicalized response target to remain under the workspace, including against symlink escape. Listings cap at 40 dirs/80 files; file output caps at 20k chars and rejects binary content. propose_handoff still only populates human review; Create draft/Create & start remain the sole session/turn mutation boundary. Verification: cargo fmt -p ocean-surface-ui -- --check; cargo test -p ocean-surface-ui voice::realtime::tests (16 passed); cargo check -p ocean-surface-ui --target wasm32-unknown-unknown; diff-check clean.
+_________________________________________________________________________________
+
+_________________________________________________________________________________
+
+time:      [03:47] [19-07-26]
+agent:     [claude] [fable 5]
+type:      [merge]
+area:      [infra], [review]
+
+TASK-26 bundle-freshness rail landed. The auto-deploy script now injects a
+.deploy-sha marker at promote, rsyncs the deployed dist into the canonical repo
+dist/ (Tauri freshness), rebuilds the extension dist in place from deployed
+files with wildcard+single-match guards mapping hashed trunk names to stable
+extension names, and restarts Tauri only when it is not running (stale marker
+otherwise — no active-session kill). Review cycle: ocean found the blocking
+hashed-filename mismatch that would have half-failed promotes post-release;
+fixed via option (b) wildcards, re-review PASS (script sha256 af2f492c…,
+bash -n clean). Non-atomic repo-dist swap accepted for v1, logged as follow-up.
+After this push ocean-prs syncs the installed launchd copy to the landed
+version; the rail proves itself on the next real main move. This commit also
+carries codex's 01:37 research ledger entry (herdr deferred-wake spec + sidebar
+backlog audit artifacts), disclosed.
 _________________________________________________________________________________
