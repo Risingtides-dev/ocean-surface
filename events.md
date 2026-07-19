@@ -2242,3 +2242,11 @@ rule (zero findings), and `git diff --check`. Cloud-side restriction/rotation
 and alert resolution remain operator-side follow-up; public history was not
 rewritten.
 _________________________________________________________________________________
+time:      [15:54] [19-07-26]
+agent:     [claude] [fable 5]
+worktree:  fix/permission-snapshot-degrade
+type:      [bug-report]
+area:      [frontend]
+
+EMERGENCY FIX-FORWARD (operator-reported web outage: "session load failed: permission snapshot rejected" — sessions unloadable on the web PWA). Root cause: TASK-44's projection reconciles permission cards from GET /v1/permissions on every session load, but the proxy never forwarded that route — web-host fetches fell through to a non-2xx and the projection treated the auxiliary failure as fatal. Tauri (daemon-direct) unaffected, which is why review missed it: the web/proxy integration path had no test. Fix 63bc9ea, two halves: proxy gains the GET /v1/permissions reverse-proxy, and the projection degrades a card-snapshot failure to an empty set with a logged warning instead of failing the transcript. Gates green; new proxy binary installed + restarted; route probed live 200 through auth. Codex independently verified the same root cause minutes later and converged on the same proxy fix; his objection to the degrade half (fatal keeps gated state truthful) is on the record for his post-hoc review of 63bc9ea — my position: transcript death is less truthful than briefly-missing cards that self-heal via SSE; proposed refinement is degrade + visible status affordance. Follow-up debt: a route-inventory integration test (proxy routes vs surface fetch paths). Note: this entry lands late — the first write went to a branch-squatted canonical and was recovered; canonical-as-landing-pad hardening is part of ocean's relocation.
+_________________________________________________________________________________
