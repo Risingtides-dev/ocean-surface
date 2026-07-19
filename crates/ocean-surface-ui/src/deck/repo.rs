@@ -491,6 +491,30 @@ fn label_pill_style(raw: &str) -> String {
     )
 }
 
+/// Generation gate — returns true only when the fetch's captured generation
+/// still matches the current generation.  Used by every async response path
+/// so a stale response from a previous project or refresh is silently dropped.
+fn generation_admitted(current: u64, captured: u64) -> bool {
+    current == captured
+}
+
+/// Composite cache keys so per-project detail/checks/reviews cannot leak
+/// across project switches.  The key shape is {project_id, discriminator}
+/// as required by the Lane C test contract (v1.4 line 461).
+type DetailCacheKey = (String, u64);
+type ChecksCacheKey = (String, String);
+type ReviewsCacheKey = (String, u64);
+
+fn detail_cache_key(project_id: &str, number: u64) -> DetailCacheKey {
+    (project_id.to_string(), number)
+}
+fn checks_cache_key(project_id: &str, head_sha: &str) -> ChecksCacheKey {
+    (project_id.to_string(), head_sha.to_string())
+}
+fn reviews_cache_key(project_id: &str, number: u64) -> ReviewsCacheKey {
+    (project_id.to_string(), number)
+}
+
 /// The GitHub depth section rendered below the local repo state.
 #[component]
 #[allow(clippy::redundant_locals)]
@@ -503,12 +527,13 @@ pub fn GitHubSection(daemon: crate::daemon::Daemon) -> impl IntoView {
     let loading: RwSignal<bool> = RwSignal::new(false);
     let error: RwSignal<Option<String>> = RwSignal::new(None);
     let expanded_pr: RwSignal<Option<u64>> = RwSignal::new(None);
-    let detail_cache: RwSignal<std::collections::HashMap<u64, GhPullDetail>> =
+    let detail_cache: RwSignal<std::collections::HashMap<DetailCacheKey, GhPullDetail>> =
         RwSignal::new(std::collections::HashMap::new());
-    let checks_cache: RwSignal<std::collections::HashMap<String, Vec<GhCheckRun>>> =
+    let checks_cache: RwSignal<std::collections::HashMap<ChecksCacheKey, Vec<GhCheckRun>>> =
         RwSignal::new(std::collections::HashMap::new());
-    let reviews_cache: RwSignal<std::collections::HashMap<u64, Vec<crate::daemon::GhReview>>> =
-        RwSignal::new(std::collections::HashMap::new());
+    let reviews_cache: RwSignal<
+        std::collections::HashMap<ReviewsCacheKey, Vec<crate::daemon::GhReview>>,
+    > = RwSignal::new(std::collections::HashMap::new());
     let generation: RwSignal<u64> = RwSignal::new(0);
 
     // ── Fetch logic ──────────────────────────────────────────────────
@@ -547,7 +572,7 @@ pub fn GitHubSection(daemon: crate::daemon::Daemon) -> impl IntoView {
             spawn_local(async move {
                 match fetch_gh_pulls(&base, &pid_clone, &st, pg, 10).await {
                     Some(env) if env.ok => {
-                        if gen_s.get_untracked() != gen {
+                        if !generation_admitted(gen_s.get_untracked(), gen) {
                             return;
                         }
                         pulls_s.set(env.pulls);
@@ -556,13 +581,13 @@ pub fn GitHubSection(daemon: crate::daemon::Daemon) -> impl IntoView {
                         err_s.set(None);
                     }
                     Some(_) => {
-                        if gen_s.get_untracked() != gen {
+                        if !generation_admitted(gen_s.get_untracked(), gen) {
                             return;
                         }
                         err_s.set(Some("GitHub API error.".into()));
                     }
                     None => {
-                        if gen_s.get_untracked() != gen {
+                        if !generation_admitted(gen_s.get_untracked(), gen) {
                             return;
                         }
                         err_s.set(Some(
@@ -570,7 +595,7 @@ pub fn GitHubSection(daemon: crate::daemon::Daemon) -> impl IntoView {
                         ));
                     }
                 }
-                if gen_s.get_untracked() == gen {
+                if generation_admitted(gen_s.get_untracked(), gen) {
                     load_s.set(false);
                 }
             });
@@ -729,13 +754,15 @@ pub fn GitHubSection(daemon: crate::daemon::Daemon) -> impl IntoView {
                         ().into_any()
                     } else {
                         let d = daemon2.clone();
+                        let pid_for_prs = daemon2.project.get_untracked().unwrap_or_default();
                         pulls.get().iter().map({
                             let d = d;
+                            let pid = pid_for_prs.clone();
                             move |pr| {
                                 let daemon_local = d.clone();
                                 pr_row(
                                     pr, daemon_local, expanded_pr, detail_cache, checks_cache,
-                                    reviews_cache, generation,
+                                    reviews_cache, generation, pid.clone(),
                                 )
                             }
                         }).collect::<Vec<_>>().into_any()
@@ -792,14 +819,16 @@ pub fn GitHubSection(daemon: crate::daemon::Daemon) -> impl IntoView {
 
 /// Renders a single PR row (collapsed + expanded detail).
 #[allow(clippy::redundant_locals)]
+#[allow(clippy::too_many_arguments)]
 fn pr_row(
     pr: &GhPullListItem,
     daemon: crate::daemon::Daemon,
     expanded_pr: RwSignal<Option<u64>>,
-    detail_cache: RwSignal<std::collections::HashMap<u64, GhPullDetail>>,
-    checks_cache: RwSignal<std::collections::HashMap<String, Vec<GhCheckRun>>>,
-    reviews_cache: RwSignal<std::collections::HashMap<u64, Vec<GhReview>>>,
+    detail_cache: RwSignal<std::collections::HashMap<DetailCacheKey, GhPullDetail>>,
+    checks_cache: RwSignal<std::collections::HashMap<ChecksCacheKey, Vec<GhCheckRun>>>,
+    reviews_cache: RwSignal<std::collections::HashMap<ReviewsCacheKey, Vec<GhReview>>>,
     generation: RwSignal<u64>,
+    project_id: String,
 ) -> impl IntoView {
     let number = pr.number;
     let is_expanded = move || expanded_pr.get() == Some(number);
@@ -826,11 +855,12 @@ fn pr_row(
 
     let check_summary = {
         let ck = checks_cache.get_untracked();
-        ck.get(&head_sha).map(|c| compute_check_summary(c))
+        ck.get(&checks_cache_key(&project_id, &head_sha))
+            .map(|c| compute_check_summary(c))
     };
     let top_review = reviews_cache
         .get_untracked()
-        .get(&number)
+        .get(&reviews_cache_key(&project_id, number))
         .map(|reviews| top_review_state(reviews));
 
     let draft_prefix = if pr.draft {
@@ -861,9 +891,9 @@ fn pr_row(
                             return;
                         }
                         expanded_pr.set(Some(number));
-                        let need_detail = !detail_cache.get_untracked().contains_key(&number);
-                        let need_checks = !checks_cache.get_untracked().contains_key(&head_sha);
-                        let need_reviews = !reviews_cache.get_untracked().contains_key(&number);
+                        let need_detail = !detail_cache.get_untracked().contains_key(&detail_cache_key(&project_id, number));
+                        let need_checks = !checks_cache.get_untracked().contains_key(&checks_cache_key(&project_id, &head_sha));
+                        let need_reviews = !reviews_cache.get_untracked().contains_key(&reviews_cache_key(&project_id, number));
                         if need_detail || need_checks || need_reviews {
                             let base = daemon.url.get_untracked();
                             let pid = project_id.clone();
@@ -875,27 +905,27 @@ fn pr_row(
                             spawn_local(async move {
                                 if need_detail {
                                     if let Some(env) = fetch_gh_pull_detail(&base, &pid, number).await {
-                                        if env.ok && generation.get_untracked() == gen {
+                                        if env.ok && generation_admitted(generation.get_untracked(), gen) {
                                             dc.update(|map| {
-                                                map.insert(number, env.pull);
+                                                map.insert(detail_cache_key(&pid, number), env.pull);
                                             });
                                         }
                                     }
                                 }
                                 if need_checks {
                                     if let Some(env) = fetch_gh_checks(&base, &pid, &sha).await {
-                                        if env.ok && generation.get_untracked() == gen {
+                                        if env.ok && generation_admitted(generation.get_untracked(), gen) {
                                             cc.update(|map| {
-                                                map.insert(sha.clone(), env.checks);
+                                                map.insert(checks_cache_key(&pid, &sha), env.checks);
                                             });
                                         }
                                     }
                                 }
                                 if need_reviews {
                                     if let Some(env) = fetch_gh_reviews(&base, &pid, number, 1, 10).await {
-                                        if env.ok && generation.get_untracked() == gen {
+                                        if env.ok && generation_admitted(generation.get_untracked(), gen) {
                                             rc.update(|map| {
-                                                map.insert(number, env.reviews);
+                                                map.insert(reviews_cache_key(&pid, number), env.reviews);
                                             });
                                         }
                                     }
@@ -950,9 +980,9 @@ fn pr_row(
 
             // Expanded detail
             {move || is_expanded().then(|| {
-                let detail = detail_cache.get().get(&number).cloned();
-                let checks: Option<Vec<GhCheckRun>> = checks_cache.get().get(&head_sha).cloned();
-                let reviews = reviews_cache.get().get(&number).cloned();
+                let detail = detail_cache.get().get(&detail_cache_key(&project_id, number)).cloned();
+                let checks: Option<Vec<GhCheckRun>> = checks_cache.get().get(&checks_cache_key(&project_id, &head_sha)).cloned();
+                let reviews = reviews_cache.get().get(&reviews_cache_key(&project_id, number)).cloned();
                 view! {
                     <div
                         class="deck-repo-gh-detail"
@@ -1024,5 +1054,265 @@ fn pr_row(
                 }
             })}
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests_gh {
+    use super::*;
+
+    // ── label_pill_style (TASK-32 review §1) ────────────────────────
+
+    #[test]
+    fn label_pill_style_known_hex_composites_over_dark_stage() {
+        // FF8800 → r=255,g=136,b=0
+        // 20% composite over #141414 (r=20,g=20,b=20):
+        //   r_comp = floor(255*0.2 + 20*0.8) = floor(51+16) = 67
+        //   g_comp = floor(136*0.2 + 20*0.8) = floor(27.2+16) = 43
+        //   b_comp = floor(0*0.2 + 20*0.8) = 16
+        let style = label_pill_style("FF8800");
+        assert!(style.contains("background:rgb(67,43,16)"));
+        assert!(style.contains("color:var(--fg);"));
+    }
+
+    #[test]
+    fn label_pill_style_greyscale_hex_composite() {
+        // 808080 → r=128, g=128, b=128: floor(128*0.2+20*0.8)=41
+        let style = label_pill_style("808080");
+        assert!(style.contains("background:rgb(41,41,41)"));
+    }
+
+    #[test]
+    fn label_pill_style_full_white_composite() {
+        // FFFFFF: floor(255*0.2+20*0.8)=67
+        let style = label_pill_style("FFFFFF");
+        assert!(style.contains("background:rgb(67,67,67)"));
+    }
+
+    #[test]
+    fn label_pill_style_full_black_composite() {
+        // 000000: floor(0*0.2+20*0.8)=16
+        let style = label_pill_style("000000");
+        assert!(style.contains("background:rgb(16,16,16)"));
+    }
+
+    #[test]
+    fn label_pill_style_empty_string_fallback() {
+        assert_eq!(
+            label_pill_style(""),
+            "background:transparent; color:var(--fg-3);"
+        );
+    }
+
+    #[test]
+    fn label_pill_style_wrong_length_fallback() {
+        assert_eq!(
+            label_pill_style("12345"),
+            "background:transparent; color:var(--fg-3);"
+        );
+    }
+
+    #[test]
+    fn label_pill_style_seven_chars_fallback() {
+        assert_eq!(
+            label_pill_style("1234567"),
+            "background:transparent; color:var(--fg-3);"
+        );
+    }
+
+    #[test]
+    fn label_pill_style_invalid_chars_fallback() {
+        assert_eq!(
+            label_pill_style("ZZZZZZ"),
+            "background:transparent; color:var(--fg-3);"
+        );
+    }
+
+    // ── generation_admitted (TASK-32 review §2) ─────────────────────
+
+    #[test]
+    fn generation_admitted_same_gen_passes() {
+        assert!(generation_admitted(5, 5));
+    }
+
+    #[test]
+    fn generation_admitted_stale_gen_dropped() {
+        assert!(!generation_admitted(6, 5));
+    }
+
+    #[test]
+    fn generation_admitted_zero_gen_stable() {
+        assert!(generation_admitted(0, 0));
+    }
+
+    #[test]
+    fn generation_admitted_wraparound_dropped() {
+        assert!(!generation_admitted(0, u64::MAX));
+    }
+
+    // ── cache-key shape (TASK-32 review §3) ─────────────────────────
+
+    #[test]
+    fn detail_cache_key_is_project_and_number() {
+        let key = detail_cache_key("proj-a", 42);
+        assert_eq!(key, ("proj-a".to_string(), 42u64));
+    }
+
+    #[test]
+    fn reviews_cache_key_is_project_and_number() {
+        let key = reviews_cache_key("proj-b", 7);
+        assert_eq!(key, ("proj-b".to_string(), 7u64));
+    }
+
+    #[test]
+    fn checks_cache_key_is_project_and_head_sha() {
+        let key = checks_cache_key("proj-c", "abc123def456abc123def456abc123def456abc1");
+        assert_eq!(
+            key,
+            (
+                "proj-c".to_string(),
+                "abc123def456abc123def456abc123def456abc1".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn cache_keys_isolate_across_projects() {
+        assert_ne!(detail_cache_key("proj-a", 1), detail_cache_key("proj-b", 1));
+    }
+
+    #[test]
+    fn checks_cache_keys_isolate_across_projects() {
+        let sha = "abcdef1234567890abcdef1234567890abcdef12";
+        assert_ne!(
+            checks_cache_key("proj-a", sha),
+            checks_cache_key("proj-b", sha)
+        );
+    }
+
+    // ── top_review_state ─────────────────────────────────────────────
+
+    #[test]
+    fn top_review_state_empty_returns_pending() {
+        let reviews: Vec<GhReview> = vec![];
+        assert_eq!(top_review_state(&reviews), "pending");
+    }
+
+    #[test]
+    fn top_review_state_approved_wins_over_commented() {
+        let reviews = vec![
+            review_fixture("a", "commented"),
+            review_fixture("b", "approved"),
+        ];
+        assert_eq!(top_review_state(&reviews), "approved");
+    }
+
+    #[test]
+    fn top_review_state_changes_wins_over_commented() {
+        let reviews = vec![
+            review_fixture("a", "commented"),
+            review_fixture("b", "changes_requested"),
+        ];
+        assert_eq!(top_review_state(&reviews), "changes");
+    }
+
+    #[test]
+    fn top_review_state_approved_wins_over_changes() {
+        let reviews = vec![
+            review_fixture("a", "changes_requested"),
+            review_fixture("b", "approved"),
+        ];
+        assert_eq!(top_review_state(&reviews), "approved");
+    }
+
+    #[test]
+    fn top_review_state_unknown_state_is_pending() {
+        let reviews = vec![review_fixture("a", "dismissed")];
+        assert_eq!(top_review_state(&reviews), "pending");
+    }
+
+    // ── compute_check_summary ────────────────────────────────────────
+
+    fn check_fixture(name: &str, status: &str, conclusion: Option<&str>) -> GhCheckRun {
+        GhCheckRun {
+            id: 1,
+            name: name.to_string(),
+            name_truncated: false,
+            status: status.to_string(),
+            conclusion: conclusion.map(|s| s.to_string()),
+            details_url: None,
+            started_at: None,
+            completed_at: None,
+        }
+    }
+
+    #[test]
+    fn compute_check_summary_empty() {
+        let checks: Vec<GhCheckRun> = vec![];
+        match compute_check_summary(&checks) {
+            CheckSummary::Empty => {}
+            other => panic!("expected Empty, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn compute_check_summary_all_pass() {
+        let checks = vec![
+            check_fixture("lint", "completed", Some("success")),
+            check_fixture("test", "completed", Some("success")),
+        ];
+        match compute_check_summary(&checks) {
+            CheckSummary::AllPass => {}
+            other => panic!("expected AllPass, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn compute_check_summary_failing() {
+        let checks = vec![
+            check_fixture("lint", "completed", Some("success")),
+            check_fixture("test", "completed", Some("failure")),
+            check_fixture("build", "completed", Some("timed_out")),
+        ];
+        match compute_check_summary(&checks) {
+            CheckSummary::Failing { passing, total } => {
+                assert_eq!(passing, 1);
+                assert_eq!(total, 3);
+            }
+            other => panic!("expected Failing, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn compute_check_summary_all_in_progress() {
+        let checks = vec![
+            check_fixture("ci", "queued", None),
+            check_fixture("deploy", "in_progress", None),
+        ];
+        match compute_check_summary(&checks) {
+            CheckSummary::InProgress { total } => assert_eq!(total, 2),
+            other => panic!("expected InProgress, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn compute_check_summary_completed_no_conclusion_counts_as_pass() {
+        let checks = vec![check_fixture("lint", "completed", None)];
+        match compute_check_summary(&checks) {
+            CheckSummary::AllPass => {}
+            other => panic!("expected AllPass, got {:?}", other),
+        }
+    }
+
+    /// Minimal GhReview fixture for top_review_state tests.
+    fn review_fixture(reviewer: &str, state: &str) -> GhReview {
+        GhReview {
+            reviewer: reviewer.to_string(),
+            reviewer_truncated: false,
+            state: state.to_string(),
+            body: String::new(),
+            body_truncated: false,
+            submitted_at: None,
+        }
     }
 }

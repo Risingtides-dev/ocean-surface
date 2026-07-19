@@ -8047,4 +8047,280 @@ mod tests {
     fn should_restore_session_filters_empty_string() {
         assert_eq!(should_restore_session(Some(""), None), None);
     }
+
+    // ── Gh DTO decode tests (TASK-32 review §4) ──────────────────────
+    // Lane C wire shapes for /v1/repo/github/{project_id}/* read-only
+    // projections. Every path returns the same 4 envelope families.
+
+    #[test]
+    fn gh_pull_list_envelope_decodes_open_prs() {
+        let json = serde_json::json!({
+            "ok": true,
+            "pulls": [{
+                "number": 42,
+                "title": "Fix race in watcher admission",
+                "title_truncated": false,
+                "author": "risingtides",
+                "author_truncated": false,
+                "branch": "feat/watcher-fix",
+                "base_branch": "main",
+                "head_sha": "abc123def456abc123def456abc123def456abc1",
+                "draft": false,
+                "labels": [
+                    {"name": "bug", "color": "ff0000"},
+                    {"name": "native", "color": "0088ff"}
+                ],
+                "labels_truncated": false,
+                "state": "open",
+                "created_at": "2026-07-18T10:00:00Z",
+                "updated_at": "2026-07-19T09:00:00Z"
+            }],
+            "pulls_truncated": false,
+            "page": 1,
+            "per_page": 10,
+            "has_more": true,
+            "rate": { "remaining": 4999, "reset": 1753000000 }
+        });
+        let env: GhPullListEnvelope =
+            serde_json::from_value(json).expect("pull list envelope must decode");
+        assert!(env.ok);
+        assert_eq!(env.pulls.len(), 1);
+        assert_eq!(env.pulls[0].number, 42);
+        assert_eq!(env.pulls[0].title, "Fix race in watcher admission");
+        assert_eq!(env.pulls[0].author, "risingtides");
+        assert_eq!(env.pulls[0].branch, "feat/watcher-fix");
+        assert_eq!(
+            env.pulls[0].head_sha,
+            "abc123def456abc123def456abc123def456abc1"
+        );
+        assert!(!env.pulls[0].draft);
+        assert_eq!(env.pulls[0].labels.len(), 2);
+        assert_eq!(env.pulls[0].labels[0].name, "bug");
+        assert_eq!(env.pulls[0].labels[0].color, "ff0000");
+        assert_eq!(env.pulls[0].state, "open");
+        assert!(env.has_more);
+        assert_eq!(env.page, 1);
+        assert_eq!(env.rate.remaining, 4999);
+    }
+
+    #[test]
+    fn gh_pull_list_envelope_decodes_closed_empty() {
+        let json = serde_json::json!({
+            "ok": true,
+            "pulls": [],
+            "pulls_truncated": false,
+            "page": 1,
+            "per_page": 10,
+            "has_more": false,
+            "rate": { "remaining": 4980, "reset": 1753000000 }
+        });
+        let env: GhPullListEnvelope =
+            serde_json::from_value(json).expect("empty pull list must decode");
+        assert!(env.ok);
+        assert!(env.pulls.is_empty());
+        assert!(!env.has_more);
+    }
+
+    #[test]
+    fn gh_pull_detail_envelope_decodes_full_body() {
+        let json = serde_json::json!({
+            "ok": true,
+            "pull": {
+                "number": 42,
+                "title": "Fix race in watcher admission",
+                "title_truncated": false,
+                "author": "risingtides",
+                "author_truncated": false,
+                "branch": "feat/watcher-fix",
+                "base_branch": "main",
+                "head_sha": "abc123def456abc123def456abc123def456abc1",
+                "body": "## Summary\\n\\nFixes a race where the watcher...",
+                "body_truncated": false,
+                "draft": true,
+                "labels": [],
+                "labels_truncated": false,
+                "state": "open",
+                "mergeable": true,
+                "requested_reviewers": ["alice", "bob"],
+                "requested_reviewers_truncated": false,
+                "created_at": "2026-07-18T10:00:00Z",
+                "updated_at": "2026-07-19T09:00:00Z"
+            },
+            "rate": { "remaining": 4998, "reset": 1753000000 }
+        });
+        let env: GhPullDetailEnvelope =
+            serde_json::from_value(json).expect("pull detail must decode");
+        assert!(env.ok);
+        assert_eq!(env.pull.number, 42);
+        assert!(env.pull.body.contains("Summary"));
+        assert!(env.pull.draft);
+        assert_eq!(env.pull.mergeable, Some(true));
+        assert_eq!(env.pull.requested_reviewers, vec!["alice", "bob"]);
+        assert_eq!(env.rate.remaining, 4998);
+    }
+
+    #[test]
+    fn gh_pull_detail_envelope_omits_optional_mergeable() {
+        let json = serde_json::json!({
+            "ok": true,
+            "pull": {
+                "number": 7,
+                "title": "nix",
+                "author": "bot",
+                "branch": "bot/nix",
+                "base_branch": "main",
+                "head_sha": "def4567890123456789012345678901234567890",
+                "state": "open",
+                "created_at": "2026-07-19T00:00:00Z",
+                "updated_at": "2026-07-19T00:00:00Z"
+            },
+            "rate": { "remaining": 4997, "reset": 1753000000 }
+        });
+        let env: GhPullDetailEnvelope =
+            serde_json::from_value(json).expect("minimal pull detail must decode");
+        assert_eq!(env.pull.mergeable, None);
+        assert!(env.pull.requested_reviewers.is_empty());
+        assert!(env.pull.labels.is_empty());
+    }
+
+    #[test]
+    fn gh_checks_envelope_decodes_mixed_conclusions() {
+        let json = serde_json::json!({
+            "ok": true,
+            "checks": [
+                {
+                    "id": 1,
+                    "name": "lint",
+                    "status": "completed",
+                    "conclusion": "success"
+                },
+                {
+                    "id": 2,
+                    "name": "test",
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "details_url": "https://ci.example.com/run/2"
+                },
+                {
+                    "id": 3,
+                    "name": "deploy",
+                    "status": "in_progress",
+                    "conclusion": null
+                }
+            ],
+            "checks_truncated": false,
+            "rate": { "remaining": 4996, "reset": 1753000000 }
+        });
+        let env: GhChecksEnvelope =
+            serde_json::from_value(json).expect("checks envelope must decode");
+        assert!(env.ok);
+        assert_eq!(env.checks.len(), 3);
+        assert_eq!(env.checks[0].name, "lint");
+        assert_eq!(env.checks[0].status, "completed");
+        assert_eq!(env.checks[0].conclusion.as_deref(), Some("success"));
+        assert_eq!(env.checks[1].conclusion.as_deref(), Some("failure"));
+        assert_eq!(
+            env.checks[1].details_url.as_deref(),
+            Some("https://ci.example.com/run/2")
+        );
+        assert_eq!(env.checks[2].status, "in_progress");
+        assert_eq!(env.checks[2].conclusion, None);
+        assert_eq!(env.checks[2].started_at, None);
+        assert_eq!(env.checks[2].completed_at, None);
+    }
+
+    #[test]
+    fn gh_checks_envelope_decodes_empty() {
+        let json = serde_json::json!({
+            "ok": true,
+            "checks": [],
+            "checks_truncated": false,
+            "rate": { "remaining": 4995, "reset": 1753000000 }
+        });
+        let env: GhChecksEnvelope = serde_json::from_value(json).expect("empty checks must decode");
+        assert!(env.ok);
+        assert!(env.checks.is_empty());
+    }
+
+    #[test]
+    fn gh_reviews_envelope_decodes_across_states() {
+        let json = serde_json::json!({
+            "ok": true,
+            "reviews": [
+                {
+                    "reviewer": "alice",
+                    "reviewer_truncated": false,
+                    "state": "approved",
+                    "body": "LGTM, ship it",
+                    "body_truncated": false,
+                    "submitted_at": "2026-07-18T14:00:00Z"
+                },
+                {
+                    "reviewer": "bob",
+                    "reviewer_truncated": false,
+                    "state": "changes_requested",
+                    "body": "",
+                    "body_truncated": false,
+                    "submitted_at": null
+                },
+                {
+                    "reviewer": "carol",
+                    "reviewer_truncated": false,
+                    "state": "commented",
+                    "body": "nit: naming",
+                    "body_truncated": false,
+                    "submitted_at": "2026-07-19T01:00:00Z"
+                }
+            ],
+            "reviews_truncated": false,
+            "page": 1,
+            "per_page": 10,
+            "has_more": false,
+            "rate": { "remaining": 4994, "reset": 1753000000 }
+        });
+        let env: GhReviewsEnvelope =
+            serde_json::from_value(json).expect("reviews envelope must decode");
+        assert!(env.ok);
+        assert_eq!(env.reviews.len(), 3);
+        assert_eq!(env.reviews[0].reviewer, "alice");
+        assert_eq!(env.reviews[0].state, "approved");
+        assert_eq!(env.reviews[0].body, "LGTM, ship it");
+        assert_eq!(
+            env.reviews[0].submitted_at.as_deref(),
+            Some("2026-07-18T14:00:00Z")
+        );
+        assert_eq!(env.reviews[1].state, "changes_requested");
+        assert_eq!(env.reviews[1].submitted_at, None);
+        assert_eq!(env.reviews[2].state, "commented");
+        assert!(!env.has_more);
+        assert_eq!(env.page, 1);
+        assert_eq!(env.rate.remaining, 4994);
+    }
+
+    #[test]
+    fn gh_reviews_envelope_decodes_forward_compat_unknown_fields() {
+        // The daemon may add fields; the surface must ignore them silently.
+        let json = serde_json::json!({
+            "ok": true,
+            "reviews": [
+                {
+                    "reviewer": "alice",
+                    "state": "approved",
+                    "body": "",
+                    "future_field": "ignore me",
+                    "nested": { "also": "ignore" }
+                }
+            ],
+            "page": 1,
+            "per_page": 10,
+            "has_more": false,
+            "rate": { "remaining": 4993, "reset": 1753000000 },
+            "future_envelope_field": 42
+        });
+        let env: GhReviewsEnvelope =
+            serde_json::from_value(json).expect("forward-compat must not break decode");
+        assert!(env.ok);
+        assert_eq!(env.reviews.len(), 1);
+        assert_eq!(env.reviews[0].reviewer, "alice");
+    }
 }
