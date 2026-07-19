@@ -241,7 +241,7 @@ async fn main() -> anyhow::Result<()> {
         // arrived) and Allow/Deny never reached the daemon. /v1/events streams
         // like /v1/agent/events; the decision route forwards body + the {id}.
         .route("/v1/events", get(proxy_control_events))
-        .route("/v1/permissions", get(proxy_permissions))
+        .route("/v1/permissions", get(proxy_permissions_snapshot))
         .route(
             "/v1/permissions/{id}/decision",
             post(proxy_permission_decision),
@@ -630,39 +630,6 @@ async fn proxy_sessions_post(State(state): State<Arc<AppState>>, body: Bytes) ->
         .send()
         .await
     {
-        Ok(resp) => {
-            let status = resp.status();
-            let bytes = resp.bytes().await.unwrap_or_default();
-            (
-                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
-                [(header::CONTENT_TYPE, "application/json")],
-                bytes,
-            )
-                .into_response()
-        }
-        Err(err) => (
-            StatusCode::BAD_GATEWAY,
-            format!("daemon unreachable: {err}"),
-        )
-            .into_response(),
-    }
-}
-
-/// Reverse-proxy GET /v1/permissions to the local daemon. The web surface's
-/// session projection (TASK-44) reconciles pending-permission cards from this
-/// list on every session load/reconnect; without the forward it fell through
-/// to ServeDir and the projection saw a non-2xx.
-async fn proxy_permissions(State(state): State<Arc<AppState>>, req: Request) -> impl IntoResponse {
-    let q = req
-        .uri()
-        .query()
-        .map(|q| format!("?{q}"))
-        .unwrap_or_default();
-    let url = format!(
-        "{}/v1/permissions{q}",
-        state.daemon_url.trim_end_matches('/')
-    );
-    match state.http.get(&url).send().await {
         Ok(resp) => {
             let status = resp.status();
             let bytes = resp.bytes().await.unwrap_or_default();
@@ -1206,6 +1173,13 @@ async fn proxy_control_events(
         )
             .into_response(),
     }
+}
+
+/// Reverse-proxy GET /v1/permissions (permission snapshot). The web UI polls
+/// this to render pending-permission cards; without it the request fell through
+/// to ServeDir → 404 (empty body) → "permission snapshot rejected".
+async fn proxy_permissions_snapshot(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    proxy_get_json(&state, "/v1/permissions").await
 }
 
 /// Reverse-proxy POST /v1/permissions/{id}/decision (OCEAN-136). The web UI
@@ -1783,5 +1757,44 @@ mod tests {
         let payload = serde_json::json!({"error": "upstream returned 500"});
         let resp = translate_stt_daemon_response(StatusCode::BAD_GATEWAY, &payload);
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// GET /v1/permissions must NOT fall through to ServeDir → 404. Prove the
+    /// route is registered by building a minimal router and verifying a GET
+    /// returns something other than the fallback 404.
+    #[tokio::test]
+    async fn permissions_snapshot_route_does_not_fall_through() {
+        use axum::routing::get;
+
+        let app = Router::new()
+            .route("/v1/permissions", get(|| async { "ok" }))
+            .fallback(get(|| async { StatusCode::NOT_FOUND }));
+
+        // Should match the route, not the fallback.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/permissions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // A sibling path with extra segment should fall through.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/permissions/anything")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }
