@@ -13,7 +13,7 @@
 //! the rest of the UI reacts naturally.
 
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 #[cfg(target_arch = "wasm32")]
 use std::sync::{Arc, Mutex};
@@ -919,6 +919,19 @@ pub struct PendingPermission {
     pub args_summary: String,
     /// True once a decision POST is in flight, so the buttons can disable.
     pub deciding: bool,
+    /// The daemon request id that raised this gate. The daemon mints
+    /// `AgentTurnId(request_id)`, so this equals the turn id. Present from a
+    /// current daemon (the control envelope's `request_id` and
+    /// `GET /v1/permissions` both carry it); `None` only from an older daemon.
+    /// Used to resolve per-card decision authority so a later turn's token can
+    /// never be replayed against an earlier turn's gate (TASK-44, finding 4).
+    pub request_id: Option<String>,
+    /// True when THIS surface holds the decision token bound to `request_id`
+    /// (it submitted the originating turn). A card raised by another surface —
+    /// or one whose request has no local token — is non-actionable: the buttons
+    /// render read-only and `decide_permission` refuses to POST, so no
+    /// wrong/unbound token ever reaches the daemon (TASK-44, finding 4).
+    pub actionable: bool,
 }
 
 /// The control-plane event envelope on `/v1/events`. Unlike `/v1/agent/events`
@@ -934,6 +947,11 @@ enum ControlEvent {
         permission_id: Option<String>,
         #[serde(default)]
         session_id: Option<String>,
+        /// The originating request/turn id, carried on the flattened envelope
+        /// (`EventEnvelope::request_id`). Used to bind the card to this
+        /// surface's decision token (TASK-44). `None` only from an older daemon.
+        #[serde(default)]
+        request_id: Option<String>,
         tool: String,
         #[serde(default)]
         reason: String,
@@ -1840,6 +1858,17 @@ pub struct Daemon {
     /// here so `decide_permission` can retrieve the same value. Cleared when a
     /// new turn begins.
     pub active_decision_token: RwSignal<Option<String>>,
+    /// Per-request decision authority (TASK-44, finding 4). Maps a daemon
+    /// request id (identical to the turn id — the daemon mints
+    /// `AgentTurnId(request_id)`) to the CSPRNG decision token THIS surface
+    /// minted when it submitted that turn, plus the session it belongs to.
+    /// `decide_permission` resolves a card's token from this map by the card's
+    /// originating `request_id`, so a later turn's token can never be replayed
+    /// against an earlier turn's gate, and a card raised by another surface (no
+    /// entry here) is non-actionable. Entries are pruned to the session's
+    /// still-live requests on every projection commit; the map is never sent
+    /// over SSE and never reaches any daemon read model.
+    decision_authority: RwSignal<HashMap<String, DecisionGrant>>,
     /// True while a `create_project` POST is in flight. Drives the Sessions
     /// panel's Create button label/disabled state and gates the modal close on
     /// the success edge. Reset to false on every terminal branch.
@@ -1916,6 +1945,21 @@ pub enum SessionRunState {
     Unknown,
 }
 
+impl SessionRunState {
+    /// True while a turn is still live and cancellable — the daemon is
+    /// generating, blocked on an operator gate, or winding down a cancel. A
+    /// live snapshot must preserve a running/cancellable projection (Stop
+    /// target intact); only a terminal state clears the active turn (TASK-44,
+    /// verdict finding 3). `Stored`/`Cancelled`/`Completed`/`Errored`/`Unknown`
+    /// are all terminal for projection purposes.
+    fn is_live(self) -> bool {
+        matches!(
+            self,
+            Self::Running | Self::WaitingForPermission | Self::Cancelling
+        )
+    }
+}
+
 /// Summary of a session, matching the daemon's AgentSessionSummary. `cwd`,
 /// `workspace_root`, and `owning_project` are all `#[serde(default)]` — an
 /// old daemon serves only `cwd`, and the sessions panel groups on whatever
@@ -1975,8 +2019,25 @@ struct SessionDetail {
     /// vanishing (OCEAN-382).
     #[serde(default)]
     tool_context: Vec<SessionToolContext>,
+    /// Ids of permissions currently awaiting a decision on this session. The
+    /// rich card detail (tool/reason/args/request_id) comes from
+    /// `GET /v1/permissions`; this list only proves the session has open gates.
     #[serde(default)]
     pending_permissions: Vec<String>,
+    /// The daemon's atomically-derived run state for the live turn, if any
+    /// (`SessionDetail::state`). `Option` + `#[serde(default)]` for backward
+    /// compatibility with older daemons that omit it. Applied together with
+    /// `active_requests` to restore a truthful running/waiting/cancelling
+    /// projection on switch/reconnect (TASK-44, finding 3).
+    #[serde(default)]
+    state: Option<SessionRunState>,
+    /// The daemon's still-live request ids for this session
+    /// (`SessionDetail::active_requests`), most-recent first, terminal requests
+    /// already filtered out. Each id equals a turn id (the daemon mints
+    /// `AgentTurnId(request_id)`). The first entry is the live turn's Stop
+    /// target restored on reconnect (TASK-44, finding 3).
+    #[serde(default)]
+    active_requests: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1991,6 +2052,11 @@ struct PermissionsResponse {
 #[derive(Debug, Clone, Deserialize)]
 struct PermissionStatusWire {
     permission_id: String,
+    /// Originating request/turn id (`PermissionStatus::request_id`). Required on
+    /// the wire from a current daemon; `Option` + default for older daemons.
+    /// Binds the card to this surface's decision token (TASK-44, finding 4).
+    #[serde(default)]
+    request_id: Option<String>,
     #[serde(default)]
     session_id: Option<String>,
     tool: String,
@@ -2091,6 +2157,7 @@ impl Daemon {
             canvas_patches: RwSignal::new(Vec::new()),
             pinned_widgets: RwSignal::new(Vec::new()),
             active_decision_token: RwSignal::new(None),
+            decision_authority: RwSignal::new(HashMap::new()),
             project_create_pending: RwSignal::new(false),
             project_create_error: RwSignal::new(None),
             preview_file_intent: RwSignal::new(None),
@@ -2155,6 +2222,7 @@ impl Daemon {
             canvas_patches: RwSignal::new(Vec::new()),
             pinned_widgets: RwSignal::new(Vec::new()),
             active_decision_token: RwSignal::new(None),
+            decision_authority: RwSignal::new(HashMap::new()),
             project_create_pending: RwSignal::new(false),
             project_create_error: RwSignal::new(None),
             preview_file_intent: RwSignal::new(None),
@@ -2290,6 +2358,10 @@ impl Daemon {
     /// Open the SSE stream and pipe events into the turns signal. Reconnects
     /// on disconnect with a small backoff. Spawned once per session.
     pub fn connect(&self) {
+        // Handle for the reconnect-path projection commit (TASK-44): a re-opened
+        // agent stream reconciles the whole focused-session projection from the
+        // daemon rather than blindly clearing live state.
+        let daemon = self.clone();
         let url = self.url.get_untracked();
         let turns = self.turns;
         let streaming = self.streaming;
@@ -2363,34 +2435,24 @@ impl Daemon {
                     break;
                 }
 
-                // On a reconnect (not the first open) the live tail had a gap.
-                // Re-hydrate the transcript from the daemon so missed events are
-                // recovered, and clear any stuck `streaming` state — if the turn
-                // finished during the outage, the `turn_finished` frame that
-                // would have flipped `streaming` off never arrives, so without
-                // this the composer's Stop button (and the streaming gate) stay
-                // stuck on forever.
+                // On a reconnect (not the first open) the live tail had a gap:
+                // any delta / tool-call / turn_finished emitted during the outage
+                // is gone. Commit the daemon's authoritative projection to recover
+                // them — transcript, pinned components, AND the live turn state
+                // together. Unlike the old path this does NOT pre-clear
+                // streaming/active_turn_id: a turn the daemon still reports as
+                // running/waiting/cancelling stays live and cancellable (no idle
+                // flicker, no lost Stop target), while a turn that terminated
+                // during the gap is cleared by the terminal snapshot — the same
+                // atomic commit either way (TASK-44, finding 3, and the 13:45
+                // Tauri/web split it reproduces).
                 if connected_once {
-                    if streaming.get_untracked() {
-                        // The in-flight turn's terminal frame may have been lost
-                        // in the gap. Drop the stuck streaming state now; the
-                        // re-hydrate below restores the true transcript, and if
-                        // the turn is genuinely still running its live frames
-                        // resume on the fresh stream.
-                        streaming.set(false);
-                        active_turn_id.set(None);
+                    if let Err(error) = daemon
+                        .commit_session_projection(&active_session_id, generation)
+                        .await
+                    {
+                        log::warn!("reconnect projection commit skipped: {error}");
                     }
-                    rehydrate_transcript(
-                        url.clone(),
-                        active_session_id.clone(),
-                        turns,
-                        session_id,
-                        session_title,
-                        cwd,
-                        model,
-                        pinned_widgets,
-                    )
-                    .await;
                     // A session switch can land while the reconnect snapshot is
                     // awaiting HTTP. Do not let that stale task install its old
                     // session EventSource into the shared slot and close the new
@@ -2605,10 +2667,20 @@ impl Daemon {
         let permission_revision = self.permission_revision;
         let planner_stream_sources = self.planner_stream_sources.clone();
         let pending = self.pending_permissions;
+        let decision_authority = self.decision_authority;
+        // Handle for the post-reconnect reconciliation: a reopened control
+        // stream has a gap, so a permission_request/decision emitted while it was
+        // down is gone. Reconcile the durable /v1/permissions registry after each
+        // reopen so a gate raised (or cleared) during the outage isn't missed
+        // (TASK-44, finding 2).
+        let daemon = self.clone();
         #[cfg(target_arch = "wasm32")]
         let permission_event_source = Arc::clone(&self.permission_event_source);
 
         spawn_local(async move {
+            // The first open is paired with the switch/create commit that already
+            // reconciled permissions; only a RE-open needs the gap recovery.
+            let mut connected_once = false;
             loop {
                 if sse_generation.get_untracked() != generation {
                     break;
@@ -2670,6 +2742,35 @@ impl Daemon {
                     generation,
                     true,
                 ));
+                // Gap recovery on RE-open: reconcile the durable permission
+                // registry so a gate raised or decided during the outage lands
+                // (or clears) even though its live frame was never delivered
+                // (TASK-44, finding 2). Skipped on the first open, which the
+                // switch/create commit already reconciled.
+                if connected_once && sse_generation.get_untracked() == generation {
+                    if let Err(error) = daemon
+                        .reconcile_pending_permissions(&active_session_id)
+                        .await
+                    {
+                        log::warn!("permission reconcile after reconnect skipped: {error}");
+                    }
+                    if sse_generation.get_untracked() != generation {
+                        clear_stream_marker(
+                            permission_stream_ready,
+                            &active_session_id,
+                            generation,
+                        );
+                        set_stream_source(
+                            &planner_stream_sources,
+                            &active_session_id,
+                            generation,
+                            true,
+                            None,
+                        );
+                        break;
+                    }
+                }
+                connected_once = true;
                 let mut stream = futures_util::stream::select_all(subs);
                 while let Some(msg) = stream.next().await {
                     if sse_generation.get_untracked() != generation {
@@ -2685,7 +2786,8 @@ impl Daemon {
                         continue;
                     };
                     permission_revision.update(|revision| *revision = revision.wrapping_add(1));
-                    apply_control_event(&evt, &active_session_id, pending);
+                    let authority = decision_authority.get_untracked();
+                    apply_control_event(&evt, &active_session_id, pending, &authority);
                 }
 
                 clear_stream_marker(permission_stream_ready, &active_session_id, generation);
@@ -2719,9 +2821,30 @@ impl Daemon {
         let status = self.status;
         let pending = self.pending_permissions;
         let permission_revision = self.permission_revision;
-        // Read the token before moving into the async block. `get_untracked`
-        // avoids a reactive subscription that isn't needed here.
-        let token = self.active_decision_token.get_untracked();
+        // Resolve decision authority for THIS card, not from a session-global
+        // slot (TASK-44, finding 4). Look up the card's originating request id and
+        // resolve the token bound to it. A card this surface never submitted —
+        // remote-origin, or a request with no local grant — has no token and is
+        // non-actionable: refuse the POST outright rather than send a
+        // wrong/unbound token the daemon would 403 (or, worse, one bound to a
+        // DIFFERENT turn).
+        let token = pending.with_untracked(|list| {
+            list.iter()
+                .find(|p| p.permission_id == permission_id)
+                .and_then(|p| {
+                    self.decision_authority.with_untracked(|authority| {
+                        resolve_decision_authority(p.request_id.as_deref(), authority)
+                            .map(str::to_string)
+                    })
+                })
+        });
+        let Some(token) = token else {
+            log::warn!(
+                "refusing permission decision for {permission_id}: no local authority (remote-origin card)"
+            );
+            status.set("permission awaiting the surface that requested it".into());
+            return;
+        };
 
         // Mark the card as deciding so its buttons disable and it can't be
         // double-submitted.
@@ -2736,23 +2859,14 @@ impl Daemon {
                 "{}/v1/permissions/{permission_id}/decision",
                 url.trim_end_matches('/')
             );
-            // Include the per-turn decision token so the daemon's OCEAN-185
+            // Replay the request-bound decision token so the daemon's OCEAN-185
             // gate can verify this decision came from the turn submitter.
-            let body = if allow {
-                match &token {
-                    Some(t) => {
-                        json!({ "permission_id": permission_id, "decision": "allow", "decision_token": t })
-                    }
-                    None => json!({ "permission_id": permission_id, "decision": "allow" }),
-                }
-            } else {
-                match &token {
-                    Some(t) => {
-                        json!({ "permission_id": permission_id, "decision": "deny", "decision_token": t })
-                    }
-                    None => json!({ "permission_id": permission_id, "decision": "deny" }),
-                }
-            };
+            let decision = if allow { "allow" } else { "deny" };
+            let body = json!({
+                "permission_id": permission_id,
+                "decision": decision,
+                "decision_token": token,
+            });
             let res = Request::post(&post_url)
                 .header("content-type", "application/json")
                 .json(&body);
@@ -3091,6 +3205,23 @@ impl Daemon {
             match res {
                 Ok(resp) => match resp.json::<AgentTurnResponse>().await {
                     Ok(r) if r.ok => {
+                        // Bind decision authority for this turn (TASK-44, finding
+                        // 4). The daemon's turn id IS the request id, so a later
+                        // permission gate on this turn resolves to exactly the
+                        // token minted here — never a subsequent turn's token. The
+                        // grant is tagged with the turn's session so a projection
+                        // commit prunes it per-session once the turn terminates.
+                        // Bound before any gate can fire (the POST returns on turn
+                        // acceptance, before the model emits a tool call).
+                        daemon.decision_authority.update(|authority| {
+                            authority.insert(
+                                r.turn_id.clone(),
+                                DecisionGrant {
+                                    token: decision_token.clone(),
+                                    session_id: r.session_id.clone(),
+                                },
+                            );
+                        });
                         // Do not let a late HTTP response from an older submit
                         // switch the visible cockpit back to another session.
                         // Active session changes only via explicit create/select
@@ -3630,13 +3761,47 @@ impl Daemon {
     }
 
     /// Switch to a different session. Clears the current turns, sets the
-    /// session_id, fetches the persisted transcript snapshot, then reconnects the
-    /// SSE stream for any future live events. SSE is a live tail, not historical
-    /// replay, so switching sessions must explicitly hydrate from the daemon.
+    /// session_id, opens the scoped SSE streams, then commits the daemon's
+    /// authoritative projection for the new session. SSE is a live tail, not
+    /// historical replay, so a switch must explicitly reconcile from the daemon.
+    ///
+    /// Ordering matters (TASK-44): `connect()` first, so the projection commits
+    /// under the SSE generation the new streams run on and a second switch that
+    /// races the fetch retires this one via the generation guard. The commit
+    /// then restores transcript, pinned components, the live Stop target, and the
+    /// pending-permission cards TOGETHER — a session that is running/gated
+    /// elsewhere lands as a live, cancellable projection rather than a transient
+    /// idle screen.
     pub fn switch_session(&self, id: String, title: String) {
         self.select_session_state(&id, title);
-        self.load_session_snapshot(id);
         self.connect();
+        let generation = self.sse_generation.get_untracked();
+        self.spawn_session_projection(id, generation);
+    }
+
+    /// Spawn the authoritative projection commit for `(id, generation)`. Shared
+    /// by explicit switch/load and by the reconnect paths so a single mechanism
+    /// reconciles focus. A retired snapshot (focus or generation moved) is
+    /// discarded silently; a genuine fetch failure surfaces only while this
+    /// snapshot is still the current one.
+    fn spawn_session_projection(&self, id: String, generation: u64) {
+        let daemon = self.clone();
+        spawn_local(async move {
+            if let Err(error) = daemon.commit_session_projection(&id, generation).await {
+                log::warn!("session projection commit skipped: {error}");
+                if admit_session_snapshot(
+                    &id,
+                    generation,
+                    daemon.session_id.get_untracked().as_deref(),
+                    daemon.sse_generation.get_untracked(),
+                ) == SnapshotAdmission::Commit
+                {
+                    daemon
+                        .status
+                        .set(format!("session load failed: {}", concise_error(&error)));
+                }
+            }
+        });
     }
 
     fn select_session_state(&self, id: &str, title: String) {
@@ -3659,18 +3824,133 @@ impl Daemon {
         self.reset_token_stats();
     }
 
-    fn load_session_snapshot(&self, id: String) {
-        let daemon = self.clone();
-        spawn_local(async move {
-            if let Err(error) = daemon.hydrate_active_session(&id).await {
-                log::error!("session load failed: {error}");
-                if daemon.session_id.get_untracked().as_deref() == Some(id.as_str()) {
-                    daemon
-                        .status
-                        .set(format!("session load failed: {}", concise_error(&error)));
+    /// Fetch the daemon's authoritative snapshot for `id` and, if it is still the
+    /// focused session on SSE `generation`, commit the WHOLE projection in one
+    /// synchronous block: transcript, pinned components, live turn id + streaming
+    /// state, and the pending-permission cards (with per-card decision authority
+    /// resolved). This is the single reconciliation mechanism the switch and both
+    /// reconnect paths share (TASK-44, findings 2/3/4).
+    ///
+    /// The two HTTP awaits (session detail, then pending permissions) happen
+    /// up front; the projection is applied only after a final admission recheck,
+    /// with no `await` between the signal writes, so no loop can publish a stale
+    /// partial projection over another's fresh one. The live turn id/streaming
+    /// come straight from the daemon's `state`/`active_requests`: a running,
+    /// waiting-for-permission, or cancelling session is never transiently
+    /// declared idle; only a terminal state clears the Stop target.
+    async fn commit_session_projection(&self, id: &str, generation: u64) -> Result<(), String> {
+        let url = self.url.get_untracked();
+
+        // 1. Authoritative session snapshot (transcript + atomic live-turn state).
+        let get_url = format!("{}/v1/sessions/{id}", url.trim_end_matches('/'));
+        let resp = Request::get(&get_url)
+            .send()
+            .await
+            .map_err(|error| format!("session fetch error: {error}"))?;
+        if !resp.ok() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("session fetch rejected: {}", concise_error(&text)));
+        }
+        let response = resp
+            .json::<SessionDetailResponse>()
+            .await
+            .map_err(|error| format!("session decode error: {error}"))?;
+        if !response.ok {
+            return Err(response.error.unwrap_or_else(|| "unknown error".into()));
+        }
+        let detail = response
+            .session
+            .ok_or_else(|| "session snapshot missing".to_string())?;
+        if detail.id != id {
+            return Err("session snapshot id mismatch".into());
+        }
+        if admit_session_snapshot(
+            id,
+            generation,
+            self.session_id.get_untracked().as_deref(),
+            self.sse_generation.get_untracked(),
+        ) == SnapshotAdmission::Discard
+        {
+            return Err("session snapshot retired before commit".into());
+        }
+
+        // 2. Rich pending-permission cards, revision-gated against control-stream
+        //    churn (reuses the same fetch the reconciler uses, but returns the
+        //    cards for the atomic commit instead of publishing them alone).
+        let mut source = DaemonPermissionSnapshotSource {
+            daemon: self,
+            session_id: id,
+        };
+        let cards = {
+            let mut settled = None;
+            for _ in 0..4 {
+                let revision = source.revision();
+                let snapshot = source.fetch().await?;
+                if source.revision() == revision {
+                    settled = Some(snapshot);
+                    break;
                 }
             }
+            settled.ok_or_else(|| {
+                "permission snapshot changed repeatedly during reconciliation".to_string()
+            })?
+        };
+
+        // 3. Re-admit after the second await: focus/generation may have moved.
+        if admit_session_snapshot(
+            id,
+            generation,
+            self.session_id.get_untracked().as_deref(),
+            self.sse_generation.get_untracked(),
+        ) == SnapshotAdmission::Discard
+        {
+            return Err("session snapshot retired before commit".into());
+        }
+
+        // 4. Pure projection, then one atomic commit — no `await` between writes.
+        let SessionDetail {
+            title,
+            model,
+            workspace_root,
+            cwd,
+            transcript,
+            tool_context,
+            state,
+            active_requests,
+            ..
+        } = detail;
+        let (rebuilt_turns, rebuilt_pinned) =
+            turns_from_session_transcript(transcript, &tool_context);
+        let authority = self.decision_authority.get_untracked();
+        let projection = build_session_projection(state, &active_requests, cards, &authority);
+        // Live set = the daemon's live requests plus any request still holding an
+        // open gate; authority for anything else in this session is terminal.
+        let mut live_requests: HashSet<String> = active_requests.iter().cloned().collect();
+        for card in &projection.pending {
+            if let Some(request_id) = &card.request_id {
+                live_requests.insert(request_id.clone());
+            }
+        }
+
+        self.session_title.set(title);
+        if let Some(root) = workspace_root.or(cwd) {
+            if !root.is_empty() {
+                self.cwd.set(root);
+            }
+        }
+        if !model.is_empty() {
+            self.model.set(Some(model));
+        }
+        self.turns.set(rebuilt_turns);
+        self.pinned_widgets.set(rebuilt_pinned);
+        self.active_turn_id.set(projection.active_turn_id);
+        self.streaming.set(projection.streaming);
+        self.pending_permissions.set(projection.pending);
+        self.decision_authority.update(|authority| {
+            prune_session_authority(authority, id, &live_requests);
         });
+        self.status.set("session loaded".into());
+        Ok(())
     }
 
     async fn hydrate_active_session(&self, id: &str) -> Result<Vec<String>, String> {
@@ -4200,6 +4480,18 @@ impl Daemon {
             if response.session_id != session_id {
                 return Err("turn response returned a different session".into());
             }
+            // Bind decision authority for this planner turn (TASK-44, finding 4),
+            // keyed by the turn/request id so a gate on it resolves to exactly
+            // this token.
+            self.decision_authority.update(|authority| {
+                authority.insert(
+                    response.turn_id.clone(),
+                    DecisionGrant {
+                        token: decision_token.clone(),
+                        session_id: session_id.to_string(),
+                    },
+                );
+            });
             Ok(())
         }
         .await;
@@ -4309,10 +4601,6 @@ pub struct RealtimeSecret {
     pub model: String,
 }
 
-/// Mutate the turns vec in response to a single SSE event. Splits assistant
-/// content into Text / Thinking / ToolCall blocks under one Turn per turn_id,
-/// matching the TUI's `pm_*_assistant_turn_mut` logic.
-#[allow(clippy::too_many_arguments)]
 /// Whether a `TurnFinished` frame may clear the session's live turn state
 /// (`streaming` + `active_turn_id`) and write the header status line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4347,6 +4635,144 @@ fn admit_turn_terminal(active_turn_id: Option<&str>, event_turn_id: &str) -> Ter
     }
 }
 
+// ── TASK-44: atomic session projection — switch/reconnect reconciliation ──────
+//
+// The reducers below are pure over their inputs (no signals, no `web-sys`) so
+// every admission decision — session+generation match, live-turn projection,
+// per-card decision-authority resolution, and authority pruning — unit-tests off
+// the browser, mirroring `admit_turn_terminal` above. `commit_session_projection`
+// is the single async caller that fetches the daemon's authoritative snapshot,
+// runs these deciders, and applies the whole projection in one synchronous block.
+
+/// A decision token this surface minted for a turn it submitted, tagged with the
+/// session it belongs to so authority can be pruned per session without
+/// discarding another session's live grants (TASK-44, finding 4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DecisionGrant {
+    token: String,
+    session_id: String,
+}
+
+/// Whether a fetched session snapshot may still be committed, given the session
+/// and SSE generation it was issued under versus the surface's current focus.
+/// A switch or a newer reconnect moves focus or bumps the generation, retiring
+/// any in-flight snapshot so a stale settle cannot overwrite the live projection
+/// (TASK-44: "switch during an in-flight snapshot" / "old-generation snapshot
+/// settling after a newer one").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotAdmission {
+    Commit,
+    Discard,
+}
+
+fn admit_session_snapshot(
+    snapshot_session: &str,
+    snapshot_generation: u64,
+    current_session: Option<&str>,
+    current_generation: u64,
+) -> SnapshotAdmission {
+    if current_session == Some(snapshot_session) && current_generation == snapshot_generation {
+        SnapshotAdmission::Commit
+    } else {
+        SnapshotAdmission::Discard
+    }
+}
+
+/// Derive the live turn projection (`active_turn_id`, `streaming`) from the
+/// daemon's atomic `state` + `active_requests`. A live state
+/// (running / waiting-for-permission / cancelling) with a live request restores
+/// a cancellable Stop target; a terminal or absent state clears it. Never
+/// declares idle while the daemon reports the turn live (TASK-44, finding 3).
+fn project_live_turn(
+    state: Option<SessionRunState>,
+    active_requests: &[String],
+) -> (Option<String>, bool) {
+    match state {
+        Some(s) if s.is_live() => match active_requests.first() {
+            Some(request_id) => (Some(request_id.clone()), true),
+            // Daemon says live but named no request — treat as idle rather than
+            // invent a Stop target we can't cancel.
+            None => (None, false),
+        },
+        _ => (None, false),
+    }
+}
+
+/// Resolve the decision token bound to a card's originating request, if this
+/// surface holds it. Returns the token to replay on the decision POST, or `None`
+/// when the card is non-actionable (remote-origin, or a request this surface
+/// never submitted) — in which case no decision is ever posted (TASK-44,
+/// finding 4).
+fn resolve_decision_authority<'a>(
+    request_id: Option<&str>,
+    authority: &'a HashMap<String, DecisionGrant>,
+) -> Option<&'a str> {
+    request_id
+        .and_then(|id| authority.get(id))
+        .map(|grant| grant.token.as_str())
+}
+
+/// Stamp each card's `actionable` flag from local authority, so the view can
+/// render a card from another surface read-only.
+fn mark_cards_actionable(
+    cards: &mut [PendingPermission],
+    authority: &HashMap<String, DecisionGrant>,
+) {
+    for card in cards.iter_mut() {
+        card.actionable =
+            resolve_decision_authority(card.request_id.as_deref(), authority).is_some();
+    }
+}
+
+/// Drop this session's authority grants whose request is no longer live, while
+/// preserving grants for other sessions (their turns may still be running).
+/// Keeping the map bounded to live requests is what lets a snapshot commit
+/// "preserve matching local authority by request id" without leaking tokens for
+/// finished turns (TASK-44, finding 4).
+fn prune_session_authority(
+    authority: &mut HashMap<String, DecisionGrant>,
+    session_id: &str,
+    live_requests: &HashSet<String>,
+) {
+    authority.retain(|request_id, grant| {
+        grant.session_id != session_id || live_requests.contains(request_id)
+    });
+}
+
+/// The whole focused-session projection derived from one authoritative snapshot:
+/// the live-turn state and the pending-permission cards (with per-card
+/// actionability resolved). Transcript + pinned components are rebuilt by
+/// `turns_from_session_transcript` and committed alongside this in the same
+/// synchronous block; they are omitted here so the projection stays cheap to
+/// unit-test. Pure, so the cross-surface convergence test can feed two
+/// independent authority maps the same snapshot and assert identical live state
+/// with only per-card actionability differing.
+#[derive(Debug, Clone, PartialEq)]
+struct SessionProjection {
+    active_turn_id: Option<String>,
+    streaming: bool,
+    pending: Vec<PendingPermission>,
+}
+
+fn build_session_projection(
+    state: Option<SessionRunState>,
+    active_requests: &[String],
+    mut cards: Vec<PendingPermission>,
+    authority: &HashMap<String, DecisionGrant>,
+) -> SessionProjection {
+    let (active_turn_id, streaming) = project_live_turn(state, active_requests);
+    mark_cards_actionable(&mut cards, authority);
+    SessionProjection {
+        active_turn_id,
+        streaming,
+        pending: cards,
+    }
+}
+
+/// Mutate the turns vec in response to a single SSE event. Splits assistant
+/// content into Text / Thinking / ToolCall blocks under one Turn per turn_id,
+/// matching the TUI's `pm_*_assistant_turn_mut` logic.
+#[allow(clippy::too_many_arguments)]
 fn apply_event(
     event: &AgentEvent,
     turns: RwSignal<Vec<Turn>>,
@@ -4918,13 +5344,23 @@ impl PermissionSnapshotSource for DaemonPermissionSnapshotSource<'_> {
                     reason: permission.reason,
                     args_summary: summarize_args(&permission.args),
                     deciding: false,
+                    // Carry the originating request id so decision authority can
+                    // be resolved per card; `actionable` is stamped on apply from
+                    // the local authority map (TASK-44, finding 4).
+                    request_id: permission.request_id,
+                    actionable: false,
                 })
                 .collect())
         }
         .boxed_local()
     }
 
-    fn apply(&mut self, snapshot: Vec<PendingPermission>) {
+    fn apply(&mut self, mut snapshot: Vec<PendingPermission>) {
+        // Stamp per-card actionability from this surface's decision authority
+        // before publishing, so a card raised by another surface renders
+        // read-only rather than sending an unbound token.
+        let authority = self.daemon.decision_authority.get_untracked();
+        mark_cards_actionable(&mut snapshot, &authority);
         self.daemon.pending_permissions.set(snapshot);
     }
 }
@@ -4954,15 +5390,21 @@ fn planner_streams_ready(
 /// `permission_decision` removes the matching card (the daemon decided it,
 /// possibly from another surface like the TUI). Frames for other sessions, or
 /// without a `permission_id`, are dropped.
+///
+/// The enqueued card carries the envelope's `request_id` and is stamped
+/// actionable only when `authority` holds the token for that request — a card
+/// from another surface renders read-only (TASK-44, finding 4).
 fn apply_control_event(
     event: &ControlEvent,
     active_session_id: &str,
     pending: RwSignal<Vec<PendingPermission>>,
+    authority: &HashMap<String, DecisionGrant>,
 ) {
     match event {
         ControlEvent::PermissionRequest {
             permission_id,
             session_id,
+            request_id,
             tool,
             reason,
             args,
@@ -4975,6 +5417,7 @@ fn apply_control_event(
             let Some(permission_id) = permission_id.clone() else {
                 return;
             };
+            let actionable = resolve_decision_authority(request_id.as_deref(), authority).is_some();
             let entry = PendingPermission {
                 permission_id: permission_id.clone(),
                 session_id: active_session_id.to_string(),
@@ -4982,6 +5425,8 @@ fn apply_control_event(
                 reason: reason.clone(),
                 args_summary: summarize_args(args),
                 deciding: false,
+                request_id: request_id.clone(),
+                actionable,
             };
             pending.update(|list| {
                 // Dedupe: the daemon reuses one PermissionId for an identical
@@ -5228,89 +5673,6 @@ fn concise_error(err: &str) -> String {
     } else {
         collapsed
     }
-}
-
-/// Re-fetch a session's persisted transcript snapshot and apply it to `turns`
-/// (plus title/cwd/model), recovering events missed while the SSE stream was
-/// disconnected. SSE is a live tail with no server-side replay, so a reconnect
-/// after a network blip / daemon restart / proxy hiccup would otherwise leave
-/// the transcript permanently stale or truncated (OCEAN-104).
-///
-/// This mirrors [`Daemon::load_session_snapshot`] but is a free async fn so the
-/// `connect()` reconnect loop can `await` it inline without a `&self` handle.
-/// Like the snapshot loader, it guards against a session switch landing mid
-/// fetch by re-checking the active `session_id` before mutating any signal.
-#[allow(clippy::too_many_arguments)] // signal-handle mirror of load_session_snapshot; a bundle struct would only obscure the seven independent signals
-async fn rehydrate_transcript(
-    url: String,
-    expected_session_id: String,
-    turns: RwSignal<Vec<Turn>>,
-    session_id: RwSignal<Option<String>>,
-    session_title: RwSignal<String>,
-    cwd: RwSignal<String>,
-    model: RwSignal<Option<String>>,
-    pinned_widgets: RwSignal<Vec<PinnedWidget>>,
-) {
-    // If the user switched away from this session while we were disconnected,
-    // the reconnect (and this hydrate) is for a session no longer on screen.
-    // Bail before touching any signal so we don't clobber the new transcript.
-    if session_id.get_untracked().as_deref() != Some(expected_session_id.as_str()) {
-        return;
-    }
-    let get_url = format!(
-        "{}/v1/sessions/{expected_session_id}",
-        url.trim_end_matches('/')
-    );
-    let resp = match Request::get(&get_url).send().await {
-        Ok(resp) => resp,
-        Err(err) => {
-            log::warn!("rehydrate fetch error: {err}");
-            return;
-        }
-    };
-    let detail = match resp.json::<SessionDetailResponse>().await {
-        Ok(r) if r.ok => match r.session {
-            Some(detail) => detail,
-            None => {
-                log::warn!("rehydrate: session snapshot missing");
-                return;
-            }
-        },
-        Ok(r) => {
-            log::warn!(
-                "rehydrate failed: {}",
-                r.error.unwrap_or_else(|| "unknown error".into())
-            );
-            return;
-        }
-        Err(err) => {
-            log::warn!("rehydrate decode error: {err}");
-            return;
-        }
-    };
-    // Re-check after the await: a switch may have raced the fetch.
-    if session_id.get_untracked().as_deref() != Some(detail.id.as_str()) {
-        return;
-    }
-    if !detail.title.is_empty() {
-        session_title.set(detail.title.clone());
-    }
-    if let Some(root) = detail.workspace_root.or(detail.cwd) {
-        if !root.is_empty() {
-            cwd.set(root);
-        }
-    }
-    if !detail.model.is_empty() {
-        model.set(Some(detail.model));
-    }
-    // Replace the (possibly truncated) live transcript with the daemon's
-    // authoritative snapshot, which includes anything missed during the gap —
-    // including ComponentRender frames recovered from persisted tool-call args
-    // (OCEAN-382), so rendered components re-render instead of vanishing.
-    let (rebuilt_turns, rebuilt_pinned) =
-        turns_from_session_transcript(detail.transcript, &detail.tool_context);
-    turns.set(rebuilt_turns);
-    pinned_widgets.set(rebuilt_pinned);
 }
 
 fn turns_from_session_transcript(
@@ -6498,6 +6860,291 @@ mod tests {
         );
     }
 
+    // ── TASK-44: atomic session projection — switch/reconnect reconciliation ──
+
+    fn task44_card(permission_id: &str, request_id: Option<&str>) -> PendingPermission {
+        PendingPermission {
+            permission_id: permission_id.into(),
+            session_id: "session-a".into(),
+            tool: "bash".into(),
+            reason: "run check".into(),
+            args_summary: String::new(),
+            deciding: false,
+            request_id: request_id.map(str::to_string),
+            actionable: false,
+        }
+    }
+
+    fn task44_authority(pairs: &[(&str, &str, &str)]) -> HashMap<String, DecisionGrant> {
+        pairs
+            .iter()
+            .map(|(request_id, token, session_id)| {
+                (
+                    (*request_id).to_string(),
+                    DecisionGrant {
+                        token: (*token).to_string(),
+                        session_id: (*session_id).to_string(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    // 1. Switch into a session with a pending gate: the daemon reports the turn
+    // waiting for permission, so the projection restores a live, cancellable Stop
+    // target AND an actionable card (this surface holds the token).
+    #[test]
+    fn switch_into_session_with_pending_gate_projects_live_and_actionable() {
+        let authority = task44_authority(&[("request-1", "token-1", "session-a")]);
+        let projection = build_session_projection(
+            Some(SessionRunState::WaitingForPermission),
+            &["request-1".to_string()],
+            vec![task44_card("permission-1", Some("request-1"))],
+            &authority,
+        );
+        assert_eq!(projection.active_turn_id.as_deref(), Some("request-1"));
+        assert!(projection.streaming);
+        assert_eq!(projection.pending.len(), 1);
+        assert!(projection.pending[0].actionable);
+    }
+
+    // 2. Agent reconnect mid-tool: the daemon still reports Running with a live
+    // request, so the reconnect projection keeps the turn live — no idle flicker,
+    // Stop target intact.
+    #[test]
+    fn agent_reconnect_mid_tool_preserves_live_turn() {
+        assert_eq!(
+            project_live_turn(
+                Some(SessionRunState::Running),
+                &["request-live".to_string()]
+            ),
+            (Some("request-live".to_string()), true)
+        );
+        // Cancelling is still live and cancellable.
+        assert_eq!(
+            project_live_turn(
+                Some(SessionRunState::Cancelling),
+                &["request-live".to_string()]
+            ),
+            (Some("request-live".to_string()), true)
+        );
+    }
+
+    // 3. Permission-stream reconnect: reconciling the durable registry keeps a
+    // card actionable when this surface holds its request's token, and read-only
+    // otherwise — authority is preserved across the reconcile, never discarded.
+    #[test]
+    fn permission_stream_reconnect_marks_cards_from_preserved_authority() {
+        let authority = task44_authority(&[("request-1", "token-1", "session-a")]);
+        let mut cards = vec![
+            task44_card("permission-1", Some("request-1")),
+            task44_card("permission-2", Some("request-remote")),
+        ];
+        mark_cards_actionable(&mut cards, &authority);
+        assert!(cards[0].actionable);
+        assert!(!cards[1].actionable);
+        // The grant survives the reconcile (mark does not mutate authority).
+        assert_eq!(
+            resolve_decision_authority(Some("request-1"), &authority),
+            Some("token-1")
+        );
+    }
+
+    // 4. Switch during an in-flight snapshot: focus moved to another session, so
+    // the settling snapshot is discarded and cannot overwrite the new projection.
+    #[test]
+    fn switch_during_in_flight_snapshot_discards() {
+        assert_eq!(
+            admit_session_snapshot("session-a", 5, Some("session-b"), 5),
+            SnapshotAdmission::Discard
+        );
+        assert_eq!(
+            admit_session_snapshot("session-a", 5, None, 5),
+            SnapshotAdmission::Discard
+        );
+        // Same session and generation still commit.
+        assert_eq!(
+            admit_session_snapshot("session-a", 5, Some("session-a"), 5),
+            SnapshotAdmission::Commit
+        );
+    }
+
+    // 5. An old-generation snapshot settling after a newer reconnect is discarded
+    // by the generation guard even though the session id still matches.
+    #[test]
+    fn old_generation_snapshot_settling_is_discarded() {
+        assert_eq!(
+            admit_session_snapshot("session-a", 4, Some("session-a"), 5),
+            SnapshotAdmission::Discard
+        );
+    }
+
+    // 6. Deciding an old card after a new dispatch resolves the ORIGINAL turn's
+    // token, never the latest one — the core of finding 4.
+    #[test]
+    fn deciding_old_card_after_new_dispatch_uses_original_token() {
+        let mut authority = task44_authority(&[("request-1", "token-1", "session-a")]);
+        // A newer turn is submitted and bound.
+        authority.insert(
+            "request-2".into(),
+            DecisionGrant {
+                token: "token-2".into(),
+                session_id: "session-a".into(),
+            },
+        );
+        // The still-open card from request-1 resolves token-1, not token-2.
+        assert_eq!(
+            resolve_decision_authority(Some("request-1"), &authority),
+            Some("token-1")
+        );
+        assert_eq!(
+            resolve_decision_authority(Some("request-2"), &authority),
+            Some("token-2")
+        );
+    }
+
+    // 7. A card raised by another surface (no local grant) is read-only: no token
+    // resolves, and the projection marks it non-actionable.
+    #[test]
+    fn remote_origin_card_is_read_only() {
+        let authority = task44_authority(&[("request-local", "token-local", "session-a")]);
+        assert_eq!(
+            resolve_decision_authority(Some("request-remote"), &authority),
+            None
+        );
+        // A card with no request id at all is also non-actionable.
+        assert_eq!(resolve_decision_authority(None, &authority), None);
+        let projection = build_session_projection(
+            Some(SessionRunState::WaitingForPermission),
+            &["request-remote".to_string()],
+            vec![task44_card("permission-remote", Some("request-remote"))],
+            &authority,
+        );
+        assert!(!projection.pending[0].actionable);
+        // The turn is still shown live/cancellable even though the card is
+        // read-only for us.
+        assert_eq!(projection.active_turn_id.as_deref(), Some("request-remote"));
+        assert!(projection.streaming);
+    }
+
+    // 8. A terminal-state snapshot clears the live turn: completed, cancelled,
+    // errored, stored, unknown, and absent state all project idle.
+    #[test]
+    fn terminal_state_snapshot_clears_live_turn() {
+        for state in [
+            SessionRunState::Completed,
+            SessionRunState::Cancelled,
+            SessionRunState::Errored,
+            SessionRunState::Stored,
+            SessionRunState::Unknown,
+        ] {
+            assert_eq!(
+                project_live_turn(Some(state), &["request-done".to_string()]),
+                (None, false),
+                "state {state:?} must project idle"
+            );
+        }
+        assert_eq!(
+            project_live_turn(None, &["request-done".to_string()]),
+            (None, false)
+        );
+        // A live state with no live request also projects idle (nothing to cancel).
+        assert_eq!(
+            project_live_turn(Some(SessionRunState::Running), &[]),
+            (None, false)
+        );
+    }
+
+    // 9. Cross-surface convergence: two independent surfaces (web + Tauri) fed the
+    // SAME daemon snapshot converge on the SAME truthful live projection; only
+    // per-card actionability differs, because only the submitter holds the token.
+    // This reproduces the 13:45 Tauri/web split — both now show the turn live.
+    #[test]
+    fn cross_surface_projection_converges_with_divergent_authority() {
+        let state = Some(SessionRunState::WaitingForPermission);
+        let active_requests = ["request-1".to_string()];
+        let cards = || vec![task44_card("permission-1", Some("request-1"))];
+
+        // Web submitted the turn, so it holds the token.
+        let web_authority = task44_authority(&[("request-1", "token-1", "session-a")]);
+        // Tauri only observes the shared session — no local grant.
+        let tauri_authority: HashMap<String, DecisionGrant> = HashMap::new();
+
+        let web = build_session_projection(state, &active_requests, cards(), &web_authority);
+        let tauri = build_session_projection(state, &active_requests, cards(), &tauri_authority);
+
+        // Both converge on the same live turn state (the split is gone).
+        assert_eq!(web.active_turn_id, tauri.active_turn_id);
+        assert_eq!(web.active_turn_id.as_deref(), Some("request-1"));
+        assert!(web.streaming && tauri.streaming);
+        assert_eq!(web.pending.len(), tauri.pending.len());
+        assert_eq!(web.pending[0].permission_id, tauri.pending[0].permission_id);
+        // They differ only in who may act on the card.
+        assert!(web.pending[0].actionable);
+        assert!(!tauri.pending[0].actionable);
+    }
+
+    // Wire contract: the surface SessionDetail DTO decodes the daemon's atomic
+    // `state` + `active_requests` (verified against ocean-core::SessionDetail),
+    // and GET /v1/permissions decodes `request_id`. These are the fields the
+    // projection commit reads.
+    #[test]
+    fn session_detail_decodes_daemon_state_and_active_requests() {
+        let detail: SessionDetail = serde_json::from_value(serde_json::json!({
+            "id": "session-a",
+            "title": "Live session",
+            "model": "grok",
+            "state": "waiting_for_permission",
+            "active_requests": ["request-1", "request-2"],
+            "pending_permissions": ["permission-1"],
+        }))
+        .expect("session detail decodes");
+        assert_eq!(detail.state, Some(SessionRunState::WaitingForPermission));
+        assert_eq!(detail.active_requests, vec!["request-1", "request-2"]);
+        assert_eq!(detail.pending_permissions, vec!["permission-1"]);
+
+        // An older daemon omitting the fields is backward compatible.
+        let legacy: SessionDetail = serde_json::from_value(serde_json::json!({
+            "id": "session-a",
+            "title": "Legacy",
+            "model": "grok",
+        }))
+        .expect("legacy session detail decodes");
+        assert_eq!(legacy.state, None);
+        assert!(legacy.active_requests.is_empty());
+    }
+
+    #[test]
+    fn permission_status_wire_decodes_request_id() {
+        let wire: PermissionStatusWire = serde_json::from_value(serde_json::json!({
+            "permission_id": "permission-1",
+            "request_id": "request-1",
+            "session_id": "session-a",
+            "tool": "bash",
+            "reason": "run check",
+            "args": { "cmd": "ls" },
+        }))
+        .expect("permission status decodes");
+        assert_eq!(wire.request_id.as_deref(), Some("request-1"));
+    }
+
+    #[test]
+    fn prune_session_authority_drops_terminated_but_keeps_live_and_other_sessions() {
+        let mut authority = task44_authority(&[
+            ("request-live", "token-live", "session-a"),
+            ("request-done", "token-done", "session-a"),
+            ("request-other", "token-other", "session-b"),
+        ]);
+        let live: HashSet<String> = ["request-live".to_string()].into_iter().collect();
+        prune_session_authority(&mut authority, "session-a", &live);
+        // The live request's grant survives.
+        assert!(authority.contains_key("request-live"));
+        // The terminated request's grant in this session is pruned.
+        assert!(!authority.contains_key("request-done"));
+        // Another session's grant is untouched (its turn may still be running).
+        assert!(authority.contains_key("request-other"));
+    }
+
     #[test]
     fn matching_finish_clears_live_state() {
         let session_id = "session-task45-match";
@@ -7306,11 +7953,15 @@ mod tests {
             ControlEvent::PermissionRequest {
                 permission_id,
                 session_id,
+                request_id,
                 tool,
                 ..
             } => {
                 assert_eq!(permission_id.as_deref(), Some("perm-xyz"));
                 assert_eq!(session_id.as_deref(), Some("sess-abc"));
+                // TASK-44: the envelope's request_id is decoded so the card can
+                // resolve its decision authority.
+                assert_eq!(request_id.as_deref(), Some("req-1"));
                 assert_eq!(tool, "bash");
             }
             other => panic!("expected PermissionRequest, got {other:?}"),
@@ -8216,6 +8867,8 @@ mod tests {
                     reason: "test".into(),
                     args_summary: String::new(),
                     deciding: false,
+                    request_id: None,
+                    actionable: false,
                 }])
             }
             .boxed_local()

@@ -562,6 +562,8 @@ mod tests {
             reason: "run check".into(),
             args_summary: String::new(),
             deciding: false,
+            request_id: Some("request-a".into()),
+            actionable: true,
         }];
 
         assert_eq!(

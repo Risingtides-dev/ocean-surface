@@ -1778,12 +1778,22 @@ pub fn PermissionPrompts(daemon: Daemon) -> impl IntoView {
                         let allow_id = p.permission_id.clone();
                         let deny_id = p.permission_id.clone();
                         let deciding = p.deciding;
+                        // A card raised by another surface (no local decision
+                        // token bound to its request) is read-only here: this
+                        // surface can't produce the token the daemon's gate
+                        // requires, so the buttons disable and `decide_permission`
+                        // refuses regardless (TASK-44, finding 4).
+                        let actionable = p.actionable;
                         let has_args = !p.args_summary.trim().is_empty();
                         let tool = p.tool.clone();
                         let reason = p.reason.clone();
                         let args_summary = p.args_summary.clone();
                         view! {
-                            <div class="ocean-perm" class:is-deciding=move || deciding>
+                            <div
+                                class="ocean-perm"
+                                class:is-deciding=move || deciding
+                                class:is-readonly=move || !actionable
+                            >
                                 <div class="ocean-perm__head">
                                     <span class="ocean-perm__badge">"permission"</span>
                                     <span class="ocean-perm__tool">{tool}</span>
@@ -1792,28 +1802,41 @@ pub fn PermissionPrompts(daemon: Daemon) -> impl IntoView {
                                 {has_args.then(|| view! {
                                     <pre class="ocean-perm__args">{args_summary.clone()}</pre>
                                 })}
-                                <div class="ocean-perm__actions">
-                                    <button
-                                        class="ocean-perm__deny"
-                                        type="button"
-                                        disabled=deciding
-                                        on:click=move |_| daemon.with_value(|d| {
-                                            d.decide_permission(deny_id.clone(), false)
-                                        })
-                                    >
-                                        "Deny"
-                                    </button>
-                                    <button
-                                        class="ocean-perm__approve"
-                                        type="button"
-                                        disabled=deciding
-                                        on:click=move |_| daemon.with_value(|d| {
-                                            d.decide_permission(allow_id.clone(), true)
-                                        })
-                                    >
-                                        {move || if deciding { "…" } else { "Approve" }}
-                                    </button>
-                                </div>
+                                {(!actionable).then(|| view! {
+                                    <p class="ocean-perm__note">
+                                        "Awaiting a decision from the surface that started this turn."
+                                    </p>
+                                })}
+                                <Show when=move || actionable>
+                                    <div class="ocean-perm__actions">
+                                        <button
+                                            class="ocean-perm__deny"
+                                            type="button"
+                                            disabled=deciding
+                                            on:click={
+                                                let deny_id = deny_id.clone();
+                                                move |_| daemon.with_value(|d| {
+                                                    d.decide_permission(deny_id.clone(), false)
+                                                })
+                                            }
+                                        >
+                                            "Deny"
+                                        </button>
+                                        <button
+                                            class="ocean-perm__approve"
+                                            type="button"
+                                            disabled=deciding
+                                            on:click={
+                                                let allow_id = allow_id.clone();
+                                                move |_| daemon.with_value(|d| {
+                                                    d.decide_permission(allow_id.clone(), true)
+                                                })
+                                            }
+                                        >
+                                            {move || if deciding { "…" } else { "Approve" }}
+                                        </button>
+                                    </div>
+                                </Show>
                             </div>
                         }
                     }
