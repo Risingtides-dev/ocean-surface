@@ -2016,3 +2016,11 @@ area:      [frontend]
 
 Landed TASK-29 (sidebar text overflow semantics, findings 3+8) as 4324d92 on main. Fable subagent build, my review: both rooms.rs roster render sites wrap the participant name in a .rooms-chip__name span (the only shrinkable/ellipsizing chip child; kind pinned nonshrinking), and .sessions-item__path is now flex 0 1 auto with min-width 0, 160px cap, and ellipsis so long repo tails stop crowding the title. Boundary held: control-size region 98-114 and workspace.css untouched. Source-scan regression test with runtime-built needles. Clean rebase over TASK-30's panels.css changes, 473 tests + wasm check green, I pushed. Correction: the previous TASK-27 entry is stamped 05:26 but the clock read 05:22 at write time; entry stands as pushed, drift disclosed here.
 _________________________________________________________________________________
+time:      [05:26] [19-07-26]
+agent:     [claude] [fable 5]
+worktree:  fix/task28-collapse-priming
+type:      [merge]
+area:      [frontend]
+
+Landed TASK-28 (generation-aware collapse priming) as de436b5 on main — the last of the five sidebar-audit slices. Fable subagent build, my review: priming decision extracted to pure plan_collapse_priming with per-panel-open generation state; only the no-active fallback settles (so polls cannot jump the default) while an active session keeps priming eligible so the default follows it through catalogue regrouping and active-id changes; first user toggle owns collapse for the rest of the generation; close-to-reopen resets. Five decider tests cover all four contract orderings plus the fallback-relock case. 478 tests + wasm check green after rebase, I pushed. Sidebar audit slate complete: 27/28/29/30/31 all on main within the hour, four built by fable subagents while team seats were down, one by ocean under the held-diff gate.
+_________________________________________________________________________________
