@@ -110,9 +110,13 @@ fn coarse_font_size_px(css: &str, selector: &str) -> Option<u32> {
 
 #[test]
 fn composer_input_has_16px_floor_under_coarse_pointer() {
-    let css = read_style("composer.css");
+    // The composer floor landed on main in styles/compact.css (owner lane,
+    // commit 98c8a59) — it shipped untested, so this covers it. The rule is
+    // scoped `.ocean-surface .ocean-composer__input`; coarse_font_size_px finds
+    // `.ocean-composer__input` as a substring of that descendant selector.
+    let css = read_style("compact.css");
     let px = coarse_font_size_px(&css, ".ocean-composer__input").expect(
-        "composer.css must set .ocean-composer__input font-size inside a \
+        "compact.css must set .ocean-composer__input font-size inside a \
          @media (pointer: coarse) block — the iOS anti-zoom floor (TASK-41)",
     );
     assert!(
@@ -123,12 +127,33 @@ fn composer_input_has_16px_floor_under_coarse_pointer() {
 }
 
 #[test]
+fn landed_composer_floor_is_scoped_to_the_app_shell() {
+    // Guard the exact selector the owner lane shipped: `.ocean-surface
+    // .ocean-composer__input`. Scoping under the .ocean-surface shell (not the
+    // extension-only root) is what makes the floor reach the iPhone PWA, and
+    // the extra class keeps it above the composer's own base rule. If a refactor
+    // narrows it to .ocean-surface--extension the PWA regresses silently.
+    let css = strip_css_comments(&read_style("compact.css"));
+    let has_shell_scoped_floor = coarse_pointer_blocks(&css).iter().any(|block| {
+        block
+            .split('}')
+            .any(|rule| rule.contains(".ocean-surface .ocean-composer__input"))
+    });
+    assert!(
+        has_shell_scoped_floor,
+        "the composer anti-zoom floor must stay scoped to \
+         `.ocean-surface .ocean-composer__input` under @media (pointer: coarse) \
+         so it applies to the PWA shell, not just the extension side panel",
+    );
+}
+
+#[test]
 fn touch_focused_fields_carry_the_16px_anti_zoom_floor() {
     // Every field a phone user actually focuses, mapped to the stylesheet that
     // co-locates its coarse-pointer floor. Each must reach >= 16px so focusing
     // it never triggers the iOS zoom-and-shift (TASK-41).
     let fields: &[(&str, &str)] = &[
-        ("composer.css", ".ocean-composer__input"),
+        ("compact.css", ".ocean-composer__input"),
         ("island.css", ".island-search__input"),
         ("island.css", ".island-recall__input"),
         ("panels.css", ".sessions-create__input"),

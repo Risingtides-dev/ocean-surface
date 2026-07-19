@@ -754,7 +754,7 @@
    force-zooms iOS Safari on focus — jarring on the two fields a phone user hits
    most after the composer (find/switch a session, recall a past turn). Lift
    only the mobile (coarse-pointer) size to the 16px floor; desktop is
-   untouched. Mirrors the composer floor in styles/composer.css. */
+   untouched. Mirrors the composer floor in styles/compact.css. */
 @media (pointer: coarse) {
   .island-search__input,
   .island-recall__input {
