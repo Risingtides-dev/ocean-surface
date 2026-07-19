@@ -13,7 +13,8 @@ const root = mkdtempSync(join(tmpdir(), 'ocean-surface-promote-'));
 function validBundle(path) {
   mkdirSync(path, { recursive: true });
   writeFileSync(join(path, 'index.html'), '<script type="module" src="/ocean.js"></script>');
-  writeFileSync(join(path, 'ocean_bg.wasm'), Buffer.from([0x00, 0x61, 0x73, 0x6d, 0x01]));
+  writeFileSync(join(path, 'ocean-surface-ui_bg.wasm'), Buffer.from([0x00, 0x61, 0x73, 0x6d, 0x01]));
+  writeFileSync(join(path, 'ocean-surface-ui.js'), '// wasm-bindgen glue');
 }
 
 try {
@@ -28,7 +29,7 @@ try {
 
   assert.equal(readlinkSync(join(state, 'current')), 'releases/abc123');
   assert.equal(readFileSync(join(state, 'deployed-rev'), 'utf8').trim(), 'abc123');
-  assert.equal(readFileSync(join(state, 'releases', 'abc123', 'ocean_bg.wasm')).subarray(0, 4).toString('hex'), '0061736d');
+  assert.equal(readFileSync(join(state, 'releases', 'abc123', 'ocean-surface-ui_bg.wasm')).subarray(0, 4).toString('hex'), '0061736d');
 
   const staged2 = join(root, 'staged2');
   validBundle(staged2);
@@ -38,7 +39,7 @@ try {
   });
   assert.equal(readlinkSync(join(state, 'current')), 'releases/def456', 'a second promotion must replace the current symlink');
   assert.equal(readFileSync(join(state, 'deployed-rev'), 'utf8').trim(), 'def456');
-  assert.deepEqual(readdirSync(join(state, 'releases', 'abc123')).sort(), ['index.html', 'ocean_bg.wasm']);
+  assert.deepEqual(readdirSync(join(state, 'releases', 'abc123')).sort(), ['.deploy-sha', 'index.html', 'ocean-surface-ui.js', 'ocean-surface-ui_bg.wasm']);
 
   const bad = join(root, 'bad');
   mkdirSync(bad, { recursive: true });

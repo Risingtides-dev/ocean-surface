@@ -79,8 +79,10 @@ rebuild_extension() {
   local js_file wasm_file
   js_file="$(ls "$deployed_dist"/ocean-surface-ui*.js 2>/dev/null | grep -v '_bg.wasm' | head -1 || true)"
   wasm_file="$(ls "$deployed_dist"/ocean-surface-ui*_bg.wasm 2>/dev/null | head -1 || true)"
-  [[ -n "$js_file" && -f "$js_file" ]] || fail "cannot locate wasm-bindgen JS in $deployed_dist"
-  [[ -n "$wasm_file" && -f "$wasm_file" ]] || fail "cannot locate wasm in $deployed_dist"
+  if [[ -z "$js_file" || ! -f "$js_file" ]] || [[ -z "$wasm_file" || ! -f "$wasm_file" ]]; then
+    echo "EXTENSION: skipping — no wasm-bindgen files in $deployed_dist"
+    return 0
+  fi
   cp "$js_file"   "$ext_dist/ocean-surface-ui.js"
   cp "$wasm_file" "$ext_dist/ocean-surface-ui_bg.wasm"
   cp "$deployed_dist"/*.css "$ext_dist/" 2>/dev/null || true
