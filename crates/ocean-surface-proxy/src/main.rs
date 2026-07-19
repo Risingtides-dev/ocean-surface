@@ -342,7 +342,7 @@ fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
         // were removed when the council modal went native — the iframe body was
         // swapped for the in-app Leptos council component fed by the daemon's
         // captured longhouse payloads.
-        .fallback_service(ServeDir::new(&dist).append_index_html_on_directories(true))
+        .fallback_service(ServeDir::new(dist).append_index_html_on_directories(true))
         // Set Cache-Control on static-file responses so a CDN / tunnel can never
         // wedge the app on a stale shell again (OCEAN — "blank pane / 11-minute
         // load"). The shell + sw.js + manifest are `no-cache, no-store,
