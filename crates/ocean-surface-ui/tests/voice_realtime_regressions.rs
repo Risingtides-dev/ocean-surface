@@ -6,9 +6,13 @@ struct CssRule {
     declarations: BTreeMap<String, String>,
 }
 
-fn realtime_composer_css() -> String {
+fn composer_css() -> String {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../styles/composer.css");
-    let css = std::fs::read_to_string(path).expect("read root styles/composer.css");
+    std::fs::read_to_string(path).expect("read root styles/composer.css")
+}
+
+fn realtime_composer_css() -> String {
+    let css = composer_css();
     let start = css
         .find("/* ── Realtime voice chat")
         .expect("composer.css has realtime voice section comment");
@@ -93,4 +97,25 @@ fn realtime_active_css_hides_all_composer_controls_in_one_completed_rule() {
             .is_some_and(|value| value == "none"),
         "expected one completed .voice-chat-active rule with selectors {expected_selectors:?} and display:none so the composer input, Send/Stop action slot, turn controls, and slash menu all hide together; parsed realtime rules were {rules:#?}"
     );
+}
+
+#[test]
+fn composer_css_uses_canonical_tokens_not_obsolete_aliases() {
+    // TASK-31: the slash-menu chrome must reference canonical tokens from
+    // styles/tokens.css (--radius, --bg-elevated, --fg-3, --bg-hover, --mono),
+    // not these undefined aliases that silently fell back to raw values.
+    let css = composer_css();
+    const OBSOLETE: [&str; 5] = [
+        "--radius-md",
+        "--surface-elevated",
+        "--fg-muted",
+        "--surface-hover",
+        "--font-mono",
+    ];
+    for alias in OBSOLETE {
+        assert!(
+            !css.contains(alias),
+            "composer.css must not reference obsolete token alias {alias}; use the canonical token from styles/tokens.css instead"
+        );
+    }
 }
