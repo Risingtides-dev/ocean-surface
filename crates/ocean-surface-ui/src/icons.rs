@@ -9,7 +9,7 @@ use leptos::prelude::*;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
-use web_sys::CanvasRenderingContext2d;
+use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, ResizeObserver};
 
 // ── Tide Coin (Canvas 2D) ──────────────────────────────────────────────
 // Ported 1:1 from deliverables/engines/orbstudio.js kind='tide'.
@@ -171,6 +171,122 @@ fn draw_tide_frame(ctx: &CanvasRenderingContext2d, s: f64, t: f64, spinning: boo
 /// dropped on unmount).
 type RafHolder = Rc<RefCell<Option<Closure<dyn FnMut(f64)>>>>;
 
+/// Holder for the reveal-watch `ResizeObserver` callback (outlives registration;
+/// dropped on first draw / unmount). Mirrors the observatory precedent.
+type ResizeHolder = Rc<RefCell<Option<Closure<dyn FnMut(js_sys::Array, ResizeObserver)>>>>;
+
+/// Admit the first *real* layout: the canvas must measure at least 2 CSS px on
+/// its smaller side before we size the backing store and paint. Below that the
+/// element is collapsed or not yet laid out (e.g. inside a `display:none`
+/// ancestor). Pure so it can be unit-tested without a DOM.
+fn layout_admits(css_w: i32, css_h: i32) -> bool {
+    (css_w.min(css_h) as f64) >= 2.0
+}
+
+/// Whether the churning rAF loop should run: only when the badge is `spinning`
+/// and the user has not asked to reduce motion. The static rest frame is always
+/// painted regardless, so a `false` here means "static frame only, no loop."
+/// Pure decider.
+fn wants_animation_loop(spinning: bool, reduce: bool) -> bool {
+    spinning && !reduce
+}
+
+/// Measure the canvas and, once it has a real layout, size the DPR-scaled
+/// backing store and paint the tide frame (starting the churn loop when
+/// `spinning` and motion is allowed). Returns `true` once it has painted (or
+/// hit an unrecoverable 2D-context error) so the caller stops deferring;
+/// `false` while the element is still unlaid-out, so a `ResizeObserver` can
+/// retry on the first non-zero layout. Callable from both the mount `Effect`
+/// and the reveal observer — the DPR/backing-store math and reduced-motion
+/// pause are identical on both paths.
+fn draw_wave_badge(
+    el: &HtmlCanvasElement,
+    spinning: bool,
+    raf_id: &Rc<RefCell<i32>>,
+    holder: &RafHolder,
+    start: &Rc<RefCell<Option<f64>>>,
+) -> bool {
+    let Some(win) = web_sys::window() else {
+        return false;
+    };
+
+    // Measure CSS pixel size of the 1em canvas.
+    let css_w = el.offset_width();
+    let css_h = el.offset_height();
+    if !layout_admits(css_w, css_h) {
+        return false; // not laid out yet — let the observer retry on reveal
+    }
+    let css_px = css_w.min(css_h) as f64;
+
+    let dpr = win.device_pixel_ratio().min(2.0);
+    let s = (css_px * dpr).round();
+    el.set_width(s as u32);
+    el.set_height(s as u32);
+
+    let Ok(ctx) = (|| -> Result<CanvasRenderingContext2d, JsValue> {
+        el.get_context("2d")
+            .map_err(|_| JsValue::from("getContext"))?
+            .ok_or_else(|| JsValue::from("no 2d"))?
+            .dyn_into::<CanvasRenderingContext2d>()
+            .map_err(|_| JsValue::from("cast"))
+    })() else {
+        return true; // context unrecoverable — a re-layout won't fix it
+    };
+
+    // Always draw the static rest frame first so the canvas is never blank.
+    draw_tide_frame(&ctx, s, 0.0, false);
+
+    if !spinning {
+        return true;
+    }
+
+    // Paused under prefers-reduced-motion: the static frame is enough.
+    let reduce = win
+        .match_media("(prefers-reduced-motion: reduce)")
+        .ok()
+        .flatten()
+        .map(|m| m.matches())
+        .unwrap_or(false);
+    if !wants_animation_loop(spinning, reduce) {
+        return true;
+    }
+
+    // Self-rescheduling rAF loop. DPR-scaled S is already the backing-store
+    // pixel size, passed straight to the tide engine.
+    let raf_id2 = raf_id.clone();
+    let holder2 = holder.clone();
+    let start2 = start.clone();
+    let ctx2 = ctx.clone();
+
+    let cb = Closure::wrap(Box::new(move |ts: f64| {
+        let t0 = {
+            let mut b = start2.borrow_mut();
+            if b.is_none() {
+                *b = Some(ts);
+            }
+            b.unwrap()
+        };
+        let t = (ts - t0) / 1000.0;
+        draw_tide_frame(&ctx2, s, t, true);
+
+        if let Some(c) = holder2.borrow().as_ref() {
+            if let Some(win) = web_sys::window() {
+                if let Ok(id) = win.request_animation_frame(c.as_ref().unchecked_ref()) {
+                    *raf_id2.borrow_mut() = id;
+                }
+            }
+        }
+    }) as Box<dyn FnMut(f64)>);
+
+    if let Some(win) = web_sys::window() {
+        if let Ok(id) = win.request_animation_frame(cb.as_ref().unchecked_ref()) {
+            *raf_id.borrow_mut() = id;
+        }
+    }
+    *holder.borrow_mut() = Some(cb);
+    true
+}
+
 // ── WaveBadge component ────────────────────────────────────────────────
 
 /// The Ocean badge — a Canvas 2D tide coin (waterline churns while loading,
@@ -187,17 +303,30 @@ pub fn WaveBadge(
     let raf_id: Rc<RefCell<i32>> = Rc::new(RefCell::new(0));
     let holder: RafHolder = Rc::new(RefCell::new(None));
     let start: Rc<RefCell<Option<f64>>> = Rc::new(RefCell::new(None));
+    // Reveal watch: armed only when the canvas is not laid out at mount (a
+    // collapsed / display:none ancestor). Disconnected on first draw and on
+    // unmount. Precedent: observatory/scene.rs.
+    let resize_observer: Rc<RefCell<Option<ResizeObserver>>> = Rc::new(RefCell::new(None));
+    let resize_callback: ResizeHolder = Rc::new(RefCell::new(None));
 
-    // Cancel pending rAF and drop the callback on unmount.
+    // Cancel pending rAF, drop the callback, and tear down the reveal observer
+    // on unmount.
     let c_raf = raf_id.clone();
     let c_holder = holder.clone();
-    let cleanup = send_wrapper::SendWrapper::new((c_raf, c_holder));
+    let c_observer = resize_observer.clone();
+    let c_resize_callback = resize_callback.clone();
+    let cleanup = send_wrapper::SendWrapper::new((c_raf, c_holder, c_observer, c_resize_callback));
     on_cleanup(move || {
-        let (raf_id, holder) = &*cleanup;
+        let (raf_id, holder, resize_observer, resize_callback) = &*cleanup;
         if let Some(w) = web_sys::window() {
             let _ = w.cancel_animation_frame(*raf_id.borrow());
         }
         holder.borrow_mut().take();
+        if let Some(observer) = resize_observer.borrow().as_ref() {
+            observer.disconnect();
+        }
+        resize_observer.borrow_mut().take();
+        resize_callback.borrow_mut().take();
     });
 
     let cls = if compact {
@@ -206,84 +335,53 @@ pub fn WaveBadge(
         "wave-badge"
     };
 
+    // Only reactive read: the canvas mounting (None -> Some). A NodeRef fires
+    // this exactly once, so we can't rely on it to re-run when a collapsed
+    // ancestor is later revealed — that admission is handled by the observer
+    // below.
+    let effect_raf = raf_id.clone();
+    let effect_holder = holder.clone();
+    let effect_start = start.clone();
+    let effect_observer = resize_observer.clone();
+    let effect_callback = resize_callback.clone();
     Effect::new(move |_| {
         let Some(el) = canvas_ref.get() else { return };
-        let Some(win) = web_sys::window() else { return };
 
-        // Measure CSS pixel size of the 1em canvas.
-        let css_w = el.offset_width() as f64;
-        let css_h = el.offset_height() as f64;
-        let css_px = css_w.min(css_h);
-        if css_px < 2.0 {
-            return; // not laid out yet — element will remount
-        }
-
-        let dpr = win.device_pixel_ratio().min(2.0);
-        let s = (css_px * dpr).round();
-        el.set_width(s as u32);
-        el.set_height(s as u32);
-
-        let Ok(ctx) = (|| -> Result<CanvasRenderingContext2d, JsValue> {
-            el.get_context("2d")
-                .map_err(|_| JsValue::from("getContext"))?
-                .ok_or_else(|| JsValue::from("no 2d"))?
-                .dyn_into::<CanvasRenderingContext2d>()
-                .map_err(|_| JsValue::from("cast"))
-        })() else {
-            return;
-        };
-
-        // Always draw the static rest frame first so the canvas is never blank.
-        draw_tide_frame(&ctx, s, 0.0, false);
-
-        if !spinning {
+        // Visible-at-mount path: draw immediately, exactly as before. No
+        // observer is armed, so there is no extra work or blank-frame flash.
+        if draw_wave_badge(&el, spinning, &effect_raf, &effect_holder, &effect_start) {
             return;
         }
 
-        // Paused under prefers-reduced-motion: the static frame is enough.
-        let reduce = win
-            .match_media("(prefers-reduced-motion: reduce)")
-            .ok()
-            .flatten()
-            .map(|m| m.matches())
-            .unwrap_or(false);
-        if reduce {
-            return;
+        // Mounted but not laid out (collapsed / display:none ancestor). Rather
+        // than bail forever, observe the canvas for its first non-zero layout
+        // and paint on reveal. Modeled on observatory/scene.rs.
+        if effect_observer.borrow().is_some() {
+            return; // already armed
         }
-
-        // Self-rescheduling rAF loop. DPR-scaled S is already the backing-
-        // store pixel size, passed straight to the tide engine.
-        let raf_id2 = raf_id.clone();
-        let holder2 = holder.clone();
-        let start2 = start.clone();
-        let ctx2 = ctx.clone();
-
-        let cb = Closure::wrap(Box::new(move |ts: f64| {
-            let t0 = {
-                let mut b = start2.borrow_mut();
-                if b.is_none() {
-                    *b = Some(ts);
-                }
-                b.unwrap()
-            };
-            let t = (ts - t0) / 1000.0;
-            draw_tide_frame(&ctx2, s, t, true);
-
-            if let Some(c) = holder2.borrow().as_ref() {
-                if let Some(win) = web_sys::window() {
-                    if let Ok(id) = win.request_animation_frame(c.as_ref().unchecked_ref()) {
-                        *raf_id2.borrow_mut() = id;
+        let cb_el = el.clone();
+        let cb_raf = effect_raf.clone();
+        let cb_holder = effect_holder.clone();
+        let cb_start = effect_start.clone();
+        let cb_observer = effect_observer.clone();
+        let callback = Closure::wrap(Box::new(
+            move |_entries: js_sys::Array, _observer: ResizeObserver| {
+                // ResizeObserver fires once on observe() (still zero-sized) and
+                // again on reveal. Draw only when a real layout arrives, then
+                // disconnect so this fires exactly once for the badge's life.
+                if draw_wave_badge(&cb_el, spinning, &cb_raf, &cb_holder, &cb_start) {
+                    if let Some(observer) = cb_observer.borrow().as_ref() {
+                        observer.disconnect();
                     }
                 }
-            }
-        }) as Box<dyn FnMut(f64)>);
-
-        if let Some(win) = web_sys::window() {
-            if let Ok(id) = win.request_animation_frame(cb.as_ref().unchecked_ref()) {
-                *raf_id.borrow_mut() = id;
-            }
-        }
-        *holder.borrow_mut() = Some(cb);
+            },
+        ) as Box<dyn FnMut(js_sys::Array, ResizeObserver)>);
+        let Ok(observer) = ResizeObserver::new(callback.as_ref().unchecked_ref()) else {
+            return;
+        };
+        observer.observe(&el);
+        *effect_callback.borrow_mut() = Some(callback);
+        *effect_observer.borrow_mut() = Some(observer);
     });
 
     view! {
@@ -722,5 +820,153 @@ pub fn Refresh() -> impl IntoView {
             <polyline points="23 4 23 10 17 10" />
             <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
         </svg>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── layout admission (pure decider) ─────────────────────────────────
+    // The bug was a permanent bail when the badge measured < 2 CSS px. These
+    // pin the admission boundary that both the mount Effect and the reveal
+    // observer share, so a re-measure on reveal admits the same badge that a
+    // pre-layout measure rejects. (Contract tests a + b: the DOM-level
+    // "draws on mount" / "draws on reveal" behavior is driven by re-running
+    // this decider from the observer — see the source-structure tests below.)
+
+    #[test]
+    fn layout_admits_a_measured_badge() {
+        // A visible 1em badge measures well above the 2px floor.
+        assert!(layout_admits(24, 24));
+        assert!(layout_admits(16, 16));
+    }
+
+    #[test]
+    fn layout_rejects_a_collapsed_badge() {
+        // display:none / collapsed ancestor → zero box, not yet drawable.
+        assert!(!layout_admits(0, 0));
+        assert!(!layout_admits(1, 1));
+    }
+
+    #[test]
+    fn layout_admission_boundary_is_two_css_px() {
+        assert!(!layout_admits(1, 1));
+        assert!(layout_admits(2, 2));
+    }
+
+    #[test]
+    fn layout_uses_the_smaller_dimension() {
+        // A zero-height (but wide) box is still not laid out.
+        assert!(!layout_admits(200, 0));
+        assert!(!layout_admits(0, 200));
+        assert!(layout_admits(200, 2));
+    }
+
+    // ── motion gate (pure decider) ──────────────────────────────────────
+    // Contract test d: reduced-motion (and the non-spinning case) must paint
+    // the static frame but never start the rAF loop.
+
+    #[test]
+    fn animation_loop_runs_only_when_spinning_and_motion_allowed() {
+        assert!(wants_animation_loop(true, false));
+        assert!(!wants_animation_loop(true, true)); // reduced-motion → no loop
+        assert!(!wants_animation_loop(false, false)); // static badge → no loop
+        assert!(!wants_animation_loop(false, true));
+    }
+
+    // ── source-structure invariants ─────────────────────────────────────
+    // WASM/DOM behavior can't run under `cargo test` (native), so these assert
+    // the wiring the contract requires, per the repo's include_str! pattern
+    // (see palette.rs). They guard against regressing the reveal/teardown
+    // structure without a headless browser.
+    const SRC: &str = include_str!("icons.rs");
+
+    #[test]
+    fn draw_paints_static_frame_before_the_motion_gate() {
+        // Contract: the static rest-frame draw must precede the spinning /
+        // reduced-motion early-returns, so every admitted layout paints even
+        // when the loop never starts.
+        let f = SRC
+            .find("fn draw_wave_badge(")
+            .expect("draw_wave_badge exists");
+        let body = &SRC[f..];
+        let static_draw = body
+            .find("draw_tide_frame(&ctx, s, 0.0, false)")
+            .expect("static rest frame drawn");
+        let spin_gate = body.find("if !spinning {").expect("spinning gate");
+        let motion_gate = body
+            .find("wants_animation_loop(spinning, reduce)")
+            .expect("motion gate");
+        assert!(
+            static_draw < spin_gate && spin_gate < motion_gate,
+            "static frame must paint before the spinning/reduced-motion gates"
+        );
+    }
+
+    #[test]
+    fn mount_draws_before_arming_the_observer() {
+        // Contract test a: the visible-at-mount path draws and returns without
+        // arming an observer (no extra work, no blank-frame flash).
+        let e = SRC.find("Effect::new(move |_| {").expect("mount effect");
+        let body = &SRC[e..];
+        let draw = body
+            .find("if draw_wave_badge(&el, spinning,")
+            .expect("mount tries the draw first");
+        let observe = body.find("observer.observe(&el)").expect("observer arm");
+        assert!(
+            draw < observe,
+            "the mount effect must attempt the draw before arming the observer"
+        );
+    }
+
+    #[test]
+    fn observer_redraws_and_disconnects_after_first_layout() {
+        // Contract test b + c: the observer callback re-runs the draw and, on
+        // success, disconnects so it fires exactly once.
+        let c = SRC
+            .find("move |_entries: js_sys::Array, _observer: ResizeObserver|")
+            .expect("resize callback");
+        let body = &SRC[c..];
+        let redraw = body
+            .find("if draw_wave_badge(&cb_el, spinning,")
+            .expect("callback re-runs the draw on reveal");
+        let disconnect = body
+            .find("observer.disconnect()")
+            .expect("callback disconnects after a successful draw");
+        assert!(
+            redraw < disconnect,
+            "the observer must draw before disconnecting"
+        );
+    }
+
+    #[test]
+    fn cleanup_tears_down_observer_and_raf() {
+        // Contract test c (unmount half): on_cleanup cancels the rAF, drops the
+        // loop callback, and disconnects + drops the reveal observer.
+        let cu = SRC.find("on_cleanup(move || {").expect("on_cleanup");
+        let body = &SRC[cu..];
+        let end = body.find("});").expect("cleanup body closes");
+        let cleanup = &body[..end];
+        assert!(
+            cleanup.contains("cancel_animation_frame"),
+            "cleanup cancels the pending rAF"
+        );
+        assert!(
+            cleanup.contains("holder.borrow_mut().take()"),
+            "cleanup drops the rAF loop callback"
+        );
+        assert!(
+            cleanup.contains("observer.disconnect()"),
+            "cleanup disconnects the reveal observer"
+        );
+        assert!(
+            cleanup.contains("resize_observer.borrow_mut().take()"),
+            "cleanup drops the observer handle"
+        );
+        assert!(
+            cleanup.contains("resize_callback.borrow_mut().take()"),
+            "cleanup drops the observer callback"
+        );
     }
 }
