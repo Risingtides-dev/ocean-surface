@@ -18,7 +18,9 @@ use crate::model::{Block, Role, Turn};
 use crate::palette::{Command, CommandRegistry, CommandScope, PaletteView};
 use crate::rooms::{RoomStage, Rooms, RoomsPanel};
 use crate::sessions::SessionsPanel;
-use crate::slash_menu::{SlashMenu, SlashRow};
+use crate::slash_menu::{
+    clamp_selection, next_selection, prev_selection, project_rows, SlashMenu, SlashRow,
+};
 use crate::transcript::Transcript;
 use crate::voice::planner::{
     reduce as reduce_planner, PlannerAction, PlannerContext, PlannerEffect, PlannerEvent,
@@ -1644,9 +1646,12 @@ pub fn App() -> impl IntoView {
     // is the command-name token (text after the leading `/`, up to the first
     // space) so the menu keeps filtering while the user types args — e.g.
     // `/model gpt-5` keeps `/model` selected and passes `gpt-5` as the arg on
-    // pick. `slash_items` mirrors registry order so the flat `slash_selected`
-    // index lines up with `<SlashMenu>`'s row order. The menu is open while the
-    // input is a leading-slash line with at least one matching command.
+    // pick. `slash_items` is the single `project_rows` projection — grouped and
+    // flattened — so its index space is the one selection space: `slash_selected`
+    // indexes it, `<SlashMenu>` renders it in that exact order, and Enter/Tab
+    // dispatch `slash_items[selected]`, so keyboard order can never diverge from
+    // what the user sees. The menu is open while the input is a leading-slash
+    // line with at least one matching command.
     let slash_selected: RwSignal<usize> = RwSignal::new(0);
     let slash_query = Signal::derive(move || {
         input
@@ -1664,7 +1669,7 @@ pub fn App() -> impl IntoView {
                 return Vec::new();
             }
             let q = slash_query.get();
-            registry
+            let rows = registry
                 .slash_filter(&q)
                 .into_iter()
                 .map(|c| SlashRow {
@@ -1675,7 +1680,10 @@ pub fn App() -> impl IntoView {
                     group: scope_label(c.scope).to_string(),
                     enabled: c.enabled.get(),
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            // Project once into grouped-and-flattened order: this vector's index
+            // space is the selection space shared by render, nav, and dispatch.
+            project_rows(rows)
         }
     });
     let slash_open =
@@ -2540,9 +2548,8 @@ pub fn App() -> impl IntoView {
                                 if items.is_empty() {
                                     return None;
                                 }
-                                let selected = slash_selected
-                                    .get()
-                                    .min(items.len().saturating_sub(1));
+                                let selected =
+                                    clamp_selection(slash_selected.get(), items.len());
                                 Some(view! {
                                     <SlashMenu items selected on_pick=on_slash_pick />
                                 })
@@ -2580,30 +2587,31 @@ pub fn App() -> impl IntoView {
                                         // Escape dismisses \u{2014} none fall
                                         // through to submit.
                                         if text.starts_with('/') && !items.is_empty() {
+                                            // `items` is the projected order, so
+                                            // moving/clamping `slash_selected`
+                                            // over it tracks the visible rows 1:1.
                                             let len = items.len();
                                             match key.as_str() {
                                                 "ArrowDown" => {
                                                     ev.prevent_default();
-                                                    slash_selected
-                                                        .update(|i| *i = (*i + 1) % len);
+                                                    slash_selected.update(|i| {
+                                                        *i = next_selection(*i, len)
+                                                    });
                                                     return;
                                                 }
                                                 "ArrowUp" => {
                                                     ev.prevent_default();
                                                     slash_selected.update(|i| {
-                                                        *i = if *i == 0 {
-                                                            len.saturating_sub(1)
-                                                        } else {
-                                                            *i - 1
-                                                        }
+                                                        *i = prev_selection(*i, len)
                                                     });
                                                     return;
                                                 }
                                                 "Enter" | "Tab" => {
                                                     ev.prevent_default();
-                                                    let idx = slash_selected
-                                                        .get_untracked()
-                                                        .min(len.saturating_sub(1));
+                                                    let idx = clamp_selection(
+                                                        slash_selected.get_untracked(),
+                                                        len,
+                                                    );
                                                     let row = &items[idx];
                                                     if row.enabled {
                                                         let args = text

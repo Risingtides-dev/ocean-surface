@@ -638,15 +638,18 @@
   border: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
   box-shadow: var(--shadow-md, 0 8px 28px rgba(0,0,0,0.35));
 }
-.ocean-slash-menu__group + .ocean-slash-menu__group {
-  margin-top: 6px;
-}
-.ocean-slash-menu__group-label {
+.ocean-slash-menu__group {
   padding: 4px 8px;
   font-size: 11px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--fg-3);
+}
+/* Space every group after the first. Rows always sit between two headers, so a
+   header is spaced when it follows a row (i.e. begins a new group) — the
+   header-adjacent-header rule this replaces could never match. */
+.ocean-slash-menu__row + .ocean-slash-menu__group {
+  margin-top: 6px;
 }
 .ocean-slash-menu__row {
   display: grid;
