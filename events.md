@@ -1,3 +1,17 @@
+time:      [01:15pm] [07-19-26]
+agent:     [claude] [ocean TUI]
+worktree:  [main]
+type:      bugfix
+area:      frontend
+
+Mobile focus-zoom fix: iOS Safari auto-zooms any focused control whose
+computed font-size is below 16px; the composer input was 14px
+(composer.css:512) with no compact override, so tapping the prompt box
+zoomed the viewport. Added a `@media (pointer: coarse)` 16px floor for
+`.ocean-composer__input` in styles/compact.css — keyed on pointer
+coarseness (iPads zoom too), not the 720px breakpoint. Shell already uses
+100dvh so keyboard resize was fine. CSS-only. Committed 98c8a59, pushed.
+
 time:      [11:52pm] [07-18-26]
 agent:     [ocean] [ocean-prs gate-authority]
 worktree:  [main]
