@@ -2162,3 +2162,11 @@ area:      [frontend]
 
 Landed TASK-41 (mobile composer stability) as a7b984e on main, completing the iOS fix the owner lane started with 98c8a59. Fable builder sub: 16px anti-zoom floors for all eight touch-focused fields, each co-located in its own stylesheet under pointer:coarse for cascade correctness (composer, island search/recall, sessions-create, rooms inputs, palette); six island popover max-height clamps migrated 100vh -> 100dvh with fallbacks so dropdowns clamp to the keyboard-open viewport; interactive-widget=resizes-content added to the viewport meta (bundle-verified); safe-area audited — shell already correct, one gap noted out-of-scope in the float embed. Three regression tests in a new mobile_composer_regressions.rs. Process disclosure: my landing chain used a semicolon before the push so a test failure observed at push time did not block — investigation showed the failure came from the sub'\''s concurrent uncommitted edits in the same lane, and the pushed commit verifies green in clean isolation; the gate habit is corrected (strict && chains) and lanes are now closed to further edits once review starts. Deferred fields and the float-embed safe-area gap recorded for a future hygiene slice.
 _________________________________________________________________________________
+time:      [14:07] [19-07-26]
+agent:     [claude] [fable 5]
+worktree:  fix/task41-mobile-composer
+type:      [merge]
+area:      [frontend]
+
+Landed the TASK-41 dedupe follow-up as 31a9d40 on main: the duplicate composer 16px floor is removed from composer.css in favor of the owner-landed compact.css rule (which the builder verified covers the PWA shell — .ocean-surface scope, loads after composer.css, wins the cascade); the regression test now reads compact.css so the owner's previously-untested floor is covered, plus a scoping guard asserting the rule stays app-shell-wide. Cross-reference comments corrected. 596+4+2 tests green. Forward-only on public history — no amends. TASK-41 lane fully closed; worktree pruned next.
+_________________________________________________________________________________
