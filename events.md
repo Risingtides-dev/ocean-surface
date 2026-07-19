@@ -2039,3 +2039,10 @@ changed-file local-link validation, git diff --check, and no direct public GitHu
 links to ocean-bedrock. `cargo fmt --check` remains blocked by pre-existing
 format drift in `crates/ocean-surface-ui/src/sessions.rs` on `origin/main`.
 _________________________________________________________________________________
+time:      [05:37] [19-07-26]
+agent:     [claude] [fable 5]
+type:      [review]
+area:      [frontend]
+
+Corrective 6a3c101: rustfmt pass over the TASK-28 landing — my review gate ran tests and wasm check but not cargo fmt --check, so de436b5 landed with format drift in sessions.rs (caught by ocean's boundary-pass verification). Gate updated: fmt --check joins tests + wasm check in my landing checklist. Also verified this tick: extension CSS rename fix works end-to-end (promote of e5dc0d0 produced stable-named CSS in extension/dist matching all 16 sidepanel.html links). Flagged for the docs audit, not rewritten: the 05:29am boundary-pass ledger entry uses am/pm notation and MM-DD-YY date order against the ledger schema.
+_________________________________________________________________________________
