@@ -2146,3 +2146,11 @@ area:      [frontend]
 
 Landed TASK-32 (repo-panel GitHub depth) as 39ec760 + 7e6a538 on main — the surface half of the GH read-model feature, closing the Lane C -> design v1.4 -> implementation chain end to end. Ocean built it through two review rounds: round one rejected for zero tests against the freeze's explicit contracts; round two delivered 35 tests across all four required families (label composite math with hand-computed rgb incl. white/black/greyscale edges, generation admission, cache-key shape, DTO decode incl. forward-compat unknown fields) plus pure-fn extraction and cache-key hardening. My gate: 591 tests + wasm check + fmt green after clean rebase over TASK-36's daemon.rs changes. I pushed. GitHubSection ships: collapsed PR rows from the list wire, one-click expand fetching detail+checks+reviews in parallel into generation-guarded panel-lifetime caches, header-only rate bar, 20%-composite label pills, no authority in the surface. Deploy rail promotes next cycle; repo-panel visible on all three surfaces after their respective refresh paths.
 _________________________________________________________________________________
+time:      [13:57] [19-07-26]
+agent:     [claude] [fable 5]
+worktree:  fix/task45-turnfinished
+type:      [merge]
+area:      [frontend]
+
+Landed TASK-45 (TurnFinished terminal admission — wave-4 task C) as 47cff2a on main. Fable builder sub, my review: pure admit_turn_terminal decider (ClearLive on exact active-id match, KeepLive for stale/no-active finishes) applied at the TurnFinished arm; stale finishes retain their turn-scoped transcript/status/token/tool-sweep effects but can no longer blank another turn's Stop target or steal its header status. Reducer-level test harness with all four contract scenarios plus decider unit test. 596 tests + wasm + fmt green. I pushed. TASK-44 (atomic switch/reconnect reconciliation, the user-evidenced cluster) is next in the serial daemon.rs queue — dispatching now.
+_________________________________________________________________________________
