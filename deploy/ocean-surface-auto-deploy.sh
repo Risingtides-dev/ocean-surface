@@ -85,7 +85,16 @@ rebuild_extension() {
   fi
   cp "$js_file"   "$ext_dist/ocean-surface-ui.js"
   cp "$wasm_file" "$ext_dist/ocean-surface-ui_bg.wasm"
-  cp "$deployed_dist"/*.css "$ext_dist/" 2>/dev/null || true
+  # Trunk --release produces hashed CSS names (tokens-HASH.css etc.);
+  # sidepanel.html references stable names (tokens.css etc.). Strip the hash.
+  local css base stable
+  for css in "$deployed_dist"/*.css; do
+    [[ -f "$css" ]] || continue
+    base="$(basename "$css")"
+    # tokens-b44329ae8bc1c369.css -> tokens.css (strip hash suffix)
+    stable="${base%-*}.css"
+    cp "$css" "$ext_dist/$stable"
+  done
   if [[ -d "$deployed_dist/fonts" ]]; then
     mkdir -p "$ext_dist/fonts"
     cp "$deployed_dist/fonts"/* "$ext_dist/fonts/"
