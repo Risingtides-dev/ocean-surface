@@ -14,13 +14,14 @@
 //! [`vad`] is the voice-activity-detection state machine that auto-endpoints
 //! speech so hands-free mode doesn't need a button hold.
 
+pub mod admit;
 pub mod listen;
 pub mod mode;
 pub mod planner;
 pub mod realtime;
 pub mod vad;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gloo_net::http::Request;
@@ -116,9 +117,13 @@ pub fn VoiceOrb(
             if state.get_untracked() != RecState::Idle {
                 return;
             }
+            // Stamp this capture with the current generation + mode at press
+            // time. The stamp is immutable for the capture's life, so a later
+            // mode switch can't retroactively change how (or whether) it lands.
+            let capture: admit::CaptureId = current_voice_gen().into();
             let rec = rec.clone();
             spawn_local(async move {
-                match start_recording(rec, state).await {
+                match start_recording(rec, state, capture).await {
                     Ok(()) => state.set(RecState::Recording),
                     Err(msg) => {
                         state.set(RecState::Idle);
@@ -179,6 +184,12 @@ pub fn VoiceOrb(
         let rec = rec.clone();
         Effect::new(move |_| {
             let m = voice_mode.get();
+            // Every mode/capture lifecycle transition mints a fresh voice
+            // generation. Completions stamped with any prior generation (an
+            // in-flight upload, a late listener handle) are now stale and will be
+            // rejected by `admit`. Off's bump is what synchronously invalidates
+            // every pending capture.
+            let gen = advance_voice_gen(m);
             // Stop any running loop from the previous mode.
             if let Some(h) = listen_handle.borrow_mut().take() {
                 listen::stop(&h);
@@ -191,32 +202,36 @@ pub fn VoiceOrb(
                         discard_recording(&rec);
                         state.set(RecState::Idle);
                     }
-                    set_hands_free(None);
-                    DICTATE_CB.with(|c| *c.borrow_mut() = None);
                 }
-                mode::VoiceMode::Dictate => {
-                    // Same capture as PushToTalk; route transcripts through the
-                    // dictate callback so they land in the composer for review.
-                    set_hands_free(None);
-                    DICTATE_CB.with(|c| *c.borrow_mut() = on_dictate);
+                mode::VoiceMode::Dictate | mode::VoiceMode::PushToTalk => {
+                    // Same capture path for both; how an admitted transcript
+                    // lands is decided by its stamped capture mode in
+                    // `deliver_transcript`, not by a mutable thread-local.
                 }
                 mode::VoiceMode::HandsFree => {
-                    set_hands_free(Some(mode::HandsFreeState::new(m)));
-                    DICTATE_CB.with(|c| *c.borrow_mut() = None);
+                    let capture: admit::CaptureId = gen.into();
                     let listen_handle = listen_handle.clone();
                     spawn_local(async move {
                         match listen::start().await {
-                            Ok(h) => *listen_handle.borrow_mut() = Some(h),
+                            Ok(h) => {
+                                // The mic might already be someone else's by the
+                                // time start() resolves. Only keep the handle if
+                                // this generation is still current; otherwise tear
+                                // it down immediately so a stale listener never
+                                // owns the mic.
+                                if admit::admit(capture, current_voice_gen()).is_admitted() {
+                                    *listen_handle.borrow_mut() = Some(h);
+                                } else {
+                                    listen::stop(&h);
+                                }
+                            }
                             Err(msg) => {
-                                set_hands_free(None);
-                                report_status(msg);
+                                if admit::admit(capture, current_voice_gen()).is_admitted() {
+                                    report_status(msg);
+                                }
                             }
                         }
                     });
-                }
-                mode::VoiceMode::PushToTalk => {
-                    set_hands_free(None);
-                    DICTATE_CB.with(|c| *c.borrow_mut() = None);
                 }
             }
         });
@@ -425,8 +440,11 @@ pub fn VoiceOrb(
     let ptt_up2 = ptt_up.clone();
     let ptt_up3 = ptt_up.clone();
 
-    // Bridge: stash the transcript callback where start_recording can grab it.
+    // Bridge: stash the transcript callbacks where the async upload path can
+    // grab them. All three are stable component-scoped handles; routing between
+    // them is decided by each capture's stamped mode, not by swapping these.
     provide_voice_callback(on_transcript, on_status);
+    DICTATE_CB.with(|c| *c.borrow_mut() = on_dictate);
 
     let glyph = move || match voice_mode.get() {
         mode::VoiceMode::Off => view! { <crate::icons::MicOff /> }.into_any(),
@@ -662,17 +680,43 @@ fn provide_voice_callback(on_transcript: Callback<String>, on_status: Callback<S
     VOICE_CB.with(|c| *c.borrow_mut() = Some((on_transcript, on_status)));
 }
 
-// In hands-free modes the active router decides whether/what to submit. When
-// set, transcripts pass through it; when None (push-to-talk), they go straight
-// to the shell callback as before.
-thread_local! {
-    static HANDS_FREE: RefCell<Option<mode::HandsFreeState>> = const { RefCell::new(None) };
-}
-
-// Dictation callback — set while Dictate mode is active, so async uploads can
-// route transcripts to the composer-append path instead of auto-sending.
+// Dictation callback — the composer-append handoff used for admitted Dictate
+// captures. Set once at mount and never swapped; whether a given transcript
+// routes here is decided by its stamped capture mode, not by toggling this slot.
 thread_local! {
     static DICTATE_CB: RefCell<Option<Callback<String>>> = const { RefCell::new(None) };
+}
+
+// The live voice generation + mode. Advanced on every mode/capture lifecycle
+// transition so completions from a superseded capture can be rejected. Read by
+// the async upload/listener paths to stamp captures and to check admission.
+thread_local! {
+    static VOICE_GEN: Cell<admit::VoiceGen> = const {
+        Cell::new(admit::VoiceGen {
+            generation: 0,
+            mode: mode::VoiceMode::PushToTalk,
+        })
+    };
+}
+
+/// Advance to a fresh voice generation for `mode` and return the new live
+/// identity. Every mode/capture lifecycle transition calls this; the bump is
+/// what makes any prior in-flight completion stale.
+fn advance_voice_gen(mode: mode::VoiceMode) -> admit::VoiceGen {
+    VOICE_GEN.with(|g| {
+        let next = admit::VoiceGen {
+            generation: g.get().generation.wrapping_add(1),
+            mode,
+        };
+        g.set(next);
+        next
+    })
+}
+
+/// The current live voice generation + mode, used to stamp a starting capture
+/// and to check a completion's admission.
+fn current_voice_gen() -> admit::VoiceGen {
+    VOICE_GEN.with(Cell::get)
 }
 
 // Live hands-free capture status is read by a conditionally mounted orb and
@@ -714,51 +758,53 @@ pub(super) fn set_hands_free_status(status: HandsFreeStatus) {
     }
 }
 
-/// Install (or clear) the hands-free router for the current mode.
-fn set_hands_free(router: Option<mode::HandsFreeState>) {
-    HANDS_FREE.with(|h| *h.borrow_mut() = router);
+/// Hand an admitted transcript to the shell's auto-send callback.
+fn submit_transcript(text: String) {
+    VOICE_CB.with(|c| {
+        if let Some((cb, _)) = c.borrow().as_ref() {
+            cb.run(text);
+        }
+    });
 }
 
-fn deliver_transcript(text: String) {
-    // Route through the hands-free state machine if one is active.
-    let routed = HANDS_FREE.with(|h| {
-        h.borrow_mut()
-            .as_mut()
-            .map(|router| router.on_utterance(&text))
-    });
-    // In hands-free modes, surface what STT actually heard so the user gets a
-    // final-text confirmation (closes the listening→transcribing→final loop).
-    // Ignored chatter clears back to Idle so the orb doesn't keep showing stale
-    // text. Push-to-talk (routed == None) has its own RecState-driven hint.
-    if routed.is_some() {
-        let confirm = match &routed {
-            Some(mode::HandsFreeAction::Submit(cmd)) => HandsFreeStatus::Final(cmd.clone()),
-            // An ignored (empty) utterance has nothing to confirm — drop back
-            // to the ambient listening state.
-            _ => HandsFreeStatus::Idle,
-        };
-        set_hands_free_status(confirm);
+/// Deliver a completed transcript, gated by capture admission and routed by the
+/// capture's stamped mode.
+///
+/// The transcript is dropped unless [`admit`](admit::admit) says the stamped
+/// `capture` is still current — this is what stops a Dictate upload from
+/// auto-sending after a switch to push-to-talk, or a stale hands-free segment
+/// from submitting after Off. When admitted, the route is chosen by
+/// `capture.mode`, not by whichever thread-local callback happens to be
+/// installed now: HandsFree runs the utterance decision and submits, Dictate
+/// appends to the composer for review, and push-to-talk auto-sends.
+fn deliver_transcript(text: String, capture: admit::CaptureId) {
+    if !admit::admit(capture, current_voice_gen()).is_admitted() {
+        return;
     }
-    let to_submit = match routed {
-        // Dictate or push-to-talk: no router, handle directly.
-        None => Some(text),
-        Some(mode::HandsFreeAction::Submit(cmd)) => Some(cmd),
-        // Ignored (empty/whitespace utterance).
-        Some(mode::HandsFreeAction::Ignore) => None,
-    };
-    if let Some(text) = to_submit {
-        // In Dictate mode the async upload routes through DICTATE_CB so the
-        // transcript lands in the composer for review instead of auto-sending.
-        let dictate = DICTATE_CB.with(|c| *c.borrow());
-        if let Some(cb) = dictate {
-            cb.run(text);
-        } else {
-            VOICE_CB.with(|c| {
-                if let Some((cb, _)) = c.borrow().as_ref() {
-                    cb.run(text);
+    match capture.mode {
+        mode::VoiceMode::HandsFree => {
+            // Surface what STT heard so the user gets a final-text confirmation
+            // (closes the listening→transcribing→final loop); an ignored empty
+            // utterance drops back to ambient listening.
+            match mode::HandsFreeState::new(mode::VoiceMode::HandsFree).on_utterance(&text) {
+                mode::HandsFreeAction::Submit(cmd) => {
+                    set_hands_free_status(HandsFreeStatus::Final(cmd.clone()));
+                    submit_transcript(cmd);
                 }
-            });
+                mode::HandsFreeAction::Ignore => set_hands_free_status(HandsFreeStatus::Idle),
+            }
         }
+        mode::VoiceMode::Dictate => {
+            // Land in the composer for review instead of auto-sending. Fall back
+            // to auto-send only if no dictate callback was wired.
+            match DICTATE_CB.with(|c| *c.borrow()) {
+                Some(cb) => cb.run(text),
+                None => submit_transcript(text),
+            }
+        }
+        mode::VoiceMode::PushToTalk => submit_transcript(text),
+        // Off never captures, and admission rejects it above.
+        mode::VoiceMode::Off => {}
     }
 }
 
@@ -770,10 +816,22 @@ fn report_status(msg: String) {
     });
 }
 
+/// Surface a status/error message only if `capture` is still the current
+/// generation — a completion that outlived its capture must not report noise
+/// over the new mode's status line.
+fn report_status_if_current(capture: admit::CaptureId, msg: String) {
+    if admit::admit(capture, current_voice_gen()).is_admitted() {
+        report_status(msg);
+    }
+}
+
 /// Acquire the mic, build a MediaRecorder, wire data/stop handlers, start it.
+/// `capture` is the immutable identity stamped at press time; it rides along to
+/// the `onstop` upload so a completion can be admitted (or dropped) by generation.
 async fn start_recording(
     rec: Rc<RefCell<Recorder>>,
     state: RwSignal<RecState>,
+    capture: admit::CaptureId,
 ) -> Result<(), String> {
     let window = web_sys::window().ok_or("no window")?;
     let navigator = window.navigator();
@@ -818,13 +876,18 @@ async fn start_recording(
             let parts = chunks.borrow();
             let blob = assemble_blob(&parts, &mime);
             drop(parts);
+            // If a mode/capture transition superseded this capture (e.g. Off
+            // discarded it, or the mode switched), don't drive the new owner's
+            // orb state or surface a stale "too short" message.
+            let admitted = admit::admit(capture, current_voice_gen()).is_admitted();
             match blob {
-                Some(blob) if blob.size() >= 800.0 => {
+                Some(blob) if blob.size() >= 800.0 && admitted => {
                     state.set(RecState::Transcribing);
                     // upload_blob resets state → Idle when it finishes (success
                     // or error), so the orb never gets stuck on "transcribing…".
-                    spawn_local(upload_blob(blob, state));
+                    spawn_local(upload_blob(blob, state, capture));
                 }
+                Some(_) | None if !admitted => {}
                 _ => {
                     state.set(RecState::Idle);
                     report_status("recording too short — try again".into());
@@ -902,14 +965,17 @@ fn assemble_blob(parts: &[Blob], mime: &str) -> Option<Blob> {
     Blob::new_with_blob_sequence_and_options(&array, &bag).ok()
 }
 
-/// POST the audio bytes to /api/stt and deliver the transcript. Always
-/// returns the orb to Idle when finished, whatever the outcome.
-async fn upload_blob(blob: Blob, state: RwSignal<RecState>) {
+/// POST the audio bytes to /api/stt and deliver the transcript. Always returns
+/// the orb to Idle when finished, whatever the outcome. Delivery and any status
+/// message are gated on `capture` still being the current generation, so a
+/// completion that outlived its capture neither auto-sends nor reports noise;
+/// `deliver_transcript` re-checks admission and routes by the stamped mode.
+async fn upload_blob(blob: Blob, state: RwSignal<RecState>, capture: admit::CaptureId) {
     // Read the Blob into an ArrayBuffer → Vec<u8> for the request body.
     let bytes = match blob_to_bytes(&blob).await {
         Ok(b) => b,
         Err(msg) => {
-            report_status(msg);
+            report_status_if_current(capture, msg);
             state.set(RecState::Idle);
             return;
         }
@@ -927,7 +993,7 @@ async fn upload_blob(blob: Blob, state: RwSignal<RecState>) {
     let resp = match req {
         Ok(r) => r.send().await,
         Err(err) => {
-            report_status(format!("stt encode error: {err}"));
+            report_status_if_current(capture, format!("stt encode error: {err}"));
             state.set(RecState::Idle);
             return;
         }
@@ -935,14 +1001,17 @@ async fn upload_blob(blob: Blob, state: RwSignal<RecState>) {
     match resp {
         Ok(r) => match r.json::<SttResponse>().await {
             Ok(s) if s.ok && !s.text.trim().is_empty() => {
-                deliver_transcript(s.text.trim().to_string());
+                deliver_transcript(s.text.trim().to_string(), capture);
             }
             Ok(s) => {
-                report_status(s.error.unwrap_or_else(|| "no transcript heard".into()));
+                report_status_if_current(
+                    capture,
+                    s.error.unwrap_or_else(|| "no transcript heard".into()),
+                );
             }
-            Err(err) => report_status(format!("stt decode error: {err}")),
+            Err(err) => report_status_if_current(capture, format!("stt decode error: {err}")),
         },
-        Err(err) => report_status(format!("stt request failed: {err}")),
+        Err(err) => report_status_if_current(capture, format!("stt request failed: {err}")),
     }
     state.set(RecState::Idle);
 }
@@ -972,6 +1041,10 @@ pub(super) fn segment_recorder_start(seg: &Rc<RefCell<SegmentRecorder>>, stream:
     if seg.borrow().recorder.is_some() {
         return;
     }
+    // Stamp this VAD-bounded segment with the generation live at speech onset, so
+    // a transcript that lands after the user left hands-free is rejected on
+    // admission rather than submitted.
+    let capture: admit::CaptureId = current_voice_gen().into();
     let recorder = match MediaRecorder::new_with_media_stream(stream) {
         Ok(r) => r,
         Err(_) => {
@@ -1003,7 +1076,7 @@ pub(super) fn segment_recorder_start(seg: &Rc<RefCell<SegmentRecorder>>, stream:
             drop(parts);
             if let Some(blob) = blob {
                 if blob.size() >= 800.0 {
-                    spawn_local(upload_segment(blob));
+                    spawn_local(upload_segment(blob, capture));
                 }
             }
         }) as Box<dyn FnMut(web_sys::Event)>)
@@ -1042,11 +1115,11 @@ pub(super) fn segment_recorder_stop_discard(seg: &Rc<RefCell<SegmentRecorder>>) 
 
 /// Upload one segment's audio to /api/stt and deliver the transcript through the
 /// hands-free router. Mirrors `upload_blob` but without the RecState machine.
-async fn upload_segment(blob: Blob) {
+async fn upload_segment(blob: Blob, capture: admit::CaptureId) {
     let bytes = match blob_to_bytes(&blob).await {
         Ok(b) => b,
         Err(msg) => {
-            report_status(msg);
+            report_status_if_current(capture, msg);
             return;
         }
     };
@@ -1062,14 +1135,14 @@ async fn upload_segment(blob: Blob) {
     let resp = match req {
         Ok(r) => r.send().await,
         Err(err) => {
-            report_status(format!("stt encode error: {err}"));
+            report_status_if_current(capture, format!("stt encode error: {err}"));
             return;
         }
     };
     if let Ok(r) = resp {
         if let Ok(s) = r.json::<SttResponse>().await {
             if s.ok && !s.text.trim().is_empty() {
-                deliver_transcript(s.text.trim().to_string());
+                deliver_transcript(s.text.trim().to_string(), capture);
             }
         }
     }
