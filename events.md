@@ -2201,3 +2201,11 @@ area:      [frontend]
 
 Landed TASK-48 (WaveBadge reveal-safe first draw) as 8d3e076 on main. Fable builder sub, my review: draw logic factored to a free fn returning painted/not-laid-out; the visible-at-mount path is byte-equivalent (draws and returns, no observer, no flash); a collapsed badge arms a ResizeObserver per the scene.rs precedent that redraws on first real layout then disconnects; on_cleanup extended to tear down observer + callback alongside the existing rAF cancel. Pure deciders (layout_admits, wants_animation_loop) + structure assertions; 9 new tests, 625 green, wasm + fmt clean. Honest coverage boundary recorded: pixel-level paint on reveal needs a future headless-browser pass; the logic is unit-covered. I pushed. Wave-5 remaining: 47 building, 42 in fix round (td min-height no-op -> height), 49 queued.
 _________________________________________________________________________________
+time:      [15:21] [19-07-26]
+agent:     [claude] [fable 5]
+worktree:  fix/task42-component-reflow
+type:      [merge]
+area:      [frontend]
+
+Landed TASK-42 (component mobile reflow) as two commits ending 2357f9f on main. Fable builder sub, one review round: fixed multi-column dashboards now stack to a single column at phone widths (justified !important against author-supplied inline grids; video dashboards correctly excluded — their auto-fit already collapses), and component controls get the repo's 44px coarse-pointer floor (filetree rows, form fields/selects/submit, kanban cards, confirm buttons). Review catch: the data-table cell floor was a silent no-op — .data-table is a real <table> and table-cell layout ignores min-height; corrected to height (table semantics treat it as a minimum) with the test assertion updated. Verdict premises respected: tables and stat cards were already reflow-correct and got verification tests, not re-implementation. 8 reflow tests in a new source-assertion suite; 625+8 green, wasm + fmt clean. I pushed. Wave-5: 42+48 landed, 47 building, 49 unblocked on the components.css side (still shares markdown.rs with 47).
+_________________________________________________________________________________
