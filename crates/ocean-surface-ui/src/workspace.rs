@@ -190,6 +190,48 @@ pub(crate) fn close_tab(tabs: &mut Vec<WorkspaceTab>, active: usize, id: &str) -
 }
 
 // ---------------------------------------------------------------------------
+// Preview lifecycle — pure helpers (unit-testable without WASM)
+// ---------------------------------------------------------------------------
+
+/// Remove every closable `Preview` tab, returning the active index to use next.
+/// Persistent `Files`/`Browser`/`Repo` tabs are preserved in order. If `active`
+/// pointed at a persistent tab, focus follows it to its new index; if it pointed
+/// at a removed `Preview` (or is out of range), focus lands on the first tab
+/// (Files) — always a safe persistent surface.
+pub(crate) fn clear_preview_tabs(tabs: &mut Vec<WorkspaceTab>, active: usize) -> usize {
+    let active_persistent_id = tabs
+        .get(active)
+        .filter(|t| !matches!(t.kind, TabKind::Preview(_)))
+        .map(|t| t.id.clone());
+    tabs.retain(|t| !matches!(t.kind, TabKind::Preview(_)));
+    match active_persistent_id {
+        Some(id) => tabs.iter().position(|t| t.id == id).unwrap_or(0),
+        None => 0,
+    }
+}
+
+/// Whether a preview-generation retire is warranted: any change to session
+/// identity or browsable root retires the generation (and wipes preview state);
+/// a stable session at a stable root does not, so same-session tree refreshes
+/// never spuriously clear open previews.
+pub(crate) fn preview_gen_should_retire(
+    prev_session: &Option<String>,
+    next_session: &Option<String>,
+    prev_root: &Option<String>,
+    next_root: &Option<String>,
+) -> bool {
+    prev_session != next_session || prev_root != next_root
+}
+
+/// Admission check for an async file-read completion: a result is applied only
+/// when the generation it was issued under still matches the live generation.
+/// A read from a retired generation (session/root changed mid-flight) is
+/// discarded so it cannot repopulate the prior session's preview state.
+pub(crate) fn read_is_current(issued_generation: u64, live_generation: u64) -> bool {
+    issued_generation == live_generation
+}
+
+// ---------------------------------------------------------------------------
 // Shared callback types
 // ---------------------------------------------------------------------------
 
@@ -314,6 +356,16 @@ pub fn WorkspacePane(
     let preview_loading: RwSignal<Option<String>> = RwSignal::new(None);
     let preview_error: RwSignal<Option<(String, String)>> = RwSignal::new(None);
 
+    // Preview lifecycle guard. `preview_generation` binds every async file read
+    // to the {session, browsable-root} it was issued under; `preview_session`
+    // tracks the session identity the current previews belong to. A change to
+    // either session identity or root bumps the generation, wipes preview
+    // surface state, and drops Preview tabs — so a late read or a docked tab can
+    // never carry the prior session's file into a new one (TASK-27).
+    let preview_generation: RwSignal<u64> = RwSignal::new(0);
+    let preview_session: RwSignal<Option<String>> =
+        RwSignal::new(daemon.session_id.get_untracked());
+
     // Context menu (B0: Open Externally). (path, pointer_x, pointer_y).
     // Root is resolved from tree_root at render time.
     let context_menu: RwSignal<Option<(String, f64, f64)>> = RwSignal::new(None);
@@ -387,10 +439,19 @@ pub fn WorkspacePane(
     let fetch_file_content: FileCallback = {
         Arc::new(move |path: String| {
             let url = daemon_url.get_untracked();
+            // Capture the generation this read is issued under; its completion
+            // is admitted only if the session/root has not changed meanwhile.
+            let issued_generation = preview_generation.get_untracked();
             preview_loading.set(Some(path.clone()));
             preview_error.set(None);
             spawn_local(async move {
-                if let Some(resp) = fetch_fs_file(&url, &path).await {
+                let fetched = fetch_fs_file(&url, &path).await;
+                // Discard a completion from a retired generation so a stale read
+                // cannot repopulate the prior session's preview state.
+                if !read_is_current(issued_generation, preview_generation.get_untracked()) {
+                    return;
+                }
+                if let Some(resp) = fetched {
                     if resp.error.is_none() {
                         preview_cache.update(|c| {
                             c.insert(path.clone(), resp);
@@ -463,9 +524,37 @@ pub fn WorkspacePane(
     {
         let load_dir = Arc::clone(&load_dir);
         let cwd_sig = daemon.cwd;
+        let session_sig = daemon.session_id;
         Effect::new(move |_| {
+            // Subscribe to BOTH session identity and cwd: a change to either
+            // retires the current preview generation. (Reads are ordered so the
+            // effect re-runs whenever either signal changes.)
+            let session = session_sig.get();
             let cwd = cwd_sig.get();
-            let Some(root) = browsable_root(&cwd).map(str::to_string) else {
+            let new_root = browsable_root(&cwd).map(str::to_string);
+
+            // Session identity or browsable-root change → wipe preview surface
+            // state and retire in-flight reads, so no docked Preview tab or late
+            // completion carries the prior session's file forward (TASK-27).
+            if preview_gen_should_retire(
+                &preview_session.get_untracked(),
+                &session,
+                &tree_root.get_untracked(),
+                &new_root,
+            ) {
+                preview_generation.update(|g| *g += 1);
+                preview_session.set(session);
+                preview_cache.set(HashMap::new());
+                preview_loading.set(None);
+                preview_error.set(None);
+                context_menu.set(None);
+                let mut t = tabs.get_untracked();
+                let new_active = clear_preview_tabs(&mut t, active_tab.get_untracked());
+                tabs.set(t);
+                active_tab.set(new_active);
+            }
+
+            let Some(root) = new_root else {
                 // Session reset ("New chat" pins cwd to /tmp) or no session:
                 // clear the tree and any lingering load error (e.g. "access
                 // denied: /tmp is outside home directory") so the pane shows
@@ -1611,5 +1700,108 @@ mod tests {
             &TabKind::Browser,
             NARROW_PANE_W + 40.0
         ));
+    }
+
+    // ---- Preview lifecycle (TASK-27): session/root-bound clearing ----
+
+    fn preview_tab(path: &str) -> WorkspaceTab {
+        WorkspaceTab {
+            id: format!("preview:{}", path),
+            title: basename(path).to_string(),
+            kind: TabKind::Preview(path.into()),
+        }
+    }
+
+    #[test]
+    fn clear_preview_tabs_removes_previews_keeps_persistent_in_order() {
+        // Files · a.rs · b.rs · Browser · Repo → previews gone, order intact.
+        let mut tabs = vec![
+            tab("files", TabKind::Files),
+            preview_tab("/root/a.rs"),
+            preview_tab("/root/b.rs"),
+            tab("browser", TabKind::Browser),
+            tab("repo", TabKind::Repo),
+        ];
+        let _ = clear_preview_tabs(&mut tabs, 0);
+        let ids: Vec<&str> = tabs.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["files", "browser", "repo"]);
+    }
+
+    #[test]
+    fn clear_preview_tabs_active_on_preview_lands_on_files() {
+        // A session switch while a Preview tab is focused must land on the
+        // safe first persistent tab (Files), never a stale/out-of-range index.
+        let mut tabs = vec![
+            tab("files", TabKind::Files),
+            preview_tab("/root/a.rs"),
+            tab("browser", TabKind::Browser),
+            tab("repo", TabKind::Repo),
+        ];
+        let new_active = clear_preview_tabs(&mut tabs, 1);
+        assert_eq!(new_active, 0);
+        assert!(matches!(tabs[0].kind, TabKind::Files));
+    }
+
+    #[test]
+    fn clear_preview_tabs_active_on_persistent_follows_it() {
+        // Focus on Browser (index 3) survives the wipe: Browser is now index 1.
+        let mut tabs = vec![
+            tab("files", TabKind::Files),
+            preview_tab("/root/a.rs"),
+            preview_tab("/root/b.rs"),
+            tab("browser", TabKind::Browser),
+            tab("repo", TabKind::Repo),
+        ];
+        let new_active = clear_preview_tabs(&mut tabs, 3);
+        assert_eq!(new_active, 1);
+        assert_eq!(tabs[new_active].id, "browser");
+    }
+
+    #[test]
+    fn read_is_current_admits_only_matching_generation() {
+        // A completion issued under generation 3 is admitted only while the
+        // live generation is still 3; any later generation retires it.
+        assert!(read_is_current(3, 3));
+        assert!(!read_is_current(3, 4));
+        assert!(!read_is_current(0, 1));
+    }
+
+    #[test]
+    fn preview_gen_retires_on_session_change() {
+        // Same root, different session → retire (clear previews).
+        let root = Some("/home/project".to_string());
+        assert!(preview_gen_should_retire(
+            &Some("sess-a".into()),
+            &Some("sess-b".into()),
+            &root,
+            &root,
+        ));
+    }
+
+    #[test]
+    fn preview_gen_retires_on_root_change() {
+        // Same session, different browsable root → retire.
+        let session = Some("sess-a".to_string());
+        assert!(preview_gen_should_retire(
+            &session,
+            &session,
+            &Some("/home/project-one".into()),
+            &Some("/home/project-two".into()),
+        ));
+        // A drop to a non-browsable root (None, e.g. /tmp reset) also retires.
+        assert!(preview_gen_should_retire(
+            &session,
+            &session,
+            &Some("/home/project-one".into()),
+            &None,
+        ));
+    }
+
+    #[test]
+    fn preview_gen_stable_session_and_root_does_not_retire() {
+        // Same session, same root (a mere tree refresh) must NOT clear previews.
+        let session = Some("sess-a".to_string());
+        let root = Some("/home/project".to_string());
+        assert!(!preview_gen_should_retire(&session, &session, &root, &root));
     }
 }
