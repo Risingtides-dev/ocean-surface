@@ -461,6 +461,31 @@
   }
 }
 
+/* coarse-pointer: grow the tiny trigger (20×20) and live chip (~14px tall) to a
+   ~44px tap target without touching their quiet desktop look or focus rings. The
+   pseudo-element sits behind content and captures taps. `.voice-wrap` spaces
+   these siblings by only 2px, so the hit area grows along the short (vertical)
+   axis into the composer's own padding — no horizontal bleed that could overlap
+   the neighbour. */
+@media (pointer: coarse) {
+  .voice-trigger,
+  .voice-live-chip {
+    position: relative;
+  }
+  .voice-trigger::after,
+  .voice-live-chip::after {
+    content: '';
+    position: absolute;
+    inset-inline: 0;
+  }
+  .voice-trigger::after {
+    inset-block: -12px; /* 20 + 24 = 44 */
+  }
+  .voice-live-chip::after {
+    inset-block: -15px; /* ~14 + 30 = 44 */
+  }
+}
+
 /* The orb speaks through color and its tooltip; a permanent caption under
    it is knob noise. */
 .voice-hint { display: none; }

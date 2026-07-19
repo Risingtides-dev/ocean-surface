@@ -368,9 +368,9 @@ pub fn VoiceOrb(
         let base = format!("voice-orb {}", m.css_modifier());
         match rt_stage_for_class.get() {
             realtime::RealtimeStage::Connecting => {
-                return format!("{base} is-voicechat is-transcribing");
+                return format!("{base} is-transcribing");
             }
-            realtime::RealtimeStage::Live => return format!("{base} is-voicechat is-live"),
+            realtime::RealtimeStage::Live => return format!("{base} is-live"),
             realtime::RealtimeStage::Off => {}
         }
         match m {
@@ -486,7 +486,9 @@ pub fn VoiceOrb(
                     title="open mic — click to change voice settings"
                     on:click=move |_| show_menu.set(true)
                 >
-                    <span class="voice-live-chip__dot" aria-hidden="true"></span>
+                    // The pulsing dot is the CSS `.voice-live-chip::before`
+                    // pseudo-element (semantic-hidden by nature) — the single
+                    // dot source, so no markup span is emitted here.
                     "listening"
                 </button>
             </Show>

@@ -191,6 +191,21 @@ fn reset_composer_textarea(el: &web_sys::HtmlTextAreaElement) {
     let _ = style.set_property("overflow-y", "hidden");
 }
 
+/// Merge a dictated fragment into the current composer draft. A separating
+/// space is inserted only when the draft is non-empty and does not already end
+/// in whitespace, so repeated dictation appends read as running prose and a
+/// trailing newline from a prior multiline fragment is preserved. The fragment
+/// is assumed pre-trimmed by the caller.
+fn append_dictation(current: &str, fragment: &str) -> String {
+    let mut out = String::with_capacity(current.len() + fragment.len() + 1);
+    out.push_str(current);
+    if !current.is_empty() && !current.ends_with(char::is_whitespace) {
+        out.push(' ');
+    }
+    out.push_str(fragment);
+    out
+}
+
 /// Whether the surface window currently has focus (`document.hasFocus()`).
 /// Defaults to `true` when the document can't be read so an off-focus
 /// notification is never fired on an uncertain state.
@@ -1995,15 +2010,24 @@ pub fn App() -> impl IntoView {
     // Dictate mode: transcript lands in the composer for review rather than
     // auto-sending. VoiceOrb routes to this when Dictate is active.
     let on_dictate = Callback::new(move |text: String| {
-        let text = text.trim().to_string();
-        if text.is_empty() {
+        let fragment = text.trim().to_string();
+        if fragment.is_empty() {
             return;
         }
-        input.update(|s| {
-            if !s.is_empty() && !s.ends_with(' ') {
-                s.push(' ');
+        input.update(|s| *s = append_dictation(s, &fragment));
+        // `prop:value` writes the DOM through a reactive effect, and a
+        // programmatic value change never fires the `on:input` handler where
+        // typed growth is hooked. Defer a frame so the mounted textarea holds
+        // the dictated text, then size it with the same bounded grow logic and
+        // drop the caret at the end so continued dictation/typing flows on.
+        // `fit_composer_textarea` clamps to the min height for empty content,
+        // so this doubles as the reset when the draft is later cleared.
+        request_animation_frame(move || {
+            if let Some(el) = textarea_ref.get_untracked() {
+                fit_composer_textarea(&el);
+                let end = el.value().encode_utf16().count() as u32;
+                let _ = el.set_selection_range(end, end);
             }
-            s.push_str(&text);
         });
     });
 
@@ -2876,12 +2900,13 @@ pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
 #[cfg(test)]
 mod tests {
     use super::{
-        competing_reveal_open, composer_height_px, composer_overflow_y, council_open_visibility,
-        execute_planner_workflow, initial_planner_context, island_open_visibility, parse_deep_link,
-        planner_candidates, selected_planner_context, should_submit_composer_key, topmost_reveal,
-        window_escape_should_handle, DeepLinkAction, PlannerAction, PlannerContext,
-        PlannerWorkflowFailureStage, PlannerWorkflowOps, PlannerWorkflowRequest, RevealSurface,
-        RevealVisibility, COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX,
+        append_dictation, competing_reveal_open, composer_height_px, composer_overflow_y,
+        council_open_visibility, execute_planner_workflow, initial_planner_context,
+        island_open_visibility, parse_deep_link, planner_candidates, selected_planner_context,
+        should_submit_composer_key, topmost_reveal, window_escape_should_handle, DeepLinkAction,
+        PlannerAction, PlannerContext, PlannerWorkflowFailureStage, PlannerWorkflowOps,
+        PlannerWorkflowRequest, RevealSurface, RevealVisibility, COMPOSER_MAX_HEIGHT_PX,
+        COMPOSER_MIN_HEIGHT_PX,
     };
     use crate::daemon::{ProjectInfo, WorktreeInfo};
     use futures_util::future::LocalBoxFuture;
@@ -3329,6 +3354,81 @@ mod tests {
     fn composer_overflow_switches_only_past_max_height() {
         assert_eq!(composer_overflow_y(COMPOSER_MAX_HEIGHT_PX), "hidden");
         assert_eq!(composer_overflow_y(COMPOSER_MAX_HEIGHT_PX + 1), "auto");
+    }
+
+    #[test]
+    fn dictation_into_empty_draft_is_the_fragment_verbatim() {
+        assert_eq!(append_dictation("", "hello world"), "hello world");
+        // Multiline fragment survives intact into an empty draft.
+        assert_eq!(
+            append_dictation("", "line one\nline two"),
+            "line one\nline two"
+        );
+    }
+
+    #[test]
+    fn dictation_into_nonempty_draft_inserts_one_separating_space() {
+        assert_eq!(append_dictation("draft", "more"), "draft more");
+        // Multiline fragment appends after the space separator.
+        assert_eq!(append_dictation("draft", "two\nlines"), "draft two\nlines");
+    }
+
+    #[test]
+    fn dictation_does_not_double_space_across_existing_whitespace() {
+        // Typed-input parity: a draft already ending in a space or newline
+        // (from typing or a prior multiline dictation) is not padded again.
+        assert_eq!(append_dictation("draft ", "more"), "draft more");
+        assert_eq!(append_dictation("draft\n", "more"), "draft\nmore");
+    }
+
+    #[test]
+    fn repeated_dictation_appends_read_as_running_prose() {
+        let first = append_dictation("", "one");
+        let second = append_dictation(&first, "two");
+        let third = append_dictation(&second, "three");
+        assert_eq!(third, "one two three");
+    }
+
+    #[test]
+    fn dictation_reset_reuses_the_min_height_clamp() {
+        // Growth after dictation calls `fit_composer_textarea`, which clamps to
+        // the min height when the draft is cleared — the same reset the typed
+        // path relies on. Guards the shared clamp the Dictate grow hook reuses.
+        assert_eq!(composer_height_px(0), COMPOSER_MIN_HEIGHT_PX);
+    }
+
+    #[test]
+    fn voice_affordances_have_coarse_pointer_hit_areas() {
+        let css = include_str!("../../../styles/composer.css");
+        let start = css
+            .find("@media (pointer: coarse) {")
+            .expect("coarse-pointer hit-area block");
+        // Scan to the end of the media block (its closing brace is the first
+        // `}\n}` after the nested rules).
+        let block = &css[start..];
+        assert!(block.contains(".voice-trigger::after"));
+        assert!(block.contains(".voice-live-chip::after"));
+        // Negative inset expands the tap target without visible chrome.
+        assert!(block.contains("inset-block: -12px"));
+        assert!(block.contains("inset-block: -15px"));
+    }
+
+    #[test]
+    fn live_chip_emits_exactly_one_dot_source() {
+        // The visible dot is the CSS `::before` pseudo-element; the markup must
+        // not re-emit a `voice-live-chip__dot` span (which doubled the flex gap).
+        let markup = include_str!("voice/mod.rs");
+        assert!(!markup.contains("voice-live-chip__dot"));
+        let css = include_str!("../../../styles/composer.css");
+        assert!(css.contains(".voice-live-chip::before"));
+    }
+
+    #[test]
+    fn orb_class_drops_the_inert_voicechat_modifier() {
+        // `is-voicechat` was emitted but styled/read nowhere; realtime
+        // presentation goes through the ancestor `.voice-chat-active` rules.
+        let markup = include_str!("voice/mod.rs");
+        assert!(!markup.contains("is-voicechat"));
     }
 
     #[test]
