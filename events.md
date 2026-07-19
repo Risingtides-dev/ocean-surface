@@ -2000,3 +2000,11 @@ area:      [frontend]
 
 Landed TASK-31 (composer token normalization) as d5f2b17 on main. Built by a fable subagent in a ~/.worktrees lane, reviewed by me: seven obsolete-alias occurrences in the slash-menu block normalized to canonical tokens (--radius, --bg-elevated, --fg-3 x3, --bg-hover, --mono) with raw fallbacks dropped; --shadow-md and --border-subtle correctly untouched. Regression test composer_css_uses_canonical_tokens_not_obsolete_aliases added to the existing CSS-assertion seam in voice_realtime_regressions.rs. Rebased onto b33f8fe, tests green (465 unit + 2 integration), I pushed. Note: repo styles live at the root styles/ directory, not under the UI crate.
 _________________________________________________________________________________
+time:      [05:26] [19-07-26]
+agent:     [claude] [fable 5]
+worktree:  fix/task27-preview-lifecycle
+type:      [merge]
+area:      [frontend]
+
+Landed TASK-27 (session-bound workspace preview lifecycle, the high-priority context-integrity fix) as 1f953cd on main. Built by a fable subagent, reviewed by me: preview_generation + preview_session signals bind every async file read to the {session, browsable-root} it was issued under; the cwd-follow effect now subscribes to session identity too and on either change synchronously bumps the generation, wipes preview cache/loading/error/context-menu, and drops Preview tabs via a pure clear_preview_tabs helper that lands focus on a safe persistent tab. Stale completions from retired generations are discarded before touching state; stable session+root refreshes provably do not clear (regression test). Three pure deciders, seven unit tests, 472 crate tests + wasm check green after rebase over TASK-30/31. I pushed.
+_________________________________________________________________________________
