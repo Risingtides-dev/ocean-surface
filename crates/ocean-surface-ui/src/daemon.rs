@@ -2483,21 +2483,11 @@ impl Daemon {
                     false,
                     None,
                 );
-                let mut events_url = format!(
+                let events_url = format!(
                     "{}/v1/agent/events?session_id={}",
                     url.trim_end_matches('/'),
                     active_session_id.as_str()
                 );
-                // TASK-46: on reconnect, ask the daemon to replay every
-                // buffered frame from the current active turn (gap_replay=1).
-                // The daemon resolves active_requests → turn_ids → replays
-                // from the earliest turn_started offset. The snapshot already
-                // contains only committed turns (active content is filtered
-                // server-side), so replay fills exactly the mid-turn gap
-                // without overlapping the hydrated transcript.
-                if connected_once {
-                    events_url.push_str("&gap_replay=1");
-                }
                 status.set(if connected_once {
                     "reconnecting…".into()
                 } else {
