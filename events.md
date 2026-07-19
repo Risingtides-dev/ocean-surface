@@ -2024,3 +2024,18 @@ area:      [frontend]
 
 Landed TASK-28 (generation-aware collapse priming) as de436b5 on main — the last of the five sidebar-audit slices. Fable subagent build, my review: priming decision extracted to pure plan_collapse_priming with per-panel-open generation state; only the no-active fallback settles (so polls cannot jump the default) while an active session keeps priming eligible so the default follows it through catalogue regrouping and active-id changes; first user toggle owns collapse for the rest of the generation; close-to-reopen resets. Five decider tests cover all four contract orderings plus the fallback-relock case. 478 tests + wasm check green after rebase, I pushed. Sidebar audit slate complete: 27/28/29/30/31 all on main within the hour, four built by fable subagents while team seats were down, one by ocean under the held-diff gate.
 _________________________________________________________________________________
+
+time:      [05:29am] [07-19-26]
+agent:     [ocean] [gpt-5]
+worktree:  [public-boundary-20260719]
+type:      documentation
+area:      public/private boundary
+
+Updated Surface's public entry points and local ecosystem map after ocean-bedrock
+moved private. Surface now requires only the public ocean-os daemon, treats
+Bedrock as an optional authenticated team service, and forbids Bedrock credentials
+or private-repository assumptions in public browser/client paths. Verification:
+changed-file local-link validation, git diff --check, and no direct public GitHub
+links to ocean-bedrock. `cargo fmt --check` remains blocked by pre-existing
+format drift in `crates/ocean-surface-ui/src/sessions.rs` on `origin/main`.
+_________________________________________________________________________________

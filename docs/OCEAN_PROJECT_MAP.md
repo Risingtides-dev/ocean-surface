@@ -2,12 +2,14 @@
 
 Status: active cross-repo orientation map for agents.
 
-This map is mirrored across the four Ocean repos so an agent can start in any
-repo and still route the user's words to the right source of truth. It does not
-replace the local `AGENTS.md` chain. Read the target repo's `AGENTS.md` before
-editing.
+This local boundary summary lets an agent route work from `ocean-surface`; the
+canonical public ecosystem map lives in
+`ocean-os/docs/OCEAN_PROJECT_MAP.md`. This map does not replace the local
+`AGENTS.md` chain. Read the target repo's `AGENTS.md` before editing.
 
-Animated cartography artifact: `../../ocean-os/docs/OCEAN_PROJECT_MAP_ART.html`.
+Visibility: `ocean-os`, `ocean-surface`, and `ocean-agents` are public.
+`ocean-bedrock` is a private repository and an optional authenticated knowledge
+service for team deployments. Public Ocean use must not require Bedrock access.
 
 ## First Routing Rule
 
@@ -16,26 +18,27 @@ Animated cartography artifact: `../../ocean-os/docs/OCEAN_PROJECT_MAP_ART.html`.
 | runtime, daemon, tools, permissions, providers, models, sessions, events, TUI, ACP, MCP client | `../../ocean-os` | Rust runtime authority and daemon API |
 | surface, GUI, GPUI, web, PWA, Chrome extension, Cursor or VS Code extension, voice, canvas, LiveKit | `../../ocean-surface` | Thin client surfaces that steer the daemon |
 | assistant, agent package, surface profile, Bonzai, content-agent, courier, Slack bridge, Slack delivery | `../../ocean-agents` | Provider-agnostic assistant/courier packages and profiles |
-| bedrock, Longhouse files, shared docs, context, handoffs, ledger, source runners, semantic search, graph, MCP wrapper, cloud box | `../../ocean-bedrock` | Shared knowledge/data plane and collaboration substrate |
+| bedrock, Longhouse files, shared docs, context, handoffs, ledger, source runners, semantic search, graph, MCP wrapper, cloud box | `../../ocean-bedrock` (authorized private checkout) | Optional shared knowledge/data plane and collaboration substrate |
 
 When in doubt, inspect the live repo and code path before answering. Do not
 collapse these repos into one product surface.
 
-## Four-Repo Connection Map
+## Ecosystem Connection Map
 
-These repos are one connected system. The routing table only tells an agent
-where to start; most real features cross repo boundaries.
+The three public repos form the local product and package system. An authorized
+team deployment may additionally connect the private Bedrock service. The
+routing table only identifies ownership; many features cross repo boundaries.
 
 | Connection | Contract |
 | --- | --- |
 | `ocean-surface` -> `ocean-os` | Surfaces create/select sessions, submit turns, subscribe to scoped SSE, and render daemon state. The daemon owns the actual session, tool, model, provider, and permission decisions. |
 | `ocean-os` -> `ocean-surface` | The daemon emits events, permission requests, tool activity, model/session state, and runtime results for surfaces to present. Surface-specific context travels through `client_type`, `session_id`, `cwd`, `project_id`, guidance, and room/canvas fields. |
 | `ocean-os` <-> `ocean-agents` | Agent packages supply editable profiles, manifests, SOPs, tool declarations, couriers, and assistant source material. `ocean-os` supplies the runtime that enforces tools, permissions, providers, memory, sessions, and typed contracts. |
-| `ocean-os` <-> `ocean-bedrock` | `ocean-os` can use Bedrock/Longhouse data as shared context, workflow specs, handoffs, ledger history, source-runner output, and MCP/API-accessible knowledge. Local machine side effects still go through the daemon's permission-gated tools. |
+| `ocean-os` <-> `ocean-bedrock` | Optional, authenticated integration: `ocean-os` can use Bedrock data as shared context, workflow specs, handoffs, ledger history, source-runner output, and MCP/API-accessible knowledge. Local machine side effects still go through daemon permission gates. |
 | `ocean-surface` <-> `ocean-agents` | Surfaces expose the context that selects or shapes assistant behavior, such as `client_type`, active surface, session, room, canvas, Slack, or editor state. The agent behavior itself remains package/profile data, not UI code. |
-| `ocean-surface` <-> `ocean-bedrock` | Surfaces may display or request shared files, context, handoffs, search results, and workflow artifacts through Bedrock APIs or a proxy. They do not become the shared storage authority. |
-| `ocean-agents` <-> `ocean-bedrock` | Agents and couriers use Bedrock for shared docs, `/context`, `/handoffs`, `/sessions`, workflow run artifacts, ledgers, and scoped delivery outputs. Bedrock stores the collaborative record; agent packages declare behavior. |
-| all four | A normal Ocean workflow can begin in a surface, run through the daemon, be shaped by an agent profile/package, retrieve or write shared context in Bedrock, and stream results back to the surface. |
+| `ocean-surface` <-> `ocean-bedrock` | In an authorized team deployment, surfaces may display or request shared files, context, handoffs, search results, and workflow artifacts through authenticated Bedrock APIs or a daemon-owned proxy. Browser state never becomes the shared-storage authority. |
+| `ocean-agents` <-> `ocean-bedrock` | In an authorized team deployment, agents and couriers may use authenticated Bedrock contracts for shared collaboration records. Public packages cannot assume Bedrock access. |
+| all connected components | A team workflow may begin in a surface, run through the daemon, be shaped by an agent package, optionally retrieve or write authenticated shared context in Bedrock, and stream results back to the surface. |
 
 ## System Shape
 
@@ -53,8 +56,8 @@ surface context
 ocean-agents  ->  profiles, manifests, assistants, couriers
                   package/source material consumed by Ocean workflows
 
-ocean-bedrock ->  shared files, context, ledger, graph, semantic search,
-                  source ingest, workflow specs, MCP/API access
+ocean-bedrock (private, optional)
+              ->  authenticated shared files, context, ledger, graph, search
 ```
 
 ## Repo Ownership
@@ -62,9 +65,9 @@ ocean-bedrock ->  shared files, context, ledger, graph, semantic search,
 | Repo | Owns | Does not own |
 | --- | --- | --- |
 | `ocean-os` | Rust daemon, agent loop, provider routing, tool execution, local sessions, permissions, TUI/CLI/ACP, Longhouse coordination crate, local memory/context crates | Product UI chrome, shared cloud file store, agent package content |
-| `ocean-surface` | GPUI desktop app, Leptos web/PWA, browser and editor extension surfaces, proxy, voice/canvas presentation | Provider calls, reasoning loop, session authority, permission policy, tool execution |
+| `ocean-surface` | Canonical Leptos web/PWA UI, Tauri and extension hosts, proxy, voice/canvas presentation; retained GPUI source is reference-only | Provider calls, reasoning loop, session authority, permission policy, tool execution |
 | `ocean-agents` | Assistant/courier folders, editable profiles, manifests, SOP/tool declarations, transitional Python harnesses | Runtime enforcement, provider credentials, daemon-owned session storage |
-| `ocean-bedrock` | Authenticated shared filesystem, `/docs`, `/context`, `/handoffs`, `/sessions`, Ocean Ledger, Ocean Context, graph/semantic search, source runners, workflow specs as data | Local machine execution authority, UI session ownership, provider routing |
+| `ocean-bedrock` (private, optional) | Authenticated shared filesystem, Ocean Ledger/Context, graph/semantic search, source runners, and workflow data for authorized team deployments | Local machine execution authority, UI session ownership, provider routing |
 
 ## Shared Contracts
 
@@ -76,10 +79,12 @@ ocean-bedrock ->  shared files, context, ledger, graph, semantic search,
 - `ocean-surface` must call the daemon API instead of inventing agent state.
 - `ocean-agents` packages can define profiles, tools, SOPs, and courier
   contracts, but runtime enforcement belongs in `ocean-os`.
-- `ocean-bedrock` can provide shared context and APIs, but local shell/filesystem
-  side effects still route through `ocean-os` permission gates.
+- An authorized `ocean-bedrock` deployment can provide optional authenticated
+  shared context and APIs, but public clients and packages cannot require it and
+  local shell/filesystem side effects still route through `ocean-os` permission gates.
 - Longhouse has two pieces: `ocean-os/crates/ocean-longhouse` for local/runtime
-  coordination logic, and `ocean-bedrock` for shared data-plane support.
+  coordination logic and, when configured for an authorized team deployment,
+  private `ocean-bedrock` data-plane support.
 
 ## Live Ports And APIs
 
@@ -88,7 +93,7 @@ ocean-bedrock ->  shared files, context, ledger, graph, semantic search,
 | Ocean daemon | `127.0.0.1:4780` | `ocean-os` |
 | Standalone Longhouse service direction | `127.0.0.1:4781` | `ocean-os` |
 | Surface proxy/dev web app | `0.0.0.0:8790` via `./run-surface.sh` | `ocean-surface` |
-| Ocean Bedrock server | `:8080` unless overridden | `ocean-bedrock` |
+| Ocean Bedrock server (private, optional) | deployment-defined; local default `:8080` | `ocean-bedrock` |
 
 Core daemon routes used by surfaces:
 
@@ -108,12 +113,13 @@ Voice is daemon-owned as of voice phase 4 (2026-07-10): the surface proxy's
 via `POST /v1/voice/realtime/client-secret`. Provider keys (xAI, OpenAI)
 resolve only inside `ocean-os`.
 
-Core Bedrock routes and tools are documented in `../../ocean-bedrock/docs/API.md`,
-`../../ocean-bedrock/docs/openapi.yaml`, and `../../ocean-bedrock/docs/MCP.md`.
+Authorized maintainers can inspect the private checkout's `docs/API.md`,
+`docs/openapi.yaml`, and `docs/MCP.md`. Public surfaces must rely only on
+published integration contracts rather than private repository paths.
 
 ## Source Anchors
 
-Read these before making cross-repo claims:
+Read these public source anchors before making cross-repository claims:
 
 - `../../ocean-os/AGENTS.md`
 - `../../ocean-os/README.md`
@@ -129,6 +135,9 @@ Read these before making cross-repo claims:
 - `../../ocean-surface/README.md`
 - `../../ocean-surface/docs/OCEAN_GPUI_CANVAS_LIVEKIT_SPEC.md`
 - `../../ocean-surface/Cargo.toml`
+
+Authorized maintainers may additionally inspect private Bedrock anchors:
+
 - `../../ocean-bedrock/README.md`
 - `../../ocean-bedrock/docs/OCEAN-CONTEXT.md`
 - `../../ocean-bedrock/docs/OCEAN-LONGHOUSE-DATA-PLANE.md`
@@ -141,8 +150,9 @@ Read these before making cross-repo claims:
 - Do not treat `ocean-agents` Python harnesses as the final runtime engine; they
   are package-side conventions or transitional harnesses unless a manifest says
   otherwise and the daemon path verifies it.
-- Do not treat `ocean-bedrock` as a local root shell. It is the shared
-  knowledge/data plane, not the user's machine authority.
+- Do not treat private, optional `ocean-bedrock` as a local root shell or a
+  public-client dependency. It is an authenticated team knowledge/data plane,
+  not the user's machine authority.
 - Do not assume the daemon is reading a repo profile just because a local file
   exists. Verify the running daemon's profile source when the distinction
   matters.
@@ -151,7 +161,7 @@ Read these before making cross-repo claims:
 
 ## Maintenance
 
-Keep this file mirrored across `ocean-os`, `ocean-agents`, `ocean-surface`, and
-`ocean-bedrock` when a connection contract changes. Update the nearest owning
-`AGENTS.md` and append `events.md` entries where that repo's devlog contract
-requires it.
+Keep this local boundary summary aligned with the canonical public map in
+`ocean-os/docs/OCEAN_PROJECT_MAP.md`. The private Bedrock repository maintains
+its own operating references. Update the nearest owning `AGENTS.md` and append
+`events.md` entries where that repo's devlog contract requires it.

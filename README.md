@@ -9,6 +9,9 @@ GPUI desktop app (`crates/ocean-gui`) is soft-deprecated (source retained for
 mining into the Tauri Rust backend).
 
 Cross-repo routing and ownership map: [`docs/OCEAN_PROJECT_MAP.md`](docs/OCEAN_PROJECT_MAP.md).
+Ocean Surface requires only the public `ocean-os` daemon. The private
+`ocean-bedrock` service is optional for authorized team deployments; surfaces
+must not depend on it or place Bedrock credentials in browser state.
 
 | Target | How | Why |
 |---|---|---|

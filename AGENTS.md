@@ -9,7 +9,10 @@ source retained for mining into the Tauri Rust backend, not for new feature work
 
 The sibling repo `../ocean-os` owns runtime authority: daemon, agent loop,
 tools, providers, permissions, projects, workspaces, sessions, and events.
-Cross-repo routing and ownership map: `docs/OCEAN_PROJECT_MAP.md`.
+`ocean-bedrock` is a private, optional authenticated service for authorized team
+deployments; Surface must not require it or expose Bedrock credentials to
+browser state. Cross-repo routing and ownership map:
+`docs/OCEAN_PROJECT_MAP.md`.
 
 Do not put provider calls, agent reasoning, session storage, permission policy,
 or tool execution authority in this repo. Surface code should render state,
