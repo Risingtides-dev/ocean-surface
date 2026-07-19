@@ -23,6 +23,7 @@ mod island_dynamic;
 mod livekit;
 mod loader;
 mod markdown;
+mod markdown_stream;
 mod model;
 mod observatory;
 mod palette;

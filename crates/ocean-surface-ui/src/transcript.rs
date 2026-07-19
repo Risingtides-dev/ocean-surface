@@ -18,7 +18,6 @@ use wasm_bindgen::JsCast;
 use crate::components::ComponentView;
 use crate::daemon::Daemon;
 use crate::icons::WaveBadge;
-use crate::markdown::render as render_md;
 use crate::model::{Block, Role, ToolStatus};
 
 /// A single live-activity descriptor from the reducer.
@@ -727,14 +726,23 @@ fn BlockView(
     move || {
         let daemon = daemon.clone();
         match block() {
-            Some(Block::Text(text)) => view! {
-                <div
-                    class="block block--text"
-                    inner_html=render_md(&text)
-                    on:click=crate::host::open_external_link_click
-                ></div>
+            Some(Block::Text(_)) => {
+                // Stream this text block as stable, keyed markdown blocks so only
+                // the in-progress tail re-parses per delta and finalized blocks
+                // keep their DOM. The source is read reactively from `turns` so
+                // growth is picked up without re-parsing the whole message.
+                let text = Signal::derive(move || match block() {
+                    Some(Block::Text(t)) => t,
+                    _ => String::new(),
+                });
+                view! {
+                    <crate::markdown_stream::MarkdownStream
+                        text=text
+                        class="block block--text"
+                    />
+                }
+                .into_any()
             }
-            .into_any(),
 
             Some(Block::ToolCall {
                 name,

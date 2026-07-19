@@ -440,11 +440,20 @@
   text-wrap: pretty;
 }
 
-.block--text :first-child {
+/* Streaming markdown (markdown_stream.rs) wraps each top-level block in a
+   display:contents `.md-block` host so the block-split structure has zero
+   layout/margin-collapse effect — sibling block margins collapse exactly as if
+   the wrappers were absent. Only the very first and very last rendered node
+   flush against the bubble padding. */
+.md-block {
+  display: contents;
+}
+
+.block--text > .md-block:first-child > :first-child {
   margin-top: 0;
 }
 
-.block--text :last-child {
+.block--text > .md-block:last-child > :last-child {
   margin-bottom: 0;
 }
 

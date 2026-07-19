@@ -15,11 +15,73 @@
 
 use pulldown_cmark::{html, CowStr, Event, Options, Parser, Tag};
 
-pub fn render(src: &str) -> String {
+/// Parser options shared by [`render`] and [`split_blocks`] so the two always
+/// agree on document structure (tables, task lists, strikethrough).
+fn options() -> Options {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TASKLISTS);
     opts.insert(Options::ENABLE_TABLES);
+    opts
+}
+
+/// Split accumulated markdown into its ordered top-level block source segments.
+///
+/// This is the boundary primitive behind streaming render: each returned slice
+/// is exactly one top-level block (paragraph, list, table, fenced code, …), so
+/// callers can render finalized blocks once and only re-parse the last,
+/// in-progress block as a stream grows. Because appending text to a CommonMark
+/// document never rewrites an earlier top-level block, every segment except the
+/// last is stable once it appears.
+///
+/// Boundaries are anchored at top-level block *starts* reported by
+/// pulldown-cmark's source-offset iterator — never on blank lines — so a fenced
+/// code block, table, or list that spans blank lines is kept whole. Rendering
+/// each segment through [`render`] and concatenating the results is
+/// byte-identical to a single [`render`] of the whole input (the HTML writer
+/// carries no state across a top-level boundary: block elements always close on
+/// a newline, exactly as at the start of a fresh parse).
+pub fn split_blocks(src: &str) -> Vec<String> {
+    let mut starts: Vec<usize> = Vec::new();
+    let mut depth = 0i32;
+    for (event, range) in Parser::new_ext(src, options()).into_offset_iter() {
+        match event {
+            // A block opening at the top level begins a new segment; nested
+            // opens (list items, table cells, inline spans) stay inside it.
+            Event::Start(_) => {
+                if depth == 0 {
+                    starts.push(range.start);
+                }
+                depth += 1;
+            }
+            Event::End(_) => depth -= 1,
+            // Standalone top-level block events (a thematic break) are their own
+            // segment; anything standalone at depth > 0 is inline and ignored.
+            _ => {
+                if depth == 0 {
+                    starts.push(range.start);
+                }
+            }
+        }
+    }
+
+    if starts.is_empty() {
+        // No parsed block (empty or whitespace-only input): one empty tail.
+        return vec![src.to_string()];
+    }
+
+    starts
+        .iter()
+        .enumerate()
+        .map(|(i, &start)| {
+            let end = starts.get(i + 1).copied().unwrap_or(src.len());
+            src[start..end].to_string()
+        })
+        .collect()
+}
+
+pub fn render(src: &str) -> String {
+    let opts = options();
 
     let parser = Parser::new_ext(src, opts).map(|ev| match ev {
         // Raw HTML must never reach inner_html as live markup. Textify it so
@@ -200,6 +262,65 @@ mod tests {
             html.contains("<img src=\"data:image/png;base64,iVBORw0KGgo=\" alt=\"a\" />"),
             "data:image sources should remain available for rendered images: {html}"
         );
+    }
+
+    #[test]
+    fn split_blocks_concatenation_is_byte_identical() {
+        // A full, received message rendered block-by-block must be byte-for-byte
+        // identical to rendering the whole thing in one pass.
+        let src = r#"# Heading
+
+A paragraph with **bold**, *emphasis*, `inline code`, and a
+[safe link](https://example.com/path?q=1).
+
+- first
+- second
+- [x] done
+
+| h1 | h2 |
+|----|----|
+| a  | b  |
+
+```rust
+let x = 1;
+// blank line inside a fence:
+
+let y = 2;
+```
+
+> a quote
+> spanning lines
+
+---
+
+Trailing paragraph.
+"#;
+        let whole = render(src);
+        let joined: String = split_blocks(src).iter().map(|s| render(s)).collect();
+        assert_eq!(
+            joined, whole,
+            "block-split render must equal single-parse render"
+        );
+    }
+
+    #[test]
+    fn split_blocks_keeps_fence_whole_across_blank_lines() {
+        // A fenced code block contains a blank line; naive blank-line splitting
+        // would fragment it. It must remain a single segment.
+        let src = "```\na\n\nb\n```\n";
+        let segs = split_blocks(src);
+        assert_eq!(
+            segs.len(),
+            1,
+            "fence with blank line must be one block: {segs:?}"
+        );
+        assert_eq!(render(&segs[0]), render(src));
+    }
+
+    #[test]
+    fn split_blocks_separates_paragraphs() {
+        let segs = split_blocks("one\n\ntwo\n\nthree");
+        assert_eq!(segs.len(), 3, "three paragraphs → three segments: {segs:?}");
     }
 
     #[test]

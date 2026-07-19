@@ -14,7 +14,6 @@ use wasm_bindgen::JsCast;
 
 use crate::components::PermissionPrompts;
 use crate::daemon::{daemon_url_from_env, Daemon};
-use crate::markdown::render as render_md;
 use crate::model::{Block, Role, ToolStatus, Turn};
 
 #[component]
@@ -219,10 +218,10 @@ fn FloatAssistant(idx: usize, turns: RwSignal<Vec<Turn>>) -> impl IntoView {
         <div class="ocean-float__msg ocean-float__msg--agent">
             <Show when=has_text>
                 <div class="ocean-float__bubble">
-                    <span
-                        inner_html=move || render_md(&text())
-                        on:click=crate::host::open_external_link_click
-                    ></span>
+                    <crate::markdown_stream::MarkdownStream
+                        text=Signal::derive(text)
+                        class="ocean-float__md"
+                    />
                 </div>
             </Show>
             <For
