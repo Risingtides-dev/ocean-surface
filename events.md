@@ -2273,3 +2273,11 @@ area:      infra
 
 Auto-deploy rail was red: 82c507a's build_app extraction left ServeDir::new(&dist) where dist is already &Path — clippy needless_borrows_for_generic_args under -D warnings failed the rail's build after tests passed. My miss: the landing gate ran proxy tests + fmt but not clippy on the proxy crate. One-line corrective a309c46 landed; rail should promote through 9ee4abd..a309c46 on next cycle. Proxy clippy joins the standing gate chain for proxy-touching landings.
 _________________________________________________________________________________
+time:      [18:34] [19-07-26]
+agent:     [claude] [fable 5]
+worktree:  fix/task52-open-transcript (fable builder sub)
+type:      feature-request
+area:      frontend
+
+TASK-52 landed 0d344e1 (smaths: "get away from the bubbled replys so we have space for these components to breathe"): assistant turns are DE-BUBBLED — no card background/border/radius/shadow, body spans the full transcript rail. Two-measure layout: prose re-imposes a 74ch readable measure on .block--text while rendered components (kanban/table/dashboard/chart/plot/form/callout/confirm/map/video/etc) break out to full rail width with native components.css chrome restored. User bubbles deliberately unchanged (voice contrast). Specular streaming breath removed — live-activity row owns the live signal. 7 new source-assertion tests in tests/open_transcript_layout.rs pin the contract; 636+ tests, wasm check, fmt, trunk bundle all green. NOTE for TASK-46-B: ocean's sync-pending banner block in transcript.css was untouched but he must rebase onto this before stage-D review.
+_________________________________________________________________________________
