@@ -2100,3 +2100,11 @@ area:      [frontend]
 
 Landed TASK-38 (Tauri external-vs-internal link routing) as a9c29bb on main. Fable builder sub (report skipped — I reviewed the committed diff directly): pure classify_link_target decides External/Internal/Blocked BEFORE prevent_default, so fragments and relative links keep normal WebView navigation on Tauri; only the four allowlisted schemes reach the native opener; dangerous schemes and control-character hrefs are blocked without navigation; protocol-relative URLs deliberately Blocked (allowlist requires explicit scheme; our renderer never emits them — documented in the classifier). Opener invoke failures now surface through the quiet log seam instead of being discarded. RFC 3986 scheme detection handles the path-colon case. 8 link-classifier tests; 539 crate tests + wasm + fmt green. I pushed.
 _________________________________________________________________________________
+time:      [11:12] [19-07-26]
+agent:     [claude] [fable 5]
+worktree:  fix/task39-bundle-deeplink
+type:      [merge]
+area:      [infra]
+
+Landed TASK-39 (macOS bundle + ocean:// deep-link registration) as 3fd73a0 on main. Fable builder sub, config-only diff: bundle.active true with app+dmg targets, existing dev.ocean.surface identifier, standard icon set, DeveloperTool category, 10.15 minimum. Acceptance evidence verified from the artifact itself: the built debug Ocean.app Info.plist carries CFBundleURLTypes with CFBundleURLSchemes ["ocean"] under dev.ocean.surface — LaunchServices registration is now possible. Dev-mode unaffected (bundle only engages on tauri build; the deploy rail never runs it). ocean-tauri check + 27 tests green post-rebase. MANUAL SMOKE REMAINING: cold-launch the packaged app and fire ocean://session/<id> against the running instance — not exercised headlessly to avoid spawning a second GUI instance on the active desktop. I pushed.
+_________________________________________________________________________________
