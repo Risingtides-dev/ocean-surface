@@ -2084,3 +2084,11 @@ area:      [frontend]
 
 Landed TASK-33 (capture-bound voice completion admission, CRITICAL) as d85a6ef on main. Fable builder sub, my review at all four seams: new pure voice/admit.rs (CaptureId stamped at capture start, VoiceGen minted on every mode/lifecycle transition, admit() rejects on generation or mode mismatch and hard-rejects under Off); late listen::start handles torn down when stale; error statuses admission-gated; transcripts route by capture identity — the mutable HANDS_FREE router and per-mode DICTATE_CB swapping are gone, closing the audited mid-upload auto-send and post-Off delivery defects plus the mic-ownership race codex added to the contract. 9 pure decider tests; 526 crate tests + wasm + fmt green after rebase over TASK-34. I pushed. TASK-36 (daemon-direct voice transport) is now unblocked on voice/mod.rs.
 _________________________________________________________________________________
+time:      [10:58] [19-07-26]
+agent:     [claude] [fable 5]
+worktree:  fix/task37-native-watcher
+type:      [merge]
+area:      [frontend]
+
+Landed TASK-37 (resilient native watcher admission) as 3cc50c4 on main. Fable builder sub, my review: pure admit_watches processes each path independently (a stale entry no longer poisons the batch), returns typed WatchOutcome; replacement installs before retiring so a failed re-watch preserves the prior watcher; unwatch resolves deleted paths via parent-canonicalize+rejoin so watchers stop leaking; host wrapper returns typed WatchAdmission with the zero-watchable case surfaced through the quiet log seam; unused tauri-plugin-fs init, dependency, and fs:allow-watch capability removed (opener wiring untouched per verdict). 14 new tests across both crates; gates green on both (531 ui + wasm + fmt; 27 ocean-tauri standalone — note ocean-tauri carries 12 PRE-EXISTING fmt diffs verified present on base, left for a dedicated format commit). Both existing callers use let-underscore so ocean's in-flight TASK-32 is source-compatible. I pushed. TASK-38 (link routing, host.rs) now unblocked.
+_________________________________________________________________________________
