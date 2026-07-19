@@ -2281,3 +2281,11 @@ area:      frontend
 
 TASK-52 landed 0d344e1 (smaths: "get away from the bubbled replys so we have space for these components to breathe"): assistant turns are DE-BUBBLED — no card background/border/radius/shadow, body spans the full transcript rail. Two-measure layout: prose re-imposes a 74ch readable measure on .block--text while rendered components (kanban/table/dashboard/chart/plot/form/callout/confirm/map/video/etc) break out to full rail width with native components.css chrome restored. User bubbles deliberately unchanged (voice contrast). Specular streaming breath removed — live-activity row owns the live signal. 7 new source-assertion tests in tests/open_transcript_layout.rs pin the contract; 636+ tests, wasm check, fmt, trunk bundle all green. NOTE for TASK-46-B: ocean's sync-pending banner block in transcript.css was untouched but he must rebase onto this before stage-D review.
 _________________________________________________________________________________
+time:      [19:40] [19-07-26]
+agent:     [claude] [fable 5]
+worktree:  task-59-cache-prune (fable builder sub)
+type:      feature-request
+area:      infra
+
+TASK-59 landed 1dd8f15: cargo cache pruning rail after today's ENOSPC (158GB emergency purge). scripts/prune-cargo-caches.sh — dry-run default, single delete primitive with hard protected-path denylist (canonical target/release NEVER touched: live daemon+proxy binaries), gitdir-ownership classification so other repos' worktrees under ~/.worktrees are skipped (the literal spec would have deleted syzygy/Horus/Thoth lanes — sub caught it), pgrep build guard (proved itself live during this landing by refusing while sub-58 built). LaunchAgent plist Sunday 05:00 --apply, homebrew bash pinned (script needs bash>=4). Fable installs the agent at this closeout. Fixture-verified destructive path (10 assertions), plutil OK.
+_________________________________________________________________________________
