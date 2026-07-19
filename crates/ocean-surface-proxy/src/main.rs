@@ -39,9 +39,6 @@ use tracing_subscriber::EnvFilter;
 const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:4780";
 const DEFAULT_LIVEKIT_ROOM_ID: &str = "project:surface-main";
 const DEFAULT_VOICE_PROFILE: &str = "leo";
-// Default Google Maps JS API key (browser key, referrer-restricted in GCP).
-// Override at runtime with GOOGLE_MAPS_API_KEY.
-const DEFAULT_MAPS_KEY: &str = "AIzaSyCmUHR3JD9AZfw9DiRvvSSZsRitdGuunPs";
 
 const CALL_PLACE_DAEMON_PATH: &str = "/v1/calls/place";
 
@@ -154,13 +151,13 @@ async fn main() -> anyhow::Result<()> {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
 
-    // Google Maps JS API key for the map component. Env override, else the
-    // configured default. Empty disables the map (component renders a notice).
+    // Google Maps JS API key for the map component. An explicit, non-empty
+    // environment value enables maps; absence is safe and leaves the component
+    // on its existing unavailable notice. Never ship an organization-owned
+    // default key in the public source tree or release bundle.
     let maps_key = std::env::var("GOOGLE_MAPS_API_KEY")
         .ok()
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| Some(DEFAULT_MAPS_KEY.to_string()))
         .filter(|s| !s.is_empty());
     if maps_key.is_some() {
         tracing::info!("Google Maps key resolved; map component enabled");

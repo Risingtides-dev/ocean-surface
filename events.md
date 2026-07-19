@@ -2225,3 +2225,20 @@ area:      [frontend]
 
 Landed TASK-49 (render hygiene, wave-5 final slice) as 3bb76d4 on main. Fable builder sub, my review: council tally names now ellipsize (min-width:0 against the grid min-width:auto trap, rationale commented); three dead selectors deleted (.island-group, .ocean-council-modal__frame, .ocean-map__panel + descendant) with a new dead_selector_removal.rs guard asserting no emitter AND no rule for each; the markdown target/rel revert now matches through href="" without the trailing bracket so sanitized links carrying titles are reverted too — regression asserts both the stripped injection and the preserved inert anchor, sanitizer allowlist untouched. 636+12 tests green, wasm + fmt clean. I pushed. WAVE-5 FULLY COMPLETE: 42/47/48/49 all landed. Board's cut work is now exhausted — in flight: ocean's TASK-46-B held branch (codex four production admissions binding), ocean-os daemon-core exploration.
 _________________________________________________________________________________
+
+time:      [03:52pm] [07-19-26]
+agent:     [ocean] [gpt-5]
+worktree:  [remove-public-maps-key-20260719]
+type:      security
+area:      proxy configuration
+
+Removed the organization-owned Google Maps browser key default from public
+source after the full-history audit correlated it with GitHub secret-scanning
+alert 1. Maps now enable only through an explicit non-empty
+`GOOGLE_MAPS_API_KEY`; absence preserves the existing unavailable notice. The
+key value was not copied into docs or logs by this change. Gates: `cargo fmt
+--check`, `cargo check -p ocean-surface-proxy`, current-tree Gitleaks GCP
+rule (zero findings), and `git diff --check`. Cloud-side restriction/rotation
+and alert resolution remain operator-side follow-up; public history was not
+rewritten.
+_________________________________________________________________________________

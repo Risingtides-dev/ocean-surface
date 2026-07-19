@@ -124,7 +124,9 @@ Basic auth is enabled without nonblank credentials, or if auth is disabled on a
 non-loopback bind. Tailnet traffic is encrypted; direct LAN HTTP should be used
 only on a trusted network because Basic auth does not encrypt transport.
 Override the daemon or voice profile with `OCEAN_DAEMON_URL` and
-`OCEAN_VOICE_PROFILE`.
+`OCEAN_VOICE_PROFILE`. Maps are optional: set a referrer-restricted
+`GOOGLE_MAPS_API_KEY` to enable them. No organization-owned Maps key is bundled;
+without the variable, the map component renders its unavailable notice.
 
 ### Verify before you open the browser
 

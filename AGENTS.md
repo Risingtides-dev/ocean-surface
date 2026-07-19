@@ -252,7 +252,9 @@ Web surface session UI:
 The proxy holds no provider credentials. `/api/stt` and `/api/tts` forward to
 the daemon's `/v1/voice/stt` and `/v1/voice/tts`, where `ocean-os` resolves the
 xAI key per-request (env `XAI_API_KEY` / auth.json `xai` block). Do not add
-provider credentials or direct provider calls to the proxy.
+provider credentials or direct provider calls to the proxy. Google Maps is
+optional and enabled only by an explicit non-empty `GOOGLE_MAPS_API_KEY`; never
+commit an organization-owned browser key or restore a compiled-in default.
 
 ## Build / Check
 
