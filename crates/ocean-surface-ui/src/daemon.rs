@@ -1394,7 +1394,239 @@ pub async fn fetch_fs_file(base_url: &str, path: &str) -> Option<FsFileResponse>
     resp.json::<FsFileResponse>().await.ok()
 }
 
-/// A component the agent docked into the persistent pinned rail. Keyed by
+// ── GitHub read-model types (Lane C / TASK-32) ──────────────────────────
+// Consumed by the repo panel's GitHubSection. All four routes are read-only
+// public projections from the daemon's /v1/repo/github/{project_id}/* family.
+// Every envelope carries a `rate` block for the embedded rate-limit bar.
+//
+// Naming convention: `Gh` prefix on surface-local DTOs to distinguish from
+// upstream daemon types. Fields omit unknown (serde default) for forward compat.
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct GhRate {
+    pub remaining: u64,
+    pub reset: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct GhLabel {
+    pub name: String,
+    pub color: String,
+    #[serde(default)]
+    pub name_truncated: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct GhPullListItem {
+    pub number: u64,
+    pub title: String,
+    #[serde(default)]
+    pub title_truncated: bool,
+    pub author: String,
+    #[serde(default)]
+    pub author_truncated: bool,
+    pub branch: String,
+    pub base_branch: String,
+    pub head_sha: String,
+    #[serde(default)]
+    pub draft: bool,
+    #[serde(default)]
+    pub labels: Vec<GhLabel>,
+    #[serde(default)]
+    pub labels_truncated: bool,
+    pub state: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct GhPullListEnvelope {
+    pub ok: bool,
+    #[serde(default)]
+    pub pulls: Vec<GhPullListItem>,
+    #[serde(default)]
+    pub pulls_truncated: bool,
+    pub page: u32,
+    pub per_page: u32,
+    pub has_more: bool,
+    #[serde(default)]
+    pub rate: GhRate,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct GhPullDetail {
+    pub number: u64,
+    pub title: String,
+    #[serde(default)]
+    pub title_truncated: bool,
+    pub author: String,
+    #[serde(default)]
+    pub author_truncated: bool,
+    pub branch: String,
+    pub base_branch: String,
+    pub head_sha: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub body_truncated: bool,
+    #[serde(default)]
+    pub draft: bool,
+    #[serde(default)]
+    pub labels: Vec<GhLabel>,
+    #[serde(default)]
+    pub labels_truncated: bool,
+    pub state: String,
+    pub mergeable: Option<bool>,
+    #[serde(default)]
+    pub requested_reviewers: Vec<String>,
+    #[serde(default)]
+    pub requested_reviewers_truncated: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct GhPullDetailEnvelope {
+    pub ok: bool,
+    pub pull: GhPullDetail,
+    #[serde(default)]
+    pub rate: GhRate,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct GhCheckRun {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub name_truncated: bool,
+    pub status: String,
+    pub conclusion: Option<String>,
+    pub details_url: Option<String>,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct GhChecksEnvelope {
+    pub ok: bool,
+    #[serde(default)]
+    pub checks: Vec<GhCheckRun>,
+    #[serde(default)]
+    pub checks_truncated: bool,
+    #[serde(default)]
+    pub rate: GhRate,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct GhReview {
+    pub reviewer: String,
+    #[serde(default)]
+    pub reviewer_truncated: bool,
+    pub state: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub body_truncated: bool,
+    pub submitted_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct GhReviewsEnvelope {
+    pub ok: bool,
+    #[serde(default)]
+    pub reviews: Vec<GhReview>,
+    #[serde(default)]
+    pub reviews_truncated: bool,
+    pub page: u32,
+    pub per_page: u32,
+    pub has_more: bool,
+    #[serde(default)]
+    pub rate: GhRate,
+}
+
+/// Fetch pull requests for a project.
+///
+/// `state` is "open", "closed", or "all". The daemon caps decimals in
+/// `page`/`per_page` for us.
+pub async fn fetch_gh_pulls(
+    base_url: &str,
+    project_id: &str,
+    state: &str,
+    page: u32,
+    per_page: u32,
+) -> Option<GhPullListEnvelope> {
+    let url = format!(
+        "{}/v1/repo/github/{}/pulls?state={}&page={}&per_page={}",
+        base_url.trim_end_matches('/'),
+        project_id,
+        state,
+        page,
+        per_page
+    );
+    let resp = gloo_net::http::Request::get(&url).send().await.ok()?;
+    resp.json::<GhPullListEnvelope>().await.ok()
+}
+
+/// Fetch one pull request's detail body + metadata.
+pub async fn fetch_gh_pull_detail(
+    base_url: &str,
+    project_id: &str,
+    number: u64,
+) -> Option<GhPullDetailEnvelope> {
+    let url = format!(
+        "{}/v1/repo/github/{}/pulls/{}",
+        base_url.trim_end_matches('/'),
+        project_id,
+        number
+    );
+    let resp = gloo_net::http::Request::get(&url).send().await.ok()?;
+    resp.json::<GhPullDetailEnvelope>().await.ok()
+}
+
+/// Fetch check runs for a full 40-hex head SHA.
+pub async fn fetch_gh_checks(
+    base_url: &str,
+    project_id: &str,
+    head_sha: &str,
+) -> Option<GhChecksEnvelope> {
+    let url = format!(
+        "{}/v1/repo/github/{}/head-sha/{}/checks",
+        base_url.trim_end_matches('/'),
+        project_id,
+        head_sha
+    );
+    let resp = gloo_net::http::Request::get(&url).send().await.ok()?;
+    resp.json::<GhChecksEnvelope>().await.ok()
+}
+
+/// Fetch reviews for a pull request (paginated).
+pub async fn fetch_gh_reviews(
+    base_url: &str,
+    project_id: &str,
+    number: u64,
+    page: u32,
+    per_page: u32,
+) -> Option<GhReviewsEnvelope> {
+    let url = format!(
+        "{}/v1/repo/github/{}/pulls/{}/reviews?page={}&per_page={}",
+        base_url.trim_end_matches('/'),
+        project_id,
+        number,
+        page,
+        per_page
+    );
+    let resp = gloo_net::http::Request::get(&url).send().await.ok()?;
+    resp.json::<GhReviewsEnvelope>().await.ok()
+}
 /// `component_id` (upsert — last write wins); rendered by the same
 /// [`ComponentView`](crate::components::ComponentView) as an inline component.
 #[derive(Debug, Clone)]
