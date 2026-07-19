@@ -609,6 +609,16 @@
   color: var(--fg-4);
 }
 
+/* Anti-zoom (TASK-41): the command-palette query field is 14px, which
+   force-zooms iOS Safari on focus. Lift only the mobile (coarse-pointer) size
+   to the 16px floor; desktop is untouched. Mirrors the composer floor in
+   styles/composer.css. */
+@media (pointer: coarse) {
+  .palette-input {
+    font-size: 16px;
+  }
+}
+
 .palette-results {
   flex: 1;
   min-height: 0;

@@ -166,7 +166,10 @@
 
 .island-results {
   min-height: 0;
+  /* dvh clamps to the live viewport when the mobile keyboard is open; 100vh
+     line first as the fallback for engines without dvh (TASK-41). */
   max-height: min(464px, calc(100vh - var(--island-top) - 72px));
+  max-height: min(464px, calc(100dvh - var(--island-top) - 72px));
   overflow-y: auto;
   padding: 4px 0 0;
   border-radius: var(--radius);
@@ -375,7 +378,10 @@
   z-index: 121;
   box-sizing: border-box;
   width: min(520px, calc(100vw - 32px));
+  /* dvh keeps the stage above the mobile keyboard; vh line first as the
+     fallback for engines without dvh (TASK-41). */
   max-height: min(520px, calc(100vh - 24px));
+  max-height: min(520px, calc(100dvh - 24px));
   margin-inline: auto;
   padding: 48px var(--island-stage-pad) var(--island-stage-pad);
   border: 1px solid var(--border-subtle);
@@ -392,6 +398,7 @@
 .island-stage--agent {
   width: min(460px, calc(100vw - 32px));
   max-height: min(330px, calc(100vh - 24px));
+  max-height: min(330px, calc(100dvh - 24px));
 }
 
 .island-stage--sessions {
@@ -719,6 +726,7 @@
 
 .island-sessions .island-results {
   max-height: min(370px, calc(100vh - 132px));
+  max-height: min(370px, calc(100dvh - 132px));
 }
 
 .island-recall__search {
@@ -742,8 +750,24 @@
   font: 400 13px/1.4 var(--font);
 }
 
+/* Anti-zoom (TASK-41): the island search and recall fields are 13px, which
+   force-zooms iOS Safari on focus — jarring on the two fields a phone user hits
+   most after the composer (find/switch a session, recall a past turn). Lift
+   only the mobile (coarse-pointer) size to the 16px floor; desktop is
+   untouched. Mirrors the composer floor in styles/composer.css. */
+@media (pointer: coarse) {
+  .island-search__input,
+  .island-recall__input {
+    font-size: 16px;
+  }
+}
+
 .island-recall__results {
+  /* dvh so the results clamp to the live viewport when the iOS/Android keyboard
+     is open (100vh stays full-height and would run behind the keyboard); 100vh
+     line kept first as the fallback for engines without dvh. */
   max-height: min(360px, calc(100vh - 132px));
+  max-height: min(360px, calc(100dvh - 132px));
   overflow-y: auto;
   padding: 2px 4px 4px;
 }
@@ -816,6 +840,7 @@
     right: 10px;
     width: calc(100vw - 20px);
     max-height: min(520px, calc(100vh - 18px));
+    max-height: min(520px, calc(100dvh - 18px));
   }
 
   .island-stage__header {

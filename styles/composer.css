@@ -532,6 +532,21 @@
   cursor: not-allowed;
 }
 
+/* Anti-zoom (TASK-41): iOS Safari force-zooms the page when a focused
+   input/textarea computes to < 16px. The desktop 14px reads correctly, but on
+   a phone that zoom shifts and rescales the whole layout the moment the
+   composer gains focus. Bump only the mobile (coarse-pointer) computed size to
+   the 16px floor so focus never triggers zoom; desktop sizing is untouched.
+   This is the accessible fix — never maximum-scale/user-scalable=no.
+   Sibling touch-focused fields (island search/recall, session + rooms create,
+   command palette) get the same 16px floor co-located in their own
+   stylesheets under a matching (pointer: coarse) block. */
+@media (pointer: coarse) {
+  .ocean-composer__input {
+    font-size: 16px;
+  }
+}
+
 /* Trailing action — one circular icon slot shared by Send (idle, accent) and
    Stop (streaming, halt-red). Mutually exclusive; both live in `action`. */
 .ocean-composer__send,

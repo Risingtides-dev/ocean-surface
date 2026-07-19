@@ -249,6 +249,17 @@
   color: var(--fg-3);
 }
 
+/* Anti-zoom (TASK-41): session-create and the rooms create/composer/add-agent/
+   cron fields all compute to 12-13px, which force-zooms iOS Safari on focus.
+   Lift only the mobile (coarse-pointer) size to the 16px floor; desktop is
+   untouched. Placed after the cron override so it wins the cascade. Mirrors the
+   composer floor in styles/composer.css. */
+@media (pointer: coarse) {
+  :is(.rooms-panel__create-input, .rooms-policy__cron, .rooms-addagent__input, .sessions-create__input, .rooms-composer__input) {
+    font-size: 16px;
+  }
+}
+
 :is(.rooms-panel__create-input, .rooms-policy__cron, .rooms-addagent__input, .sessions-create__input, .rooms-composer__input):hover:not(:disabled) {
   border-color: var(--border-strong);
 }
