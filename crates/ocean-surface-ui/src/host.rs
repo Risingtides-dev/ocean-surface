@@ -75,10 +75,95 @@ pub struct RepoState {
 pub fn running_in_tauri() -> bool {
     crate::daemon::running_as_tauri()
 }
+/// How a rendered anchor's raw `href` should be handled inside the native
+/// shell, decided *before* any `prevent_default`. The three arms are mutually
+/// exclusive and cover every href the Markdown renderer can emit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LinkTarget {
+    /// An externally-openable scheme on the native allowlist (`http`, `https`,
+    /// `mailto`, `tel`). Intercept the click and hand it to the OS opener.
+    External,
+    /// A fragment (`#…`) or relative reference. Leave the click untouched so
+    /// the WebView performs its normal in-document / same-origin navigation.
+    Internal,
+    /// Anything else — a dangerous or unsupported scheme (`javascript:`,
+    /// `data:`, …), a protocol-relative URL (`//host/…`), or an href carrying
+    /// control characters / surrounding whitespace. Swallow the click so the
+    /// WebView neither navigates nor executes it, but never invoke the opener.
+    Blocked,
+}
+
+/// True when `href` begins with an RFC 3986 scheme (`ALPHA *( ALPHA / DIGIT /
+/// "+" / "-" / "." ) ":"`). Used to tell a dangerous scheme apart from a
+/// relative reference: a colon that follows a `/` (e.g. `foo/bar:baz`) is a
+/// path character, not a scheme delimiter, so such hrefs are *not* schemes.
+fn has_scheme(href: &str) -> bool {
+    let Some(colon) = href.find(':') else {
+        return false;
+    };
+    let scheme = &href[..colon];
+    let mut chars = scheme.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
+/// Classify a raw anchor `href` into a [`LinkTarget`] — a pure function so the
+/// routing decision is testable without a DOM.
+///
+/// Ordering matters: control-character / whitespace rejection runs first (it
+/// mirrors the native `allowed_external_url` boundary so a hostile href can
+/// neither reach the opener nor the WebView), then fragment and
+/// protocol-relative are decided before scheme sniffing.
+///
+/// **Protocol-relative ruling (`//host/path`):** deliberately [`Blocked`],
+/// not treated as external. Two reasons: (1) the native allowlist requires an
+/// explicit `http(s)://` prefix, so forwarding `//host/…` to the opener would
+/// only ever produce a guaranteed rejection; (2) Ocean's Markdown renderer
+/// never emits scheme-relative URLs, so any that appear are untrusted. Blocking
+/// satisfies the contract requirement that they never "fall through by
+/// accident" to WebView navigation.
+///
+/// [`Blocked`]: LinkTarget::Blocked
+fn classify_link_target(href: &str) -> LinkTarget {
+    // Surrounding whitespace or any control character: never safe to act on.
+    if href.trim() != href || href.chars().any(char::is_control) {
+        return LinkTarget::Blocked;
+    }
+    if href.starts_with('#') {
+        return LinkTarget::Internal;
+    }
+    // Protocol-relative (`//host/path`) — decided before the relative-path
+    // fall-through so it can't be mistaken for a root-relative `/path`.
+    if href.starts_with("//") {
+        return LinkTarget::Blocked;
+    }
+    let lower = href.to_ascii_lowercase();
+    if lower.starts_with("https://")
+        || lower.starts_with("http://")
+        || lower.starts_with("mailto:")
+        || lower.starts_with("tel:")
+    {
+        return LinkTarget::External;
+    }
+    // A remaining scheme (javascript:, data:, ftp:, …) is unsupported and
+    // unsafe to navigate; everything else is a relative reference.
+    if has_scheme(href) {
+        LinkTarget::Blocked
+    } else {
+        LinkTarget::Internal
+    }
+}
+
 /// Intercept a rendered Markdown link inside the native shell and hand it to
 /// the OS default browser. WKWebView does not reliably honor `target="_blank"`
-/// for these dynamically injected anchors. Browser/PWA hosts keep their normal
-/// anchor behavior because this handler is a no-op outside Tauri.
+/// for these dynamically injected anchors — but only *external* links are
+/// intercepted: fragment (`#…`) and relative hrefs are classified before any
+/// `prevent_default` and left to the WebView so in-document and same-origin
+/// navigation keep working. Browser/PWA hosts keep their normal anchor
+/// behavior because this handler is a no-op outside Tauri.
 pub fn open_external_link_click(event: web_sys::MouseEvent) {
     if !running_in_tauri()
         || event.button() != 0
@@ -100,16 +185,25 @@ pub fn open_external_link_click(event: web_sys::MouseEvent) {
     let Some(url) = anchor.get_attribute("href") else {
         return;
     };
-    if url.is_empty() {
-        return;
-    }
 
-    event.prevent_default();
-    wasm_bindgen_futures::spawn_local(async move {
-        let args = Object::new();
-        let _ = Reflect::set(&args, &JsValue::from_str("url"), &JsValue::from_str(&url));
-        let _ = tauri_invoke("open_external_url", &args).await;
-    });
+    match classify_link_target(&url) {
+        // Fragment / relative: do not touch the event — the WebView navigates.
+        LinkTarget::Internal => {}
+        // Dangerous or unsupported href: block navigation, never open it.
+        LinkTarget::Blocked => event.prevent_default(),
+        LinkTarget::External => {
+            event.prevent_default();
+            wasm_bindgen_futures::spawn_local(async move {
+                let args = Object::new();
+                let _ = Reflect::set(&args, &JsValue::from_str("url"), &JsValue::from_str(&url));
+                if let Err(err) = tauri_invoke("open_external_url", &args).await {
+                    // Quiet log seam (mirrors the native watcher failure path):
+                    // a rejected opener is surfaced here, never dropped silently.
+                    log::warn!("native opener: open_external_url rejected for {url}: {err:?}");
+                }
+            });
+        }
+    }
 }
 
 /// Open the native folder picker. `None` on non-Tauri hosts or user cancel.
@@ -535,6 +629,118 @@ fn jsval_to<T: serde::de::DeserializeOwned + Default>(val: &JsValue) -> T {
     // Use a default on parse failure so a single malformed payload
     // doesn't poison the subscriber callback chain.
     serde_json::from_str(&s).unwrap_or_else(|_| serde_json::from_str("null").unwrap_or_default())
+}
+
+#[cfg(test)]
+mod link_target_tests {
+    use super::{classify_link_target, LinkTarget};
+
+    #[test]
+    fn fragment_is_internal() {
+        // In-document anchor: must fall through to WebView navigation.
+        assert_eq!(classify_link_target("#section"), LinkTarget::Internal);
+        assert_eq!(classify_link_target("#"), LinkTarget::Internal);
+    }
+
+    #[test]
+    fn relative_paths_are_internal() {
+        for href in [
+            "/projects/ocean",
+            "docs/readme.md",
+            "./sibling",
+            "../parent",
+            "?tab=events",
+            "path/to:file", // colon after a slash is a path char, not a scheme
+        ] {
+            assert_eq!(
+                classify_link_target(href),
+                LinkTarget::Internal,
+                "{href} should be Internal",
+            );
+        }
+    }
+
+    #[test]
+    fn https_and_http_are_external() {
+        assert_eq!(
+            classify_link_target("https://www.tiktok.com/@creator"),
+            LinkTarget::External,
+        );
+        assert_eq!(
+            classify_link_target("http://localhost:8790"),
+            LinkTarget::External,
+        );
+        // Scheme match is case-insensitive, mirroring the native allowlist.
+        assert_eq!(
+            classify_link_target("HTTPS://Example.com"),
+            LinkTarget::External,
+        );
+    }
+
+    #[test]
+    fn mailto_is_external() {
+        assert_eq!(
+            classify_link_target("mailto:creator@example.com"),
+            LinkTarget::External,
+        );
+    }
+
+    #[test]
+    fn tel_is_external() {
+        assert_eq!(
+            classify_link_target("tel:+15551234567"),
+            LinkTarget::External,
+        );
+    }
+
+    #[test]
+    fn dangerous_schemes_are_blocked() {
+        for href in [
+            "javascript:alert(1)",
+            "data:text/html,boom",
+            "ftp://host/file",
+            "vbscript:msgbox",
+        ] {
+            assert_eq!(
+                classify_link_target(href),
+                LinkTarget::Blocked,
+                "{href} should be Blocked",
+            );
+        }
+    }
+
+    #[test]
+    fn protocol_relative_is_blocked() {
+        // Deliberate ruling: `//host/path` is rejected, never forwarded to the
+        // opener and never allowed to fall through to WebView navigation.
+        assert_eq!(
+            classify_link_target("//evil.example.com/path"),
+            LinkTarget::Blocked,
+        );
+        assert_eq!(classify_link_target("//"), LinkTarget::Blocked);
+    }
+
+    #[test]
+    fn control_chars_and_whitespace_are_blocked() {
+        // Matches the native `allowed_external_url` rejection so an obfuscated
+        // href can neither reach the opener nor the WebView.
+        assert_eq!(
+            classify_link_target(" https://example.com"),
+            LinkTarget::Blocked,
+        );
+        assert_eq!(
+            classify_link_target("https://example.com\n"),
+            LinkTarget::Blocked,
+        );
+        assert_eq!(
+            classify_link_target("https://exa\tmple.com"),
+            LinkTarget::Blocked,
+        );
+        assert_eq!(
+            classify_link_target("javascript:\u{0000}alert(1)"),
+            LinkTarget::Blocked,
+        );
+    }
 }
 
 #[cfg(test)]
