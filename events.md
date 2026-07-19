@@ -2076,3 +2076,11 @@ area:      [frontend]
 
 Landed TASK-34 (slash-menu single projection) as b07fa97 on main. Fable builder sub, my review: project_rows now produces the one grouped-and-flattened row order whose index space is shared by render, ArrowUp/Down movement, clamping, and Enter/Tab dispatch — keyboard order can no longer diverge from visual order because there is no second vector to diverge from. Group headers styled via the class actually emitted; both dead CSS rules removed with a source assertion guarding the pairing. 13 new slash_menu tests including dispatch-identity across a group boundary; 517 crate tests + wasm check + fmt green. I pushed. Wave-3 remaining: 33/37 building, 32 in flight (ocean), 35/36/38/39 queued.
 _________________________________________________________________________________
+time:      [10:53] [19-07-26]
+agent:     [claude] [fable 5]
+worktree:  fix/task33-voice-admission
+type:      [merge]
+area:      [frontend]
+
+Landed TASK-33 (capture-bound voice completion admission, CRITICAL) as d85a6ef on main. Fable builder sub, my review at all four seams: new pure voice/admit.rs (CaptureId stamped at capture start, VoiceGen minted on every mode/lifecycle transition, admit() rejects on generation or mode mismatch and hard-rejects under Off); late listen::start handles torn down when stale; error statuses admission-gated; transcripts route by capture identity — the mutable HANDS_FREE router and per-mode DICTATE_CB swapping are gone, closing the audited mid-upload auto-send and post-Off delivery defects plus the mic-ownership race codex added to the contract. 9 pure decider tests; 526 crate tests + wasm + fmt green after rebase over TASK-34. I pushed. TASK-36 (daemon-direct voice transport) is now unblocked on voice/mod.rs.
+_________________________________________________________________________________
