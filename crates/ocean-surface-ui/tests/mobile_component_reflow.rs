@@ -121,13 +121,13 @@ fn px_value(body: &str, prop: &str) -> Option<u32> {
     value.parse::<u32>().ok()
 }
 
-/// The `min-height` px floor applied to a rule whose selector list contains
+/// The px value of `prop` applied to a rule whose selector list contains
 /// `selector`, searched only inside `@media (pointer: coarse)` blocks.
-fn coarse_min_height_px(css: &str, selector: &str) -> Option<u32> {
+fn coarse_prop_px(css: &str, selector: &str, prop: &str) -> Option<u32> {
     for block in coarse_blocks(css) {
         for (selectors, body) in rules_in(&block) {
             if selectors.contains(selector) {
-                if let Some(px) = px_value(&body, "min-height") {
+                if let Some(px) = px_value(&body, prop) {
                     return Some(px);
                 }
             }
@@ -196,7 +196,7 @@ fn dashboard_stacking_preserves_the_video_auto_fit_override() {
 
 #[test]
 fn component_tap_targets_clear_44px_under_coarse_pointer() {
-    // Every interactive component control a touch user hits must report a
+    // Every non-table interactive control a touch user hits must report a
     // >= 44px min-height under @media (pointer: coarse). Folds finding 5
     // (.filetree__row was ~25px effective height).
     let css = read_components();
@@ -207,10 +207,9 @@ fn component_tap_targets_clear_44px_under_coarse_pointer() {
         ".form-submit",
         ".kanban-card",
         ".confirm__btn",
-        ".data-table__row td",
     ];
     for selector in targets {
-        let px = coarse_min_height_px(&css, selector).unwrap_or_else(|| {
+        let px = coarse_prop_px(&css, selector, "min-height").unwrap_or_else(|| {
             panic!(
                 "styles/components.css must set {selector} min-height inside a \
                  @media (pointer: coarse) block (TASK-42 44px tap floor)"
@@ -221,6 +220,29 @@ fn component_tap_targets_clear_44px_under_coarse_pointer() {
             "{selector} must clear the 44px coarse-pointer tap floor; found {px}px",
         );
     }
+}
+
+#[test]
+fn data_table_row_uses_height_not_min_height_for_its_44px_floor() {
+    // .data-table is a real <table> with border-collapse; CSS table-cell layout
+    // ignores min-height, so the row floor must use `height` (which acts as a
+    // minimum for table cells — they grow past it, never shrink below).
+    let css = read_components();
+    assert!(
+        coarse_prop_px(&css, ".data-table__row td", "min-height").is_none(),
+        "the .data-table__row td floor must NOT use min-height — table-cell \
+         layout ignores it, making the tap floor a silent no-op (TASK-42)",
+    );
+    let px = coarse_prop_px(&css, ".data-table__row td", "height").unwrap_or_else(|| {
+        panic!(
+            "styles/components.css must set .data-table__row td `height` inside \
+             a @media (pointer: coarse) block so table rows clear the tap floor"
+        )
+    });
+    assert!(
+        px >= 44,
+        ".data-table__row td must clear the 44px coarse-pointer tap floor; found {px}px",
+    );
 }
 
 #[test]

@@ -1666,8 +1666,14 @@ select.form-field__input {
   select.form-field__input,
   .form-submit,
   .kanban-card,
-  .confirm__btn,
-  .data-table__row td {
+  .confirm__btn {
     min-height: 44px;
+  }
+
+  /* .data-table is a real <table> with border-collapse; CSS table-cell layout
+     ignores min-height, but `height` behaves as a minimum (cells grow past it,
+     never shrink below), so it is the correct floor for a table row. */
+  .data-table__row td {
+    height: 44px;
   }
 }
