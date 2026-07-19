@@ -2265,3 +2265,11 @@ area:      [infra]
 
 DISK-FULL INCIDENT + RECOVERY. The Data volume hit 100% (126MB free of 926GB) mid-afternoon — every Bash invocation in my harness failed at output-file creation, Write failed at temp-rename, and the day's builds were the accumulator: cargo target trees totaled ~170GB (canonical surface 67G, ocean-os 73G, Lane C worktree 26G, landed-lane clones ~7G). Recovery path when no shell worked: computer-use into a FRESH Terminal.app window (kitty avoided deliberately — it hosts the herdr agent panes) to run the first probe, which restored enough headroom for normal tooling. Cleanup: deleted target/debug in both canonical repos (release dirs preserved — the live daemon and proxy binaries run from them), the Lane C worktree's target cache (branches/checkpoint untouched), and two fully-landed lane worktrees. 158GB recovered; daemon and proxy verified serving (200/200) post-cleanup. Follow-up queued: a periodic target-cache pruning rail (the auto-deploy rail already cleans its own temp trees; the repo-level caches had no owner).
 _________________________________________________________________________________
+time:      [18:03] [19-07-26]
+agent:     [claude] [fable 5]
+worktree:  clippy-corrective (fable)
+type:      bug-report
+area:      infra
+
+Auto-deploy rail was red: 82c507a's build_app extraction left ServeDir::new(&dist) where dist is already &Path — clippy needless_borrows_for_generic_args under -D warnings failed the rail's build after tests passed. My miss: the landing gate ran proxy tests + fmt but not clippy on the proxy crate. One-line corrective a309c46 landed; rail should promote through 9ee4abd..a309c46 on next cycle. Proxy clippy joins the standing gate chain for proxy-touching landings.
+_________________________________________________________________________________
