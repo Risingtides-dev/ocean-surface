@@ -33,7 +33,7 @@ use axum::{
 use base64::Engine;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
+use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:4780";
@@ -50,6 +50,14 @@ struct AppState {
     /// `reqwest` `.timeout()` covers the whole request lifetime including reading
     /// the body, which would sever those open-ended event streams mid-session.
     http: reqwest::Client,
+    /// TASK-73: buffered JSON forwards use a SEPARATE client that DOES carry a
+    /// timeout. Before this, every forward shared the untimed SSE client, so a
+    /// wedged daemon hung each JSON passthrough indefinitely — tasks and
+    /// sockets accumulated on the proxy with no upper bound and the operator
+    /// saw a spinner instead of an error. SSE keeps the untimed client above
+    /// (a timeout there would sever live event streams mid-session), so the
+    /// split is: streams untimed by necessity, request/response bounded.
+    http_json: reqwest::Client,
     voice_profile: String,
     daemon_url: String,
     default_livekit_room_id: String,
@@ -187,7 +195,9 @@ async fn main() -> anyhow::Result<()> {
             .filter(|s| !s.trim().is_empty());
         match (user, pass) {
             (Some(user), Some(pass)) => {
-                tracing::info!(user = %user, "HTTP Basic auth enabled");
+                // TASK-73: log that auth is ON, not who. The username is half
+                // the credential pair and the log stream is not a secret store.
+                tracing::info!("HTTP Basic auth enabled");
                 Some((user, pass))
             }
             _ => {
@@ -212,6 +222,11 @@ async fn main() -> anyhow::Result<()> {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("reqwest client with no-redirect policy should build"),
+        http_json: reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(JSON_FORWARD_TIMEOUT)
+            .build()
+            .expect("reqwest json client should build"),
         voice_profile,
         daemon_url,
         default_livekit_room_id,
@@ -384,7 +399,13 @@ fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
             state.clone(),
             basic_auth_gate,
         ))
-        .layer(CorsLayer::permissive())
+        // TASK-73: no CORS layer in the deployed topology. The app is served
+        // by this same proxy and `config_payload` deliberately hands the client
+        // an empty daemon_url so it never goes cross-origin — permissive() was
+        // dev convenience that also answered preflights BEFORE the auth gate
+        // and stamped `*` onto 401s. Nothing legitimate needs it; a future
+        // genuine cross-origin consumer should get a narrow allow-list here,
+        // not a blanket permit.
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -431,7 +452,16 @@ async fn basic_auth_gate(State(state): State<Arc<AppState>>, req: Request, next:
 
     if let Some(creds) = provided {
         if let Some((u, p)) = creds.split_once(':') {
-            if u == want_user && p == want_pass {
+            // TASK-73: constant-time compare. `==` on str short-circuits on
+            // length and first differing byte, which leaks a timing signal on
+            // the single most security-critical comparison in this binary.
+            // Tunnel jitter almost certainly swamps it today — this is cheap
+            // insurance, not a claimed live exploit. Both halves are compared
+            // unconditionally (no `&&` short-circuit) so a wrong username
+            // costs the same as a wrong password.
+            let user_ok = constant_time_eq(u.as_bytes(), want_user.as_bytes());
+            let pass_ok = constant_time_eq(p.as_bytes(), want_pass.as_bytes());
+            if user_ok & pass_ok {
                 return next.run(req).await;
             }
         }
@@ -684,7 +714,7 @@ fn config_payload(state: &AppState) -> Value {
 async fn proxy_turns(State(state): State<Arc<AppState>>, body: Bytes) -> impl IntoResponse {
     let url = format!("{}/v1/agent/turns", state.daemon_url.trim_end_matches('/'));
     match state
-        .http
+        .http_json
         .post(&url)
         .header(header::CONTENT_TYPE, "application/json")
         .body(body.to_vec())
@@ -701,11 +731,7 @@ async fn proxy_turns(State(state): State<Arc<AppState>>, body: Bytes) -> impl In
             )
                 .into_response()
         }
-        Err(err) => (
-            StatusCode::BAD_GATEWAY,
-            format!("daemon unreachable: {err}"),
-        )
-            .into_response(),
+        Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
     }
 }
 
@@ -716,7 +742,7 @@ async fn proxy_sessions_post(State(state): State<Arc<AppState>>, body: Bytes) ->
         state.daemon_url.trim_end_matches('/')
     );
     match state
-        .http
+        .http_json
         .post(&url)
         .header(header::CONTENT_TYPE, "application/json")
         .body(body.to_vec())
@@ -733,11 +759,7 @@ async fn proxy_sessions_post(State(state): State<Arc<AppState>>, body: Bytes) ->
             )
                 .into_response()
         }
-        Err(err) => (
-            StatusCode::BAD_GATEWAY,
-            format!("daemon unreachable: {err}"),
-        )
-            .into_response(),
+        Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
     }
 }
 
@@ -752,7 +774,7 @@ async fn proxy_sessions(State(state): State<Arc<AppState>>, req: Request) -> imp
         "{}/v1/agent/sessions{q}",
         state.daemon_url.trim_end_matches('/')
     );
-    match state.http.get(&url).send().await {
+    match state.http_json.get(&url).send().await {
         Ok(resp) => {
             let status = resp.status();
             let bytes = resp.bytes().await.unwrap_or_default();
@@ -763,11 +785,7 @@ async fn proxy_sessions(State(state): State<Arc<AppState>>, req: Request) -> imp
             )
                 .into_response()
         }
-        Err(err) => (
-            StatusCode::BAD_GATEWAY,
-            format!("daemon unreachable: {err}"),
-        )
-            .into_response(),
+        Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
     }
 }
 
@@ -792,7 +810,7 @@ async fn proxy_agent_session_detail(
 /// JSON GET passthrough helper for small daemon endpoints.
 async fn proxy_get_json(state: &AppState, path: &str) -> Response {
     let url = format!("{}{path}", state.daemon_url.trim_end_matches('/'));
-    match state.http.get(&url).send().await {
+    match state.http_json.get(&url).send().await {
         Ok(resp) => {
             let status = resp.status();
             let bytes = resp.bytes().await.unwrap_or_default();
@@ -803,11 +821,7 @@ async fn proxy_get_json(state: &AppState, path: &str) -> Response {
             )
                 .into_response()
         }
-        Err(err) => (
-            StatusCode::BAD_GATEWAY,
-            format!("daemon unreachable: {err}"),
-        )
-            .into_response(),
+        Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
     }
 }
 
@@ -815,7 +829,7 @@ async fn proxy_get_json(state: &AppState, path: &str) -> Response {
 async fn proxy_post_json(state: &AppState, path: &str, body: Bytes) -> Response {
     let url = format!("{}{path}", state.daemon_url.trim_end_matches('/'));
     match state
-        .http
+        .http_json
         .post(&url)
         .header(header::CONTENT_TYPE, "application/json")
         .body(body.to_vec())
@@ -832,11 +846,7 @@ async fn proxy_post_json(state: &AppState, path: &str, body: Bytes) -> Response 
             )
                 .into_response()
         }
-        Err(err) => (
-            StatusCode::BAD_GATEWAY,
-            format!("daemon unreachable: {err}"),
-        )
-            .into_response(),
+        Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
     }
 }
 
@@ -858,7 +868,7 @@ async fn proxy_fs_dirs(State(state): State<Arc<AppState>>, req: Request) -> impl
         url.push('?');
         url.push_str(qs);
     }
-    match state.http.get(&url).send().await {
+    match state.http_json.get(&url).send().await {
         Ok(resp) => {
             let status = resp.status();
             let bytes = resp.bytes().await.unwrap_or_default();
@@ -869,11 +879,7 @@ async fn proxy_fs_dirs(State(state): State<Arc<AppState>>, req: Request) -> impl
             )
                 .into_response()
         }
-        Err(err) => (
-            StatusCode::BAD_GATEWAY,
-            format!("daemon unreachable: {err}"),
-        )
-            .into_response(),
+        Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
     }
 }
 
@@ -987,7 +993,7 @@ async fn proxy_method_json(
 ) -> Response {
     let url = format!("{}{path}", state.daemon_url.trim_end_matches('/'));
     match state
-        .http
+        .http_json
         .request(method, &url)
         .header(header::CONTENT_TYPE, "application/json")
         .body(body.to_vec())
@@ -1004,11 +1010,7 @@ async fn proxy_method_json(
             )
                 .into_response()
         }
-        Err(err) => (
-            StatusCode::BAD_GATEWAY,
-            format!("daemon unreachable: {err}"),
-        )
-            .into_response(),
+        Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
     }
 }
 
@@ -1025,6 +1027,50 @@ fn livekit_token_daemon_path(room_id: &str) -> String {
         "/v1/rooms/{}/livekit-token",
         percent_encode_path_segment(room_id)
     )
+}
+
+/// Opaque 502 body for an unreachable daemon (TASK-73).
+///
+/// A `reqwest::Error`'s `Display` includes the full upstream URL, so the old
+/// `format!("daemon unreachable: {err}")` handed every caller the daemon's
+/// bind address, port, and internal path shape. That is behind auth, but an
+/// auth boundary should not narrate its own topology. The detail goes to the
+/// log — where operators can actually use it — and the client gets a fixed
+/// string.
+fn daemon_unreachable_body(err: &reqwest::Error) -> &'static str {
+    tracing::warn!(error = %err, "daemon unreachable");
+    "daemon unreachable"
+}
+
+/// Timeout for buffered JSON forwards (TASK-73). Generous enough that a slow
+/// but working daemon still answers — a cold model call can take a while —
+/// while bounding the case the audit found: a WEDGED daemon previously hung
+/// every JSON passthrough forever, because they all shared the untimed client
+/// that SSE legitimately requires.
+const JSON_FORWARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Length-independent byte comparison (TASK-73).
+///
+/// Returns false for a length mismatch, but reads BOTH inputs fully before
+/// answering so the work done is a function of the inputs' sizes rather than
+/// of how many leading bytes happened to match. This is deliberately a small
+/// local helper rather than a new dependency: the proxy has one credential
+/// comparison, and adding a crypto crate to a boundary binary for six lines
+/// is a worse trade than the six lines.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        // Still touch both, so a length probe is not obviously cheaper.
+        let mut sink = 0u8;
+        for byte in a.iter().chain(b.iter()) {
+            sink |= *byte;
+        }
+        return std::hint::black_box(sink) == 0 && false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// True when a client-supplied path tail contains a dot segment (`.` or `..`).
@@ -1090,17 +1136,23 @@ async fn proxy_longhouse(
         state.daemon_url.trim_end_matches('/')
     );
     // buffer the (small) body so we can forward it on POST
-    let body = axum::body::to_bytes(req.into_body(), 1 << 20)
-        .await
-        .unwrap_or_default();
+    // TASK-73: a body over the cap previously became an EMPTY forwarded
+    // request via unwrap_or_default() — a truncation that presents upstream as
+    // a legitimate call. Refuse it instead.
+    let body = match axum::body::to_bytes(req.into_body(), 1 << 20).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
+        }
+    };
     let builder = if method == axum::http::Method::POST {
         state
-            .http
+            .http_json
             .post(&url)
             .header(header::CONTENT_TYPE, "application/json")
             .body(body.to_vec())
     } else {
-        state.http.get(&url)
+        state.http_json.get(&url)
     };
     match builder.send().await {
         Ok(resp) => {
@@ -1113,11 +1165,7 @@ async fn proxy_longhouse(
             )
                 .into_response()
         }
-        Err(err) => (
-            StatusCode::BAD_GATEWAY,
-            format!("daemon unreachable: {err}"),
-        )
-            .into_response(),
+        Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
     }
 }
 
@@ -1172,11 +1220,7 @@ async fn proxy_rooms_persistent(
         }
         return match upstream.send().await {
             Ok(resp) => sse_stream_response(resp),
-            Err(err) => (
-                StatusCode::BAD_GATEWAY,
-                format!("daemon unreachable: {err}"),
-            )
-                .into_response(),
+            Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
         };
     }
 
@@ -1185,14 +1229,20 @@ async fn proxy_rooms_persistent(
     // the transcript tail's ?after_seq= reaches the daemon.
     let url = format!("{}{path}{q}", state.daemon_url.trim_end_matches('/'));
     // buffer the (small) body so we can forward it on POST/DELETE
-    let body = axum::body::to_bytes(req.into_body(), 1 << 20)
-        .await
-        .unwrap_or_default();
+    // TASK-73: a body over the cap previously became an EMPTY forwarded
+    // request via unwrap_or_default() — a truncation that presents upstream as
+    // a legitimate call. Refuse it instead.
+    let body = match axum::body::to_bytes(req.into_body(), 1 << 20).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
+        }
+    };
     let builder = if method == axum::http::Method::GET {
-        state.http.get(&url)
+        state.http_json.get(&url)
     } else {
         state
-            .http
+            .http_json
             .request(method, &url)
             .header(header::CONTENT_TYPE, "application/json")
             .body(body.to_vec())
@@ -1208,11 +1258,7 @@ async fn proxy_rooms_persistent(
             )
                 .into_response()
         }
-        Err(err) => (
-            StatusCode::BAD_GATEWAY,
-            format!("daemon unreachable: {err}"),
-        )
-            .into_response(),
+        Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
     }
 }
 
@@ -1294,11 +1340,7 @@ async fn proxy_control_events(
     let url = format!("{}/v1/events{q}", state.daemon_url.trim_end_matches('/'));
     match state.http.get(&url).send().await {
         Ok(resp) => sse_stream_response(resp),
-        Err(err) => (
-            StatusCode::BAD_GATEWAY,
-            format!("daemon unreachable: {err}"),
-        )
-            .into_response(),
+        Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
     }
 }
 
@@ -1339,11 +1381,7 @@ async fn proxy_events(State(state): State<Arc<AppState>>, req: Request) -> impl 
     );
     match state.http.get(&url).send().await {
         Ok(resp) => sse_stream_response(resp),
-        Err(err) => (
-            StatusCode::BAD_GATEWAY,
-            format!("daemon unreachable: {err}"),
-        )
-            .into_response(),
+        Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
     }
 }
 
@@ -1355,7 +1393,13 @@ async fn proxy_observatory(State(state): State<Arc<AppState>>, req: Request) -> 
         Ok(token) => token,
         Err(error) => {
             tracing::warn!(%error, path = %state.observer_token_path.display(), "observatory credential unavailable");
-            return (StatusCode::SERVICE_UNAVAILABLE, error).into_response();
+            // TASK-73: the error stringifies io::Error, which carries the FULL
+            // filesystem path of the credential file. Log it, never ship it.
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "observatory credential unavailable",
+            )
+                .into_response();
         }
     };
     let path = req.uri().path();
@@ -1375,11 +1419,7 @@ async fn proxy_observatory(State(state): State<Arc<AppState>>, req: Request) -> 
     let response = match upstream.send().await {
         Ok(response) => response,
         Err(error) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                format!("daemon unreachable: {error}"),
-            )
-                .into_response();
+            return (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&error)).into_response();
         }
     };
     if path.ends_with("/events") {
@@ -1423,8 +1463,7 @@ async fn stt(State(state): State<Arc<AppState>>, body: Bytes) -> impl IntoRespon
         Ok(resp) => resp,
         Err(err) => {
             tracing::error!(error = %err, "stt daemon unreachable");
-            return Json(json!({ "ok": false, "error": format!("stt daemon unreachable: {err}") }))
-                .into_response();
+            return Json(json!({ "ok": false, "error": "stt daemon unreachable" })).into_response();
         }
     };
 
@@ -1496,7 +1535,7 @@ async fn tts(
             tracing::error!(error = %err, "tts daemon unreachable");
             (
                 StatusCode::BAD_GATEWAY,
-                format!("tts daemon unreachable: {err}"),
+                "tts daemon unreachable".to_string(),
             )
         })?;
 
@@ -1533,9 +1572,9 @@ async fn tts(
 #[cfg(test)]
 mod tests {
     use super::{
-        basic_auth_gate, build_app, config_payload, is_hashed_asset, livekit_token_daemon_path,
-        percent_encode_path_segment, read_observer_token, sse_no_buffer_headers, wasm_headers,
-        AppState, CALL_PLACE_DAEMON_PATH, WASM_CACHE_CONTROL,
+        basic_auth_gate, build_app, config_payload, constant_time_eq, is_hashed_asset,
+        livekit_token_daemon_path, percent_encode_path_segment, read_observer_token,
+        sse_no_buffer_headers, wasm_headers, AppState, CALL_PLACE_DAEMON_PATH, WASM_CACHE_CONTROL,
     };
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
@@ -1569,6 +1608,7 @@ mod tests {
     fn auth_test_state() -> Arc<AppState> {
         Arc::new(AppState {
             http: reqwest::Client::new(),
+            http_json: reqwest::Client::new(),
             voice_profile: "leo".to_string(),
             daemon_url: "http://127.0.0.1:4780".to_string(),
             default_livekit_room_id: "project:surface-test".to_string(),
@@ -1821,6 +1861,7 @@ mod tests {
     fn config_payload_includes_surface_collaboration_defaults() {
         let state = AppState {
             http: reqwest::Client::new(),
+            http_json: reqwest::Client::new(),
             voice_profile: "leo".to_string(),
             daemon_url: "http://127.0.0.1:4780".to_string(),
             default_livekit_room_id: "project/surface demo".to_string(),
@@ -1886,6 +1927,71 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
+    /// TASK-73: the credential comparison must not short-circuit. This proves
+    /// the SEMANTICS (right answer for every shape, including length
+    /// mismatches and empty inputs) rather than attempting to time it —
+    /// a timing assertion in a unit test would be flaky theatre.
+    #[test]
+    fn constant_time_eq_matches_equality_semantics() {
+        assert!(constant_time_eq(b"", b""));
+        assert!(constant_time_eq(b"hunter2", b"hunter2"));
+        assert!(!constant_time_eq(b"hunter2", b"hunter3"));
+        assert!(
+            !constant_time_eq(b"hunter2", b"hunter2x"),
+            "length mismatch"
+        );
+        assert!(!constant_time_eq(b"", b"x"));
+        assert!(!constant_time_eq(b"x", b""));
+        // Differing in the FIRST byte and in the LAST byte must both be false;
+        // a short-circuiting implementation gets these right too, but a broken
+        // masking implementation (e.g. `&` instead of `|=`) would not.
+        assert!(!constant_time_eq(b"aaaa", b"baaa"));
+        assert!(!constant_time_eq(b"aaaa", b"aaab"));
+    }
+
+    /// TASK-73: error bodies must not narrate internal topology. The audit
+    /// found 502s echoing the daemon's bind address and a 503 echoing the
+    /// FULL filesystem path of the observer-token file.
+    #[tokio::test]
+    async fn daemon_unreachable_body_is_opaque() {
+        let dist = tempfile::tempdir().expect("tempdir");
+        let state = Arc::new(AppState {
+            http: reqwest::Client::new(),
+            http_json: reqwest::Client::new(),
+            voice_profile: "leo".to_string(),
+            // Closed port → the forward fails and we see the real error body.
+            daemon_url: "http://127.0.0.1:9".to_string(),
+            default_livekit_room_id: "project:surface-test".to_string(),
+            tldraw_sync_uri: None,
+            maps_key: None,
+            maps_map_id: "DEMO_MAP_ID".to_string(),
+            basic_auth: None,
+            observer_token_path: PathBuf::from("/not-used"),
+        });
+        let app = build_app(state, dist.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/permissions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("read body");
+        let text = String::from_utf8_lossy(&body);
+        assert_eq!(text, "daemon unreachable");
+        assert!(
+            !text.contains("127.0.0.1") && !text.contains(':') && !text.contains("http"),
+            "error body must not disclose the upstream address: {text}",
+        );
+    }
+
     /// TASK-72: security headers must reach real document responses through
     /// the PRODUCTION router, and must NOT be pasted onto proxied API/SSE
     /// responses. Drives `build_app` so a middleware that gets dropped from
@@ -1896,6 +2002,7 @@ mod tests {
         std::fs::write(dist.path().join("index.html"), "<!doctype html>ok").expect("write shell");
         let state = Arc::new(AppState {
             http: reqwest::Client::new(),
+            http_json: reqwest::Client::new(),
             voice_profile: "leo".to_string(),
             daemon_url: "http://127.0.0.1:9".to_string(),
             default_livekit_room_id: "project:surface-test".to_string(),
@@ -1983,6 +2090,7 @@ mod tests {
         let dist = tempfile::tempdir().expect("tempdir");
         let state = Arc::new(AppState {
             http: reqwest::Client::new(),
+            http_json: reqwest::Client::new(),
             voice_profile: "leo".to_string(),
             // Closed port: a request that gets past the guard fails fast as
             // 502, which is exactly how we detect a bypass.
@@ -2054,6 +2162,7 @@ mod tests {
         let dist = tempfile::tempdir().expect("tempdir");
         let state = Arc::new(AppState {
             http: reqwest::Client::new(),
+            http_json: reqwest::Client::new(),
             voice_profile: "leo".to_string(),
             // Closed port: instant connection refusal, never a real daemon.
             daemon_url: "http://127.0.0.1:9".to_string(),
