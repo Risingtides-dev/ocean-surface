@@ -36,6 +36,27 @@ use crate::model::{Block, ComponentPlacement, Role, ToolStatus, Turn};
 
 pub const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:4780";
 
+/// The turn's `guidance` field (TASK-76/86).
+///
+/// Always `None`, and it is a FUNCTION rather than a literal at the call site
+/// so the invariant is testable behavior instead of a string in a file.
+///
+/// Why the invariant exists: `guidance` is rendered by the daemon under
+/// "Operator guidance for this turn:", so anything placed here reaches the
+/// model wearing operator authority. The surface previously fed it
+/// page-controlled browser tab titles — any website the operator had open
+/// could author text that arrived with that authority, at a runtime whose
+/// tools execute ungated. Browser state now travels only as the structured
+/// client context, which the daemon sanitizes.
+///
+/// A future operator-AUTHORED guidance feature may legitimately return
+/// `Some` here — but it must carry text the operator typed, never text a page
+/// supplied. Change this function, not the call site, so the test below moves
+/// with it.
+fn turn_guidance() -> Option<Vec<String>> {
+    None
+}
+
 /// Percent-encode a path segment before it is interpolated into a daemon URL
 /// (TASK-77).
 ///
@@ -3378,12 +3399,11 @@ impl Daemon {
                 session_id: session_id.as_deref(),
                 project_id: project.as_deref(),
                 client_type: Some(client_type),
-                // Always `None` (TASK-76). The surface emits no freeform
-                // guidance at all now; browser state travels only as the
-                // sanitized structured context. A future operator-authored
-                // guidance feature must NOT reuse this field for
-                // page-controlled data.
-                guidance: None,
+                // TASK-86: routed through `turn_guidance()` so the invariant
+                // is pinned by a real unit test rather than by a string match
+                // against this file (the previous assertion matched its own
+                // source and could not fail).
+                guidance: turn_guidance(),
                 // Deliberately `None`: the daemon's turn `room_id` is the
                 // closed Track-0 set (pm/writers/orch_mesh/review), NOT the
                 // surface's persistent-room keys — those rooms post through
@@ -9062,12 +9082,22 @@ mod tests {
                  ship browser state through client_context (daemon-sanitized) instead",
             );
         }
-        // The production turn construction must pass guidance: None. Pinned by
-        // source assertion because the call site is inside an async closure
-        // that needs a live document to drive.
+        // The real behavioral pin: the production turn construction calls
+        // `turn_guidance()`, and that function returns None. This REPLACES a
+        // source assertion (`src.contains("guidance: None,")`) that matched
+        // its own text and therefore could not fail — it would have passed
+        // even with `guidance: Some(page_controlled_text)` at the call site,
+        // while appearing to guard a prompt-injection boundary.
+        assert_eq!(
+            turn_guidance(),
+            None,
+            "guidance is rendered under \"Operator guidance for this turn:\" — \
+             it must never carry page-controlled text",
+        );
+        let call = format!("guidance: turn_{}()", "guidance");
         assert!(
-            src.contains("guidance: None,"),
-            "the turn body must send guidance: None",
+            src.contains(call.as_str()),
+            "the turn body must route guidance through turn_guidance()",
         );
         let wiring = format!("guidance: active_tab{suffix}");
         assert!(

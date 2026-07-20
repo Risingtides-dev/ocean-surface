@@ -8,10 +8,20 @@
 //!
 //! # The injection channel (and the trap it avoids)
 //!
-//! Per OCEAN-143 the daemon **discards** the `AgentTurnRequest::guidance` field.
-//! So this context must NOT ride on `guidance` — that would be a silent no-op.
-//! Instead it is folded into the **prompt** itself (the field the daemon always
-//! reads and forwards to the model). The shell wraps the user's prompt with
+//! This context is folded into the **prompt** itself rather than riding on
+//! `AgentTurnRequest::guidance`.
+//!
+//! CORRECTION (TASK-86): this note previously claimed, per OCEAN-143, that the
+//! daemon DISCARDS `guidance` and that using it would be "a silent no-op".
+//! That is FALSE on current daemon main — `apply_turn_guidance` is live, and
+//! whatever is in that field is rendered to the model under the header
+//! "Operator guidance for this turn:". The stale claim was load-bearing: it
+//! made a genuinely dangerous field look inert, and the surface shipped
+//! page-controlled browser tab titles through it (fixed in TASK-76).
+//!
+//! Prompt-folding remains the right choice here — but for the honest reason
+//! (one framing site the daemon controls), not because the alternative is
+//! harmless. Anything placed in `guidance` arrives wearing operator authority. The shell wraps the user's prompt with
 //! [`canvas_context_block`] before sending, exactly as the older tldraw-era
 //! `prompt_with_surface_context` does for the webview ledger.
 //!
@@ -122,8 +132,9 @@ pub fn canvas_context_block(ledger: Option<&CanvasLedger>) -> Option<String> {
 /// prompt is returned unchanged.
 ///
 /// This is the single function the shell calls on the send path so the canvas
-/// state reaches the model through the **prompt** field (which the daemon reads),
-/// never the discarded `guidance` field.
+/// state reaches the model through the **prompt** field — one framing site the
+/// daemon controls — rather than through `guidance` (which is NOT discarded;
+/// see the module note, TASK-86).
 #[must_use]
 pub fn prompt_with_canvas_context(prompt: &str, ledger: Option<&CanvasLedger>) -> String {
     match canvas_context_block(ledger) {

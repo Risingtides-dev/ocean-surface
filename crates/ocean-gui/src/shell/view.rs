@@ -5060,8 +5060,11 @@ impl OceanGuiShell {
         // The native CanvasLedger is canonical (OCEAN-156/163/167); its compact
         // context (ids/kinds/rects/edges/selection/mode/viewport) is the only
         // canvas description the agent gets, so it can drive the surface with
-        // `surface_patch`. This rides on the PROMPT field, not the discarded
-        // `guidance` field (OCEAN-143), so it actually reaches the model.
+        // `surface_patch`. This rides on the PROMPT field rather than
+        // `guidance`. (TASK-86: `guidance` is NOT discarded — the old
+        // OCEAN-143 note here said so and was wrong; the daemon renders it
+        // under "Operator guidance for this turn:". Prompt-folding is still
+        // correct, just not because guidance is inert.)
         //
         // The legacy `prompt_with_surface_context` (SurfaceLedger / tldraw-era)
         // block is no longer appended here — OCEAN-154 had shipped BOTH blocks on
