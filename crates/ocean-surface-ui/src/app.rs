@@ -2884,6 +2884,21 @@ pub(crate) enum DeepLinkAction {
 /// not an error, just not something v1 acts on.
 ///
 /// Pure on purpose: no WASM, fully unit-testable on the native target.
+/// Accept only the shape a daemon-minted session id actually takes: ASCII
+/// alphanumerics plus `-` and `_` (covers both UUIDs and slug ids), bounded in
+/// length. Deliberately strict — see the call site in [`parse_deep_link`] for
+/// why an untrusted id is rejected rather than sanitized.
+fn is_valid_session_id(id: &str) -> bool {
+    // A uuid is 36 chars; allow generous headroom for slug ids without
+    // admitting an unbounded string from an untrusted source.
+    const MAX: usize = 128;
+    !id.is_empty()
+        && id.len() <= MAX
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
     // Drop any query ("?…") / fragment ("#…") so `ocean://session/abc?ref=x`
     // resolves to the same action as the bare URL.
@@ -2892,6 +2907,26 @@ pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
     // The id is everything after the prefix. Reject an empty id and a
     // multi-segment path (`ocean://session/a/b`) — a session id is atomic.
     if rest.is_empty() || rest.contains('/') {
+        return None;
+    }
+    // TASK-80: charset-validate the id before it becomes an action.
+    //
+    // Deep links are ATTACKER-TRIGGERABLE by construction: any web page can
+    // navigate to `ocean://…`, and macOS scheme prompts are per-browser and
+    // commonly suppressed after the first accept. So this string arrives from
+    // an untrusted source and then drives a real state change — foregrounding
+    // the app and switching the operator's active session, which clears state
+    // and reconnects the SSE tail.
+    //
+    // A session id is a daemon-minted opaque token (uuid or slug), so the
+    // legitimate charset is narrow. Anything outside it is either a mistake or
+    // an attempt to smuggle structure — percent-encodings (`%2f`), dot
+    // segments, control characters, whitespace — into a value that is later
+    // interpolated into a daemon URL. TASK-77 percent-encodes at those
+    // format sites; rejecting here as well means a malformed id never becomes
+    // an action in the first place, rather than being safely encoded and then
+    // failing downstream as a confusing 404.
+    if !is_valid_session_id(rest) {
         return None;
     }
     Some(DeepLinkAction::SelectSession(rest.to_string()))
@@ -3509,6 +3544,48 @@ mod tests {
         assert_eq!(
             parse_deep_link("ocean://session/abc#frag"),
             Some(DeepLinkAction::SelectSession("abc".into()))
+        );
+    }
+
+    /// TASK-80: a deep link is attacker-triggerable — any web page can
+    /// navigate to `ocean://…` — and it drives a real state change
+    /// (foreground + session switch). Ids outside the daemon-minted charset
+    /// must never become an action.
+    #[test]
+    fn deep_link_rejects_ids_outside_the_session_charset() {
+        // Percent-encoded separators and dot segments: the shapes that would
+        // try to smuggle path structure into a value later interpolated into
+        // a daemon URL.
+        assert_eq!(parse_deep_link("ocean://session/..%2f..%2fhealth"), None);
+        assert_eq!(parse_deep_link("ocean://session/.."), None);
+        assert_eq!(parse_deep_link("ocean://session/%2e%2e"), None);
+        // Structure and whitespace.
+        assert_eq!(parse_deep_link("ocean://session/a b"), None);
+        assert_eq!(parse_deep_link("ocean://session/a:b"), None);
+        assert_eq!(parse_deep_link("ocean://session/a.b"), None);
+        // Control characters and non-ASCII.
+        assert_eq!(parse_deep_link("ocean://session/a\nb"), None);
+        assert_eq!(parse_deep_link("ocean://session/café"), None);
+        // Unbounded input from an untrusted source.
+        let long = "a".repeat(129);
+        assert_eq!(parse_deep_link(&format!("ocean://session/{long}")), None);
+
+        // And the legitimate shapes still work — the guard must not break the
+        // feature it protects. Both real id shapes the daemon mints:
+        assert_eq!(
+            parse_deep_link("ocean://session/11111111-2222-4333-8444-555555555555"),
+            Some(DeepLinkAction::SelectSession(
+                "11111111-2222-4333-8444-555555555555".into()
+            ))
+        );
+        assert_eq!(
+            parse_deep_link("ocean://session/my_session-2"),
+            Some(DeepLinkAction::SelectSession("my_session-2".into()))
+        );
+        let max = "a".repeat(128);
+        assert_eq!(
+            parse_deep_link(&format!("ocean://session/{max}")),
+            Some(DeepLinkAction::SelectSession(max))
         );
     }
 
