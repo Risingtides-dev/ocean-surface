@@ -615,7 +615,37 @@ struct SoundingsLandingEngine {
 }
 
 impl SoundingsLandingEngine {
+    /// Match the drawing buffer to the canvas's live CSS display size (× DPR,
+    /// capped at 2 to match `init_gl`). A no-op once in sync, so a steady frame
+    /// costs one layout read.
+    ///
+    /// `init_gl` sizes the buffer exactly once, but a phone's viewport is not
+    /// stable when that first frame runs: the iOS/Android URL bar collapses on
+    /// settle and `100dvh` resolves late, and the pane changes again on
+    /// rotation. A frozen buffer is then stretched by the canvas's
+    /// `width/height:100%` — the aspect-fitted "OCEAN" wordmark runs off the
+    /// sides (cropped), and if that first frame measured a zero-height pane the
+    /// buffer clamps to 2×2 and the scene reads as blank. Re-measuring each
+    /// frame heals both without any resize listener.
+    fn sync_size(&self) {
+        let dpr = web_sys::window()
+            .map(|w| w.device_pixel_ratio().min(2.0))
+            .unwrap_or(1.0);
+        let w = u32::max((self.canvas.client_width() as f64 * dpr).round() as u32, 2);
+        let h = u32::max((self.canvas.client_height() as f64 * dpr).round() as u32, 2);
+        if w != self.canvas.width() || h != self.canvas.height() {
+            self.canvas.set_width(w);
+            self.canvas.set_height(h);
+            self.gl.viewport(0, 0, w as i32, h as i32);
+        }
+    }
+
     fn render(&mut self, now: f64) {
+        // Keep the backing store matched to the live pane size every frame —
+        // the mobile viewport is not stable at first paint and changes on
+        // rotation (see `sync_size`).
+        self.sync_size();
+
         // t0 latches from the first rAF timestamp (performance-origin);
         // an epoch t0 would push uT past f32 precision and freeze the field.
         if self.t0 < 0.0 {

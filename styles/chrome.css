@@ -469,21 +469,42 @@
 .ocean-sessions-trigger {
   display: inline-flex;
   align-items: center;
+  justify-content: center;   /* label sits dead-center in the pill */
   height: var(--ctl-h-sm);
-  padding: 0 12px;
+  padding: 0 14px;
   color: var(--fg);
   font-size: 12px;
   font-weight: 600;
+  letter-spacing: 0.01em;
   line-height: 1;
   white-space: nowrap;
   background: var(--bg-elevated);
-  border: none;
+  /* Hairline edge + lit top seam is the app-chrome idiom every neighbouring
+     control (--thinking / --model-override / browser chip) shares; the old
+     borderless fill read as a flat web button. */
+  border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--elev-1);
 }
 
 .ocean-sessions-trigger:hover {
   background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+/* Coarse pointers get a 44px tap target without disturbing the desktop
+   density — an invisible ::after grows the hit area along the short axis into
+   the header's own padding (TASK-42 idiom, matching the composer triggers). */
+@media (pointer: coarse) {
+  .ocean-sessions-trigger {
+    position: relative;
+  }
+  .ocean-sessions-trigger::after {
+    content: "";
+    position: absolute;
+    inset-inline: 0;
+    inset-block: -8px; /* 28 + 16 = 44 */
+  }
 }
 
 /* Council modal ---------------------------------------------------------- */
