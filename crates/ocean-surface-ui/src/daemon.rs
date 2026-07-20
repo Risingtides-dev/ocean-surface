@@ -3312,15 +3312,24 @@ impl Daemon {
                 return;
             }
 
-            // In the Chrome side panel we ride along in the user's live tab.
-            // Attach the active tab's URL + title — and the current window's
-            // open-tab list (OCEAN-92) — as guidance so the agent knows what
-            // page the user is on and what other tabs they have open when they
-            // send a turn. Only the current window's already-open tabs, only on
-            // a user-initiated turn — never a passive scrape (OCEAN-70). On the
-            // detached web app this is always `None`.
-            let active_tab_guidance = browser_context_guidance();
-            // Structured counterpart of the freeform guidance above (OCEAN-377):
+            // TASK-76: the freeform browser-context GUIDANCE path is gone.
+            //
+            // Tab titles are page-controlled: any site the operator has open
+            // authors `document.title`. That text was interpolated raw (no
+            // escaping, no cap, no delimiter) and shipped as `guidance`, which
+            // the daemon HONORS (`apply_turn_guidance`) and renders under
+            // "Operator guidance for this turn:" — so a website's text reached
+            // a tool-executing agent wearing OPERATOR authority. Zero-click:
+            // the operator only had to have the tab open and type anything.
+            //
+            // The structured `client_context.browser` path below carries the
+            // same snapshot and is sanitized daemon-side
+            // (`sanitize_browser_field`: length cap, control chars collapsed,
+            // markdown neutralized), so dropping the prose path loses no
+            // capability — it removes a second, unsanitized channel that
+            // existed only for historical reasons.
+            //
+            // Structured counterpart (OCEAN-377):
             // the daemon now consumes `client_context.browser` directly, so we
             // ship the same active-tab/open-tab snapshot in the structured shape.
             // `None` off the extension, leaving the wire shape unchanged there.
@@ -3340,9 +3349,12 @@ impl Daemon {
                 session_id: session_id.as_deref(),
                 project_id: project.as_deref(),
                 client_type: Some(client_type),
-                // The web UI doesn't surface free-form guidance yet; the only
-                // guidance we emit is the extension's active-tab context above.
-                guidance: active_tab_guidance,
+                // Always `None` (TASK-76). The surface emits no freeform
+                // guidance at all now; browser state travels only as the
+                // sanitized structured context. A future operator-authored
+                // guidance feature must NOT reuse this field for
+                // page-controlled data.
+                guidance: None,
                 // Deliberately `None`: the daemon's turn `room_id` is the
                 // closed Track-0 set (pm/writers/orch_mesh/review), NOT the
                 // surface's persistent-room keys — those rooms post through
@@ -6808,123 +6820,11 @@ fn surface_client_type() -> &'static str {
     }
 }
 
-/// The active browser tab the side panel is docked in, as a single guidance
-/// line for the agent. `None` unless we're the Chrome extension *and* the
-/// loader (`sidepanel.js`) has published the active tab on
-/// `window.__ocean_active_tab` (`{ url, title }`).
-///
-/// `chrome.tabs.query` is a JS-only extension API — the wasm app can't call it
-/// directly — so the side-panel loader keeps `window.__ocean_active_tab`
-/// current (initial query + tab-activation / URL-change / window-focus
-/// listeners) and we read the latest snapshot here at send time. Reading a
-/// global rather than awaiting a promise keeps the hot turn path synchronous.
-fn active_tab_guidance() -> Option<Vec<String>> {
-    if !running_as_extension() {
-        return None;
-    }
-    let window = web_sys::window()?;
-    let tab = js_sys::Reflect::get(
-        &window,
-        &wasm_bindgen::JsValue::from_str("__ocean_active_tab"),
-    )
-    .ok()?;
-    if !tab.is_object() {
-        return None;
-    }
-    let read = |key: &str| -> Option<String> {
-        js_sys::Reflect::get(&tab, &wasm_bindgen::JsValue::from_str(key))
-            .ok()
-            .and_then(|v| v.as_string())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    };
-    let url = read("url")?;
-    // Don't leak the extension's own panel page or empty new-tab pages.
-    if url.starts_with("chrome-extension://") || url.starts_with("chrome://newtab") {
-        return None;
-    }
-    let line = match read("title") {
-        Some(title) => format!("The user's active browser tab is \"{title}\" ({url})."),
-        None => format!("The user's active browser tab is {url}."),
-    };
-    Some(vec![line])
-}
-
-/// Maximum number of open tabs we list in guidance, matching the extension
-/// loader's own cap. Keeps the guidance block bounded for a user with many
-/// tabs open.
+/// Maximum number of open tabs shipped in the structured browser context,
+/// matching the extension loader's own cap. Keeps the snapshot bounded for an
+/// operator with many tabs open. (Named for the removed guidance path it
+/// originally bounded; still the cap for the structured path, TASK-76.)
 const MAX_OPEN_TABS_GUIDANCE: usize = 24;
-
-/// The current window's open-tab list as a single guidance line, read from
-/// `window.__ocean_open_tabs` (published by `sidepanel.js`, OCEAN-92). `None`
-/// unless we're the Chrome extension and the loader published a non-empty list.
-/// We only enumerate tabs the user already has open in the focused window, and
-/// only at user-initiated send time — never a passive background scrape.
-fn open_tabs_guidance() -> Option<Vec<String>> {
-    if !running_as_extension() {
-        return None;
-    }
-    let window = web_sys::window()?;
-    let tabs_val = js_sys::Reflect::get(
-        &window,
-        &wasm_bindgen::JsValue::from_str("__ocean_open_tabs"),
-    )
-    .ok()?;
-    let arr = js_sys::Array::from(&tabs_val);
-    let len = arr.length();
-    if len == 0 {
-        return None;
-    }
-    let read = |obj: &wasm_bindgen::JsValue, key: &str| -> Option<String> {
-        js_sys::Reflect::get(obj, &wasm_bindgen::JsValue::from_str(key))
-            .ok()
-            .and_then(|v| v.as_string())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    };
-    let mut lines = Vec::new();
-    for i in 0..len.min(MAX_OPEN_TABS_GUIDANCE as u32) {
-        let tab = arr.get(i);
-        if !tab.is_object() {
-            continue;
-        }
-        let Some(url) = read(&tab, "url") else {
-            continue;
-        };
-        if url.starts_with("chrome-extension://") {
-            continue;
-        }
-        let entry = match read(&tab, "title") {
-            Some(title) => format!("\"{title}\" ({url})"),
-            None => url,
-        };
-        lines.push(format!("  - {entry}"));
-    }
-    if lines.is_empty() {
-        return None;
-    }
-    let mut out = vec![format!(
-        "The user has {} tab(s) open in this browser window:",
-        lines.len()
-    )];
-    out.extend(lines);
-    Some(out)
-}
-
-/// Assemble the per-turn browser context guidance for the Chrome side panel:
-/// the active tab (OCEAN-70) plus the current window's open-tab list
-/// (OCEAN-92). Returns `None` on non-extension surfaces or when nothing is
-/// available, so the daemon's wire shape stays `guidance: None` there.
-fn browser_context_guidance() -> Option<Vec<String>> {
-    let mut lines = Vec::new();
-    if let Some(active) = active_tab_guidance() {
-        lines.extend(active);
-    }
-    if let Some(open) = open_tabs_guidance() {
-        lines.extend(open);
-    }
-    (!lines.is_empty()).then_some(lines)
-}
 
 /// Ensure exactly one tab is flagged active when the loader snapshot carried no
 /// per-tab `active` boolean (an older `sidepanel.js`, OCEAN-377 P2). The current
@@ -6949,11 +6849,12 @@ fn flag_active_tab_fallback(
     }
 }
 
-/// Structured browser state for the turn (OCEAN-377), the counterpart of
-/// [`browser_context_guidance`]. Reads the same loader-published globals —
+/// Structured browser state for the turn (OCEAN-377) — since TASK-76 the ONLY
+/// channel carrying browser state to the daemon. Reads the loader-published
+/// globals —
 /// `window.__ocean_active_tab` (`{url, title}`) and `window.__ocean_open_tabs`
 /// (`[{url, title}, …]`, OCEAN-92) — and packs them into the daemon's
-/// `ClientContext` wire shape. Same guard rails as the guidance path: only the
+/// `ClientContext` wire shape. Guard rails: only the
 /// Chrome extension, only the user's already-open tabs, never the extension's
 /// own panel/new-tab pages. Returns `None` (so `client_context` is omitted) on
 /// non-extension surfaces or when no browser state is available.
@@ -9026,6 +8927,47 @@ mod tests {
         }
         // And a garbage value is still rejected by the same filter.
         assert!(!THINKING_LEVELS.contains(&"turbo"));
+    }
+
+    /// TASK-76: the surface must NEVER put page-controlled browser data in
+    /// `guidance`. Tab titles are authored by whatever site the operator has
+    /// open; the daemon HONORS guidance and renders it under "Operator
+    /// guidance for this turn:", so anything here arrives wearing operator
+    /// authority at a runtime whose tools are ungated.
+    ///
+    /// This pins the SOURCE, not just a value: the browser-context helpers
+    /// that used to build those strings are gone, so a future change that
+    /// reintroduces prose from `__ocean_active_tab` / `__ocean_open_tabs` has
+    /// to re-add a guidance producer — and this test names the invariant it
+    /// would be violating. Browser state travels only via the structured
+    /// `client_context`, which the daemon sanitizes.
+    #[test]
+    fn guidance_never_carries_browser_data() {
+        let src = include_str!("daemon.rs");
+        // Needles are assembled at runtime: a literal here would match THIS
+        // test's own source and the assertion would fail on itself.
+        let suffix = "_guidance";
+        for stem in ["browser_context", "active_tab", "open_tabs"] {
+            let dead = format!("fn {stem}{suffix}");
+            let dead = dead.as_str();
+            assert!(
+                !src.contains(dead),
+                "{dead} rebuilds the unsanitized guidance channel TASK-76 removed; \
+                 ship browser state through client_context (daemon-sanitized) instead",
+            );
+        }
+        // The production turn construction must pass guidance: None. Pinned by
+        // source assertion because the call site is inside an async closure
+        // that needs a live document to drive.
+        assert!(
+            src.contains("guidance: None,"),
+            "the turn body must send guidance: None",
+        );
+        let wiring = format!("guidance: active_tab{suffix}");
+        assert!(
+            !src.contains(wiring.as_str()),
+            "the browser-guidance wiring must stay removed",
+        );
     }
 
     #[test]
