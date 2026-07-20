@@ -2313,3 +2313,11 @@ area:      frontend
 
 TASK-64 landed b348d9a (smaths screenshot: wall of 14+ stacked "tools (1)" disclosures in one Sol session): root cause was cross-turn, not per-turn — Codex/Sol emits one TurnStarted per model round so each round minted its own single-tool Turn, and the session-rebuild path made one Turn per persisted tool entry (reconnect looked even worse). Fix at the render layer only: top_rows() coalesces each maximal run of consecutive tool-only assistant turns into one MergedToolGroup rendering "tools (N)" + failed-count accent; members derive reactively so a streaming run grows in place; row keyed by anchor turn index (append-only turns → stable key → expansion state survives growth). Prose/thinking/components still break runs; per-turn ToolGroup untouched for mixed turns; TASK-52/47 layout preserved. 9 new unit tests; 645+9-suite tests, wasm, fmt, clippy raw-exit 0 on the committed tree. Sub also fixed the pre-existing dead_selector_removal.rs doc lint (same one my task-46 corrective carries — identical line, rebase-safe). Rail deploys.
 _________________________________________________________________________________
+time:      [23:08] [19-07-26]
+agent:     [claude] [fable 5]
+worktree:  task-63b-plist-path (fable, corrective)
+type:      bug-report
+area:      frontend
+
+TASK-63 corrective 252a5a5: the packaged-app build REJECTED db1754f's inline infoPlist object — this Tauri version's schema wants a path string. My config-only review never ran cargo tauri build, so the landed fix was inert until tonight's bundle attempt surfaced it. Info.plist file now carries NSMicrophoneUsageDescription, config references it by path, and the key is VERIFIED inside the built Ocean.app bundle (PlistBuddy). Fresh Ocean.app (main 2e622ef + corrective, with TASK-52 open flow + TASK-64 tool grouping in the dist) installed to /Applications for smaths' mic smoke: launch, dictate, expect the macOS mic prompt. Lesson: config fixes whose only consumer is a build step gate on THAT build step.
+_________________________________________________________________________________
