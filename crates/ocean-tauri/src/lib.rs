@@ -515,7 +515,7 @@ fn repo_state(root: String) -> Result<Option<RepoStateDto>, String> {
 // ── dock badge ────────────────────────────────────────────────────────────
 
 /// Set or clear the dock-icon badge. `Some(n)` shows `n`; `None` clears.
-
+///
 /// The wasm side maps the pending permission-prompt count onto this so an
 /// agent waiting on approval is visible from the dock (host.rs `set_badge`).
 #[tauri::command]
@@ -620,24 +620,20 @@ const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:4780";
 /// Liveness state of the supervised daemon, reported to the webview. Wire
 /// discriminants are lowercase via `rename_all` — `running` | `stopped` |
 /// `starting` | `unreachable`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum DaemonState {
     /// Port reachable. `pid` is present iff the shell owns the child.
     Running,
     /// No child and the port is not reachable (never started / just stopped).
+    /// Default: the shell reports Stopped before its first poll.
+    #[default]
     Stopped,
     /// The shell owns a live child but the port is not up yet (just spawned).
     Starting,
     /// Port not reachable after previously being up, with no owned child —
     /// an external daemon that went away.
     Unreachable,
-}
-
-impl Default for DaemonState {
-    fn default() -> Self {
-        DaemonState::Stopped
-    }
 }
 
 /// Pure state decision (unit-tested, no I/O). Maps the raw signals — port
@@ -994,7 +990,7 @@ fn repo_ahead_behind(repo: &Repository) -> (usize, usize) {
     };
 
     match repo.graph_ahead_behind(local_oid, upstream_oid) {
-        Ok((a, b)) => (a as usize, b as usize),
+        Ok((a, b)) => (a, b),
         Err(_) => (0, 0),
     }
 }
@@ -1062,7 +1058,8 @@ fn repo_recent_commits(repo: &Repository, n: usize) -> Vec<CommitInfoDto> {
             Ok(c) => c,
             Err(_) => continue,
         };
-        let id_short = format!("{}", &oid.to_string()[..7.min(oid.to_string().len())]);
+        let oid_str = oid.to_string();
+        let id_short = oid_str[..7.min(oid_str.len())].to_string();
         let summary = commit.summary().unwrap_or("").to_string();
         let author = commit.author().name().unwrap_or("").to_string();
         let when_epoch = commit.time().seconds();
@@ -1085,7 +1082,6 @@ fn repo_recent_commits(repo: &Repository, n: usize) -> Vec<CommitInfoDto> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     #[test]
     fn dto_json_shape_matches_wasm_contract() {

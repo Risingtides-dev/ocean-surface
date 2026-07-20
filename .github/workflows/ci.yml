@@ -39,7 +39,7 @@ jobs:
       # --------------------------------------------------------------------
       # SCOPE NOTE — why this gate is not a plain `cargo build --workspace`:
       #
-      # The workspace has three crates with very different build profiles:
+      # The workspace has four crates with very different build profiles:
       #   * ocean-surface-proxy — native axum binary (the only default member).
       #     Builds/tests/lints fine headless. This is the real CI target.
       #   * ocean-surface-ui    — wasm-only Leptos CSR app. A native build is
@@ -52,6 +52,20 @@ jobs:
       #     compiles the source + the webrtc-sys C++ bindings and emits link
       #     metadata WITHOUT performing the final GPU/render link, which is
       #     viable headless — see the dedicated `gui-check` job below.
+      #   * ocean-tauri        — the macOS desktop shell. NOT GATED HERE, and
+      #     that gap is why it accumulated 6 clippy errors unnoticed until
+      #     TASK-81. Gating it needs two things this runner does not have:
+      #     (1) a `dist/` directory — `tauri::generate_context!` panics at
+      #         compile time when `frontendDist` ("../../dist") is missing, so
+      #         even `cargo check` fails in a bare checkout. A stub
+      #         (`mkdir -p dist && touch dist/index.html`) is enough for a
+      #         lint/check gate since the bundle itself is not built here.
+      #     (2) the webkit2gtk/libsoup system deps Tauri needs on ubuntu, or a
+      #         macOS runner (the shell is macOS-targeted in practice).
+      #     Until one of those is arranged, ocean-tauri is lint-checked locally
+      #     only. Whoever adds the job: TASK-81 left the crate clippy-clean, so
+      #     it should go green on the first run — if it does not, the runner
+      #     setup is the problem, not the source.
       # --------------------------------------------------------------------
 
       # ocean-surface-proxy: the native crate — full build/test/clippy gate.
