@@ -376,6 +376,10 @@ fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
         // headers; it runs AFTER routing/ServeDir so it only touches the
         // actual file response; non-wasm paths pass through untouched.
         .layer(middleware::from_fn(wasm_headers))
+        // TASK-72: baseline security headers. Declared here so it decorates
+        // every document/static response (including the SPA fallback) but
+        // sits inside the auth gate — a 401 challenge needs no CSP.
+        .layer(middleware::from_fn(security_headers))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             basic_auth_gate,
@@ -454,6 +458,81 @@ const WASM_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
 /// Everything else passes through unchanged. This is the primary fix for the
 /// blank deployed page — see the layer registration in `main` for the full
 /// root-cause writeup.
+/// Baseline security response headers (TASK-72).
+///
+/// The surface renders untrusted model output on the same origin that holds
+/// the operator's basic-auth session — and that session is the only thing
+/// between the internet and a daemon with no auth of its own. Before this,
+/// the proxy set no security headers at all.
+///
+/// Split deliberately into ENFORCED and REPORT-ONLY:
+///
+/// Enforced here are the headers that cannot break a working app —
+/// `nosniff` (ServeDir already sends correct types), `no-referrer` (nothing
+/// depends on outbound Referer), `frame-ancestors 'none'` (the app is never
+/// framed; this is the clickjacking guard for an authenticated session),
+/// `base-uri 'self'` (a `<base>` injected into rendered output cannot
+/// re-root relative URLs), and `object-src 'none'`.
+///
+/// CSP proper ships REPORT-ONLY, and the reason is worth stating plainly: the
+/// Trunk-generated shell carries large INLINE `<script>` blocks (LiveKit
+/// wiring, social embeds), so an enforcing policy would need
+/// `script-src 'unsafe-inline'` — which defeats most of what CSP is for. The
+/// honest fix is nonce- or hash-based script-src, which means rewriting the
+/// shell at build time; that is follow-up work, not a header change. Until
+/// then Report-Only tells us exactly what a real policy would break without
+/// risking a blank app for the operator.
+///
+/// The allow-list reflects what the bundle actually loads today: jsdelivr
+/// (livekit-client ESM), tiktok/instagram embed scripts, Google Maps JS, and
+/// `wss:` for LiveKit rooms whose URL is server-supplied per token.
+async fn security_headers(req: Request, next: Next) -> Response {
+    // API/proxy/SSE responses are JSON or event streams — a document CSP is
+    // meaningless there, and skipping them keeps this off the hot paths.
+    let path = req.uri().path().to_string();
+    let is_api = path.starts_with("/v1/") || path.starts_with("/api/");
+    let mut resp = next.run(req).await;
+    if is_api {
+        return resp;
+    }
+    let headers = resp.headers_mut();
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        header::HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        header::HeaderValue::from_static(CSP_ENFORCED),
+    );
+    headers.insert(
+        header::HeaderName::from_static("content-security-policy-report-only"),
+        header::HeaderValue::from_static(CSP_REPORT_ONLY),
+    );
+    resp
+}
+
+/// Enforced directives only — chosen because none of them can break a working
+/// page. Notably absent: `script-src`/`default-src` (see `security_headers`).
+const CSP_ENFORCED: &str = "frame-ancestors 'none'; base-uri 'self'; object-src 'none'";
+
+/// The policy we WANT, shipped observe-only until inline scripts get nonces.
+/// `'unsafe-inline'` appears here on purpose: it documents the current gap
+/// rather than hiding it, so violation reports show what else would break.
+const CSP_REPORT_ONLY: &str = "default-src 'self'; \
+     script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline' https://cdn.jsdelivr.net https://www.tiktok.com https://www.instagram.com https://maps.googleapis.com https://*.gstatic.com; \
+     style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
+     img-src 'self' data: blob: https:; \
+     media-src 'self' data: blob:; \
+     font-src 'self' data: https://fonts.gstatic.com; \
+     connect-src 'self' wss: https://maps.googleapis.com https://*.gstatic.com; \
+     worker-src 'self' blob:; \
+     frame-src https://www.tiktok.com https://www.instagram.com; \
+     frame-ancestors 'none'; base-uri 'self'; object-src 'none'";
+
 async fn wasm_headers(req: Request, next: Next) -> Response {
     let is_wasm = req.uri().path().ends_with(".wasm");
     let mut resp = next.run(req).await;
@@ -1805,6 +1884,88 @@ mod tests {
         let payload = serde_json::json!({"error": "upstream returned 500"});
         let resp = translate_stt_daemon_response(StatusCode::BAD_GATEWAY, &payload);
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// TASK-72: security headers must reach real document responses through
+    /// the PRODUCTION router, and must NOT be pasted onto proxied API/SSE
+    /// responses. Drives `build_app` so a middleware that gets dropped from
+    /// the layer stack fails this test.
+    #[tokio::test]
+    async fn security_headers_cover_documents_and_skip_api() {
+        let dist = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dist.path().join("index.html"), "<!doctype html>ok").expect("write shell");
+        let state = Arc::new(AppState {
+            http: reqwest::Client::new(),
+            voice_profile: "leo".to_string(),
+            daemon_url: "http://127.0.0.1:9".to_string(),
+            default_livekit_room_id: "project:surface-test".to_string(),
+            tldraw_sync_uri: None,
+            maps_key: None,
+            maps_map_id: "DEMO_MAP_ID".to_string(),
+            basic_auth: None,
+            observer_token_path: PathBuf::from("/not-used"),
+        });
+        let app = build_app(state, dist.path());
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/index.html")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let h = resp.headers();
+        assert_eq!(
+            h.get(header::X_CONTENT_TYPE_OPTIONS)
+                .map(|v| v.to_str().unwrap()),
+            Some("nosniff"),
+        );
+        assert_eq!(
+            h.get(header::REFERRER_POLICY).map(|v| v.to_str().unwrap()),
+            Some("no-referrer"),
+        );
+        let csp = h
+            .get(header::CONTENT_SECURITY_POLICY)
+            .expect("enforced CSP present")
+            .to_str()
+            .unwrap();
+        assert!(
+            csp.contains("frame-ancestors 'none'") && csp.contains("object-src 'none'"),
+            "enforced CSP must carry the break-proof directives: {csp}",
+        );
+        assert!(
+            !csp.contains("script-src"),
+            "script-src must NOT be enforced while the shell has inline scripts — \
+             it belongs in report-only until nonces land: {csp}",
+        );
+        assert!(
+            h.get("content-security-policy-report-only").is_some(),
+            "the aspirational policy must ship report-only so violations surface",
+        );
+
+        // A proxied API response must be left alone (JSON/SSE carry their own
+        // headers; a document CSP there is meaningless and risks clobbering).
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/permissions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        assert!(
+            resp.headers()
+                .get(header::CONTENT_SECURITY_POLICY)
+                .is_none(),
+            "API responses must not be decorated with a document CSP",
+        );
     }
 
     /// TASK-71: dot segments in a wildcard forwarder's tail must be refused
