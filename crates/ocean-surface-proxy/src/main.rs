@@ -1511,7 +1511,19 @@ async fn proxy_observatory(State(state): State<Arc<AppState>>, req: Request) -> 
         .map(|query| format!("?{query}"))
         .unwrap_or_default();
     let url = format!("{}{path}{query}", state.daemon_url.trim_end_matches('/'));
-    let mut upstream = state.http.get(&url).bearer_auth(token);
+    // TASK-83: this one handler serves BOTH an SSE tail (`/events`) and
+    // buffered routes (`/snapshot`, `/replay`), so the client must be chosen
+    // by route shape rather than swapped wholesale. The streaming tail keeps
+    // the untimed client — a timeout there would sever a live session — while
+    // the buffered routes get the bounded one, which is what TASK-73 intended
+    // and missed here because the choice happens before the branch below.
+    let is_stream = path.ends_with("/events");
+    let client = if is_stream {
+        &state.http
+    } else {
+        &state.http_json
+    };
+    let mut upstream = client.get(&url).bearer_auth(token);
     if let Some(last_event_id) = req.headers().get("last-event-id") {
         if let Ok(last_event_id) = last_event_id.to_str() {
             upstream = upstream.header("Last-Event-ID", last_event_id);
@@ -1524,7 +1536,7 @@ async fn proxy_observatory(State(state): State<Arc<AppState>>, req: Request) -> 
             return (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&error)).into_response();
         }
     };
-    if path.ends_with("/events") {
+    if is_stream {
         return sse_stream_response(response);
     }
 
@@ -1554,8 +1566,12 @@ async fn proxy_observatory(State(state): State<Arc<AppState>>, req: Request) -> 
 async fn stt(State(state): State<Arc<AppState>>, body: Bytes) -> impl IntoResponse {
     let url = format!("{}/v1/voice/stt", state.daemon_url.trim_end_matches('/'));
 
+    // TASK-83: buffered (the response is read to completion via `.json()`),
+    // so it belongs on the timed client. It was left on the untimed SSE
+    // client when TASK-73 split them, so a wedged daemon hung dictation
+    // forever instead of failing.
     let resp = match state
-        .http
+        .http_json
         .post(&url)
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .body(body.to_vec())
@@ -1623,8 +1639,9 @@ async fn tts(
 
     let url = format!("{}/v1/voice/tts", state.daemon_url.trim_end_matches('/'));
 
+    // TASK-83: buffered (`.bytes()` below) — same miss as stt.
     let resp = state
-        .http
+        .http_json
         .post(&url)
         .header(header::CONTENT_TYPE, "application/json")
         .json(&json!({
@@ -2150,6 +2167,64 @@ mod tests {
         assert!(
             !text.contains("127.0.0.1") && !text.contains(':') && !text.contains("http"),
             "error body must not disclose the upstream address: {text}",
+        );
+    }
+
+    /// TASK-83: every use of the UNTIMED client must be a genuine SSE tail.
+    ///
+    /// TASK-73 split the clients so a wedged daemon could not hang buffered
+    /// forwards forever — but three buffered handlers (stt, tts, observatory
+    /// snapshot/replay) were left on the untimed client, so the bug it
+    /// claimed to close stayed open for them. The inverse mistake is worse:
+    /// moving an SSE tail onto the timed client would SEVER live event
+    /// streams mid-session.
+    ///
+    /// This pins the classification itself. Each untimed use must sit in a
+    /// handler that hands its response to `sse_stream_response`; a new
+    /// buffered forward on `state.http` fails here rather than shipping.
+    #[test]
+    fn untimed_client_is_used_only_by_streaming_handlers() {
+        let src = include_str!("main.rs");
+        // Needle assembled at runtime so it cannot match this test's own text.
+        let untimed = format!("state.{}{}", "http", ".");
+        let streaming_handlers = [
+            "async fn proxy_rooms_persistent",
+            "async fn proxy_control_events",
+            "async fn proxy_events",
+            "async fn proxy_observatory",
+        ];
+
+        // Collect the handler each untimed use falls inside.
+        let mut offenders = Vec::new();
+        for (idx, _) in src.match_indices(untimed.as_str()) {
+            let before = &src[..idx];
+            let handler = streaming_handlers
+                .iter()
+                .filter_map(|h| before.rfind(h).map(|pos| (pos, *h)))
+                .max_by_key(|(pos, _)| *pos);
+            // Also find the nearest preceding fn of ANY kind, so a use inside
+            // a non-streaming fn is not attributed to an earlier streaming one.
+            let nearest_fn = before.rfind("\nasync fn ").max(before.rfind("\nfn "));
+            match (handler, nearest_fn) {
+                (Some((hpos, _)), Some(fpos)) if hpos >= fpos => {}
+                _ => {
+                    let line = before.matches('\n').count() + 1;
+                    offenders.push(line);
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "untimed client used outside a streaming handler at line(s) {offenders:?} — \
+             a buffered forward there hangs forever on a wedged daemon (TASK-83). \
+             Use state.http_json, or add the handler above if it truly streams.",
+        );
+
+        // And the observatory handler must pick its client by route shape,
+        // since it serves both an SSE tail and buffered routes.
+        assert!(
+            src.contains("let is_stream = path.ends_with(\"/events\");"),
+            "observatory must branch on route shape before choosing a client",
         );
     }
 
