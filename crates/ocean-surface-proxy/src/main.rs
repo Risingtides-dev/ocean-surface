@@ -204,7 +204,14 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| ocean_config_dir().join("observatory-token"));
 
     let state = Arc::new(AppState {
-        http: reqwest::Client::new(),
+        // TASK-71: never follow upstream redirects. A redirect-following
+        // reverse proxy is an SSRF primitive waiting on a daemon-side 3xx —
+        // the daemon returns none today, but this boundary should not depend
+        // on that staying true.
+        http: reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("reqwest client with no-redirect policy should build"),
         voice_profile,
         daemon_url,
         default_livekit_room_id,
@@ -941,6 +948,27 @@ fn livekit_token_daemon_path(room_id: &str) -> String {
     )
 }
 
+/// True when a client-supplied path tail contains a dot segment (`.` or `..`).
+///
+/// The wildcard forwarders build their upstream URL by string-formatting a
+/// client-controlled tail into it. `reqwest`'s `Url::parse` then applies RFC
+/// 3986 dot-segment removal, so a tail carrying `..` COLLAPSES the traversal
+/// and reaches a daemon path the proxy's route table never exposed (TASK-71,
+/// probe-confirmed: `/v1/rooms/persistent/../../../v1/agent/turns` arrived at
+/// the daemon as `/v1/agent/turns`). That matters more here than in a normal
+/// reverse proxy: the daemon behind this boundary has NO auth of its own and
+/// runs with tool execution ungated, so the proxy's route table is the real
+/// allow-list of internet-reachable surface. A traversal makes it advisory.
+///
+/// Call this on the DECODED tail — axum's `Path` extractor percent-decodes
+/// its capture, so `%2e%2e` arrives here as `..` and must be caught too.
+/// Segments are split on `/` so a legitimate id containing dots
+/// (`room.v2`, `..config` as a whole segment is rejected, but `a.b` is fine)
+/// is unaffected; only a segment that IS `.` or `..` is refused.
+fn has_dot_segment(path: &str) -> bool {
+    path.split('/').any(|seg| seg == "." || seg == "..")
+}
+
 fn percent_encode_path_segment(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
     for byte in value.bytes() {
@@ -966,6 +994,12 @@ async fn proxy_longhouse(
     Path(rest): Path<String>,
     req: Request,
 ) -> impl IntoResponse {
+    // TASK-71: `rest` is the DECODED wildcard capture, so `%2e%2e` is already
+    // `..` by the time we see it. Refuse dot segments before they can collapse
+    // into a daemon path this route was never meant to reach.
+    if has_dot_segment(&rest) {
+        return (StatusCode::BAD_REQUEST, "invalid path").into_response();
+    }
     let method = req.method().clone();
     let q = req
         .uri()
@@ -1022,6 +1056,13 @@ async fn proxy_rooms_persistent(
 ) -> impl IntoResponse {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
+    // TASK-71: this handler forwards the RAW request path verbatim, so a `..`
+    // segment would collapse upstream into an unproxied daemon route. Refuse
+    // before the SSE branch below, so both the streaming and buffered paths
+    // are covered by one check.
+    if has_dot_segment(&path) {
+        return (StatusCode::BAD_REQUEST, "invalid path").into_response();
+    }
     let q = req
         .uri()
         .query()
@@ -1764,6 +1805,81 @@ mod tests {
         let payload = serde_json::json!({"error": "upstream returned 500"});
         let resp = translate_stt_daemon_response(StatusCode::BAD_GATEWAY, &payload);
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// TASK-71: dot segments in a wildcard forwarder's tail must be refused
+    /// BEFORE the upstream URL is built, because `reqwest`'s `Url::parse`
+    /// collapses them and would reach a daemon route this proxy never exposed.
+    ///
+    /// Drives the PRODUCTION router (`build_app`), not `has_dot_segment` alone:
+    /// a helper-only test would pass even if a forwarder forgot to call it.
+    /// The discriminator is 400-vs-502 — a refused traversal returns 400
+    /// WITHOUT contacting the daemon, while a legitimate path reaches the
+    /// forwarder and fails at the closed port with 502. A 502 on a traversal
+    /// would mean the guard was bypassed and the request went upstream.
+    #[tokio::test]
+    async fn dot_segments_are_refused_before_reaching_the_daemon() {
+        let dist = tempfile::tempdir().expect("tempdir");
+        let state = Arc::new(AppState {
+            http: reqwest::Client::new(),
+            voice_profile: "leo".to_string(),
+            // Closed port: a request that gets past the guard fails fast as
+            // 502, which is exactly how we detect a bypass.
+            daemon_url: "http://127.0.0.1:9".to_string(),
+            default_livekit_room_id: "project:surface-test".to_string(),
+            tldraw_sync_uri: None,
+            maps_key: None,
+            maps_map_id: "DEMO_MAP_ID".to_string(),
+            basic_auth: None,
+            observer_token_path: PathBuf::from("/not-used"),
+        });
+        let app = build_app(state, dist.path());
+
+        // Both probe-confirmed attack shapes, raw and percent-encoded. The
+        // encoded form matters because axum's Path extractor decodes before
+        // the handler sees it, so `%2e%2e` arrives as `..`.
+        for uri in [
+            "/v1/rooms/persistent/../../../v1/agent/turns",
+            "/v1/longhouse/../../v1/agent/sessions",
+            "/v1/longhouse/%2e%2e/%2e%2e/v1/agent/sessions",
+            "/v1/rooms/persistent/./events",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "traversal must be refused at the proxy, never forwarded: {uri}",
+            );
+        }
+
+        // Control: a legitimate room path still reaches the forwarder, proving
+        // the guard rejects dot segments specifically rather than blanket-
+        // failing the route (which would pass the assertions above vacuously).
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/rooms/persistent/room.v2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_GATEWAY,
+            "a legitimate path (incl. dots inside a segment) must still route",
+        );
     }
 
     /// GET /v1/permissions must NOT fall through to ServeDir → 404 — proven
