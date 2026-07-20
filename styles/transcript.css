@@ -410,6 +410,64 @@
   }
 }
 
+/* ── TASK-46: sync_pending banner ───────────────────────────────────────────
+   Renders below the live-activity-row when the transcript is quarantined
+   behind an in-progress live turn. Derives from Ocean's depth ramp: deep
+   indigo base with subtle aqua accent on refresh. Stalled (5 min deadline
+   exceeded) gets a warn pulse on the button. */
+
+.sync-pending-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 2px;
+  min-height: 24px;
+  align-self: flex-start;
+  width: min(74ch, 100%);
+  font-family: var(--font);
+  font-size: 12px;
+  color: var(--fg-4);
+}
+
+.sync-pending-banner__badge {
+  font-size: 16px;
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+.sync-pending-banner__label {
+  flex: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.sync-pending-banner__refresh {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: background-color 150ms ease, color 150ms ease;
+}
+
+.sync-pending-banner__refresh:hover {
+  background-color: var(--bg-2);
+}
+
+.sync-pending-banner__refresh--stalled {
+  color: var(--warn);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sync-pending-banner__refresh--stalled {
+    animation: none;
+  }
+}
+
 /* TASK-52 two-measure layout — the PROSE column. The assistant body is now
    de-bubbled and full-width, so the readable measure lives HERE on the text
    block itself: streaming markdown prose is capped at 74ch (the same

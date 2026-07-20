@@ -18,7 +18,7 @@ use std::rc::Rc;
 #[cfg(target_arch = "wasm32")]
 use std::sync::{Arc, Mutex};
 
-use futures_util::future::LocalBoxFuture;
+use futures_util::future::{abortable, AbortHandle, LocalBoxFuture};
 use futures_util::{FutureExt, StreamExt};
 use gloo_net::eventsource::futures::EventSource;
 use gloo_net::eventsource::State as EventSourceState;
@@ -35,6 +35,22 @@ use crate::canvas::CanvasContext;
 use crate::model::{Block, ComponentPlacement, Role, ToolStatus, Turn};
 
 pub const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:4780";
+
+#[cfg(target_arch = "wasm32")]
+fn now_millis() -> f64 {
+    js_sys::Date::now()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn now_millis() -> f64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock must be after Unix epoch")
+        .as_secs_f64()
+        * 1000.0
+}
 
 // Browsers cap concurrent HTTP/1.1 connections per origin. Each focused
 // session owns two long-lived EventSource requests (agent events + permission
@@ -1817,6 +1833,45 @@ pub struct Daemon {
     /// `browser_activity` event itself only carries `{ active }`, so we derive
     /// the action label from the tool-call stream (OCEAN-92).
     pub browser_last_action: RwSignal<Option<String>>,
+    // ── TASK-46: sync_pending — mid-turn content recovery on fresh attach ──────
+    //
+    // When a surface attaches or reconnects during an active turn, we enter
+    // generation+session-scoped sync_pending: committed snapshot renders
+    // immediately, partial active-turn tail is suppressed, and a bounded
+    // abortable detail poll runs until terminal state, then atomically replaces
+    // the transcript. Zero daemon changes. See `.stitchpad/artifacts/`.
+    //
+    /// True while the sync_pending poll is active — the apply_event suppression
+    /// gate and the UI "syncing current turn" affordance both read this.
+    pub sync_pending: RwSignal<bool>,
+    /// Monotonic sync cycle counter, never read from `sse_generation`, never
+    /// decremented. `stop_sync_poll` bumps it; every async write and
+    /// `in_flight` release must match the captured value. ABA-proof.
+    sync_cycle: RwSignal<u64>,
+    /// Poll interval handle (leptos `set_interval_with_handle`). Cleared on
+    /// stop/stalled/switch.
+    sync_interval: RwSignal<Option<IntervalHandle>>,
+    /// Abort handle for the in-flight detail fetch so a switch/close can cancel
+    /// it immediately without waiting for the HTTP request to settle.
+    sync_fetch_abort: RwSignal<Option<AbortHandle>>,
+    /// Prevents overlapping poll ticks. Set before the fetch spawns, cleared
+    /// after the fetch settles (success/error/abort). A tick that sees this
+    /// true skips — the in-flight fetch will release it.
+    sync_in_flight: RwSignal<bool>,
+    /// Absolute deadline (`now_millis()` ms). When the current time
+    /// exceeds this, the poll transitions to stalled and stops ticking.
+    /// Checked BEFORE the `in_flight` guard so a hung fetch cannot block the
+    /// timeout from being observed.
+    pub sync_deadline: RwSignal<Option<f64>>,
+    /// Monotonic activity revision bumped by admitted `TurnStarted` and
+    /// `TurnFinished`. Captured at projection start; mismatch at commit
+    /// → `ProjectionOutcome::Live` (re-quarantine). Covers both directions:
+    /// live-detail-stale-when-terminal AND terminal-detail-stale-when-new-turn.
+    activity_revision: RwSignal<u64>,
+    /// Edge-safe kick counter for the sync poll. Bumped by `TurnFinished` during
+    /// sync_pending so the live SSE frame triggers an immediate detail refetch
+    /// without waiting for the next 2s interval tick. An Effect watches this.
+    sync_poll_kick: RwSignal<u64>,
     /// Permission requests awaiting an allow/deny decision, oldest first. Each
     /// blocks its turn on the daemon until decided. Populated from the
     /// `/v1/events` control stream (`permission_request`) and cleared on
@@ -2106,6 +2161,25 @@ struct SessionToolContext {
     arguments: Option<serde_json::Value>,
 }
 
+/// TASK-46: outcome of `commit_session_projection` — whether the detail was
+/// terminal (sync done with full transcript) or still live (quarantined
+/// prefix + sync_pending poll running).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectionOutcome {
+    Terminal,
+    Live,
+}
+
+const SESSION_PROJECTION_ACTIVITY_CHANGED: &str =
+    "session activity changed while loading; retrying authoritative snapshot";
+
+/// A terminal HTTP snapshot can briefly race a TurnStarted frame received
+/// before the daemon registers the request in its durable request map. Keep the
+/// local live projection and let sync_pending poll once registration settles.
+fn should_defer_terminal_snapshot(query_is_live: bool, local_has_live_turn: bool) -> bool {
+    !query_is_live && local_has_live_turn
+}
+
 impl Daemon {
     pub fn new(url: impl Into<String>) -> Self {
         Self {
@@ -2173,6 +2247,14 @@ impl Daemon {
             project_create_pending: RwSignal::new(false),
             project_create_error: RwSignal::new(None),
             preview_file_intent: RwSignal::new(None),
+            sync_pending: RwSignal::new(false),
+            sync_cycle: RwSignal::new(0),
+            sync_interval: RwSignal::new(None),
+            sync_fetch_abort: RwSignal::new(None),
+            sync_in_flight: RwSignal::new(false),
+            sync_deadline: RwSignal::new(None),
+            activity_revision: RwSignal::new(0),
+            sync_poll_kick: RwSignal::new(0),
         }
     }
 
@@ -2239,6 +2321,14 @@ impl Daemon {
             project_create_pending: RwSignal::new(false),
             project_create_error: RwSignal::new(None),
             preview_file_intent: RwSignal::new(None),
+            sync_pending: RwSignal::new(false),
+            sync_cycle: RwSignal::new(0),
+            sync_interval: RwSignal::new(None),
+            sync_fetch_abort: RwSignal::new(None),
+            sync_in_flight: RwSignal::new(false),
+            sync_deadline: RwSignal::new(None),
+            activity_revision: RwSignal::new(0),
+            sync_poll_kick: RwSignal::new(0),
         }
     }
 
@@ -2396,6 +2486,9 @@ impl Daemon {
         // restore title/cwd) after a stream gap — see the rehydrate call below.
         let session_title = self.session_title;
         let cwd = self.cwd;
+        let sync_pending = self.sync_pending;
+        let sync_poll_kick = self.sync_poll_kick;
+        let activity_revision = self.activity_revision;
         let pinned_widgets = self.pinned_widgets;
         #[cfg(target_arch = "wasm32")]
         let agent_event_source = Arc::clone(&self.agent_event_source);
@@ -2460,11 +2553,21 @@ impl Daemon {
                 // atomic commit either way (TASK-44, finding 3, and the 13:45
                 // Tauri/web split it reproduces).
                 if connected_once {
-                    if let Err(error) = daemon
+                    match daemon
                         .commit_session_projection(&active_session_id, generation)
                         .await
                     {
-                        log::warn!("reconnect projection commit skipped: {error}");
+                        Ok(ProjectionOutcome::Terminal) => {
+                            // Terminal — nothing to sync.
+                            daemon.stop_sync_poll();
+                        }
+                        Ok(ProjectionOutcome::Live) => {
+                            // Live turn — start the sync_pending poll.
+                            daemon.start_sync_poll(active_session_id.clone(), generation);
+                        }
+                        Err(error) => {
+                            log::warn!("reconnect projection commit skipped: {error}");
+                        }
                     }
                     // A session switch can land while the reconnect snapshot is
                     // awaiting HTTP. Do not let that stale task install its old
@@ -2638,6 +2741,9 @@ impl Daemon {
                         canvas_patches,
                         pinned_widgets,
                         awaiting_session_adoption,
+                        sync_pending,
+                        sync_poll_kick,
+                        activity_revision,
                         session_title,
                         cwd,
                     );
@@ -3845,6 +3951,332 @@ impl Daemon {
         });
     }
 
+    // ── TASK-46: sync_pending helpers ──────────────────────────────────────────
+    //
+    // On first attach/reconnect where detail state is Running/WaitingForPermission/
+    // Cancelling: committed snapshot renders immediately, partial active-turn tail
+    // is suppressed, bounded abortable detail poll runs until terminal state.
+
+    /// Stop the sync_pending poll: abort in-flight fetch, clear interval, bump
+    /// sync_cycle, clear in_flight, clear deadline, clear sync_pending flag.
+    /// Idempotent — safe to call when no poll is active.
+    fn stop_sync_poll(&self) {
+        if let Some(h) = self.sync_fetch_abort.get_untracked() {
+            h.abort();
+            self.sync_fetch_abort.set(None);
+        }
+        if let Some(handle) = self.sync_interval.get_untracked() {
+            handle.clear();
+            self.sync_interval.set(None);
+        }
+        self.sync_cycle.update(|g| *g = g.wrapping_add(1));
+        self.sync_in_flight.set(false);
+        self.sync_deadline.set(None);
+        self.sync_pending.set(false);
+    }
+
+    /// Manual refresh: abort any in-flight sync fetch and kick an immediate
+    /// poll tick. Idempotent — no-op if sync_pending is not active. Resets
+    /// the deadline so a stalled banner can be revived by the operator.
+    pub fn sync_touch(&self) {
+        if !self.sync_pending.get_untracked() {
+            return;
+        }
+        // Reset the 5-minute deadline.
+        self.sync_deadline.set(Some(now_millis() + 300_000.0));
+        // Bump the kick counter — the Effect in start_sync_poll fires a tick.
+        self.sync_poll_kick.update(|k| *k = k.wrapping_add(1));
+    }
+
+    /// Enter sync_pending mode for `(session_id, sse_generation)`. Commit the
+    /// committed transcript immediately (already done by the caller), set the
+    /// sync_pending flag, and start the bounded abortable detail poll at 2s
+    /// intervals until the turn becomes terminal or the 5-minute deadline is
+    /// reached (→ stalled with explicit refresh affordance).
+    ///
+    /// Must be called ONLY when the caller already committed the quarantined
+    /// projection and the sync_pending flag is false (not already polling).
+    fn start_sync_poll(&self, session_id: String, generation: u64) {
+        // Stop any prior poll first (idempotent — no-op if none active).
+        self.stop_sync_poll();
+
+        let sync_cycle = self.sync_cycle.get_untracked();
+        self.sync_pending.set(true);
+
+        // 5-minute absolute deadline in js_sys milliseconds.
+        let deadline = now_millis() + 300_000.0;
+        self.sync_deadline.set(Some(deadline));
+
+        // Kick counter effect: TurnFinished bumps sync_poll_kick; when it
+        // changes, we fire an immediate poll tick.
+        let kick = self.sync_poll_kick;
+        let sync_pending = self.sync_pending;
+        let d_kick = self.clone();
+        let s_kick = session_id.clone();
+        Effect::new(move |_| {
+            // Read the kick counter — the effect re-runs on change.
+            let _current = kick.get();
+            // Only fire when sync_pending is still active; the effect outlives
+            // the interval and could fire after stop_sync_poll cleared the flag.
+            if !sync_pending.get_untracked() {
+                return;
+            }
+            let d2 = d_kick.clone();
+            let s2 = s_kick.clone();
+            spawn_local(async move {
+                d2.sync_poll_tick(&s2, generation, sync_cycle).await;
+            });
+        });
+
+        // Set up the 2s interval poll.
+        let d_interval = self.clone();
+        let s_interval = session_id.clone();
+        match set_interval_with_handle(
+            move || {
+                let d = d_interval.clone();
+                let s = s_interval.clone();
+                spawn_local(async move {
+                    d.sync_poll_tick(&s, generation, sync_cycle).await;
+                });
+            },
+            std::time::Duration::from_secs(2),
+        ) {
+            Ok(handle) => {
+                self.sync_interval.set(Some(handle));
+            }
+            Err(err) => {
+                log::error!("sync_poll interval creation failed: {err:?}");
+                self.sync_pending.set(false);
+            }
+        }
+    }
+
+    /// Keyed cleanup guard shared by both `sync_poll_tick` completion arms.
+    ///
+    /// Returns `true` iff `(sse_generation, session_id, sync_cycle)` still
+    /// match current — only a *matching* completion may clear the abort
+    /// handle and in-flight flag. A **retired** completion (cycle bumped by
+    /// a `stop_sync_poll` + restart) must leave the newer cycle's signals
+    /// intact.
+    ///
+    /// On match this is the **sole** authority for both
+    /// `sync_fetch_abort` (→ `None`) and `sync_in_flight` (→ `false`).
+    /// There is no separate trailing `sync_in_flight` clear — all callers
+    /// route through this helper.
+    fn release_sync_fetch(&self, session_id: &str, sse_generation: u64, sync_cycle: u64) -> bool {
+        let matched = self.sse_generation.get_untracked() == sse_generation
+            && self.session_id.get_untracked().as_deref() == Some(session_id)
+            && self.sync_cycle.get_untracked() == sync_cycle;
+
+        if !matched {
+            return false; // retired — touch nothing
+        }
+
+        // Matching completion: release both signals.
+        self.sync_fetch_abort.set(None);
+        self.sync_in_flight.set(false);
+        true
+    }
+
+    /// One tick of the sync_poll: fetch the session detail, check guards,
+    /// quarantine if live, atomically commit if terminal. Gen-gated — stale
+    /// generations are rejected.
+    async fn sync_poll_tick(&self, session_id: &str, sse_generation: u64, sync_cycle: u64) {
+        // Guard 1: generation + session match.
+        if self.sse_generation.get_untracked() != sse_generation
+            || self.session_id.get_untracked().as_deref() != Some(session_id)
+            || self.sync_cycle.get_untracked() != sync_cycle
+        {
+            return;
+        }
+
+        // Guard 2: deadline check BEFORE in_flight — a hung fetch cannot block
+        // timeout from being observed.
+        if let Some(deadline) = self.sync_deadline.get_untracked() {
+            if now_millis() > deadline {
+                // Deadline exceeded — transition to stalled.
+                self.stop_sync_poll();
+                self.sync_pending.set(true); // re-enable for stalled affordance
+                self.status
+                    .set("turn still active — refresh available".into());
+                return;
+            }
+        }
+
+        // Guard 3: prevent overlapping ticks.
+        if self.sync_in_flight.get_untracked() {
+            return;
+        }
+        self.sync_in_flight.set(true);
+
+        // Abortable fetch. Capture the activity revision before the await: an
+        // admitted TurnStarted/TurnFinished retires this snapshot even when the
+        // focused session and SSE generation remain unchanged.
+        let snapshot_activity_revision = self.activity_revision.get_untracked();
+        let url = self.url.get_untracked();
+        let get_url = format!("{}/v1/sessions/{session_id}", url.trim_end_matches('/'));
+        let (fut, abort_handle) = abortable(Self::fetch_session_detail_for_sync_impl(
+            self.clone(),
+            session_id.to_string(),
+            get_url,
+            sse_generation,
+            sync_cycle,
+            snapshot_activity_revision,
+        ));
+        self.sync_fetch_abort.set(Some(abort_handle));
+
+        match fut.await {
+            Ok(outcome) => {
+                // Keyed guard — only a matching-cycle completion may touch
+                // the abort handle or in_flight. Retired completions return
+                // early, leaving the newer cycle's signals intact.
+                if !self.release_sync_fetch(session_id, sse_generation, sync_cycle) {
+                    return;
+                }
+                match outcome {
+                    ProjectionOutcome::Terminal => {
+                        // Turn finished — atomically replaced by the fetch, clear sync.
+                        self.stop_sync_poll();
+                        self.status.set("connected".into());
+                    }
+                    ProjectionOutcome::Live => {
+                        // Still running — keep polling.
+                    }
+                }
+            }
+            Err(_aborted) => {
+                // Release the handle + in_flight only if this cycle still
+                // matches; a retired abort must not clear the newer cycle's
+                // signals.
+                self.release_sync_fetch(session_id, sse_generation, sync_cycle);
+            }
+        }
+    }
+
+    /// Fetch the session detail and commit with quarantine. Associated fn (not
+    /// `&self` — takes a clone to survive the abortable wrapper). Returns the
+    /// outcome for the tick to act on.
+    async fn fetch_session_detail_for_sync_impl(
+        self,
+        session_id: String,
+        get_url: String,
+        sse_generation: u64,
+        sync_cycle: u64,
+        snapshot_activity_revision: u64,
+    ) -> ProjectionOutcome {
+        let resp = match Request::get(&get_url).send().await {
+            Ok(r) => r,
+            Err(error) => {
+                log::warn!("sync_poll fetch error: {error}");
+                return ProjectionOutcome::Live; // retry next tick
+            }
+        };
+        if !resp.ok() {
+            log::warn!("sync_poll fetch rejected: {}", resp.status());
+            return ProjectionOutcome::Live;
+        }
+        let response = match resp.json::<SessionDetailResponse>().await {
+            Ok(r) => r,
+            Err(error) => {
+                log::warn!("sync_poll decode error: {error}");
+                return ProjectionOutcome::Live;
+            }
+        };
+        if !response.ok {
+            log::warn!("sync_poll daemon error: {:?}", response.error);
+            return ProjectionOutcome::Live;
+        }
+        let Some(detail) = response.session else {
+            log::warn!("sync_poll: session detail missing");
+            return ProjectionOutcome::Live;
+        };
+        if detail.id != session_id {
+            log::warn!("sync_poll: session id mismatch");
+            return ProjectionOutcome::Live;
+        }
+
+        // Final admission happens inside the fetch helper, immediately before
+        // any signal writes. The caller's post-await check is intentionally not
+        // sufficient: this helper used to publish first and discover staleness
+        // only after returning.
+        self.try_commit_sync_snapshot(
+            &detail,
+            &session_id,
+            sse_generation,
+            sync_cycle,
+            snapshot_activity_revision,
+        )
+    }
+
+    /// Admission-gated commit of a parsed sync-poll snapshot. Returns
+    /// [`ProjectionOutcome::Live`] when the snapshot is discarded (stale guard
+    /// values) so the caller retries next tick. Extracted from the fetch helper
+    /// so the production commit seam is independently testable (TASK-46 stage F).
+    fn try_commit_sync_snapshot(
+        &self,
+        detail: &SessionDetail,
+        session_id: &str,
+        sse_generation: u64,
+        sync_cycle: u64,
+        snapshot_activity_revision: u64,
+    ) -> ProjectionOutcome {
+        if admit_sync_snapshot(
+            session_id,
+            sse_generation,
+            sync_cycle,
+            snapshot_activity_revision,
+            self.session_id.get_untracked().as_deref(),
+            self.sse_generation.get_untracked(),
+            self.sync_cycle.get_untracked(),
+            self.activity_revision.get_untracked(),
+        ) == SnapshotAdmission::Discard
+        {
+            return ProjectionOutcome::Live;
+        }
+
+        // Check state: live or terminal?
+        let query_is_live = detail.state.is_some_and(|s| s.is_live());
+        let active_requests = detail.active_requests.clone();
+        let (transcript_for_commit, outcome) = if query_is_live {
+            // Quarantine at last user entry.
+            let split_idx = detail
+                .transcript
+                .iter()
+                .rposition(|e| e.role == "user")
+                .unwrap_or(0);
+            let prefix: Vec<_> = detail.transcript.iter().take(split_idx).cloned().collect();
+            (prefix, ProjectionOutcome::Live)
+        } else {
+            (detail.transcript.clone(), ProjectionOutcome::Terminal)
+        };
+
+        // Commit the quarantined or full transcript atomically.
+        let (rebuilt_turns, rebuilt_pinned) =
+            turns_from_session_transcript(transcript_for_commit, &detail.tool_context);
+        let projection = build_session_projection(
+            detail.state,
+            &active_requests,
+            Vec::new(), // no permission cards in poll ticks
+            &self.decision_authority.get_untracked(),
+        );
+
+        self.turns.set(rebuilt_turns);
+        self.pinned_widgets.set(rebuilt_pinned);
+        self.active_turn_id.set(projection.active_turn_id);
+        self.streaming.set(projection.streaming);
+        self.session_title.set(detail.title.clone());
+        if let Some(root) = detail.workspace_root.as_ref().or(detail.cwd.as_ref()) {
+            if !root.is_empty() {
+                self.cwd.set((*root).clone());
+            }
+        }
+        if !detail.model.is_empty() {
+            self.model.set(Some(detail.model.clone()));
+        }
+
+        outcome
+    }
+
     /// Switch to a different session. Clears the current turns, sets the
     /// session_id, opens the scoped SSE streams, then commits the daemon's
     /// authoritative projection for the new session. SSE is a live tail, not
@@ -3858,6 +4290,7 @@ impl Daemon {
     /// elsewhere lands as a live, cancellable projection rather than a transient
     /// idle screen.
     pub fn switch_session(&self, id: String, title: String) {
+        self.stop_sync_poll();
         self.select_session_state(&id, title);
         self.connect();
         let generation = self.sse_generation.get_untracked();
@@ -3872,18 +4305,38 @@ impl Daemon {
     fn spawn_session_projection(&self, id: String, generation: u64) {
         let daemon = self.clone();
         spawn_local(async move {
-            if let Err(error) = daemon.commit_session_projection(&id, generation).await {
-                log::warn!("session projection commit skipped: {error}");
-                if admit_session_snapshot(
-                    &id,
-                    generation,
-                    daemon.session_id.get_untracked().as_deref(),
-                    daemon.sse_generation.get_untracked(),
-                ) == SnapshotAdmission::Commit
-                {
-                    daemon
-                        .status
-                        .set(format!("session load failed: {}", concise_error(&error)));
+            for attempt in 0..4 {
+                match daemon.commit_session_projection(&id, generation).await {
+                    Ok(ProjectionOutcome::Terminal) => {
+                        // Turn is terminal — projection already committed, nothing to sync.
+                        daemon.stop_sync_poll();
+                        return;
+                    }
+                    Ok(ProjectionOutcome::Live) => {
+                        // Turn is live — enter sync_pending mode.
+                        daemon.start_sync_poll(id.clone(), generation);
+                        return;
+                    }
+                    Err(error) if error == SESSION_PROJECTION_ACTIVITY_CHANGED && attempt < 3 => {
+                        // An admitted lifecycle event raced the HTTP snapshot.
+                        // Retry from a fresh revision rather than publishing it.
+                        continue;
+                    }
+                    Err(error) => {
+                        log::warn!("session projection commit skipped: {error}");
+                        if admit_session_snapshot(
+                            &id,
+                            generation,
+                            daemon.session_id.get_untracked().as_deref(),
+                            daemon.sse_generation.get_untracked(),
+                        ) == SnapshotAdmission::Commit
+                        {
+                            daemon
+                                .status
+                                .set(format!("session load failed: {}", concise_error(&error)));
+                        }
+                        return;
+                    }
                 }
             }
         });
@@ -3927,7 +4380,17 @@ impl Daemon {
     /// come straight from the daemon's `state`/`active_requests`: a running,
     /// waiting-for-permission, or cancelling session is never transiently
     /// declared idle; only a terminal state clears the Stop target.
-    async fn commit_session_projection(&self, id: &str, generation: u64) -> Result<(), String> {
+    ///
+    /// TASK-46: when the fetched detail state is Running/WaitingForPermission/
+    /// Cancelling, quarantine the transcript at the last user entry (render
+    /// prefix only) and return `ProjectionOutcome::Live` so the caller starts
+    /// the sync_pending poll. Terminal states return `ProjectionOutcome::Terminal`.
+    async fn commit_session_projection(
+        &self,
+        id: &str,
+        generation: u64,
+    ) -> Result<ProjectionOutcome, String> {
+        let snapshot_activity_revision = self.activity_revision.get_untracked();
         let url = self.url.get_untracked();
 
         // 1. Authoritative session snapshot (transcript + atomic live-turn state).
@@ -4015,8 +4478,31 @@ impl Daemon {
         {
             return Err("session snapshot retired before commit".into());
         }
+        if admit_activity_snapshot(
+            id,
+            generation,
+            snapshot_activity_revision,
+            self.session_id.get_untracked().as_deref(),
+            self.sse_generation.get_untracked(),
+            self.activity_revision.get_untracked(),
+        ) == SnapshotAdmission::Discard
+        {
+            return Err(SESSION_PROJECTION_ACTIVITY_CHANGED.into());
+        }
 
-        // 4. Pure projection, then one atomic commit — no `await` between writes.
+        // 4. TASK-46: determine whether this detail is terminal or live.
+        let query_is_live = detail.state.is_some_and(|s| s.is_live());
+        let local_has_live_turn =
+            self.streaming.get_untracked() && self.active_turn_id.get_untracked().is_some();
+        if should_defer_terminal_snapshot(query_is_live, local_has_live_turn) {
+            // Register-before-accepted: an SSE TurnStarted can precede the
+            // request registry that enriches SessionDetail. Do not let that
+            // transient terminal snapshot clear the local Stop target; the
+            // bounded sync poll will reconcile the durable state.
+            return Ok(ProjectionOutcome::Live);
+        }
+
+        // 5. Pure projection, then one atomic commit — no `await` between writes.
         let SessionDetail {
             title,
             model,
@@ -4028,8 +4514,27 @@ impl Daemon {
             active_requests,
             ..
         } = detail;
+
+        // TASK-46 quarantine: when state is live, split at last user entry and
+        // render only the prefix. Suffix (last user + everything after) is
+        // quarantined under the sync_pending banner. Conservative under-display
+        // is allowed; false-complete partial content is not.
+        let (quarantined_transcript, outcome) = if query_is_live {
+            let split_idx = transcript
+                .iter()
+                .rposition(|e| e.role == "user")
+                .unwrap_or(0);
+            // The suffix starts AT the last user entry — we exclude it.
+            // If split_idx is 0 (no user entries, or only one), we show
+            // nothing — conservative under-display.
+            let prefix: Vec<_> = transcript.iter().take(split_idx).cloned().collect();
+            (prefix, ProjectionOutcome::Live)
+        } else {
+            (transcript, ProjectionOutcome::Terminal)
+        };
+
         let (rebuilt_turns, rebuilt_pinned) =
-            turns_from_session_transcript(transcript, &tool_context);
+            turns_from_session_transcript(quarantined_transcript, &tool_context);
         let authority = self.decision_authority.get_untracked();
         let projection = build_session_projection(state, &active_requests, cards, &authority);
         // Live set = the daemon's live requests plus any request still holding an
@@ -4059,7 +4564,7 @@ impl Daemon {
             prune_session_authority(authority, id, &live_requests);
         });
         self.status.set("session loaded".into());
-        Ok(())
+        Ok(outcome)
     }
 
     async fn hydrate_active_session(&self, id: &str) -> Result<Vec<String>, String> {
@@ -4195,6 +4700,7 @@ impl Daemon {
     }
 
     pub fn new_session(&self) {
+        self.stop_sync_poll();
         self.turns.set(Vec::new());
         self.streaming.set(false);
         self.active_turn_id.set(None);
@@ -4868,6 +5374,60 @@ fn admit_session_snapshot(
     }
 }
 
+/// Extends the focus/generation admission with the session activity revision
+/// captured before an async fetch. Any admitted TurnStarted or TurnFinished
+/// retires the fetched snapshot, even when focus did not move.
+fn admit_activity_snapshot(
+    snapshot_session: &str,
+    snapshot_generation: u64,
+    snapshot_activity_revision: u64,
+    current_session: Option<&str>,
+    current_generation: u64,
+    current_activity_revision: u64,
+) -> SnapshotAdmission {
+    if admit_session_snapshot(
+        snapshot_session,
+        snapshot_generation,
+        current_session,
+        current_generation,
+    ) == SnapshotAdmission::Commit
+        && current_activity_revision == snapshot_activity_revision
+    {
+        SnapshotAdmission::Commit
+    } else {
+        SnapshotAdmission::Discard
+    }
+}
+
+/// Poll snapshots additionally belong to one sync cycle. Stopping or replacing
+/// a poll bumps the cycle, so its late fetch can never publish into a newer poll.
+#[allow(clippy::too_many_arguments)]
+fn admit_sync_snapshot(
+    snapshot_session: &str,
+    snapshot_generation: u64,
+    snapshot_cycle: u64,
+    snapshot_activity_revision: u64,
+    current_session: Option<&str>,
+    current_generation: u64,
+    current_cycle: u64,
+    current_activity_revision: u64,
+) -> SnapshotAdmission {
+    if admit_activity_snapshot(
+        snapshot_session,
+        snapshot_generation,
+        snapshot_activity_revision,
+        current_session,
+        current_generation,
+        current_activity_revision,
+    ) == SnapshotAdmission::Commit
+        && current_cycle == snapshot_cycle
+    {
+        SnapshotAdmission::Commit
+    } else {
+        SnapshotAdmission::Discard
+    }
+}
+
 /// Derive the live turn projection (`active_turn_id`, `streaming`) from the
 /// daemon's atomic `state` + `active_requests`. A live state
 /// (running / waiting-for-permission / cancelling) with a live request restores
@@ -4979,6 +5539,16 @@ fn apply_event(
     canvas_patches: RwSignal<Vec<CanvasPatchEntry>>,
     pinned_widgets: RwSignal<Vec<PinnedWidget>>,
     awaiting_session_adoption: RwSignal<bool>,
+    // TASK-46: sync_pending suppression gate — when true, content-mutating events
+    // are suppressed but state/Stop/permissions/terminal detection still flow.
+    sync_pending: RwSignal<bool>,
+    // TASK-46: kicked by TurnFinished during sync_pending so the poll fires an
+    // immediate detail refetch.
+    sync_poll_kick: RwSignal<u64>,
+    // TASK-46: bumped by admitted TurnStarted and TurnFinished; captured at
+    // projection start so stale terminal detail cannot clear a new live turn
+    // and stale live detail cannot clear a just-finished Stop target.
+    activity_revision: RwSignal<u64>,
     // Header-bound session identity (OCEAN-236). A `session_created` frame is the
     // authoritative source for the live session's title and working directory; the
     // header already renders both signals, so threading them here stops the surface
@@ -4994,6 +5564,26 @@ fn apply_event(
     if session_id.get_untracked().as_deref() != Some(evt_sid) {
         log::warn!("dropping agent event for non-active session {evt_sid}");
         return;
+    }
+
+    // TASK-46: suppression gate — during sync_pending, content-mutating events
+    // are suppressed so the quarantined transcript stays intact until the detail
+    // poll reaches terminal state. State/Stop/permissions/SurfacePatch still flow.
+    let sp = sync_pending.get_untracked();
+    if sp {
+        match event {
+            // Content-mutating events — suppress; the poll will atomically
+            // replace when the turn becomes terminal.
+            AgentEvent::AssistantTextDelta { .. }
+            | AgentEvent::ThinkingDelta { .. }
+            | AgentEvent::ToolCallStarted { .. }
+            | AgentEvent::ToolCallChunk { .. }
+            | AgentEvent::ToolCallFinished { .. }
+            | AgentEvent::ComponentRender { .. }
+            | AgentEvent::ComponentUnmount { .. } => return,
+            // State events still flow through.
+            _ => {}
+        }
     }
 
     match event {
@@ -5014,9 +5604,12 @@ fn apply_event(
             }
             // Mirror the title into the browser tab so the OS-level window/tab
             // label tracks the live session too.
-            if let Some(window) = web_sys::window() {
-                if let Some(doc) = window.document() {
-                    doc.set_title(&format!("Ocean — {title}"));
+            #[cfg(target_arch = "wasm32")]
+            {
+                if let Some(window) = web_sys::window() {
+                    if let Some(doc) = window.document() {
+                        doc.set_title(&format!("Ocean — {title}"));
+                    }
                 }
             }
         }
@@ -5027,6 +5620,8 @@ fn apply_event(
             // Track the in-flight turn so the halt button can cancel it, and
             // reflect the live model (covers a mid-session swap).
             active_turn_id.set(Some(turn_id.clone()));
+            streaming.set(true);
+            activity_revision.update(|r| *r = r.wrapping_add(1));
             if let Some(m) = m {
                 model.set(Some(m.clone()));
             }
@@ -5153,6 +5748,14 @@ fn apply_event(
             if admission == TerminalAdmission::ClearLive {
                 streaming.set(false);
                 active_turn_id.set(None);
+            }
+            // TASK-46: bump activity revision so stale in-flight projections
+            // (fetched while this turn was still live) are rejected at commit.
+            activity_revision.update(|r| *r = r.wrapping_add(1));
+            // Kick the sync_poll if active — the detail poll should refetch
+            // immediately on termination instead of waiting for the next 2s tick.
+            if sync_pending.get_untracked() {
+                sync_poll_kick.update(|k| *k = k.wrapping_add(1));
             }
             // Adoption is session-scoped, not turn-scoped: the frame is already
             // gated to the active session above, so any finish for it resolves a
@@ -6874,6 +7477,9 @@ mod tests {
             daemon.canvas_patches,
             daemon.pinned_widgets,
             daemon.awaiting_session_adoption,
+            daemon.sync_pending,
+            daemon.sync_poll_kick,
+            daemon.activity_revision,
             daemon.session_title,
             daemon.cwd,
         );
@@ -7315,6 +7921,55 @@ mod tests {
             admit_session_snapshot("session-a", 4, Some("session-a"), 5),
             SnapshotAdmission::Discard
         );
+    }
+
+    #[test]
+    fn lifecycle_activity_retires_in_flight_snapshot() {
+        assert_eq!(
+            admit_activity_snapshot("session-a", 5, 8, Some("session-a"), 5, 9),
+            SnapshotAdmission::Discard,
+            "TurnStarted/TurnFinished after fetch start must retire the snapshot"
+        );
+        assert_eq!(
+            admit_activity_snapshot("session-a", 5, 9, Some("session-a"), 5, 9),
+            SnapshotAdmission::Commit
+        );
+    }
+
+    #[test]
+    fn sync_snapshot_requires_focus_generation_cycle_and_activity() {
+        let admit = |session, generation, cycle, activity| {
+            admit_sync_snapshot("session-a", 5, 7, 11, session, generation, cycle, activity)
+        };
+
+        assert_eq!(
+            admit(Some("session-a"), 5, 7, 11),
+            SnapshotAdmission::Commit
+        );
+        assert_eq!(
+            admit(Some("session-b"), 5, 7, 11),
+            SnapshotAdmission::Discard
+        );
+        assert_eq!(
+            admit(Some("session-a"), 6, 7, 11),
+            SnapshotAdmission::Discard
+        );
+        assert_eq!(
+            admit(Some("session-a"), 5, 8, 11),
+            SnapshotAdmission::Discard
+        );
+        assert_eq!(
+            admit(Some("session-a"), 5, 7, 12),
+            SnapshotAdmission::Discard
+        );
+    }
+
+    #[test]
+    fn register_before_accepted_defers_only_terminal_snapshot_with_local_live_turn() {
+        assert!(should_defer_terminal_snapshot(false, true));
+        assert!(!should_defer_terminal_snapshot(true, true));
+        assert!(!should_defer_terminal_snapshot(false, false));
+        assert!(!should_defer_terminal_snapshot(true, false));
     }
 
     // 6. Deciding an old card after a new dispatch resolves the ORIGINAL turn's
@@ -8963,10 +9618,7 @@ mod tests {
     #[test]
     fn session_page_url_percent_encodes_reserved_cursor_bytes() {
         assert_eq!(
-            sessions_page_url(
-                "https://surface.test/",
-                Some("a&b=c+d/e?f#g %z"),
-            ),
+            sessions_page_url("https://surface.test/", Some("a&b=c+d/e?f#g %z"),),
             "https://surface.test/v1/agent/sessions?limit=1000&cursor=a%26b%3Dc%2Bd%2Fe%3Ff%23g%20%25z",
         );
         assert_eq!(
@@ -9550,5 +10202,874 @@ mod tests {
         assert!(env.ok);
         assert_eq!(env.reviews.len(), 1);
         assert_eq!(env.reviews[0].reviewer, "alice");
+    }
+
+    // ── TASK-46 stage D: sync_pending B-v3 regression matrix ────────────────────
+
+    fn daemon_with_sync(sync_pending: bool, deadline: Option<f64>) -> Daemon {
+        let daemon = Daemon::dummy();
+        daemon.sync_pending.set(sync_pending);
+        daemon.sync_deadline.set(deadline);
+        // Seed sync_cycle so we can distinguish a bump from zero.
+        daemon.sync_cycle.set(1);
+        daemon
+    }
+
+    // ── 1. default state ───────────────────────────────────────────────────────
+
+    #[test]
+    fn sync_pending_fields_default_false_and_none() {
+        let daemon = Daemon::dummy();
+        assert!(!daemon.sync_pending.get_untracked());
+        assert!(daemon.sync_deadline.get_untracked().is_none());
+        assert!(!daemon.sync_in_flight.get_untracked());
+    }
+
+    // ── 2. stop_sync_poll ──────────────────────────────────────────────────────
+
+    #[test]
+    fn stop_sync_poll_clears_all_state_and_bumps_cycle() {
+        let daemon = daemon_with_sync(true, Some(now_millis() + 100_000.0));
+        daemon.sync_in_flight.set(true);
+        let prev_cycle = daemon.sync_cycle.get_untracked();
+
+        daemon.stop_sync_poll();
+
+        assert!(!daemon.sync_pending.get_untracked());
+        assert!(daemon.sync_deadline.get_untracked().is_none());
+        assert!(!daemon.sync_in_flight.get_untracked());
+        assert_eq!(
+            daemon.sync_cycle.get_untracked(),
+            prev_cycle.wrapping_add(1),
+            "cycle must bump on stop"
+        );
+    }
+
+    // ── 3. sync_touch ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn sync_touch_noop_when_sync_pending_is_false() {
+        let daemon = Daemon::dummy();
+        let prev_kick = daemon.sync_poll_kick.get_untracked();
+        let prev_deadline = daemon.sync_deadline.get_untracked();
+
+        daemon.sync_touch();
+
+        assert_eq!(
+            daemon.sync_poll_kick.get_untracked(),
+            prev_kick,
+            "kick must not change"
+        );
+        assert_eq!(
+            daemon.sync_deadline.get_untracked(),
+            prev_deadline,
+            "deadline must not change"
+        );
+    }
+
+    #[test]
+    fn sync_touch_resets_deadline_and_bumps_kick_when_pending() {
+        let daemon = daemon_with_sync(true, Some(now_millis() + 1000.0));
+        let prev_kick = daemon.sync_poll_kick.get_untracked();
+
+        daemon.sync_touch();
+
+        assert_eq!(
+            daemon.sync_poll_kick.get_untracked(),
+            prev_kick.wrapping_add(1),
+            "kick must bump"
+        );
+        let new_deadline = daemon.sync_deadline.get_untracked().expect("deadline set");
+        // Should be ~300s from now, within 500ms tolerance.
+        let expected = now_millis() + 300_000.0;
+        assert!(
+            (new_deadline - expected).abs() < 500.0,
+            "deadline reset to ~5 min ahead; got {new_deadline}"
+        );
+    }
+
+    // ── 4. suppression gate: content events ────────────────────────────────────
+
+    #[test]
+    fn apply_event_suppresses_tool_call_started_when_sync_pending() {
+        let daemon = daemon_with_sync(true, Some(now_millis() + 100_000.0));
+        daemon.session_id.set(Some("s1".into()));
+        // Seed one assistant turn so the tool-call reducer has a target.
+        daemon.turns.set(vec![Turn::assistant("t1".into())]);
+        let before = daemon.turns.with_untracked(|t| t[0].blocks.len());
+
+        apply_test_event(
+            &daemon,
+            AgentEvent::ToolCallStarted {
+                session_id: "s1".into(),
+                turn_id: "t1".into(),
+                call: ToolCallSummary {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                    args_json: serde_json::json!({}),
+                },
+            },
+        );
+
+        let after = daemon.turns.with_untracked(|t| t[0].blocks.len());
+        assert_eq!(
+            after, before,
+            "ToolCallStarted suppressed during sync_pending"
+        );
+    }
+
+    #[test]
+    fn apply_event_suppresses_assistant_text_delta_when_sync_pending() {
+        let daemon = daemon_with_sync(true, Some(now_millis() + 100_000.0));
+        daemon.session_id.set(Some("s1".into()));
+        daemon.turns.set(vec![Turn::assistant("t1".into())]);
+        let before = daemon.turns.with_untracked(|t| t[0].blocks.len());
+
+        apply_test_event(
+            &daemon,
+            AgentEvent::AssistantTextDelta {
+                session_id: "s1".into(),
+                turn_id: "t1".into(),
+                delta: "hello".into(),
+            },
+        );
+
+        let after = daemon.turns.with_untracked(|t| t[0].blocks.len());
+        assert_eq!(
+            after, before,
+            "AssistantTextDelta suppressed during sync_pending"
+        );
+    }
+
+    #[test]
+    fn apply_event_suppresses_thinking_delta_when_sync_pending() {
+        let daemon = daemon_with_sync(true, Some(now_millis() + 100_000.0));
+        daemon.session_id.set(Some("s1".into()));
+        daemon.turns.set(vec![Turn::assistant("t1".into())]);
+        let before = daemon.turns.with_untracked(|t| t[0].blocks.len());
+
+        apply_test_event(
+            &daemon,
+            AgentEvent::ThinkingDelta {
+                session_id: "s1".into(),
+                turn_id: "t1".into(),
+                delta: "hmm".into(),
+            },
+        );
+
+        let after = daemon.turns.with_untracked(|t| t[0].blocks.len());
+        assert_eq!(
+            after, before,
+            "ThinkingDelta suppressed during sync_pending"
+        );
+    }
+
+    #[test]
+    fn apply_event_suppresses_component_render_when_sync_pending() {
+        let daemon = daemon_with_sync(true, Some(now_millis() + 100_000.0));
+        daemon.session_id.set(Some("s1".into()));
+        daemon.turns.set(vec![Turn::assistant("t1".into())]);
+        let before = daemon.turns.with_untracked(|t| t[0].blocks.len());
+
+        apply_test_event(
+            &daemon,
+            AgentEvent::ComponentRender {
+                session_id: "s1".into(),
+                component_id: "comp1".into(),
+                kind: "card".into(),
+                props: serde_json::Value::Null,
+                replace: false,
+            },
+        );
+
+        let after = daemon.turns.with_untracked(|t| t[0].blocks.len());
+        assert_eq!(
+            after, before,
+            "ComponentRender suppressed during sync_pending"
+        );
+    }
+
+    #[test]
+    fn apply_event_suppresses_component_unmount_when_sync_pending() {
+        let daemon = daemon_with_sync(true, Some(now_millis() + 100_000.0));
+        daemon.session_id.set(Some("s1".into()));
+        let before = daemon.pinned_widgets.with_untracked(|w| w.len());
+
+        apply_test_event(
+            &daemon,
+            AgentEvent::ComponentUnmount {
+                session_id: "s1".into(),
+                component_id: "comp1".into(),
+            },
+        );
+
+        let after = daemon.pinned_widgets.with_untracked(|w| w.len());
+        assert_eq!(
+            after, before,
+            "ComponentUnmount suppressed during sync_pending"
+        );
+    }
+
+    #[test]
+    fn apply_event_suppresses_tool_call_finished_when_sync_pending() {
+        let daemon = daemon_with_sync(true, Some(now_millis() + 100_000.0));
+        daemon.session_id.set(Some("s1".into()));
+        // Seed a running tool call block so the reducer has a target.
+        let mut turn = Turn::assistant("t1".into());
+        turn.blocks.push(Block::ToolCall {
+            call_id: "c1".into(),
+            name: "bash".into(),
+            args_preview: "{}".into(),
+            output: String::new(),
+            expanded: false,
+            status: ToolStatus::Running,
+        });
+        daemon.turns.set(vec![turn]);
+
+        apply_test_event(
+            &daemon,
+            AgentEvent::ToolCallFinished {
+                session_id: "s1".into(),
+                turn_id: "t1".into(),
+                call_id: "c1".into(),
+                result: ToolResult {
+                    ok: true,
+                    output: "ok".into(),
+                },
+            },
+        );
+
+        // The block must NOT have transitioned to Ok — suppressed.
+        let state = tool_state(&daemon, "t1", "c1");
+        assert_eq!(
+            state,
+            (ToolStatus::Running, false),
+            "ToolCallFinished suppressed during sync_pending — tool still Running"
+        );
+    }
+
+    // ── 5. suppression gate: state/Stop flow through ───────────────────────────
+
+    #[test]
+    fn apply_event_passes_turn_started_when_sync_pending() {
+        let daemon = daemon_with_sync(true, Some(now_millis() + 100_000.0));
+        daemon.session_id.set(Some("s1".into()));
+
+        apply_test_event(
+            &daemon,
+            AgentEvent::TurnStarted {
+                turn_id: "t1".into(),
+                session_id: "s1".into(),
+                model: None,
+            },
+        );
+
+        // TurnStarted bumps activity_revision even during sync_pending.
+        assert!(daemon.activity_revision.get_untracked() > 0);
+    }
+
+    #[test]
+    fn apply_event_passes_turn_finished_when_sync_pending() {
+        let daemon = daemon_with_sync(true, Some(now_millis() + 100_000.0));
+        daemon.session_id.set(Some("s1".into()));
+        daemon.active_turn_id.set(Some("t1".into()));
+        let prev_rev = daemon.activity_revision.get_untracked();
+
+        apply_test_event(
+            &daemon,
+            AgentEvent::TurnFinished {
+                session_id: "s1".into(),
+                turn_id: "t1".into(),
+                status: "completed".into(),
+                error: None,
+                wall_ms: Some(100),
+                output_tokens: None,
+                input_tokens: None,
+                cache_read_tokens: None,
+                tokens_per_second: None,
+            },
+        );
+
+        // Activity revision bumps (terminal track).
+        assert!(daemon.activity_revision.get_untracked() > prev_rev);
+    }
+
+    #[test]
+    fn apply_event_passes_session_created_when_sync_pending() {
+        let daemon = daemon_with_sync(true, Some(now_millis() + 100_000.0));
+        daemon.session_id.set(Some("s1".into()));
+
+        apply_test_event(
+            &daemon,
+            AgentEvent::SessionCreated {
+                session_id: "s1".into(),
+                title: "test session".into(),
+                cwd: "/work".into(),
+            },
+        );
+
+        assert_eq!(daemon.session_title.get_untracked(), "test session");
+        assert_eq!(daemon.cwd.get_untracked(), "/work");
+        assert!(!daemon.awaiting_session_adoption.get_untracked());
+    }
+
+    // ── 6. TurnFinished kick integration ───────────────────────────────────────
+
+    #[test]
+    fn turn_finished_kicks_sync_poll_when_sync_pending_true() {
+        let daemon = daemon_with_sync(true, Some(now_millis() + 100_000.0));
+        daemon.session_id.set(Some("s1".into()));
+        let prev_kick = daemon.sync_poll_kick.get_untracked();
+
+        apply_test_event(
+            &daemon,
+            AgentEvent::TurnFinished {
+                session_id: "s1".into(),
+                turn_id: "t1".into(),
+                status: "completed".into(),
+                error: None,
+                wall_ms: Some(100),
+                output_tokens: None,
+                input_tokens: None,
+                cache_read_tokens: None,
+                tokens_per_second: None,
+            },
+        );
+
+        assert_eq!(
+            daemon.sync_poll_kick.get_untracked(),
+            prev_kick.wrapping_add(1),
+            "TurnFinished must bump sync_poll_kick when sync_pending"
+        );
+    }
+
+    #[test]
+    fn turn_finished_does_not_kick_when_sync_pending_false() {
+        let daemon = daemon_with_sync(false, None);
+        daemon.session_id.set(Some("s1".into()));
+        let prev_kick = daemon.sync_poll_kick.get_untracked();
+
+        apply_test_event(
+            &daemon,
+            AgentEvent::TurnFinished {
+                session_id: "s1".into(),
+                turn_id: "t1".into(),
+                status: "completed".into(),
+                error: None,
+                wall_ms: Some(100),
+                output_tokens: None,
+                input_tokens: None,
+                cache_read_tokens: None,
+                tokens_per_second: None,
+            },
+        );
+
+        assert_eq!(
+            daemon.sync_poll_kick.get_untracked(),
+            prev_kick,
+            "kick must not change when sync_pending is false"
+        );
+    }
+
+    #[test]
+    fn turn_finished_bumps_activity_revision_when_sync_pending() {
+        let daemon = daemon_with_sync(true, Some(now_millis() + 100_000.0));
+        daemon.session_id.set(Some("s1".into()));
+        let prev_rev = daemon.activity_revision.get_untracked();
+
+        apply_test_event(
+            &daemon,
+            AgentEvent::TurnFinished {
+                session_id: "s1".into(),
+                turn_id: "t2".into(),
+                status: "completed".into(),
+                error: None,
+                wall_ms: Some(100),
+                output_tokens: None,
+                input_tokens: None,
+                cache_read_tokens: None,
+                tokens_per_second: None,
+            },
+        );
+
+        assert!(
+            daemon.activity_revision.get_untracked() > prev_rev,
+            "activity_revision must bump on TurnFinished"
+        );
+    }
+
+    // ── 7. suppression gate: non-matching session ──────────────────────────────
+
+    #[test]
+    fn apply_event_suppression_does_not_apply_to_wrong_session() {
+        // sync_pending is true for session "s1", but event targets "s2" — gate
+        // is keyed on event.session_id(), so suppression should not trigger.
+        let daemon = daemon_with_sync(true, Some(now_millis() + 100_000.0));
+        daemon.session_id.set(Some("s1".into()));
+        daemon.turns.set(vec![Turn::assistant("t1".into())]);
+        let before = daemon.turns.with_untracked(|t| t[0].blocks.len());
+
+        // Event for a different session — the session_id guard fires first.
+        apply_test_event(
+            &daemon,
+            AgentEvent::ToolCallStarted {
+                session_id: "s2".into(),
+                turn_id: "t2".into(),
+                call: ToolCallSummary {
+                    id: "c2".into(),
+                    name: "read".into(),
+                    args_json: serde_json::json!({}),
+                },
+            },
+        );
+
+        let after = daemon.turns.with_untracked(|t| t[0].blocks.len());
+        assert_eq!(
+            after, before,
+            "event for wrong session dropped before suppression gate"
+        );
+    }
+
+    // ── 8. activity_revision tracking ──────────────────────────────────────────
+
+    #[test]
+    fn turn_started_bumps_activity_revision() {
+        let daemon = Daemon::dummy();
+        daemon.session_id.set(Some("s1".into()));
+        let prev = daemon.activity_revision.get_untracked();
+
+        apply_test_event(
+            &daemon,
+            AgentEvent::TurnStarted {
+                turn_id: "t1".into(),
+                session_id: "s1".into(),
+                model: None,
+            },
+        );
+
+        assert!(daemon.activity_revision.get_untracked() > prev);
+    }
+
+    // ── 9. activity_revision race: admission deciders ──────────────────────────
+
+    #[test]
+    fn admit_activity_snapshot_discards_on_revision_mismatch() {
+        // Same session + gen, but activity_revision bumped (TurnStarted/TurnFinished).
+        assert_eq!(
+            admit_activity_snapshot("s1", 1, 5, Some("s1"), 1, 7),
+            SnapshotAdmission::Discard,
+            "bumped activity_revision must discard"
+        );
+    }
+
+    #[test]
+    fn admit_activity_snapshot_discards_wrong_session() {
+        assert_eq!(
+            admit_activity_snapshot("s1", 1, 3, Some("s2"), 1, 3),
+            SnapshotAdmission::Discard,
+        );
+    }
+
+    #[test]
+    fn admit_activity_snapshot_discards_wrong_generation() {
+        assert_eq!(
+            admit_activity_snapshot("s1", 1, 3, Some("s1"), 2, 3),
+            SnapshotAdmission::Discard,
+        );
+    }
+
+    #[test]
+    fn admit_activity_snapshot_commits_when_all_match() {
+        assert_eq!(
+            admit_activity_snapshot("s1", 1, 3, Some("s1"), 1, 3),
+            SnapshotAdmission::Commit,
+        );
+    }
+
+    #[test]
+    fn admit_sync_snapshot_discards_on_cycle_mismatch() {
+        // Same session, gen, activity_revision — but sync_cycle bumped (stop+restart).
+        assert_eq!(
+            admit_sync_snapshot("s1", 1, 5, 3, Some("s1"), 1, 7, 3),
+            SnapshotAdmission::Discard,
+            "stale cycle disqualified even when activity_revision matches"
+        );
+    }
+
+    #[test]
+    fn admit_sync_snapshot_discards_on_activity_revision_bump() {
+        // Same session, gen, cycle — but activity_revision bumped mid-fetch.
+        assert_eq!(
+            admit_sync_snapshot("s1", 1, 3, 5, Some("s1"), 1, 3, 7),
+            SnapshotAdmission::Discard,
+            "activity_revision bump during fetch must discard"
+        );
+    }
+
+    #[test]
+    fn admit_sync_snapshot_commits_when_all_three_match() {
+        assert_eq!(
+            admit_sync_snapshot("s1", 1, 3, 5, Some("s1"), 1, 3, 5),
+            SnapshotAdmission::Commit,
+        );
+    }
+
+    #[test]
+    fn activity_revision_bump_via_turn_started_during_sync_pending() {
+        // Simulated race: snapshot captured at rev 0, then TurnStarted bumps
+        // activity_revision. The admission decider must discard.
+        let daemon = daemon_with_sync(true, Some(now_millis() + 100_000.0));
+        daemon.session_id.set(Some("s1".into()));
+
+        // Phase 1: capture snapshot values before any event.
+        let snap_rev = daemon.activity_revision.get_untracked();
+        let snap_gen = daemon.sse_generation.get_untracked();
+        let snap_cycle = daemon.sync_cycle.get_untracked();
+
+        // Phase 2: TurnStarted bumps activity_revision (simulating concurrent event).
+        apply_test_event(
+            &daemon,
+            AgentEvent::TurnStarted {
+                turn_id: "t1".into(),
+                session_id: "s1".into(),
+                model: None,
+            },
+        );
+        let current_rev = daemon.activity_revision.get_untracked();
+        assert!(
+            current_rev > snap_rev,
+            "TurnStarted must bump activity_revision"
+        );
+
+        // Phase 3: the stale snapshot (snap_rev) must be discarded by admission.
+        assert_eq!(
+            admit_sync_snapshot(
+                "s1",
+                snap_gen,
+                snap_cycle,
+                snap_rev,
+                daemon.session_id.get_untracked().as_deref(),
+                daemon.sse_generation.get_untracked(),
+                daemon.sync_cycle.get_untracked(),
+                current_rev,
+            ),
+            SnapshotAdmission::Discard,
+            "stale snapshot with old activity_revision must be discarded"
+        );
+    }
+
+    // ── 10. production-seam: try_commit_sync_snapshot race ─────────────────────
+
+    /// Minimal terminal session detail with no transcript — enough to exercise
+    /// the admission gate and signal-write path without depending on the daemon.
+    fn minimal_detail() -> SessionDetail {
+        SessionDetail {
+            id: "s1".into(),
+            title: "test session".into(),
+            model: String::new(),
+            workspace_root: None,
+            cwd: None,
+            transcript: vec![],
+            tool_context: vec![],
+            pending_permissions: vec![],
+            state: None, // terminal (no live turn)
+            active_requests: vec![],
+        }
+    }
+
+    /// Sentinel Daemon for production-seam tests: sync_pending active, known
+    /// session, generation, cycle, and a seeded turn to detect writes.
+    fn sentinel_daemon() -> Daemon {
+        let daemon = daemon_with_sync(true, Some(now_millis() + 100_000.0));
+        daemon.session_id.set(Some("s1".into()));
+        daemon.sse_generation.set(1);
+        daemon.sync_cycle.set(5);
+        // Seed a user turn so we can detect overwrites.
+        daemon.turns.set(vec![Turn::user("old turn")]);
+        daemon.streaming.set(false);
+        daemon.session_title.set("old title".into());
+        daemon
+    }
+
+    #[test]
+    fn try_commit_sync_snapshot_discards_on_revision_bump() {
+        let daemon = sentinel_daemon();
+        daemon.activity_revision.set(0);
+
+        // Simulate mid-fetch bump: snapshot captured at rev 0, but a concurrent
+        // TurnStarted bumped activity_revision to 1 before commit.
+        daemon.activity_revision.set(1);
+
+        let detail = minimal_detail();
+        let old_turns = serde_json::to_value(daemon.turns.get_untracked()).unwrap();
+        let old_title = daemon.session_title.get_untracked();
+
+        let outcome = daemon.try_commit_sync_snapshot(
+            &detail, "s1", /* sse_generation */ 1, /* sync_cycle */ 5,
+            /* snapshot_activity_revision (stale) */ 0,
+        );
+
+        assert_eq!(
+            outcome,
+            ProjectionOutcome::Live,
+            "stale activity_revision must discard, not commit"
+        );
+
+        // Zero writes: turns, title, streaming untouched.
+        assert_eq!(
+            serde_json::to_value(daemon.turns.get_untracked()).unwrap(),
+            old_turns,
+            "turns must not change on discard"
+        );
+        assert_eq!(
+            daemon.session_title.get_untracked(),
+            old_title,
+            "title must not change on discard"
+        );
+        assert!(
+            !daemon.streaming.get_untracked(),
+            "streaming must stay false on discard"
+        );
+        // sync_pending must remain true — caller will retry next tick.
+        assert!(
+            daemon.sync_pending.get_untracked(),
+            "sync_pending must remain true after discard (retry next tick)"
+        );
+    }
+
+    #[test]
+    fn try_commit_sync_snapshot_commits_when_guards_match() {
+        let daemon = sentinel_daemon();
+        daemon.activity_revision.set(3);
+
+        let detail = minimal_detail();
+        // Same revision → admission must Commit, writes must apply.
+        let outcome = daemon.try_commit_sync_snapshot(
+            &detail, "s1", /* sse_generation */ 1, /* sync_cycle */ 5,
+            /* snapshot_activity_revision */ 3,
+        );
+
+        assert_eq!(
+            outcome,
+            ProjectionOutcome::Terminal,
+            "matching guards must commit terminal snapshot"
+        );
+
+        // Signal writes applied: turns replaced, title updated.
+        assert_eq!(
+            daemon.session_title.get_untracked(),
+            "test session",
+            "title must be committed"
+        );
+        let committed_turns = daemon.turns.get_untracked();
+        assert!(
+            committed_turns.is_empty(),
+            "old sentinel turn must not survive commit"
+        );
+    }
+
+    #[test]
+    fn try_commit_sync_snapshot_discards_on_session_mismatch() {
+        let daemon = sentinel_daemon();
+        daemon.activity_revision.set(0);
+        // Switch to different session after snapshot captured.
+        daemon.session_id.set(Some("s2".into()));
+
+        let detail = minimal_detail();
+        let old_turns = serde_json::to_value(daemon.turns.get_untracked()).unwrap();
+
+        let outcome = daemon.try_commit_sync_snapshot(
+            &detail, "s1", // snapshot captured for s1, but current is s2
+            1, 5, 0,
+        );
+
+        assert_eq!(outcome, ProjectionOutcome::Live);
+        assert_eq!(
+            serde_json::to_value(daemon.turns.get_untracked()).unwrap(),
+            old_turns,
+            "zero writes on session switch"
+        );
+        assert!(
+            daemon.sync_pending.get_untracked(),
+            "sync_pending stays true"
+        );
+    }
+
+    #[test]
+    fn try_commit_sync_snapshot_discards_on_generation_mismatch() {
+        let daemon = sentinel_daemon();
+        daemon.activity_revision.set(0);
+        // New SSE generation after snapshot captured.
+        daemon.sse_generation.set(2);
+
+        let detail = minimal_detail();
+        let old_turns = serde_json::to_value(daemon.turns.get_untracked()).unwrap();
+
+        let outcome = daemon.try_commit_sync_snapshot(
+            &detail, "s1", 1, // snapshot_gen=1, current=2
+            5, 0,
+        );
+
+        assert_eq!(outcome, ProjectionOutcome::Live);
+        assert_eq!(
+            serde_json::to_value(daemon.turns.get_untracked()).unwrap(),
+            old_turns
+        );
+        assert!(daemon.sync_pending.get_untracked());
+    }
+
+    #[test]
+    fn try_commit_sync_snapshot_discards_on_cycle_mismatch() {
+        let daemon = sentinel_daemon();
+        daemon.activity_revision.set(0);
+        // stop_sync_poll + restart bumped the cycle.
+        daemon.sync_cycle.set(7);
+
+        let detail = minimal_detail();
+        let old_turns = serde_json::to_value(daemon.turns.get_untracked()).unwrap();
+
+        let outcome = daemon.try_commit_sync_snapshot(
+            &detail, "s1", 1, 5, // snapshot_cycle=5, current=7
+            0,
+        );
+
+        assert_eq!(outcome, ProjectionOutcome::Live);
+        assert_eq!(
+            serde_json::to_value(daemon.turns.get_untracked()).unwrap(),
+            old_turns
+        );
+        assert!(daemon.sync_pending.get_untracked());
+    }
+
+    // ── 11. stage G: release_sync_fetch — keyed cleanup helper ─────
+
+    /// Matching completion: `release_sync_fetch` clears both the abort
+    /// handle and in_flight, and returns `true`.
+    #[test]
+    fn release_sync_fetch_matching_clears_both_signals() {
+        let daemon = sentinel_daemon();
+        daemon.session_id.set(Some("s1".into()));
+        daemon.sse_generation.set(1);
+        daemon.sync_cycle.set(5);
+        daemon.sync_in_flight.set(true);
+
+        let (_fut, handle) = abortable(async { ProjectionOutcome::Live });
+        daemon.sync_fetch_abort.set(Some(handle));
+
+        let matched = daemon.release_sync_fetch("s1", 1, 5);
+
+        assert!(matched, "matching must return true");
+        assert!(
+            daemon.sync_fetch_abort.get_untracked().is_none(),
+            "matching must clear abort handle"
+        );
+        assert!(
+            !daemon.sync_in_flight.get_untracked(),
+            "matching must clear in_flight"
+        );
+    }
+
+    /// Mismatched (cycle bumped): `release_sync_fetch` returns `false`
+    /// and leaves BOTH signals untouched.
+    #[test]
+    fn release_sync_fetch_mismatched_leaves_both_signals_intact() {
+        let daemon = sentinel_daemon();
+        daemon.session_id.set(Some("s1".into()));
+        daemon.sse_generation.set(1);
+        daemon.sync_cycle.set(5);
+        daemon.sync_in_flight.set(true);
+
+        let (_fut, handle) = abortable(async { ProjectionOutcome::Live });
+        daemon.sync_fetch_abort.set(Some(handle));
+
+        // Bump the cycle — simulates stop_sync_poll + restart.
+        daemon.sync_cycle.set(7);
+
+        let in_flight_before = daemon.sync_in_flight.get_untracked();
+        let handle_before = daemon.sync_fetch_abort.get_untracked().is_some();
+
+        let matched = daemon.release_sync_fetch("s1", 1, 5);
+
+        assert!(!matched, "mismatched must return false");
+        assert_eq!(
+            daemon.sync_in_flight.get_untracked(),
+            in_flight_before,
+            "mismatched must not clear in_flight"
+        );
+        assert_eq!(
+            daemon.sync_fetch_abort.get_untracked().is_some(),
+            handle_before,
+            "mismatched must not clear abort handle"
+        );
+    }
+
+    /// Retired Ok: stop_sync_poll cleared in_flight before the completion
+    /// runs. `release_sync_fetch` sees a cycle mismatch and leaves both
+    /// signals alone — the handle stays with the newer cycle.
+    #[test]
+    fn release_sync_fetch_retired_ok_leaves_both_signals_intact() {
+        let daemon = sentinel_daemon();
+        daemon.session_id.set(Some("s1".into()));
+        daemon.sse_generation.set(1);
+        daemon.sync_cycle.set(5);
+        // stop_sync_poll already cleared in_flight
+        daemon.sync_in_flight.set(false);
+
+        let (_fut, handle) = abortable(async { ProjectionOutcome::Live });
+        daemon.sync_fetch_abort.set(Some(handle));
+
+        // Cycle bumped by restart.
+        daemon.sync_cycle.set(7);
+
+        let in_flight_before = daemon.sync_in_flight.get_untracked();
+        let handle_before = daemon.sync_fetch_abort.get_untracked().is_some();
+
+        let matched = daemon.release_sync_fetch("s1", 1, 5);
+
+        assert!(!matched, "retired Ok must return false");
+        assert_eq!(
+            daemon.sync_in_flight.get_untracked(),
+            in_flight_before,
+            "retired Ok must not toggle in_flight"
+        );
+        assert_eq!(
+            daemon.sync_fetch_abort.get_untracked().is_some(),
+            handle_before,
+            "retired Ok must not clear abort handle"
+        );
+    }
+
+    /// Retired Aborted: like retired Ok but from the Err(aborted) arm.
+    /// The cycle bump makes completion stale — both signals stay intact.
+    #[test]
+    fn release_sync_fetch_retired_aborted_leaves_both_signals_intact() {
+        let daemon = sentinel_daemon();
+        daemon.session_id.set(Some("s1".into()));
+        daemon.sse_generation.set(1);
+        daemon.sync_cycle.set(5);
+        // stop_sync_poll already cleared in_flight
+        daemon.sync_in_flight.set(false);
+
+        let (_fut, handle) = abortable(async { ProjectionOutcome::Live });
+        daemon.sync_fetch_abort.set(Some(handle));
+
+        // Cycle bumped.
+        daemon.sync_cycle.set(7);
+
+        let in_flight_before = daemon.sync_in_flight.get_untracked();
+        let handle_before = daemon.sync_fetch_abort.get_untracked().is_some();
+
+        daemon.release_sync_fetch("s1", 1, 5);
+
+        assert_eq!(
+            daemon.sync_in_flight.get_untracked(),
+            in_flight_before,
+            "retired Aborted must not change in_flight"
+        );
+        assert_eq!(
+            daemon.sync_fetch_abort.get_untracked().is_some(),
+            handle_before,
+            "retired Aborted must not clear abort handle"
+        );
     }
 }
