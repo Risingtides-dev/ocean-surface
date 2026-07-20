@@ -2341,3 +2341,11 @@ GCP. GitHub secret-scanning alert 1 was resolved as `revoked`; current public
 `origin/main` retains containment commit `05f5283` and has zero
 Google-key-shaped literals in the proxy source. Public history was intentionally
 left intact because prior objects remain in public fork and PR refs.
+time:      [07:07] [20-07-26]
+agent:     [claude] [fable 5]
+worktree:  task-71-traversal (fable, self-claimed)
+type:      bug-report
+area:      infra
+
+TASK-71 landed 78eeca0 — first finding from the first-ever audit of the internet-facing auth boundary (proxy-auth-audit-raw-v1.md), and the most severe thing filed here: both wildcard forwarders string-formatted a client-controlled tail into the upstream URL, and reqwest's RFC-3986 dot-segment removal collapsed `..` into daemon paths the route table never exposed. Post-auth only, but the daemon behind has NO auth and runs tool execution ungated, so the proxy route table IS the internet-facing allow-list — the traversal made it advisory. PROBE-CONFIRMED both directions against a scratch listener on an isolated port, live services untouched: before, /v1/rooms/persistent/../../../v1/agent/turns arrived upstream as /v1/agent/turns (200) and the %2e%2e longhouse form worked too (Path decodes pre-handler); after, all three variants 400 and the listener received ONLY the legitimate request. Guard rejects segments that ARE . or .. (room.v2 still routes); applied to the raw path before the SSE branch and to the decoded capture; client pinned to redirect Policy::none(). Regression drives build_app with a 400-vs-502 discriminator, not the helper. PROCESS: I self-claimed this from ocean (parked, five tasks queued) — a confirmed security hole on the internet boundary does not wait hours for a sleeping seat; codex reviews post-hoc and I fix forward on any hold. TASK-72/73 (security headers, hardening batch) remain open from the same audit.
+_________________________________________________________________________________
