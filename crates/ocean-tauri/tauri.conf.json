@@ -41,7 +41,10 @@
     ],
     "category": "DeveloperTool",
     "macOS": {
-      "minimumSystemVersion": "10.15"
+      "minimumSystemVersion": "10.15",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Ocean uses the microphone for voice dictation and conversation with the assistant."
+      }
     }
   },
   "plugins": {
