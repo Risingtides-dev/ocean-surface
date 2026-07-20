@@ -1143,13 +1143,57 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// runs with tool execution ungated, so the proxy's route table is the real
 /// allow-list of internet-reachable surface. A traversal makes it advisory.
 ///
-/// Call this on the DECODED tail — axum's `Path` extractor percent-decodes
-/// its capture, so `%2e%2e` arrives here as `..` and must be caught too.
-/// Segments are split on `/` so a legitimate id containing dots
-/// (`room.v2`, `..config` as a whole segment is rejected, but `a.b` is fine)
-/// is unaffected; only a segment that IS `.` or `..` is refused.
+/// TASK-82: this guard DECODES each segment itself rather than trusting the
+/// caller to hand it a decoded value.
+///
+/// The original version documented "call this on the DECODED tail" and one of
+/// its two call sites then passed the raw request path. `%2e%2e` is not
+/// literally `..`, so it sailed through the guard — and the `url` crate
+/// percent-decodes BEFORE applying RFC 3986 dot-segment removal, so the
+/// traversal collapsed upstream anyway. Confirmed live: raw `..` returned 400
+/// while `%2e%2e` reached the daemon with 200.
+///
+/// A rule that depends on every caller passing the right form is a rule that
+/// eventually meets a caller who doesn't. Decoding here makes the guard
+/// correct on BOTH raw and encoded input, so neither call site can hold it
+/// wrong.
+///
+/// Percent-decoding is done per segment and is deliberately tolerant of
+/// malformed escapes (a stray `%` is kept literally) — this is a security
+/// check, not a parser, and anything it cannot decode it must not silently
+/// treat as safe. Double-encoded input (`%252e`) decodes to the literal text
+/// `%2e`, which is not a dot segment and is also not what the upstream `url`
+/// crate will collapse (it decodes once), so single-pass decoding matches
+/// upstream behavior exactly.
+///
+/// Segments are split on `/` so a legitimate id containing dots (`room.v2`)
+/// is unaffected; only a segment that IS `.` or `..` after decoding is refused.
 fn has_dot_segment(path: &str) -> bool {
-    path.split('/').any(|seg| seg == "." || seg == "..")
+    path.split('/')
+        .any(|seg| matches!(decode_segment(seg).as_str(), "." | ".."))
+}
+
+/// Single-pass percent-decode of one path segment, for [`has_dot_segment`].
+/// Invalid escapes are preserved literally rather than dropped, so a
+/// malformed input can never decode into something shorter that looks safe.
+fn decode_segment(seg: &str) -> String {
+    let bytes = seg.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn percent_encode_path_segment(value: &str) -> String {
@@ -1630,9 +1674,10 @@ async fn tts(
 #[cfg(test)]
 mod tests {
     use super::{
-        basic_auth_gate, build_app, config_payload, constant_time_eq, is_hashed_asset,
-        livekit_token_daemon_path, percent_encode_path_segment, read_observer_token,
-        sse_no_buffer_headers, wasm_headers, AppState, CALL_PLACE_DAEMON_PATH, WASM_CACHE_CONTROL,
+        basic_auth_gate, build_app, config_payload, constant_time_eq, decode_segment,
+        has_dot_segment, is_hashed_asset, livekit_token_daemon_path, percent_encode_path_segment,
+        read_observer_token, sse_no_buffer_headers, wasm_headers, AppState, CALL_PLACE_DAEMON_PATH,
+        WASM_CACHE_CONTROL,
     };
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
@@ -2108,6 +2153,39 @@ mod tests {
         );
     }
 
+    /// TASK-82: the guard must catch dot segments in BOTH raw and encoded
+    /// form, because the upstream `url` crate decodes before collapsing. It
+    /// must NOT over-reject legitimate ids that merely contain dots, and it
+    /// must treat double-encoding the way upstream does (one decode pass), so
+    /// `%252e` stays the literal text `%2e` and is not a dot segment.
+    #[test]
+    fn dot_segment_guard_sees_through_percent_encoding() {
+        // Raw.
+        assert!(has_dot_segment("/a/../b"));
+        assert!(has_dot_segment("/a/./b"));
+        // Encoded — the case that shipped a live bypass.
+        assert!(has_dot_segment("/a/%2e%2e/b"));
+        assert!(has_dot_segment("/a/%2E%2E/b"));
+        assert!(has_dot_segment("/a/%2e/b"));
+        // Mixed raw/encoded within one segment.
+        assert!(has_dot_segment("/a/.%2e/b"));
+        assert!(has_dot_segment("/a/%2e./b"));
+        // Legitimate ids must survive — a guard that breaks the feature is
+        // not a fix.
+        assert!(!has_dot_segment("/v1/rooms/persistent/room.v2/events"));
+        assert!(!has_dot_segment("/v1/rooms/persistent/..config/events"));
+        assert!(!has_dot_segment("/v1/rooms/persistent/a.b.c"));
+        assert!(!has_dot_segment("/v1/agent/sessions"));
+        // Double-encoded decodes to the literal "%2e", not a dot segment —
+        // matching what the upstream url crate does with one decode pass.
+        assert!(!has_dot_segment("/a/%252e%252e/b"));
+        // Malformed escapes are preserved literally, never silently dropped
+        // into something that looks safe.
+        assert_eq!(decode_segment("%zz"), "%zz");
+        assert_eq!(decode_segment("%2"), "%2");
+        assert_eq!(decode_segment("%2e"), ".");
+    }
+
     /// TASK-72: security headers must reach real document responses through
     /// the PRODUCTION router, and must NOT be pasted onto proxied API/SSE
     /// responses. Drives `build_app` so a middleware that gets dropped from
@@ -2223,11 +2301,25 @@ mod tests {
         // Both probe-confirmed attack shapes, raw and percent-encoded. The
         // encoded form matters because axum's Path extractor decodes before
         // the handler sees it, so `%2e%2e` arrives as `..`.
+        // TASK-82: the encoded forms are the ones that BYPASSED the first
+        // version of this guard. The original probe matrix tested raw dots on
+        // rooms and encoded dots on longhouse — never encoded-on-rooms — and
+        // that exact gap shipped a live bypass (confirmed in production:
+        // %2e%2e reached the daemon with 200 while `..` returned 400).
+        // Every combination of {raw, encoded, mixed-case} x {both forwarders}
+        // is enumerated here so the matrix cannot be partial again.
         for uri in [
+            // rooms — raw
             "/v1/rooms/persistent/../../../v1/agent/turns",
+            "/v1/rooms/persistent/./events",
+            // rooms — encoded (the shipped bypass)
+            "/v1/rooms/persistent/%2e%2e/%2e%2e/%2e%2e/v1/agent/turns",
+            "/v1/rooms/persistent/%2E%2E/v1/agent/turns",
+            "/v1/rooms/persistent/%2e/events",
+            // longhouse — raw and encoded
             "/v1/longhouse/../../v1/agent/sessions",
             "/v1/longhouse/%2e%2e/%2e%2e/v1/agent/sessions",
-            "/v1/rooms/persistent/./events",
+            "/v1/longhouse/%2E%2E/v1/agent/sessions",
         ] {
             let resp = app
                 .clone()
