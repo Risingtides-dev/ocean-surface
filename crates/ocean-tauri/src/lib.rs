@@ -528,14 +528,63 @@ fn set_badge(app: AppHandle, count: Option<i64>) -> Result<(), String> {
 
 // ── open_file (B0: Open Externally) ───────────────────────────────────────
 
+/// File types macOS `open(1)` EXECUTES rather than opens in an application
+/// (TASK-85). `opener::open` is `open(1)` on macOS, so handing it one of
+/// these runs code.
+const EXECUTING_EXTENSIONS: &[&str] = &[
+    "command",     // shell script run by Terminal
+    "terminal",    // Terminal settings file that runs a command
+    "workflow",    // Automator, runs actions
+    "app",         // bundle (also excluded by the is_file check, belt+braces)
+    "scpt",        // compiled AppleScript
+    "applescript", // AppleScript source
+    "action",      // Automator action bundle
+    "osascript",
+];
+
+/// True when opening this target would EXECUTE it rather than view it —
+/// either because macOS treats the extension as runnable, or because the
+/// file carries an executable bit (a `#!` script `open(1)` will hand to a
+/// shell).
+fn opens_as_executable(target: &Path) -> bool {
+    if let Some(ext) = target.extension().and_then(|e| e.to_str()) {
+        let ext = ext.to_ascii_lowercase();
+        if EXECUTING_EXTENSIONS.iter().any(|e| *e == ext) {
+            return true;
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if let Ok(meta) = std::fs::metadata(target) {
+            if meta.permissions().mode() & 0o111 != 0 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Open a file with the OS default application.
 ///
-/// * `root` — session workspace root (canonical).
+/// * `root` — session workspace root, as the CALLER believes it to be.
 /// * `path` — absolute path of the file to open.
 ///
-/// Safety: `path` must be under `root` component-wise. Only regular files
-/// are opened (directories pass through to the OS but are not the intended
-/// use).
+/// SECURITY (TASK-85): the `root` containment check below is defence in
+/// depth ONLY, and deliberately documented as such. Both `root` and `path`
+/// arrive from the same IPC caller, so `target.starts_with(&root)` is
+/// self-satisfiable — invoke with `root: "/"` and the check passes for any
+/// absolute path. Tauri 2's capability ACL does not gate
+/// `generate_handler!` commands, so nothing upstream constrains it either.
+/// Making `root` trustworthy would mean the shell independently knowing the
+/// session workspace, which it does not today.
+///
+/// So the real gate is the consequence, not the location: this refuses to
+/// open anything macOS would EXECUTE (`opens_as_executable`). That closes
+/// the primitive that matters here — the daemon runs tools ungated, so it
+/// can already write a payload and mark it executable; without this check
+/// `open_file` was the launcher. Viewing a document in its default app,
+/// which is what this command exists for, is unaffected.
 #[tauri::command]
 fn open_file(root: String, path: String) -> Result<(), String> {
     let root = Path::new(&root)
@@ -544,12 +593,17 @@ fn open_file(root: String, path: String) -> Result<(), String> {
     let target = Path::new(&path)
         .canonicalize()
         .map_err(|e| format!("canonicalize path: {e}"))?;
-    // Component-wise prefix check: target must start with root.
+    // Defence in depth — see the SECURITY note above for why this is not
+    // sufficient on its own.
     if !target.starts_with(&root) {
         return Err("path escapes workspace root".into());
     }
     if !target.is_file() {
         return Err("path is not a regular file".into());
+    }
+    // The load-bearing check.
+    if opens_as_executable(&target) {
+        return Err("refusing to open an executable file".into());
     }
     opener::open(&target).map_err(|e| e.to_string())
 }
@@ -1196,6 +1250,60 @@ mod tests {
     /// webview and ended in `ProcessCommand::spawn`. If someone re-adds an
     /// `explicit` parameter here, this test stops compiling — which is the
     /// point: the signature IS the security boundary.
+    /// TASK-85: `open_file`'s root containment is self-satisfiable (the
+    /// caller supplies both root and path), so the load-bearing gate is
+    /// refusing targets macOS would EXECUTE. These drive the real predicate
+    /// against real files on disk.
+    #[test]
+    fn open_file_refuses_targets_that_would_execute() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Extension-based: macOS `open(1)` runs these regardless of mode.
+        for name in ["payload.command", "x.terminal", "a.workflow", "s.scpt"] {
+            let p = dir.path().join(name);
+            std::fs::write(&p, b"#!/bin/sh\necho pwned\n").unwrap();
+            assert!(
+                opens_as_executable(&p),
+                "{name} must be refused — open(1) executes it",
+            );
+        }
+        // Case-insensitive: .COMMAND is the same file type.
+        let upper = dir.path().join("payload.COMMAND");
+        std::fs::write(&upper, b"x").unwrap();
+        assert!(opens_as_executable(&upper));
+
+        // Mode-based: no dangerous extension, but the exec bit is set — the
+        // exact shape a tool-writing daemon would produce.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let p = dir.path().join("innocuous.txt");
+            std::fs::write(&p, b"#!/bin/sh\necho pwned\n").unwrap();
+            let mut perms = std::fs::metadata(&p).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&p, perms).unwrap();
+            assert!(
+                opens_as_executable(&p),
+                "an executable-bit file must be refused even with a safe extension",
+            );
+        }
+
+        // And the feature still works: ordinary documents open. A guard that
+        // blocks the thing it protects is not a fix.
+        for name in ["notes.md", "data.json", "photo.png", "report.pdf"] {
+            let p = dir.path().join(name);
+            std::fs::write(&p, b"content").unwrap();
+            assert!(
+                !opens_as_executable(&p),
+                "{name} is a document and must still open",
+            );
+        }
+        // No extension, not executable — still a document.
+        let plain = dir.path().join("LICENSE");
+        std::fs::write(&plain, b"text").unwrap();
+        assert!(!opens_as_executable(&plain));
+    }
+
     #[test]
     fn resolve_daemon_bin_env_wins_over_path_default() {
         assert_eq!(resolve_daemon_bin_with(Some("/env/od")), "/env/od");
