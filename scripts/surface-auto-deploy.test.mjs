@@ -75,11 +75,40 @@ try {
   assert.match(noOp.stdout, new RegExp(`CURRENT: ${mainRevision}`));
   assert.equal(existsSync(join(noOpState, 'auto-deploy.lock')), false, 'a stale deployment lock must be reclaimed');
 
+  // TASK-87: a shell-source change must leave a VISIBLE rebuild marker.
+  // A restart picks up new web assets but cannot pick up Rust changes, and two
+  // native exec fixes once shipped "landed" while the installed app kept
+  // running the old binary. Silence is the failure mode this pins against.
+  const railSrc = readFileSync(script, 'utf8');
+  assert.ok(
+    railSrc.includes('tauri-rebuild-required'),
+    'the rail must record an owed rebuild distinctly from a deferred restart',
+  );
+  assert.ok(
+    railSrc.includes('crates/ocean-tauri'),
+    'the rebuild signal must be scoped to shell-source changes, not every deploy',
+  );
+  assert.match(
+    railSrc,
+    /REBUILD REQUIRED/,
+    'the operator-facing log line must say a rebuild is owed, not just that a restart was deferred',
+  );
+
+  // And the script the marker points at must exist, be executable, and refuse
+  // the two things doing this by hand proved dangerous: clobbering a running
+  // app, and trusting a successful build instead of checking the binary.
+  const rebuildScript = join(repo, 'scripts', 'rebuild-tauri-app.sh');
+  assert.ok(existsSync(rebuildScript), 'rebuild-tauri-app.sh must exist');
+  const rebuildSrc = readFileSync(rebuildScript, 'utf8');
+  assert.match(rebuildSrc, /pgrep -x "ocean-tauri"/, 'must refuse to replace a running app');
+  assert.match(rebuildSrc, /strings "\$BIN"/, 'must verify guards in the built binary, not the exit code');
+  assert.match(rebuildSrc, /rm -f "\$REBUILD_MARKER"/, 'must clear the marker it consumes');
+
   assert.ok(proxyPlist.includes('/Users/risingtidesdev/.config/ocean-surface/bin/ocean-surface-proxy.sh'));
   assert.ok(deployPlist.includes('/Users/risingtidesdev/.config/ocean-surface/bin/ocean-surface-auto-deploy.sh'));
   assert.ok(!`${proxyPlist}\n${deployPlist}`.includes('/dev/ocean-surface/deploy/ocean-surface-'));
 
-  console.log('ALL PASS: surface atomic deployment promotion (16 assertions)');
+  console.log('ALL PASS: surface atomic deployment promotion (24 assertions)');
 } finally {
   rmSync(root, { recursive: true, force: true });
 }

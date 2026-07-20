@@ -17,6 +17,15 @@ WORKTREE_ROOT="${OCEAN_SURFACE_WORKTREE_ROOT:-/private/tmp/ocean-surface-auto-de
 PROXY_LABEL="dev.risingtides.ocean-surface-proxy"
 TAURI_LABEL="dev.ocean.surface-tauri"
 TAURI_STALE_MARKER="$STATE_DIR/tauri-stale"
+# TASK-87: a RESTART picks up new web assets (frontendDist), but NOT changes to
+# the shell's own Rust code — that needs `cargo tauri build`, which this rail
+# deliberately does not run (it must never rebuild over a running app, and a
+# release bundle build is minutes long). When the shell's source changes we
+# therefore record a distinct marker: staleness that a restart CANNOT clear.
+# This exists because TASK-78 and TASK-85 (both native exec fixes) landed and
+# were announced while /Applications/Ocean.app kept running the old binary for
+# hours — "landed" and "deployed" are different claims for this crate.
+TAURI_REBUILD_MARKER="$STATE_DIR/tauri-rebuild-required"
 DOMAIN="gui/$(id -u)"
 
 export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$HOME/.cargo/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -53,6 +62,25 @@ restart_proxy() {
 # Restart Tauri only if it is not currently running — never kill an active
 # operator session. When Tauri IS running, leave a staleness marker so the
 # next Tauri start (or a future surface-side check) can act on it.
+# TASK-87: record when the shell's own source changed since the last deploy, so
+# an owed `cargo tauri build` is VISIBLE instead of silent. Compares the
+# previously deployed revision against the new one; on the first deploy (no
+# prior marker) it says nothing rather than crying wolf.
+note_tauri_rebuild_needed() {
+  local prev="$1" revision="$2"
+  [[ -n "$prev" ]] || return 0
+  [[ "$prev" == "$revision" ]] && return 0
+  # Only ask for a rebuild when the shell's own sources moved. Frontend-only
+  # changes are covered by the dist sync + restart above.
+  local changed
+  changed="$(git -C "$REPO" diff --name-only "$prev" "$revision" -- crates/ocean-tauri 2>/dev/null || true)"
+  if [[ -n "$changed" ]]; then
+    printf '%s\n' "$revision" > "$TAURI_REBUILD_MARKER"
+    echo "TAURI: crates/ocean-tauri changed ($prev -> $revision) — REBUILD REQUIRED"
+    echo "TAURI: a restart will NOT pick this up; run scripts/rebuild-tauri-app.sh"
+  fi
+}
+
 maybe_restart_tauri() {
   [[ "${OCEAN_SURFACE_NO_RESTART:-0}" == "1" ]] && return 0
   local pid revision="${1:-}"
@@ -108,6 +136,12 @@ rebuild_extension() {
 promote_bundle() {
   local source="$1"
   local revision="$2"
+  # TASK-87: capture the OUTGOING revision before $MARKER is overwritten below.
+  # Reading it afterwards always yields the incoming one, which silently
+  # disables the shell-rebuild detector — caught by actually running a promote,
+  # not by the source-assertion test, which passed while it was broken.
+  local previous_revision=""
+  [[ -f "$MARKER" ]] && previous_revision="$(cat "$MARKER" 2>/dev/null || true)"
   [[ "$revision" =~ ^[0-9A-Za-z._-]+$ ]] || fail "unsafe revision: $revision"
   validate_bundle "$source"
   mkdir -p "$RELEASES_DIR"
@@ -147,6 +181,7 @@ promote_bundle() {
   rsync -a --delete "$source/" "$repo_dist/"
   validate_bundle "$repo_dist"
   rebuild_extension "$source"
+  note_tauri_rebuild_needed "$previous_revision" "$revision"
   maybe_restart_tauri "$revision"
 
   echo "DEPLOYED: $revision -> $CURRENT_LINK"
