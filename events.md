@@ -2471,3 +2471,14 @@ area:      frontend
 
 Normal realtime Voice chat now freezes the canonical workspace root returned by the daemon and fulfills the same bounded list/read project tools as Voice Planner. Spoken assistant transcript deltas now stream into one live local assistant turn keyed by output item, with the authoritative done transcript repairing any missed/duplicate delta; a later daemon session refresh remains the persisted-history authority. Relative-path normalization, daemon-canonical response containment, binary rejection, listing caps, and 20k-character file output caps remain shared; older/project-less secret responses retain render + handoff only. Added streaming-reducer and additive/backward-compatible secret decoding coverage.
 _________________________________________________________________________________
+
+time:      [06:12pm] [07-20-26]
+agent:     [ocean] [gpt-5]
+worktree:  [agents-split-closeout-20260720]
+type:      docs/security boundary
+area:      cross-repo ownership
+
+Updated the Surface routing map for the agent-package split. Public ocean-agents
+now owns only reusable profiles and package mechanisms; private
+risingtides-agents owns production Rising Tides assistants, couriers, Slack
+intake, and workflows. Surface remains a thin client of ocean-os.
