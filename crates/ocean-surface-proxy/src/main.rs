@@ -251,6 +251,12 @@ async fn main() -> anyhow::Result<()> {
 fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
     Router::new()
         .route("/health", get(health))
+        // TASK-74: CSP violation sink. Without somewhere to report, the
+        // report-only policy from TASK-72 is decorative — browsers log to
+        // their own console and nobody ever sees it. This turns it into
+        // operator-visible signal, which is the prerequisite for deciding
+        // what a real enforced script-src can safely contain.
+        .route("/csp-report", post(csp_report))
         .route("/api/config", get(config))
         .route("/api/stt", post(stt))
         .route("/api/tts", post(tts))
@@ -418,7 +424,16 @@ fn is_public_boot_asset(path: &str) -> bool {
         return false;
     }
 
-    path == "/health"
+    // TASK-74: the CSP violation sink is public BY NECESSITY — a browser
+    // posting a violation report does not carry the operator's basic auth, so
+    // an authenticated sink collects nothing. It lives at the root rather than
+    // under /api/ deliberately: the "no /api/ path is ever public" invariant
+    // is what makes this whole exemption list safe to reason about, and
+    // punching a hole in it for one endpoint would trade a durable property
+    // for a convenience. The handler is bounded (16KB cap, always 204, never
+    // parsed as trusted structure) precisely because it is reachable.
+    path == "/csp-report"
+        || path == "/health"
         || path == "/manifest.webmanifest"
         || path == "/sw.js"
         || path == "/favicon.ico"
@@ -561,7 +576,8 @@ const CSP_REPORT_ONLY: &str = "default-src 'self'; \
      connect-src 'self' wss: https://maps.googleapis.com https://*.gstatic.com; \
      worker-src 'self' blob:; \
      frame-src https://www.tiktok.com https://www.instagram.com; \
-     frame-ancestors 'none'; base-uri 'self'; object-src 'none'";
+     frame-ancestors 'none'; base-uri 'self'; object-src 'none'; \
+     report-uri /csp-report";
 
 async fn wasm_headers(req: Request, next: Next) -> Response {
     let is_wasm = req.uri().path().ends_with(".wasm");
@@ -1029,6 +1045,48 @@ fn livekit_token_daemon_path(room_id: &str) -> String {
     )
 }
 
+/// CSP violation sink (TASK-74).
+///
+/// The report-only policy shipped in TASK-72 had nowhere to report, which made
+/// it decorative: browsers logged violations to their own consoles and no
+/// operator ever saw them. Enforcing `script-src` safely requires knowing what
+/// a real policy would actually break — measure first, enforce second.
+///
+/// Deliberately minimal and defensive, because this endpoint is reachable by
+/// anything that can reach the proxy:
+/// - the body is capped and never parsed as trusted structure; we log the
+///   fields we care about and drop the rest,
+/// - it always answers 204 so a browser never retries or surfaces an error to
+///   the operator,
+/// - it logs at `info` (not `warn`) since violations are expected during the
+///   measurement phase and should not read as incidents.
+async fn csp_report(body: Bytes) -> impl IntoResponse {
+    // A violation report is small; anything larger is not a browser.
+    const MAX: usize = 16 * 1024;
+    if body.len() > MAX {
+        return StatusCode::NO_CONTENT;
+    }
+    match serde_json::from_slice::<Value>(&body) {
+        Ok(report) => {
+            // Both the legacy `csp-report` envelope and the newer flat shape.
+            let r = report.get("csp-report").unwrap_or(&report);
+            tracing::info!(
+                directive = %r.get("effective-directive")
+                    .or_else(|| r.get("violated-directive"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?"),
+                blocked = %r.get("blocked-uri").and_then(|v| v.as_str()).unwrap_or("?"),
+                document = %r.get("document-uri").and_then(|v| v.as_str()).unwrap_or("?"),
+                "csp violation (report-only)"
+            );
+        }
+        Err(_) => {
+            tracing::info!(bytes = body.len(), "csp violation report: unparseable body");
+        }
+    }
+    StatusCode::NO_CONTENT
+}
+
 /// Opaque 502 body for an unreachable daemon (TASK-73).
 ///
 /// A `reqwest::Error`'s `Display` includes the full upstream URL, so the old
@@ -1487,7 +1545,7 @@ fn translate_stt_daemon_response(status: StatusCode, payload: &Value) -> Respons
     if status.is_success() {
         let text = payload
             .get("text")
-            .and_then(Value::as_str)
+            .and_then(|v| v.as_str())
             .unwrap_or("")
             .trim()
             .to_string();
@@ -1495,7 +1553,7 @@ fn translate_stt_daemon_response(status: StatusCode, payload: &Value) -> Respons
     } else {
         let error = payload
             .get("error")
-            .and_then(Value::as_str)
+            .and_then(|v| v.as_str())
             .unwrap_or("stt_failed");
         tracing::error!(%status, ?payload, "stt daemon error");
         Json(json!({ "ok": false, "error": error })).into_response()
@@ -1545,7 +1603,7 @@ async fn tts(
         let body = resp.text().await.unwrap_or_default();
         let err_msg = serde_json::from_str::<Value>(&body)
             .ok()
-            .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_string))
+            .and_then(|v| v.get("error").and_then(|v| v.as_str()).map(str::to_string))
             .unwrap_or(body);
         tracing::error!(%status, %err_msg, "tts daemon error");
         let code = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -1925,6 +1983,64 @@ mod tests {
         let payload = serde_json::json!({"error": "upstream returned 500"});
         let resp = translate_stt_daemon_response(StatusCode::BAD_GATEWAY, &payload);
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// TASK-74: the CSP report sink must exist in the PRODUCTION router, must
+    /// be reachable WITHOUT credentials (a browser posting a violation report
+    /// does not carry the operator's basic auth), and must always answer 204
+    /// so a browser never retries or surfaces an error. Drives `build_app`.
+    #[tokio::test]
+    async fn csp_report_endpoint_accepts_and_swallows() {
+        let dist = tempfile::tempdir().expect("tempdir");
+        let state = Arc::new(AppState {
+            http: reqwest::Client::new(),
+            http_json: reqwest::Client::new(),
+            voice_profile: "leo".to_string(),
+            daemon_url: "http://127.0.0.1:9".to_string(),
+            default_livekit_room_id: "project:surface-test".to_string(),
+            tldraw_sync_uri: None,
+            maps_key: None,
+            maps_map_id: "DEMO_MAP_ID".to_string(),
+            // Auth ON: a violation report must still land, otherwise the
+            // report-only policy silently collects nothing in production.
+            basic_auth: Some(("u".to_string(), "p".to_string())),
+            observer_token_path: PathBuf::from("/not-used"),
+        });
+        let app = build_app(state, dist.path());
+
+        // Legacy envelope, no credentials.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/csp-report")
+                    .header(header::CONTENT_TYPE, "application/csp-report")
+                    .body(Body::from(
+                        r#"{"csp-report":{"effective-directive":"script-src","blocked-uri":"inline","document-uri":"https://x/"}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NO_CONTENT,
+            "violation reports must be accepted without auth",
+        );
+
+        // Garbage body must not 500 — a browser must never see an error here.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/csp-report")
+                    .body(Body::from("not json at all"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     }
 
     /// TASK-73: the credential comparison must not short-circuit. This proves
