@@ -3,12 +3,12 @@
   "name": "Ocean",
   "version": "0.1.0",
   "description": "Ocean cockpit — chat that rides along while Ocean drives this browser.",
-  "permissions": ["sidePanel", "storage", "tabs", "activeTab"],
+  "permissions": ["sidePanel", "tabs", "activeTab"],
   "host_permissions": ["http://127.0.0.1:4780/*"],
   "background": { "service_worker": "background.js" },
   "action": { "default_title": "Open Ocean" },
   "side_panel": { "default_path": "sidepanel.html" },
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; connect-src http://127.0.0.1:4780 ws://127.0.0.1:4780"
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; connect-src http://127.0.0.1:4780"
   }
 }

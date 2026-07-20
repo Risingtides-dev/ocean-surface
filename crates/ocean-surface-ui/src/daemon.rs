@@ -36,6 +36,31 @@ use crate::model::{Block, ComponentPlacement, Role, ToolStatus, Turn};
 
 pub const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:4780";
 
+/// Percent-encode a path segment before it is interpolated into a daemon URL
+/// (TASK-77).
+///
+/// Session ids are daemon- or localStorage-sourced today, so this is not a
+/// live traversal — but building daemon paths by raw string interpolation is
+/// exactly the pattern that produced the CONFIRMED proxy traversal in TASK-71,
+/// and it becomes reachable the moment an id is ever user-typed, URL-sourced,
+/// or copied between surfaces. `rooms.rs` already encodes its keys this way;
+/// this makes the session paths consistent rather than leaving one module
+/// disciplined and its neighbour not.
+///
+/// Pure Rust (no js_sys) so it runs under native `cargo test`.
+fn encode_path_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 #[cfg(target_arch = "wasm32")]
 fn now_millis() -> f64 {
     js_sys::Date::now()
@@ -4126,7 +4151,11 @@ impl Daemon {
         // focused session and SSE generation remain unchanged.
         let snapshot_activity_revision = self.activity_revision.get_untracked();
         let url = self.url.get_untracked();
-        let get_url = format!("{}/v1/sessions/{session_id}", url.trim_end_matches('/'));
+        let get_url = format!(
+            "{}/v1/sessions/{}",
+            url.trim_end_matches('/'),
+            encode_path_segment(session_id)
+        );
         let (fut, abort_handle) = abortable(Self::fetch_session_detail_for_sync_impl(
             self.clone(),
             session_id.to_string(),
@@ -4406,7 +4435,11 @@ impl Daemon {
         let url = self.url.get_untracked();
 
         // 1. Authoritative session snapshot (transcript + atomic live-turn state).
-        let get_url = format!("{}/v1/sessions/{id}", url.trim_end_matches('/'));
+        let get_url = format!(
+            "{}/v1/sessions/{}",
+            url.trim_end_matches('/'),
+            encode_path_segment(id)
+        );
         let resp = Request::get(&get_url)
             .send()
             .await
@@ -4581,7 +4614,11 @@ impl Daemon {
 
     async fn hydrate_active_session(&self, id: &str) -> Result<Vec<String>, String> {
         let url = self.url.get_untracked();
-        let get_url = format!("{}/v1/sessions/{id}", url.trim_end_matches('/'));
+        let get_url = format!(
+            "{}/v1/sessions/{}",
+            url.trim_end_matches('/'),
+            encode_path_segment(id)
+        );
         let resp = Request::get(&get_url)
             .send()
             .await
@@ -7105,7 +7142,11 @@ fn should_restore_session<'a>(persisted: Option<&'a str>, active: Option<&str>) 
 /// the caller falls through to the normal boot path with state untouched.
 async fn restore_session_or_clear(daemon: &Daemon, id: &str) -> bool {
     let url = daemon.url.get_untracked();
-    let get_url = format!("{}/v1/sessions/{id}", url.trim_end_matches('/'));
+    let get_url = format!(
+        "{}/v1/sessions/{}",
+        url.trim_end_matches('/'),
+        encode_path_segment(id)
+    );
     match Request::get(&get_url).send().await {
         Ok(resp) => match resp.json::<SessionDetailResponse>().await {
             Ok(r) if r.ok => {
@@ -8941,6 +8982,34 @@ mod tests {
     /// to re-add a guidance producer — and this test names the invariant it
     /// would be violating. Browser state travels only via the structured
     /// `client_context`, which the daemon sanitizes.
+    /// TASK-77: session ids must be percent-encoded before they land in a
+    /// daemon URL. Not a live traversal today (ids come from the daemon or
+    /// extension-origin localStorage), but raw interpolation into daemon paths
+    /// is the exact pattern that produced the CONFIRMED proxy traversal in
+    /// TASK-71 — this keeps the surface consistent with rooms.rs instead of
+    /// leaving one module disciplined and its neighbour not.
+    #[test]
+    fn session_ids_are_percent_encoded_in_daemon_urls() {
+        // The characters that would break out of a path segment.
+        assert_eq!(encode_path_segment("abc-123_x.y~z"), "abc-123_x.y~z");
+        assert_eq!(encode_path_segment("a/b"), "a%2Fb");
+        assert_eq!(encode_path_segment(".."), "..");
+        assert_eq!(encode_path_segment("a?b#c"), "a%3Fb%23c");
+        assert_eq!(encode_path_segment("a b"), "a%20b");
+
+        // And the production call sites must use it: a raw session-path
+        // interpolation (the id substituted straight into the format string)
+        // must not reappear. The needle is assembled below rather than written
+        // as a literal — a literal here would match this very comment and the
+        // assertion would fail on itself.
+        let src = include_str!("daemon.rs");
+        let raw = format!("/v1/sessions/{}{}{}", "{", "id", "}");
+        assert!(
+            !src.contains(raw.as_str()),
+            "session URLs must go through encode_path_segment, not raw interpolation",
+        );
+    }
+
     #[test]
     fn guidance_never_carries_browser_data() {
         let src = include_str!("daemon.rs");
