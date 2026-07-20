@@ -2289,3 +2289,11 @@ area:      infra
 
 TASK-59 landed 1dd8f15: cargo cache pruning rail after today's ENOSPC (158GB emergency purge). scripts/prune-cargo-caches.sh — dry-run default, single delete primitive with hard protected-path denylist (canonical target/release NEVER touched: live daemon+proxy binaries), gitdir-ownership classification so other repos' worktrees under ~/.worktrees are skipped (the literal spec would have deleted syzygy/Horus/Thoth lanes — sub caught it), pgrep build guard (proved itself live during this landing by refusing while sub-58 built). LaunchAgent plist Sunday 05:00 --apply, homebrew bash pinned (script needs bash>=4). Fable installs the agent at this closeout. Fixture-verified destructive path (10 assertions), plutil OK.
 _________________________________________________________________________________
+time:      [20:50] [19-07-26]
+agent:     [claude] [fable 5]
+worktree:  task-14-splash-sessions (fable builder sub)
+type:      bug-report
+area:      frontend
+
+TASK-14 landed 680aff1 (oldest open board item, from 07-16). Mobile splash root cause: the Soundings WebGL landing sized its drawing buffer exactly once in init_gl, but a phone viewport is not stable at first paint (URL-bar settle, late 100dvh, rotation) — the frozen buffer got CSS-stretched so the aspect-fitted wordmark cropped, and a zero-height first measure clamped to 2x2 (blank). Fix: per-frame sync_size() no-op re-measure (DPR<=2 cap matching init_gl), no listeners. Sessions button: borderless flat fill with no justify-content — off-center label and missing the hairline+lit-seam idiom every neighboring header control carries; fixed with existing tokens + coarse-pointer 44px tap floor (TASK-42 idiom). 5 source-assertion regressions in tests/task14_splash_sessions.rs; 666 tests, wasm, fmt all raw-exit 0. Board todo column is now EMPTY.
+_________________________________________________________________________________
