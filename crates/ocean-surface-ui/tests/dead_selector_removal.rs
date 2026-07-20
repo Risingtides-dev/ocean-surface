@@ -5,8 +5,7 @@
 //! confirmed to have no Rust emitter:
 //!   * `.island-group`               (was styles/island.css)
 //!   * `.ocean-council-modal__frame` (was styles/chrome.css)
-//!   * `.ocean-map__panel`           (was styles/components.css, incl. its
-//!                                    `gmp-place-search` descendant rule)
+//!   * `.ocean-map__panel` (was styles/components.css, incl. its `gmp-place-search` descendant rule)
 //!
 //! Each is asserted absent from BOTH the stylesheet AND the Rust source tree,
 //! so it can neither be re-added to CSS nor emitted from a component without

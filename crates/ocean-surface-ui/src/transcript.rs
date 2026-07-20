@@ -225,13 +225,128 @@ fn render_items(blocks: &[Block]) -> Vec<RenderItem> {
     items
 }
 
+/// True when an assistant turn is made up ENTIRELY of tool calls (at least one,
+/// no text/thinking/component). This is the shape a Codex/Sol round takes — the
+/// provider emits one `TurnStarted` per model round, so a multi-round turn lands
+/// as several single-tool assistant `Turn`s — and also the shape
+/// `turns_from_session_transcript` rebuilds each persisted tool entry into. Such
+/// turns are the ones that merge across turn boundaries into a single
+/// disclosure; a turn carrying any prose/thinking/component is NOT tool-only, so
+/// it anchors its own row and breaks the run (prose/thinking between tool runs
+/// still splits the grouping).
+fn is_tool_only_turn(turn: &crate::model::Turn) -> bool {
+    turn.role == Role::Assistant
+        && !turn.blocks.is_empty()
+        && turn
+            .blocks
+            .iter()
+            .all(|b| matches!(b, Block::ToolCall { .. }))
+}
+
+/// One top-level transcript row. A normal turn (a user turn, or an assistant
+/// turn that carries prose/thinking/components) renders through [`TurnView`]
+/// with its full per-turn DOM intact — TASK-52's de-bubbled layout untouched. A
+/// `ToolRun` is a MAXIMAL run of consecutive tool-only assistant turns (see
+/// [`is_tool_only_turn`]) merged into ONE disclosure — the fix for the "wall of
+/// `tools (1)`" a multi-round Sol turn (or a rebuilt session) otherwise
+/// produces. Identified by its anchor (the first turn index of the run), which
+/// is stable as the run grows (turns only ever append), so the merged
+/// disclosure keeps a stable `For` key and never re-mounts — nor drops the
+/// user's expand state — while the run is still streaming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TopRow {
+    Turn(usize),
+    ToolRun(usize),
+}
+
+/// Project the turn list into top-level rows, coalescing each maximal run of
+/// consecutive tool-only assistant turns into one `ToolRun`. Render-only: never
+/// mutates `turns`, so the model layer stays truthful and BOTH the live SSE
+/// reducer path and the `turns_from_session_transcript` rebuild path collapse
+/// identically.
+fn top_rows(turns: &[crate::model::Turn]) -> Vec<TopRow> {
+    let mut rows = Vec::new();
+    let mut i = 0;
+    while i < turns.len() {
+        if is_tool_only_turn(&turns[i]) {
+            let anchor = i;
+            while i < turns.len() && is_tool_only_turn(&turns[i]) {
+                i += 1;
+            }
+            rows.push(TopRow::ToolRun(anchor));
+        } else {
+            rows.push(TopRow::Turn(i));
+            i += 1;
+        }
+    }
+    rows
+}
+
+/// The `(turn_idx, block_idx)` address of every tool call in the tool-only run
+/// that STARTS at `anchor`, in transcript order. Derived reactively by the
+/// merged disclosure so a run still growing mid-stream (fresh tool-only turns
+/// appending) keeps its count, aggregate status and failed count current — the
+/// same "scan, don't snapshot" contract the per-turn groups use, extended across
+/// the turn boundary.
+fn tool_run_members(turns: &[crate::model::Turn], anchor: usize) -> Vec<(usize, usize)> {
+    let mut members = Vec::new();
+    let mut ti = anchor;
+    while ti < turns.len() && is_tool_only_turn(&turns[ti]) {
+        for (bi, block) in turns[ti].blocks.iter().enumerate() {
+            if matches!(block, Block::ToolCall { .. }) {
+                members.push((ti, bi));
+            }
+        }
+        ti += 1;
+    }
+    members
+}
+
+/// The `ToolStatus` of the tool block at `(turn_idx, block_idx)`, if any.
+fn member_status(turns: &[crate::model::Turn], ti: usize, bi: usize) -> Option<ToolStatus> {
+    match turns.get(ti).and_then(|turn| turn.blocks.get(bi)) {
+        Some(Block::ToolCall { status, .. }) => Some(*status),
+        _ => None,
+    }
+}
+
+/// Aggregate status of the tool-only run at `anchor`: `Err` if any call failed,
+/// else `Running` if any is still in flight, else `Ok`. Mirrors the per-turn
+/// [`ToolGroup`] rollup, extended across the run's turns.
+fn tool_run_status(turns: &[crate::model::Turn], anchor: usize) -> ToolStatus {
+    let mut any_running = false;
+    for (ti, bi) in tool_run_members(turns, anchor) {
+        match member_status(turns, ti, bi) {
+            Some(ToolStatus::Err) => return ToolStatus::Err,
+            Some(ToolStatus::Running) => any_running = true,
+            _ => {}
+        }
+    }
+    if any_running {
+        ToolStatus::Running
+    } else {
+        ToolStatus::Ok
+    }
+}
+
+/// Count of failed calls across the whole tool-only run at `anchor` — drives the
+/// merged disclosure's `N failed` accent.
+fn tool_run_failed_count(turns: &[crate::model::Turn], anchor: usize) -> usize {
+    tool_run_members(turns, anchor)
+        .into_iter()
+        .filter(|&(ti, bi)| member_status(turns, ti, bi) == Some(ToolStatus::Err))
+        .count()
+}
+
 #[component]
 pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoView {
     let turns = daemon.turns;
-    // Key by turn index. New turns append; existing ones mutate in place and
-    // their child views read the signal reactively, so re-keying isn't needed
-    // mid-stream.
-    let indices = move || (0..turns.with(Vec::len)).collect::<Vec<_>>();
+    // Project turns into top-level rows: normal turns render one-to-one, but a
+    // run of consecutive tool-only assistant turns collapses into a single
+    // `ToolRun` (see [`top_rows`]). Re-derived on every turns mutation; the `For`
+    // below keys rows by their anchor turn index (stable under append), so new
+    // turns append and existing rows mutate in place without re-keying mid-stream.
+    let rows = move || turns.with(|t| top_rows(t));
 
     // Auto-scroll: keep the viewport pinned to the latest output as turns
     // append and streaming deltas grow existing turns — but only when the user
@@ -344,16 +459,42 @@ pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoVie
                 </div>
             </Show>
             <For
-                each=indices
-                key=|i| *i
-                children=move |idx| {
+                each=rows
+                key=|row| match row {
+                    // Distinct tag per kind so a Turn and a ToolRun anchored at
+                    // the same index never collide; both keys are stable under
+                    // append (turns never reorder, a growing run keeps its anchor).
+                    TopRow::Turn(i) => (0u8, *i),
+                    TopRow::ToolRun(anchor) => (1u8, *anchor),
+                }
+                children=move |row| {
                     let daemon = daemon.clone();
-                    // Snapshot streaming at creation: turns that mount while
+                    // Snapshot streaming at creation: rows that mount while
                     // live-streaming get `is-new` so CSS can run a one-shot
                     // materialize entry. Hydrated history (session load) mounts
                     // with streaming=false — no class, no page-load choreography.
                     let is_new = daemon.streaming.get_untracked();
-                    view! { <TurnView idx=idx turns=turns daemon=daemon is_new=is_new /> }
+                    match row {
+                        TopRow::Turn(idx) => view! {
+                            <TurnView idx=idx turns=turns daemon=daemon is_new=is_new />
+                        }
+                        .into_any(),
+                        // A merged run of tool-only turns. Wrap it in the same
+                        // turn / assistant / body scaffold a lone tool-only turn
+                        // uses so it shares the transcript's 18px rhythm and the
+                        // de-bubbled assistant rail — the disclosure inside just
+                        // spans several turns' worth of calls.
+                        TopRow::ToolRun(anchor) => view! {
+                            <div class="turn" class:is-new=move || is_new>
+                                <div class="turn--assistant">
+                                    <div class="turn__body">
+                                        <MergedToolGroup anchor=anchor turns=turns daemon=daemon />
+                                    </div>
+                                </div>
+                            </div>
+                        }
+                        .into_any(),
+                    }
                 }
             />
             // Live activity row: pure reducer-driven, one row at transcript
@@ -611,6 +752,82 @@ fn ToolGroup(
                             let daemon = daemon.get_value();
                             view! {
                                 <BlockView turn_idx=turn_idx block_idx=bi turns=turns daemon=daemon />
+                            }
+                        }
+                    />
+                </div>
+            </Show>
+        </div>
+    }
+}
+
+/// A contiguous run of tool-only assistant turns, merged into ONE `tools (N)`
+/// disclosure that spans every turn in the run (see [`top_rows`] /
+/// [`is_tool_only_turn`]). Visually and behaviourally identical to [`ToolGroup`]
+/// — collapsed by default, never auto-opens, sticky user toggle, `N failed`
+/// accent, each call individually expandable — the only difference is that its
+/// members are addressed by `(turn_idx, block_idx)` across the run rather than
+/// block index within a single turn.
+///
+/// Membership is DERIVED reactively from `turns` via [`tool_run_members`], not
+/// snapshotted from the `anchor` prop: while the run is still streaming, fresh
+/// tool-only turns keep appending, and the parent `For` retains this component
+/// under its stable anchor key — so a snapshot would freeze the group at the
+/// first turn and miss every later call. Re-scanning from the anchor each update
+/// keeps the count, aggregate status, failed count and body current, and the
+/// stable key means the disclosure never re-mounts (or loses an operator's
+/// expand state) as the run grows.
+#[component]
+fn MergedToolGroup(
+    anchor: usize,
+    turns: RwSignal<Vec<crate::model::Turn>>,
+    daemon: Daemon,
+) -> impl IntoView {
+    let daemon = StoredValue::new(daemon);
+    // Members span the whole run, DERIVED reactively — a growing run must not
+    // freeze at the anchor turn.
+    let members = Signal::derive(move || turns.with(|t| tool_run_members(t, anchor)));
+    // Aggregate status across every call in the run, read reactively.
+    let agg = Signal::derive(move || turns.with(|t| tool_run_status(t, anchor)));
+    // Collapsed by default, always — same contract as ToolGroup. `user_override`
+    // sticks; failures surface through the tinted header and the `N failed` count.
+    let user_override: RwSignal<Option<bool>> = RwSignal::new(None);
+    let open = Signal::derive(move || user_override.get().unwrap_or(false));
+    // Count of failed calls across the whole run — drives the `N failed` label.
+    let failed_count = Signal::derive(move || turns.with(|t| tool_run_failed_count(t, anchor)));
+    let toggle = move |_| user_override.set(Some(!open.get()));
+
+    let status_class = move || match agg.get() {
+        ToolStatus::Running => "is-running",
+        ToolStatus::Ok => "is-ok",
+        ToolStatus::Err => "is-err",
+    };
+    let status_label = move || match agg.get() {
+        ToolStatus::Running => "running".to_string(),
+        ToolStatus::Ok => String::new(),
+        ToolStatus::Err => format!("{} failed", failed_count.get()),
+    };
+    let glyph = move || if open.get() { "▾" } else { "▸" };
+
+    view! {
+        <div class=move || format!("tool-group transcript-disclosure--group {}", status_class()) class:is-open=open>
+            <button class="transcript-disclosure__head"
+                aria-expanded=move || open.get().to_string()
+                on:click=toggle>
+                <span class="transcript-disclosure__tick">{glyph}</span>
+                <span class="transcript-disclosure__dot"></span>
+                <span class="transcript-disclosure__label">{move || format!("tools ({})", members.with(Vec::len))}</span>
+                <span class="transcript-disclosure__status">{status_label}</span>
+            </button>
+            <Show when=move || open.get()>
+                <div class="transcript-disclosure__body">
+                    <For
+                        each=move || members.get()
+                        key=|addr| *addr
+                        children=move |(ti, bi)| {
+                            let daemon = daemon.get_value();
+                            view! {
+                                <BlockView turn_idx=ti block_idx=bi turns=turns daemon=daemon />
                             }
                         }
                     />
@@ -917,6 +1134,195 @@ mod tests {
             RenderItem::ThinkingGroup(idxs) => assert_eq!(idxs.len(), 26),
             other => panic!("expected ThinkingGroup, got {other:?}"),
         }
+    }
+
+    // ── top_rows / tool-run merging (TASK-64) ───────────────────────────
+
+    /// A tool-only assistant turn with the given per-call statuses. Models one
+    /// Codex/Sol round (or one rebuilt persisted tool entry): all blocks are
+    /// tool calls, nothing else.
+    fn tool_only_turn(id: &str, statuses: &[ToolStatus]) -> Turn {
+        Turn {
+            turn_id: Some(id.into()),
+            role: Role::Assistant,
+            blocks: statuses
+                .iter()
+                .enumerate()
+                .map(|(i, s)| Block::ToolCall {
+                    call_id: format!("{id}-{i}"),
+                    name: "read".into(),
+                    args_preview: String::new(),
+                    output: String::new(),
+                    status: *s,
+                    expanded: false,
+                })
+                .collect(),
+        }
+    }
+
+    /// An assistant turn that interleaves a thinking segment and a tool call —
+    /// NOT tool-only, so it must anchor its own row and break any run.
+    fn thinking_plus_tool_turn(id: &str) -> Turn {
+        Turn {
+            turn_id: Some(id.into()),
+            role: Role::Assistant,
+            blocks: vec![
+                Block::Thinking {
+                    content: "hmm".into(),
+                    expanded: false,
+                },
+                Block::ToolCall {
+                    call_id: format!("{id}-tool"),
+                    name: "bash".into(),
+                    args_preview: String::new(),
+                    output: String::new(),
+                    status: ToolStatus::Running,
+                    expanded: false,
+                },
+            ],
+        }
+    }
+
+    /// is_tool_only_turn gates on "assistant + non-empty + every block a tool".
+    #[test]
+    fn is_tool_only_turn_gating() {
+        assert!(is_tool_only_turn(&tool_only_turn("t", &[ToolStatus::Ok])));
+        assert!(!is_tool_only_turn(&user_turn()));
+        assert!(!is_tool_only_turn(&assistant_text_turn()));
+        assert!(!is_tool_only_turn(&thinking_plus_tool_turn("t")));
+        let empty = Turn {
+            turn_id: Some("e".into()),
+            role: Role::Assistant,
+            blocks: vec![],
+        };
+        assert!(!is_tool_only_turn(&empty));
+    }
+
+    /// (a) One turn, many tools → one ToolRun row holding every call.
+    #[test]
+    fn one_turn_many_tools_is_one_run() {
+        let turns = vec![tool_only_turn(
+            "t1",
+            &[ToolStatus::Ok, ToolStatus::Ok, ToolStatus::Ok],
+        )];
+        assert_eq!(top_rows(&turns), vec![TopRow::ToolRun(0)]);
+        assert_eq!(tool_run_members(&turns, 0), vec![(0, 0), (0, 1), (0, 2)]);
+    }
+
+    /// (b) Many consecutive tool-only turns → ONE merged run with the correct
+    /// total N (the exact defect: a wall of `tools (1)` collapses to one row).
+    #[test]
+    fn consecutive_tool_only_turns_merge_into_one_run() {
+        let turns = vec![
+            tool_only_turn("t1", &[ToolStatus::Ok]),
+            tool_only_turn("t2", &[ToolStatus::Ok]),
+            tool_only_turn("t3", &[ToolStatus::Ok]),
+        ];
+        assert_eq!(top_rows(&turns), vec![TopRow::ToolRun(0)]);
+        assert_eq!(tool_run_members(&turns, 0), vec![(0, 0), (1, 0), (2, 0)]);
+    }
+
+    /// A leading user turn is untouched; the run anchors at the first tool turn.
+    #[test]
+    fn user_turn_then_tool_run() {
+        let turns = vec![
+            user_turn(),
+            tool_only_turn("t1", &[ToolStatus::Ok]),
+            tool_only_turn("t2", &[ToolStatus::Ok]),
+        ];
+        assert_eq!(top_rows(&turns), vec![TopRow::Turn(0), TopRow::ToolRun(1)]);
+        assert_eq!(tool_run_members(&turns, 1), vec![(1, 0), (2, 0)]);
+    }
+
+    /// (c) Prose between two tool runs splits them into two disclosures.
+    #[test]
+    fn prose_between_tool_runs_splits() {
+        let turns = vec![
+            tool_only_turn("t1", &[ToolStatus::Ok]),
+            assistant_text_turn(),
+            tool_only_turn("t3", &[ToolStatus::Ok]),
+        ];
+        assert_eq!(
+            top_rows(&turns),
+            vec![TopRow::ToolRun(0), TopRow::Turn(1), TopRow::ToolRun(2)]
+        );
+        assert_eq!(tool_run_members(&turns, 0), vec![(0, 0)]);
+        assert_eq!(tool_run_members(&turns, 2), vec![(2, 0)]);
+    }
+
+    /// (d) Thinking interleaved with tools follows the existing per-turn design:
+    /// the mixed turn is NOT tool-only, so it anchors its own row (thinking
+    /// between runs breaks grouping), and render_items still splits its blocks
+    /// into a ThinkingGroup + a ToolGroup.
+    #[test]
+    fn thinking_tool_turns_do_not_merge() {
+        let turns = vec![
+            tool_only_turn("t1", &[ToolStatus::Ok]),
+            thinking_plus_tool_turn("t2"),
+            tool_only_turn("t3", &[ToolStatus::Ok]),
+        ];
+        assert_eq!(
+            top_rows(&turns),
+            vec![TopRow::ToolRun(0), TopRow::Turn(1), TopRow::ToolRun(2)]
+        );
+        let items = render_items(&turns[1].blocks);
+        assert!(matches!(items[0], RenderItem::ThinkingGroup(_)));
+        assert!(matches!(items[1], RenderItem::ToolGroup(_)));
+    }
+
+    /// (e) Failed count and aggregate status are correct ACROSS the merged turns.
+    #[test]
+    fn failed_count_and_status_span_merged_turns() {
+        let turns = vec![
+            tool_only_turn("t1", &[ToolStatus::Ok, ToolStatus::Err]),
+            tool_only_turn("t2", &[ToolStatus::Err]),
+            tool_only_turn("t3", &[ToolStatus::Ok]),
+        ];
+        assert_eq!(top_rows(&turns), vec![TopRow::ToolRun(0)]);
+        assert_eq!(tool_run_members(&turns, 0).len(), 4);
+        assert_eq!(tool_run_failed_count(&turns, 0), 2);
+        assert_eq!(tool_run_status(&turns, 0), ToolStatus::Err);
+    }
+
+    /// A still-running call anywhere in the run rolls the aggregate up to
+    /// Running (no failures yet), matching the per-turn ToolGroup rollup.
+    #[test]
+    fn running_call_makes_run_running() {
+        let turns = vec![tool_only_turn("t1", &[ToolStatus::Ok, ToolStatus::Running])];
+        assert_eq!(tool_run_status(&turns, 0), ToolStatus::Running);
+        assert_eq!(tool_run_failed_count(&turns, 0), 0);
+    }
+
+    /// (f) A run growing mid-stream keeps the SAME anchor, so the `For` key is
+    /// stable and the merged disclosure never re-mounts (nor drops expand state)
+    /// — while its membership still grows to include the newly-arrived turn.
+    #[test]
+    fn growing_run_keeps_stable_anchor_key() {
+        // First Sol round: one running tool, one row anchored at 0.
+        let mut turns = vec![tool_only_turn("t1", &[ToolStatus::Running])];
+        let TopRow::ToolRun(anchor_before) = top_rows(&turns)[0] else {
+            panic!("expected a ToolRun");
+        };
+        assert_eq!(tool_run_members(&turns, 0).len(), 1);
+
+        // That call finishes and the next round appends a fresh tool-only turn.
+        turns[0] = tool_only_turn("t1", &[ToolStatus::Ok]);
+        turns.push(tool_only_turn("t2", &[ToolStatus::Running]));
+
+        let rows = top_rows(&turns);
+        assert_eq!(rows, vec![TopRow::ToolRun(0)]);
+        let TopRow::ToolRun(anchor_after) = rows[0] else {
+            panic!("expected a ToolRun");
+        };
+        assert_eq!(
+            anchor_before, anchor_after,
+            "anchor (For key) must be stable"
+        );
+        assert_eq!(
+            tool_run_members(&turns, 0),
+            vec![(0, 0), (1, 0)],
+            "membership grows across the appended turn"
+        );
     }
 
     // ── describe_tool ───────────────────────────────────────────────────
