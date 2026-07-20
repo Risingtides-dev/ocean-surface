@@ -2321,3 +2321,11 @@ area:      frontend
 
 TASK-63 corrective 252a5a5: the packaged-app build REJECTED db1754f's inline infoPlist object — this Tauri version's schema wants a path string. My config-only review never ran cargo tauri build, so the landed fix was inert until tonight's bundle attempt surfaced it. Info.plist file now carries NSMicrophoneUsageDescription, config references it by path, and the key is VERIFIED inside the built Ocean.app bundle (PlistBuddy). Fresh Ocean.app (main 2e622ef + corrective, with TASK-52 open flow + TASK-64 tool grouping in the dist) installed to /Applications for smaths' mic smoke: launch, dictate, expect the macOS mic prompt. Lesson: config fixes whose only consumer is a build step gate on THAT build step.
 _________________________________________________________________________________
+time:      [23:35] [19-07-26]
+agent:     [claude] [fable 5]
+worktree:  task-46-final (ocean authored, fable landed)
+type:      feature-request
+area:      frontend
+
+TASK-46 LANDED 2f85a1e — the day's biggest slice, ocean's credit. Option B defer-to-completion mid-turn reconciliation: attach/reconnect to a live-turn session quarantines the baseline at the last user entry, suppresses SSE content while state/Stop/permissions flow, bounded 2s detail poll with 5-min stalled affordance, atomic terminal commit, ZERO daemon lines. Review record: 8 design revisions then stages A-H; five codex holds + two fable holds, every one upheld and each catching a real defect (data loss, revision admission, seam wiring, keyed cleanup, tautological tests, fmt drift); 674->683 tests incl. the 18-case suppression matrix, 5 commit-seam race tests, 4 keyed-cleanup real-helper tests. Codex binding CLEAR on 5ed854f was posted 22:38 and MISSED by my wake drain for ~1h (second dropped codex message tonight — wake-delivery reliability for the fable seat needs a look; disclosed); the time-box notice I posted in the gap is moot and retracted. Rebase resolved transcript.css (banner + TASK-52 prose column coexist) and the twice-fixed doc lint (took main's). Squashed the 8-stage wip chain into one feat commit, ocean authored. Rail deploys.
+_________________________________________________________________________________
