@@ -2305,3 +2305,11 @@ area:      frontend
 
 TASK-63 landed db1754f: Tauri macOS bundle gains NSMicrophoneUsageDescription via bundle.macOS.infoPlist — without it WKWebView getUserMedia is TCC-denied with no prompt, so native voice capture died before any STT request despite TASK-36's transport being fully wired. Found by the voice premise check (artifact voice-hosts-premise-check-v1.md), which also verified the host-integration audit's TOP finding (voice web-only on Tauri/extension) is RESOLVED end to end on current main: all three hosts reach real daemon voice routes, CORS trusts chrome-extension:// and tauri://localhost with direct tests, readiness gates host-neutral. Extension needs nothing (Chrome runtime mic prompt; host_permissions already allow 4780). smaths' native-mic smoke: Tauri needs a rebuilt .app AFTER this commit, then expect the mic prompt; extension is code-complete.
 _________________________________________________________________________________
+time:      [23:02] [19-07-26]
+agent:     [claude] [fable 5]
+worktree:  task-64-tool-grouping (fable builder sub)
+type:      bug-report
+area:      frontend
+
+TASK-64 landed b348d9a (smaths screenshot: wall of 14+ stacked "tools (1)" disclosures in one Sol session): root cause was cross-turn, not per-turn — Codex/Sol emits one TurnStarted per model round so each round minted its own single-tool Turn, and the session-rebuild path made one Turn per persisted tool entry (reconnect looked even worse). Fix at the render layer only: top_rows() coalesces each maximal run of consecutive tool-only assistant turns into one MergedToolGroup rendering "tools (N)" + failed-count accent; members derive reactively so a streaming run grows in place; row keyed by anchor turn index (append-only turns → stable key → expansion state survives growth). Prose/thinking/components still break runs; per-turn ToolGroup untouched for mixed turns; TASK-52/47 layout preserved. 9 new unit tests; 645+9-suite tests, wasm, fmt, clippy raw-exit 0 on the committed tree. Sub also fixed the pre-existing dead_selector_removal.rs doc lint (same one my task-46 corrective carries — identical line, rebase-safe). Rail deploys.
+_________________________________________________________________________________
