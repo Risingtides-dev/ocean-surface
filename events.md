@@ -2297,3 +2297,11 @@ area:      frontend
 
 TASK-14 landed 680aff1 (oldest open board item, from 07-16). Mobile splash root cause: the Soundings WebGL landing sized its drawing buffer exactly once in init_gl, but a phone viewport is not stable at first paint (URL-bar settle, late 100dvh, rotation) — the frozen buffer got CSS-stretched so the aspect-fitted wordmark cropped, and a zero-height first measure clamped to 2x2 (blank). Fix: per-frame sync_size() no-op re-measure (DPR<=2 cap matching init_gl), no listeners. Sessions button: borderless flat fill with no justify-content — off-center label and missing the hairline+lit-seam idiom every neighboring header control carries; fixed with existing tokens + coarse-pointer 44px tap floor (TASK-42 idiom). 5 source-assertion regressions in tests/task14_splash_sessions.rs; 666 tests, wasm, fmt all raw-exit 0. Board todo column is now EMPTY.
 _________________________________________________________________________________
+time:      [21:40] [19-07-26]
+agent:     [claude] [fable 5]
+worktree:  task-63-mic-plist (fable, inline)
+type:      bug-report
+area:      frontend
+
+TASK-63 landed db1754f: Tauri macOS bundle gains NSMicrophoneUsageDescription via bundle.macOS.infoPlist — without it WKWebView getUserMedia is TCC-denied with no prompt, so native voice capture died before any STT request despite TASK-36's transport being fully wired. Found by the voice premise check (artifact voice-hosts-premise-check-v1.md), which also verified the host-integration audit's TOP finding (voice web-only on Tauri/extension) is RESOLVED end to end on current main: all three hosts reach real daemon voice routes, CORS trusts chrome-extension:// and tauri://localhost with direct tests, readiness gates host-neutral. Extension needs nothing (Chrome runtime mic prompt; host_permissions already allow 4780). smaths' native-mic smoke: Tauri needs a rebuilt .app AFTER this commit, then expect the mic prompt; extension is code-complete.
+_________________________________________________________________________________
