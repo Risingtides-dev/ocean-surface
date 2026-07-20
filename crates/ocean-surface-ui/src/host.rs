@@ -482,19 +482,18 @@ pub async fn daemon_status() -> Option<DaemonStatus> {
     }
 }
 
-/// Start the ocean-daemon the shell supervises. `bin` overrides
-/// `OCEAN_DAEMON_BIN` → PATH resolution. On Tauri, spawning onto an
-/// already-served port is a graceful no-op (the shell never launches a second
-/// daemon). Returns `false` on non-Tauri hosts or if the invoke rejects.
-pub async fn daemon_start(bin: Option<String>) -> bool {
+/// Start the ocean-daemon the shell supervises. The binary is resolved
+/// shell-side from `OCEAN_DAEMON_BIN` → PATH; TASK-78 removed the
+/// caller-supplied override because this seam is reachable from the webview
+/// and the argument reached `ProcessCommand::spawn` on the native side. On
+/// Tauri, spawning onto an already-served port is a graceful no-op (the shell
+/// never launches a second daemon). Returns `false` on non-Tauri hosts or if
+/// the invoke rejects.
+pub async fn daemon_start() -> bool {
     if !running_in_tauri() {
         return false;
     }
-    let args = Object::new();
-    if let Some(b) = bin {
-        let _ = Reflect::set(&args, &JsValue::from_str("bin"), &JsValue::from_str(&b));
-    }
-    tauri_invoke("daemon_start", &args).await.is_ok()
+    tauri_invoke("daemon_start", &Object::new()).await.is_ok()
 }
 
 /// Stop the daemon the shell owns. Never affects an external daemon the shell
@@ -507,17 +506,13 @@ pub async fn daemon_stop() -> bool {
     tauri_invoke("daemon_stop", &JsValue::NULL).await.is_ok()
 }
 
-/// Restart the shell-owned daemon (stop + start). `bin` overrides
-/// `OCEAN_DAEMON_BIN` → PATH. Returns `false` on non-Tauri hosts.
-pub async fn daemon_restart(bin: Option<String>) -> bool {
+/// Restart the shell-owned daemon (stop + start). Binary resolved shell-side
+/// (TASK-78: no caller-supplied override). Returns `false` on non-Tauri hosts.
+pub async fn daemon_restart() -> bool {
     if !running_in_tauri() {
         return false;
     }
-    let args = Object::new();
-    if let Some(b) = bin {
-        let _ = Reflect::set(&args, &JsValue::from_str("bin"), &JsValue::from_str(&b));
-    }
-    tauri_invoke("daemon_restart", &args).await.is_ok()
+    tauri_invoke("daemon_restart", &Object::new()).await.is_ok()
 }
 
 /// Subscribe to shell `daemon-status` events (emitted on change only). No-op

@@ -793,17 +793,23 @@ fn daemon_url_from_env() -> String {
 }
 
 /// Binary resolution order (testable via [`resolve_daemon_bin_with`]):
-/// explicit arg → `OCEAN_DAEMON_BIN` env → `ocean-daemon` on PATH.
-fn resolve_daemon_bin(explicit: Option<&str>) -> String {
-    resolve_daemon_bin_with(explicit, std::env::var("OCEAN_DAEMON_BIN").ok().as_deref())
+/// `OCEAN_DAEMON_BIN` env → `ocean-daemon` on PATH.
+///
+/// TASK-78: there is deliberately NO caller-supplied override. `daemon_start`
+/// and `daemon_restart` used to accept an optional binary-path argument
+/// straight from IPC, which reached `ProcessCommand::spawn` after only a trim
+/// and a non-empty check — an arbitrary-executable primitive callable by
+/// anything running in the webview. Tauri 2's capability ACL does NOT cover commands
+/// registered through `generate_handler!` (it gates plugin/`core:` commands),
+/// so the crate's otherwise-minimal capability set gave no protection there.
+/// The env var is a trusted operator-set channel; an IPC argument is not.
+fn resolve_daemon_bin() -> String {
+    resolve_daemon_bin_with(std::env::var("OCEAN_DAEMON_BIN").ok().as_deref())
 }
 
 /// Pure core of [`resolve_daemon_bin`] — takes the env value as a parameter
 /// so the resolution order is unit-testable without mutating process env.
-fn resolve_daemon_bin_with(explicit: Option<&str>, env_bin: Option<&str>) -> String {
-    if let Some(bin) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
-        return bin.to_string();
-    }
+fn resolve_daemon_bin_with(env_bin: Option<&str>) -> String {
     if let Some(bin) = env_bin.map(str::trim).filter(|s| !s.is_empty()) {
         return bin.to_string();
     }
@@ -914,11 +920,11 @@ async fn daemon_status(state: State<'_, AppState>) -> Result<DaemonStatusDto, St
 /// UI flips without waiting for the next poll.
 #[tauri::command]
 async fn daemon_start(
-    bin: Option<String>,
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<DaemonStatusDto, String> {
-    state.daemon.start(&resolve_daemon_bin(bin.as_deref()))?;
+    // TASK-78: no caller-supplied binary path — see `resolve_daemon_bin`.
+    state.daemon.start(&resolve_daemon_bin())?;
     let snap = state.daemon.snapshot();
     let _ = app.emit("daemon-status", snap.clone());
     Ok(snap)
@@ -941,11 +947,11 @@ async fn daemon_stop(
 /// event.
 #[tauri::command]
 async fn daemon_restart(
-    bin: Option<String>,
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<DaemonStatusDto, String> {
-    state.daemon.restart(&resolve_daemon_bin(bin.as_deref()))?;
+    // TASK-78: no caller-supplied binary path — see `resolve_daemon_bin`.
+    state.daemon.restart(&resolve_daemon_bin())?;
     let snap = state.daemon.snapshot();
     let _ = app.emit("daemon-status", snap.clone());
     Ok(snap)
@@ -1189,30 +1195,35 @@ mod tests {
         assert!(parse_host_port("http://").is_none());
     }
 
-    #[test]
-    fn resolve_daemon_bin_explicit_wins_over_env_and_default() {
-        // Explicit arg always wins, regardless of env.
-        assert_eq!(
-            resolve_daemon_bin_with(Some("/x/ocean-daemon"), Some("/env/od")),
-            "/x/ocean-daemon"
-        );
-        // Whitespace-only explicit falls through.
-        assert_eq!(
-            resolve_daemon_bin_with(Some("   "), Some("/env/od")),
-            "/env/od"
-        );
-    }
-
+    /// TASK-78: the resolver takes ONLY the env value. There is no
+    /// caller-supplied override, because that argument was reachable from the
+    /// webview and ended in `ProcessCommand::spawn`. If someone re-adds an
+    /// `explicit` parameter here, this test stops compiling — which is the
+    /// point: the signature IS the security boundary.
     #[test]
     fn resolve_daemon_bin_env_wins_over_path_default() {
-        assert_eq!(resolve_daemon_bin_with(None, Some("/env/od")), "/env/od");
+        assert_eq!(resolve_daemon_bin_with(Some("/env/od")), "/env/od");
         // Whitespace-only env falls through to the PATH default.
-        assert_eq!(resolve_daemon_bin_with(None, Some("  ")), "ocean-daemon");
+        assert_eq!(resolve_daemon_bin_with(Some("  ")), "ocean-daemon");
     }
 
     #[test]
     fn resolve_daemon_bin_path_default_when_nothing_set() {
-        assert_eq!(resolve_daemon_bin_with(None, None), "ocean-daemon");
+        assert_eq!(resolve_daemon_bin_with(None), "ocean-daemon");
+    }
+
+    /// The IPC commands must expose no path parameter at all. Source-pinned
+    /// because the commands need a live Tauri runtime to invoke.
+    #[test]
+    fn daemon_commands_take_no_caller_supplied_binary() {
+        let src = include_str!("lib.rs");
+        let needle = format!("bin: Option<{}>", "String");
+        assert!(
+            !src.contains(needle.as_str()),
+            "daemon_start/daemon_restart must not accept a binary path from IPC \
+             (TASK-78): Tauri 2 capabilities do not gate generate_handler! commands, \
+             so any script in the webview could spawn an arbitrary executable",
+        );
     }
 
     #[test]
@@ -1317,7 +1328,7 @@ fn tray_daemon_action(app: &AppHandle, action: DaemonTrayAction) {
     let daemon = app.state::<AppState>().daemon.clone();
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let bin = resolve_daemon_bin(None);
+        let bin = resolve_daemon_bin();
         let _ = match action {
             DaemonTrayAction::Start => daemon.start(&bin),
             DaemonTrayAction::Restart => daemon.restart(&bin),

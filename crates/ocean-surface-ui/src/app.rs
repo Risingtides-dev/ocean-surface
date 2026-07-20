@@ -1561,7 +1561,7 @@ pub fn App() -> impl IntoView {
             enabled: Signal::derive(move || daemon_tauri),
             run: Callback::new(move |_| {
                 wasm_bindgen_futures::spawn_local(async move {
-                    crate::host::daemon_start(None).await;
+                    crate::host::daemon_start().await;
                 });
             }),
         });
@@ -1574,7 +1574,7 @@ pub fn App() -> impl IntoView {
             enabled: Signal::derive(move || daemon_tauri),
             run: Callback::new(move |_| {
                 wasm_bindgen_futures::spawn_local(async move {
-                    crate::host::daemon_restart(None).await;
+                    crate::host::daemon_restart().await;
                 });
             }),
         });
