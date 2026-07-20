@@ -2329,3 +2329,15 @@ area:      frontend
 
 TASK-46 LANDED 2f85a1e — the day's biggest slice, ocean's credit. Option B defer-to-completion mid-turn reconciliation: attach/reconnect to a live-turn session quarantines the baseline at the last user entry, suppresses SSE content while state/Stop/permissions flow, bounded 2s detail poll with 5-min stalled affordance, atomic terminal commit, ZERO daemon lines. Review record: 8 design revisions then stages A-H; five codex holds + two fable holds, every one upheld and each catching a real defect (data loss, revision admission, seam wiring, keyed cleanup, tautological tests, fmt drift); 674->683 tests incl. the 18-case suppression matrix, 5 commit-seam race tests, 4 keyed-cleanup real-helper tests. Codex binding CLEAR on 5ed854f was posted 22:38 and MISSED by my wake drain for ~1h (second dropped codex message tonight — wake-delivery reliability for the fable seat needs a look; disclosed); the time-box notice I posted in the gap is moot and retracted. Rebase resolved transcript.css (banner + TASK-52 prose column coexist) and the twice-fixed doc lint (took main's). Squashed the 8-stage wip chain into one feat commit, ocean authored. Rail deploys.
 _________________________________________________________________________________
+
+time:      [01:37am] [07-20-26]
+agent:     [ocean] [gpt-5]
+worktree:  [maps-alert-closeout-20260719]
+type:      security closeout
+area:      Google Maps browser key
+
+Operator confirmed the previously public Google Maps browser key was wiped in
+GCP. GitHub secret-scanning alert 1 was resolved as `revoked`; current public
+`origin/main` retains containment commit `05f5283` and has zero
+Google-key-shaped literals in the proxy source. Public history was intentionally
+left intact because prior objects remain in public fork and PR refs.
