@@ -155,6 +155,17 @@ Web surface session UI:
   normalized and daemon-canonicalized targets stay under the validated workspace
   plus `propose_handoff`; only the exact `Create draft` or `Create & start` click
   creates a session or starts a turn.
+- Ordinary realtime Voice chat receives workspace inspection only when the
+  daemon's secret response includes the canonical root resolved from the active
+  session. Freeze that root into the connection config and fulfill only bounded
+  relative `list_workspace` / `read_workspace_file` calls whose daemon-resolved
+  targets remain under it. Never derive authority from model arguments or a
+  browser-selected path; older/project-less responses keep render + handoff only.
+- Ordinary realtime Voice chat streams OpenAI `response.output_audio_transcript.*`
+  deltas into one local assistant turn keyed by output item, then replaces the
+  accumulated text with the authoritative done transcript. Keep this projection
+  conversation-only (Planner has no chat transcript), and do not represent it as
+  daemon-persisted history: a later session refresh remains authoritative.
 - Idle web/extension headers stay single-bar: project/session context may stay
   visible, but call/join affordances live behind overflow until intentionally
   opened or actively connected.

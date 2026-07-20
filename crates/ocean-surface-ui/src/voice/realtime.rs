@@ -6,13 +6,10 @@
 //! WebRTC directly to OpenAI: mic track up, agent audio track down, and a
 //! `oai-events` data channel for tool calls.
 //!
-//! Conversation mode exposes two tools round-tripped through that channel:
-//! - `render_component` — folded into the transcript locally via
-//!   [`crate::daemon::Daemon::render_local_component`], the same upsert the
-//!   SSE `ComponentRender` reducer performs.
-//! - `write_handoff` — appended to the chat session through the daemon
-//!   (`POST /v1/agent/sessions/{id}/messages`), so the text agent's next turn
-//!   picks the note up.
+//! Conversation mode always exposes `render_component` + `write_handoff` and,
+//! for daemon-authorized project sessions, bounded read-only workspace tools.
+//! Assistant output-audio transcript deltas are folded into a local assistant
+//! turn as they arrive, so spoken replies are readable in the live transcript.
 //!
 //! Planner mode is isolated from conversation tools. It exposes only bounded
 //! read-only workspace inspection (`list_workspace`, `read_workspace_file`) plus
@@ -41,6 +38,7 @@ use web_sys::{
 use super::planner::{PlannerContext, VoicePlannerBrief};
 use super::vad;
 use crate::daemon::Daemon;
+use crate::model::{Block, Role, Turn};
 use crate::tts;
 
 /// Where the browser posts its SDP offer, authorized by the ephemeral secret.
@@ -68,6 +66,9 @@ pub enum RealtimeKind {
 enum RealtimeConfig {
     Conversation {
         session_id: Option<String>,
+        /// Canonical daemon-validated root returned with the ephemeral secret.
+        /// `None` preserves the session-less/project-less two-tool contract.
+        workspace_root: Option<String>,
     },
     Planner {
         context: PlannerContext,
@@ -430,7 +431,13 @@ pub fn start() {
         return;
     };
     let session_id = daemon.session_id.get_untracked();
-    start_with_config(daemon, RealtimeConfig::Conversation { session_id });
+    start_with_config(
+        daemon,
+        RealtimeConfig::Conversation {
+            session_id,
+            workspace_root: None,
+        },
+    );
 }
 
 /// Start the isolated propose-only planner transport. A valid proposal is
@@ -518,7 +525,7 @@ async fn connect(
 ) -> Result<RealtimeSession, String> {
     // 1. Ephemeral secret from the daemon (same-origin through the proxy).
     let secret = match &config {
-        RealtimeConfig::Conversation { session_id } => {
+        RealtimeConfig::Conversation { session_id, .. } => {
             daemon.realtime_client_secret(session_id.clone()).await?
         }
         RealtimeConfig::Planner { context, .. } => {
@@ -526,6 +533,15 @@ async fn connect(
         }
     };
     ensure_connect_attempt_current(attempt)?;
+    // Bind conversation tool fulfillment to the canonical root returned by the
+    // daemon for this exact session mint. The browser never nominates a root.
+    let config = match config {
+        RealtimeConfig::Conversation { session_id, .. } => RealtimeConfig::Conversation {
+            session_id,
+            workspace_root: secret.workspace_root.clone(),
+        },
+        planner @ RealtimeConfig::Planner { .. } => planner,
+    };
 
     // 2. Mic with echo cancellation — same constraints as the listen loop, so
     //    the agent's own voice doesn't feed back into the conversation.
@@ -753,14 +769,96 @@ fn start_level_meter(mic: &MediaStream) -> Result<LevelMeterHandles, String> {
     Ok((ctx, raf_handle, frame_cell, running))
 }
 
-/// One server event off the data channel. Tool calls are dispatched from the
-/// completed response (`response.done` carries every `function_call` output
-/// item with its full `arguments` string — no delta assembly needed).
+const REALTIME_REPLY_TURN_PREFIX: &str = "voice-realtime:";
+
+fn realtime_reply_id(event: &Value) -> Option<String> {
+    event
+        .pointer("/item_id")
+        .or_else(|| event.pointer("/response_id"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+/// Fold a streaming realtime reply into one stable local assistant turn. The
+/// final event replaces accumulated deltas with the authoritative transcript,
+/// repairing a dropped/duplicated data-channel delta without creating a second
+/// bubble. This is a live Surface projection; daemon session history remains the
+/// authority on a later reload.
+fn apply_realtime_reply_text(turns: &mut Vec<Turn>, reply_id: &str, text: &str, replace: bool) {
+    if reply_id.is_empty() || text.is_empty() {
+        return;
+    }
+    let turn_id = format!("{REALTIME_REPLY_TURN_PREFIX}{reply_id}");
+    let turn = match turns
+        .iter_mut()
+        .find(|turn| turn.turn_id.as_deref() == Some(turn_id.as_str()))
+    {
+        Some(turn) => turn,
+        None => {
+            turns.push(Turn {
+                turn_id: Some(turn_id),
+                role: Role::Assistant,
+                blocks: vec![Block::Text(String::new())],
+            });
+            turns.last_mut().expect("realtime turn was just pushed")
+        }
+    };
+    let block = match turn
+        .blocks
+        .iter_mut()
+        .find(|block| matches!(block, Block::Text(_)))
+    {
+        Some(block) => block,
+        None => {
+            turn.blocks.push(Block::Text(String::new()));
+            turn.blocks.last_mut().expect("text block was just pushed")
+        }
+    };
+    let Block::Text(current) = block else {
+        unreachable!("selected or inserted a text block")
+    };
+    if replace {
+        *current = text.to_string();
+    } else {
+        current.push_str(text);
+    }
+}
+
+/// One server event off the data channel. Audio transcript deltas stream into
+/// the live chat projection; tool calls are dispatched from the completed
+/// response (`response.done` carries every `function_call` output item with its
+/// full `arguments` string — no delta assembly needed).
 fn handle_server_event(daemon: &Daemon, config: &RealtimeConfig, text: &str) {
     let Ok(event) = serde_json::from_str::<Value>(text) else {
         return;
     };
     match event.pointer("/type").and_then(Value::as_str) {
+        Some("response.output_audio_transcript.delta") | Some("response.output_text.delta")
+            if matches!(config, RealtimeConfig::Conversation { .. }) =>
+        {
+            if let (Some(reply_id), Some(delta)) = (
+                realtime_reply_id(&event),
+                event.pointer("/delta").and_then(Value::as_str),
+            ) {
+                daemon
+                    .turns
+                    .update(|turns| apply_realtime_reply_text(turns, &reply_id, delta, false));
+            }
+        }
+        Some("response.output_audio_transcript.done") | Some("response.output_text.done")
+            if matches!(config, RealtimeConfig::Conversation { .. }) =>
+        {
+            let complete = event
+                .pointer("/transcript")
+                .or_else(|| event.pointer("/text"))
+                .and_then(Value::as_str);
+            if let (Some(reply_id), Some(complete)) = (realtime_reply_id(&event), complete) {
+                daemon
+                    .turns
+                    .update(|turns| apply_realtime_reply_text(turns, &reply_id, complete, true));
+            }
+        }
         Some("response.done") => {
             let items = event
                 .pointer("/response/output")
@@ -782,9 +880,19 @@ fn handle_server_event(daemon: &Daemon, config: &RealtimeConfig, text: &str) {
                     .and_then(Value::as_str)
                     .unwrap_or("");
                 match config {
-                    RealtimeConfig::Conversation { session_id } => {
+                    RealtimeConfig::Conversation {
+                        session_id,
+                        workspace_root,
+                    } => {
                         let args = serde_json::from_str(raw_args).unwrap_or(Value::Null);
-                        dispatch_tool(daemon, session_id.as_deref(), name, call_id, args);
+                        dispatch_tool(
+                            daemon,
+                            session_id.as_deref(),
+                            workspace_root.as_deref(),
+                            name,
+                            call_id,
+                            args,
+                        );
                     }
                     RealtimeConfig::Planner {
                         context,
@@ -845,9 +953,11 @@ fn dispatch_planner_tool(
             let args = raw_args.to_string();
             spawn_local(async move {
                 let output = match name.as_str() {
-                    "list_workspace" => planner_list_workspace(&daemon, &context, &args).await,
+                    "list_workspace" => {
+                        workspace_list(&daemon, &context.workspace_root, &args).await
+                    }
                     "read_workspace_file" => {
-                        planner_read_workspace_file(&daemon, &context, &args).await
+                        workspace_read_file(&daemon, &context.workspace_root, &args).await
                     }
                     _ => unreachable!("matched planner read-only tool"),
                 };
@@ -868,19 +978,15 @@ fn validate_planner_tool_call(name: &str, raw_args: &str) -> Result<VoicePlanner
     VoicePlannerBrief::from_tool_arguments(raw_args)
 }
 
-async fn planner_list_workspace(
-    daemon: &Daemon,
-    context: &PlannerContext,
-    raw_args: &str,
-) -> String {
+async fn workspace_list(daemon: &Daemon, workspace_root: &str, raw_args: &str) -> String {
     let relative = match planner_relative_path_from_args(raw_args) {
         Ok(path) => path,
         Err(error) => return planner_error(&error),
     };
-    let absolute = planner_workspace_path(&context.workspace_root, &relative);
+    let absolute = planner_workspace_path(workspace_root, &relative);
     match crate::daemon::fetch_fs_dirs_with_files(&daemon.url.get_untracked(), &absolute).await {
         Some(resp) if resp.error.is_none() => {
-            if !planner_path_is_within_workspace(&resp.path, &context.workspace_root) {
+            if !planner_path_is_within_workspace(&resp.path, workspace_root) {
                 return planner_error("resolved path is outside the validated workspace");
             }
             let dirs: Vec<_> = resp
@@ -916,20 +1022,16 @@ async fn planner_list_workspace(
     }
 }
 
-async fn planner_read_workspace_file(
-    daemon: &Daemon,
-    context: &PlannerContext,
-    raw_args: &str,
-) -> String {
+async fn workspace_read_file(daemon: &Daemon, workspace_root: &str, raw_args: &str) -> String {
     let relative = match planner_relative_path_from_args(raw_args) {
         Ok(path) if !path.is_empty() => path,
         Ok(_) => return planner_error("path must name a file under the workspace"),
         Err(error) => return planner_error(&error),
     };
-    let absolute = planner_workspace_path(&context.workspace_root, &relative);
+    let absolute = planner_workspace_path(workspace_root, &relative);
     match crate::daemon::fetch_fs_file(&daemon.url.get_untracked(), &absolute).await {
         Some(resp) if resp.error.is_none() => {
-            if !planner_path_is_within_workspace(&resp.path, &context.workspace_root) {
+            if !planner_path_is_within_workspace(&resp.path, workspace_root) {
                 return planner_error("resolved path is outside the validated workspace");
             }
             if resp.binary {
@@ -1010,6 +1112,7 @@ fn planner_error(error: &str) -> String {
 fn dispatch_tool(
     daemon: &Daemon,
     session_id: Option<&str>,
+    workspace_root: Option<&str>,
     name: &str,
     call_id: String,
     args: Value,
@@ -1019,6 +1122,28 @@ fn dispatch_tool(
             let (component_id, kind, props) = parse_render_args(&args);
             daemon.render_local_component(component_id, kind, props);
             send_tool_output(&call_id, "rendered");
+        }
+        "list_workspace" | "read_workspace_file" => {
+            let Some(workspace_root) = workspace_root.map(str::to_string) else {
+                send_tool_output(
+                    &call_id,
+                    "project tools are unavailable for this chat session",
+                );
+                return;
+            };
+            let daemon = daemon.clone();
+            let name = name.to_string();
+            let raw_args = args.to_string();
+            spawn_local(async move {
+                let output = match name.as_str() {
+                    "list_workspace" => workspace_list(&daemon, &workspace_root, &raw_args).await,
+                    "read_workspace_file" => {
+                        workspace_read_file(&daemon, &workspace_root, &raw_args).await
+                    }
+                    _ => unreachable!("matched conversation read-only tool"),
+                };
+                send_tool_output(&call_id, &output);
+            });
         }
         "write_handoff" => {
             let note = args
@@ -1195,6 +1320,47 @@ mod tests {
         assert_arc_rw_signal::<RealtimeStage>(stage());
         assert_arc_rw_signal::<f32>(level());
         assert_arc_rw_signal::<Option<String>>(last_error());
+    }
+
+    #[test]
+    fn realtime_reply_deltas_stream_into_one_assistant_turn_and_done_repairs_text() {
+        let mut turns = vec![Turn::user("existing question")];
+
+        apply_realtime_reply_text(&mut turns, "item-1", "Hello", false);
+        apply_realtime_reply_text(&mut turns, "item-1", " world", false);
+
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[1].role, Role::Assistant);
+        assert_eq!(turns[1].turn_id.as_deref(), Some("voice-realtime:item-1"));
+        let Block::Text(streamed) = &turns[1].blocks[0] else {
+            panic!("realtime reply must render as text");
+        };
+        assert_eq!(streamed, "Hello world");
+
+        // The authoritative done transcript replaces rather than appends, so a
+        // missing or duplicated data-channel delta cannot corrupt the bubble.
+        apply_realtime_reply_text(&mut turns, "item-1", "Hello, world.", true);
+        let Block::Text(done) = &turns[1].blocks[0] else {
+            panic!("realtime reply must stay text");
+        };
+        assert_eq!(done, "Hello, world.");
+
+        apply_realtime_reply_text(&mut turns, "item-2", "Next reply", false);
+        assert_eq!(turns.len(), 3);
+        assert_eq!(turns[2].turn_id.as_deref(), Some("voice-realtime:item-2"));
+    }
+
+    #[test]
+    fn realtime_reply_event_identity_prefers_item_and_falls_back_to_response() {
+        assert_eq!(
+            realtime_reply_id(&json!({"item_id": "item", "response_id": "response"})).as_deref(),
+            Some("item")
+        );
+        assert_eq!(
+            realtime_reply_id(&json!({"response_id": "response"})).as_deref(),
+            Some("response")
+        );
+        assert_eq!(realtime_reply_id(&json!({"item_id": ""})), None);
     }
 
     #[test]

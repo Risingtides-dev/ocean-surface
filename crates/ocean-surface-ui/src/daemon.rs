@@ -5323,6 +5323,11 @@ impl Daemon {
 pub struct RealtimeSecret {
     pub client_secret: String,
     pub model: String,
+    /// Canonical registered project root/live worktree resolved by the daemon
+    /// for an ordinary conversation session. Omitted for planner, session-less,
+    /// project-less, and older-daemon responses.
+    #[serde(default)]
+    pub workspace_root: Option<String>,
 }
 
 /// Whether a `TurnFinished` frame may clear the session's live turn state
@@ -9787,6 +9792,24 @@ mod tests {
         assert!(d.git);
         assert!(!d.is_repo);
         assert_eq!(d.git_branch, None);
+    }
+
+    #[test]
+    fn realtime_secret_workspace_root_is_additive_and_backward_compatible() {
+        let old: RealtimeSecret = serde_json::from_value(json!({
+            "client_secret": "ephemeral",
+            "model": "gpt-realtime-2.1"
+        }))
+        .unwrap();
+        assert_eq!(old.workspace_root, None);
+
+        let scoped: RealtimeSecret = serde_json::from_value(json!({
+            "client_secret": "ephemeral",
+            "model": "gpt-realtime-2.1",
+            "workspace_root": "/work/tree"
+        }))
+        .unwrap();
+        assert_eq!(scoped.workspace_root.as_deref(), Some("/work/tree"));
     }
 
     #[test]
