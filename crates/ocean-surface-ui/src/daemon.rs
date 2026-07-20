@@ -2611,10 +2611,14 @@ impl Daemon {
                     false,
                     None,
                 );
+                // TASK-84: encode into the QUERY too. An `&` or `#` in an id
+                // would otherwise split the query string and inject a
+                // parameter — the same raw-interpolation class as the path
+                // sites, with a different delimiter.
                 let events_url = format!(
                     "{}/v1/agent/events?session_id={}",
                     url.trim_end_matches('/'),
-                    active_session_id.as_str()
+                    encode_path_segment(active_session_id.as_str())
                 );
                 status.set(if connected_once {
                     "reconnecting…".into()
@@ -5073,9 +5077,12 @@ impl Daemon {
         markdown: &str,
     ) -> Result<(), String> {
         let url = self.url.get_untracked();
+        // TASK-84: percent-encode — missed by TASK-77 because its regression
+        // needle matched only the `{id}` binding, not `{session_id}`.
         let post_url = format!(
-            "{}/v1/agent/sessions/{session_id}/messages",
-            url.trim_end_matches('/')
+            "{}/v1/agent/sessions/{}/messages",
+            url.trim_end_matches('/'),
+            encode_path_segment(session_id)
         );
         let body = PlannerHandoffRequest {
             role: "user",
@@ -5211,9 +5218,12 @@ impl Daemon {
         kind: Option<&str>,
     ) -> Result<(), String> {
         let url = self.url.get_untracked();
+        // TASK-84: percent-encode — missed by TASK-77 because its regression
+        // needle matched only the `{id}` binding, not `{session_id}`.
         let post_url = format!(
-            "{}/v1/agent/sessions/{session_id}/messages",
-            url.trim_end_matches('/')
+            "{}/v1/agent/sessions/{}/messages",
+            url.trim_end_matches('/'),
+            encode_path_segment(session_id)
         );
         let body = json!({ "role": "user", "content": content, "kind": kind });
         let resp = Request::post(&post_url)
@@ -8997,16 +9007,43 @@ mod tests {
         assert_eq!(encode_path_segment("a?b#c"), "a%3Fb%23c");
         assert_eq!(encode_path_segment("a b"), "a%20b");
 
-        // And the production call sites must use it: a raw session-path
-        // interpolation (the id substituted straight into the format string)
-        // must not reappear. The needle is assembled below rather than written
-        // as a literal — a literal here would match this very comment and the
-        // assertion would fail on itself.
-        let src = include_str!("daemon.rs");
-        let raw = format!("/v1/sessions/{}{}{}", "{", "id", "}");
+        // And no production call site may interpolate an id straight into a
+        // daemon URL. TASK-84: the original version of this check matched a
+        // single literal binding (`{id}`) and therefore missed three sites
+        // that bound `{session_id}` — two paths and one QUERY STRING. It now
+        // checks every binding name we use for a session id, in both the path
+        // and query positions.
+        //
+        // Needles are assembled at runtime: written as literals they would
+        // match this test's own source and the assertion would pass on itself.
+        // Comments are stripped first: a doc comment that DESCRIBES a URL
+        // shape (`POST /v1/agent/sessions/{id}/messages`) is prose, not a call
+        // site, and flagging it is the same self-reference trap that has bitten
+        // these source-assertion tests repeatedly. Only executable lines count.
+        let src_raw = include_str!("daemon.rs");
+        let src: String = src_raw
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let src = src.as_str();
+        let (open, close) = ("{", "}");
+        let mut raw_forms = Vec::new();
+        for binding in ["id", "session_id"] {
+            // Path position, both URL shapes in use.
+            raw_forms.push(format!("/v1/sessions/{open}{binding}{close}"));
+            raw_forms.push(format!("/v1/agent/sessions/{open}{binding}{close}"));
+            // Query position — an `&` or `#` in an id splits the query.
+            raw_forms.push(format!("session_id={open}{binding}{close}"));
+        }
+        let offenders: Vec<&String> = raw_forms
+            .iter()
+            .filter(|form| src.contains(form.as_str()))
+            .collect();
         assert!(
-            !src.contains(raw.as_str()),
-            "session URLs must go through encode_path_segment, not raw interpolation",
+            offenders.is_empty(),
+            "session ids must go through encode_path_segment, not raw \
+             interpolation — found {offenders:?}",
         );
     }
 
