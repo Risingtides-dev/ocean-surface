@@ -6,6 +6,7 @@ license = "MIT OR Apache-2.0"
 authors = ["Risingtides-dev"]
 rust-version = "1.82"
 description = "Tauri 2.x native shell that hosts the ocean-surface Leptos WASM bundle."
+publish = false
 
 # Standalone Tauri project: intentionally NOT a member of the ocean-surface
 # workspace. `cargo tauri` manages this crate's own build graph, and keeping it
