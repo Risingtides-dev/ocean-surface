@@ -375,6 +375,39 @@ pub(crate) fn derive_island_sessions(
     items
 }
 
+/// TASK-101: the distinct project names across the island sessions, ordered for
+/// the project-filter chip row (focused/most-recent first, then alphabetical, so
+/// the projects the operator is actively in surface first). Sessions with no
+/// project are omitted — the "All" chip already covers them.
+pub(crate) fn island_session_projects(sessions: &[IslandSession]) -> Vec<String> {
+    let mut ordered: Vec<String> = Vec::new();
+    for session in sessions {
+        if let Some(project) = &session.project {
+            if !ordered.iter().any(|p| p == project) {
+                ordered.push(project.clone());
+            }
+        }
+    }
+    ordered
+}
+
+/// TASK-101: keep only sessions in `project`; `None` returns them all. Pure so
+/// the island's project filter is unit-testable and the "crapshoot" free-text
+/// search is no longer the only way to narrow by project.
+pub(crate) fn filter_sessions_by_project(
+    sessions: &[IslandSession],
+    project: Option<&str>,
+) -> Vec<IslandSession> {
+    match project {
+        None => sessions.to_vec(),
+        Some(project) => sessions
+            .iter()
+            .filter(|session| session.project.as_deref() == Some(project))
+            .cloned()
+            .collect(),
+    }
+}
+
 /// Normalized session document shared by Browse filtering and `Cmd/Ctrl+P`.
 pub(crate) fn island_search_text(item: &IslandSession) -> String {
     let state = match item.priority {
@@ -459,6 +492,56 @@ pub(crate) fn search_island(query: &str, items: &[IslandSession]) -> Vec<IslandR
 mod tests {
     use super::*;
     use crate::daemon::{OwningProjectRef, WorktreeInfo};
+
+    fn island_session(id: &str, project: Option<&str>) -> IslandSession {
+        IslandSession {
+            id: id.into(),
+            title: id.into(),
+            project: project.map(str::to_string),
+            cwd: "/tmp".into(),
+            branch: None,
+            origin: None,
+            updated_at: String::new(),
+            turn_count: 1,
+            is_focused: false,
+            priority: IslandPriority::Background,
+        }
+    }
+
+    #[test]
+    fn project_filter_scopes_sessions_and_all_returns_everything() {
+        let sessions = vec![
+            island_session("a", Some("ocean")),
+            island_session("b", Some("pasture")),
+            island_session("c", Some("ocean")),
+            island_session("d", None),
+        ];
+        // None ("All") returns every session, including project-less ones.
+        assert_eq!(filter_sessions_by_project(&sessions, None).len(), 4);
+        // A project scopes to exactly its sessions.
+        let ocean: Vec<_> = filter_sessions_by_project(&sessions, Some("ocean"))
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(ocean, vec!["a".to_string(), "c".to_string()]);
+        // An unknown project yields nothing (not a fallback to all).
+        assert!(filter_sessions_by_project(&sessions, Some("nope")).is_empty());
+    }
+
+    #[test]
+    fn distinct_projects_dedupe_in_session_order_omitting_none() {
+        let sessions = vec![
+            island_session("a", Some("ocean")),
+            island_session("b", None),
+            island_session("c", Some("pasture")),
+            island_session("d", Some("ocean")),
+        ];
+        // Distinct, in first-seen (session) order, project-less omitted.
+        assert_eq!(
+            island_session_projects(&sessions),
+            vec!["ocean".to_string(), "pasture".to_string()]
+        );
+    }
 
     fn session(id: &str, title: &str, root: &str, updated_at: &str) -> SessionSummary {
         SessionSummary {

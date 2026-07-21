@@ -11,7 +11,8 @@ use wasm_bindgen::JsCast;
 use crate::daemon::{Daemon, HistorySearchHit};
 use crate::island::{
     compact_attention_counts, derive_attention_items, derive_island_sessions,
-    permission_action_state, search_island, stop_action_state, IslandAttentionItem, IslandResult,
+    filter_sessions_by_project, island_session_projects, permission_action_state, search_island,
+    stop_action_state, IslandAttentionItem, IslandResult,
 };
 use crate::sessions::fmt_relative_time;
 
@@ -359,6 +360,10 @@ pub fn DynamicIsland(
     on_open: Callback<IslandMode>,
 ) -> impl IntoView {
     let session_query = RwSignal::new(String::new());
+    // TASK-101: the project the Sessions browse is scoped to (`None` = all). A
+    // chip row sets it, so narrowing by project no longer means typing the exact
+    // project name into the free-text search.
+    let active_project = RwSignal::new(None::<String>);
     let history_query = RwSignal::new(String::new());
     let session_selected = RwSignal::new(0usize);
     let history_selected = RwSignal::new(0usize);
@@ -407,8 +412,21 @@ pub fn DynamicIsland(
         derive_attention_items(&request_list.get(), &permission_list.get(), &sessions.get())
     });
     let attention_counts = Memo::new(move |_| compact_attention_counts(&attention_items.get()));
+    // Distinct projects across the current sessions, for the filter chip row.
+    let session_projects = Memo::new(move |_| island_session_projects(&sessions.get()));
+    // Drop the active-project scope if that project no longer has any session
+    // (e.g. its last session closed) so the browse can't get stuck on an empty
+    // filter with no way back except "All".
+    Effect::new(move |_| {
+        if let Some(project) = active_project.get() {
+            if !session_projects.get().iter().any(|p| p == &project) {
+                active_project.set(None);
+            }
+        }
+    });
     let session_results = Memo::new(move |_| {
-        let mut matches = search_island(&session_query.get(), &sessions.get());
+        let scoped = filter_sessions_by_project(&sessions.get(), active_project.get().as_deref());
+        let mut matches = search_island(&session_query.get(), &scoped);
         matches.truncate(if session_query.get().trim().is_empty() {
             8
         } else {
@@ -757,6 +775,49 @@ pub fn DynamicIsland(
                                     }
                                 />
                             </div>
+                            <Show when=move || !session_projects.get().is_empty()>
+                                <div
+                                    class="island-project-filter"
+                                    role="group"
+                                    aria-label="Filter sessions by project"
+                                >
+                                    <button
+                                        class="island-project-chip"
+                                        class:is-active=move || active_project.get().is_none()
+                                        type="button"
+                                        on:click=move |_| {
+                                            active_project.set(None);
+                                            session_selected.set(0);
+                                        }
+                                    >
+                                        "All"
+                                    </button>
+                                    <For
+                                        each=move || session_projects.get()
+                                        key=|project| project.clone()
+                                        children=move |project| {
+                                            let active_key = project.clone();
+                                            let click_key = project.clone();
+                                            view! {
+                                                <button
+                                                    class="island-project-chip"
+                                                    class:is-active=move || {
+                                                        active_project.get().as_deref()
+                                                            == Some(active_key.as_str())
+                                                    }
+                                                    type="button"
+                                                    on:click=move |_| {
+                                                        active_project.set(Some(click_key.clone()));
+                                                        session_selected.set(0);
+                                                    }
+                                                >
+                                                    {project}
+                                                </button>
+                                            }
+                                        }
+                                    />
+                                </div>
+                            </Show>
                             <div id="island-session-results" class="island-results" role="listbox">
                                 <Show
                                     when=move || !session_results.get().is_empty()

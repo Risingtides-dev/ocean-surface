@@ -164,6 +164,59 @@
   box-shadow: var(--focus-ring);
 }
 
+/* TASK-101: project filter chip row — scope the session browse to one project
+   without typing its name into the free-text search. */
+.island-project-filter {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+  padding-bottom: 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.island-project-filter::-webkit-scrollbar {
+  display: none;
+}
+
+.island-project-chip {
+  appearance: none;
+  flex: 0 0 auto;
+  max-width: 160px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  background: var(--bg-elevated);
+  color: var(--fg-2);
+  font: 500 12px/1 var(--font);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.island-project-chip:hover {
+  color: var(--fg);
+  border-color: var(--border);
+}
+
+.island-project-chip.is-active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.island-project-chip:focus-visible {
+  outline: 0;
+  box-shadow: var(--focus-ring);
+}
+
 .island-results {
   min-height: 0;
   /* dvh clamps to the live viewport when the mobile keyboard is open; 100vh
