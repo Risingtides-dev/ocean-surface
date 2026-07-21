@@ -3241,8 +3241,12 @@ impl Daemon {
                 .find(|p| p.permission_id == permission_id)
                 .and_then(|p| {
                     self.decision_authority.with_untracked(|authority| {
-                        resolve_decision_authority(p.request_id.as_deref(), authority)
-                            .map(str::to_string)
+                        resolve_decision_authority(
+                            p.request_id.as_deref(),
+                            &p.session_id,
+                            authority,
+                        )
+                        .map(str::to_string)
                     })
                 })
         });
@@ -3738,6 +3742,15 @@ impl Daemon {
                             daemon.session_id.set(None);
                             clear_persisted_session();
                             daemon.reset_token_stats();
+                            // TASK-69 (codex HOLD on af82ee8): this is a
+                            // session-IDENTITY transition too — it retires the
+                            // expired session and adopts a fresh one below. Route
+                            // through the same reset/invalidation helper as
+                            // select/new so old-session cards + their request-bound
+                            // authority never carry into the replacement session,
+                            // and any in-flight publisher is superseded. Does not
+                            // touch `turns`, so the prompt is not re-echoed.
+                            daemon.retire_permission_state();
                             status.set("session expired — starting fresh".into());
                             daemon.dispatch_prompt(prompt, true, client_type);
                             return;
@@ -4676,12 +4689,10 @@ impl Daemon {
         self.canvas_patches.set(Vec::new());
         self.pinned_widgets.set(Vec::new());
         self.pending_images.set(Vec::new());
-        self.permission_view.set(PermissionView::default());
-        self.permission_tombstones.set(Vec::new());
-        // TASK-69: advance the permission epoch so any in-flight OLDER publisher
-        // (a still-running load/reconcile for the session we just left) is
-        // superseded and cannot publish over the reset state (codex HOLD on 8b41fee1).
-        self.claim_permission_epoch();
+        // TASK-69: clear permission cards/tombstones and advance the epoch so an
+        // in-flight publisher for the session we're leaving is superseded (shared
+        // with new-session + strict-resume via one helper — codex HOLD on af82ee8).
+        self.retire_permission_state();
         self.active_decision_token.set(None);
         self.session_id.set(Some(id.to_string()));
         persist_session(id);
@@ -4839,6 +4850,24 @@ impl Daemon {
         self.permission_epoch.get_untracked()
     }
 
+    /// TASK-69: retire the focused-session permission state at a session-IDENTITY
+    /// transition. Clears the pending-permission view and the decision tombstones,
+    /// and ADVANCES the epoch so any in-flight publisher for the session being
+    /// left is superseded and cannot publish over the replacement. EVERY path that
+    /// changes the active session identity must route through this — select/switch,
+    /// new session, AND strict-resume retirement of an expired session — so
+    /// old-session cards (and their request-bound decision authority, which
+    /// `decide_permission` resolves by card/request, not by active session) never
+    /// carry into the new session (codex HOLD on af82ee8: the strict-resume path
+    /// bypassed both `select_session_state` and `new_session`). Deliberately does
+    /// NOT touch `turns` — the strict-resume path preserves its transcript for the
+    /// retry, and the switch/new paths clear turns separately.
+    fn retire_permission_state(&self) {
+        self.permission_view.set(PermissionView::default());
+        self.permission_tombstones.set(Vec::new());
+        self.claim_permission_epoch();
+    }
+
     async fn hydrate_active_session(&self, id: &str) -> Result<Vec<String>, String> {
         let url = self.url.get_untracked();
         let get_url = format!(
@@ -4989,12 +5018,10 @@ impl Daemon {
         self.canvas_patches.set(Vec::new());
         self.pinned_widgets.set(Vec::new());
         self.pending_images.set(Vec::new());
-        self.permission_view.set(PermissionView::default());
-        self.permission_tombstones.set(Vec::new());
-        // TASK-69: advance the permission epoch so any in-flight OLDER publisher
-        // (a still-running load/reconcile for the session we just left) is
-        // superseded and cannot publish over the reset state (codex HOLD on 8b41fee1).
-        self.claim_permission_epoch();
+        // TASK-69: clear permission cards/tombstones and advance the epoch so an
+        // in-flight publisher for the session we're leaving is superseded (shared
+        // with new-session + strict-resume via one helper — codex HOLD on af82ee8).
+        self.retire_permission_state();
         self.active_decision_token.set(None);
         self.session_id.set(None);
         clear_persisted_session();
@@ -5745,16 +5772,23 @@ fn project_live_turn(
 }
 
 /// Resolve the decision token bound to a card's originating request, if this
-/// surface holds it. Returns the token to replay on the decision POST, or `None`
-/// when the card is non-actionable (remote-origin, or a request this surface
-/// never submitted) — in which case no decision is ever posted (TASK-44,
-/// finding 4).
+/// surface holds it FOR THAT CARD'S SESSION. Returns the token to replay on the
+/// decision POST, or `None` when the card is non-actionable (remote-origin, a
+/// request this surface never submitted, or a grant belonging to a DIFFERENT
+/// session) — in which case no decision is ever posted (TASK-44, finding 4).
+///
+/// The `card_session_id` gate (codex HOLD on af82ee8) is what prevents a leftover
+/// grant from a retired session from authorizing a new-session card that happens
+/// to reuse or collide on the request id: a token is bound to a session, not just
+/// a request id.
 fn resolve_decision_authority<'a>(
     request_id: Option<&str>,
+    card_session_id: &str,
     authority: &'a HashMap<String, DecisionGrant>,
 ) -> Option<&'a str> {
     request_id
         .and_then(|id| authority.get(id))
+        .filter(|grant| grant.session_id == card_session_id)
         .map(|grant| grant.token.as_str())
 }
 
@@ -5766,7 +5800,8 @@ fn mark_cards_actionable(
 ) {
     for card in cards.iter_mut() {
         card.actionable =
-            resolve_decision_authority(card.request_id.as_deref(), authority).is_some();
+            resolve_decision_authority(card.request_id.as_deref(), &card.session_id, authority)
+                .is_some();
     }
 }
 
@@ -6895,7 +6930,9 @@ fn apply_control_event(
             // decision tombstone — a legitimately reused id must not stay
             // suppressed on a later degrade (codex HOLD on 4cfb5c2).
             tombstones.update(|ids| ids.retain(|id| id != &permission_id));
-            let actionable = resolve_decision_authority(request_id.as_deref(), authority).is_some();
+            let actionable =
+                resolve_decision_authority(request_id.as_deref(), active_session_id, authority)
+                    .is_some();
             let entry = PendingPermission {
                 permission_id: permission_id.clone(),
                 session_id: active_session_id.to_string(),
@@ -8392,9 +8429,19 @@ mod tests {
     // ── TASK-44: atomic session projection — switch/reconnect reconciliation ──
 
     fn task44_card(permission_id: &str, request_id: Option<&str>) -> PendingPermission {
+        session_card(permission_id, request_id, "session-a")
+    }
+
+    /// A pending-permission card scoped to a specific session — for tests that
+    /// exercise session-bound authority resolution (codex HOLD on af82ee8).
+    fn session_card(
+        permission_id: &str,
+        request_id: Option<&str>,
+        session: &str,
+    ) -> PendingPermission {
         PendingPermission {
             permission_id: permission_id.into(),
-            session_id: "session-a".into(),
+            session_id: session.into(),
             tool: "bash".into(),
             reason: "run check".into(),
             args_summary: String::new(),
@@ -8477,7 +8524,7 @@ mod tests {
         assert!(!cards[1].actionable);
         // The grant survives the reconcile (mark does not mutate authority).
         assert_eq!(
-            resolve_decision_authority(Some("request-1"), &authority),
+            resolve_decision_authority(Some("request-1"), "session-a", &authority),
             Some("token-1")
         );
     }
@@ -8575,12 +8622,17 @@ mod tests {
         );
         // The still-open card from request-1 resolves token-1, not token-2.
         assert_eq!(
-            resolve_decision_authority(Some("request-1"), &authority),
+            resolve_decision_authority(Some("request-1"), "session-a", &authority),
             Some("token-1")
         );
         assert_eq!(
-            resolve_decision_authority(Some("request-2"), &authority),
+            resolve_decision_authority(Some("request-2"), "session-a", &authority),
             Some("token-2")
+        );
+        // A grant only authorizes a card in its OWN session (codex HOLD on af82ee8).
+        assert_eq!(
+            resolve_decision_authority(Some("request-1"), "other-session", &authority),
+            None
         );
     }
 
@@ -8590,11 +8642,14 @@ mod tests {
     fn remote_origin_card_is_read_only() {
         let authority = task44_authority(&[("request-local", "token-local", "session-a")]);
         assert_eq!(
-            resolve_decision_authority(Some("request-remote"), &authority),
+            resolve_decision_authority(Some("request-remote"), "session-a", &authority),
             None
         );
         // A card with no request id at all is also non-actionable.
-        assert_eq!(resolve_decision_authority(None, &authority), None);
+        assert_eq!(
+            resolve_decision_authority(None, "session-a", &authority),
+            None
+        );
         let projection = build_session_projection(
             Some(SessionRunState::WaitingForPermission),
             &["request-remote".to_string()],
@@ -10789,14 +10844,15 @@ mod tests {
     }
 
     /// Push a control frame through the real `apply_control_event` into the
-    /// daemon's live pending/tombstone signals (as the control stream would).
+    /// daemon's live pending/tombstone signals (as the control stream would),
+    /// stamping card actionability from the daemon's own decision authority.
     fn drive_frame(daemon: &Daemon, frame: &ControlEvent) {
         apply_control_event(
             frame,
             "s1",
             daemon.permission_view,
             daemon.permission_tombstones,
-            &HashMap::new(),
+            &daemon.decision_authority.get_untracked(),
         );
     }
 
@@ -11227,14 +11283,14 @@ mod tests {
     #[test]
     fn reg12_skipped_older_commit_does_not_prune_newer_card_authority() {
         let daemon = wrapper_daemon();
-        // Local authority so card B is actionable.
+        // Local authority so card B (in the daemon's session s1) is actionable.
         daemon
             .decision_authority
             .set(task44_authority(&[("B-req", "token-B", "s1")]));
         // The agent load starts first (claims the earlier epoch).
         let agent_epoch = daemon.claim_permission_epoch();
         // A newer standalone reconcile publishes Fresh([B]); B is actionable.
-        let mut source = canned_source(&daemon, Ok(vec![task44_card("B", Some("B-req"))]));
+        let mut source = canned_source(&daemon, Ok(vec![session_card("B", Some("B-req"), "s1")]));
         reconcile_permission_snapshot(&mut source)
             .now_or_never()
             .expect("canned fetch resolves immediately")
@@ -11290,6 +11346,76 @@ mod tests {
         assert!(
             daemon.permission_view.get_untracked().cards().is_empty(),
             "a session switch must supersede an in-flight reconcile's stale publish"
+        );
+    }
+
+    // Regression 14 (codex HOLD on af82ee8): the THIRD session-identity transition
+    // — strict-resume retirement of an EXPIRED session — must clear old-session
+    // permission state and invalidate in-flight publishers, exactly like
+    // select/new. It previously bypassed both, leaving old actionable cards (and
+    // their request-bound authority, which decide_permission resolves by
+    // card/request not active session) visible in the replacement session. All
+    // three paths now route through `retire_permission_state`. This drives that
+    // shared retirement — the exact action the strict-resume branch runs — and
+    // asserts old-session cards/tombstones are gone, the epoch advanced, and an
+    // in-flight old-session publisher is rejected. (Broken: retirement doesn't
+    // clear the view / advance the epoch → old card carries in → RED.)
+    #[test]
+    fn reg14_expired_session_retirement_clears_permission_and_supersedes_publisher() {
+        let daemon = wrapper_daemon();
+        // Old (s1) session state: an actionable card A (authority present), plus a
+        // decided card B tombstoned.
+        daemon
+            .decision_authority
+            .set(task44_authority(&[("card-A-req", "token-A", "s1")]));
+        drive_frame(&daemon, &request_frame("card-A"));
+        drive_frame(&daemon, &request_frame("card-B"));
+        drive_frame(&daemon, &decision_frame("card-B"));
+        assert!(daemon.permission_view.get_untracked().cards()[0].actionable);
+        assert_eq!(
+            daemon.permission_tombstones.get_untracked(),
+            vec!["card-B".to_string()]
+        );
+        // An old-session publisher is in flight (claimed before the retirement).
+        let stale_claim = daemon.claim_permission_epoch();
+        // The strict-resume path retires the expired session (the exact action it
+        // runs before recursively adopting a fresh one), then s2 is installed.
+        daemon.retire_permission_state();
+        daemon.session_id.set(Some("s2".into()));
+        // Old-session card + tombstone are gone from the replacement session.
+        assert!(
+            daemon.permission_view.get_untracked().cards().is_empty(),
+            "old-session cards must not carry into the strict-resume replacement session"
+        );
+        assert!(daemon.permission_tombstones.get_untracked().is_empty());
+        // The in-flight old-session publisher is superseded: its publish is rejected
+        // and the (empty) replacement view survives.
+        let published = publish_permission_view(
+            daemon.permission_view,
+            daemon.permission_tombstones,
+            daemon.permission_epoch,
+            stale_claim,
+            PermissionView::fresh(vec![task44_card("card-A", Some("card-A-req"))]),
+        );
+        assert!(
+            !published,
+            "an in-flight old-session publisher must be superseded by the retirement"
+        );
+        assert!(
+            daemon.permission_view.get_untracked().cards().is_empty(),
+            "a superseded stale publish must not resurrect an old-session card"
+        );
+        // Codex pin: the leftover s1 grant must NOT authorize a NEW-session (s2)
+        // card that reuses/collides on the request id — authority is session-bound
+        // (resolve_decision_authority requires card.session_id == grant.session_id).
+        let mut s2_card = session_card("card-A", Some("card-A-req"), "s2");
+        mark_cards_actionable(
+            std::slice::from_mut(&mut s2_card),
+            &daemon.decision_authority.get_untracked(),
+        );
+        assert!(
+            !s2_card.actionable,
+            "a retired s1 grant must not authorize an s2 card with a colliding request id"
         );
     }
 
