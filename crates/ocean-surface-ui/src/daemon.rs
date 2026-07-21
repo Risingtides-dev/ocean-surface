@@ -2133,6 +2133,17 @@ pub struct Daemon {
     /// `/v1/events` control stream (`permission_request`) and cleared on
     /// `permission_decision` or a successful decision POST. Multiple can stack.
     pub permission_view: RwSignal<PermissionView>,
+    /// TASK-69: permission ids RESOLVED (decided via a `permission_decision`
+    /// frame or a successful decision POST) since the last authoritative Fresh
+    /// snapshot — decision tombstones. A session-load projection whose rich
+    /// snapshot degrades must fold the daemon's `SessionDetail.pending_permissions`
+    /// MINUS these ids, so a gate decided DURING the load (its detail id is now
+    /// stale) cannot resurrect as a warning, while an unrelated interleaved
+    /// request still leaves a genuinely-open detail id visible (a scalar revision
+    /// gate cannot tell those apart — codex HOLD on 4cfb5c2). Cleared on an
+    /// authoritative Fresh commit and on session switch; a reused permission id
+    /// (a fresh `permission_request` for the same id) clears its own tombstone.
+    permission_tombstones: RwSignal<Vec<String>>,
     /// Per-turn reasoning-effort override (OCEAN-79). Holds the serialized
     /// `ThinkingLevel` string (`off` / `low` / `medium` / `high`) the daemon
     /// expects, or `None` to leave the daemon's global default in force. Set
@@ -2489,6 +2500,7 @@ impl Daemon {
             browser_active: RwSignal::new(false),
             browser_last_action: RwSignal::new(None),
             permission_view: RwSignal::new(PermissionView::default()),
+            permission_tombstones: RwSignal::new(Vec::new()),
             // Restore the last-selected per-turn overrides from localStorage so
             // the choices survive a reload (like `project`).
             thinking_level: RwSignal::new(load_persisted_thinking_level()),
@@ -2568,6 +2580,7 @@ impl Daemon {
             browser_active: RwSignal::new(false),
             browser_last_action: RwSignal::new(None),
             permission_view: RwSignal::new(PermissionView::default()),
+            permission_tombstones: RwSignal::new(Vec::new()),
             thinking_level: RwSignal::new(None),
             model_override: RwSignal::new(None),
             agent_override: RwSignal::new(None),
@@ -3048,6 +3061,7 @@ impl Daemon {
         let permission_revision = self.permission_revision;
         let planner_stream_sources = self.planner_stream_sources.clone();
         let pending = self.permission_view;
+        let tombstones = self.permission_tombstones;
         let decision_authority = self.decision_authority;
         // Handle for the post-reconnect reconciliation: a reopened control
         // stream has a gap, so a permission_request/decision emitted while it was
@@ -3168,7 +3182,7 @@ impl Daemon {
                     };
                     permission_revision.update(|revision| *revision = revision.wrapping_add(1));
                     let authority = decision_authority.get_untracked();
-                    apply_control_event(&evt, &active_session_id, pending, &authority);
+                    apply_control_event(&evt, &active_session_id, pending, tombstones, &authority);
                 }
 
                 clear_stream_marker(permission_stream_ready, &active_session_id, generation);
@@ -3201,6 +3215,7 @@ impl Daemon {
         let url = self.url.get_untracked();
         let status = self.status;
         let pending = self.permission_view;
+        let tombstones = self.permission_tombstones;
         let permission_revision = self.permission_revision;
         // Resolve decision authority for THIS card, not from a session-global
         // slot (TASK-44, finding 4). Look up the card's originating request id and
@@ -3262,6 +3277,9 @@ impl Daemon {
                 Ok(resp) if resp.ok() => {
                     permission_revision.update(|revision| *revision = revision.wrapping_add(1));
                     remove_pending_permission(pending, &permission_id);
+                    // Tombstone the decided id so a stale detail id cannot
+                    // resurrect it on a later degraded session-load projection.
+                    tombstone_permission(tombstones, &permission_id);
                     status.set(if allow {
                         "permission allowed".into()
                     } else {
@@ -4552,7 +4570,7 @@ impl Daemon {
             SnapshotSettle::Fresh(Vec::new()),
             &[],
             &PermissionView::default(),
-            true,
+            &[],
             &self.decision_authority.get_untracked(),
         );
 
@@ -4648,6 +4666,7 @@ impl Daemon {
         self.pinned_widgets.set(Vec::new());
         self.pending_images.set(Vec::new());
         self.permission_view.set(PermissionView::default());
+        self.permission_tombstones.set(Vec::new());
         self.active_decision_token.set(None);
         self.session_id.set(Some(id.to_string()));
         persist_session(id);
@@ -4727,14 +4746,6 @@ impl Daemon {
         }
 
         // The permission revision AS OF the session snapshot: `detail.pending_permissions`
-        // is authoritative only for this revision. If a `permission_decision` /
-        // `permission_request` frame or a decision POST bumps it during the settle
-        // await below, those detail ids are STALE — a decided gate could resurrect
-        // from them (codex HOLD on 4cfb5c2, seam 5). Captured here, re-read at
-        // commit; on any change the local `prior_view` (which already reflects the
-        // decision/enqueue) is authoritative and the stale detail ids are dropped.
-        let detail_permission_revision = self.permission_revision.get_untracked();
-
         // 2. Rich pending-permission cards, revision-gated against control-stream
         //    churn (reuses the same fetch the reconciler uses, but returns the
         //    cards for the atomic commit instead of publishing them alone).
@@ -4754,13 +4765,6 @@ impl Daemon {
         if let SnapshotSettle::Degraded(reason) = &settle {
             log::warn!("session projection permission snapshot degraded for {id}: {reason}");
         }
-        // The live view at commit time. Captured AFTER the settle await (the only
-        // yield point) and read again with no `await` before the atomic set below,
-        // so a `permission_request` frame admitted during the await is already
-        // reflected here — its card must survive a degrade (codex HOLD: preserve
-        // already-admitted same-session live cards), not be flattened to an id.
-        let prior_view = self.permission_view.get_untracked();
-
         // 3. Re-admit after the second await: focus/generation may have moved.
         if admit_session_snapshot(
             id,
@@ -4834,20 +4838,19 @@ impl Daemon {
         let (rebuilt_turns, rebuilt_pinned) =
             turns_from_session_transcript(quarantined_transcript, &tool_context);
         let authority = self.decision_authority.get_untracked();
-        // Read with no `await` since `detail_permission_revision` was captured, so
-        // this reflects every permission frame/decision that interleaved the
-        // settle await. Unchanged ⇒ the detail ids are still authoritative and may
-        // seed the first-load warning; changed ⇒ a decision/enqueue happened and
-        // the stale detail ids are dropped so a resolved gate cannot resurrect.
-        let permission_stable =
-            detail_permission_revision == self.permission_revision.get_untracked();
-        let projection = build_session_projection(
+        // Publish the permission view through the shared signal-plumbing seam: it
+        // reads the prior view + decision tombstones from their signals (the ones
+        // `apply_control_event`/`decide_permission` populated across BOTH fetch
+        // awaits), folds `detail_ids − tombstones`, sets the view, and clears the
+        // tombstones only on an authoritative Fresh. No `await` since the settle,
+        // so a decision/request that interleaved either await is reflected.
+        let projection = commit_permission_view(
+            self.permission_view,
+            self.permission_tombstones,
             state,
             &active_requests,
             settle,
             &detail_pending_ids,
-            &prior_view,
-            permission_stable,
             &authority,
         );
         // Live set = the daemon's live requests plus any request still holding an
@@ -4872,7 +4875,8 @@ impl Daemon {
         self.pinned_widgets.set(rebuilt_pinned);
         self.active_turn_id.set(projection.active_turn_id);
         self.streaming.set(projection.streaming);
-        self.permission_view.set(projection.permission);
+        // permission_view + tombstones were already published by
+        // `commit_permission_view` above (same synchronous block, no await).
         self.decision_authority.update(|authority| {
             prune_session_authority(authority, id, &live_requests);
         });
@@ -5027,6 +5031,7 @@ impl Daemon {
         self.pinned_widgets.set(Vec::new());
         self.pending_images.set(Vec::new());
         self.permission_view.set(PermissionView::default());
+        self.permission_tombstones.set(Vec::new());
         self.active_decision_token.set(None);
         self.session_id.set(None);
         clear_persisted_session();
@@ -5841,25 +5846,27 @@ struct SessionProjection {
 /// not natively unit-runnable: it is `async` over two browser `fetch`es AND its
 /// receiver `Daemon` cannot even be constructed off-wasm (`Daemon::new` panics in
 /// `js-sys` on the native target — verified by spike). So this function is the
-/// injectable seam (codex HOLD on 8b41fee/4cfb5c2), and the three regressions
-/// (first-load detail surfacing, in-flight live-card preservation, and
-/// decision-during-degrade non-resurrection via `permission_stable`) drive it
-/// directly with the fetch/signal inputs supplied.
+/// injectable seam (codex HOLD on 8b41fee/4cfb5c2), and the four regressions
+/// (first-load detail surfacing, in-flight live-card preservation,
+/// decision-during-degrade non-resurrection, and request-during-degrade keeping
+/// a still-open detail id visible) drive it directly with the fetch/signal
+/// inputs supplied.
 ///
 /// `detail_pending_ids` = the daemon's authoritative `SessionDetail.pending_permissions`
 /// (first-load proof). `prior_view` = the live view at commit time, whose
-/// same-session cards must survive a degrade. `permission_stable` = whether the
-/// permission revision was UNCHANGED across the settle await (no decision /
-/// enqueue interleaved); when false the detail ids are STALE and are dropped so a
-/// gate resolved during the load cannot resurrect from them (codex HOLD on
-/// 4cfb5c2, seam 5) — `prior_view` alone is then authoritative.
+/// same-session cards must survive a degrade. `resolved_ids` = decision
+/// tombstones: ids decided since the last Fresh snapshot. A degrade folds
+/// `detail_pending_ids − resolved_ids`, so a gate decided during the load cannot
+/// resurrect from its now-stale detail id (codex HOLD on 4cfb5c2, seam 5) while
+/// an unrelated interleaved request still leaves a genuinely-open detail id
+/// visible — a distinction a scalar revision gate cannot make.
 fn build_session_projection(
     state: Option<SessionRunState>,
     active_requests: &[String],
     settle: SnapshotSettle,
     detail_pending_ids: &[String],
     prior_view: &PermissionView,
-    permission_stable: bool,
+    resolved_ids: &[String],
     authority: &HashMap<String, DecisionGrant>,
 ) -> SessionProjection {
     let (active_turn_id, streaming) = project_live_turn(state, active_requests);
@@ -5874,15 +5881,15 @@ fn build_session_projection(
             PermissionView::fresh(cards)
         }
         SnapshotSettle::Degraded(reason) => {
-            // Fold the daemon's detail ids only while the permission revision held
-            // steady across the await; otherwise they are stale w.r.t. a decision
-            // and must not resurrect a resolved gate (seam 5).
-            let trusted_detail_ids: &[String] = if permission_stable {
-                detail_pending_ids
-            } else {
-                &[]
-            };
-            PermissionView::degraded_preserving(reason, prior_view, trusted_detail_ids)
+            // Fold the daemon's detail ids EXCEPT those tombstoned as resolved, so
+            // a gate decided during the load cannot resurrect while a genuinely-
+            // open, non-decided detail id stays visible (seam 5).
+            let trusted_detail_ids: Vec<String> = detail_pending_ids
+                .iter()
+                .filter(|id| !resolved_ids.iter().any(|resolved| resolved == *id))
+                .cloned()
+                .collect();
+            PermissionView::degraded_preserving(reason, prior_view, &trusted_detail_ids)
         }
     };
     SessionProjection {
@@ -5890,6 +5897,49 @@ fn build_session_projection(
         streaming,
         permission,
     }
+}
+
+/// The post-await permission commit, driving the live SIGNALS — the exact
+/// plumbing `commit_session_projection` runs after both fetches. It reads the
+/// prior view and the decision tombstones FROM their signals (so the tombstones
+/// are the ones `apply_control_event`/`decide_permission` actually populated, not
+/// a precomputed literal), folds `detail_ids − tombstones` via
+/// [`build_session_projection`], publishes the resulting view, and — only on an
+/// authoritative Fresh — clears the tombstones (they are now absorbed). Returned
+/// so the caller can read `active_turn_id`/`streaming`/cards for the rest of the
+/// atomic commit. Extracted as a free function over the signals because the full
+/// `Daemon` cannot be constructed off-wasm (`Daemon::new` panics in `js-sys`),
+/// so this is the seam the regression tests drive with real control-event
+/// plumbing (codex HOLD on 4cfb5c2: drive the signal plumbing, not precomputed
+/// tombstones).
+fn commit_permission_view(
+    permission_view: RwSignal<PermissionView>,
+    tombstones: RwSignal<Vec<String>>,
+    state: Option<SessionRunState>,
+    active_requests: &[String],
+    settle: SnapshotSettle,
+    detail_pending_ids: &[String],
+    authority: &HashMap<String, DecisionGrant>,
+) -> SessionProjection {
+    let prior_view = permission_view.get_untracked();
+    let resolved_ids = tombstones.get_untracked();
+    let projection = build_session_projection(
+        state,
+        active_requests,
+        settle,
+        detail_pending_ids,
+        &prior_view,
+        &resolved_ids,
+        authority,
+    );
+    permission_view.set(projection.permission.clone());
+    // A Fresh snapshot is authoritative and absorbs every decision so far, so the
+    // tombstones have served their purpose; a degrade keeps them, since the next
+    // load's detail ids may still be stale.
+    if !projection.permission.is_unavailable() {
+        tombstones.set(Vec::new());
+    }
+    projection
 }
 
 /// Mutate the turns vec in response to a single SSE event. Splits assistant
@@ -6657,6 +6707,7 @@ fn apply_control_event(
     event: &ControlEvent,
     active_session_id: &str,
     pending: RwSignal<PermissionView>,
+    tombstones: RwSignal<Vec<String>>,
     authority: &HashMap<String, DecisionGrant>,
 ) {
     match event {
@@ -6676,6 +6727,10 @@ fn apply_control_event(
             let Some(permission_id) = permission_id.clone() else {
                 return;
             };
+            // A live (re)request for this id makes it pending again, so clear any
+            // decision tombstone — a legitimately reused id must not stay
+            // suppressed on a later degrade (codex HOLD on 4cfb5c2).
+            tombstones.update(|ids| ids.retain(|id| id != &permission_id));
             let actionable = resolve_decision_authority(request_id.as_deref(), authority).is_some();
             let entry = PendingPermission {
                 permission_id: permission_id.clone(),
@@ -6702,10 +6757,23 @@ fn apply_control_event(
             }
             if let Some(id) = permission_id {
                 remove_pending_permission(pending, id);
+                // Tombstone the decided id so a stale `SessionDetail.pending_permissions`
+                // entry cannot resurrect it if a session-load snapshot degrades.
+                tombstone_permission(tombstones, id);
             }
         }
         ControlEvent::Other => {}
     }
+}
+
+/// Record a decided permission id as a tombstone (dedup), so a stale detail id
+/// cannot resurrect a resolved gate on a degraded session-load projection.
+fn tombstone_permission(tombstones: RwSignal<Vec<String>>, permission_id: &str) {
+    tombstones.update(|ids| {
+        if !ids.iter().any(|id| id == permission_id) {
+            ids.push(permission_id.to_string());
+        }
+    });
 }
 
 /// Remove a pending permission by id (decision recorded or daemon-resolved).
@@ -8199,7 +8267,7 @@ mod tests {
             SnapshotSettle::Fresh(vec![task44_card("permission-1", Some("request-1"))]),
             &[],
             &PermissionView::default(),
-            true,
+            &[],
             &authority,
         );
         assert_eq!(projection.active_turn_id.as_deref(), Some("request-1"));
@@ -8372,7 +8440,7 @@ mod tests {
             )]),
             &[],
             &PermissionView::default(),
-            true,
+            &[],
             &authority,
         );
         assert!(!projection.permission.cards()[0].actionable);
@@ -8431,7 +8499,7 @@ mod tests {
             SnapshotSettle::Fresh(cards()),
             &[],
             &PermissionView::default(),
-            true,
+            &[],
             &web_authority,
         );
         let tauri = build_session_projection(
@@ -8440,7 +8508,7 @@ mod tests {
             SnapshotSettle::Fresh(cards()),
             &[],
             &PermissionView::default(),
-            true,
+            &[],
             &tauri_authority,
         );
 
@@ -10457,7 +10525,7 @@ mod tests {
             SnapshotSettle::Degraded("route missing on host".into()),
             &[],
             &prior,
-            true,
+            &[],
             &HashMap::new(),
         );
         assert!(
@@ -10478,7 +10546,7 @@ mod tests {
             SnapshotSettle::Fresh(vec![task44_card("gate-only", None)]),
             &[],
             &PermissionView::default(),
-            true,
+            &[],
             &HashMap::new(),
         );
         assert!(!projection.permission.is_unavailable());
@@ -10489,102 +10557,251 @@ mod tests {
         assert!(projection.permission.unconfirmed_ids().is_empty());
     }
 
-    // Regression 1 (codex HOLD on 8b41fee): on a FIRST load — empty local prior
-    // view — a degraded rich snapshot must still surface a pre-existing gate from
-    // the daemon's authoritative SessionDetail.pending_permissions. This drives
-    // the exact decision commit_session_projection delegates to
-    // (build_session_projection), which the HTTP-bound commit itself cannot unit
-    // run. (Broken build: Degraded arm ignores detail_pending_ids / uses only the
-    // prior view → unconfirmed empty on first load → RED.)
-    #[test]
-    fn reg1_first_load_degrade_surfaces_daemon_pending_ids() {
-        let daemon_pending = vec![format!("gate-{}", "predates-load")];
-        let projection = build_session_projection(
+    // -- codex HOLD regressions, driven through the REAL signal plumbing --
+    //
+    // The full `Daemon` cannot be constructed off-wasm (`Daemon::new` panics in
+    // `js-sys`; verified by spike), but bare `RwSignal`s under an `Owner` run
+    // natively. These tests therefore drive the exact post-await plumbing
+    // `commit_session_projection` runs: control frames flow through the real
+    // `apply_control_event` into the live pending/tombstone SIGNALS, then
+    // `commit_permission_view` reads those signals, folds, and publishes — no
+    // precomputed tombstones (codex HOLD on 4cfb5c2).
+
+    /// Bare live signals under a kept-alive `Owner`.
+    fn perm_env() -> (Owner, RwSignal<PermissionView>, RwSignal<Vec<String>>) {
+        let owner = Owner::new();
+        owner.set();
+        (
+            owner,
+            RwSignal::new(PermissionView::default()),
+            RwSignal::new(Vec::new()),
+        )
+    }
+
+    fn decision_frame(id: &str) -> ControlEvent {
+        ControlEvent::PermissionDecision {
+            permission_id: Some(id.to_string()),
+            session_id: Some("s1".to_string()),
+        }
+    }
+
+    fn request_frame(id: &str) -> ControlEvent {
+        ControlEvent::PermissionRequest {
+            permission_id: Some(id.to_string()),
+            session_id: Some("s1".to_string()),
+            request_id: Some(format!("{id}-req")),
+            tool: "bash".to_string(),
+            reason: "run".to_string(),
+            args: serde_json::Value::Null,
+        }
+    }
+
+    fn degraded_commit(
+        pending: RwSignal<PermissionView>,
+        tombstones: RwSignal<Vec<String>>,
+        detail_ids: &[String],
+    ) -> SessionProjection {
+        commit_permission_view(
+            pending,
+            tombstones,
             None,
             &[],
-            SnapshotSettle::Degraded("permissions route 500".into()),
-            &daemon_pending,
-            &PermissionView::default(), // first load: nothing shown locally yet
-            true,                       // permission revision held steady across the await
+            SnapshotSettle::Degraded("permissions route failed".into()),
+            detail_ids,
             &HashMap::new(),
-        );
-        assert!(projection.permission.is_unavailable());
+        )
+    }
+
+    // Regression 1: FIRST load, empty local view, degraded snapshot — a
+    // pre-existing gate must still surface from the daemon's authoritative
+    // SessionDetail.pending_permissions. (Broken: Degraded ignores detail ids →
+    // empty warning → RED.)
+    #[test]
+    fn reg1_first_load_degrade_surfaces_daemon_pending_ids() {
+        let (_owner, pending, tombstones) = perm_env();
+        let daemon_pending = vec![format!("gate-{}", "predates-load")];
+        degraded_commit(pending, tombstones, &daemon_pending);
+        let view = pending.get_untracked();
+        assert!(view.is_unavailable());
         assert_eq!(
-            projection.permission.unconfirmed_ids(),
+            view.unconfirmed_ids(),
             daemon_pending,
             "a pre-load gate must surface from the daemon snapshot on first load"
         );
     }
 
-    // Regression 2 (codex HOLD on 8b41fee): a live permission_request frame
-    // admitted DURING the snapshot await (modeled by ingesting into the prior
-    // view) must SURVIVE a degraded commit as a real actionable card — not be
-    // flattened to an id and overwritten — while an un-materialized daemon id
-    // still warns. (Broken build: Degraded arm rebuilds via `unavailable(...)`
-    // with cards=[] → the live card is lost → RED.)
+    // Regression 2: a live permission_request admitted during the await (driven
+    // through apply_control_event into the pending signal) must SURVIVE a degraded
+    // commit as a real card while an un-materialized daemon id still warns.
+    // (Broken: degrade drops live cards → card lost → RED.)
     #[test]
     fn reg2_degrade_preserves_inflight_live_card_and_warns_uncovered() {
-        // The interleaved live frame: an actionable card enters the live view
-        // before the settle resolves.
-        let mut live = PermissionView::default();
-        live.ingest_request(task44_card("live-A", Some("req-A")));
-        let daemon_pending = vec!["live-A".to_string(), format!("gate-{}", "other")];
-        let projection = build_session_projection(
-            None,
-            &[],
-            SnapshotSettle::Degraded("snapshot kept changing".into()),
-            &daemon_pending,
-            &live,
-            true, // the enqueue happened before the captured revision; ids stay fresh here
+        let (_owner, pending, tombstones) = perm_env();
+        // B arrives as a live frame during the await.
+        apply_control_event(
+            &request_frame("live-A"),
+            "s1",
+            pending,
+            tombstones,
             &HashMap::new(),
         );
-        // The live card survives as a real card...
+        let daemon_pending = vec!["live-A".to_string(), format!("gate-{}", "other")];
+        degraded_commit(pending, tombstones, &daemon_pending);
+        let view = pending.get_untracked();
         assert_eq!(
-            ids_of(&projection.permission),
+            ids_of(&view),
             vec!["live-A".to_string()],
             "an admitted live card must survive the degraded commit"
         );
-        // ...is not double-counted in the warning; only the uncovered daemon id
-        // (which has no live card) warns.
-        assert!(projection.permission.is_unavailable());
+        assert!(view.is_unavailable());
+        assert_eq!(view.unconfirmed_ids(), vec![format!("gate-{}", "other")]);
+    }
+
+    // Regression 3: a permission_decision for A interleaves the await (driven
+    // through apply_control_event → removes A from the view AND tombstones it in
+    // the signal). On a degraded settle whose stale detail ids still list A, the
+    // fold `detail − tombstones` must NOT resurrect A (seam 5). (Broken: fold
+    // ignores the tombstone signal → A resurfaces → RED.)
+    #[test]
+    fn reg3_decision_during_degrade_does_not_resurrect_from_stale_detail_ids() {
+        let (_owner, pending, tombstones) = perm_env();
+        // A was shown, then decided during the await.
+        apply_control_event(
+            &request_frame("gate-A"),
+            "s1",
+            pending,
+            tombstones,
+            &HashMap::new(),
+        );
+        apply_control_event(
+            &decision_frame("gate-A"),
+            "s1",
+            pending,
+            tombstones,
+            &HashMap::new(),
+        );
+        assert_eq!(tombstones.get_untracked(), vec!["gate-A".to_string()]);
+        // The daemon's session snapshot is stale and still lists A.
+        degraded_commit(pending, tombstones, &[format!("gate-{}", "A")]);
+        let view = pending.get_untracked();
+        assert!(
+            !view.unconfirmed_ids().contains(&"gate-A".to_string()),
+            "a gate decided during the load must not resurrect from stale detail ids"
+        );
+        assert!(view.unconfirmed_ids().is_empty());
+    }
+
+    // Regression 4: the case a scalar revision gate could NOT handle. A
+    // permission_REQUEST B interleaves (bumps the revision but resolves nothing);
+    // a pre-existing still-open A lives only in the older detail. On degrade, B is
+    // preserved AND A stays visible — B is not tombstoned, so A is not dropped.
+    // (Broken: drop all detail ids on churn → A vanishes → RED.)
+    #[test]
+    fn reg4_request_during_degrade_keeps_still_open_detail_id_visible() {
+        let (_owner, pending, tombstones) = perm_env();
+        // B arrives as a live request during the await (no decision → no tombstone).
+        apply_control_event(
+            &request_frame("req-B"),
+            "s1",
+            pending,
+            tombstones,
+            &HashMap::new(),
+        );
+        assert!(tombstones.get_untracked().is_empty());
+        // A is a pre-existing, still-open gate known only from the session detail.
+        degraded_commit(pending, tombstones, &[format!("gate-{}", "still-open-A")]);
+        let view = pending.get_untracked();
+        assert_eq!(ids_of(&view), vec!["req-B".to_string()]);
+        assert!(view.is_unavailable());
         assert_eq!(
-            projection.permission.unconfirmed_ids(),
-            vec![format!("gate-{}", "other")]
+            view.unconfirmed_ids(),
+            vec![format!("gate-{}", "still-open-A")],
+            "an unrelated interleaved request must not hide a genuinely-open detail gate"
         );
     }
 
-    // Regression 3 (codex HOLD on 4cfb5c2): a permission_decision that interleaves
-    // the snapshot await removes the gate from the LIVE view AND bumps
-    // permission_revision. On a degraded settle the daemon's detail ids are then
-    // STALE (they still list the decided gate). With `permission_stable = false`
-    // the stale ids MUST NOT resurrect the resolved gate as a warning — the local
-    // prior_view is authoritative (seam 5: a decided gate does not reappear).
-    // (Broken build: fold detail ids unconditionally / ignore permission_stable →
-    // the decided id resurfaces in unconfirmed_ids → RED.)
+    // Regression 5: a reused id after a decision must rematerialize. A is decided
+    // (tombstoned), then a fresh permission_request for A arrives — the tombstone
+    // must clear so A is a live card again, not suppressed on a later degrade.
+    // (Broken: request frame doesn't clear the tombstone → reused A stays hidden →
+    // RED.)
     #[test]
-    fn reg3_decision_during_degrade_does_not_resurrect_from_stale_detail_ids() {
-        // The daemon's session snapshot still lists gate A as pending...
-        let stale_detail_ids = vec![format!("gate-{}", "decided-A")];
-        // ...but a permission_decision for A landed during the await, so the live
-        // view no longer holds it (resolve removed it) and the revision advanced.
-        let prior_after_decision = PermissionView::default();
-        let projection = build_session_projection(
-            None,
-            &[],
-            SnapshotSettle::Degraded("confirm fetch failed".into()),
-            &stale_detail_ids,
-            &prior_after_decision,
-            false, // permission revision advanced across the await → detail ids stale
+    fn reg5_reused_id_after_decision_rematerializes() {
+        let (_owner, pending, tombstones) = perm_env();
+        apply_control_event(
+            &request_frame("gate-A"),
+            "s1",
+            pending,
+            tombstones,
+            &HashMap::new(),
+        );
+        apply_control_event(
+            &decision_frame("gate-A"),
+            "s1",
+            pending,
+            tombstones,
+            &HashMap::new(),
+        );
+        assert_eq!(tombstones.get_untracked(), vec!["gate-A".to_string()]);
+        // The daemon reuses the id for an identical retry — a fresh request frame.
+        apply_control_event(
+            &request_frame("gate-A"),
+            "s1",
+            pending,
+            tombstones,
             &HashMap::new(),
         );
         assert!(
-            !projection
-                .permission
-                .unconfirmed_ids()
-                .contains(&format!("gate-{}", "decided-A")),
-            "a gate decided during the load must not resurrect from stale detail ids"
+            tombstones.get_untracked().is_empty(),
+            "a reused permission_request must clear the decision tombstone"
         );
-        assert!(projection.permission.unconfirmed_ids().is_empty());
+        // A is live again; a later degrade keeps it as a card, not suppressed.
+        degraded_commit(pending, tombstones, &[format!("gate-{}", "A")]);
+        let view = pending.get_untracked();
+        assert_eq!(ids_of(&view), vec!["gate-A".to_string()]);
+    }
+
+    // Regression 6: an authoritative Fresh snapshot clears BOTH the degradation
+    // and the tombstones. A is decided (tombstoned); a Fresh(empty) settle then
+    // establishes an authoritative empty view AND wipes the tombstones. (Broken:
+    // Fresh commit doesn't clear tombstones → a stale tombstone lingers → RED.)
+    #[test]
+    fn reg6_fresh_snapshot_clears_degradation_and_tombstones() {
+        let (_owner, pending, tombstones) = perm_env();
+        apply_control_event(
+            &request_frame("gate-A"),
+            "s1",
+            pending,
+            tombstones,
+            &HashMap::new(),
+        );
+        apply_control_event(
+            &decision_frame("gate-A"),
+            "s1",
+            pending,
+            tombstones,
+            &HashMap::new(),
+        );
+        assert_eq!(tombstones.get_untracked(), vec!["gate-A".to_string()]);
+        commit_permission_view(
+            pending,
+            tombstones,
+            None,
+            &[],
+            SnapshotSettle::Fresh(Vec::new()),
+            &[format!("gate-{}", "A")],
+            &HashMap::new(),
+        );
+        let view = pending.get_untracked();
+        assert!(
+            !view.is_unavailable(),
+            "a Fresh snapshot clears degradation"
+        );
+        assert!(view.cards().is_empty());
+        assert!(
+            tombstones.get_untracked().is_empty(),
+            "an authoritative Fresh snapshot absorbs and clears the tombstones"
+        );
     }
 
     // Seam 2: a failed cross-session permission poll classifies as Unavailable
