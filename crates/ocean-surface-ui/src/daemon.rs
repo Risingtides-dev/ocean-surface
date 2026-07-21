@@ -4552,6 +4552,7 @@ impl Daemon {
             SnapshotSettle::Fresh(Vec::new()),
             &[],
             &PermissionView::default(),
+            true,
             &self.decision_authority.get_untracked(),
         );
 
@@ -4725,6 +4726,15 @@ impl Daemon {
             return Err("session snapshot retired before commit".into());
         }
 
+        // The permission revision AS OF the session snapshot: `detail.pending_permissions`
+        // is authoritative only for this revision. If a `permission_decision` /
+        // `permission_request` frame or a decision POST bumps it during the settle
+        // await below, those detail ids are STALE — a decided gate could resurrect
+        // from them (codex HOLD on 4cfb5c2, seam 5). Captured here, re-read at
+        // commit; on any change the local `prior_view` (which already reflects the
+        // decision/enqueue) is authoritative and the stale detail ids are dropped.
+        let detail_permission_revision = self.permission_revision.get_untracked();
+
         // 2. Rich pending-permission cards, revision-gated against control-stream
         //    churn (reuses the same fetch the reconciler uses, but returns the
         //    cards for the atomic commit instead of publishing them alone).
@@ -4824,12 +4834,20 @@ impl Daemon {
         let (rebuilt_turns, rebuilt_pinned) =
             turns_from_session_transcript(quarantined_transcript, &tool_context);
         let authority = self.decision_authority.get_untracked();
+        // Read with no `await` since `detail_permission_revision` was captured, so
+        // this reflects every permission frame/decision that interleaved the
+        // settle await. Unchanged ⇒ the detail ids are still authoritative and may
+        // seed the first-load warning; changed ⇒ a decision/enqueue happened and
+        // the stale detail ids are dropped so a resolved gate cannot resurrect.
+        let permission_stable =
+            detail_permission_revision == self.permission_revision.get_untracked();
         let projection = build_session_projection(
             state,
             &active_requests,
             settle,
             &detail_pending_ids,
             &prior_view,
+            permission_stable,
             &authority,
         );
         // Live set = the daemon's live requests plus any request still holding an
@@ -5815,22 +5833,33 @@ struct SessionProjection {
 }
 
 /// The pure permission-and-live-turn decision `commit_session_projection`
-/// delegates to. All of the two-state permission logic lives HERE — the commit
-/// path adds no permission handling of its own beyond sampling its inputs and
-/// publishing the result — so the seam/regression tests that drive this function
-/// exercise the real production decision (codex HOLD on 8b41fee: regressions 1/2
-/// must test the commit path, and `commit_session_projection` itself is
-/// HTTP-bound and not unit-runnable).
+/// delegates to. ALL two-state permission logic lives HERE — the commit path
+/// only fetches (session detail + permission settle), samples live signals into
+/// these arguments, and publishes the returned view; it adds no permission
+/// handling of its own — so the seam/regression tests that drive this function
+/// exercise the real production decision. `commit_session_projection` itself is
+/// not natively unit-runnable: it is `async` over two browser `fetch`es AND its
+/// receiver `Daemon` cannot even be constructed off-wasm (`Daemon::new` panics in
+/// `js-sys` on the native target — verified by spike). So this function is the
+/// injectable seam (codex HOLD on 8b41fee/4cfb5c2), and the three regressions
+/// (first-load detail surfacing, in-flight live-card preservation, and
+/// decision-during-degrade non-resurrection via `permission_stable`) drive it
+/// directly with the fetch/signal inputs supplied.
 ///
 /// `detail_pending_ids` = the daemon's authoritative `SessionDetail.pending_permissions`
 /// (first-load proof). `prior_view` = the live view at commit time, whose
-/// same-session cards must survive a degrade.
+/// same-session cards must survive a degrade. `permission_stable` = whether the
+/// permission revision was UNCHANGED across the settle await (no decision /
+/// enqueue interleaved); when false the detail ids are STALE and are dropped so a
+/// gate resolved during the load cannot resurrect from them (codex HOLD on
+/// 4cfb5c2, seam 5) — `prior_view` alone is then authoritative.
 fn build_session_projection(
     state: Option<SessionRunState>,
     active_requests: &[String],
     settle: SnapshotSettle,
     detail_pending_ids: &[String],
     prior_view: &PermissionView,
+    permission_stable: bool,
     authority: &HashMap<String, DecisionGrant>,
 ) -> SessionProjection {
     let (active_turn_id, streaming) = project_live_turn(state, active_requests);
@@ -5845,7 +5874,15 @@ fn build_session_projection(
             PermissionView::fresh(cards)
         }
         SnapshotSettle::Degraded(reason) => {
-            PermissionView::degraded_preserving(reason, prior_view, detail_pending_ids)
+            // Fold the daemon's detail ids only while the permission revision held
+            // steady across the await; otherwise they are stale w.r.t. a decision
+            // and must not resurrect a resolved gate (seam 5).
+            let trusted_detail_ids: &[String] = if permission_stable {
+                detail_pending_ids
+            } else {
+                &[]
+            };
+            PermissionView::degraded_preserving(reason, prior_view, trusted_detail_ids)
         }
     };
     SessionProjection {
@@ -8162,6 +8199,7 @@ mod tests {
             SnapshotSettle::Fresh(vec![task44_card("permission-1", Some("request-1"))]),
             &[],
             &PermissionView::default(),
+            true,
             &authority,
         );
         assert_eq!(projection.active_turn_id.as_deref(), Some("request-1"));
@@ -8334,6 +8372,7 @@ mod tests {
             )]),
             &[],
             &PermissionView::default(),
+            true,
             &authority,
         );
         assert!(!projection.permission.cards()[0].actionable);
@@ -8392,6 +8431,7 @@ mod tests {
             SnapshotSettle::Fresh(cards()),
             &[],
             &PermissionView::default(),
+            true,
             &web_authority,
         );
         let tauri = build_session_projection(
@@ -8400,6 +8440,7 @@ mod tests {
             SnapshotSettle::Fresh(cards()),
             &[],
             &PermissionView::default(),
+            true,
             &tauri_authority,
         );
 
@@ -10416,6 +10457,7 @@ mod tests {
             SnapshotSettle::Degraded("route missing on host".into()),
             &[],
             &prior,
+            true,
             &HashMap::new(),
         );
         assert!(
@@ -10436,6 +10478,7 @@ mod tests {
             SnapshotSettle::Fresh(vec![task44_card("gate-only", None)]),
             &[],
             &PermissionView::default(),
+            true,
             &HashMap::new(),
         );
         assert!(!projection.permission.is_unavailable());
@@ -10462,6 +10505,7 @@ mod tests {
             SnapshotSettle::Degraded("permissions route 500".into()),
             &daemon_pending,
             &PermissionView::default(), // first load: nothing shown locally yet
+            true,                       // permission revision held steady across the await
             &HashMap::new(),
         );
         assert!(projection.permission.is_unavailable());
@@ -10491,6 +10535,7 @@ mod tests {
             SnapshotSettle::Degraded("snapshot kept changing".into()),
             &daemon_pending,
             &live,
+            true, // the enqueue happened before the captured revision; ids stay fresh here
             &HashMap::new(),
         );
         // The live card survives as a real card...
@@ -10506,6 +10551,40 @@ mod tests {
             projection.permission.unconfirmed_ids(),
             vec![format!("gate-{}", "other")]
         );
+    }
+
+    // Regression 3 (codex HOLD on 4cfb5c2): a permission_decision that interleaves
+    // the snapshot await removes the gate from the LIVE view AND bumps
+    // permission_revision. On a degraded settle the daemon's detail ids are then
+    // STALE (they still list the decided gate). With `permission_stable = false`
+    // the stale ids MUST NOT resurrect the resolved gate as a warning — the local
+    // prior_view is authoritative (seam 5: a decided gate does not reappear).
+    // (Broken build: fold detail ids unconditionally / ignore permission_stable →
+    // the decided id resurfaces in unconfirmed_ids → RED.)
+    #[test]
+    fn reg3_decision_during_degrade_does_not_resurrect_from_stale_detail_ids() {
+        // The daemon's session snapshot still lists gate A as pending...
+        let stale_detail_ids = vec![format!("gate-{}", "decided-A")];
+        // ...but a permission_decision for A landed during the await, so the live
+        // view no longer holds it (resolve removed it) and the revision advanced.
+        let prior_after_decision = PermissionView::default();
+        let projection = build_session_projection(
+            None,
+            &[],
+            SnapshotSettle::Degraded("confirm fetch failed".into()),
+            &stale_detail_ids,
+            &prior_after_decision,
+            false, // permission revision advanced across the await → detail ids stale
+            &HashMap::new(),
+        );
+        assert!(
+            !projection
+                .permission
+                .unconfirmed_ids()
+                .contains(&format!("gate-{}", "decided-A")),
+            "a gate decided during the load must not resurrect from stale detail ids"
+        );
+        assert!(projection.permission.unconfirmed_ids().is_empty());
     }
 
     // Seam 2: a failed cross-session permission poll classifies as Unavailable
