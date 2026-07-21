@@ -2635,3 +2635,16 @@ area:      frontend
 
 TASK-100 (found by a first-ever scout of the ocean-gui GPUI native shell): TextBuffer::word_count (shell/editor_buffer.rs:399) computed self.rope.chunks().flat_map(str::split_whitespace).count() — splitting whitespace INDEPENDENTLY per ropey leaf chunk and summing. ropey stores text as ~1KB chunks split at arbitrary char boundaries, so a word that straddles a chunk boundary was counted once per chunk it touched: "a".repeat(4000) returned 5 (one per ~1KB chunk) instead of 1. This is the exact opposite of the file's own cross-chunk discipline — char_to_utf16_offset/utf16_to_char_offset (556/578) carry state ACROSS chunks precisely so boundaries don't corrupt the result. word_count feeds the editor status-bar count (model.rs:896, status.words) on every recompute, so any multi-KB note or pasted long token (URL/base64/minified line) inflated the count. Fix: count runs of non-whitespace carrying the in_word state across chunk boundaries (chunk.chars() with carried state), matching split_whitespace semantics exactly. TDD: word_count_counts_boundary_spanning_word_once ("a"*4000 -> 1; "one two three" -> 3; ""/whitespace-only -> 0), watched RED against the per-chunk bug (returned 5) then GREEN. Gate on clean worktree off origin/main 1cf9d35 (ocean-gui is native, no wasm target; CI gates it via check + test --lib): cargo fmt --check 0, cargo check -p ocean-gui 0, cargo test -p ocean-gui --lib 417 passed 0 failed, cargo clippy -p ocean-gui --lib -D warnings 0. Single file (editor_buffer.rs). ocean-gui is the GPUI desktop shell (no deploy rail — activates on manual rebuild). First slice landed in ocean-gui this session.
 _________________________________________________________________________________
+time:      [07:05pm] [07-20-26]
+agent:     [ocean] [gpt-5]
+worktree:  [asset-provenance-20260720]
+type:      security/provenance
+area:      public release assets
+
+Inventoried every tracked Surface image, icon, font, media/PDF, and HTML
+application/design artifact with exact SHA-256 and source/license status. Added
+the missing Poppins OFL-1.1 license, replaced the retained Zed/GPL-attributed
+GPUI icon copies path-for-path with pinned Lucide ISC/MIT icons, and removed two
+unreferenced implementation screenshots from the current public tree. Added a
+fail-closed manifest checker. Original Ocean artwork is project-authored but
+remains pending the operator's copyright-holder and root-license decision.
