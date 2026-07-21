@@ -2653,3 +2653,12 @@ area:      frontend
 
 REVERTED TASK-100 (94ca6bd). It was a word_count fix I landed INTO crates/ocean-gui — the ABANDONED GPUI shell. smaths made clear (twice, crew-wide) that ocean-gui is DEAD and no one works on it; landing a fix there was my mistake. This revert restores editor_buffer.rs to its prior state and removes the dead-crate change from the active tree. Docs already scrubbed (15bed33: Cargo.toml/AGENTS.md/README now say ABANDONED, not soft-deprecated). Going forward: ocean-gui is untouchable — no fixes, no scouting, no tickets. The work is on the LIVE surface (ocean-surface-ui + tauri).
 _________________________________________________________________________________
+
+time:      [17:10] [07-21-26]
+agent:     [claude] [opus 4.8]
+worktree:  task102-rooms-policy-collapse
+type:      feature-request
+area:      frontend
+
+TASK-102 (rooms-layout cleanup, smaths' freshest complaint "atrocious/unstomachable rooms"): the RoomsPanel slide-over had an always-open ~150px "Response Policy" form (4 checkboxes + cron) wedged BETWEEN the create input and the room list, so on the common task (browse/open a room) the list was shoved to the bottom of a min(380px,92vw) drawer. Policy is only relevant at create time. Fixed: converted the .rooms-policy div into a collapsed <details> disclosure — <summary> "Response Policy · when should agents respond — set at create" with a rotating caret; the room list now sits right under the create input. Low-regression, isolated to RoomsPanel: markup change in rooms.rs (div→details, title→summary) + panels.css (.rooms-policy__title → .rooms-policy__summary/__summary-label/__summary-hint, caret via ::before rotating on [open], hid ::-webkit-details-marker). No logic change. Gate on clean worktree off origin/main 8331750: fmt 0, cargo test 716 passed + dead_selector_removal green (new classes covered), check --target wasm32 0, clippy --all-targets -D warnings wasm+native 0. Surface auto-deploys — smaths to eyeball. First of the rooms-layout slices; roster de-chunk + loading-state next.
+_________________________________________________________________________________

@@ -930,22 +930,72 @@
   text-align: center;
 }
 
+/* TASK-102: the response policy is a create-time concern, so it's a collapsed
+   <details> disclosure — the room list is the primary content of the panel and
+   should sit right under the create input, not below a 150px always-open form. */
 .rooms-policy {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 12px 16px 14px;
+  padding: 10px 16px 12px;
   border-bottom: 1px solid var(--border-subtle);
 }
 
-.rooms-policy__title {
-  margin-bottom: 2px;
+.rooms-policy > .rooms-policy__row {
+  /* When collapsed, only the <summary> shows; rows appear on open. */
+  margin-top: 2px;
+}
+
+.rooms-policy__summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
   color: var(--fg-3);
+}
+
+.rooms-policy__summary::-webkit-details-marker {
+  display: none;
+}
+
+/* Disclosure caret, rotates when open. */
+.rooms-policy__summary::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 5px;
+  height: 5px;
+  margin-right: 2px;
+  border-right: 1.5px solid var(--fg-3);
+  border-bottom: 1.5px solid var(--fg-3);
+  transform: rotate(-45deg);
+  transition: transform var(--dur-fast) var(--ease);
+}
+
+.rooms-policy[open] .rooms-policy__summary::before {
+  transform: rotate(45deg);
+}
+
+.rooms-policy__summary-label {
   font-size: 11px;
   font-weight: 600;
   line-height: 1.2;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+.rooms-policy__summary-hint {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-3);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.7;
 }
 
 .rooms-policy__row {

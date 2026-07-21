@@ -1887,10 +1887,13 @@ pub fn RoomsPanel(rooms: Rooms, open: RwSignal<bool>) -> impl IntoView {
                     // Trigger-policy toggles applied at room creation (OCEAN-117).
                     // These wire into the daemon's `room_create` body; there is no
                     // room-update route yet, so policy is set once at create time.
-                    <div class="rooms-policy">
-                        <div class="rooms-policy__title">
-                            "Response Policy"
-                        </div>
+                    <details class="rooms-policy">
+                        <summary class="rooms-policy__summary">
+                            <span class="rooms-policy__summary-label">"Response Policy"</span>
+                            <span class="rooms-policy__summary-hint">
+                                "when should agents respond — set at create"
+                            </span>
+                        </summary>
                         <label class="rooms-policy__row">
                             <input
                                 type="checkbox"
@@ -1926,7 +1929,7 @@ pub fn RoomsPanel(rooms: Rooms, open: RwSignal<bool>) -> impl IntoView {
                                 on:input=move |ev| policy_on_schedule.set(event_target_value(&ev))
                             />
                         </label>
-                    </div>
+                    </details>
 
                     <div class="rooms-panel__list">
                         <For
