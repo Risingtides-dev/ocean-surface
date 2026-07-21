@@ -3235,7 +3235,10 @@ impl Daemon {
         // non-actionable: refuse the POST outright rather than send a
         // wrong/unbound token the daemon would 403 (or, worse, one bound to a
         // DIFFERENT turn).
-        let token = pending.with_untracked(|view| {
+        // Capture the token AND the exact card identity (session + request id):
+        // every post-await completion must target THIS card instance, or write
+        // nothing (codex HOLD on 9c584d0).
+        let resolved = pending.with_untracked(|view| {
             view.cards()
                 .iter()
                 .find(|p| p.permission_id == permission_id)
@@ -3246,11 +3249,17 @@ impl Daemon {
                             &p.session_id,
                             authority,
                         )
-                        .map(str::to_string)
+                        .map(|token| {
+                            (
+                                token.to_string(),
+                                p.session_id.clone(),
+                                p.request_id.clone(),
+                            )
+                        })
                     })
                 })
         });
-        let Some(token) = token else {
+        let Some((token, card_session, card_request)) = resolved else {
             log::warn!(
                 "refusing permission decision for {permission_id}: no local authority (remote-origin card)"
             );
@@ -3263,6 +3272,19 @@ impl Daemon {
         pending.update(|view| view.set_deciding(&permission_id, true));
 
         spawn_local(async move {
+            let card_request = card_request.as_deref();
+            let complete = |completion: DecisionCompletion| {
+                apply_permission_decision_completion(
+                    pending,
+                    tombstones,
+                    permission_revision,
+                    status,
+                    &permission_id,
+                    &card_session,
+                    card_request,
+                    completion,
+                );
+            };
             let post_url = format!(
                 "{}/v1/permissions/{permission_id}/decision",
                 url.trim_end_matches('/')
@@ -3283,38 +3305,29 @@ impl Daemon {
                 Err(err) => {
                     let raw = err.to_string();
                     log::error!("permission encode error: {raw}");
-                    status.set(format!("permission encode error: {}", concise_error(&raw)));
-                    clear_pending_deciding(pending, &permission_id);
+                    complete(DecisionCompletion::Failed {
+                        message: format!("permission encode error: {}", concise_error(&raw)),
+                    });
                     return;
                 }
             };
             match res {
                 Ok(resp) if resp.ok() => {
-                    permission_revision.update(|revision| *revision = revision.wrapping_add(1));
-                    remove_pending_permission(pending, &permission_id);
-                    // Tombstone the decided id so a stale detail id cannot
-                    // resurrect it on a later degraded session-load projection.
-                    tombstone_permission(tombstones, &permission_id);
-                    status.set(if allow {
-                        "permission allowed".into()
-                    } else {
-                        "permission denied".into()
-                    });
+                    complete(DecisionCompletion::Succeeded { allow });
                 }
                 Ok(resp) => {
                     let text = resp.text().await.unwrap_or_default();
                     log::error!("permission decision failed: {text}");
-                    status.set(format!(
-                        "permission decision failed: {}",
-                        concise_error(&text)
-                    ));
-                    clear_pending_deciding(pending, &permission_id);
+                    complete(DecisionCompletion::Failed {
+                        message: format!("permission decision failed: {}", concise_error(&text)),
+                    });
                 }
                 Err(err) => {
                     let raw = err.to_string();
                     log::error!("permission post error: {raw}");
-                    status.set(format!("permission post error: {}", concise_error(&raw)));
-                    clear_pending_deciding(pending, &permission_id);
+                    complete(DecisionCompletion::Failed {
+                        message: format!("permission post error: {}", concise_error(&raw)),
+                    });
                 }
             }
         });
@@ -6987,6 +7000,69 @@ fn remove_pending_permission(pending: RwSignal<PermissionView>, permission_id: &
 /// Clear the `deciding` flag on a card (a decision POST failed; re-enable it).
 fn clear_pending_deciding(pending: RwSignal<PermissionView>, permission_id: &str) {
     pending.update(|view| view.set_deciding(permission_id, false));
+}
+
+/// The outcome of a permission-decision POST, applied to the local signals by
+/// [`apply_permission_decision_completion`].
+enum DecisionCompletion {
+    /// The daemon accepted the decision — remove + tombstone the card, bump the
+    /// revision, and report allow/deny.
+    Succeeded { allow: bool },
+    /// The POST could not be encoded / was rejected / errored — re-enable the
+    /// card and report the message.
+    Failed { message: String },
+}
+
+/// Apply a permission-decision completion to the local signals, but ONLY while
+/// the EXACT card instance we decided on is still present — same `permission_id`,
+/// `session_id` AND `request_id`. A stale completion — the operator
+/// switched/retired the session, OR the id was legitimately reused for a NEW
+/// request in the same session, while the POST was in flight — must write
+/// NOTHING; the daemon result / control frame remains authoritative (codex HOLD
+/// on 9c584d0 + the 06:23 same-session-reuse pin). Deliberately NOT epoch-gated:
+/// an ordinary snapshot claim must not suppress a same-session, same-request
+/// decision. Returns whether it applied.
+#[allow(clippy::too_many_arguments)]
+fn apply_permission_decision_completion(
+    pending: RwSignal<PermissionView>,
+    tombstones: RwSignal<Vec<String>>,
+    permission_revision: RwSignal<u64>,
+    status: RwSignal<String>,
+    permission_id: &str,
+    card_session: &str,
+    card_request: Option<&str>,
+    completion: DecisionCompletion,
+) -> bool {
+    // Target the exact card instance, not just the session: session + request id
+    // together distinguish the decided card from a same-id card reused for a new
+    // request, and from a same-id card in a different (switched-in) session.
+    let still_targets = pending.with_untracked(|view| {
+        view.cards().iter().any(|card| {
+            card.permission_id == permission_id
+                && card.session_id == card_session
+                && card.request_id.as_deref() == card_request
+        })
+    });
+    if !still_targets {
+        return false;
+    }
+    match completion {
+        DecisionCompletion::Succeeded { allow } => {
+            permission_revision.update(|revision| *revision = revision.wrapping_add(1));
+            remove_pending_permission(pending, permission_id);
+            tombstone_permission(tombstones, permission_id);
+            status.set(if allow {
+                "permission allowed".into()
+            } else {
+                "permission denied".into()
+            });
+        }
+        DecisionCompletion::Failed { message } => {
+            status.set(message);
+            clear_pending_deciding(pending, permission_id);
+        }
+    }
+    true
 }
 
 /// Mint a per-turn CSPRNG decision token using `window.crypto.getRandomValues`
@@ -11417,6 +11493,120 @@ mod tests {
             !s2_card.actionable,
             "a retired s1 grant must not authorize an s2 card with a colliding request id"
         );
+    }
+
+    // Regression 15 (codex HOLD on 9c584d0 + 06:23 pin): decide_permission's
+    // post-await completion must target the EXACT decided card instance —
+    // permission_id + session_id + request_id — or write nothing. This covers the
+    // cross-session race (an old-session decision landing after a switch) AND the
+    // same-session id-REUSE race (the id reused for a new request while the POST is
+    // in flight). Drives the extracted completion helper directly.
+    #[test]
+    fn reg15_permission_decision_completion_targets_exact_card_instance() {
+        let daemon = wrapper_daemon();
+        let complete = |session: &str, request: Option<&str>, completion: DecisionCompletion| {
+            apply_permission_decision_completion(
+                daemon.permission_view,
+                daemon.permission_tombstones,
+                daemon.permission_revision,
+                daemon.status,
+                "A",
+                session,
+                request,
+                completion,
+            )
+        };
+
+        // Branch 1 — cross-session: we decided s1 card A (request R1), but the
+        // session switched to s2, whose view holds a DIFFERENT card A. The stale s1
+        // completion must write nothing (the s2 card survives, untombstoned).
+        daemon
+            .permission_view
+            .set(PermissionView::fresh(vec![session_card(
+                "A",
+                Some("R1"),
+                "s2",
+            )]));
+        assert!(
+            !complete(
+                "s1",
+                Some("R1"),
+                DecisionCompletion::Succeeded { allow: true }
+            ),
+            "a cross-session stale completion must write nothing"
+        );
+        assert_eq!(
+            ids_of(&daemon.permission_view.get_untracked()),
+            vec!["A".to_string()]
+        );
+        assert!(daemon.permission_tombstones.get_untracked().is_empty());
+
+        // Branch 2 — same-session id REUSE: s1 card A decided for R1, but the id was
+        // reused for a NEW request R2 in s1 before the response landed. The old R1
+        // completion must not remove/tombstone the valid R2 card.
+        daemon
+            .permission_view
+            .set(PermissionView::fresh(vec![session_card(
+                "A",
+                Some("R2"),
+                "s1",
+            )]));
+        assert!(
+            !complete(
+                "s1",
+                Some("R1"),
+                DecisionCompletion::Succeeded { allow: true }
+            ),
+            "a same-session reused-id completion must not remove the R2 card"
+        );
+        assert_eq!(
+            ids_of(&daemon.permission_view.get_untracked()),
+            vec!["A".to_string()]
+        );
+        assert!(daemon.permission_tombstones.get_untracked().is_empty());
+
+        // Branch 3 — exact match: same session + request. Success removes and
+        // tombstones the card.
+        daemon
+            .permission_view
+            .set(PermissionView::fresh(vec![session_card(
+                "A",
+                Some("R1"),
+                "s1",
+            )]));
+        assert!(complete(
+            "s1",
+            Some("R1"),
+            DecisionCompletion::Succeeded { allow: true }
+        ));
+        assert!(daemon.permission_view.get_untracked().cards().is_empty());
+        assert_eq!(
+            daemon.permission_tombstones.get_untracked(),
+            vec!["A".to_string()]
+        );
+
+        // Branch 3b — exact match, ERROR: only re-enables the card (clears
+        // deciding), does not remove it.
+        let mut card = session_card("A", Some("R1"), "s1");
+        card.deciding = true;
+        daemon
+            .permission_view
+            .set(PermissionView::fresh(vec![card]));
+        daemon.permission_tombstones.set(Vec::new());
+        assert!(complete(
+            "s1",
+            Some("R1"),
+            DecisionCompletion::Failed {
+                message: "boom".into()
+            }
+        ));
+        let view = daemon.permission_view.get_untracked();
+        assert_eq!(ids_of(&view), vec!["A".to_string()]);
+        assert!(
+            !view.cards()[0].deciding,
+            "error completion re-enables the exact card"
+        );
+        assert!(daemon.permission_tombstones.get_untracked().is_empty());
     }
 
     // Seam 2: a failed cross-session permission poll classifies as Unavailable
