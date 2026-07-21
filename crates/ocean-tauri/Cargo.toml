@@ -17,7 +17,7 @@ description = "Tauri 2.x native shell that hosts the ocean-surface Leptos WASM b
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["devtools", "tray-icon"] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
 # Native notifications: polyfills `window.Notification` in the webview so the

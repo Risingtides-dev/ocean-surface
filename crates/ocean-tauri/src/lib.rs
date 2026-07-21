@@ -1543,6 +1543,11 @@ pub fn run() {
                     app.get_webview_window("main"),
                 ) {
                     (Ok(script), Some(webview)) => {
+                        // Devtools ship only in debug builds: the `devtools`
+                        // Cargo feature is off, so `open_devtools` exists solely
+                        // under `debug_assertions`. Release bundles carry no
+                        // WKWebView inspector even with the env var set.
+                        #[cfg(debug_assertions)]
                         if std::env::var_os("OCEAN_UI_DEBUG_DEVTOOLS").is_some() {
                             webview.open_devtools();
                         }
