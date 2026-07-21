@@ -511,6 +511,19 @@
   background: var(--bg-elevated);
 }
 
+/* TASK-69 seam 2: the cross-session permission poll failed, so the attention
+   list may show already-resolved gates — flag it rather than present it as
+   authoritative. */
+.island-agent__stale {
+  margin: 2px 4px 6px;
+  padding: 8px 12px;
+  border-radius: calc(var(--island-stage-radius) - var(--island-stage-pad) - 4px);
+  background: var(--warn-soft);
+  border: 1px solid var(--warn);
+  color: var(--fg-2);
+  font: 500 12px/1.4 var(--font);
+}
+
 .island-agent__pulse {
   width: 9px;
   height: 9px;

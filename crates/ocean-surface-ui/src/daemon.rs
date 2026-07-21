@@ -996,6 +996,172 @@ pub struct PendingPermission {
     pub actionable: bool,
 }
 
+/// TASK-69: two-state pending-permission view. The bare `Vec<PendingPermission>`
+/// could not distinguish "genuinely zero pending" (snapshot settled, list empty
+/// — show nothing, correct) from "couldn't load" (fetch failed / revision churn
+/// — which previously ALSO degraded to an empty vec and showed nothing). A gate
+/// that PREDATES a session-load lives only in the snapshot; if that snapshot
+/// degrades to empty the blocked tool call is invisible with no live frame to
+/// rescue it (live `permission_request` frames only re-enqueue gates raised
+/// AFTER the load). The operator sees a clean idle screen while a tool call
+/// hangs. This models the distinction explicitly.
+///
+/// `cards` always holds the fully-materialized, renderable, actionable cards —
+/// including, under `Unavailable`, any live cards that arrived over the control
+/// stream after degradation (codex contract: "preserves admitted same-session
+/// live cards"). `Unavailable.known_pending_ids` records ids last known pending
+/// that could NOT be re-materialized, so the UI warns ("N may be pending —
+/// couldn't refresh") instead of silently showing nothing. Only a settled
+/// successful snapshot (`Fresh`) may establish an authoritative empty set or
+/// clear degradation.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PermissionView {
+    cards: Vec<PendingPermission>,
+    availability: PermissionAvailability,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+enum PermissionAvailability {
+    #[default]
+    Fresh,
+    Unavailable {
+        reason: String,
+        known_pending_ids: Vec<String>,
+    },
+}
+
+impl PermissionView {
+    /// The authoritative complete pending set as of a settled snapshot.
+    fn fresh(cards: Vec<PendingPermission>) -> Self {
+        Self {
+            cards,
+            availability: PermissionAvailability::Fresh,
+        }
+    }
+
+    /// A degraded view: no confident snapshot. `known_pending_ids` are the ids
+    /// the operator was last shown (seed from the prior view) so a warning stub
+    /// renders instead of a blank screen. Carries no live cards; a subsequent
+    /// control-stream frame re-materializes individual cards via
+    /// [`PermissionView::ingest_request`].
+    fn unavailable(reason: String, known_pending_ids: Vec<String>) -> Self {
+        Self {
+            cards: Vec::new(),
+            availability: PermissionAvailability::Unavailable {
+                reason,
+                known_pending_ids,
+            },
+        }
+    }
+
+    /// The fully-materialized, actionable cards (renderable exactly as before).
+    pub(crate) fn cards(&self) -> &[PendingPermission] {
+        &self.cards
+    }
+
+    pub(crate) fn is_unavailable(&self) -> bool {
+        matches!(
+            self.availability,
+            PermissionAvailability::Unavailable { .. }
+        )
+    }
+
+    /// The degrade reason, for the "couldn't refresh" affordance.
+    pub(crate) fn reason(&self) -> Option<&str> {
+        match &self.availability {
+            PermissionAvailability::Unavailable { reason, .. } => Some(reason.as_str()),
+            PermissionAvailability::Fresh => None,
+        }
+    }
+
+    /// Ids known pending but NOT present as a live card — what the "N may be
+    /// pending — couldn't refresh" warning counts. Empty under `Fresh`.
+    pub(crate) fn unconfirmed_ids(&self) -> Vec<String> {
+        match &self.availability {
+            PermissionAvailability::Unavailable {
+                known_pending_ids, ..
+            } => known_pending_ids
+                .iter()
+                .filter(|id| !self.cards.iter().any(|card| &card.permission_id == *id))
+                .cloned()
+                .collect(),
+            PermissionAvailability::Fresh => Vec::new(),
+        }
+    }
+
+    /// Every id the operator has been shown as pending (live cards ∪ still-
+    /// unconfirmed known ids). Seeds `known_pending_ids` at the NEXT degrade so a
+    /// warning survives a chain of failed refreshes without inventing ids.
+    fn all_known_pending_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .cards
+            .iter()
+            .map(|card| card.permission_id.clone())
+            .collect();
+        if let PermissionAvailability::Unavailable {
+            known_pending_ids, ..
+        } = &self.availability
+        {
+            for id in known_pending_ids {
+                if !ids.contains(id) {
+                    ids.push(id.clone());
+                }
+            }
+        }
+        ids
+    }
+
+    /// Seam 4: a live `permission_request` frame. Push the real, actionable card
+    /// (dedup by id) and drop its id from `known_pending_ids` (now
+    /// materialized). Degradation is NOT cleared here — only a settled snapshot
+    /// may do that — so a frame for C while {A,B} were known yields
+    /// `cards = [.., C]` with the {A,B} warning retained.
+    fn ingest_request(&mut self, card: PendingPermission) {
+        if self
+            .cards
+            .iter()
+            .any(|existing| existing.permission_id == card.permission_id)
+        {
+            // The daemon reuses one PermissionId for an identical tool+args retry
+            // within a turn, so a replayed frame must not stack a second card.
+            return;
+        }
+        if let PermissionAvailability::Unavailable {
+            known_pending_ids, ..
+        } = &mut self.availability
+        {
+            known_pending_ids.retain(|id| id != &card.permission_id);
+        }
+        self.cards.push(card);
+    }
+
+    /// Seam 5: a decision recorded (or a daemon-resolved `permission_decision`
+    /// frame). Drop the id from BOTH the live cards and `known_pending_ids` so a
+    /// decided gate can never resurrect through the degrade warning.
+    fn resolve(&mut self, permission_id: &str) {
+        self.cards
+            .retain(|card| card.permission_id != permission_id);
+        if let PermissionAvailability::Unavailable {
+            known_pending_ids, ..
+        } = &mut self.availability
+        {
+            known_pending_ids.retain(|id| id != permission_id);
+        }
+    }
+
+    /// Toggle a card's in-flight `deciding` flag (a decision POST started or
+    /// failed). No-op if the id is not a live card.
+    fn set_deciding(&mut self, permission_id: &str, deciding: bool) {
+        if let Some(card) = self
+            .cards
+            .iter_mut()
+            .find(|card| card.permission_id == permission_id)
+        {
+            card.deciding = deciding;
+        }
+    }
+}
+
 /// The control-plane event envelope on `/v1/events`. Unlike `/v1/agent/events`
 /// (which streams `AgentTurnEvent` and serializes only the inner event), this
 /// stream serializes the FULL `EventEnvelope`, so `permission_id` / `session_id`
@@ -1834,6 +2000,12 @@ pub struct Daemon {
     /// after a successful snapshot decode.
     pub request_list: RwSignal<Vec<RequestSnapshot>>,
     pub permission_list: RwSignal<Vec<PermissionSnapshot>>,
+    /// TASK-69 seam 2: `None` when the cross-session permission attention list is
+    /// authoritative (last poll settled); `Some(reason)` when the poll failed and
+    /// the last-known list may be stale (already-resolved gates could still show).
+    /// The Island renders a "couldn't refresh" note rather than presenting the
+    /// stale set as confidently authoritative.
+    pub permission_list_stale: RwSignal<Option<String>>,
     /// Daemon-owned transcript recall results. A monotonically increasing
     /// generation prevents a slow older query from replacing a newer one.
     pub history_results: RwSignal<Vec<HistorySearchHit>>,
@@ -1922,7 +2094,7 @@ pub struct Daemon {
     /// blocks its turn on the daemon until decided. Populated from the
     /// `/v1/events` control stream (`permission_request`) and cleared on
     /// `permission_decision` or a successful decision POST. Multiple can stack.
-    pub pending_permissions: RwSignal<Vec<PendingPermission>>,
+    pub permission_view: RwSignal<PermissionView>,
     /// Per-turn reasoning-effort override (OCEAN-79). Holds the serialized
     /// `ThinkingLevel` string (`off` / `low` / `medium` / `high`) the daemon
     /// expects, or `None` to leave the daemon's global default in force. Set
@@ -2260,6 +2432,7 @@ impl Daemon {
             session_fetch_ticket: RwSignal::new(0),
             request_list: RwSignal::new(Vec::new()),
             permission_list: RwSignal::new(Vec::new()),
+            permission_list_stale: RwSignal::new(None),
             history_results: RwSignal::new(Vec::new()),
             history_searching: RwSignal::new(false),
             history_error: RwSignal::new(None),
@@ -2277,7 +2450,7 @@ impl Daemon {
             active_turn_id: RwSignal::new(None),
             browser_active: RwSignal::new(false),
             browser_last_action: RwSignal::new(None),
-            pending_permissions: RwSignal::new(Vec::new()),
+            permission_view: RwSignal::new(PermissionView::default()),
             // Restore the last-selected per-turn overrides from localStorage so
             // the choices survive a reload (like `project`).
             thinking_level: RwSignal::new(load_persisted_thinking_level()),
@@ -2340,6 +2513,7 @@ impl Daemon {
             session_fetch_ticket: RwSignal::new(0),
             request_list: RwSignal::new(Vec::new()),
             permission_list: RwSignal::new(Vec::new()),
+            permission_list_stale: RwSignal::new(None),
             history_results: RwSignal::new(Vec::new()),
             history_searching: RwSignal::new(false),
             history_error: RwSignal::new(None),
@@ -2355,7 +2529,7 @@ impl Daemon {
             active_turn_id: RwSignal::new(None),
             browser_active: RwSignal::new(false),
             browser_last_action: RwSignal::new(None),
-            pending_permissions: RwSignal::new(Vec::new()),
+            permission_view: RwSignal::new(PermissionView::default()),
             thinking_level: RwSignal::new(None),
             model_override: RwSignal::new(None),
             agent_override: RwSignal::new(None),
@@ -2835,7 +3009,7 @@ impl Daemon {
         let permission_stream_ready = self.permission_stream_ready;
         let permission_revision = self.permission_revision;
         let planner_stream_sources = self.planner_stream_sources.clone();
-        let pending = self.pending_permissions;
+        let pending = self.permission_view;
         let decision_authority = self.decision_authority;
         // Handle for the post-reconnect reconciliation: a reopened control
         // stream has a gap, so a permission_request/decision emitted while it was
@@ -2988,7 +3162,7 @@ impl Daemon {
     pub fn decide_permission(&self, permission_id: String, allow: bool) {
         let url = self.url.get_untracked();
         let status = self.status;
-        let pending = self.pending_permissions;
+        let pending = self.permission_view;
         let permission_revision = self.permission_revision;
         // Resolve decision authority for THIS card, not from a session-global
         // slot (TASK-44, finding 4). Look up the card's originating request id and
@@ -2997,8 +3171,9 @@ impl Daemon {
         // non-actionable: refuse the POST outright rather than send a
         // wrong/unbound token the daemon would 403 (or, worse, one bound to a
         // DIFFERENT turn).
-        let token = pending.with_untracked(|list| {
-            list.iter()
+        let token = pending.with_untracked(|view| {
+            view.cards()
+                .iter()
                 .find(|p| p.permission_id == permission_id)
                 .and_then(|p| {
                     self.decision_authority.with_untracked(|authority| {
@@ -3017,11 +3192,7 @@ impl Daemon {
 
         // Mark the card as deciding so its buttons disable and it can't be
         // double-submitted.
-        pending.update(|list| {
-            if let Some(p) = list.iter_mut().find(|p| p.permission_id == permission_id) {
-                p.deciding = true;
-            }
-        });
+        pending.update(|view| view.set_deciding(&permission_id, true));
 
         spawn_local(async move {
             let post_url = format!(
@@ -3653,6 +3824,7 @@ impl Daemon {
         let base = self.url.get_untracked().trim_end_matches('/').to_string();
         let request_list = self.request_list;
         let permission_list = self.permission_list;
+        let permission_list_stale = self.permission_list_stale;
         let attention_fetching = self.attention_fetching;
         let request_cancellations = self.request_cancellations;
         spawn_local(async move {
@@ -3697,13 +3869,27 @@ impl Daemon {
                 Err(err) => log::warn!("attention requests fetch error: {err}"),
             }
 
-            match permissions_response {
-                Ok(resp) => match resp.json::<PermissionsResponse>().await {
-                    Ok(snapshot) if snapshot.ok => permission_list.set(snapshot.permissions),
-                    Ok(_) => log::warn!("attention permissions fetch not ok"),
-                    Err(err) => log::warn!("attention permissions decode error: {err}"),
-                },
-                Err(err) => log::warn!("attention permissions fetch error: {err}"),
+            // TASK-69 seam 2: a failed poll no longer silently leaves the stale
+            // list as authoritative. Classify the outcome; on error keep the
+            // last-known list but publish a stale marker the Island surfaces.
+            let permission_result: Result<Vec<PermissionSnapshot>, String> =
+                match permissions_response {
+                    Ok(resp) => match resp.json::<PermissionsResponse>().await {
+                        Ok(snapshot) if snapshot.ok => Ok(snapshot.permissions),
+                        Ok(_) => Err("attention permissions fetch not ok".into()),
+                        Err(err) => Err(format!("attention permissions decode error: {err}")),
+                    },
+                    Err(err) => Err(format!("attention permissions fetch error: {err}")),
+                };
+            match classify_permission_poll(permission_result) {
+                PermissionPollOutcome::Fresh(permissions) => {
+                    permission_list.set(permissions);
+                    permission_list_stale.set(None);
+                }
+                PermissionPollOutcome::Unavailable(reason) => {
+                    log::warn!("{reason}");
+                    permission_list_stale.set(Some(reason));
+                }
             }
             attention_fetching.set(false);
         });
@@ -4318,10 +4504,15 @@ impl Daemon {
         // Commit the quarantined or full transcript atomically.
         let (rebuilt_turns, rebuilt_pinned) =
             turns_from_session_transcript(transcript_for_commit, &detail.tool_context);
+        // Poll ticks reconcile only live-turn state; the permission view is owned
+        // by the control stream / full projection, so this arm never publishes it
+        // (Fresh(empty) here is discarded — only `active_turn_id`/`streaming` are
+        // consumed below).
         let projection = build_session_projection(
             detail.state,
             &active_requests,
-            Vec::new(), // no permission cards in poll ticks
+            SnapshotSettle::Fresh(Vec::new()),
+            Vec::new(),
             &self.decision_authority.get_untracked(),
         );
 
@@ -4416,7 +4607,7 @@ impl Daemon {
         self.canvas_patches.set(Vec::new());
         self.pinned_widgets.set(Vec::new());
         self.pending_images.set(Vec::new());
-        self.pending_permissions.set(Vec::new());
+        self.permission_view.set(PermissionView::default());
         self.active_decision_token.set(None);
         self.session_id.set(Some(id.to_string()));
         persist_session(id);
@@ -4503,39 +4694,20 @@ impl Daemon {
             session_id: id,
         };
         // The card snapshot is AUXILIARY: a failure here (route missing on a
-        // host, daemon hiccup, revision churn) must degrade to an empty card
-        // set — never fail the whole session projection. Cards self-heal from
-        // the live control stream (`permission_request` frames re-enqueue), so
-        // the worst case is a briefly missing card, not a dead transcript.
-        let cards = {
-            let mut settled = None;
-            for _ in 0..4 {
-                let revision = source.revision();
-                match source.fetch().await {
-                    Ok(snapshot) => {
-                        if source.revision() == revision {
-                            settled = Some(snapshot);
-                            break;
-                        }
-                    }
-                    Err(error) => {
-                        log::warn!(
-                            "session projection: permission snapshot degraded \
-                             to empty for {id}: {error}"
-                        );
-                        settled = Some(Vec::new());
-                        break;
-                    }
-                }
-            }
-            settled.unwrap_or_else(|| {
-                log::warn!(
-                    "session projection: permission snapshot for {id} kept \
-                     changing; degrading to empty (control stream will refill)"
-                );
-                Vec::new()
-            })
-        };
+        // host, daemon hiccup, revision churn) must NEVER fail the whole session
+        // projection (the 63bc9ea invariant — transcript survives). But TASK-69:
+        // it must NOT silently degrade to a blank card set either, or a gate that
+        // predates this load goes invisible with no live frame to rescue it.
+        // `settle_permission_snapshot` yields Fresh(cards) or Degraded(reason);
+        // the two-state view (built below, under the same admission) carries the
+        // distinction to the operator.
+        let settle = settle_permission_snapshot(&mut source).await;
+        if let SnapshotSettle::Degraded(reason) = &settle {
+            log::warn!("session projection permission snapshot degraded for {id}: {reason}");
+        }
+        // What the operator was already shown for THIS session — seeds the
+        // Unavailable warning so a degrade keeps the stub instead of blanking.
+        let prior_known_pending_ids = self.permission_view.get_untracked().all_known_pending_ids();
 
         // 3. Re-admit after the second await: focus/generation may have moved.
         if admit_session_snapshot(
@@ -4605,11 +4777,17 @@ impl Daemon {
         let (rebuilt_turns, rebuilt_pinned) =
             turns_from_session_transcript(quarantined_transcript, &tool_context);
         let authority = self.decision_authority.get_untracked();
-        let projection = build_session_projection(state, &active_requests, cards, &authority);
+        let projection = build_session_projection(
+            state,
+            &active_requests,
+            settle,
+            prior_known_pending_ids,
+            &authority,
+        );
         // Live set = the daemon's live requests plus any request still holding an
         // open gate; authority for anything else in this session is terminal.
         let mut live_requests: HashSet<String> = active_requests.iter().cloned().collect();
-        for card in &projection.pending {
+        for card in projection.permission.cards() {
             if let Some(request_id) = &card.request_id {
                 live_requests.insert(request_id.clone());
             }
@@ -4628,7 +4806,7 @@ impl Daemon {
         self.pinned_widgets.set(rebuilt_pinned);
         self.active_turn_id.set(projection.active_turn_id);
         self.streaming.set(projection.streaming);
-        self.pending_permissions.set(projection.pending);
+        self.permission_view.set(projection.permission);
         self.decision_authority.update(|authority| {
             prune_session_authority(authority, id, &live_requests);
         });
@@ -4782,7 +4960,7 @@ impl Daemon {
         self.canvas_patches.set(Vec::new());
         self.pinned_widgets.set(Vec::new());
         self.pending_images.set(Vec::new());
-        self.pending_permissions.set(Vec::new());
+        self.permission_view.set(PermissionView::default());
         self.active_decision_token.set(None);
         self.session_id.set(None);
         clear_persisted_session();
@@ -5585,21 +5763,33 @@ fn prune_session_authority(
 struct SessionProjection {
     active_turn_id: Option<String>,
     streaming: bool,
-    pending: Vec<PendingPermission>,
+    permission: PermissionView,
 }
 
 fn build_session_projection(
     state: Option<SessionRunState>,
     active_requests: &[String],
-    mut cards: Vec<PendingPermission>,
+    settle: SnapshotSettle,
+    prior_known_pending_ids: Vec<String>,
     authority: &HashMap<String, DecisionGrant>,
 ) -> SessionProjection {
     let (active_turn_id, streaming) = project_live_turn(state, active_requests);
-    mark_cards_actionable(&mut cards, authority);
+    // TASK-69 seam 1: a settled fetch establishes an authoritative Fresh view; a
+    // degrade publishes Unavailable retaining the ids the operator was already
+    // shown, so a pre-load gate stays visible as a warning rather than vanishing.
+    let permission = match settle {
+        SnapshotSettle::Fresh(mut cards) => {
+            mark_cards_actionable(&mut cards, authority);
+            PermissionView::fresh(cards)
+        }
+        SnapshotSettle::Degraded(reason) => {
+            PermissionView::unavailable(reason, prior_known_pending_ids)
+        }
+    };
     SessionProjection {
         active_turn_id,
         streaming,
-        pending: cards,
+        permission,
     }
 }
 
@@ -6156,21 +6346,94 @@ trait PermissionSnapshotSource {
     fn revision(&self) -> u64;
     fn fetch<'a>(&'a mut self) -> LocalBoxFuture<'a, Result<Vec<PendingPermission>, String>>;
     fn apply(&mut self, snapshot: Vec<PendingPermission>);
+    /// TASK-69 seam 3: publish a visible `Unavailable` state (retaining the
+    /// last-known pending ids) instead of leaving the caller to fail-open. Called
+    /// when the snapshot cannot be settled.
+    fn degrade(&mut self, reason: String);
 }
 
+/// TASK-69 seam 3: reconcile the durable permission registry. On a settled
+/// fetch, publish the authoritative cards. On a fetch error OR revision
+/// exhaustion, publish a visible `Unavailable` via [`PermissionSnapshotSource::degrade`]
+/// and return `Ok` — a hard `Err` here used to bubble to callers that swallow it
+/// to an empty set (a silent fail-open on a possibly-blocked session).
 async fn reconcile_permission_snapshot<S: PermissionSnapshotSource>(
     source: &mut S,
 ) -> Result<(), String> {
     for _ in 0..4 {
         let revision = source.revision();
-        let snapshot = source.fetch().await?;
-        if source.revision() != revision {
-            continue;
+        match source.fetch().await {
+            Ok(snapshot) => {
+                if source.revision() != revision {
+                    continue;
+                }
+                source.apply(snapshot);
+                return Ok(());
+            }
+            Err(error) => {
+                source.degrade(format!("permission refresh failed: {error}"));
+                return Ok(());
+            }
         }
-        source.apply(snapshot);
-        return Ok(());
     }
-    Err("permission snapshot changed repeatedly during reconciliation".into())
+    source.degrade("permission snapshot changed repeatedly during reconciliation".into());
+    Ok(())
+}
+
+/// TASK-69 seam 1: settle the auxiliary permission-card snapshot for a session
+/// projection. Returns `Fresh(cards)` on a revision-stable fetch, or
+/// `Degraded(reason)` on a fetch error / revision exhaustion — NEVER an `Err`, so
+/// the caller commits the transcript regardless (the 63bc9ea invariant) and the
+/// two-state view carries the degrade instead of silently blanking.
+async fn settle_permission_snapshot<S: PermissionSnapshotSource>(source: &mut S) -> SnapshotSettle {
+    for _ in 0..4 {
+        let revision = source.revision();
+        match source.fetch().await {
+            Ok(snapshot) => {
+                if source.revision() == revision {
+                    return SnapshotSettle::Fresh(snapshot);
+                }
+            }
+            Err(error) => {
+                return SnapshotSettle::Degraded(format!(
+                    "session projection: permission snapshot degraded: {error}"
+                ));
+            }
+        }
+    }
+    SnapshotSettle::Degraded(
+        "session projection: permission snapshot kept changing during load".into(),
+    )
+}
+
+/// Outcome of [`settle_permission_snapshot`].
+#[derive(Debug, Clone, PartialEq)]
+enum SnapshotSettle {
+    Fresh(Vec<PendingPermission>),
+    Degraded(String),
+}
+
+/// TASK-69 seam 2: outcome of a cross-session permission ATTENTION poll (the
+/// Island's `/v1/permissions` refresh, distinct from the focused-session view).
+#[derive(Debug, Clone, PartialEq)]
+enum PermissionPollOutcome {
+    /// A settled `ok` response — authoritative. Apply the list, clear stale.
+    Fresh(Vec<PermissionSnapshot>),
+    /// Transport/decode error or not-ok body. The caller KEEPS the last-known
+    /// list (a transient blip must not erase real attention) but marks it stale
+    /// so the Island shows "couldn't refresh" rather than presenting
+    /// possibly-resolved gates as confidently authoritative.
+    Unavailable(String),
+}
+
+/// Pure classifier for [`Daemon::fetch_attention`]'s permission arm (seam 2).
+fn classify_permission_poll(
+    result: Result<Vec<PermissionSnapshot>, String>,
+) -> PermissionPollOutcome {
+    match result {
+        Ok(permissions) => PermissionPollOutcome::Fresh(permissions),
+        Err(reason) => PermissionPollOutcome::Unavailable(reason),
+    }
 }
 
 struct DaemonPermissionSnapshotSource<'a> {
@@ -6238,7 +6501,27 @@ impl PermissionSnapshotSource for DaemonPermissionSnapshotSource<'_> {
         // read-only rather than sending an unbound token.
         let authority = self.daemon.decision_authority.get_untracked();
         mark_cards_actionable(&mut snapshot, &authority);
-        self.daemon.pending_permissions.set(snapshot);
+        // A settled fetch is authoritative: this establishes Fresh and clears any
+        // prior degradation.
+        self.daemon
+            .permission_view
+            .set(PermissionView::fresh(snapshot));
+    }
+
+    fn degrade(&mut self, reason: String) {
+        // Only publish for the still-focused session — a degrade for a session
+        // we've since left must not stamp a warning over the new focus.
+        if self.daemon.session_id.get_untracked().as_deref() != Some(self.session_id) {
+            return;
+        }
+        let known = self
+            .daemon
+            .permission_view
+            .get_untracked()
+            .all_known_pending_ids();
+        self.daemon
+            .permission_view
+            .set(PermissionView::unavailable(reason, known));
     }
 }
 
@@ -6274,7 +6557,7 @@ fn planner_streams_ready(
 fn apply_control_event(
     event: &ControlEvent,
     active_session_id: &str,
-    pending: RwSignal<Vec<PendingPermission>>,
+    pending: RwSignal<PermissionView>,
     authority: &HashMap<String, DecisionGrant>,
 ) {
     match event {
@@ -6305,15 +6588,11 @@ fn apply_control_event(
                 request_id: request_id.clone(),
                 actionable,
             };
-            pending.update(|list| {
-                // Dedupe: the daemon reuses one PermissionId for an identical
-                // tool+args retry within a turn, so a replayed frame must not
-                // stack a second card.
-                if list.iter().any(|p| p.permission_id == permission_id) {
-                    return;
-                }
-                list.push(entry);
-            });
+            // TASK-69 seam 4: merge into the view. Under `Unavailable` this
+            // re-materializes a real, actionable card and drops its id from the
+            // known-pending warning set, without prematurely clearing the
+            // degradation (only a settled snapshot may do that).
+            pending.update(|view| view.ingest_request(entry));
         }
         ControlEvent::PermissionDecision {
             permission_id,
@@ -6331,17 +6610,15 @@ fn apply_control_event(
 }
 
 /// Remove a pending permission by id (decision recorded or daemon-resolved).
-fn remove_pending_permission(pending: RwSignal<Vec<PendingPermission>>, permission_id: &str) {
-    pending.update(|list| list.retain(|p| p.permission_id != permission_id));
+/// TASK-69 seam 5: drops the id from both live cards AND any `known_pending_ids`
+/// so a decided gate cannot resurrect through the degrade warning.
+fn remove_pending_permission(pending: RwSignal<PermissionView>, permission_id: &str) {
+    pending.update(|view| view.resolve(permission_id));
 }
 
 /// Clear the `deciding` flag on a card (a decision POST failed; re-enable it).
-fn clear_pending_deciding(pending: RwSignal<Vec<PendingPermission>>, permission_id: &str) {
-    pending.update(|list| {
-        if let Some(p) = list.iter_mut().find(|p| p.permission_id == permission_id) {
-            p.deciding = false;
-        }
-    });
+fn clear_pending_deciding(pending: RwSignal<PermissionView>, permission_id: &str) {
+    pending.update(|view| view.set_deciding(permission_id, false));
 }
 
 /// Mint a per-turn CSPRNG decision token using `window.crypto.getRandomValues`
@@ -7820,13 +8097,14 @@ mod tests {
         let projection = build_session_projection(
             Some(SessionRunState::WaitingForPermission),
             &["request-1".to_string()],
-            vec![task44_card("permission-1", Some("request-1"))],
+            SnapshotSettle::Fresh(vec![task44_card("permission-1", Some("request-1"))]),
+            Vec::new(),
             &authority,
         );
         assert_eq!(projection.active_turn_id.as_deref(), Some("request-1"));
         assert!(projection.streaming);
-        assert_eq!(projection.pending.len(), 1);
-        assert!(projection.pending[0].actionable);
+        assert_eq!(projection.permission.cards().len(), 1);
+        assert!(projection.permission.cards()[0].actionable);
     }
 
     // 2. Agent reconnect mid-tool: the daemon still reports Running with a live
@@ -7987,10 +8265,14 @@ mod tests {
         let projection = build_session_projection(
             Some(SessionRunState::WaitingForPermission),
             &["request-remote".to_string()],
-            vec![task44_card("permission-remote", Some("request-remote"))],
+            SnapshotSettle::Fresh(vec![task44_card(
+                "permission-remote",
+                Some("request-remote"),
+            )]),
+            Vec::new(),
             &authority,
         );
-        assert!(!projection.pending[0].actionable);
+        assert!(!projection.permission.cards()[0].actionable);
         // The turn is still shown live/cancellable even though the card is
         // read-only for us.
         assert_eq!(projection.active_turn_id.as_deref(), Some("request-remote"));
@@ -8040,18 +8322,33 @@ mod tests {
         // Tauri only observes the shared session — no local grant.
         let tauri_authority: HashMap<String, DecisionGrant> = HashMap::new();
 
-        let web = build_session_projection(state, &active_requests, cards(), &web_authority);
-        let tauri = build_session_projection(state, &active_requests, cards(), &tauri_authority);
+        let web = build_session_projection(
+            state,
+            &active_requests,
+            SnapshotSettle::Fresh(cards()),
+            Vec::new(),
+            &web_authority,
+        );
+        let tauri = build_session_projection(
+            state,
+            &active_requests,
+            SnapshotSettle::Fresh(cards()),
+            Vec::new(),
+            &tauri_authority,
+        );
 
         // Both converge on the same live turn state (the split is gone).
         assert_eq!(web.active_turn_id, tauri.active_turn_id);
         assert_eq!(web.active_turn_id.as_deref(), Some("request-1"));
         assert!(web.streaming && tauri.streaming);
-        assert_eq!(web.pending.len(), tauri.pending.len());
-        assert_eq!(web.pending[0].permission_id, tauri.pending[0].permission_id);
+        assert_eq!(web.permission.cards().len(), tauri.permission.cards().len());
+        assert_eq!(
+            web.permission.cards()[0].permission_id,
+            tauri.permission.cards()[0].permission_id
+        );
         // They differ only in who may act on the card.
-        assert!(web.pending[0].actionable);
-        assert!(!tauri.pending[0].actionable);
+        assert!(web.permission.cards()[0].actionable);
+        assert!(!tauri.permission.cards()[0].actionable);
     }
 
     // Wire contract: the surface SessionDetail DTO decodes the daemon's atomic
@@ -9935,6 +10232,7 @@ mod tests {
         revision: u64,
         fetches: usize,
         applied: Vec<Vec<String>>,
+        degraded: Vec<String>,
     }
 
     impl PermissionSnapshotSource for FakePermissionSnapshotSource {
@@ -9973,6 +10271,40 @@ mod tests {
                     .collect(),
             );
         }
+
+        fn degrade(&mut self, reason: String) {
+            self.degraded.push(reason);
+        }
+    }
+
+    /// A snapshot source that always errors from `fetch` — for seam 3.
+    #[derive(Default)]
+    struct ErroringPermissionSnapshotSource {
+        fetches: usize,
+        applied: usize,
+        degraded: Vec<String>,
+    }
+
+    impl PermissionSnapshotSource for ErroringPermissionSnapshotSource {
+        fn revision(&self) -> u64 {
+            0
+        }
+
+        fn fetch<'a>(&'a mut self) -> LocalBoxFuture<'a, Result<Vec<PendingPermission>, String>> {
+            async move {
+                self.fetches += 1;
+                Err("route missing".into())
+            }
+            .boxed_local()
+        }
+
+        fn apply(&mut self, _snapshot: Vec<PendingPermission>) {
+            self.applied += 1;
+        }
+
+        fn degrade(&mut self, reason: String) {
+            self.degraded.push(reason);
+        }
     }
 
     #[test]
@@ -9984,6 +10316,143 @@ mod tests {
             .unwrap();
         assert_eq!(source.fetches, 2);
         assert_eq!(source.applied, vec![vec!["fresh-pending".to_string()]]);
+    }
+
+    // ---------------------------------------------------------------------
+    // TASK-69: two-state permission view. Five seams, each with a failure-
+    // watched test (watched RED against a deliberately-broken build before it
+    // counted). Needles are assembled at runtime, not matched against source.
+    // ---------------------------------------------------------------------
+
+    fn ids_of(view: &PermissionView) -> Vec<String> {
+        view.cards()
+            .iter()
+            .map(|card| card.permission_id.clone())
+            .collect()
+    }
+
+    // Seam 1: a degraded session-load projection publishes a VISIBLE Unavailable
+    // that retains the ids the operator was already shown — not a blank Fresh
+    // that makes a pre-load gate vanish. (Broken build: Degraded arm returns
+    // `PermissionView::fresh(vec![])` → `is_unavailable()` goes false → RED.)
+    #[test]
+    fn seam1_projection_degrade_publishes_unavailable_retaining_prior_ids() {
+        let mut prior = Vec::new();
+        prior.push(format!("gate-{}", "alpha"));
+        prior.push(format!("gate-{}", "beta"));
+        let projection = build_session_projection(
+            None,
+            &[],
+            SnapshotSettle::Degraded("route missing on host".into()),
+            prior.clone(),
+            &HashMap::new(),
+        );
+        assert!(
+            projection.permission.is_unavailable(),
+            "degrade must publish Unavailable, not a silent empty Fresh"
+        );
+        assert_eq!(projection.permission.unconfirmed_ids(), prior);
+        assert!(projection.permission.cards().is_empty());
+    }
+
+    // Seam 1 contrast: a settled fetch is authoritative Fresh with actionable
+    // cards, and NO degradation warning.
+    #[test]
+    fn seam1_projection_fresh_publishes_authoritative_cards() {
+        let projection = build_session_projection(
+            None,
+            &[],
+            SnapshotSettle::Fresh(vec![task44_card("gate-only", None)]),
+            Vec::new(),
+            &HashMap::new(),
+        );
+        assert!(!projection.permission.is_unavailable());
+        assert_eq!(
+            ids_of(&projection.permission),
+            vec!["gate-only".to_string()]
+        );
+        assert!(projection.permission.unconfirmed_ids().is_empty());
+    }
+
+    // Seam 2: a failed cross-session permission poll classifies as Unavailable
+    // (the caller keeps the last list but flags it stale) — it does NOT silently
+    // pass as authoritative. (Broken build: Err arm returns `Fresh(vec![])` →
+    // the `Unavailable` match fails → RED.)
+    #[test]
+    fn seam2_permission_poll_error_is_unavailable_not_authoritative() {
+        let reason = format!("network {}", "down");
+        let errored = classify_permission_poll(Err(reason.clone()));
+        match errored {
+            PermissionPollOutcome::Unavailable(got) => assert_eq!(got, reason),
+            PermissionPollOutcome::Fresh(_) => {
+                panic!("a failed poll must not classify as authoritative Fresh")
+            }
+        }
+        let settled = classify_permission_poll(Ok(Vec::new()));
+        assert!(matches!(settled, PermissionPollOutcome::Fresh(_)));
+    }
+
+    // Seam 3: reconciliation that cannot settle DEGRADES (visible Unavailable)
+    // and returns Ok — it does not bubble a hard Err that a caller swallows to
+    // empty (a silent fail-open). (Broken build: Err arm `return Err(...)` →
+    // `result.is_ok()` false and `degraded` empty → RED.)
+    #[test]
+    fn seam3_reconcile_error_degrades_instead_of_failing_open() {
+        let mut source = ErroringPermissionSnapshotSource::default();
+        let result = reconcile_permission_snapshot(&mut source)
+            .now_or_never()
+            .expect("erroring source resolves immediately");
+        assert!(
+            result.is_ok(),
+            "exhaustion/err must degrade, not bubble an Err a caller swallows"
+        );
+        assert_eq!(source.applied, 0, "a failed fetch must never apply cards");
+        assert_eq!(source.degraded.len(), 1, "must publish exactly one degrade");
+    }
+
+    // Seam 4: a live permission_request frame while Unavailable re-materializes a
+    // real card (dropping its id from the warning set) but does NOT clear the
+    // degradation — only a settled snapshot may. So {A,B} unavailable + frame C
+    // yields cards=[C], retained warning {A,B}, still Unavailable. (Broken build:
+    // `ingest_request` sets availability = Fresh → `is_unavailable()` false → RED.)
+    #[test]
+    fn seam4_live_frame_rematerializes_card_without_clearing_degradation() {
+        let known = vec!["A".to_string(), "B".to_string()];
+        let mut view = PermissionView::unavailable("stale".into(), known.clone());
+        view.ingest_request(task44_card("C", None));
+        assert_eq!(ids_of(&view), vec!["C".to_string()]);
+        assert!(
+            view.is_unavailable(),
+            "a live frame must not clear degradation — only a settled snapshot may"
+        );
+        assert_eq!(view.unconfirmed_ids(), known);
+
+        // A frame whose id WAS in the known set materializes it out of the
+        // warning without clearing the rest.
+        let mut view2 = PermissionView::unavailable("stale".into(), known.clone());
+        view2.ingest_request(task44_card("A", None));
+        assert_eq!(view2.unconfirmed_ids(), vec!["B".to_string()]);
+        assert!(view2.is_unavailable());
+    }
+
+    // Seam 5: a decided gate must not resurrect through the degrade warning — the
+    // decision drops the id from BOTH live cards and known_pending_ids. (Broken
+    // build: `resolve` retains cards only, skipping known_pending_ids → the
+    // decided id stays in `unconfirmed_ids()` → RED.)
+    #[test]
+    fn seam5_decided_gate_does_not_resurrect_via_known_pending_ids() {
+        let mut degraded =
+            PermissionView::unavailable("stale".into(), vec!["A".to_string(), "B".to_string()]);
+        degraded.resolve("A");
+        assert_eq!(
+            degraded.unconfirmed_ids(),
+            vec!["B".to_string()],
+            "a decided id must not survive in the degrade warning"
+        );
+
+        let mut fresh = PermissionView::fresh(vec![task44_card("X", None), task44_card("Y", None)]);
+        fresh.resolve("X");
+        assert_eq!(ids_of(&fresh), vec!["Y".to_string()]);
     }
 
     #[test]

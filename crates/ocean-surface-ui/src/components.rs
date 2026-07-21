@@ -1765,14 +1765,44 @@ fn VideoView(component_id: String, kind_props: Value) -> impl IntoView {
 /// scrolled away.
 #[component]
 pub fn PermissionPrompts(daemon: Daemon) -> impl IntoView {
-    let pending = daemon.pending_permissions;
+    let view = daemon.permission_view;
     let daemon = StoredValue::new(daemon);
 
+    // TASK-69: the "couldn't refresh" affordance. When the snapshot is
+    // Unavailable and there are ids we last knew were pending but could not
+    // re-materialize, warn the operator that N permissions MAY be pending —
+    // instead of the pre-fix behavior where a degraded snapshot showed nothing
+    // and a blocked, pre-load tool call was invisible. Fresh(empty) shows
+    // nothing (unchanged).
+    let unconfirmed = move || view.with(|v| v.unconfirmed_ids().len());
+    let unavailable_reason = move || view.with(|v| v.reason().map(str::to_string));
+
     view! {
-        <Show when=move || !pending.get().is_empty()>
+        <Show when=move || { unconfirmed() > 0 }>
+            {move || {
+                let n = unconfirmed();
+                let plural = if n == 1 { "" } else { "s" };
+                let reason = unavailable_reason().unwrap_or_default();
+                view! {
+                    <div
+                        class="ocean-perms__warning"
+                        role="status"
+                        aria-label="permissions could not refresh"
+                    >
+                        <span class="ocean-perms__warning-head">
+                            {format!("{n} permission{plural} may be pending — couldn't refresh")}
+                        </span>
+                        {(!reason.is_empty()).then(|| view! {
+                            <span class="ocean-perms__warning-detail">{reason}</span>
+                        })}
+                    </div>
+                }
+            }}
+        </Show>
+        <Show when=move || view.with(|v| !v.cards().is_empty())>
             <div class="ocean-perms" role="region" aria-label="permission requests">
                 <For
-                    each=move || pending.get()
+                    each=move || view.with(|v| v.cards().to_vec())
                     key=|p| p.permission_id.clone()
                     children=move |p| {
                         let allow_id = p.permission_id.clone();

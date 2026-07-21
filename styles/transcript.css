@@ -8,6 +8,36 @@
   padding: 12px 18px 0;
 }
 
+/* TASK-69: "permissions couldn't refresh" affordance. A degraded snapshot no
+   longer degrades to a silent blank — this warns that N gates MAY be pending so
+   a pre-load, blocked tool call is never invisible. */
+.ocean-perms__warning {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 12px 18px 0;
+  padding: 10px 14px;
+  background: var(--warn-soft);
+  border: 1px solid var(--warn);
+  border-radius: var(--radius-lg);
+  color: var(--fg-2);
+  animation: ocean-perm-in var(--dur-fast) var(--ease);
+}
+
+.ocean-perms__warning-head {
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.ocean-perms__warning-detail {
+  color: var(--fg-3, var(--fg-2));
+  font-size: 12px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
 .ocean-perm {
   display: flex;
   flex-direction: column;

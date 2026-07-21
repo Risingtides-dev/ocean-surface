@@ -1222,7 +1222,7 @@ pub fn App() -> impl IntoView {
     let browser_active = daemon.browser_active;
     let livekit_token_path = daemon.livekit_token_path;
     let browser_last_action = daemon.browser_last_action;
-    let pending_permissions = daemon.pending_permissions;
+    let permission_view = daemon.permission_view;
     // Canvas patch stream (OCEAN-178): patches the agent applied this session,
     // streamed over the daemon's `surface_patch` SSE event. The GPUI native
     // shell renders these on a full canvas; the web surface renders a basic
@@ -1779,7 +1779,10 @@ pub fn App() -> impl IntoView {
     // noticed; zero clears it. No-op off the Tauri shell (host::set_badge
     // returns early on non-Tauri hosts).
     Effect::new(move |_| {
-        let n = pending_permissions.with(|p| p.len() as i64);
+        // TASK-69: badge live cards PLUS ids known-pending-but-unrefreshed, so a
+        // gate that predates a session-load (and can't re-materialize) still
+        // raises the dock badge instead of silently hanging.
+        let n = permission_view.with(|v| (v.cards().len() + v.unconfirmed_ids().len()) as i64);
         wasm_bindgen_futures::spawn_local(async move {
             crate::host::set_badge(if n > 0 { Some(n) } else { None }).await;
         });

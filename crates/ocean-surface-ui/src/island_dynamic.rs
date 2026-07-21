@@ -106,7 +106,8 @@ fn AgentStage(
     let prompt = RwSignal::new(String::new());
     let prompt_ref: NodeRef<leptos::html::Input> = NodeRef::new();
     let focused_id = daemon.session_id;
-    let pending_permissions = daemon.pending_permissions;
+    let permission_view = daemon.permission_view;
+    let permission_list_stale = daemon.permission_list_stale;
     let active_decision_token = daemon.active_decision_token;
     let request_cancellations = daemon.request_cancellations;
     let status = daemon.status;
@@ -155,6 +156,15 @@ fn AgentStage(
                     </button>
                 </div>
             </header>
+
+            // TASK-69 seam 2: the cross-session permission poll failed, so the
+            // attention list below may show already-resolved gates. Flag it as
+            // stale rather than presenting it as confidently authoritative.
+            <Show when=move || permission_list_stale.with(Option::is_some)>
+                <div class="island-agent__stale" role="status">
+                    "Permissions couldn't refresh — attention may be out of date."
+                </div>
+            </Show>
 
             <Show when=move || items.get().is_empty()>
                 <div class="island-agent__idle">
@@ -242,13 +252,15 @@ fn AgentStage(
                         let request_id = StoredValue::new_local(item.request_id.clone());
                         let item_state = item.state;
                         let permission_action = Memo::new(move |_| {
-                            permission_action_state(
-                                permission_id.get_value().as_deref(),
-                                permission_session.get_value().as_deref(),
-                                focused_id.get().as_deref(),
-                                active_decision_token.get().is_some(),
-                                &pending_permissions.get(),
-                            )
+                            permission_view.with(|v| {
+                                permission_action_state(
+                                    permission_id.get_value().as_deref(),
+                                    permission_session.get_value().as_deref(),
+                                    focused_id.get().as_deref(),
+                                    active_decision_token.get().is_some(),
+                                    v.cards(),
+                                )
+                            })
                         });
                         let stop_action = Memo::new(move |_| {
                             stop_action_state(

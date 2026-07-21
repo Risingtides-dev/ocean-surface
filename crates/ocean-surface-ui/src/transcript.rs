@@ -484,9 +484,13 @@ pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoVie
         let Some(ref active) = active else {
             return false;
         };
-        daemon
-            .pending_permissions
-            .with(|pp| pp.iter().any(|p| p.session_id == *active))
+        // TASK-69: a card for the focused session, OR a degraded view that still
+        // knows an id may be pending — both are "the operator has a decision to
+        // make here" for the live-activity row.
+        daemon.permission_view.with(|v| {
+            v.cards().iter().any(|p| p.session_id == *active)
+                || (v.is_unavailable() && !v.unconfirmed_ids().is_empty())
+        })
     });
 
     // LiveActivity reducer: inspects ONLY current tail turn + streaming +
