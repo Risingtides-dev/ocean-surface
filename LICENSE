@@ -1,0 +1,34 @@
+# Licensing Ocean Surface
+
+Except for the exclusions and third-party materials described below, Ocean
+Surface source code is available under either of these licenses, at your option:
+
+- the Apache License, Version 2.0 ([`LICENSE-APACHE`](LICENSE-APACHE)); or
+- the MIT License ([`LICENSE-MIT`](LICENSE-MIT)).
+
+Copyright © 2026 Rising Tides.
+
+## Documentation and project-authored assets
+
+Project-authored documentation and non-brand assets in this repository are
+available under the same `MIT OR Apache-2.0` choice unless a file or directory
+states different terms.
+
+## Brand exclusion
+
+Ocean names, logos, wordmarks, application icons derived from the Ocean mark,
+and other distinctive brand assets are not licensed under the open-source
+licenses above. Reasonable nominative use remains allowed as described in
+[`TRADEMARKS.md`](TRADEMARKS.md). Source code surrounding or generating a brand
+asset remains under the project license; the resulting brand identity does not.
+
+## Third-party material
+
+Third-party code, fonts, and icons remain under their respective licenses. See
+[`NOTICE.md`](NOTICE.md), [`docs/ASSET_PROVENANCE.md`](docs/ASSET_PROVENANCE.md),
+local license files, source headers, and dependency manifests. Those terms
+continue to apply regardless of which Ocean license you select.
+
+Unless required by an upstream license or agreed in writing, contributions
+submitted to this repository are licensed under this same project licensing
+posture.

@@ -10,7 +10,7 @@ process.chdir(repoRoot);
 const manifestPath = new URL('../docs/asset-provenance.json', import.meta.url);
 const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
 const assetExtensions = new Set(manifest.asset_extensions);
-const allowedStatuses = new Set(['cleared', 'project_license_pending']);
+const allowedStatuses = new Set(['cleared', 'protected_brand', 'project_dual_licensed']);
 
 function fail(message) {
   console.error(`asset-provenance: ${message}`);
@@ -72,6 +72,38 @@ for (const record of records) {
   }
 }
 
+const expectedStatusCounts = {
+  cleared: 22,
+  protected_brand: 61,
+  project_dual_licensed: 30,
+};
+const actualStatusCounts = records.reduce((counts, record) => {
+  counts[record.status] = (counts[record.status] || 0) + 1;
+  return counts;
+}, {});
+for (const [status, expected] of Object.entries(expectedStatusCounts)) {
+  if (actualStatusCounts[status] !== expected) {
+    fail(`${status}: expected ${expected} records, found ${actualStatusCounts[status] || 0}`);
+  }
+}
+if (Object.keys(actualStatusCounts).length !== Object.keys(expectedStatusCounts).length) {
+  fail(`unexpected launch status set: ${Object.keys(actualStatusCounts).sort().join(', ')}`);
+}
+
+for (const record of records) {
+  if (record.status === 'protected_brand' && !record.license.includes('TRADEMARKS.md')) {
+    fail(`${record.path}: protected brand records must point to TRADEMARKS.md`);
+  }
+  if (record.status === 'project_dual_licensed') {
+    if (!record.path.toLowerCase().endsWith('.html')) {
+      fail(`${record.path}: only repository-authored HTML artifacts use project_dual_licensed`);
+    }
+    if (!record.license.includes('MIT OR Apache-2.0') || !record.license.includes('TRADEMARKS.md')) {
+      fail(`${record.path}: dual-licensed HTML must record the project license and brand exclusion`);
+    }
+  }
+}
+
 for (const required of [
   'public/fonts/OFL.txt',
   'crates/ocean-gui/assets/icons/ocean-gui/LICENSE-LUCIDE',
@@ -80,9 +112,9 @@ for (const required of [
 }
 
 if (!process.exitCode) {
-  const counts = records.reduce((acc, record) => {
-    acc[record.status] = (acc[record.status] || 0) + 1;
-    return acc;
-  }, {});
-  console.log(JSON.stringify({ ok: true, trackedAssets: trackedAssets.length, statuses: counts }, null, 2));
+  console.log(JSON.stringify({
+    ok: true,
+    trackedAssets: trackedAssets.length,
+    statuses: actualStatusCounts,
+  }, null, 2));
 }

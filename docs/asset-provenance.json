@@ -28,10 +28,6 @@
     ".woff2"
   ],
   "scope": "Every tracked image, icon, font, audio/video, PDF, and HTML application/design artifact in the current public tree.",
-  "pending_decisions": [
-    "Confirm the copyright holder for original Ocean artwork and project-authored artifacts.",
-    "Choose the root project license and effective release boundary."
-  ],
   "assets": [
     {
       "path": ".superpowers/brainstorm/84184-1783188707/content/module-boundaries.html",
@@ -40,8 +36,8 @@
       "category": "design_or_documentation_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "crates/ocean-gui/assets/icons/ocean-gui/bell.svg",
@@ -230,8 +226,8 @@
       "category": "application_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "crates/ocean-tauri/icons/128x128.png",
@@ -240,8 +236,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/128x128@2x.png",
@@ -250,8 +246,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/32x32.png",
@@ -260,8 +256,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/64x64.png",
@@ -270,8 +266,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/Square107x107Logo.png",
@@ -280,8 +276,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/Square142x142Logo.png",
@@ -290,8 +286,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/Square150x150Logo.png",
@@ -300,8 +296,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/Square284x284Logo.png",
@@ -310,8 +306,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/Square30x30Logo.png",
@@ -320,8 +316,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/Square310x310Logo.png",
@@ -330,8 +326,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/Square44x44Logo.png",
@@ -340,8 +336,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/Square71x71Logo.png",
@@ -350,8 +346,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/Square89x89Logo.png",
@@ -360,8 +356,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/StoreLogo.png",
@@ -370,8 +366,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/android/mipmap-hdpi/ic_launcher.png",
@@ -380,8 +376,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/android/mipmap-hdpi/ic_launcher_foreground.png",
@@ -390,8 +386,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/android/mipmap-hdpi/ic_launcher_round.png",
@@ -400,8 +396,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/android/mipmap-mdpi/ic_launcher.png",
@@ -410,8 +406,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/android/mipmap-mdpi/ic_launcher_foreground.png",
@@ -420,8 +416,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/android/mipmap-mdpi/ic_launcher_round.png",
@@ -430,8 +426,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/android/mipmap-xhdpi/ic_launcher.png",
@@ -440,8 +436,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/android/mipmap-xhdpi/ic_launcher_foreground.png",
@@ -450,8 +446,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/android/mipmap-xhdpi/ic_launcher_round.png",
@@ -460,8 +456,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/android/mipmap-xxhdpi/ic_launcher.png",
@@ -470,8 +466,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/android/mipmap-xxhdpi/ic_launcher_foreground.png",
@@ -480,8 +476,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/android/mipmap-xxhdpi/ic_launcher_round.png",
@@ -490,8 +486,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/android/mipmap-xxxhdpi/ic_launcher.png",
@@ -500,8 +496,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/android/mipmap-xxxhdpi/ic_launcher_foreground.png",
@@ -510,8 +506,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/android/mipmap-xxxhdpi/ic_launcher_round.png",
@@ -520,8 +516,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/icon.ico",
@@ -530,8 +526,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/icon.png",
@@ -540,8 +536,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/ios/AppIcon-20x20@1x.png",
@@ -550,8 +546,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/ios/AppIcon-20x20@2x-1.png",
@@ -560,8 +556,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/ios/AppIcon-20x20@2x.png",
@@ -570,8 +566,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/ios/AppIcon-20x20@3x.png",
@@ -580,8 +576,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/ios/AppIcon-29x29@1x.png",
@@ -590,8 +586,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/ios/AppIcon-29x29@2x-1.png",
@@ -600,8 +596,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/ios/AppIcon-29x29@2x.png",
@@ -610,8 +606,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/ios/AppIcon-29x29@3x.png",
@@ -620,8 +616,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/ios/AppIcon-40x40@1x.png",
@@ -630,8 +626,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/ios/AppIcon-40x40@2x-1.png",
@@ -640,8 +636,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/ios/AppIcon-40x40@2x.png",
@@ -650,8 +646,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/ios/AppIcon-40x40@3x.png",
@@ -660,8 +656,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/ios/AppIcon-512@2x.png",
@@ -670,8 +666,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/ios/AppIcon-60x60@2x.png",
@@ -680,8 +676,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/ios/AppIcon-60x60@3x.png",
@@ -690,8 +686,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/ios/AppIcon-76x76@1x.png",
@@ -700,8 +696,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/ios/AppIcon-76x76@2x.png",
@@ -710,8 +706,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "crates/ocean-tauri/icons/ios/AppIcon-83.5x83.5@2x.png",
@@ -720,8 +716,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "design-systems/ocean-leptos/assets/master-1024.png",
@@ -730,8 +726,8 @@
       "category": "ocean_brand_master",
       "provenance": "Ocean project artwork authored and checked in by Risingtides-dev; public/brand is canonical and design-systems/ocean-leptos/assets is an exact mirror",
       "source": "crates/ocean-surface-ui/src/icons.rs and scripts/build-brand-assets.mjs",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "design-systems/ocean-leptos/assets/ocean-mark.svg",
@@ -740,8 +736,8 @@
       "category": "ocean_brand_master",
       "provenance": "Ocean project artwork authored and checked in by Risingtides-dev; public/brand is canonical and design-systems/ocean-leptos/assets is an exact mirror",
       "source": "crates/ocean-surface-ui/src/icons.rs and scripts/build-brand-assets.mjs",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "docs/ocean-extension-context.html",
@@ -750,8 +746,8 @@
       "category": "design_or_documentation_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "docs/ocean-extension-manifesto.html",
@@ -760,8 +756,8 @@
       "category": "design_or_documentation_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "extension/sidepanel.html",
@@ -770,8 +766,8 @@
       "category": "application_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "index.html",
@@ -780,8 +776,8 @@
       "category": "application_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "legacy-voice/public/apple-touch-icon.png",
@@ -790,8 +786,8 @@
       "category": "legacy_ocean_app_icon",
       "provenance": "Repository-authored Ocean voice application artwork retained with the legacy client",
       "source": "legacy-voice/public/icon.svg and repository history beginning at 97ed5c3",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "legacy-voice/public/icon-192.png",
@@ -800,8 +796,8 @@
       "category": "legacy_ocean_app_icon",
       "provenance": "Repository-authored Ocean voice application artwork retained with the legacy client",
       "source": "legacy-voice/public/icon.svg and repository history beginning at 97ed5c3",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "legacy-voice/public/icon-512.png",
@@ -810,8 +806,8 @@
       "category": "legacy_ocean_app_icon",
       "provenance": "Repository-authored Ocean voice application artwork retained with the legacy client",
       "source": "legacy-voice/public/icon.svg and repository history beginning at 97ed5c3",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "legacy-voice/public/icon.svg",
@@ -820,8 +816,8 @@
       "category": "legacy_ocean_app_icon",
       "provenance": "Repository-authored Ocean voice application artwork retained with the legacy client",
       "source": "legacy-voice/public/icon.svg and repository history beginning at 97ed5c3",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "legacy-voice/public/index.html",
@@ -830,8 +826,8 @@
       "category": "application_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "mockups/animated-badge-v10.html",
@@ -840,8 +836,8 @@
       "category": "design_or_documentation_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "mockups/animated-badge-v11.html",
@@ -850,8 +846,8 @@
       "category": "design_or_documentation_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "mockups/animated-badge-v12.html",
@@ -860,8 +856,8 @@
       "category": "design_or_documentation_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "mockups/animated-badge-v13.html",
@@ -870,8 +866,8 @@
       "category": "design_or_documentation_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "mockups/animated-badge-v14.html",
@@ -880,8 +876,8 @@
       "category": "design_or_documentation_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "mockups/animated-badge-v15.html",
@@ -890,8 +886,8 @@
       "category": "design_or_documentation_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "mockups/animated-badge-v3.html",
@@ -900,8 +896,8 @@
       "category": "design_or_documentation_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "mockups/animated-badge-v4.html",
@@ -910,8 +906,8 @@
       "category": "design_or_documentation_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "mockups/animated-badge-v5.html",
@@ -920,8 +916,8 @@
       "category": "design_or_documentation_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "mockups/animated-badge-v6.html",
@@ -930,8 +926,8 @@
       "category": "design_or_documentation_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "mockups/animated-badge-v7.html",
@@ -940,8 +936,8 @@
       "category": "design_or_documentation_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "mockups/animated-badge-v8.html",
@@ -950,8 +946,8 @@
       "category": "design_or_documentation_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "mockups/animated-badge-v9.html",
@@ -960,8 +956,8 @@
       "category": "design_or_documentation_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "mockups/animated-badge.html",
@@ -970,8 +966,8 @@
       "category": "design_or_documentation_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "mockups/lockups.html",
@@ -980,8 +976,8 @@
       "category": "design_or_documentation_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "mockups/material-pass.html",
@@ -990,8 +986,8 @@
       "category": "design_or_documentation_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "mockups/wordmark-reveal-v16.html",
@@ -1000,8 +996,8 @@
       "category": "design_or_documentation_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "mockups/wordmark-reveal-v17.html",
@@ -1010,8 +1006,8 @@
       "category": "design_or_documentation_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "mockups/wordmark-reveal-v18.html",
@@ -1020,8 +1016,8 @@
       "category": "design_or_documentation_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "mockups/wordmark-reveal-v19.html",
@@ -1030,8 +1026,8 @@
       "category": "design_or_documentation_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "mockups/wordmark-reveal-v20.html",
@@ -1040,8 +1036,8 @@
       "category": "design_or_documentation_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "mockups/wordmark-reveal-v21.html",
@@ -1050,8 +1046,8 @@
       "category": "design_or_documentation_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "mockups/wordmark-reveal-v22.html",
@@ -1060,8 +1056,8 @@
       "category": "design_or_documentation_html",
       "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
       "source": "the tracked repository source at this path and its Git history",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "MIT OR Apache-2.0 (LICENSE); embedded Ocean names, logos, wordmarks, and distinctive brand elements remain excluded (TRADEMARKS.md)",
+      "status": "project_dual_licensed"
     },
     {
       "path": "public/apple-touch-icon.png",
@@ -1070,8 +1066,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "public/brand/master-1024.png",
@@ -1080,8 +1076,8 @@
       "category": "ocean_brand_master",
       "provenance": "Ocean project artwork authored and checked in by Risingtides-dev; public/brand is canonical and design-systems/ocean-leptos/assets is an exact mirror",
       "source": "crates/ocean-surface-ui/src/icons.rs and scripts/build-brand-assets.mjs",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "public/brand/ocean-mark.svg",
@@ -1090,8 +1086,8 @@
       "category": "ocean_brand_master",
       "provenance": "Ocean project artwork authored and checked in by Risingtides-dev; public/brand is canonical and design-systems/ocean-leptos/assets is an exact mirror",
       "source": "crates/ocean-surface-ui/src/icons.rs and scripts/build-brand-assets.mjs",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "public/fonts/Poppins-Bold.woff2",
@@ -1140,8 +1136,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "public/icon-512.png",
@@ -1150,8 +1146,8 @@
       "category": "generated_app_icon",
       "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
       "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     },
     {
       "path": "vscode-extension/media/wave.svg",
@@ -1160,8 +1156,13 @@
       "category": "ocean_ui_icon",
       "provenance": "Repository-authored Ocean wave icon introduced with the VS Code/Cursor ACP surface",
       "source": "repository commit 80bea30",
-      "license": "LicenseRef-Ocean-Project-Pending",
-      "status": "project_license_pending"
+      "license": "Protected Ocean brand asset; excluded from MIT OR Apache-2.0 grants (TRADEMARKS.md)",
+      "status": "protected_brand"
     }
-  ]
+  ],
+  "licensing_policy": {
+    "project_code_docs_and_non_brand_assets": "MIT OR Apache-2.0 (LICENSE)",
+    "brand_assets": "Excluded from the open-source grants; see TRADEMARKS.md",
+    "third_party_material": "Remains under the license recorded per asset and in NOTICE.md"
+  }
 }

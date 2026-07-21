@@ -2,6 +2,7 @@
   "name": "ocean-voice",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT OR Apache-2.0",
   "type": "module",
   "description": "Voice surface for the Ocean runtime — a thin steering client (web PWA + desktop daemon) over ocean-daemon.",
   "bin": {

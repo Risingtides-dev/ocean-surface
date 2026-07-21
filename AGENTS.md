@@ -99,10 +99,15 @@ All visual work on the Leptos web surface follows
   application/design artifact must update the manifest and preserve any
   required third-party license in the nearest asset directory.
 - Run `node scripts/check-asset-provenance.mjs`; missing records, stale records,
-  hash drift, and missing Poppins/Lucide licenses are release blockers.
-- Original Ocean artwork remains project-authored material pending the root
-  copyright-holder and license decision. Do not relabel unknown third-party
-  work as Ocean-owned merely because it appears in Git history.
+  hash drift, missing Poppins/Lucide licenses, and unresolved launch statuses
+  are release blockers.
+- Project-authored HTML source, application/design structure, and documentation
+  are `MIT OR Apache-2.0`; embedded Ocean names, marks, and distinctive brand
+  elements remain excluded under `TRADEMARKS.md`.
+- Ocean names, logos, wordmarks, application icons derived from the Ocean mark,
+  and distinctive brand assets are protected brand material, not project-dual-
+  licensed assets. Do not relabel unknown third-party work as Ocean-owned merely
+  because it appears in Git history.
 
 Ocean Floor is the read-only Observatory mode. Its isometric pixel scene,
 semantic list, inspector, and replay rail consume only the typed reducer over

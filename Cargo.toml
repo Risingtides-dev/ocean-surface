@@ -23,6 +23,6 @@ default-members = ["crates/ocean-surface-proxy"]
 
 [workspace.package]
 edition = "2021"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 authors = ["Risingtides-dev"]
 rust-version = "1.82"

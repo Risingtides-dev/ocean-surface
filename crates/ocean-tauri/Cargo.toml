@@ -2,7 +2,7 @@
 name = "ocean-tauri"
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 authors = ["Risingtides-dev"]
 rust-version = "1.82"
 description = "Tauri 2.x native shell that hosts the ocean-surface Leptos WASM bundle."

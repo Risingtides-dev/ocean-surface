@@ -193,3 +193,17 @@ xAI key.
 ## Provenance
 
 The voice work in `legacy-voice/` was originally proposed as PR #22 in `ocean-os`. Extracted here so the runtime repo stays Rust-only.
+
+## License, brand, and credits
+
+Ocean Surface code, project-authored documentation, and non-brand assets are
+available under [MIT or Apache-2.0](LICENSE), at your option. Ocean names, logos,
+wordmarks, application icons, and distinctive brand assets are excluded from
+those grants; see [`TRADEMARKS.md`](TRADEMARKS.md) for truthful and nominative
+use.
+
+Third-party material remains under its own terms. See [`NOTICE.md`](NOTICE.md)
+and the per-file [`docs/ASSET_PROVENANCE.md`](docs/ASSET_PROVENANCE.md) inventory,
+and meet the people and projects behind the surface in
+[`CREDITS.md`](CREDITS.md). Contribution terms are in
+[`CONTRIBUTING.md`](CONTRIBUTING.md).

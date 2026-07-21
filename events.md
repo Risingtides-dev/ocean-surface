@@ -2648,3 +2648,20 @@ GPUI icon copies path-for-path with pinned Lucide ISC/MIT icons, and removed two
 unreferenced implementation screenshots from the current public tree. Added a
 fail-closed manifest checker. Original Ocean artwork is project-authored but
 remains pending the operator's copyright-holder and root-license decision.
+
+time:      [03:45] [07-21-26]
+agent:     [ocean] [launch licensing]
+worktree:  license-credits-20260720
+type:      legal/provenance
+area:      public launch
+
+Applied the approved Ocean Surface launch posture: project code, documentation,
+repository-authored HTML structure, and non-brand assets are MIT OR Apache-2.0;
+61 Ocean marks and application-icon derivatives are explicitly protected brand
+assets rather than unknown or dual-licensed material. Finalized root license,
+trademark, notice, credits, and contribution documents; aligned Rust and npm
+package metadata; and made the 113-record asset gate reject pending statuses.
+The current inventory is 22 cleared third-party assets, 61 protected brand
+assets, and 30 dual-licensed repository-authored HTML artifacts. Lucide/Feather
+and Poppins remain under their upstream terms with pinned revisions and human
+credit.
