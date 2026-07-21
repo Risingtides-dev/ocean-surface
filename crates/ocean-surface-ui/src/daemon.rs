@@ -2143,6 +2143,16 @@ pub struct Daemon {
     /// authoritative Fresh commit and on session switch; a reused permission id
     /// (a fresh `permission_request` for the same id) clears its own tombstone.
     permission_tombstones: RwSignal<Vec<String>>,
+    /// TASK-69: a monotonically-increasing claim ticket ordering the TWO
+    /// independent publishers of permission/tombstone state — the agent loop's
+    /// `commit_session_projection` and the permission loop's standalone reconcile.
+    /// Each permission-fetching op CLAIMS an epoch at its START; the shared
+    /// `publish_permission_view` publishes ONLY if the claimant is still the
+    /// latest, so a stale (older-claim) result cannot overwrite a newer
+    /// authoritative one and resurrect a decided gate (codex HOLD on 8b41fee1:
+    /// nothing else orders the two publishers — `permission_revision` moves only
+    /// on frames/POST, not on snapshot publication).
+    permission_epoch: RwSignal<u64>,
     /// Per-turn reasoning-effort override (OCEAN-79). Holds the serialized
     /// `ThinkingLevel` string (`off` / `low` / `medium` / `high`) the daemon
     /// expects, or `None` to leave the daemon's global default in force. Set
@@ -2500,6 +2510,7 @@ impl Daemon {
             browser_last_action: RwSignal::new(None),
             permission_view: RwSignal::new(PermissionView::default()),
             permission_tombstones: RwSignal::new(Vec::new()),
+            permission_epoch: RwSignal::new(0),
             // Restore the last-selected per-turn overrides from localStorage so
             // the choices survive a reload (like `project`).
             thinking_level: RwSignal::new(load_persisted_thinking_level()),
@@ -2580,6 +2591,7 @@ impl Daemon {
             browser_last_action: RwSignal::new(None),
             permission_view: RwSignal::new(PermissionView::default()),
             permission_tombstones: RwSignal::new(Vec::new()),
+            permission_epoch: RwSignal::new(0),
             thinking_level: RwSignal::new(None),
             model_override: RwSignal::new(None),
             agent_override: RwSignal::new(None),
@@ -4666,6 +4678,10 @@ impl Daemon {
         self.pending_images.set(Vec::new());
         self.permission_view.set(PermissionView::default());
         self.permission_tombstones.set(Vec::new());
+        // TASK-69: advance the permission epoch so any in-flight OLDER publisher
+        // (a still-running load/reconcile for the session we just left) is
+        // superseded and cannot publish over the reset state (codex HOLD on 8b41fee1).
+        self.claim_permission_epoch();
         self.active_decision_token.set(None);
         self.session_id.set(Some(id.to_string()));
         persist_session(id);
@@ -4705,6 +4721,12 @@ impl Daemon {
         generation: u64,
     ) -> Result<ProjectionOutcome, String> {
         let snapshot_activity_revision = self.activity_revision.get_untracked();
+        // Claim this session-load's permission-projection epoch up front, BEFORE
+        // either fetch. A standalone reconcile that starts later claims a higher
+        // epoch and supersedes us, so our (older) permission publish will be
+        // skipped rather than resurrect a gate the newer reconcile resolved
+        // (codex HOLD on 8b41fee1). The transcript projection commits regardless.
+        let permission_epoch_claim = self.claim_permission_epoch();
         let url = self.url.get_untracked();
 
         // 1. Authoritative session snapshot (transcript + atomic live-turn state).
@@ -4751,6 +4773,10 @@ impl Daemon {
         let mut source = DaemonPermissionSnapshotSource {
             daemon: self,
             session_id: id,
+            // Fetch-only: this source feeds `settle_permission_snapshot` and never
+            // publishes (the session-load commit publishes via `commit_permission_view`
+            // under `permission_epoch_claim`), so its epoch is unused.
+            epoch_claim: 0,
         };
         // The card snapshot is AUXILIARY: a failure here (route missing on a
         // host, daemon hiccup, revision churn) must NEVER fail the whole session
@@ -4775,6 +4801,7 @@ impl Daemon {
             id,
             generation,
             snapshot_activity_revision,
+            permission_epoch_claim,
             detail,
             settle,
         )
@@ -4791,6 +4818,7 @@ impl Daemon {
             decision_authority: self.decision_authority,
             permission_view: self.permission_view,
             permission_tombstones: self.permission_tombstones,
+            permission_epoch: self.permission_epoch,
             session_title: self.session_title,
             cwd: self.cwd,
             model: self.model,
@@ -4798,6 +4826,17 @@ impl Daemon {
             pinned_widgets: self.pinned_widgets,
             status: self.status,
         }
+    }
+
+    /// TASK-69: claim the next permission-projection epoch. Called at the START
+    /// of a permission-publishing operation (session-load commit or standalone
+    /// reconcile); the returned ticket is the claimant's identity. A later claim
+    /// supersedes it, so `publish_permission_view` will then skip this claimant's
+    /// (now stale) publish — ordering the two otherwise-unsynchronized publishers.
+    fn claim_permission_epoch(&self) -> u64 {
+        self.permission_epoch
+            .update(|epoch| *epoch = epoch.wrapping_add(1));
+        self.permission_epoch.get_untracked()
     }
 
     async fn hydrate_active_session(&self, id: &str) -> Result<Vec<String>, String> {
@@ -4914,9 +4953,13 @@ impl Daemon {
     }
 
     async fn reconcile_pending_permissions(&self, session_id: &str) -> Result<(), String> {
+        // Claim this reconcile's epoch at the START (before the fetch), so it can
+        // supersede an older in-flight session-load publish (codex HOLD on
+        // 8b41fee1).
         let mut source = DaemonPermissionSnapshotSource {
             daemon: self,
             session_id,
+            epoch_claim: self.claim_permission_epoch(),
         };
         reconcile_permission_snapshot(&mut source).await
     }
@@ -4948,6 +4991,10 @@ impl Daemon {
         self.pending_images.set(Vec::new());
         self.permission_view.set(PermissionView::default());
         self.permission_tombstones.set(Vec::new());
+        // TASK-69: advance the permission epoch so any in-flight OLDER publisher
+        // (a still-running load/reconcile for the session we just left) is
+        // superseded and cannot publish over the reset state (codex HOLD on 8b41fee1).
+        self.claim_permission_epoch();
         self.active_decision_token.set(None);
         self.session_id.set(None);
         clear_persisted_session();
@@ -5819,9 +5866,12 @@ fn build_session_projection(
 /// `Daemon::dummy()` with the tombstones populated by the real
 /// `apply_control_event`/`decide_permission` plumbing — not precomputed literals
 /// (codex HOLD on 4cfb5c2).
+#[allow(clippy::too_many_arguments)]
 fn commit_permission_view(
     permission_view: RwSignal<PermissionView>,
     tombstones: RwSignal<Vec<String>>,
+    epoch: RwSignal<u64>,
+    epoch_claim: u64,
     state: Option<SessionRunState>,
     active_requests: &[String],
     settle: SnapshotSettle,
@@ -5839,7 +5889,13 @@ fn commit_permission_view(
         &resolved_ids,
         authority,
     );
-    publish_permission_view(permission_view, tombstones, projection.permission.clone());
+    publish_permission_view(
+        permission_view,
+        tombstones,
+        epoch,
+        epoch_claim,
+        projection.permission.clone(),
+    );
     projection
 }
 
@@ -5847,19 +5903,32 @@ fn commit_permission_view(
 /// by BOTH the session-load commit (`commit_permission_view`) and the standalone
 /// reconciler (`DaemonPermissionSnapshotSource`), so the two paths share one
 /// lifecycle (codex HOLD on c2a1810): publish the view, and — only on an
-/// authoritative Fresh — clear the decision tombstones, since a Fresh snapshot
-/// absorbs every decision so far. A degrade keeps them, since a later stale
-/// detail id may still need suppressing.
+/// authoritative Fresh — clear the decision tombstones.
+///
+/// TASK-69 (codex HOLD on 8b41fee1): the publish is EPOCH-GATED. `epoch_claim`
+/// is the ticket this caller took when it started; if a newer permission op has
+/// since claimed a later epoch (`epoch` advanced past `epoch_claim`), this
+/// publisher is stale and is SKIPPED — it must not overwrite the newer
+/// authoritative view or clear a tombstone the newer op depends on. Returns
+/// whether it published.
 fn publish_permission_view(
     permission_view: RwSignal<PermissionView>,
     tombstones: RwSignal<Vec<String>>,
+    epoch: RwSignal<u64>,
+    epoch_claim: u64,
     view: PermissionView,
-) {
+) -> bool {
+    // Only the latest claimant may publish. A stale claim (superseded by a newer
+    // permission op) is dropped; the caller's transcript projection still commits.
+    if epoch_claim != epoch.get_untracked() {
+        return false;
+    }
     let clears_tombstones = !view.is_unavailable();
     permission_view.set(view);
     if clears_tombstones {
         tombstones.set(Vec::new());
     }
+    true
 }
 
 /// The live signals `apply_session_projection` reads and writes — the signal half
@@ -5878,6 +5947,7 @@ struct SessionCommitSignals {
     decision_authority: RwSignal<HashMap<String, DecisionGrant>>,
     permission_view: RwSignal<PermissionView>,
     permission_tombstones: RwSignal<Vec<String>>,
+    permission_epoch: RwSignal<u64>,
     session_title: RwSignal<String>,
     cwd: RwSignal<String>,
     model: RwSignal<Option<String>>,
@@ -5899,6 +5969,7 @@ fn apply_session_projection(
     id: &str,
     generation: u64,
     snapshot_activity_revision: u64,
+    permission_epoch_claim: u64,
     detail: SessionDetail,
     settle: SnapshotSettle,
 ) -> Result<ProjectionOutcome, String> {
@@ -5970,11 +6041,15 @@ fn apply_session_projection(
     let authority = sig.decision_authority.get_untracked();
     // Publish the two-state permission view through the shared signal seam: reads
     // prior view + tombstones from their signals, folds `detail_ids − tombstones`,
-    // publishes, and clears tombstones only on a Fresh. No `await`, so a
+    // and publishes UNDER THE EPOCH CLAIM — if a newer permission op (a concurrent
+    // standalone reconcile) has since claimed a later epoch, this stale publish is
+    // SKIPPED so it cannot overwrite the newer authoritative view. No `await`, so a
     // decision/request that interleaved either fetch await is reflected.
     let projection = commit_permission_view(
         sig.permission_view,
         sig.permission_tombstones,
+        sig.permission_epoch,
+        permission_epoch_claim,
         state,
         &active_requests,
         settle,
@@ -5982,12 +6057,16 @@ fn apply_session_projection(
         &authority,
     );
     // Live set = daemon live requests plus any request still holding an open gate.
+    // Read from the CURRENT permission view (which may be the newer view a
+    // concurrent publisher committed, if our permission publish was skipped).
     let mut live_requests: HashSet<String> = active_requests.iter().cloned().collect();
-    for card in projection.permission.cards() {
-        if let Some(request_id) = &card.request_id {
-            live_requests.insert(request_id.clone());
+    sig.permission_view.with_untracked(|view| {
+        for card in view.cards() {
+            if let Some(request_id) = &card.request_id {
+                live_requests.insert(request_id.clone());
+            }
         }
-    }
+    });
 
     sig.session_title.set(title);
     if let Some(root) = workspace_root.or(cwd) {
@@ -6002,7 +6081,8 @@ fn apply_session_projection(
     sig.pinned_widgets.set(rebuilt_pinned);
     sig.active_turn_id.set(projection.active_turn_id);
     sig.streaming.set(projection.streaming);
-    // permission_view + tombstones already published by commit_permission_view.
+    // permission_view + tombstones already published by commit_permission_view
+    // (or skipped if a newer epoch superseded this claim).
     sig.decision_authority.update(|authority| {
         prune_session_authority(authority, id, &live_requests);
     });
@@ -6656,6 +6736,11 @@ fn classify_permission_poll(
 struct DaemonPermissionSnapshotSource<'a> {
     daemon: &'a Daemon,
     session_id: &'a str,
+    /// The permission-projection epoch claimed when this reconcile started; its
+    /// `apply`/`degrade` publish under it, so a stale reconcile cannot overwrite a
+    /// newer publisher (codex HOLD on 8b41fee1). Fetch-only sources (the
+    /// session-load settle) pass 0 — they never publish, so it is unused.
+    epoch_claim: u64,
 }
 
 impl PermissionSnapshotSource for DaemonPermissionSnapshotSource<'_> {
@@ -6725,6 +6810,8 @@ impl PermissionSnapshotSource for DaemonPermissionSnapshotSource<'_> {
         publish_permission_view(
             self.daemon.permission_view,
             self.daemon.permission_tombstones,
+            self.daemon.permission_epoch,
+            self.epoch_claim,
             PermissionView::fresh(snapshot),
         );
     }
@@ -6744,6 +6831,8 @@ impl PermissionSnapshotSource for DaemonPermissionSnapshotSource<'_> {
         publish_permission_view(
             self.daemon.permission_view,
             self.daemon.permission_tombstones,
+            self.daemon.permission_epoch,
+            self.epoch_claim,
             view,
         );
     }
@@ -10711,13 +10800,15 @@ mod tests {
         );
     }
 
-    /// Run the real post-fetch commit wrapper with injected fetch results.
+    /// Run the real post-fetch commit wrapper with injected fetch results,
+    /// claiming a fresh permission epoch (the ordinary single-publisher case).
     fn run_wrapper(
         daemon: &Daemon,
         detail: SessionDetail,
         settle: SnapshotSettle,
     ) -> ProjectionOutcome {
-        apply_session_projection(&daemon.commit_signals(), "s1", 5, 0, detail, settle)
+        let epoch = daemon.claim_permission_epoch();
+        apply_session_projection(&daemon.commit_signals(), "s1", 5, 0, epoch, detail, settle)
             .expect("admission passes for the focused session")
     }
 
@@ -10931,6 +11022,7 @@ mod tests {
             inner: DaemonPermissionSnapshotSource {
                 daemon,
                 session_id: "s1",
+                epoch_claim: daemon.claim_permission_epoch(),
             },
             result,
         }
@@ -11010,11 +11102,13 @@ mod tests {
         // Retire the snapshot: call the wrapper with a generation the daemon has
         // moved past (sse_generation is 5; this snapshot captured generation 4).
         let detail = wrapper_detail(vec![format!("gate-{}", "A")], vec![user_entry("new")]);
+        let epoch = daemon.claim_permission_epoch();
         let outcome = apply_session_projection(
             &daemon.commit_signals(),
             "s1",
             4,
             0,
+            epoch,
             detail,
             SnapshotSettle::Fresh(Vec::new()),
         );
@@ -11029,6 +11123,173 @@ mod tests {
         assert_eq!(
             daemon.permission_tombstones.get_untracked(),
             tombstones_before
+        );
+    }
+
+    // Regression 10 (codex HOLD on 8b41fee1): the cross-publisher epoch race. The
+    // agent load claims its epoch first (detail lists A); decision A lands
+    // (tombstone); a NEWER standalone reconcile then claims a later epoch and
+    // publishes authoritative Fresh(empty), clearing the tombstone; finally the
+    // OLDER agent rich fetch degrades. Its permission publish must be SKIPPED (its
+    // epoch is superseded) so it cannot resurrect A over the newer Fresh — while
+    // its transcript still commits. (Broken: no epoch gate → stale Degraded
+    // overwrites Fresh(empty) with Unavailable(A) → RED.)
+    #[test]
+    fn reg10_stale_agent_degrade_does_not_overwrite_newer_standalone_fresh() {
+        let daemon = wrapper_daemon();
+        // A is pending and shown; the agent load starts (claims its epoch) with A
+        // in its detail.
+        drive_frame(&daemon, &request_frame("gate-A"));
+        let agent_epoch = daemon.claim_permission_epoch();
+        // Decision A lands during the agent's fetches: tombstone + remove.
+        drive_frame(&daemon, &decision_frame("gate-A"));
+        // A newer standalone reconcile publishes authoritative Fresh(empty),
+        // claiming a later epoch and clearing the tombstone.
+        let mut source = canned_source(&daemon, Ok(Vec::new()));
+        reconcile_permission_snapshot(&mut source)
+            .now_or_never()
+            .expect("canned fetch resolves immediately")
+            .unwrap();
+        assert!(!daemon.permission_view.get_untracked().is_unavailable());
+        assert!(daemon.permission_tombstones.get_untracked().is_empty());
+        // Now the OLDER agent rich fetch degrades and tries to commit with its
+        // stale epoch. Detail still lists A (captured before the decision).
+        let detail = wrapper_detail(vec![format!("gate-{}", "A")], vec![user_entry("hi")]);
+        apply_session_projection(
+            &daemon.commit_signals(),
+            "s1",
+            5,
+            0,
+            agent_epoch,
+            detail,
+            SnapshotSettle::Degraded("older rich fetch failed".into()),
+        )
+        .expect("admission still passes; only the permission publish is gated");
+        // Transcript committed...
+        assert!(!daemon.turns.get_untracked().is_empty());
+        // ...but the stale agent did NOT overwrite the newer authoritative Fresh:
+        // A is not resurrected and the tombstone stays clear.
+        let view = daemon.permission_view.get_untracked();
+        assert!(
+            !view.is_unavailable(),
+            "a stale agent degrade must not overwrite the newer standalone Fresh"
+        );
+        assert!(view.cards().is_empty());
+        assert!(daemon.permission_tombstones.get_untracked().is_empty());
+    }
+
+    // Regression 11 (codex HOLD on 8b41fee1): the inverse — the LATEST claimant
+    // wins. An older standalone reconcile publishes first; the agent then claims a
+    // later epoch and its publish supersedes the older one. (Broken: if the gate
+    // rejected the latest claimant, the agent's authoritative result would be lost
+    // → RED.)
+    #[test]
+    fn reg11_latest_claimant_publish_wins() {
+        let daemon = wrapper_daemon();
+        // An older standalone reconcile publishes Fresh([old-B]) first.
+        let mut source = canned_source(&daemon, Ok(vec![task44_card("old-B", Some("old-B-req"))]));
+        reconcile_permission_snapshot(&mut source)
+            .now_or_never()
+            .expect("canned fetch resolves immediately")
+            .unwrap();
+        assert_eq!(
+            ids_of(&daemon.permission_view.get_untracked()),
+            vec!["old-B".to_string()]
+        );
+        // The agent claims a LATER epoch and commits Fresh([new-C]); as the latest
+        // claimant it wins.
+        let agent_epoch = daemon.claim_permission_epoch();
+        let detail = wrapper_detail(vec![], vec![user_entry("hi")]);
+        apply_session_projection(
+            &daemon.commit_signals(),
+            "s1",
+            5,
+            0,
+            agent_epoch,
+            detail,
+            SnapshotSettle::Fresh(vec![task44_card("new-C", Some("new-C-req"))]),
+        )
+        .expect("admission passes");
+        assert_eq!(
+            ids_of(&daemon.permission_view.get_untracked()),
+            vec!["new-C".to_string()],
+            "the latest claimant's authoritative publish must win"
+        );
+    }
+
+    // Regression 12 (codex HOLD on 8b41fee1, pin 3): when an older permission
+    // commit is SKIPPED, its downstream (live_requests → decision_authority
+    // pruning) must derive from the WINNER (current permission_view), not the
+    // rejected candidate. A newer card B published by a reconcile must keep its
+    // actionability AND its request-bound decision authority when an older agent
+    // commit that lacks B is skipped. (Broken: prune from the rejected candidate →
+    // B's authority is pruned though B is still visibly published → RED.)
+    #[test]
+    fn reg12_skipped_older_commit_does_not_prune_newer_card_authority() {
+        let daemon = wrapper_daemon();
+        // Local authority so card B is actionable.
+        daemon
+            .decision_authority
+            .set(task44_authority(&[("B-req", "token-B", "s1")]));
+        // The agent load starts first (claims the earlier epoch).
+        let agent_epoch = daemon.claim_permission_epoch();
+        // A newer standalone reconcile publishes Fresh([B]); B is actionable.
+        let mut source = canned_source(&daemon, Ok(vec![task44_card("B", Some("B-req"))]));
+        reconcile_permission_snapshot(&mut source)
+            .now_or_never()
+            .expect("canned fetch resolves immediately")
+            .unwrap();
+        assert!(daemon.permission_view.get_untracked().cards()[0].actionable);
+        // The older agent commit (which lacks B) is skipped; its authority pruning
+        // must use the current view (with B), not its own empty candidate.
+        let detail = wrapper_detail(vec![], vec![user_entry("hi")]);
+        apply_session_projection(
+            &daemon.commit_signals(),
+            "s1",
+            5,
+            0,
+            agent_epoch,
+            detail,
+            SnapshotSettle::Fresh(Vec::new()),
+        )
+        .expect("admission passes");
+        let view = daemon.permission_view.get_untracked();
+        assert_eq!(ids_of(&view), vec!["B".to_string()]);
+        assert!(
+            view.cards()[0].actionable,
+            "the newer card must stay actionable through an older skipped commit"
+        );
+        assert!(
+            daemon
+                .decision_authority
+                .get_untracked()
+                .contains_key("B-req"),
+            "an older skipped commit must not prune the newer card's decision authority"
+        );
+    }
+
+    // Regression 13 (codex HOLD on 8b41fee1, pin 2): a session reset/switch must
+    // ADVANCE the epoch so an in-flight OLD-session publisher cannot remain latest
+    // and publish over the freshly-reset state. A reconcile claims its epoch, then
+    // the user switches sessions (reset + epoch advance); when the stale reconcile
+    // finally publishes, it is skipped. (Broken: switch doesn't advance the epoch →
+    // the stale reconcile's card overwrites the reset state → RED.)
+    #[test]
+    fn reg13_session_switch_supersedes_in_flight_reconcile_publish() {
+        let daemon = wrapper_daemon();
+        // An in-flight reconcile has claimed its epoch (canned_source claims on
+        // construction) but has not published yet.
+        let mut source = canned_source(&daemon, Ok(vec![task44_card("stale", Some("stale-req"))]));
+        // The user switches sessions: resets permission state AND advances the epoch.
+        daemon.select_session_state("s2", "other session".into());
+        // The stale reconcile now completes and tries to publish.
+        reconcile_permission_snapshot(&mut source)
+            .now_or_never()
+            .expect("canned fetch resolves immediately")
+            .unwrap();
+        assert!(
+            daemon.permission_view.get_untracked().cards().is_empty(),
+            "a session switch must supersede an in-flight reconcile's stale publish"
         );
     }
 
