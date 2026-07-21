@@ -1132,6 +1132,15 @@
   align-items: center;
   gap: 6px;
   flex: 0 0 auto;
+  /* TASK-103: cap the roster at ~3 chip rows and scroll, so a busy room's
+     participants can't wrap into a tall band that eats the transcript column. */
+  max-height: 90px;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.room-stage__roster::-webkit-scrollbar {
+  display: none;
 }
 
 .room-stage__addagent-toggle {
