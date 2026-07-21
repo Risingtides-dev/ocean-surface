@@ -7310,6 +7310,17 @@ fn turns_from_session_transcript(
         .map(|c| (c.tool_call_id.as_str(), c))
         .collect();
 
+    // TASK-99: index every tool CALL's arguments by tool_call_id so a rebuilt
+    // tool block can recover its `args_preview` (the live SSE reducer stores it,
+    // but the transcript rebuild dropped it to empty — so a RELOADED session lost
+    // every browser-action summary, which `deck::browser::summary_from_args`
+    // derives by parsing that preview).
+    let call_args: std::collections::HashMap<&str, &SessionToolContext> = tool_context
+        .iter()
+        .filter(|c| c.kind == "call")
+        .map(|c| (c.tool_call_id.as_str(), c))
+        .collect();
+
     let mut turns = Vec::new();
     let mut pinned: Vec<PinnedWidget> = Vec::new();
     for entry in entries {
@@ -7355,10 +7366,20 @@ fn turns_from_session_transcript(
             "tool" => {
                 let mut turn = Turn::assistant(format!("snapshot-tool-{}", turns.len()));
                 let is_error = entry.is_error.unwrap_or(false);
+                let name = entry.tool_name.unwrap_or_else(|| "tool".into());
+                // Recover the call's args (by tool_call_id) so a reloaded browser
+                // action still summarizes, matching the live path (TASK-99).
+                let args_preview = entry
+                    .tool_call_id
+                    .as_deref()
+                    .and_then(|id| call_args.get(id))
+                    .and_then(|call| call.arguments.as_ref())
+                    .map(|args| tool_args_preview(&name, args))
+                    .unwrap_or_default();
                 turn.blocks.push(Block::ToolCall {
                     call_id: format!("snapshot-tool-{}", turns.len()),
-                    name: entry.tool_name.unwrap_or_else(|| "tool".into()),
-                    args_preview: String::new(),
+                    name,
+                    args_preview,
                     output: entry.text,
                     status: if is_error {
                         ToolStatus::Err
@@ -11732,6 +11753,43 @@ mod tests {
         // Non-browser tools remain truncated (a bash/write call can be huge).
         let bash = tool_args_preview("bash", &json!({ "command": "x".repeat(200) }));
         assert!(bash.chars().count() <= 60);
+    }
+
+    // TASK-99: a RELOADED session must recover browser-action summaries too — the
+    // transcript rebuild now populates a tool block's args_preview from the
+    // matching tool CALL's persisted arguments (by tool_call_id), instead of
+    // dropping it to empty and leaving the cockpit summary as "?".
+    #[test]
+    fn transcript_rebuild_recovers_browser_tool_args_for_summary() {
+        let long_url = "https://example.com/very/long/path?a=1&b=2&c=3&d=4&e=5&f=6";
+        let entries = vec![SessionTranscriptEntry {
+            role: "tool".into(),
+            text: "navigated".into(),
+            tool_call_id: Some("call-1".into()),
+            tool_name: Some("browser_navigate".into()),
+            is_error: Some(false),
+        }];
+        let tool_context = vec![SessionToolContext {
+            kind: "call".into(),
+            tool_call_id: "call-1".into(),
+            tool_name: "browser_navigate".into(),
+            arguments: Some(json!({ "url": long_url })),
+        }];
+        let (turns, _) = turns_from_session_transcript(entries, &tool_context);
+        let preview = turns
+            .iter()
+            .flat_map(|t| &t.blocks)
+            .find_map(|b| match b {
+                Block::ToolCall {
+                    name, args_preview, ..
+                } if name == "browser_navigate" => Some(args_preview.clone()),
+                _ => None,
+            })
+            .expect("a browser_navigate tool block was rebuilt");
+        // The rebuilt args are whole + parseable, so the summary recovers the url.
+        let parsed: Value =
+            serde_json::from_str(&preview).expect("rebuilt browser args must parse as JSON");
+        assert_eq!(parsed.get("url").and_then(|v| v.as_str()), Some(long_url));
     }
 
     // -- session persistence (should_restore_session pure helper) --
