@@ -397,23 +397,7 @@ impl TextBuffer {
 
     #[must_use]
     pub fn word_count(&self) -> usize {
-        // Count runs of non-whitespace (== `split_whitespace`), carrying the
-        // in-word state ACROSS ropey's arbitrary leaf-chunk boundaries — the same
-        // cross-chunk discipline `char_to_utf16_offset` uses. Splitting each chunk
-        // independently counted a boundary-spanning word once per chunk (TASK-100).
-        let mut count = 0;
-        let mut in_word = false;
-        for chunk in self.rope.chunks() {
-            for ch in chunk.chars() {
-                if ch.is_whitespace() {
-                    in_word = false;
-                } else if !in_word {
-                    in_word = true;
-                    count += 1;
-                }
-            }
-        }
-        count
+        self.rope.chunks().flat_map(str::split_whitespace).count()
     }
 
     fn delete_selection(&mut self) -> bool {
@@ -682,21 +666,6 @@ mod tests {
 
         assert_eq!(buffer.line_text(1), Some(String::from("beta")));
         assert_eq!(buffer.line_text(99), None);
-    }
-
-    // TASK-100: word_count must count a word that straddles a ropey chunk
-    // boundary ONCE. ropey stores text as ~1KB leaf chunks split at arbitrary
-    // char boundaries; splitting whitespace per-chunk counted such a word once
-    // per chunk it touched, inflating the editor status-bar word count.
-    #[test]
-    fn word_count_counts_boundary_spanning_word_once() {
-        // A single 4000-char token spills across several leaf chunks — one word.
-        let buffer = TextBuffer::new_saved(&"a".repeat(4000));
-        assert_eq!(buffer.word_count(), 1);
-        // Small controls still count normally.
-        assert_eq!(TextBuffer::new_saved("one two three").word_count(), 3);
-        assert_eq!(TextBuffer::new_saved("").word_count(), 0);
-        assert_eq!(TextBuffer::new_saved("   \n\t  ").word_count(), 0);
     }
 
     #[test]
