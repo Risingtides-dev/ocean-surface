@@ -1054,6 +1054,44 @@ impl PermissionView {
         }
     }
 
+    /// TASK-69 fix-forward: build the degraded view for a session-load projection
+    /// that could not settle the rich card snapshot. This is what a Degraded
+    /// commit publishes, and it must (codex HOLD on 8b41fee):
+    ///
+    /// 1. PRESERVE the same-session live cards already admitted into `prior_view`
+    ///    (frames that arrived over the control stream during the snapshot await)
+    ///    — they are real and actionable and must survive the degrade, not be
+    ///    flattened to an id and overwritten.
+    /// 2. Seed the warning set from `detail_pending_ids` — the daemon's
+    ///    authoritative `SessionDetail.pending_permissions` — so a gate that
+    ///    predates the load is visible on a FIRST load where the local
+    ///    `prior_view` is empty; unioned with whatever the operator was already
+    ///    shown locally, minus anything already covered by a preserved live card.
+    fn degraded_preserving(
+        reason: String,
+        prior_view: &PermissionView,
+        detail_pending_ids: &[String],
+    ) -> Self {
+        let cards = prior_view.cards().to_vec();
+        let card_ids: HashSet<&str> = cards.iter().map(|c| c.permission_id.as_str()).collect();
+        let mut known_pending_ids: Vec<String> = Vec::new();
+        for id in detail_pending_ids
+            .iter()
+            .chain(prior_view.all_known_pending_ids().iter())
+        {
+            if !card_ids.contains(id.as_str()) && !known_pending_ids.contains(id) {
+                known_pending_ids.push(id.clone());
+            }
+        }
+        Self {
+            cards,
+            availability: PermissionAvailability::Unavailable {
+                reason,
+                known_pending_ids,
+            },
+        }
+    }
+
     /// The fully-materialized, actionable cards (renderable exactly as before).
     pub(crate) fn cards(&self) -> &[PendingPermission] {
         &self.cards
@@ -4512,7 +4550,8 @@ impl Daemon {
             detail.state,
             &active_requests,
             SnapshotSettle::Fresh(Vec::new()),
-            Vec::new(),
+            &[],
+            &PermissionView::default(),
             &self.decision_authority.get_untracked(),
         );
 
@@ -4705,9 +4744,12 @@ impl Daemon {
         if let SnapshotSettle::Degraded(reason) = &settle {
             log::warn!("session projection permission snapshot degraded for {id}: {reason}");
         }
-        // What the operator was already shown for THIS session — seeds the
-        // Unavailable warning so a degrade keeps the stub instead of blanking.
-        let prior_known_pending_ids = self.permission_view.get_untracked().all_known_pending_ids();
+        // The live view at commit time. Captured AFTER the settle await (the only
+        // yield point) and read again with no `await` before the atomic set below,
+        // so a `permission_request` frame admitted during the await is already
+        // reflected here — its card must survive a degrade (codex HOLD: preserve
+        // already-admitted same-session live cards), not be flattened to an id.
+        let prior_view = self.permission_view.get_untracked();
 
         // 3. Re-admit after the second await: focus/generation may have moved.
         if admit_session_snapshot(
@@ -4753,6 +4795,11 @@ impl Daemon {
             tool_context,
             state,
             active_requests,
+            // The daemon's authoritative pending-permission ids for this session.
+            // On a FIRST load (empty local prior view) this is the ONLY proof a
+            // pre-existing gate exists when the rich card snapshot degrades — it
+            // must not be dropped by the `..` (codex HOLD on 8b41fee).
+            pending_permissions: detail_pending_ids,
             ..
         } = detail;
 
@@ -4781,7 +4828,8 @@ impl Daemon {
             state,
             &active_requests,
             settle,
-            prior_known_pending_ids,
+            &detail_pending_ids,
+            &prior_view,
             &authority,
         );
         // Live set = the daemon's live requests plus any request still holding an
@@ -5766,24 +5814,38 @@ struct SessionProjection {
     permission: PermissionView,
 }
 
+/// The pure permission-and-live-turn decision `commit_session_projection`
+/// delegates to. All of the two-state permission logic lives HERE — the commit
+/// path adds no permission handling of its own beyond sampling its inputs and
+/// publishing the result — so the seam/regression tests that drive this function
+/// exercise the real production decision (codex HOLD on 8b41fee: regressions 1/2
+/// must test the commit path, and `commit_session_projection` itself is
+/// HTTP-bound and not unit-runnable).
+///
+/// `detail_pending_ids` = the daemon's authoritative `SessionDetail.pending_permissions`
+/// (first-load proof). `prior_view` = the live view at commit time, whose
+/// same-session cards must survive a degrade.
 fn build_session_projection(
     state: Option<SessionRunState>,
     active_requests: &[String],
     settle: SnapshotSettle,
-    prior_known_pending_ids: Vec<String>,
+    detail_pending_ids: &[String],
+    prior_view: &PermissionView,
     authority: &HashMap<String, DecisionGrant>,
 ) -> SessionProjection {
     let (active_turn_id, streaming) = project_live_turn(state, active_requests);
     // TASK-69 seam 1: a settled fetch establishes an authoritative Fresh view; a
-    // degrade publishes Unavailable retaining the ids the operator was already
-    // shown, so a pre-load gate stays visible as a warning rather than vanishing.
+    // degrade publishes Unavailable that preserves same-session live cards and
+    // seeds the warning from the daemon's authoritative pending ids ∪ what the
+    // operator was already shown — so a pre-load gate stays visible even on a
+    // first load with an empty prior view, and an in-flight live card is not lost.
     let permission = match settle {
         SnapshotSettle::Fresh(mut cards) => {
             mark_cards_actionable(&mut cards, authority);
             PermissionView::fresh(cards)
         }
         SnapshotSettle::Degraded(reason) => {
-            PermissionView::unavailable(reason, prior_known_pending_ids)
+            PermissionView::degraded_preserving(reason, prior_view, detail_pending_ids)
         }
     };
     SessionProjection {
@@ -8098,7 +8160,8 @@ mod tests {
             Some(SessionRunState::WaitingForPermission),
             &["request-1".to_string()],
             SnapshotSettle::Fresh(vec![task44_card("permission-1", Some("request-1"))]),
-            Vec::new(),
+            &[],
+            &PermissionView::default(),
             &authority,
         );
         assert_eq!(projection.active_turn_id.as_deref(), Some("request-1"));
@@ -8269,7 +8332,8 @@ mod tests {
                 "permission-remote",
                 Some("request-remote"),
             )]),
-            Vec::new(),
+            &[],
+            &PermissionView::default(),
             &authority,
         );
         assert!(!projection.permission.cards()[0].actionable);
@@ -8326,14 +8390,16 @@ mod tests {
             state,
             &active_requests,
             SnapshotSettle::Fresh(cards()),
-            Vec::new(),
+            &[],
+            &PermissionView::default(),
             &web_authority,
         );
         let tauri = build_session_projection(
             state,
             &active_requests,
             SnapshotSettle::Fresh(cards()),
-            Vec::new(),
+            &[],
+            &PermissionView::default(),
             &tauri_authority,
         );
 
@@ -10332,26 +10398,31 @@ mod tests {
     }
 
     // Seam 1: a degraded session-load projection publishes a VISIBLE Unavailable
-    // that retains the ids the operator was already shown — not a blank Fresh
-    // that makes a pre-load gate vanish. (Broken build: Degraded arm returns
-    // `PermissionView::fresh(vec![])` → `is_unavailable()` goes false → RED.)
+    // that retains the ids the operator was already shown locally — not a blank
+    // Fresh that makes a pre-load gate vanish. Prior view carries known ids with
+    // no live card (a prior degrade), and a fresh degrade preserves that warning.
+    // (Broken build: Degraded arm returns `PermissionView::fresh(vec![])` →
+    // `is_unavailable()` goes false → RED.)
     #[test]
     fn seam1_projection_degrade_publishes_unavailable_retaining_prior_ids() {
-        let mut prior = Vec::new();
-        prior.push(format!("gate-{}", "alpha"));
-        prior.push(format!("gate-{}", "beta"));
+        let prior = PermissionView::unavailable(
+            "earlier".into(),
+            vec![format!("gate-{}", "alpha"), format!("gate-{}", "beta")],
+        );
+        let expected = prior.unconfirmed_ids();
         let projection = build_session_projection(
             None,
             &[],
             SnapshotSettle::Degraded("route missing on host".into()),
-            prior.clone(),
+            &[],
+            &prior,
             &HashMap::new(),
         );
         assert!(
             projection.permission.is_unavailable(),
             "degrade must publish Unavailable, not a silent empty Fresh"
         );
-        assert_eq!(projection.permission.unconfirmed_ids(), prior);
+        assert_eq!(projection.permission.unconfirmed_ids(), expected);
         assert!(projection.permission.cards().is_empty());
     }
 
@@ -10363,7 +10434,8 @@ mod tests {
             None,
             &[],
             SnapshotSettle::Fresh(vec![task44_card("gate-only", None)]),
-            Vec::new(),
+            &[],
+            &PermissionView::default(),
             &HashMap::new(),
         );
         assert!(!projection.permission.is_unavailable());
@@ -10372,6 +10444,68 @@ mod tests {
             vec!["gate-only".to_string()]
         );
         assert!(projection.permission.unconfirmed_ids().is_empty());
+    }
+
+    // Regression 1 (codex HOLD on 8b41fee): on a FIRST load — empty local prior
+    // view — a degraded rich snapshot must still surface a pre-existing gate from
+    // the daemon's authoritative SessionDetail.pending_permissions. This drives
+    // the exact decision commit_session_projection delegates to
+    // (build_session_projection), which the HTTP-bound commit itself cannot unit
+    // run. (Broken build: Degraded arm ignores detail_pending_ids / uses only the
+    // prior view → unconfirmed empty on first load → RED.)
+    #[test]
+    fn reg1_first_load_degrade_surfaces_daemon_pending_ids() {
+        let daemon_pending = vec![format!("gate-{}", "predates-load")];
+        let projection = build_session_projection(
+            None,
+            &[],
+            SnapshotSettle::Degraded("permissions route 500".into()),
+            &daemon_pending,
+            &PermissionView::default(), // first load: nothing shown locally yet
+            &HashMap::new(),
+        );
+        assert!(projection.permission.is_unavailable());
+        assert_eq!(
+            projection.permission.unconfirmed_ids(),
+            daemon_pending,
+            "a pre-load gate must surface from the daemon snapshot on first load"
+        );
+    }
+
+    // Regression 2 (codex HOLD on 8b41fee): a live permission_request frame
+    // admitted DURING the snapshot await (modeled by ingesting into the prior
+    // view) must SURVIVE a degraded commit as a real actionable card — not be
+    // flattened to an id and overwritten — while an un-materialized daemon id
+    // still warns. (Broken build: Degraded arm rebuilds via `unavailable(...)`
+    // with cards=[] → the live card is lost → RED.)
+    #[test]
+    fn reg2_degrade_preserves_inflight_live_card_and_warns_uncovered() {
+        // The interleaved live frame: an actionable card enters the live view
+        // before the settle resolves.
+        let mut live = PermissionView::default();
+        live.ingest_request(task44_card("live-A", Some("req-A")));
+        let daemon_pending = vec!["live-A".to_string(), format!("gate-{}", "other")];
+        let projection = build_session_projection(
+            None,
+            &[],
+            SnapshotSettle::Degraded("snapshot kept changing".into()),
+            &daemon_pending,
+            &live,
+            &HashMap::new(),
+        );
+        // The live card survives as a real card...
+        assert_eq!(
+            ids_of(&projection.permission),
+            vec!["live-A".to_string()],
+            "an admitted live card must survive the degraded commit"
+        );
+        // ...is not double-counted in the warning; only the uncovered daemon id
+        // (which has no live card) warns.
+        assert!(projection.permission.is_unavailable());
+        assert_eq!(
+            projection.permission.unconfirmed_ids(),
+            vec![format!("gate-{}", "other")]
+        );
     }
 
     // Seam 2: a failed cross-session permission poll classifies as Unavailable
