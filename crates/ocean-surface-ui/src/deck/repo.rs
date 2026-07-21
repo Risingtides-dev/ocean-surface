@@ -440,7 +440,7 @@ enum CheckSummary {
     Empty,
     AllPass,
     Failing { passing: usize, total: usize },
-    InProgress { total: usize },
+    InProgress { pending: usize, total: usize },
 }
 
 fn compute_check_summary(checks: &[GhCheckRun]) -> CheckSummary {
@@ -467,8 +467,11 @@ fn compute_check_summary(checks: &[GhCheckRun]) -> CheckSummary {
     }
     if failing > 0 {
         CheckSummary::Failing { passing, total }
-    } else if pending == total {
-        CheckSummary::InProgress { total }
+    } else if pending > 0 {
+        // ANY still-running check means the PR is not "all pass" yet — a pending
+        // check can still fail. Previously only the all-pending case (pending ==
+        // total) was caught, so a partial mix false-greened as AllPass (TASK-97).
+        CheckSummary::InProgress { pending, total }
     } else {
         CheckSummary::AllPass
     }
@@ -960,8 +963,8 @@ fn pr_row(
                                 CheckSummary::Failing { passing, total } => view! {
                                     <span class="deck-repo-gh-check-text deck-repo-gh-check-text--err">{format!("✗ {}/{} checks", passing, total)}</span>
                                 }.into_any(),
-                                CheckSummary::InProgress { total } => view! {
-                                    <span class="deck-repo-gh-check-text deck-repo-gh-check-text--warn">{format!("{} checks pending", total)}</span>
+                                CheckSummary::InProgress { pending, total: _ } => view! {
+                                    <span class="deck-repo-gh-check-text deck-repo-gh-check-text--warn">{format!("{} checks pending", pending)}</span>
                                 }.into_any(),
                             }}
                         </span>
@@ -1290,8 +1293,32 @@ mod tests_gh {
             check_fixture("deploy", "in_progress", None),
         ];
         match compute_check_summary(&checks) {
-            CheckSummary::InProgress { total } => assert_eq!(total, 2),
+            CheckSummary::InProgress { pending, total } => {
+                assert_eq!(pending, 2);
+                assert_eq!(total, 2);
+            }
             other => panic!("expected InProgress, got {:?}", other),
+        }
+    }
+
+    // TASK-97: a PR whose checks are a MIX of passing and still-pending (no
+    // failures) is NOT "all pass" — a still-running check can yet fail. The old
+    // `pending == total` gate only caught the all-pending case, so a partial mix
+    // fell through to AllPass and rendered a false green "All checks pass" on an
+    // unfinished PR (the normal transient CI state).
+    #[test]
+    fn compute_check_summary_mixed_pass_and_pending_is_in_progress_not_all_pass() {
+        let checks = vec![
+            check_fixture("lint", "completed", Some("success")),
+            check_fixture("test", "completed", Some("success")),
+            check_fixture("deploy", "in_progress", None),
+        ];
+        match compute_check_summary(&checks) {
+            CheckSummary::InProgress { pending, total } => {
+                assert_eq!(pending, 1, "one check is still running");
+                assert_eq!(total, 3);
+            }
+            other => panic!("a partially-pending PR must not read as AllPass; got {other:?}"),
         }
     }
 
