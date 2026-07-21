@@ -4,9 +4,9 @@ The client face of [Ocean OS](https://github.com/Risingtides-dev/ocean-os).
 One Rust + Leptos app, built once via Trunk and shipped to two hosts: the
 browser PWA and the Tauri native shell — both load the same `dist/` WASM bundle.
 A Chrome extension wraps that same bundle. Native macOS is delivered by the
-Tauri 2.x shell (`crates/ocean-tauri`), not a separate GPUI app; the legacy
-GPUI desktop app (`crates/ocean-gui`) is soft-deprecated (source retained for
-mining into the Tauri Rust backend).
+Tauri 2.x shell (`crates/ocean-tauri`), not a separate GPUI app; the GPUI
+desktop app (`crates/ocean-gui`) is ABANDONED (2026-07-21) — dead source, do
+not work on it.
 
 Cross-repo routing and ownership map: [`docs/OCEAN_PROJECT_MAP.md`](docs/OCEAN_PROJECT_MAP.md).
 Ocean Surface requires only the public `ocean-os` daemon. The private
@@ -95,8 +95,8 @@ permission requests, completion). Surfaces must subscribe scoped to their own
 | `crates/ocean-surface-proxy/`   | axum service: forwards voice STT/TTS to the daemon, serves the WASM bundle. |
 | `extension/`                    | Chrome extension wrapper around the Leptos surface.                  |
 | `legacy-voice/`                 | Reference: the JS voice client (PR #22). Deleted once ported.        |
-| `crates/ocean-gui/`             | legacy GPUI native desktop app and tldraw canvas host (soft-deprecated, source retained for mining). |
-| `crates/ocean-gui/canvas-web/`  | tldraw/web bundle loaded by the GPUI canvas host (legacy).           |
+| `crates/ocean-gui/`             | ABANDONED GPUI desktop app (2026-07-21) — dead, do NOT work on it.   |
+| `crates/ocean-gui/canvas-web/`  | ABANDONED (part of the dead GPUI app) — do NOT work on it.           |
 
 ## Dev loop
 

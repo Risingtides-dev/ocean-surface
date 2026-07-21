@@ -13,12 +13,13 @@ members = [
 # workspace member) launched via ./run-tauri.sh.
 default-members = ["crates/ocean-surface-proxy"]
 
-# crates/ocean-gui is the LEGACY GPUI desktop face (soft-deprecated
-# 2026-07-07). The active native surface is the Tauri shell at
-# crates/ocean-tauri/ (standalone, not a workspace member). The GPUI source
-# is retained for mining into the Tauri Rust backend; do not build new
-# features on it. It stays a workspace member only so `cargo check -p
-# ocean-gui` still works for archeology.
+# crates/ocean-gui is ABANDONED (2026-07-21). The GPUI desktop face is dead —
+# the active native surface is the Tauri shell at crates/ocean-tauri/. DO NOT
+# work on ocean-gui: do not scout it for fixes, do not add features, do not
+# "clean it up", do not file or take tickets against it. It is NOT a live
+# surface and touching it is wasted effort. The source is frozen for reference
+# only; it remains a workspace member solely so a stale `cargo check` doesn't
+# error. Any agent finding a "bug" in here should ignore it and move on.
 
 [workspace.package]
 edition = "2021"

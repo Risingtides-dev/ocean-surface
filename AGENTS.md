@@ -4,8 +4,9 @@ Ocean Surface is the product-surface repo. The canonical UI is one Leptos/WASM
 app (`crates/ocean-surface-ui`) built once via Trunk and shipped to two hosts:
 the browser PWA (served by `crates/ocean-surface-proxy`) and the Tauri native
 shell (`crates/ocean-tauri`, macOS first). A Chrome extension wraps the same
-bundle. The legacy GPUI desktop app (`crates/ocean-gui`) is soft-deprecated —
-source retained for mining into the Tauri Rust backend, not for new feature work.
+bundle. The GPUI desktop app (`crates/ocean-gui`) is ABANDONED (2026-07-21) —
+DO NOT work on it: no fixes, no features, no scouting for bugs, no tickets. It
+is dead source, frozen for reference only; touching it is wasted effort.
 
 The sibling repo `../ocean-os` owns runtime authority: daemon, agent loop,
 tools, providers, permissions, projects, workspaces, sessions, and events.
@@ -257,8 +258,8 @@ Web surface session UI:
 | `extension/` | Chrome extension wrapper around the Leptos surface |
 | `vscode-extension/` | Cursor/VS Code ACP client surface with sidebar, bottom-panel, editor-tab, and status-bar launch modes |
 | `legacy-voice/` | reference voice code only; do not build new architecture here |
-| `crates/ocean-gui/` | legacy GPUI native desktop app and tldraw canvas host (soft-deprecated, source retained for mining) |
-| `crates/ocean-gui/canvas-web/` | web bundle loaded into the GPUI canvas webview (legacy) |
+| `crates/ocean-gui/` | ABANDONED GPUI desktop app (2026-07-21) — dead, do NOT work on it |
+| `crates/ocean-gui/canvas-web/` | ABANDONED (part of the dead GPUI app) — do NOT work on it |
 
 The proxy holds no provider credentials. `/api/stt` and `/api/tts` forward to
 the daemon's `/v1/voice/stt` and `/v1/voice/tts`, where `ocean-os` resolves the
@@ -275,8 +276,7 @@ cargo check -p ocean-surface-proxy
 cd crates/ocean-tauri && cargo check   # native shell (standalone, not a workspace member)
 ```
 
-The GPUI crate still builds but is not the active surface:
-`cargo check -p ocean-gui`.
+The GPUI crate is ABANDONED — do not work on it, do not scout it for fixes.
 
 For local web/proxy work:
 
