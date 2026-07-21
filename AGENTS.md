@@ -90,6 +90,19 @@ All visual work on the Leptos web surface follows
   chrome, one header overflow (`⋯`) for secondary actions, ghost triggers for
   idle features (dialer, join call), reveal-on-intent for power knobs.
 
+## Asset Provenance Contract
+
+- `docs/ASSET_PROVENANCE.md` explains the current release boundary;
+  `docs/asset-provenance.json` is the per-file source/license/hash inventory.
+- Every new or changed image, icon, font, audio/video, PDF, or HTML
+  application/design artifact must update the manifest and preserve any
+  required third-party license in the nearest asset directory.
+- Run `node scripts/check-asset-provenance.mjs`; missing records, stale records,
+  hash drift, and missing Poppins/Lucide licenses are release blockers.
+- Original Ocean artwork remains project-authored material pending the root
+  copyright-holder and license decision. Do not relabel unknown third-party
+  work as Ocean-owned merely because it appears in Git history.
+
 Ocean Floor is the read-only Observatory mode. Its isometric pixel scene,
 semantic list, inspector, and replay rail consume only the typed reducer over
 metadata-safe `/v1/observatory/{snapshot,events,replay}` responses; no mock

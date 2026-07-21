@@ -13,6 +13,10 @@ Ocean Surface requires only the public `ocean-os` daemon. The private
 `ocean-bedrock` service is optional for authorized team deployments; surfaces
 must not depend on it or place Bedrock credentials in browser state.
 
+Release asset sources, licenses, and exact hashes are documented in
+[`docs/ASSET_PROVENANCE.md`](docs/ASSET_PROVENANCE.md) and enforced by
+`node scripts/check-asset-provenance.mjs`.
+
 | Target | How | Why |
 |---|---|---|
 | Native desktop (Tauri) | `./run-tauri.sh` | Tauri 2.x shell loading a freshly built `dist/` Leptos bundle as the browser |

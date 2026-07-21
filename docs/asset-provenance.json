@@ -1,0 +1,1167 @@
+{
+  "schema_version": 1,
+  "audited_at": "2026-07-20",
+  "asset_extensions": [
+    ".avif",
+    ".bmp",
+    ".gif",
+    ".html",
+    ".ico",
+    ".jpeg",
+    ".jpg",
+    ".m4a",
+    ".mov",
+    ".mp3",
+    ".mp4",
+    ".ogg",
+    ".otf",
+    ".pdf",
+    ".png",
+    ".svg",
+    ".tif",
+    ".tiff",
+    ".ttf",
+    ".wav",
+    ".webm",
+    ".webp",
+    ".woff",
+    ".woff2"
+  ],
+  "scope": "Every tracked image, icon, font, audio/video, PDF, and HTML application/design artifact in the current public tree.",
+  "pending_decisions": [
+    "Confirm the copyright holder for original Ocean artwork and project-authored artifacts.",
+    "Choose the root project license and effective release boundary."
+  ],
+  "assets": [
+    {
+      "path": ".superpowers/brainstorm/84184-1783188707/content/module-boundaries.html",
+      "bytes": 3636,
+      "sha256": "2e7507f4f26a8b7d0412e1df6ff22c4ba8fb2d0e2b7c8a3d44828d3ee3b217d0",
+      "category": "design_or_documentation_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-gui/assets/icons/ocean-gui/bell.svg",
+      "bytes": 393,
+      "sha256": "d6fa594e7546b8bed2095a52577f28dadb59c5ee3360419fa3ebe3cc800c43c2",
+      "category": "third_party_icon",
+      "provenance": "Pinned Lucide source imported path-for-path during the 2026-07-20 provenance audit",
+      "source": "https://github.com/lucide-icons/lucide/tree/658573b0171e693bc965c167592cc0b92d002a3e/icons",
+      "license": "ISC/MIT as enumerated in crates/ocean-gui/assets/icons/ocean-gui/LICENSE-LUCIDE",
+      "status": "cleared"
+    },
+    {
+      "path": "crates/ocean-gui/assets/icons/ocean-gui/blocks.svg",
+      "bytes": 367,
+      "sha256": "227a5e8aec4e82409e39c4fc20d96d310437884f43fb97031335cc68a7f185f5",
+      "category": "third_party_icon",
+      "provenance": "Pinned Lucide source imported path-for-path during the 2026-07-20 provenance audit",
+      "source": "https://github.com/lucide-icons/lucide/tree/658573b0171e693bc965c167592cc0b92d002a3e/icons",
+      "license": "ISC/MIT as enumerated in crates/ocean-gui/assets/icons/ocean-gui/LICENSE-LUCIDE",
+      "status": "cleared"
+    },
+    {
+      "path": "crates/ocean-gui/assets/icons/ocean-gui/book.svg",
+      "bytes": 378,
+      "sha256": "f690eacd360fce7735c96d7f36b46b898668b1e372c8ae5722dd28a74ac5706d",
+      "category": "third_party_icon",
+      "provenance": "Pinned Lucide source imported path-for-path during the 2026-07-20 provenance audit",
+      "source": "https://github.com/lucide-icons/lucide/tree/658573b0171e693bc965c167592cc0b92d002a3e/icons",
+      "license": "ISC/MIT as enumerated in crates/ocean-gui/assets/icons/ocean-gui/LICENSE-LUCIDE",
+      "status": "cleared"
+    },
+    {
+      "path": "crates/ocean-gui/assets/icons/ocean-gui/chat.svg",
+      "bytes": 347,
+      "sha256": "6a4cf513c582d4d4d186fe24daad7854eb5b4384d5c39ce3ba9f507f119a6ed6",
+      "category": "third_party_icon",
+      "provenance": "Pinned Lucide source imported path-for-path during the 2026-07-20 provenance audit",
+      "source": "https://github.com/lucide-icons/lucide/tree/658573b0171e693bc965c167592cc0b92d002a3e/icons",
+      "license": "ISC/MIT as enumerated in crates/ocean-gui/assets/icons/ocean-gui/LICENSE-LUCIDE",
+      "status": "cleared"
+    },
+    {
+      "path": "crates/ocean-gui/assets/icons/ocean-gui/check_circle.svg",
+      "bytes": 273,
+      "sha256": "dcc1173f496b67f0791bdc4c99d4caf8980c4b08c91c2fc633c10b482230869d",
+      "category": "third_party_icon",
+      "provenance": "Pinned Lucide source imported path-for-path during the 2026-07-20 provenance audit",
+      "source": "https://github.com/lucide-icons/lucide/tree/658573b0171e693bc965c167592cc0b92d002a3e/icons",
+      "license": "ISC/MIT as enumerated in crates/ocean-gui/assets/icons/ocean-gui/LICENSE-LUCIDE",
+      "status": "cleared"
+    },
+    {
+      "path": "crates/ocean-gui/assets/icons/ocean-gui/code.svg",
+      "bytes": 266,
+      "sha256": "fbc04d57fcec927f7368654698f52ee1e68ec79948f1c2b3ecaf0acf63d24215",
+      "category": "third_party_icon",
+      "provenance": "Pinned Lucide source imported path-for-path during the 2026-07-20 provenance audit",
+      "source": "https://github.com/lucide-icons/lucide/tree/658573b0171e693bc965c167592cc0b92d002a3e/icons",
+      "license": "ISC/MIT as enumerated in crates/ocean-gui/assets/icons/ocean-gui/LICENSE-LUCIDE",
+      "status": "cleared"
+    },
+    {
+      "path": "crates/ocean-gui/assets/icons/ocean-gui/database_zap.svg",
+      "bytes": 396,
+      "sha256": "906fbf05bbad4bba96afb30d18045a5e51c0fca5ce87a60476680b4697041ec1",
+      "category": "third_party_icon",
+      "provenance": "Pinned Lucide source imported path-for-path during the 2026-07-20 provenance audit",
+      "source": "https://github.com/lucide-icons/lucide/tree/658573b0171e693bc965c167592cc0b92d002a3e/icons",
+      "license": "ISC/MIT as enumerated in crates/ocean-gui/assets/icons/ocean-gui/LICENSE-LUCIDE",
+      "status": "cleared"
+    },
+    {
+      "path": "crates/ocean-gui/assets/icons/ocean-gui/diff.svg",
+      "bytes": 413,
+      "sha256": "f833fb3fb138e018ff499d3a53f9bc9c235bf07c8e4959062dec85d0d6c94c02",
+      "category": "third_party_icon",
+      "provenance": "Pinned Lucide source imported path-for-path during the 2026-07-20 provenance audit",
+      "source": "https://github.com/lucide-icons/lucide/tree/658573b0171e693bc965c167592cc0b92d002a3e/icons",
+      "license": "ISC/MIT as enumerated in crates/ocean-gui/assets/icons/ocean-gui/LICENSE-LUCIDE",
+      "status": "cleared"
+    },
+    {
+      "path": "crates/ocean-gui/assets/icons/ocean-gui/file_doc.svg",
+      "bytes": 444,
+      "sha256": "243299048ddaba9f5e52455ea2922afa09272dfda8ee4d428ec6112ff6532c1e",
+      "category": "third_party_icon",
+      "provenance": "Pinned Lucide source imported path-for-path during the 2026-07-20 provenance audit",
+      "source": "https://github.com/lucide-icons/lucide/tree/658573b0171e693bc965c167592cc0b92d002a3e/icons",
+      "license": "ISC/MIT as enumerated in crates/ocean-gui/assets/icons/ocean-gui/LICENSE-LUCIDE",
+      "status": "cleared"
+    },
+    {
+      "path": "crates/ocean-gui/assets/icons/ocean-gui/file_markdown.svg",
+      "bytes": 444,
+      "sha256": "3c9392fd4ec959c04bd7186b95006a00764e5f7547757910fda50663927e2c23",
+      "category": "third_party_icon",
+      "provenance": "Pinned Lucide source imported path-for-path during the 2026-07-20 provenance audit",
+      "source": "https://github.com/lucide-icons/lucide/tree/658573b0171e693bc965c167592cc0b92d002a3e/icons",
+      "license": "ISC/MIT as enumerated in crates/ocean-gui/assets/icons/ocean-gui/LICENSE-LUCIDE",
+      "status": "cleared"
+    },
+    {
+      "path": "crates/ocean-gui/assets/icons/ocean-gui/file_text.svg",
+      "bytes": 444,
+      "sha256": "243299048ddaba9f5e52455ea2922afa09272dfda8ee4d428ec6112ff6532c1e",
+      "category": "third_party_icon",
+      "provenance": "Pinned Lucide source imported path-for-path during the 2026-07-20 provenance audit",
+      "source": "https://github.com/lucide-icons/lucide/tree/658573b0171e693bc965c167592cc0b92d002a3e/icons",
+      "license": "ISC/MIT as enumerated in crates/ocean-gui/assets/icons/ocean-gui/LICENSE-LUCIDE",
+      "status": "cleared"
+    },
+    {
+      "path": "crates/ocean-gui/assets/icons/ocean-gui/folder_open.svg",
+      "bytes": 401,
+      "sha256": "8a673d287a48096e5e8bc4e6e45f14d25393a9b38e037bd38f6645459e789696",
+      "category": "third_party_icon",
+      "provenance": "Pinned Lucide source imported path-for-path during the 2026-07-20 provenance audit",
+      "source": "https://github.com/lucide-icons/lucide/tree/658573b0171e693bc965c167592cc0b92d002a3e/icons",
+      "license": "ISC/MIT as enumerated in crates/ocean-gui/assets/icons/ocean-gui/LICENSE-LUCIDE",
+      "status": "cleared"
+    },
+    {
+      "path": "crates/ocean-gui/assets/icons/ocean-gui/list_todo.svg",
+      "bytes": 359,
+      "sha256": "3c8a5e602cd46d673d0dcb06cdd9157577d2d59cb9ccda2c5be424a8251e0f36",
+      "category": "third_party_icon",
+      "provenance": "Pinned Lucide source imported path-for-path during the 2026-07-20 provenance audit",
+      "source": "https://github.com/lucide-icons/lucide/tree/658573b0171e693bc965c167592cc0b92d002a3e/icons",
+      "license": "ISC/MIT as enumerated in crates/ocean-gui/assets/icons/ocean-gui/LICENSE-LUCIDE",
+      "status": "cleared"
+    },
+    {
+      "path": "crates/ocean-gui/assets/icons/ocean-gui/send.svg",
+      "bytes": 393,
+      "sha256": "be7b866b2e10c10a108f6f649e2db8cc446e909e9b8f132ca1cb4ed222130768",
+      "category": "third_party_icon",
+      "provenance": "Pinned Lucide source imported path-for-path during the 2026-07-20 provenance audit",
+      "source": "https://github.com/lucide-icons/lucide/tree/658573b0171e693bc965c167592cc0b92d002a3e/icons",
+      "license": "ISC/MIT as enumerated in crates/ocean-gui/assets/icons/ocean-gui/LICENSE-LUCIDE",
+      "status": "cleared"
+    },
+    {
+      "path": "crates/ocean-gui/assets/icons/ocean-gui/server.svg",
+      "bytes": 413,
+      "sha256": "02b466fbf81e9ae6ffed5a3f0d9df339d9d48ad0eb092e5a8e33f87ac61530a2",
+      "category": "third_party_icon",
+      "provenance": "Pinned Lucide source imported path-for-path during the 2026-07-20 provenance audit",
+      "source": "https://github.com/lucide-icons/lucide/tree/658573b0171e693bc965c167592cc0b92d002a3e/icons",
+      "license": "ISC/MIT as enumerated in crates/ocean-gui/assets/icons/ocean-gui/LICENSE-LUCIDE",
+      "status": "cleared"
+    },
+    {
+      "path": "crates/ocean-gui/assets/icons/ocean-gui/terminal.svg",
+      "bytes": 261,
+      "sha256": "556723d56513b46624c0f0ab4f2c59968548638525a40ce7c9cebbc7d0d7691f",
+      "category": "third_party_icon",
+      "provenance": "Pinned Lucide source imported path-for-path during the 2026-07-20 provenance audit",
+      "source": "https://github.com/lucide-icons/lucide/tree/658573b0171e693bc965c167592cc0b92d002a3e/icons",
+      "license": "ISC/MIT as enumerated in crates/ocean-gui/assets/icons/ocean-gui/LICENSE-LUCIDE",
+      "status": "cleared"
+    },
+    {
+      "path": "crates/ocean-gui/assets/icons/ocean-gui/tool_search.svg",
+      "bytes": 275,
+      "sha256": "aa3cb1a3c4741790c5879c776a747b5901f936df7c075043b51ebd189c0eeb0d",
+      "category": "third_party_icon",
+      "provenance": "Pinned Lucide source imported path-for-path during the 2026-07-20 provenance audit",
+      "source": "https://github.com/lucide-icons/lucide/tree/658573b0171e693bc965c167592cc0b92d002a3e/icons",
+      "license": "ISC/MIT as enumerated in crates/ocean-gui/assets/icons/ocean-gui/LICENSE-LUCIDE",
+      "status": "cleared"
+    },
+    {
+      "path": "crates/ocean-gui/assets/icons/ocean-gui/user_check.svg",
+      "bytes": 328,
+      "sha256": "a4e06e6ccb6ce54ee56bbdee55761b6ccb602a7ffb9bc0309a05ce4af700e2ae",
+      "category": "third_party_icon",
+      "provenance": "Pinned Lucide source imported path-for-path during the 2026-07-20 provenance audit",
+      "source": "https://github.com/lucide-icons/lucide/tree/658573b0171e693bc965c167592cc0b92d002a3e/icons",
+      "license": "ISC/MIT as enumerated in crates/ocean-gui/assets/icons/ocean-gui/LICENSE-LUCIDE",
+      "status": "cleared"
+    },
+    {
+      "path": "crates/ocean-gui/canvas-web/index.html",
+      "bytes": 307,
+      "sha256": "b7ad8ec8fd9657d5ec6856a4e20070251a948f361dbb2c0bdf0221b57cf1cd5b",
+      "category": "application_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/128x128.png",
+      "bytes": 17689,
+      "sha256": "0a688a65cd784fa22b41170ff7ca13f67ebf25d6108c59fee12038604eb6e0ea",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/128x128@2x.png",
+      "bytes": 47581,
+      "sha256": "9ae05cbdd9b3767c55b1a0091c6345b6e4f69a8793b0fac45eea3ba4d65ac09f",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/32x32.png",
+      "bytes": 2381,
+      "sha256": "f910cd82373e2c336d7a2e13bd9021424454386e07eb1dfa3e3be7e79112a374",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/64x64.png",
+      "bytes": 6576,
+      "sha256": "31fc7be165dd6010dd3ef62582a8ef1d6d42142ed032fba30afc95623e01b839",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/Square107x107Logo.png",
+      "bytes": 13646,
+      "sha256": "274c501dc0c0c76b26a2d364be137c2a984bad1f1b629dea33929ec47977b058",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/Square142x142Logo.png",
+      "bytes": 20317,
+      "sha256": "6da83344f46f088221c515d17600c20fddb7674182c96008ff6a3b4b099ca6a5",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/Square150x150Logo.png",
+      "bytes": 22108,
+      "sha256": "530c045708fcc9b9c066e653f1504b9fb3e820b740a1b03011f303879b2af6dd",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/Square284x284Logo.png",
+      "bytes": 55514,
+      "sha256": "39bdaacc7ef94775ec953451de3f0430ecdb914435c4fef632dbf88ebc8cd3fe",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/Square30x30Logo.png",
+      "bytes": 2159,
+      "sha256": "999812fb8167910a4743c73483fd28550b88dec1ea2bfee873b410bbd6de04a3",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/Square310x310Logo.png",
+      "bytes": 63337,
+      "sha256": "c4e541a99704f235ff8fcb6a42e856d52020c207c8251c63bbff7f5be38cee57",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/Square44x44Logo.png",
+      "bytes": 3882,
+      "sha256": "ba0e738f5bf049a2b5782cce3202b402d7cf425546badc619cba63891087b827",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/Square71x71Logo.png",
+      "bytes": 7640,
+      "sha256": "6045a325d916019b1ca0cfc5c1f818230bf34bb6e1d8234e27154404582fa156",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/Square89x89Logo.png",
+      "bytes": 10611,
+      "sha256": "a354b692075baf5183b17749f166d5d23d9eccf47b02e4cfd2f373cfda79770d",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/StoreLogo.png",
+      "bytes": 4658,
+      "sha256": "6bff651db93a023c450743119c1b76da29455a3dcde776b3083e9d71d61ff4f6",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/android/mipmap-hdpi/ic_launcher.png",
+      "bytes": 3844,
+      "sha256": "502247a1457b048430ba6e51002a7fbab2b6b4710cf2f0e1c90ba96d21001828",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/android/mipmap-hdpi/ic_launcher_foreground.png",
+      "bytes": 24331,
+      "sha256": "a14a04323e6f4367ff1c5422efbc623761f2175fa3c42d09dba359f16d2ac42e",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/android/mipmap-hdpi/ic_launcher_round.png",
+      "bytes": 4429,
+      "sha256": "f1eb0feaae91805cf74669d6e3f821d44a0453407dbf70e09adbd10f8906d02a",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/android/mipmap-mdpi/ic_launcher.png",
+      "bytes": 3695,
+      "sha256": "1a763df7bc9b15e800d9db9249e95b5a3d21bcedebc0214e46fc7aecb2fb176a",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/android/mipmap-mdpi/ic_launcher_foreground.png",
+      "bytes": 13931,
+      "sha256": "14eebbd5ced2bfdb7b6bed08bdba3fd08b1b5378124842c5c2952ca8ffdb9c77",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/android/mipmap-mdpi/ic_launcher_round.png",
+      "bytes": 4179,
+      "sha256": "deb261b193563ccf3bbdbed2a6da421c8826d22a0f64bd8eb40a72f0f6e7fc8e",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/android/mipmap-xhdpi/ic_launcher.png",
+      "bytes": 10554,
+      "sha256": "1c367d0af682f3e7a106cdda36e571b590965cdcbbdbe71e22981853e600be9b",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/android/mipmap-xhdpi/ic_launcher_foreground.png",
+      "bytes": 36512,
+      "sha256": "6158153d706c4e8097162cbe83eac2234683445be3f4c22027b1d26806afa7f6",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/android/mipmap-xhdpi/ic_launcher_round.png",
+      "bytes": 12100,
+      "sha256": "cdbd2883cae5a41a7c341ba0becdbff4b986cb733c2bf4addc3afa35c652afaf",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/android/mipmap-xxhdpi/ic_launcher.png",
+      "bytes": 19353,
+      "sha256": "0b24d55f7a77bd9e7ba37ac3f9965936f13f28aac1bffb8723d868a92b69c469",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/android/mipmap-xxhdpi/ic_launcher_foreground.png",
+      "bytes": 67631,
+      "sha256": "594d9339369d35c0e65cac5ba0d98b8b895c102bb465a7ab60f08ff0c44f7993",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/android/mipmap-xxhdpi/ic_launcher_round.png",
+      "bytes": 22687,
+      "sha256": "e56611517e824f1c068006d1c00d9b99cf21dc132eb124e6315d9fcd75457ee6",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/android/mipmap-xxxhdpi/ic_launcher.png",
+      "bytes": 30054,
+      "sha256": "93a5c610dadb20fbe2ce5e675641e899083e40206864c9f88f870038244c662c",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/android/mipmap-xxxhdpi/ic_launcher_foreground.png",
+      "bytes": 106599,
+      "sha256": "f39da42a580a043c466a7ffcb7772197c5facf72e0b4d4ea726e96a9fba751fc",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/android/mipmap-xxxhdpi/ic_launcher_round.png",
+      "bytes": 34792,
+      "sha256": "37045d4ed4c2e7f7b5ae9c7944cd4d82adfb6de26d10d7848a581cce13d72bdd",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/icon.ico",
+      "bytes": 65165,
+      "sha256": "20109e9eafc4d4ff59a4e8ef5f9464db4d3c46e18df28ae224ad72d69efcb160",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/icon.png",
+      "bytes": 2298,
+      "sha256": "f8a3b35278d4ce0d17f9b1f959a7b081ee6af61646101fa9fa50cb60992f290d",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/ios/AppIcon-20x20@1x.png",
+      "bytes": 1067,
+      "sha256": "f38303320904b3c9fa115fb45587a3dd7e20c8e4d5470145273b1831451ef34f",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/ios/AppIcon-20x20@2x-1.png",
+      "bytes": 2806,
+      "sha256": "348e90d4fadb3ee9e6cc6d947024b0f12e5445e0298dce3cd60f32bc944f30aa",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/ios/AppIcon-20x20@2x.png",
+      "bytes": 2806,
+      "sha256": "348e90d4fadb3ee9e6cc6d947024b0f12e5445e0298dce3cd60f32bc944f30aa",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/ios/AppIcon-20x20@3x.png",
+      "bytes": 5144,
+      "sha256": "062aab60222680039c95c40b2b12e772640e8325c37bd7a019f8641c0380a845",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/ios/AppIcon-29x29@1x.png",
+      "bytes": 1770,
+      "sha256": "c9f4ff149be91ca7f3e311b474b70b54f8ce1c8bb3883e316af5f0fb96f065c8",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/ios/AppIcon-29x29@2x-1.png",
+      "bytes": 4956,
+      "sha256": "3e6992035e5305cc59307fbe9e4becdfa2adf7aa2c7a59473c96167098a2e959",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/ios/AppIcon-29x29@2x.png",
+      "bytes": 4956,
+      "sha256": "3e6992035e5305cc59307fbe9e4becdfa2adf7aa2c7a59473c96167098a2e959",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/ios/AppIcon-29x29@3x.png",
+      "bytes": 8850,
+      "sha256": "644efcf4b86b77367fec9151f9647ff95c8482116948b76ed8c5190dd43073f9",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/ios/AppIcon-40x40@1x.png",
+      "bytes": 2806,
+      "sha256": "348e90d4fadb3ee9e6cc6d947024b0f12e5445e0298dce3cd60f32bc944f30aa",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/ios/AppIcon-40x40@2x-1.png",
+      "bytes": 7881,
+      "sha256": "a2869524abff18685590f25058a9398796104307c2a41e20b4e8cfe1a41520cf",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/ios/AppIcon-40x40@2x.png",
+      "bytes": 7881,
+      "sha256": "a2869524abff18685590f25058a9398796104307c2a41e20b4e8cfe1a41520cf",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/ios/AppIcon-40x40@3x.png",
+      "bytes": 13598,
+      "sha256": "4abb4b6befe4e7bd864980022e7b0c929bfdba5b1b20f7ff872afd4b0cede8d2",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/ios/AppIcon-512@2x.png",
+      "bytes": 321500,
+      "sha256": "61666ac9bbc4a6d8e1d99449ff9cdad74e7be222570faa37301e9d14b901f639",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/ios/AppIcon-60x60@2x.png",
+      "bytes": 13598,
+      "sha256": "4abb4b6befe4e7bd864980022e7b0c929bfdba5b1b20f7ff872afd4b0cede8d2",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/ios/AppIcon-60x60@3x.png",
+      "bytes": 24123,
+      "sha256": "5e695e2236002cc917dcd141d968d3903755ca528c8ba655e653ce257981aed7",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/ios/AppIcon-76x76@1x.png",
+      "bytes": 7295,
+      "sha256": "65c4fa4a4c898412303a48c09f3b702d48815940d4291b2780d8f334316be055",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/ios/AppIcon-76x76@2x.png",
+      "bytes": 19297,
+      "sha256": "e1f02ad6e45fbf45c542f44a4e00d9fcc5a8d9dec08b3b75aa2e679d9764bf12",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "crates/ocean-tauri/icons/ios/AppIcon-83.5x83.5@2x.png",
+      "bytes": 21871,
+      "sha256": "51ef3ee1f08a8473d23fd949f20f8fd1d49f3ba7e394539935f387d0411cccb9",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "design-systems/ocean-leptos/assets/master-1024.png",
+      "bytes": 419893,
+      "sha256": "f9587a7f02e531fc9653f968fb6617219e5ac02ae5929c46a3b487fbdf894bf9",
+      "category": "ocean_brand_master",
+      "provenance": "Ocean project artwork authored and checked in by Risingtides-dev; public/brand is canonical and design-systems/ocean-leptos/assets is an exact mirror",
+      "source": "crates/ocean-surface-ui/src/icons.rs and scripts/build-brand-assets.mjs",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "design-systems/ocean-leptos/assets/ocean-mark.svg",
+      "bytes": 4691,
+      "sha256": "8a922b9fef04ad089de7cb4e5d1062075bf9ea8c5fb170073a0094f257c066e5",
+      "category": "ocean_brand_master",
+      "provenance": "Ocean project artwork authored and checked in by Risingtides-dev; public/brand is canonical and design-systems/ocean-leptos/assets is an exact mirror",
+      "source": "crates/ocean-surface-ui/src/icons.rs and scripts/build-brand-assets.mjs",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "docs/ocean-extension-context.html",
+      "bytes": 14967,
+      "sha256": "1ed504f1a81a686252d54409256fd5490d6eb47fd9f06b52307f1b8d77292754",
+      "category": "design_or_documentation_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "docs/ocean-extension-manifesto.html",
+      "bytes": 31727,
+      "sha256": "ebd10178e5a75b314b79f9a49d20b8487871c90d99a17241a6d31030a3e65d3c",
+      "category": "design_or_documentation_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "extension/sidepanel.html",
+      "bytes": 1272,
+      "sha256": "faee84a317ae51ff970a3673ea577b566fd67fc2907f0463fed133e548e47c05",
+      "category": "application_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "index.html",
+      "bytes": 32069,
+      "sha256": "0ef17ac8f1165331919cca7a65780be9ca5485810b6456201191a67e4482862d",
+      "category": "application_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "legacy-voice/public/apple-touch-icon.png",
+      "bytes": 7312,
+      "sha256": "89ae7a994155be7724c99690c767ae10dcfe04a40a579573693e6d70f87b33c5",
+      "category": "legacy_ocean_app_icon",
+      "provenance": "Repository-authored Ocean voice application artwork retained with the legacy client",
+      "source": "legacy-voice/public/icon.svg and repository history beginning at 97ed5c3",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "legacy-voice/public/icon-192.png",
+      "bytes": 7851,
+      "sha256": "3ed3514761d181e04bb6ed1a5d86b48431ceca612b4d892afd2c2d6d17063ce8",
+      "category": "legacy_ocean_app_icon",
+      "provenance": "Repository-authored Ocean voice application artwork retained with the legacy client",
+      "source": "legacy-voice/public/icon.svg and repository history beginning at 97ed5c3",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "legacy-voice/public/icon-512.png",
+      "bytes": 25439,
+      "sha256": "4864f8f94bf28e370e1d1100f98f3c3f8abc07b1b046724331787b88f659c478",
+      "category": "legacy_ocean_app_icon",
+      "provenance": "Repository-authored Ocean voice application artwork retained with the legacy client",
+      "source": "legacy-voice/public/icon.svg and repository history beginning at 97ed5c3",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "legacy-voice/public/icon.svg",
+      "bytes": 1482,
+      "sha256": "df8bbc6c4b81a0acfe08420a6a753cd49f79ebea3addd0f1376281b3604dec2b",
+      "category": "legacy_ocean_app_icon",
+      "provenance": "Repository-authored Ocean voice application artwork retained with the legacy client",
+      "source": "legacy-voice/public/icon.svg and repository history beginning at 97ed5c3",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "legacy-voice/public/index.html",
+      "bytes": 3050,
+      "sha256": "f0a6ae117a29dcbf1fe15cdb50f3e0092b4fdc04915392f721a93d5f28a8ab8c",
+      "category": "application_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "mockups/animated-badge-v10.html",
+      "bytes": 52730,
+      "sha256": "258f5a8c097f79605f1a0e68909151ebb403ba6bd21dbcfbefc659c90793be45",
+      "category": "design_or_documentation_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "mockups/animated-badge-v11.html",
+      "bytes": 16365,
+      "sha256": "b64a21e04a8f758984bbf1966f040f345594999a8cff4e86b12c89ad821a17e1",
+      "category": "design_or_documentation_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "mockups/animated-badge-v12.html",
+      "bytes": 7335,
+      "sha256": "33a91465605253df62d4f4eed3dc38fce2d169c76202e4d98f47019d4663b87d",
+      "category": "design_or_documentation_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "mockups/animated-badge-v13.html",
+      "bytes": 7042,
+      "sha256": "acb6d499cd9c3652fd7c3c17953f7b29baf9a9f4652ef2fad10a62958c692147",
+      "category": "design_or_documentation_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "mockups/animated-badge-v14.html",
+      "bytes": 7535,
+      "sha256": "703e22ecdd2a7c324cc382ee1b838a071c1bfa5a04b744ce2ff3bbfe9c58db45",
+      "category": "design_or_documentation_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "mockups/animated-badge-v15.html",
+      "bytes": 8085,
+      "sha256": "ccaf481e803d5fb0654aa89926812d223b52a636ab42515c81a4eacea1dc9daf",
+      "category": "design_or_documentation_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "mockups/animated-badge-v3.html",
+      "bytes": 6886,
+      "sha256": "0020fd842412ed72a37abeccaf4781c1b2a5d4869151758adf288f2c2201ac6b",
+      "category": "design_or_documentation_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "mockups/animated-badge-v4.html",
+      "bytes": 6997,
+      "sha256": "55a3af33ead22b17b24aa0aea22d347eef60c77cfd125e322bd40095e45e8551",
+      "category": "design_or_documentation_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "mockups/animated-badge-v5.html",
+      "bytes": 6836,
+      "sha256": "9e3348386d32fe7ab9dedeb23afa930b9c024e15dc7b49b13afa2a65b9cd3080",
+      "category": "design_or_documentation_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "mockups/animated-badge-v6.html",
+      "bytes": 6824,
+      "sha256": "58c4363b18e6134f4588168dafc734df4dbb5aef0155e56ea8016d2d481ab5e6",
+      "category": "design_or_documentation_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "mockups/animated-badge-v7.html",
+      "bytes": 6825,
+      "sha256": "ec02d7a433421b2f183e82f0f62ae0ba83245ad7163921b0eb2b2fba1cc9db65",
+      "category": "design_or_documentation_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "mockups/animated-badge-v8.html",
+      "bytes": 7155,
+      "sha256": "2b2a9bc6cd90e10923ec141582cabffed9f50b091bf557188085b987a2ce53df",
+      "category": "design_or_documentation_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "mockups/animated-badge-v9.html",
+      "bytes": 7171,
+      "sha256": "8c3f257a4f09dee2910908ff09da2bec36cb0307fb57ba62b45551a3e33a1fe9",
+      "category": "design_or_documentation_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "mockups/animated-badge.html",
+      "bytes": 5848,
+      "sha256": "087e3862b918649ffaafb5c98c76cf8920b0cc4288500b7ff4a4af1fc919fd42",
+      "category": "design_or_documentation_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "mockups/lockups.html",
+      "bytes": 24238,
+      "sha256": "c64a2b9acf36ed6da93ab359680fc216155a5af25fe3cae0142e2699412fbdb3",
+      "category": "design_or_documentation_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "mockups/material-pass.html",
+      "bytes": 14400,
+      "sha256": "d85881bb9d798ccda32578c34a07d4510bc6fb457de1f3aaf7ed7db4169ff63f",
+      "category": "design_or_documentation_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "mockups/wordmark-reveal-v16.html",
+      "bytes": 10061,
+      "sha256": "a2591002751e04f8ff572b21a43fe88f4d02d4dd907b561b553e1a1d9f2f99e5",
+      "category": "design_or_documentation_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "mockups/wordmark-reveal-v17.html",
+      "bytes": 12093,
+      "sha256": "a7b1f40593d8d4df2e7e48212eaff7c1c78e0dcd38d3f396f3033204c31b0e53",
+      "category": "design_or_documentation_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "mockups/wordmark-reveal-v18.html",
+      "bytes": 11062,
+      "sha256": "cfa631db86b76dc0116dfbdd4edd154cac5b3fb4e2bc046fdc335ffb610eba3c",
+      "category": "design_or_documentation_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "mockups/wordmark-reveal-v19.html",
+      "bytes": 12256,
+      "sha256": "bf27916cc5bd6a34ab91fff4bbc593500d38cbea18001e56c5118066aa72024f",
+      "category": "design_or_documentation_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "mockups/wordmark-reveal-v20.html",
+      "bytes": 11999,
+      "sha256": "7bc393a2e17ebb29191ecf76f401b6a2745af86c09715d383cc7e3a790e10a70",
+      "category": "design_or_documentation_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "mockups/wordmark-reveal-v21.html",
+      "bytes": 14928,
+      "sha256": "ed14e396c6f8ad2d451e645eea039314f905b15a32da455f86a54ee5c5af35c7",
+      "category": "design_or_documentation_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "mockups/wordmark-reveal-v22.html",
+      "bytes": 15940,
+      "sha256": "2046458f8546a74051a7d913b9e6729e5e209fc5a6092bf40eaa31a620ff5daa",
+      "category": "design_or_documentation_html",
+      "provenance": "Repository-authored application, design-study, or generated documentation HTML tracked in Ocean Surface history",
+      "source": "the tracked repository source at this path and its Git history",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "public/apple-touch-icon.png",
+      "bytes": 21678,
+      "sha256": "a79161a89f8df52543fdcb7cd635dd7225ddc75fc4199d8aa26331897c0f83b3",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "public/brand/master-1024.png",
+      "bytes": 419893,
+      "sha256": "f9587a7f02e531fc9653f968fb6617219e5ac02ae5929c46a3b487fbdf894bf9",
+      "category": "ocean_brand_master",
+      "provenance": "Ocean project artwork authored and checked in by Risingtides-dev; public/brand is canonical and design-systems/ocean-leptos/assets is an exact mirror",
+      "source": "crates/ocean-surface-ui/src/icons.rs and scripts/build-brand-assets.mjs",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "public/brand/ocean-mark.svg",
+      "bytes": 4691,
+      "sha256": "8a922b9fef04ad089de7cb4e5d1062075bf9ea8c5fb170073a0094f257c066e5",
+      "category": "ocean_brand_master",
+      "provenance": "Ocean project artwork authored and checked in by Risingtides-dev; public/brand is canonical and design-systems/ocean-leptos/assets is an exact mirror",
+      "source": "crates/ocean-surface-ui/src/icons.rs and scripts/build-brand-assets.mjs",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "public/fonts/Poppins-Bold.woff2",
+      "bytes": 7848,
+      "sha256": "197a3cbd7290c242c5c765268cdd69a9a39867fdc80cd13071f243a81c56fb76",
+      "category": "third_party_font",
+      "provenance": "Poppins v4.004 metadata identifies the Poppins Project Authors and SIL OFL; vendored by repository commit 8606cac",
+      "source": "https://github.com/google/fonts/tree/389b770410cc0b7c21c85673bfa2077420fe7f65/ofl/poppins",
+      "license": "OFL-1.1 (public/fonts/OFL.txt)",
+      "status": "cleared"
+    },
+    {
+      "path": "public/fonts/Poppins-Medium.woff2",
+      "bytes": 7740,
+      "sha256": "289e0afc8be731a86822349e54557296f145926496bd2138db1bac0db77f77a2",
+      "category": "third_party_font",
+      "provenance": "Poppins v4.004 metadata identifies the Poppins Project Authors and SIL OFL; vendored by repository commit 8606cac",
+      "source": "https://github.com/google/fonts/tree/389b770410cc0b7c21c85673bfa2077420fe7f65/ofl/poppins",
+      "license": "OFL-1.1 (public/fonts/OFL.txt)",
+      "status": "cleared"
+    },
+    {
+      "path": "public/fonts/Poppins-Regular.woff2",
+      "bytes": 7900,
+      "sha256": "3dc5d0c52428fe1696264907a1054ebbaac07f8cbe45832c105f819c2ae397c0",
+      "category": "third_party_font",
+      "provenance": "Poppins v4.004 metadata identifies the Poppins Project Authors and SIL OFL; vendored by repository commit 8606cac",
+      "source": "https://github.com/google/fonts/tree/389b770410cc0b7c21c85673bfa2077420fe7f65/ofl/poppins",
+      "license": "OFL-1.1 (public/fonts/OFL.txt)",
+      "status": "cleared"
+    },
+    {
+      "path": "public/fonts/Poppins-SemiBold.woff2",
+      "bytes": 7992,
+      "sha256": "872e862918591a9e824dc03ed92f05729435ffbb8ebbb10eff7eda26592b1798",
+      "category": "third_party_font",
+      "provenance": "Poppins v4.004 metadata identifies the Poppins Project Authors and SIL OFL; vendored by repository commit 8606cac",
+      "source": "https://github.com/google/fonts/tree/389b770410cc0b7c21c85673bfa2077420fe7f65/ofl/poppins",
+      "license": "OFL-1.1 (public/fonts/OFL.txt)",
+      "status": "cleared"
+    },
+    {
+      "path": "public/icon-192.png",
+      "bytes": 23857,
+      "sha256": "f696c77ef26c78ac24723a276a6ebafc49d4a40f66e75b637e79e296fb0db903",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "public/icon-512.png",
+      "bytes": 97664,
+      "sha256": "f42c80257786cea420f36b68c4e81f1d5a6a350460b1d407f5df7fcbcdd31bd3",
+      "category": "generated_app_icon",
+      "provenance": "Deterministic application-icon derivative generated from the Ocean brand master",
+      "source": "public/brand/master-1024.png via scripts/build-brand-assets.mjs and cargo tauri icon",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    },
+    {
+      "path": "vscode-extension/media/wave.svg",
+      "bytes": 328,
+      "sha256": "08ee5300f970151c11883dedf01b443d349d24213f410c6cd8b6dfcfab0931ce",
+      "category": "ocean_ui_icon",
+      "provenance": "Repository-authored Ocean wave icon introduced with the VS Code/Cursor ACP surface",
+      "source": "repository commit 80bea30",
+      "license": "LicenseRef-Ocean-Project-Pending",
+      "status": "project_license_pending"
+    }
+  ]
+}

@@ -2482,3 +2482,17 @@ Updated the Surface routing map for the agent-package split. Public ocean-agents
 now owns only reusable profiles and package mechanisms; private
 risingtides-agents owns production Rising Tides assistants, couriers, Slack
 intake, and workflows. Surface remains a thin client of ocean-os.
+
+time:      [07:05pm] [07-20-26]
+agent:     [ocean] [gpt-5]
+worktree:  [asset-provenance-20260720]
+type:      security/provenance
+area:      public release assets
+
+Inventoried every tracked Surface image, icon, font, media/PDF, and HTML
+application/design artifact with exact SHA-256 and source/license status. Added
+the missing Poppins OFL-1.1 license, replaced the retained Zed/GPL-attributed
+GPUI icon copies path-for-path with pinned Lucide ISC/MIT icons, and removed two
+unreferenced implementation screenshots from the current public tree. Added a
+fail-closed manifest checker. Original Ocean artwork is project-authored but
+remains pending the operator's copyright-holder and root-license decision.
