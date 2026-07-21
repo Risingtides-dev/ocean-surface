@@ -2482,3 +2482,12 @@ Updated the Surface routing map for the agent-package split. Public ocean-agents
 now owns only reusable profiles and package mechanisms; private
 risingtides-agents owns production Rising Tides assistants, couriers, Slack
 intake, and workflows. Surface remains a thin client of ocean-os.
+
+time:      [01:34] [07-21-26]
+agent:     [claude] [opus 4.8]
+worktree:  main
+type:      review
+area:      backend
+
+TASK-75 prerequisite discharged: harvested the live proxy's report-only CSP violations (/private/tmp/ocean-surface-proxy.log, rev 5fd3bab) instead of guessing the allow-list. Found the blocker the prerequisite existed to catch — the Cloudflare Web Analytics beacon (static.cloudflareinsights.com/beacon.min.js) loads on the live surface and is NOT in the current script-src allow-list, so flipping script-src to enforced as written today would silently kill CF analytics. Also caught two out-of-scope-for-TASK-75 real violations: frame-src -> youtube-nocookie.com and media-src -> an MDN sample mp4 (the latter a model/test embed, not a standing dependency). Recorded the full harvest + recommended enforcement path in .stitchpad/artifacts/csp-violation-harvest-v1.md and claimed TASK-75 (fable, medium). Deliberately did NOT flip enforcement: it rewrites response bodies on a live app and wants smaths reachable + a kill-switch env var, per the task's own RISK note. Enforcement is now a confident change (add cloudflareinsights, nonce the two shell script tags) rather than a blind one.
+_________________________________________________________________________________
