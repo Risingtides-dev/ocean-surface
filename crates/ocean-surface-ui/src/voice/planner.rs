@@ -154,6 +154,11 @@ fn escape_markdown_text(value: &str) -> String {
                 | '+'
                 | '!'
                 | '.'
+                // `)` is the OTHER CommonMark ordered-list delimiter: both `1.`
+                // and `1)` open a list, so escaping `.` without `)` left the
+                // paren form as an injection gap (TASK-93). Escaped
+                // unconditionally, matching how `.` is handled just above.
+                | ')'
                 | '='
         ) || (line_start && matches!(ch, ' ' | '\t'))
         {
@@ -705,6 +710,26 @@ mod tests {
         assert!(!out.contains("\n- item\n"));
         assert!(!out.contains("\n    code\n"));
         assert!(!out.contains("\n\tcode tab\n"));
+    }
+
+    // TASK-93: CommonMark opens an ordered list with EITHER `1.` or `1)`. The
+    // escaper covered `.` but missed `)`, so a brief field beginning `<digit>)`
+    // rendered an injected <ol> instead of literal prose — the same injection
+    // class the sibling test above guards for the `1.` delimiter, left open for
+    // the equally-valid `)` delimiter.
+    #[test]
+    fn ordered_list_paren_delimiter_is_escaped_like_the_dot_delimiter() {
+        let mut injected = brief();
+        injected.problem = "1) injected item\n2) second".into();
+        let out = injected.render_markdown(&context()).unwrap();
+        // The paren delimiter is escaped exactly as `.` is (`1\.` → `1\)`), so
+        // the digit run no longer opens a list.
+        assert!(
+            out.contains("1\\) injected item\n2\\) second"),
+            "the `)` ordered-list delimiter must be escaped: {out}"
+        );
+        // The raw unescaped list marker must not survive into the output.
+        assert!(!out.contains("1) injected item"));
     }
 
     #[test]
