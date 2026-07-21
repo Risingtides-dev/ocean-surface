@@ -6138,6 +6138,25 @@ fn apply_session_projection(
     Ok(outcome)
 }
 
+/// Build the `args_preview` stored on a `ToolCall` block.
+///
+/// Non-browser tools are truncated to 60 chars for a compact raw-args glance
+/// (a bash/write call can carry huge args). Browser tools are kept WHOLE: the
+/// cockpit's `deck::browser::summary_from_args` PARSES this string as JSON to
+/// extract `url`/`selector`/`text`, and a mid-JSON truncation makes it
+/// unparseable — degrading every real browser action (a full URL or
+/// selector+text easily exceeds 60 chars) to a useless `"?"` (TASK-98). Browser
+/// args are small and structured, so storing them whole is cheap and keeps the
+/// summary accurate.
+fn tool_args_preview(name: &str, args_json: &Value) -> String {
+    let args = serde_json::to_string(args_json).unwrap_or_else(|_| "{}".into());
+    if name.starts_with("browser_") {
+        args
+    } else {
+        args.chars().take(60).collect()
+    }
+}
+
 /// Mutate the turns vec in response to a single SSE event. Splits assistant
 /// content into Text / Thinking / ToolCall blocks under one Turn per turn_id,
 /// matching the TUI's `pm_*_assistant_turn_mut` logic.
@@ -6276,8 +6295,7 @@ fn apply_event(
             }
             turns.update(|t| {
                 let turn = ensure_assistant_turn(t, turn_id);
-                let args = serde_json::to_string(&call.args_json).unwrap_or_else(|_| "{}".into());
-                let preview: String = args.chars().take(60).collect();
+                let preview = tool_args_preview(&call.name, &call.args_json);
                 turn.blocks.push(Block::ToolCall {
                     call_id: call.id.clone(),
                     name: call.name.clone(),
@@ -11697,6 +11715,23 @@ mod tests {
         turns.push(Turn::user("# Plan"));
         assert!(planner_prompt_already_echoed(&turns, "# Plan"));
         assert!(!planner_prompt_already_echoed(&turns, "# Other"));
+    }
+
+    // TASK-98: browser tool args are kept WHOLE so the cockpit's
+    // summary_from_args can parse them as JSON — a real browser_navigate URL
+    // exceeds 60 chars, and truncating mid-JSON made the summary "?". Non-browser
+    // tools stay truncated for a compact raw-args glance.
+    #[test]
+    fn browser_tool_args_preview_is_kept_whole_for_summary_parsing() {
+        let long_url = "https://example.com/some/very/long/path?query=one&more=two&yet=three";
+        let preview = tool_args_preview("browser_navigate", &json!({ "url": long_url }));
+        // Kept whole → still valid JSON, so the cockpit summary parses the url.
+        let parsed: Value =
+            serde_json::from_str(&preview).expect("browser args must stay parseable JSON");
+        assert_eq!(parsed.get("url").and_then(|v| v.as_str()), Some(long_url));
+        // Non-browser tools remain truncated (a bash/write call can be huge).
+        let bash = tool_args_preview("bash", &json!({ "command": "x".repeat(200) }));
+        assert!(bash.chars().count() <= 60);
     }
 
     // -- session persistence (should_restore_session pure helper) --
