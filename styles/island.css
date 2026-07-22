@@ -465,10 +465,15 @@
   border-radius: calc(var(--island-stage-radius) - var(--island-stage-pad));
 }
 
+/* Unfurl the stage DOWN out of the compact pill rather than popping it in:
+   start at roughly the chip's footprint (chip-width ratio, a near-flat sliver)
+   and grow from the top-center origin, so the Island reads as one object
+   descending from the notch (agent-notch motion idiom) instead of a box that
+   appears then settles. */
 @keyframes island-stage-open {
   from {
     opacity: 0;
-    transform: scale(0.94, 0.72);
+    transform: scale(0.82, 0.1);
   }
   to {
     opacity: 1;
