@@ -1247,6 +1247,16 @@ pub(crate) fn rooms_list_state(loaded: bool, room_count: usize) -> RoomsListStat
     }
 }
 
+/// Whether the open room's transcript should show its "No messages yet" empty
+/// state. Only once the live tail is actually connected (`Live`) AND the
+/// transcript is empty: during the initial `Replaying` catch-up (or a
+/// `Reconnecting` gap) an empty transcript means "still loading", not
+/// "genuinely empty", so the stage must not flash the empty copy on room open
+/// before history arrives (same bug class as [`rooms_list_state`]).
+fn show_transcript_empty(tail: TailState, transcript_empty: bool) -> bool {
+    transcript_empty && matches!(tail, TailState::Live)
+}
+
 fn room_request_is_current(
     expected_generation: u64,
     current_generation: u64,
@@ -1364,6 +1374,22 @@ pub(crate) fn livekit_token_path_for_room(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transcript_empty_state_waits_for_live_tail() {
+        // During the initial catch-up the tail is Replaying and the transcript
+        // is empty — that is "still loading", NOT "no messages", so the empty
+        // copy must stay hidden.
+        assert!(!show_transcript_empty(TailState::Replaying, true));
+        // A reconnect gap with an empty transcript is likewise ambiguous.
+        assert!(!show_transcript_empty(TailState::Reconnecting, true));
+        // Only once connected (Live) does an empty transcript genuinely mean
+        // "no messages yet".
+        assert!(show_transcript_empty(TailState::Live, true));
+        // A non-empty transcript never shows the empty state, in any tail state.
+        assert!(!show_transcript_empty(TailState::Live, false));
+        assert!(!show_transcript_empty(TailState::Replaying, false));
+    }
 
     #[test]
     fn rooms_list_state_distinguishes_loading_from_genuinely_empty() {
@@ -2048,6 +2074,7 @@ pub fn RoomStage(rooms: Rooms) -> impl IntoView {
 
     let open_room = rooms.open_room;
     let transcript = rooms.transcript;
+    let tail_state = rooms.tail_state;
     let status = rooms.status;
 
     // Keep the transcript pinned to the newest message: jump to the bottom
@@ -2336,7 +2363,7 @@ pub fn RoomStage(rooms: Rooms) -> impl IntoView {
                         }
                     }
                 />
-                <Show when=move || transcript.get().is_empty()>
+                <Show when=move || show_transcript_empty(tail_state.get(), transcript.get().is_empty())>
                     <div class="room-stage__empty">
                         "No messages yet. Say something — use @id to convene an agent."
                     </div>
