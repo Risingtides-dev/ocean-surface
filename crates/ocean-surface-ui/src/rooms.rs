@@ -437,6 +437,11 @@ pub struct Rooms {
     tail_state: RwSignal<TailState>,
     /// Available agent names fetched from GET /v1/agents (TASK-9/TASK-11).
     pub available_agents: RwSignal<Vec<String>>,
+    /// Whether the first `fetch_agents` has resolved. Starts false so the
+    /// add-agent picker shows nothing rather than a premature "No agents" while
+    /// the initial `/v1/agents` fetch is still in flight (same flash class as
+    /// `rooms_loaded`).
+    pub agents_loaded: RwSignal<bool>,
     /// Required access projection for the open room. `None` means loading or
     /// no room is open; local rooms carry `Some(state = Local)`.
     pub access: RwSignal<Option<RoomAccessProjection>>,
@@ -467,6 +472,7 @@ impl Rooms {
             panel_open,
             tail_state: RwSignal::new(TailState::Replaying),
             available_agents: RwSignal::new(Vec::new()),
+            agents_loaded: RwSignal::new(false),
             access: RwSignal::new(None),
         }
     }
@@ -538,6 +544,7 @@ impl Rooms {
     pub fn fetch_agents(&self) {
         let base = self.base();
         let agents_sig = self.available_agents;
+        let loaded = self.agents_loaded;
         spawn_local(async move {
             let url = format!("{base}/v1/agents");
             match Request::get(&url).send().await {
@@ -562,6 +569,9 @@ impl Rooms {
                     agents_sig.set(Vec::new());
                 }
             }
+            // Resolved (success, empty, or error) — the picker may now show
+            // "No agents" honestly instead of during the in-flight window.
+            loaded.set(true);
         });
     }
 
@@ -1257,6 +1267,14 @@ fn show_transcript_empty(tail: TailState, transcript_empty: bool) -> bool {
     transcript_empty && matches!(tail, TailState::Live)
 }
 
+/// Whether the add-agent picker should show its "No agents" hint: only once
+/// `/v1/agents` has resolved AND the list is empty. During the initial fetch an
+/// empty list means "still loading", not "no agents" (same flash class as the
+/// rooms-list and transcript empties).
+fn show_no_agents(agents_loaded: bool, agent_count: usize) -> bool {
+    agents_loaded && agent_count == 0
+}
+
 fn room_request_is_current(
     expected_generation: u64,
     current_generation: u64,
@@ -1374,6 +1392,17 @@ pub(crate) fn livekit_token_path_for_room(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_agents_hint_waits_for_agents_fetch() {
+        // Empty list before the fetch resolves = still loading, hide the hint.
+        assert!(!show_no_agents(false, 0));
+        // Once resolved and still empty = genuinely no agents.
+        assert!(show_no_agents(true, 0));
+        // Any agents present never shows the empty hint.
+        assert!(!show_no_agents(true, 3));
+        assert!(!show_no_agents(false, 3));
+    }
 
     #[test]
     fn transcript_empty_state_waits_for_live_tail() {
@@ -1799,6 +1828,7 @@ mod tests {
             panel_open: RwSignal::new(false),
             tail_state: RwSignal::new(TailState::Replaying),
             available_agents: RwSignal::new(Vec::new()),
+            agents_loaded: RwSignal::new(false),
             access: RwSignal::new(None),
         };
 
@@ -2302,7 +2332,10 @@ pub fn RoomStage(rooms: Rooms) -> impl IntoView {
                             }
                         />
                     </select>
-                    <Show when=move || rooms.available_agents.get().is_empty()>
+                    <Show when=move || show_no_agents(
+                        rooms.agents_loaded.get(),
+                        rooms.available_agents.get().len(),
+                    )>
                         <span class="rooms-addagent__empty">
                             "No agents"
                         </span>
