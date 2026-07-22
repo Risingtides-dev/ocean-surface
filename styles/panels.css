@@ -930,6 +930,28 @@
   text-align: center;
 }
 
+/* TASK-104: distinct from __empty — shown only while the first room fetch is
+   in flight, so the panel never lies "No rooms yet" before it has an answer. */
+.rooms-panel__loading {
+  margin: 24px 16px;
+  padding: 16px;
+  color: var(--fg-3);
+  font-size: 13px;
+  text-align: center;
+  opacity: 0.75;
+  animation: rooms-loading-pulse 1.4s var(--ease) infinite;
+}
+
+@keyframes rooms-loading-pulse {
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 0.85;
+  }
+}
+
 /* TASK-102: the response policy is a create-time concern, so it's a collapsed
    <details> disclosure — the room list is the primary content of the panel and
    should sit right under the create input, not below a 150px always-open form. */

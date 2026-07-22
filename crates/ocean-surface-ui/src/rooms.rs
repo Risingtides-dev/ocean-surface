@@ -410,6 +410,10 @@ pub struct Rooms {
     pub url: RwSignal<String>,
     /// All persistent rooms (from `GET /v1/rooms/persistent`).
     pub list: RwSignal<Vec<Room>>,
+    /// Whether the first `fetch_rooms` has resolved (success or failure). Starts
+    /// false so the panel shows a loading placeholder instead of falsely
+    /// asserting "No rooms yet" during the initial in-flight fetch.
+    pub rooms_loaded: RwSignal<bool>,
     /// The currently selected room key, if any.
     pub open_key: RwSignal<Option<String>>,
     /// The open room's full record (roster + metadata).
@@ -452,6 +456,7 @@ impl Rooms {
         Self {
             url: daemon.url,
             list: RwSignal::new(Vec::new()),
+            rooms_loaded: RwSignal::new(false),
             open_key: RwSignal::new(None),
             open_room: RwSignal::new(None),
             transcript: RwSignal::new(Vec::new()),
@@ -506,6 +511,7 @@ impl Rooms {
         let base = self.base();
         let list = self.list;
         let status = self.status;
+        let loaded = self.rooms_loaded;
         spawn_local(async move {
             let get_url = format!("{base}/v1/rooms/persistent");
             match Request::get(&get_url).send().await {
@@ -519,6 +525,10 @@ impl Rooms {
                 },
                 Err(err) => status.set(format!("rooms fetch error: {err}")),
             }
+            // The first fetch has now resolved — the panel may distinguish
+            // "still loading" from "genuinely empty". Set on every outcome so a
+            // failed fetch stops claiming the list is loading forever.
+            loaded.set(true);
         });
     }
 
@@ -1214,6 +1224,29 @@ fn last_transcript_seq(transcript: &[RoomMessage]) -> u64 {
     transcript.last().map(|message| message.seq).unwrap_or(0)
 }
 
+/// Which placeholder the rooms list should render, given whether the first
+/// fetch has resolved and how many rooms came back. Splitting `Loading` from
+/// `Empty` stops the panel from flashing "No rooms yet" while the initial
+/// request is still in flight — an empty list only *means* empty once loaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RoomsListState {
+    Loading,
+    Empty,
+    Populated,
+}
+
+pub(crate) fn rooms_list_state(loaded: bool, room_count: usize) -> RoomsListState {
+    if room_count > 0 {
+        // Rooms are present — always render them, even if a refetch is in
+        // flight. Only the *empty* list is ambiguous between loading and empty.
+        RoomsListState::Populated
+    } else if loaded {
+        RoomsListState::Empty
+    } else {
+        RoomsListState::Loading
+    }
+}
+
 fn room_request_is_current(
     expected_generation: u64,
     current_generation: u64,
@@ -1331,6 +1364,19 @@ pub(crate) fn livekit_token_path_for_room(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rooms_list_state_distinguishes_loading_from_genuinely_empty() {
+        // Before the first fetch resolves, an empty list means "still loading",
+        // NOT "no rooms" — the panel must not assert emptiness prematurely.
+        assert_eq!(rooms_list_state(false, 0), RoomsListState::Loading);
+        // A non-empty list mid-load still renders rooms (they arrived).
+        assert_eq!(rooms_list_state(false, 3), RoomsListState::Populated);
+        // Once loaded, an empty list is genuinely empty.
+        assert_eq!(rooms_list_state(true, 0), RoomsListState::Empty);
+        // Once loaded with rooms, populated.
+        assert_eq!(rooms_list_state(true, 2), RoomsListState::Populated);
+    }
 
     fn access_projection(state: RoomAccessState) -> RoomAccessProjection {
         RoomAccessProjection {
@@ -1716,6 +1762,7 @@ mod tests {
         let rooms = Rooms {
             url: RwSignal::new(String::new()),
             list: RwSignal::new(Vec::new()),
+            rooms_loaded: RwSignal::new(false),
             open_key: RwSignal::new(None),
             open_room: RwSignal::new(None),
             transcript: RwSignal::new(Vec::new()),
@@ -1828,6 +1875,8 @@ pub fn RoomsPanel(rooms: Rooms, open: RwSignal<bool>) -> impl IntoView {
     };
 
     let room_list = rooms.list;
+    let rooms_loaded = rooms.rooms_loaded;
+    let list_state = move || rooms_list_state(rooms_loaded.get(), room_list.get().len());
     let status = rooms.status;
 
     view! {
@@ -1963,7 +2012,11 @@ pub fn RoomsPanel(rooms: Rooms, open: RwSignal<bool>) -> impl IntoView {
                         />
                     </div>
 
-                    <Show when=move || room_list.get().is_empty()>
+                    <Show when=move || list_state() == RoomsListState::Loading>
+                        <div class="rooms-panel__loading">"Loading rooms…"</div>
+                    </Show>
+
+                    <Show when=move || list_state() == RoomsListState::Empty>
                         <div class="rooms-panel__empty">
                             "No rooms yet. Create one above to start collaborating."
                         </div>

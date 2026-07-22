@@ -963,8 +963,8 @@ fn pr_row(
                                 CheckSummary::Failing { passing, total } => view! {
                                     <span class="deck-repo-gh-check-text deck-repo-gh-check-text--err">{format!("✗ {}/{} checks", passing, total)}</span>
                                 }.into_any(),
-                                CheckSummary::InProgress { pending, total: _ } => view! {
-                                    <span class="deck-repo-gh-check-text deck-repo-gh-check-text--warn">{format!("{} checks pending", pending)}</span>
+                                CheckSummary::InProgress { pending, total } => view! {
+                                    <span class="deck-repo-gh-check-text deck-repo-gh-check-text--warn">{format!("{}/{} checks pending", pending, total)}</span>
                                 }.into_any(),
                             }}
                         </span>
