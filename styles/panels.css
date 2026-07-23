@@ -35,21 +35,15 @@
   animation: sessions-slide-in 280ms var(--ease) both;
 }
 
-/* Sessions renders as a centered modal; rooms stays a right slide-over. */
+/* Sessions is a LEFT slide-over (the session sidebar — smaths' call); rooms
+   stays a right slide-over. Both share the full-height drawer base above; only
+   the dock edge (flex-start vs flex-end) and slide direction differ. */
 .sessions-overlay {
-  align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
 }
 
 .sessions-panel {
-  width: min(760px, calc(100vw - 28px));
-  max-height: min(80vh, 720px);
-  height: auto;
-  background: var(--bg-elevated);
-  box-shadow: var(--elev-3);
-  border-radius: var(--radius-lg);
-  overflow: hidden;
-  animation: sessions-tidal-rise var(--dur-slow) var(--ease-tide) both;
+  animation-name: sessions-slide-in-left;
 }
 
 /* Hidden overlay: removed from accessibility tree and layout when closed,
@@ -58,14 +52,16 @@
   display: none !important;
 }
 
-@keyframes sessions-tidal-rise {
+/* Left slide-over: emerge from the left screen edge (mirror of the right-docked
+   sessions-slide-in used by the rooms panel). */
+@keyframes sessions-slide-in-left {
   from {
-    opacity: 0;
-    transform: translateY(8px);
+    transform: translateX(-24px);
+    opacity: 0.96;
   }
   to {
+    transform: translateX(0);
     opacity: 1;
-    transform: none;
   }
 }
 @keyframes sessions-slide-in {
