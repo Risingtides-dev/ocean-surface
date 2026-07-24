@@ -154,7 +154,8 @@ fn load_or_create_session_secret(path: &FsPath) -> anyhow::Result<String> {
             .with_context(|| format!("creating {}", parent.display()))?;
     }
     let mut bytes = [0_u8; 32];
-    getrandom::fill(&mut bytes).context("OS randomness required for session secret")?;
+    getrandom::fill(&mut bytes)
+        .map_err(|e| anyhow::anyhow!("OS randomness required for session secret: {e}"))?;
     let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     match OpenOptions::new()
         .write(true)
