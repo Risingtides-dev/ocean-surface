@@ -84,7 +84,12 @@ fn parse_cards(props: &Value) -> Vec<DeckCard> {
 }
 
 /// `(label, variant)` for one swipe direction, with defaults.
-fn parse_action(props: &Value, dir: &str, default_label: &str, default_variant: &str) -> (String, String) {
+fn parse_action(
+    props: &Value,
+    dir: &str,
+    default_label: &str,
+    default_variant: &str,
+) -> (String, String) {
     let a = props.get("actions").and_then(|a| a.get(dir));
     let label = a
         .and_then(|v| v.get("label"))
@@ -241,7 +246,11 @@ pub fn SwipeDeckView(component_id: String, kind_props: Value, daemon: Daemon) ->
             let card_style = move || {
                 let x = drag_x.get();
                 let rot = (x / 18.0).clamp(-12.0, 12.0);
-                let transition = if dragging.get() { "none" } else { "transform 0.25s ease" };
+                let transition = if dragging.get() {
+                    "none"
+                } else {
+                    "transform 0.25s ease"
+                };
                 format!(
                     "transform: translateX({x}px) rotate({rot}deg); transition: {transition}; z-index: {};",
                     MAX_BEHIND + 2,

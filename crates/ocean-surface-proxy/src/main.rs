@@ -14,7 +14,7 @@
 //! Then point a browser at http://<host>:8790/.
 
 use std::fs::OpenOptions;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path as FsPath, PathBuf};
@@ -23,22 +23,26 @@ use std::sync::Arc;
 use anyhow::Context;
 use axum::{
     body::Bytes,
-    extract::{Path, Request, State},
-    http::{header, HeaderName, StatusCode},
+    extract::{Form, Path, Request, State},
+    http::{header, HeaderMap, HeaderName, StatusCode},
     middleware::{self, Next},
-    response::{IntoResponse, Response},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
     Json, Router,
 };
 use base64::Engine;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:4780";
 const DEFAULT_LIVEKIT_ROOM_ID: &str = "project:surface-main";
 const DEFAULT_VOICE_PROFILE: &str = "leo";
+
+const SESSION_COOKIE: &str = "ocean_session";
+const SESSION_MAX_AGE_SECONDS: u64 = 60 * 60 * 24 * 30;
 
 const CALL_PLACE_DAEMON_PATH: &str = "/v1/calls/place";
 
@@ -68,10 +72,12 @@ struct AppState {
     maps_key: Option<String>,
     /// Map ID for the map's visual style (DEMO_MAP_ID by default).
     maps_map_id: String,
-    /// Optional HTTP Basic auth. `Some((user, pass))` gates every route
-    /// except /health. `None` = open (local dev). Set via OCEAN_SURFACE_USER
-    /// + OCEAN_SURFACE_PASS.
+    /// Optional operator login. `Some((user, pass))` enables the app-owned
+    /// login form and session-cookie gate. `None` = open local development.
+    /// The random session token is process-local, so a proxy restart safely
+    /// expires every browser session without persisting bearer material.
     basic_auth: Option<(String, String)>,
+    session_token: String,
     /// Mode-0600 boot-bound credential minted and rotated by ocean-daemon.
     /// Read immediately before each Observatory request; never sent to the browser.
     observer_token_path: PathBuf,
@@ -97,6 +103,93 @@ fn ocean_config_dir() -> PathBuf {
         return PathBuf::from(home).join(".config").join("ocean-rs");
     }
     PathBuf::from(".ocean-rs")
+}
+
+fn session_secret_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("OCEAN_SURFACE_SESSION_SECRET_FILE") {
+        return PathBuf::from(path);
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join(".config")
+            .join("ocean-surface")
+            .join("session-secret");
+    }
+    PathBuf::from(".ocean-surface-session-secret")
+}
+
+fn read_mode_0600_secret(path: &FsPath, label: &str) -> anyhow::Result<String> {
+    let link = std::fs::symlink_metadata(path)
+        .with_context(|| format!("{label} unavailable at {}", path.display()))?;
+    if link.file_type().is_symlink() || !link.is_file() {
+        anyhow::bail!("{label} must be a regular file");
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .with_context(|| format!("opening {label}"))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("reading {label} metadata"))?;
+    if !metadata.is_file() || metadata.mode() & 0o777 != 0o600 {
+        anyhow::bail!("{label} must be a mode-0600 regular file");
+    }
+    let mut value = String::new();
+    file.read_to_string(&mut value)
+        .with_context(|| format!("reading {label}"))?;
+    let value = value.trim();
+    if value.is_empty() {
+        anyhow::bail!("{label} is empty");
+    }
+    Ok(value.to_owned())
+}
+
+fn load_or_create_session_secret(path: &FsPath) -> anyhow::Result<String> {
+    if path.exists() {
+        return read_mode_0600_secret(path, "surface session secret");
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).context("OS randomness required for session secret")?;
+    let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+    {
+        Ok(mut file) => {
+            file.write_all(secret.as_bytes())?;
+            file.write_all(b"\n")?;
+            file.sync_all()?;
+            Ok(secret)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            read_mode_0600_secret(path, "surface session secret")
+        }
+        Err(error) => Err(error).with_context(|| format!("creating {}", path.display())),
+    }
+}
+
+fn derive_session_token(
+    credentials: Option<&(String, String)>,
+    secret_path: &FsPath,
+) -> anyhow::Result<String> {
+    let secret = load_or_create_session_secret(secret_path)?;
+    let mut digest = Sha256::new();
+    digest.update(secret.as_bytes());
+    if let Some((user, pass)) = credentials {
+        digest.update(b"\0user\0");
+        digest.update(user.as_bytes());
+        digest.update(b"\0pass\0");
+        digest.update(pass.as_bytes());
+    }
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest.finalize()))
 }
 
 /// Read the daemon-minted observer token without following symlinks. The
@@ -179,12 +272,12 @@ async fn main() -> anyhow::Result<()> {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "DEMO_MAP_ID".to_string());
 
-    // HTTP Basic auth. Credentials come from the environment — never hardcoded,
-    // since this binds to 0.0.0.0 behind a public tunnel. Set OCEAN_SURFACE_AUTH=off
-    // to disable entirely (e.g. trusted localhost). If auth is on but creds are
-    // missing, refuse to start rather than fall back to a shipped default.
+    // Operator login. Credentials come from the environment — never hardcoded,
+    // since this binds to 0.0.0.0 behind a public tunnel. The browser exchanges
+    // them once for an HttpOnly session cookie; unlike an HTTP Basic challenge,
+    // that session survives standalone iOS/Chrome PWA launches reliably.
     let basic_auth = if std::env::var("OCEAN_SURFACE_AUTH").as_deref() == Ok("off") {
-        tracing::warn!("HTTP Basic auth DISABLED (OCEAN_SURFACE_AUTH=off)");
+        tracing::warn!("operator login DISABLED (OCEAN_SURFACE_AUTH=off)");
         None
     } else {
         let user = std::env::var("OCEAN_SURFACE_USER")
@@ -195,19 +288,22 @@ async fn main() -> anyhow::Result<()> {
             .filter(|s| !s.trim().is_empty());
         match (user, pass) {
             (Some(user), Some(pass)) => {
-                // TASK-73: log that auth is ON, not who. The username is half
-                // the credential pair and the log stream is not a secret store.
-                tracing::info!("HTTP Basic auth enabled");
+                tracing::info!("operator session login enabled");
                 Some((user, pass))
             }
             _ => {
                 panic!(
-                    "HTTP Basic auth is on but OCEAN_SURFACE_USER / OCEAN_SURFACE_PASS \
+                    "operator login is on but OCEAN_SURFACE_USER / OCEAN_SURFACE_PASS \
                      are not set. Set both, or OCEAN_SURFACE_AUTH=off for trusted localhost."
                 );
             }
         }
     };
+
+    // Stable across deploys so an installed PWA remains signed in. The mode-0600
+    // server secret never reaches the browser; rotating the configured username
+    // or password changes the derived token and invalidates prior sessions.
+    let session_token = derive_session_token(basic_auth.as_ref(), &session_secret_path())?;
 
     let observer_token_path = std::env::var_os("OCEAN_OBSERVER_TOKEN_FILE")
         .map(PathBuf::from)
@@ -232,6 +328,7 @@ async fn main() -> anyhow::Result<()> {
         default_livekit_room_id,
         tldraw_sync_uri,
         basic_auth,
+        session_token,
         maps_key,
         maps_map_id,
         observer_token_path,
@@ -257,6 +354,8 @@ fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
         // operator-visible signal, which is the prerequisite for deciding
         // what a real enforced script-src can safely contain.
         .route("/csp-report", post(csp_report))
+        .route("/login", get(login_page).post(login_submit))
+        .route("/logout", post(logout))
         .route("/api/config", get(config))
         .route("/api/stt", post(stt))
         .route("/api/tts", post(tts))
@@ -397,13 +496,14 @@ fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
         // headers; it runs AFTER routing/ServeDir so it only touches the
         // actual file response; non-wasm paths pass through untouched.
         .layer(middleware::from_fn(wasm_headers))
-        // TASK-72: baseline security headers. Declared here so it decorates
-        // every document/static response (including the SPA fallback) but
-        // sits inside the auth gate — a 401 challenge needs no CSP.
+        // Security headers decorate the login document and application shell.
         .layer(middleware::from_fn(security_headers))
+        // App-owned session auth deliberately does not emit WWW-Authenticate:
+        // browser-native Basic prompts loop in standalone iOS PWAs. Navigations
+        // redirect to /login; API calls receive a plain 401.
         .layer(middleware::from_fn_with_state(
             state.clone(),
-            basic_auth_gate,
+            session_auth_gate,
         ))
         // TASK-73: no CORS layer in the deployed topology. The app is served
         // by this same proxy and `config_payload` deliberately hands the client
@@ -416,24 +516,15 @@ fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
         .with_state(state)
 }
 
-/// Static resources required to boot the already-authenticated PWA document.
-/// API namespaces are never public, even if a future route happens to contain
-/// a hash-looking suffix.
+/// Resources that are safe before login. API namespaces are never public.
 fn is_public_boot_asset(path: &str) -> bool {
     if path.starts_with("/v1/") || path.starts_with("/api/") {
         return false;
     }
 
-    // TASK-74: the CSP violation sink is public BY NECESSITY — a browser
-    // posting a violation report does not carry the operator's basic auth, so
-    // an authenticated sink collects nothing. It lives at the root rather than
-    // under /api/ deliberately: the "no /api/ path is ever public" invariant
-    // is what makes this whole exemption list safe to reason about, and
-    // punching a hole in it for one endpoint would trade a durable property
-    // for a convenience. The handler is bounded (16KB cap, always 204, never
-    // parsed as trusted structure) precisely because it is reachable.
-    path == "/csp-report"
+    path == "/login"
         || path == "/health"
+        || path == "/csp-report"
         || path == "/manifest.webmanifest"
         || path == "/sw.js"
         || path == "/favicon.ico"
@@ -444,50 +535,182 @@ fn is_public_boot_asset(path: &str) -> bool {
         || is_hashed_asset(path)
 }
 
-/// HTTP Basic auth gate. The document and every API request require matching
-/// credentials. Static PWA boot assets are public because Chromium does not
-/// reliably replay Basic credentials for manifest/service-worker fetches; the
-/// authenticated document still gates entry and all daemon authority remains
-/// behind `/v1/*` and `/api/*`.
-async fn basic_auth_gate(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
-    let Some((want_user, want_pass)) = state.basic_auth.as_ref() else {
-        return next.run(req).await; // auth disabled
-    };
-    if is_public_boot_asset(req.uri().path()) {
-        return next.run(req).await;
-    }
+fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(header::COOKIE)?
+        .to_str()
+        .ok()?
+        .split(';')
+        .map(str::trim)
+        .find_map(|part| {
+            part.split_once('=')
+                .filter(|(key, _)| *key == name)
+                .map(|(_, value)| value)
+        })
+}
 
-    let provided = req
-        .headers()
+fn has_valid_session(state: &AppState, headers: &HeaderMap) -> bool {
+    let Some(provided) = cookie_value(headers, SESSION_COOKIE) else {
+        return false;
+    };
+    constant_time_eq(provided.as_bytes(), state.session_token.as_bytes())
+}
+
+fn has_valid_basic_credentials(state: &AppState, headers: &HeaderMap) -> bool {
+    let Some((want_user, want_pass)) = state.basic_auth.as_ref() else {
+        return true;
+    };
+    let provided = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Basic "))
         .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok())
         .and_then(|bytes| String::from_utf8(bytes).ok());
+    let Some((user, pass)) = provided.as_deref().and_then(|value| value.split_once(':')) else {
+        return false;
+    };
+    let user_ok = constant_time_eq(user.as_bytes(), want_user.as_bytes());
+    let pass_ok = constant_time_eq(pass.as_bytes(), want_pass.as_bytes());
+    user_ok & pass_ok
+}
 
-    if let Some(creds) = provided {
-        if let Some((u, p)) = creds.split_once(':') {
-            // TASK-73: constant-time compare. `==` on str short-circuits on
-            // length and first differing byte, which leaks a timing signal on
-            // the single most security-critical comparison in this binary.
-            // Tunnel jitter almost certainly swamps it today — this is cheap
-            // insurance, not a claimed live exploit. Both halves are compared
-            // unconditionally (no `&&` short-circuit) so a wrong username
-            // costs the same as a wrong password.
-            let user_ok = constant_time_eq(u.as_bytes(), want_user.as_bytes());
-            let pass_ok = constant_time_eq(p.as_bytes(), want_pass.as_bytes());
-            if user_ok & pass_ok {
-                return next.run(req).await;
-            }
-        }
+async fn session_auth_gate(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if state.basic_auth.is_none()
+        || is_public_boot_asset(req.uri().path())
+        || has_valid_session(&state, req.headers())
+        // Keep scripted/smoke clients compatible during migration, but never
+        // challenge a browser for Basic credentials.
+        || has_valid_basic_credentials(&state, req.headers())
+    {
+        return next.run(req).await;
     }
 
-    (
-        StatusCode::UNAUTHORIZED,
-        [(header::WWW_AUTHENTICATE, "Basic realm=\"Ocean Surface\"")],
-        "authentication required",
-    )
-        .into_response()
+    let is_navigation = req.method() == axum::http::Method::GET
+        && req
+            .headers()
+            .get(header::ACCEPT)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("text/html"));
+    if is_navigation {
+        return Redirect::to("/login").into_response();
+    }
+    (StatusCode::UNAUTHORIZED, "authentication required").into_response()
+}
+
+#[derive(Deserialize)]
+struct LoginForm {
+    username: String,
+    password: String,
+}
+
+fn request_is_https(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("https"))
+}
+
+fn same_origin_form(headers: &HeaderMap) -> bool {
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let scheme = if request_is_https(headers) {
+        "https"
+    } else {
+        "http"
+    };
+    origin == format!("{scheme}://{host}")
+}
+
+fn login_html(error: bool) -> Html<String> {
+    let error_message = if error {
+        "<p class=\"error\" role=\"alert\">That username or password was not accepted.</p>"
+    } else {
+        ""
+    };
+    Html(format!(
+        r##"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#060606"><title>Sign in · Ocean</title>
+<style>
+*{{box-sizing:border-box}}html,body{{min-height:100%;margin:0}}body{{display:grid;place-items:center;background:#060606;color:#fafcff;font:15px Poppins,system-ui,-apple-system,sans-serif;padding:calc(24px + env(safe-area-inset-top)) 24px calc(24px + env(safe-area-inset-bottom))}}main{{width:min(100%,380px);padding:32px;border:1px solid #272b31;border-radius:24px;background:#0d0f12;box-shadow:0 24px 80px #000}}img{{display:block;width:72px;height:72px;margin:0 auto 20px}}h1{{margin:0;text-align:center;font-size:28px}}.sub{{color:#aab2bd;text-align:center;margin:8px 0 28px}}label{{display:block;color:#d6dbe2;font-size:13px;margin:16px 0 7px}}input{{width:100%;border:1px solid #343a43;border-radius:12px;background:#08090b;color:#fafcff;padding:13px 14px;font:inherit;outline:none}}input:focus{{border-color:#00d7d7;box-shadow:0 0 0 3px #00d7d722}}button{{width:100%;border:0;border-radius:12px;margin-top:22px;padding:13px;background:#00d7d7;color:#03181a;font:600 15px inherit;cursor:pointer}}.error{{border:1px solid #673b3b;border-radius:10px;background:#251414;color:#ffb9b9;padding:10px 12px;font-size:13px}}.note{{color:#77818d;text-align:center;font-size:12px;margin:18px 0 0}}
+</style></head><body><main><img src="/brand/master-1024.png" alt=""><h1>Ocean</h1><p class="sub">Sign in to your private surface.</p>{error_message}<form method="post" action="/login"><label for="username">Username</label><input id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="256"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required maxlength="256"><button type="submit">Continue</button></form><p class="note">Credentials stay between this device and your Ocean proxy.</p></main></body></html>"##
+    ))
+}
+
+async fn login_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if state.basic_auth.is_none() || has_valid_session(&state, &headers) {
+        return Redirect::to("/").into_response();
+    }
+    login_html(false).into_response()
+}
+
+async fn login_submit(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(form): Form<LoginForm>,
+) -> Response {
+    let Some((want_user, want_pass)) = state.basic_auth.as_ref() else {
+        return Redirect::to("/").into_response();
+    };
+    if !same_origin_form(&headers) || form.username.len() > 256 || form.password.len() > 256 {
+        return (StatusCode::FORBIDDEN, "login request rejected").into_response();
+    }
+    let user_ok = constant_time_eq(form.username.as_bytes(), want_user.as_bytes());
+    let pass_ok = constant_time_eq(form.password.as_bytes(), want_pass.as_bytes());
+    if !(user_ok & pass_ok) {
+        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        return (StatusCode::UNAUTHORIZED, login_html(true)).into_response();
+    }
+
+    let secure = if request_is_https(&headers) {
+        "; Secure"
+    } else {
+        ""
+    };
+    let cookie = format!(
+        "{SESSION_COOKIE}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_MAX_AGE_SECONDS}{secure}",
+        state.session_token
+    );
+    let mut response = Redirect::to("/").into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        cookie
+            .parse()
+            .expect("session cookie must be a valid header"),
+    );
+    response
+}
+
+async fn logout(headers: HeaderMap) -> Response {
+    if !same_origin_form(&headers) {
+        return (StatusCode::FORBIDDEN, "logout request rejected").into_response();
+    }
+    let secure = if request_is_https(&headers) {
+        "; Secure"
+    } else {
+        ""
+    };
+    let mut response = Redirect::to("/login").into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        format!("{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{secure}")
+            .parse()
+            .expect("expired cookie must be a valid header"),
+    );
+    response
 }
 
 /// Header value: long-lived and immutable. Deliberately WITHOUT
@@ -634,6 +857,8 @@ async fn static_cache_headers(req: Request, next: Next) -> Response {
     let mut resp = next.run(req).await;
 
     let value = if path == "/sw.js"
+        || path == "/login"
+        || path == "/logout"
         || path == "/"
         || path.ends_with('/')
         || path.ends_with(".html")
@@ -1691,10 +1916,10 @@ async fn tts(
 #[cfg(test)]
 mod tests {
     use super::{
-        basic_auth_gate, build_app, config_payload, constant_time_eq, decode_segment,
-        has_dot_segment, is_hashed_asset, livekit_token_daemon_path, percent_encode_path_segment,
-        read_observer_token, sse_no_buffer_headers, wasm_headers, AppState, CALL_PLACE_DAEMON_PATH,
-        WASM_CACHE_CONTROL,
+        build_app, config_payload, constant_time_eq, decode_segment, has_dot_segment,
+        is_hashed_asset, livekit_token_daemon_path, percent_encode_path_segment,
+        read_observer_token, session_auth_gate, sse_no_buffer_headers, wasm_headers, AppState,
+        CALL_PLACE_DAEMON_PATH, WASM_CACHE_CONTROL,
     };
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
@@ -1736,6 +1961,7 @@ mod tests {
             maps_key: None,
             maps_map_id: "DEMO_MAP_ID".to_string(),
             basic_auth: Some(("ocean".to_string(), "surface".to_string())),
+            session_token: "test-session".to_string(),
             observer_token_path: PathBuf::from("/not-used-in-auth-tests"),
         })
     }
@@ -1766,7 +1992,7 @@ mod tests {
             .fallback(get(|| async { StatusCode::OK }))
             .layer(middleware::from_fn_with_state(
                 state.clone(),
-                basic_auth_gate,
+                session_auth_gate,
             ))
             .with_state(state)
     }
@@ -1783,26 +2009,26 @@ mod tests {
         format!("Basic {encoded}")
     }
 
-    fn assert_basic_challenge(resp: axum::response::Response) {
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(
-            resp.headers().get(header::WWW_AUTHENTICATE).unwrap(),
-            "Basic realm=\"Ocean Surface\""
-        );
-    }
-
     #[tokio::test]
-    async fn basic_auth_challenges_unauthenticated_root() {
+    async fn unauthenticated_navigation_redirects_to_login_without_basic_challenge() {
         let resp = auth_gate_test_router()
-            .oneshot(request("/"))
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::ACCEPT, "text/html")
+                    .body(Body::empty())
+                    .expect("test request must be valid"),
+            )
             .await
             .expect("router should respond");
 
-        assert_basic_challenge(resp);
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert_eq!(resp.headers().get(header::LOCATION).unwrap(), "/login");
+        assert!(resp.headers().get(header::WWW_AUTHENTICATE).is_none());
     }
 
     #[tokio::test]
-    async fn basic_auth_challenges_unauthenticated_agent_turns() {
+    async fn unauthenticated_api_gets_plain_401_without_basic_challenge() {
         let resp = auth_gate_test_router()
             .oneshot(
                 Request::builder()
@@ -1814,7 +2040,24 @@ mod tests {
             .await
             .expect("router should respond");
 
-        assert_basic_challenge(resp);
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert!(resp.headers().get(header::WWW_AUTHENTICATE).is_none());
+    }
+
+    #[tokio::test]
+    async fn session_cookie_allows_authenticated_request() {
+        let resp = auth_gate_test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::COOKIE, "other=x; ocean_session=test-session")
+                    .body(Body::empty())
+                    .expect("test request must be valid"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -1989,6 +2232,7 @@ mod tests {
             maps_key: Some("maps".to_string()),
             maps_map_id: "DEMO_MAP_ID".to_string(),
             basic_auth: None,
+            session_token: "test-session".to_string(),
             observer_token_path: PathBuf::from("/not-used-in-config-tests"),
         };
 
@@ -2066,6 +2310,7 @@ mod tests {
             // Auth ON: a violation report must still land, otherwise the
             // report-only policy silently collects nothing in production.
             basic_auth: Some(("u".to_string(), "p".to_string())),
+            session_token: "test-session".to_string(),
             observer_token_path: PathBuf::from("/not-used"),
         });
         let app = build_app(state, dist.path());
@@ -2144,6 +2389,7 @@ mod tests {
             maps_key: None,
             maps_map_id: "DEMO_MAP_ID".to_string(),
             basic_auth: None,
+            session_token: "test-session".to_string(),
             observer_token_path: PathBuf::from("/not-used"),
         });
         let app = build_app(state, dist.path());
@@ -2279,6 +2525,7 @@ mod tests {
             maps_key: None,
             maps_map_id: "DEMO_MAP_ID".to_string(),
             basic_auth: None,
+            session_token: "test-session".to_string(),
             observer_token_path: PathBuf::from("/not-used"),
         });
         let app = build_app(state, dist.path());
@@ -2369,6 +2616,7 @@ mod tests {
             maps_key: None,
             maps_map_id: "DEMO_MAP_ID".to_string(),
             basic_auth: None,
+            session_token: "test-session".to_string(),
             observer_token_path: PathBuf::from("/not-used"),
         });
         let app = build_app(state, dist.path());
@@ -2454,6 +2702,7 @@ mod tests {
             maps_key: None,
             maps_map_id: "DEMO_MAP_ID".to_string(),
             basic_auth: None,
+            session_token: "test-session".to_string(),
             observer_token_path: PathBuf::from("/not-used"),
         });
         let app = build_app(state, dist.path());

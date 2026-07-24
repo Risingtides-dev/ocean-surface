@@ -2716,3 +2716,16 @@ area:      frontend
 
 TASK-108 (session sidebar, slice 1 — the left slide-over, executing smaths' "Slide over — session sidebar" call + john's ask to move it): the sidebar isn't a from-scratch build — the mature SessionsPanel already exists (sessions.rs, 2802 lines: project grouping, worktrees, collapsible sections, poll rail, all tested), it was just presented as a CENTERED MODAL (.sessions-overlay align/justify center; .sessions-panel 760px max-height:80vh card with sessions-tidal-rise). Flipped it to a LEFT slide-over matching the shared drawer pattern rooms already uses: .sessions-overlay justify-content flex-start (dock left), .sessions-panel now inherits the shared full-height drawer base (width min(380px,92vw), height 100dvh, bg-raised, shadow-lg) with a new sessions-slide-in-left keyframe (translateX(-24px)→0, mirror of the right-docked rooms slide). Removed the now-dead modal override + sessions-tidal-rise keyframe. Pure CSS, panel content/logic untouched — only the dock edge + slide direction changed. Gate off origin/main 06c27dd: fmt 0, cargo test 719 + dead_selector 4 green (no class add/remove; keyframe swap only). Surface auto-deploys. FIRST CUT — smaths/john to eyeball the 380px left drawer; width + the agent-notch row treatment (needs the retint design call) are follow-up slices. Session-row STATE still to unify per the crew projection plan (orthogonal to this positioning change).
 _________________________________________________________________________________
+time:      [05:39am] [07-23-26]
+agent:     [codex desktop] [gpt-5]
+worktree:  [main]
+type:      [issues]
+area:      [automations]
+
+Restored ocean.agentsworld.org to the risingtidesdev Mac mini after the hostname
+was found serving the Pasture worker. Verified the mini's existing Ocean proxy,
+deployed release, authentication, and daemon; installed and bootstrapped the
+dedicated Ocean tunnel LaunchAgent; repointed DNS to the existing Ocean tunnel;
+then verified the authenticated public title is Ocean, /health is healthy, and
+Pasture/Stitchpad markers are absent. Removed the temporary laptop recovery jobs
+and moved their exact files to Trash. No source build or source-code change.
