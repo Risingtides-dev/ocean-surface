@@ -1663,3 +1663,233 @@ select.form-field__input {
     height: 44px;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Swipe deck (kind: "deck") — agent-dealt decision queue. A card stack the
+   operator judges with horizontal swipes; left/right labels come from props.
+   Class prefix is swipedeck-* to stay clear of the Context Deck (deck.css). */
+
+.component-swipedeck {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: 14px;
+  max-width: 440px;
+}
+
+.swipedeck-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.swipedeck-head__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.swipedeck-head__counter {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.swipedeck-stage {
+  position: relative;
+  /* Depth offset headroom for the behind cards. */
+  padding-bottom: 22px;
+}
+
+.swipedeck-stack {
+  position: relative;
+}
+
+.swipedeck-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-well);
+  padding: 14px;
+}
+
+.swipedeck-card--behind {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0.55;
+}
+
+.swipedeck-card--behind .swipedeck-card__title {
+  opacity: 0; /* depth silhouette only — content stays private to the top card */
+}
+
+.swipedeck-card--top {
+  position: relative;
+  cursor: grab;
+  touch-action: pan-y;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.swipedeck-card--top:active {
+  cursor: grabbing;
+}
+
+.swipedeck-card__hint {
+  position: absolute;
+  top: 10px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 2px 8px;
+  border-radius: var(--radius);
+  pointer-events: none;
+  opacity: 0;
+}
+
+.swipedeck-card__hint--left {
+  right: 10px;
+  color: var(--err);
+  border: 1px solid var(--err);
+  background: var(--err-soft);
+}
+
+.swipedeck-card__hint--right {
+  left: 10px;
+  color: var(--ok);
+  border: 1px solid var(--ok);
+  background: var(--ok-soft);
+}
+
+.swipedeck-card__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  min-height: 18px;
+}
+
+.swipedeck-card__badge {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.swipedeck-card__badge--urgent,
+.swipedeck-card__badge--error {
+  background: var(--err-soft);
+  color: var(--err);
+}
+
+.swipedeck-card__badge--important,
+.swipedeck-card__badge--warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.swipedeck-card__suggest {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-3);
+}
+
+.swipedeck-card__title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+  line-height: 1.35;
+}
+
+.swipedeck-card__summary {
+  margin-top: 6px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--fg-2);
+}
+
+.swipedeck-card__detail {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--fg-2);
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.swipedeck-card__expand-hint {
+  margin-top: 10px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-3);
+  text-align: center;
+}
+
+.swipedeck-empty {
+  padding: 26px 0;
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--fg-3);
+}
+
+.swipedeck-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.swipedeck-btn {
+  flex: 1;
+  height: var(--ctl-h);
+  padding: 0 12px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 600;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+
+.swipedeck-btn:disabled {
+  cursor: default;
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.swipedeck-btn--danger {
+  color: var(--err);
+}
+
+.swipedeck-btn--danger:hover:not(:disabled) {
+  background: var(--err-soft);
+  border-color: var(--err);
+}
+
+.swipedeck-btn--success {
+  color: var(--ok);
+}
+
+.swipedeck-btn--success:hover:not(:disabled) {
+  background: var(--ok-soft);
+  border-color: var(--ok);
+}
+
+/* Touch tap-target floor, mirroring the coarse-pointer block above. */
+@media (pointer: coarse) {
+  .swipedeck-btn {
+    min-height: 44px;
+  }
+}

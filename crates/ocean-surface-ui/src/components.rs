@@ -15,6 +15,9 @@ use crate::daemon::{Daemon, PinnedWidget};
 mod interactive_plot;
 use interactive_plot::InteractivePlotView;
 
+mod swipe_deck;
+use swipe_deck::SwipeDeckView;
+
 #[wasm_bindgen]
 extern "C" {
     /// Defined in index.html. Loads the Google Maps JS API + Places UI Kit
@@ -261,6 +264,10 @@ pub fn ComponentView(
         .into_any(),
         "confirm" => view! {
             <ConfirmView component_id kind_props daemon />
+        }
+        .into_any(),
+        "deck" => view! {
+            <SwipeDeckView component_id kind_props daemon />
         }
         .into_any(),
         "map" => view! {
