@@ -2,7 +2,7 @@
 # Launch Ocean Surface: build the WASM bundle and release proxy, then serve
 # both from one process. Point your browser (or phone) at the printed URL.
 #
-# HTTP Basic auth is enabled by default because the default bind is reachable
+# Operator login is enabled by default because the default bind is reachable
 # over the LAN/tailnet. Set OCEAN_SURFACE_USER and OCEAN_SURFACE_PASS, or use
 # OCEAN_SURFACE_AUTH=off only with a trusted localhost bind:
 #   OCEAN_SURFACE_BIND=127.0.0.1:18790 OCEAN_SURFACE_AUTH=off ./run-surface.sh
@@ -25,7 +25,7 @@ BIND_HOST="${BIND%:*}"
 
 if [[ "$AUTH" == "off" ]] && [[ "$BIND_HOST" != "127.0.0.1" && "$BIND_HOST" != "[::1]" ]]; then
   echo "FATAL: OCEAN_SURFACE_AUTH=off is allowed only with a loopback bind." >&2
-  echo "       Use OCEAN_SURFACE_BIND=127.0.0.1:18790, or enable Basic auth." >&2
+  echo "       Use OCEAN_SURFACE_BIND=127.0.0.1:18790, or enable operator login." >&2
   exit 1
 fi
 
@@ -34,7 +34,7 @@ USER_COMPACT="${USER_COMPACT//[[:space:]]/}"
 PASS_COMPACT="${OCEAN_SURFACE_PASS:-}"
 PASS_COMPACT="${PASS_COMPACT//[[:space:]]/}"
 if [[ "$AUTH" != "off" ]] && { [[ -z "$USER_COMPACT" ]] || [[ -z "$PASS_COMPACT" ]]; }; then
-  echo "FATAL: HTTP Basic auth is enabled, but OCEAN_SURFACE_USER / OCEAN_SURFACE_PASS are not both set." >&2
+  echo "FATAL: operator login is enabled, but OCEAN_SURFACE_USER / OCEAN_SURFACE_PASS are not both set." >&2
   echo "       Set both for tailnet or trusted-LAN access, or use this trusted-localhost command:" >&2
   echo "       OCEAN_SURFACE_BIND=127.0.0.1:18790 OCEAN_SURFACE_AUTH=off ./run-surface.sh" >&2
   exit 1
@@ -74,7 +74,7 @@ done
 if [[ "$AUTH" == "off" ]]; then
   echo "==> auth: DISABLED (trusted-localhost use only)"
 else
-  echo "==> auth: HTTP Basic auth enabled"
+  echo "==> auth: username/password session login enabled"
 fi
 echo "==> daemon: $DAEMON"
 echo "==> serving on http://$BIND   (open this in your browser)"

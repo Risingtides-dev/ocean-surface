@@ -78,9 +78,9 @@ struct AppState {
     /// expires every browser session without persisting bearer material.
     basic_auth: Option<(String, String)>,
     session_token: String,
-    /// Canonical browser origin used for login/logout CSRF validation when a
-    /// reverse tunnel rewrites the origin-facing Host or forwarding headers.
-    public_origin: Option<String>,
+    /// Force the session cookie's Secure attribute for public HTTPS deployments
+    /// whose tunnel does not preserve a usable x-forwarded-proto header.
+    secure_cookie: bool,
     /// Mode-0600 boot-bound credential minted and rotated by ocean-daemon.
     /// Read immediately before each Observatory request; never sent to the browser.
     observer_token_path: PathBuf,
@@ -304,16 +304,20 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // A tunnel may legitimately rewrite Host and forwarding headers before the
-    // request reaches this process. Pin browser-origin checks to an explicit,
-    // validated origin instead of trying to infer public authority from those
-    // mutable transport headers.
-    let public_origin = std::env::var("OCEAN_SURFACE_PUBLIC_ORIGIN")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .map(|value| parse_public_origin(&value))
-        .transpose()?;
+    // Public tunnels may terminate HTTPS without preserving a usable
+    // x-forwarded-proto header. This switch controls cookie transport hygiene
+    // only; it is deliberately not an origin or device allowlist.
+    let secure_cookie = match std::env::var("OCEAN_SURFACE_COOKIE_SECURE") {
+        Ok(value) if value.eq_ignore_ascii_case("on") => true,
+        Ok(value) if value.eq_ignore_ascii_case("off") => false,
+        Ok(value) => {
+            anyhow::bail!("OCEAN_SURFACE_COOKIE_SECURE must be 'on' or 'off', got {value:?}")
+        }
+        Err(std::env::VarError::NotPresent) => false,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("OCEAN_SURFACE_COOKIE_SECURE must be valid UTF-8")
+        }
+    };
 
     // Stable across deploys so an installed PWA remains signed in. The mode-0600
     // server secret never reaches the browser; rotating the configured username
@@ -344,7 +348,7 @@ async fn main() -> anyhow::Result<()> {
         tldraw_sync_uri,
         basic_auth,
         session_token,
-        public_origin,
+        secure_cookie,
         maps_key,
         maps_map_id,
         observer_token_path,
@@ -623,23 +627,6 @@ struct LoginForm {
     password: String,
 }
 
-fn parse_public_origin(value: &str) -> anyhow::Result<String> {
-    let url = reqwest::Url::parse(value).context("OCEAN_SURFACE_PUBLIC_ORIGIN must be a URL")?;
-    if !matches!(url.scheme(), "http" | "https")
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.path() != "/"
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        anyhow::bail!(
-            "OCEAN_SURFACE_PUBLIC_ORIGIN must contain only an http(s) scheme and authority"
-        );
-    }
-    Ok(url.origin().ascii_serialization())
-}
-
 fn first_forwarded_value<'a>(headers: &'a HeaderMap, name: &'static str) -> Option<&'a str> {
     headers
         .get(name)
@@ -649,37 +636,10 @@ fn first_forwarded_value<'a>(headers: &'a HeaderMap, name: &'static str) -> Opti
         .filter(|value| !value.is_empty())
 }
 
-fn request_is_https(headers: &HeaderMap, public_origin: Option<&str>) -> bool {
-    public_origin.is_some_and(|origin| origin.starts_with("https://"))
+fn request_is_https(headers: &HeaderMap, secure_cookie: bool) -> bool {
+    secure_cookie
         || first_forwarded_value(headers, "x-forwarded-proto")
             .is_some_and(|value| value.eq_ignore_ascii_case("https"))
-}
-
-fn same_origin_form(headers: &HeaderMap, public_origin: Option<&str>) -> bool {
-    let Some(origin) = headers
-        .get(header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-    else {
-        return false;
-    };
-
-    if let Some(public_origin) = public_origin {
-        return origin == public_origin;
-    }
-
-    let Some(host) = first_forwarded_value(headers, "x-forwarded-host").or_else(|| {
-        headers
-            .get(header::HOST)
-            .and_then(|value| value.to_str().ok())
-    }) else {
-        return false;
-    };
-    let scheme = if request_is_https(headers, None) {
-        "https"
-    } else {
-        "http"
-    };
-    origin == format!("{scheme}://{host}")
 }
 
 fn login_html(error: bool) -> Html<String> {
@@ -712,12 +672,9 @@ async fn login_submit(
     let Some((want_user, want_pass)) = state.basic_auth.as_ref() else {
         return Redirect::to("/").into_response();
     };
-    if !same_origin_form(&headers, state.public_origin.as_deref())
-        || form.username.len() > 256
-        || form.password.len() > 256
-    {
-        return (StatusCode::FORBIDDEN, "login request rejected").into_response();
-    }
+    // Username and password are the complete login gate. Do not reject valid
+    // credentials based on Origin, Host, forwarding headers, device identity,
+    // or tunnel topology; those transport details are not authentication.
     let user_ok = constant_time_eq(form.username.as_bytes(), want_user.as_bytes());
     let pass_ok = constant_time_eq(form.password.as_bytes(), want_pass.as_bytes());
     if !(user_ok & pass_ok) {
@@ -725,7 +682,7 @@ async fn login_submit(
         return (StatusCode::UNAUTHORIZED, login_html(true)).into_response();
     }
 
-    let secure = if request_is_https(&headers, state.public_origin.as_deref()) {
+    let secure = if request_is_https(&headers, state.secure_cookie) {
         "; Secure"
     } else {
         ""
@@ -745,10 +702,7 @@ async fn login_submit(
 }
 
 async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if !same_origin_form(&headers, state.public_origin.as_deref()) {
-        return (StatusCode::FORBIDDEN, "logout request rejected").into_response();
-    }
-    let secure = if request_is_https(&headers, state.public_origin.as_deref()) {
+    let secure = if request_is_https(&headers, state.secure_cookie) {
         "; Secure"
     } else {
         ""
@@ -1967,10 +1921,9 @@ async fn tts(
 mod tests {
     use super::{
         build_app, config_payload, constant_time_eq, decode_segment, has_dot_segment,
-        is_hashed_asset, livekit_token_daemon_path, parse_public_origin,
-        percent_encode_path_segment, read_observer_token, request_is_https, same_origin_form,
-        session_auth_gate, sse_no_buffer_headers, wasm_headers, AppState, CALL_PLACE_DAEMON_PATH,
-        WASM_CACHE_CONTROL,
+        is_hashed_asset, livekit_token_daemon_path, percent_encode_path_segment,
+        read_observer_token, session_auth_gate, sse_no_buffer_headers, wasm_headers, AppState,
+        CALL_PLACE_DAEMON_PATH, WASM_CACHE_CONTROL,
     };
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
@@ -1978,7 +1931,7 @@ mod tests {
 
     use axum::{
         body::Body,
-        http::{header, HeaderMap, HeaderValue, Request, StatusCode},
+        http::{header, Request, StatusCode},
         middleware,
         routing::{get, post},
         Router,
@@ -2013,7 +1966,7 @@ mod tests {
             maps_map_id: "DEMO_MAP_ID".to_string(),
             basic_auth: Some(("ocean".to_string(), "surface".to_string())),
             session_token: "test-session".to_string(),
-            public_origin: Some("https://ocean.agentsworld.org".to_string()),
+            secure_cookie: true,
             observer_token_path: PathBuf::from("/not-used-in-auth-tests"),
         })
     }
@@ -2061,63 +2014,18 @@ mod tests {
         format!("Basic {encoded}")
     }
 
-    #[test]
-    fn configured_public_origin_survives_tunnel_header_rewrite() {
-        let mut headers = HeaderMap::new();
-        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8790"));
-        headers.insert(
-            header::ORIGIN,
-            HeaderValue::from_static("https://ocean.agentsworld.org"),
-        );
-
-        assert!(same_origin_form(
-            &headers,
-            Some("https://ocean.agentsworld.org")
-        ));
-        assert!(request_is_https(
-            &headers,
-            Some("https://ocean.agentsworld.org")
-        ));
-
-        headers.insert(
-            header::ORIGIN,
-            HeaderValue::from_static("https://attacker.example"),
-        );
-        assert!(!same_origin_form(
-            &headers,
-            Some("https://ocean.agentsworld.org")
-        ));
-    }
-
-    #[test]
-    fn public_origin_rejects_paths_credentials_and_non_http_schemes() {
-        assert_eq!(
-            parse_public_origin("https://ocean.agentsworld.org/").unwrap(),
-            "https://ocean.agentsworld.org"
-        );
-        for invalid in [
-            "https://ocean.agentsworld.org/login",
-            "https://user:pass@ocean.agentsworld.org",
-            "file:///tmp/ocean",
-            "https://ocean.agentsworld.org?source=bad",
-        ] {
-            assert!(parse_public_origin(invalid).is_err(), "accepted {invalid}");
-        }
-    }
-
     #[tokio::test]
-    async fn tunneled_login_sets_secure_session_cookie() {
+    async fn valid_credentials_ignore_origin_and_set_secure_session_cookie() {
         let dist = tempfile::tempdir().expect("temp dist");
         let resp = build_app(auth_test_state(), dist.path())
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/login")
-                    // Model a tunnel that exposes the public HTTPS origin while
-                    // connecting to this proxy with an internal Host and no
-                    // usable x-forwarded-proto value.
-                    .header(header::HOST, "127.0.0.1:8790")
-                    .header(header::ORIGIN, "https://ocean.agentsworld.org")
+                    // Origin is transport metadata, not an authentication gate.
+                    // A browser or tunnel may omit or rewrite it; valid
+                    // credentials must still produce a normal session.
+                    .header(header::ORIGIN, "https://unfamiliar-device.example")
                     .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                     .body(Body::from("username=ocean&password=surface"))
                     .expect("valid login request"),
@@ -2363,7 +2271,7 @@ mod tests {
             maps_map_id: "DEMO_MAP_ID".to_string(),
             basic_auth: None,
             session_token: "test-session".to_string(),
-            public_origin: None,
+            secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used-in-config-tests"),
         };
 
@@ -2442,7 +2350,7 @@ mod tests {
             // report-only policy silently collects nothing in production.
             basic_auth: Some(("u".to_string(), "p".to_string())),
             session_token: "test-session".to_string(),
-            public_origin: None,
+            secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
         });
         let app = build_app(state, dist.path());
@@ -2522,7 +2430,7 @@ mod tests {
             maps_map_id: "DEMO_MAP_ID".to_string(),
             basic_auth: None,
             session_token: "test-session".to_string(),
-            public_origin: None,
+            secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
         });
         let app = build_app(state, dist.path());
@@ -2659,7 +2567,7 @@ mod tests {
             maps_map_id: "DEMO_MAP_ID".to_string(),
             basic_auth: None,
             session_token: "test-session".to_string(),
-            public_origin: None,
+            secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
         });
         let app = build_app(state, dist.path());
@@ -2751,7 +2659,7 @@ mod tests {
             maps_map_id: "DEMO_MAP_ID".to_string(),
             basic_auth: None,
             session_token: "test-session".to_string(),
-            public_origin: None,
+            secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
         });
         let app = build_app(state, dist.path());
@@ -2838,7 +2746,7 @@ mod tests {
             maps_map_id: "DEMO_MAP_ID".to_string(),
             basic_auth: None,
             session_token: "test-session".to_string(),
-            public_origin: None,
+            secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
         });
         let app = build_app(state, dist.path());

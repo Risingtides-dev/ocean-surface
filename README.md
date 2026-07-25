@@ -105,7 +105,7 @@ permission requests, completion). Surfaces must subscribe scoped to their own
 The daemon must be running (in `../ocean-os`: `cargo run -p ocean-daemon --release`). Then:
 
 ```sh
-# Tailnet or trusted LAN: Basic auth is required because the default bind is 0.0.0.0:8790.
+# Tailnet or trusted LAN: operator login is required because the default bind is 0.0.0.0:8790.
 export OCEAN_SURFACE_USER='<user>'
 export OCEAN_SURFACE_PASS='<strong password>'
 ./run-surface.sh
@@ -119,10 +119,10 @@ OCEAN_SURFACE_BIND=127.0.0.1:18790 OCEAN_SURFACE_AUTH=off ./run-surface.sh
 ```
 
 `run-surface.sh` builds both the Trunk release bundle and
-`target/release/ocean-surface-proxy` before serving. It fails before building if
-Basic auth is enabled without nonblank credentials, or if auth is disabled on a
+`target/release/ocean-surface-proxy` before serving. It fails before building
+when operator login lacks nonblank credentials or auth is disabled on a
 non-loopback bind. Tailnet traffic is encrypted; direct LAN HTTP should be used
-only on a trusted network because Basic auth does not encrypt transport.
+only on a trusted network because the login form does not encrypt transport.
 Override the daemon or voice profile with `OCEAN_DAEMON_URL` and
 `OCEAN_VOICE_PROFILE`. Maps are optional: set a referrer-restricted
 `GOOGLE_MAPS_API_KEY` to enable them. No organization-owned Maps key is bundled;

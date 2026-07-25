@@ -56,6 +56,13 @@ default LAN/tailnet bind. For trusted localhost diagnostics only, bind
 `127.0.0.1` and set `OCEAN_SURFACE_AUTH=off`. Direct `cargo tauri dev` does not
 rebuild `dist/`; use `run-tauri.sh` whenever freshness matters.
 
+The public proxy login contract is username/password to an HttpOnly,
+SameSite=Strict session cookie. Ordinary browsers and devices must not be
+rejected by Origin, Host, forwarded-header, Cloudflare Access, Tailscale, or
+device-posture gates. Public HTTPS deployments set
+`OCEAN_SURFACE_COOKIE_SECURE=on`; that setting controls only the cookie's
+Secure attribute.
+
 Native surface direction:
 
 - Tauri 2.x shell (`crates/ocean-tauri`) loads `dist/` as `frontendDist` — the
@@ -284,7 +291,7 @@ For local web/proxy work:
 OCEAN_SURFACE_BIND=127.0.0.1:18790 OCEAN_SURFACE_AUTH=off ./run-surface.sh
 ```
 
-For LAN/tailnet access, keep the default bind and provide both Basic auth
+For LAN/tailnet access, keep the default bind and provide both operator-login
 environment variables. `trunk serve` exercises the bundle alone, not the
 release proxy or daemon reverse-proxy path.
 

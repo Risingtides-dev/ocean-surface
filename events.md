@@ -2747,3 +2747,21 @@ handles comma-appended forwarding headers. Added regression coverage for rewritt
 tunnel headers, malformed origin configuration, and the real POST /login route
 setting an HttpOnly SameSite=Strict Secure session cookie. Production config pins
 https://ocean.agentsworld.org; no credentials are stored in source.
+_________________________________________________________________________________
+time:      [12:41pm] [07-25-26]
+agent:     [codex desktop] [gpt-5]
+worktree:  [codex/simplify-public-login]
+type:      [bug report]
+area:      [backend]
+
+Replaced the brittle public-login CSRF/origin gate with the operator's durable
+auth contract: any ordinary browser or device may exchange the configured
+username/password for the normal session cookie. Login no longer considers
+Origin, Host, forwarded headers, Cloudflare Access, Tailscale, or device
+posture. Credential comparison remains constant-time, failed credentials keep
+the existing 750ms delay, and the session cookie remains Path=/, HttpOnly,
+SameSite=Strict, and Secure when OCEAN_SURFACE_COOKIE_SECURE=on. Logout is an
+idempotent cookie clear with no origin rejection. Updated the proxy launcher,
+install guidance, and root devlog contract. Verified on the authoritative Mac
+mini worktree with cargo fmt --check, cargo check -p ocean-surface-proxy, all
+27 proxy tests, bash -n for the touched launch/install scripts, and diff check.

@@ -56,14 +56,15 @@ done
 export OCEAN_SURFACE_BIND="${OCEAN_SURFACE_BIND:-0.0.0.0:8790}"
 export OCEAN_DAEMON_URL="${OCEAN_DAEMON_URL:-http://127.0.0.1:4780}"
 
-# HTTP Basic auth: creds live in a 0600 env file, NEVER in the plist (plists
-# are world-readable by default and leak easily via dotfile syncs). The file
-# exports OCEAN_SURFACE_AUTH / OCEAN_SURFACE_USER / OCEAN_SURFACE_PASS and,
-# for a tunneled deployment, OCEAN_SURFACE_PUBLIC_ORIGIN. The public origin is
-# used for exact CSRF validation because a reverse tunnel may rewrite Host and
-# forwarding headers before they reach the proxy. If the file is absent the
-# binary's own guard applies (refuses to boot with auth on and no creds;
-# OCEAN_SURFACE_AUTH=off is the trusted-localhost escape hatch).
+# Operator login credentials live in a 0600 env file, NEVER in the plist
+# (plists are world-readable by default and leak easily via dotfile syncs).
+# The file exports OCEAN_SURFACE_AUTH / OCEAN_SURFACE_USER /
+# OCEAN_SURFACE_PASS and should set OCEAN_SURFACE_COOKIE_SECURE=on when a
+# public tunnel terminates HTTPS. That switch controls only the cookie's
+# Secure attribute; login itself has no origin, device, or tunnel allowlist.
+# If the file is absent the binary's own guard applies (refuses to boot with
+# auth on and no creds; OCEAN_SURFACE_AUTH=off is the trusted-localhost escape
+# hatch).
 AUTH_ENV="$HOME/.config/ocean-surface/proxy-auth.env"
 if [[ -f "$AUTH_ENV" ]]; then
   # shellcheck disable=SC1090

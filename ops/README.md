@@ -34,11 +34,12 @@ promotes a new release only after a clean detached-main build passes its gates.
 > loop cannot touch the live release.
 >
 > Secrets stay out of the plist. The xAI voice key is resolved from
-> `~/.config/ocean-surface/xai.key` (or env `XAI_API_KEY`). HTTP Basic auth is
+> `~/.config/ocean-surface/xai.key` (or env `XAI_API_KEY`). Operator login is
 > **on by default** and requires operator-supplied creds in
 > `~/.config/ocean-surface/proxy-auth.env` (0600) exporting
 > `OCEAN_SURFACE_AUTH=on`, `OCEAN_SURFACE_USER`, and `OCEAN_SURFACE_PASS`
-> (password typically read from `proxy-basic-auth.txt`). There are **no**
+> (plus `OCEAN_SURFACE_COOKIE_SECURE=on` behind the public HTTPS tunnel).
+> There are **no**
 > built-in operator credentials. The tracked plist template does **not** set
 > `OCEAN_SURFACE_AUTH`; do not put USER/PASS in the plist. For a trusted
 > localhost throwaway only, export `OCEAN_SURFACE_AUTH=off` in the process
