@@ -2729,3 +2729,21 @@ dedicated Ocean tunnel LaunchAgent; repointed DNS to the existing Ocean tunnel;
 then verified the authenticated public title is Ocean, /health is healthy, and
 Pasture/Stitchpad markers are absent. Removed the temporary laptop recovery jobs
 and moved their exact files to Trash. No source build or source-code change.
+_________________________________________________________________________________
+time:      [03:04] [07-25-26]
+agent:     [ocean] [gpt-5.2]
+worktree:  [fix-public-login]
+type:      [bug-report]
+area:      [backend]
+
+Fixed the public cookie-login lockout reproduced through ocean.agentsworld.org.
+The CSRF check inferred the browser origin from cloudflared's origin-facing Host
+and x-forwarded-proto headers, so valid credentials were rejected with 403 before
+credential validation whenever the tunnel rewrote those headers. Added a strict,
+validated OCEAN_SURFACE_PUBLIC_ORIGIN setting: login/logout compare Origin exactly
+against that configured authority and use its HTTPS scheme for Secure cookies.
+The unconfigured local/LAN path retains inferred same-origin behavior and now
+handles comma-appended forwarding headers. Added regression coverage for rewritten
+tunnel headers, malformed origin configuration, and the real POST /login route
+setting an HttpOnly SameSite=Strict Secure session cookie. Production config pins
+https://ocean.agentsworld.org; no credentials are stored in source.
