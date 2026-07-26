@@ -2437,9 +2437,11 @@ struct SessionToolContext {
     arguments: Option<serde_json::Value>,
 }
 
-/// TASK-46: outcome of `commit_session_projection` — whether the detail was
-/// terminal (sync done with full transcript) or still live (quarantined
-/// prefix + sync_pending poll running).
+/// Outcome of `commit_session_projection`.
+///
+/// New session projections always return `Terminal` after committing the full
+/// daemon transcript. `Live` remains only for the retired TASK-46 poll cleanup
+/// path; session switches and reconnects no longer enter that quarantine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProjectionOutcome {
     Terminal,
@@ -2450,9 +2452,10 @@ const SESSION_PROJECTION_ACTIVITY_CHANGED: &str =
     "session activity changed while loading; retrying authoritative snapshot";
 
 /// A terminal HTTP snapshot can briefly race a TurnStarted frame received
-/// before the daemon registers the request in its durable request map. Keep the
-/// local live projection and let sync_pending poll once registration settles.
-fn should_defer_terminal_snapshot(query_is_live: bool, local_has_live_turn: bool) -> bool {
+/// before the daemon registers the request in its durable request map. Preserve
+/// the already-admitted local Stop target while still committing the complete
+/// transcript instead of deferring the whole projection.
+fn should_preserve_local_live_state(query_is_live: bool, local_has_live_turn: bool) -> bool {
     !query_is_live && local_has_live_turn
 }
 
@@ -4322,19 +4325,6 @@ impl Daemon {
         self.sync_pending.set(false);
     }
 
-    /// Manual refresh: abort any in-flight sync fetch and kick an immediate
-    /// poll tick. Idempotent — no-op if sync_pending is not active. Resets
-    /// the deadline so a stalled banner can be revived by the operator.
-    pub fn sync_touch(&self) {
-        if !self.sync_pending.get_untracked() {
-            return;
-        }
-        // Reset the 5-minute deadline.
-        self.sync_deadline.set(Some(now_millis() + 300_000.0));
-        // Bump the kick counter — the Effect in start_sync_poll fires a tick.
-        self.sync_poll_kick.update(|k| *k = k.wrapping_add(1));
-    }
-
     /// Enter sync_pending mode for `(session_id, sse_generation)`. Commit the
     /// committed transcript immediately (already done by the caller), set the
     /// sync_pending flag, and start the bounded abortable detail poll at 2s
@@ -4585,25 +4575,15 @@ impl Daemon {
             return ProjectionOutcome::Live;
         }
 
-        // Check state: live or terminal?
-        let query_is_live = detail.state.is_some_and(|s| s.is_live());
+        // TASK-46 rollback: always commit the complete daemon transcript. The
+        // prior live-state branch truncated at the last user entry and started a
+        // detail poll, leaving legitimate long operations behind a "detail
+        // syncing…" quarantine for their entire duration.
         let active_requests = detail.active_requests.clone();
-        let (transcript_for_commit, outcome) = if query_is_live {
-            // Quarantine at last user entry.
-            let split_idx = detail
-                .transcript
-                .iter()
-                .rposition(|e| e.role == "user")
-                .unwrap_or(0);
-            let prefix: Vec<_> = detail.transcript.iter().take(split_idx).cloned().collect();
-            (prefix, ProjectionOutcome::Live)
-        } else {
-            (detail.transcript.clone(), ProjectionOutcome::Terminal)
-        };
 
-        // Commit the quarantined or full transcript atomically.
+        // Commit the full transcript atomically.
         let (rebuilt_turns, rebuilt_pinned) =
-            turns_from_session_transcript(transcript_for_commit, &detail.tool_context);
+            turns_from_session_transcript(detail.transcript.clone(), &detail.tool_context);
         // Poll ticks reconcile only live-turn state; the permission view is owned
         // by the control stream / full projection, so this arm never publishes it
         // (Fresh(empty) here is discarded — only `active_turn_id`/`streaming` are
@@ -4632,7 +4612,7 @@ impl Daemon {
             self.model.set(Some(detail.model.clone()));
         }
 
-        outcome
+        ProjectionOutcome::Terminal
     }
 
     /// Switch to a different session. Clears the current turns, sets the
@@ -4742,10 +4722,10 @@ impl Daemon {
     /// waiting-for-permission, or cancelling session is never transiently
     /// declared idle; only a terminal state clears the Stop target.
     ///
-    /// TASK-46: when the fetched detail state is Running/WaitingForPermission/
-    /// Cancelling, quarantine the transcript at the last user entry (render
-    /// prefix only) and return `ProjectionOutcome::Live` so the caller starts
-    /// the sync_pending poll. Terminal states return `ProjectionOutcome::Terminal`.
+    /// Running/WaitingForPermission/Cancelling snapshots commit their complete
+    /// persisted transcript immediately while preserving the daemon-owned live
+    /// Stop state. Session switching never enters a client-side detail
+    /// quarantine or requires a manual refresh.
     async fn commit_session_projection(
         &self,
         id: &str,
@@ -4823,7 +4803,7 @@ impl Daemon {
         }
 
         // Both HTTP awaits are done; the rest is the synchronous post-fetch
-        // commit (final admission recheck, transcript quarantine + rebuild, and
+        // commit (final admission recheck, full transcript rebuild, and
         // the atomic signal commit incl. the two-state permission publish),
         // extracted so it is drivable in a native test with injected fetch
         // results (codex HOLD on c2a1810).
@@ -6012,7 +5992,7 @@ struct SessionCommitSignals {
 }
 
 /// The post-fetch body of `commit_session_projection`: the final admission
-/// recheck, the terminal-vs-live decision, the transcript quarantine + rebuild,
+/// recheck, the live-state decision, the full transcript rebuild,
 /// and the one atomic (no-`await`) commit of every session signal — including the
 /// two-state permission publish. `detail` and `settle` are the two fetch RESULTS,
 /// injected so this whole wrapper runs in a native test (codex HOLD on c2a1810:
@@ -6050,16 +6030,16 @@ fn apply_session_projection(
         return Err(SESSION_PROJECTION_ACTIVITY_CHANGED.into());
     }
 
-    // 4. TASK-46: determine whether this detail is terminal or live.
+    // 4. Determine whether the daemon reports a live turn. A terminal snapshot
+    // can briefly race an already-admitted TurnStarted frame, so remember that
+    // local Stop target for the atomic commit below.
     let query_is_live = detail.state.is_some_and(|s| s.is_live());
     let local_has_live_turn =
         sig.streaming.get_untracked() && sig.active_turn_id.get_untracked().is_some();
-    if should_defer_terminal_snapshot(query_is_live, local_has_live_turn) {
-        // Register-before-accepted: an SSE TurnStarted can precede the request
-        // registry that enriches SessionDetail. Do not let that transient terminal
-        // snapshot clear the local Stop target; the bounded sync poll reconciles.
-        return Ok(ProjectionOutcome::Live);
-    }
+    let preserve_local_live_state =
+        should_preserve_local_live_state(query_is_live, local_has_live_turn);
+    let local_active_turn_id = sig.active_turn_id.get_untracked();
+    let local_streaming = sig.streaming.get_untracked();
 
     // 5. Pure projection, then one atomic commit — no `await` between writes.
     let SessionDetail {
@@ -6077,22 +6057,7 @@ fn apply_session_projection(
         ..
     } = detail;
 
-    // TASK-46 quarantine: when state is live, split at last user entry and render
-    // only the prefix; the suffix is quarantined. Conservative under-display is
-    // allowed; false-complete partial content is not.
-    let (quarantined_transcript, outcome) = if query_is_live {
-        let split_idx = transcript
-            .iter()
-            .rposition(|e| e.role == "user")
-            .unwrap_or(0);
-        let prefix: Vec<_> = transcript.iter().take(split_idx).cloned().collect();
-        (prefix, ProjectionOutcome::Live)
-    } else {
-        (transcript, ProjectionOutcome::Terminal)
-    };
-
-    let (rebuilt_turns, rebuilt_pinned) =
-        turns_from_session_transcript(quarantined_transcript, &tool_context);
+    let (rebuilt_turns, rebuilt_pinned) = turns_from_session_transcript(transcript, &tool_context);
     let authority = sig.decision_authority.get_untracked();
     // Publish the two-state permission view through the shared signal seam: reads
     // prior view + tombstones from their signals, folds `detail_ids − tombstones`,
@@ -6134,15 +6099,20 @@ fn apply_session_projection(
     }
     sig.turns.set(rebuilt_turns);
     sig.pinned_widgets.set(rebuilt_pinned);
-    sig.active_turn_id.set(projection.active_turn_id);
-    sig.streaming.set(projection.streaming);
+    if preserve_local_live_state {
+        sig.active_turn_id.set(local_active_turn_id);
+        sig.streaming.set(local_streaming);
+    } else {
+        sig.active_turn_id.set(projection.active_turn_id);
+        sig.streaming.set(projection.streaming);
+    }
     // permission_view + tombstones already published by commit_permission_view
     // (or skipped if a newer epoch superseded this claim).
     sig.decision_authority.update(|authority| {
         prune_session_authority(authority, id, &live_requests);
     });
     sig.status.set("session loaded".into());
-    Ok(outcome)
+    Ok(ProjectionOutcome::Terminal)
 }
 
 /// Build the `args_preview` stored on a `ToolCall` block.
@@ -6211,9 +6181,10 @@ fn apply_event(
         return;
     }
 
-    // TASK-46: suppression gate — during sync_pending, content-mutating events
-    // are suppressed so the quarantined transcript stays intact until the detail
-    // poll reaches terminal state. State/Stop/permissions/SurfacePatch still flow.
+    // Retired TASK-46 compatibility guard. New session projections never enable
+    // sync_pending, but an already-running legacy poll still suppresses content
+    // until its replacement bundle reloads. State/Stop/permissions/SurfacePatch
+    // continue to flow.
     let sp = sync_pending.get_untracked();
     if sp {
         match event {
@@ -8722,11 +8693,11 @@ mod tests {
     }
 
     #[test]
-    fn register_before_accepted_defers_only_terminal_snapshot_with_local_live_turn() {
-        assert!(should_defer_terminal_snapshot(false, true));
-        assert!(!should_defer_terminal_snapshot(true, true));
-        assert!(!should_defer_terminal_snapshot(false, false));
-        assert!(!should_defer_terminal_snapshot(true, false));
+    fn register_before_accepted_preserves_only_terminal_snapshot_with_local_live_turn() {
+        assert!(should_preserve_local_live_state(false, true));
+        assert!(!should_preserve_local_live_state(true, true));
+        assert!(!should_preserve_local_live_state(false, false));
+        assert!(!should_preserve_local_live_state(true, false));
     }
 
     // 6. Deciding an old card after a new dispatch resolves the ORIGINAL turn's
@@ -10929,6 +10900,16 @@ mod tests {
         }
     }
 
+    fn assistant_entry(text: &str) -> SessionTranscriptEntry {
+        SessionTranscriptEntry {
+            role: "assistant".into(),
+            text: text.into(),
+            tool_call_id: None,
+            tool_name: None,
+            is_error: None,
+        }
+    }
+
     fn wrapper_detail(
         pending: Vec<String>,
         transcript: Vec<SessionTranscriptEntry>,
@@ -10988,6 +10969,38 @@ mod tests {
         let epoch = daemon.claim_permission_epoch();
         apply_session_projection(&daemon.commit_signals(), "s1", 5, 0, epoch, detail, settle)
             .expect("admission passes for the focused session")
+    }
+
+    #[test]
+    fn live_session_projection_commits_full_transcript_without_sync_quarantine() {
+        let daemon = wrapper_daemon();
+        let mut detail = wrapper_detail(
+            vec![],
+            vec![
+                user_entry("start the long task"),
+                assistant_entry("partial persisted response"),
+            ],
+        );
+        detail.state = Some(SessionRunState::Running);
+        detail.active_requests = vec!["turn-live".into()];
+
+        let outcome = run_wrapper(&daemon, detail, SnapshotSettle::Fresh(Vec::new()));
+
+        assert_eq!(outcome, ProjectionOutcome::Terminal);
+        assert_eq!(daemon.turns.get_untracked().len(), 2);
+        assert!(matches!(
+            &daemon.turns.get_untracked()[1].blocks[..],
+            [Block::Text(text)] if text == "partial persisted response"
+        ));
+        assert!(daemon.streaming.get_untracked());
+        assert_eq!(
+            daemon.active_turn_id.get_untracked().as_deref(),
+            Some("turn-live")
+        );
+        assert!(
+            !daemon.sync_pending.get_untracked(),
+            "session switching must never require client-side detail polling"
+        );
     }
 
     // Regression 1: FIRST load, degraded snapshot — the TRANSCRIPT still commits
@@ -12150,50 +12163,7 @@ mod tests {
         );
     }
 
-    // ── 3. sync_touch ──────────────────────────────────────────────────────────
-
-    #[test]
-    fn sync_touch_noop_when_sync_pending_is_false() {
-        let daemon = Daemon::dummy();
-        let prev_kick = daemon.sync_poll_kick.get_untracked();
-        let prev_deadline = daemon.sync_deadline.get_untracked();
-
-        daemon.sync_touch();
-
-        assert_eq!(
-            daemon.sync_poll_kick.get_untracked(),
-            prev_kick,
-            "kick must not change"
-        );
-        assert_eq!(
-            daemon.sync_deadline.get_untracked(),
-            prev_deadline,
-            "deadline must not change"
-        );
-    }
-
-    #[test]
-    fn sync_touch_resets_deadline_and_bumps_kick_when_pending() {
-        let daemon = daemon_with_sync(true, Some(now_millis() + 1000.0));
-        let prev_kick = daemon.sync_poll_kick.get_untracked();
-
-        daemon.sync_touch();
-
-        assert_eq!(
-            daemon.sync_poll_kick.get_untracked(),
-            prev_kick.wrapping_add(1),
-            "kick must bump"
-        );
-        let new_deadline = daemon.sync_deadline.get_untracked().expect("deadline set");
-        // Should be ~300s from now, within 500ms tolerance.
-        let expected = now_millis() + 300_000.0;
-        assert!(
-            (new_deadline - expected).abs() < 500.0,
-            "deadline reset to ~5 min ahead; got {new_deadline}"
-        );
-    }
-
-    // ── 4. suppression gate: content events ────────────────────────────────────
+    // ── 3. suppression gate: content events ────────────────────────────────────
 
     #[test]
     fn apply_event_suppresses_tool_call_started_when_sync_pending() {

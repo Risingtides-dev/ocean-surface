@@ -203,6 +203,11 @@ Web surface session UI:
   quiet zero-height sticky `↓ latest` affordance returns and re-pins, and a
   session switch always re-pins so the new transcript opens at its latest
   turn. Do not re-add unconditional scroll-to-bottom on stream deltas.
+- Session switches and reconnects commit the daemon's complete persisted
+  transcript immediately, including while a turn is live, while preserving the
+  daemon-owned running/Stop projection and continuing the scoped SSE tail.
+  Never quarantine a live session behind client-side detail polling,
+  `detail syncing…`, or a manual refresh control.
 - Every complete session-list request—thin daemon spawner or A1 panel
   poll—claims the same daemon-owned generation ticket. Only the latest claimant
   may replace `session_list`; panel-local generation/open guards still protect

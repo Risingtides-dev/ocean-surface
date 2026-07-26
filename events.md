@@ -2765,3 +2765,23 @@ idempotent cookie clear with no origin rejection. Updated the proxy launcher,
 install guidance, and root devlog contract. Verified on the authoritative Mac
 mini worktree with cargo fmt --check, cargo check -p ocean-surface-proxy, all
 27 proxy tests, bash -n for the touched launch/install scripts, and diff check.
+_________________________________________________________________________________
+time:      [01:10pm] [07-26-26]
+agent:     [codex desktop] [gpt-5]
+worktree:  [codex/rollback-session-quarantine]
+type:      [bug report]
+area:      [frontend]
+
+Rolled back the TASK-46 client-side live-session quarantine that intentionally
+truncated a switched transcript, suppressed SSE content, displayed
+`detail syncing…`, and polled until a long-running turn ended. Public Chrome
+reproduction and Mac mini logs separated the two behaviors: the selected
+session remained visually hidden while its daemon turn was legitimately active
+for 884,913ms, and a second turn was correctly rejected by the daemon's
+one-operation guard. Session switches and reconnects now commit the daemon's
+complete persisted transcript immediately, preserve the live Stop projection,
+and continue the scoped SSE tail without a manual refresh control. Added a
+production-wrapper regression for a live session with partial persisted output.
+Verified 722 UI unit tests plus the integration suites, WASM check, strict WASM
+Clippy, formatting, and diff hygiene before deployment.
+_________________________________________________________________________________

@@ -170,70 +170,6 @@ fn LiveActivityRow(activity: Signal<LiveActivity>) -> impl IntoView {
     }
 }
 
-/// TASK-46: sync_pending banner. Renders when the transcript is quarantined
-/// behind an in-progress turn — detail polling is active, and SSE content
-/// deltas are suppressed. Shows status + a manual refresh affordance.
-#[component]
-fn SyncPendingBanner(
-    daemon: Daemon,
-    #[allow(unused_variables)] status: RwSignal<String>,
-) -> impl IntoView {
-    let sync_pending = daemon.sync_pending;
-    let sync_deadline = daemon.sync_deadline;
-
-    // Label: "detail syncing…" normally, "turn still active — refresh available"
-    // when the 5-minute deadline is exceeded (stalled).
-    let label = Signal::derive(move || {
-        if !sync_pending.get() {
-            return "";
-        }
-        if let Some(deadline) = sync_deadline.get() {
-            if js_sys::Date::now() > deadline {
-                return "turn still active — refresh available";
-            }
-        }
-        "detail syncing…"
-    });
-
-    let stalled = Signal::derive(move || {
-        sync_pending.get()
-            && sync_deadline
-                .get()
-                .is_some_and(|dl| js_sys::Date::now() > dl)
-    });
-
-    // Use a stored clone so the on:click handler isn't FnOnce on daemon.
-    let daemon_cell = StoredValue::new(daemon);
-
-    view! {
-        <Show when=move || sync_pending.get()>
-            <div
-                class="sync-pending-banner"
-                role="status"
-                aria-live="polite"
-                aria-atomic="true"
-            >
-                <span class="sync-pending-banner__badge">
-                    <WaveBadge spinning=true compact=true />
-                </span>
-                <span class="sync-pending-banner__label">
-                    {move || label.get()}
-                </span>
-                <button
-                    class="sync-pending-banner__refresh"
-                    class:sync-pending-banner__refresh--stalled=stalled
-                    type="button"
-                    aria-label="refresh turn state"
-                    title="Refresh — fetch latest turn state from daemon"
-                    on:click=move |_| daemon_cell.get_value().sync_touch()
-                >
-                    "↻"
-                </button>
-            </div>
-        </Show>
-    }
-}
-
 /// One renderable item in an assistant turn: a single non-tool/non-thinking
 /// block, the turn's full set of tool calls tucked into one disclosure, or the
 /// turn's full set of thinking segments tucked into one disclosure.
@@ -507,9 +443,6 @@ pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoVie
         scroll_to_bottom(container);
     };
 
-    // TASK-46: clone for the sync_pending banner before the For loop consumes daemon.
-    let banner_daemon = daemon.clone();
-
     view! {
         <div class="transcript" node_ref=container on:scroll=on_scroll>
             <Show when=is_empty>
@@ -572,10 +505,6 @@ pub fn Transcript(daemon: Daemon, show_sessions: RwSignal<bool>) -> impl IntoVie
             // tail, outside the turn loop. Replaces SoundingsThinking + per-turn
             // ocean-status-row.
             <LiveActivityRow activity=live_activity />
-            // TASK-46: sync_pending banner — renders when the transcript is
-            // quarantined behind an in-progress live turn. Shows status + a
-            // manual refresh affordance that kicks an immediate detail poll.
-            <SyncPendingBanner daemon={banner_daemon.clone()} status={banner_daemon.status} />
             // Quiet return affordance: content is growing below while the
             // user reads history. Zero-height sticky dock — no layout shift,
             // never scrolls the viewport on its own.
