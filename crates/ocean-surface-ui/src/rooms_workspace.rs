@@ -70,7 +70,14 @@ fn members_loaded(access: Option<&RoomAccessProjection>) -> bool {
 /// On narrow screens (&lt;650px) a compact top nav reveals the hidden left
 /// rail so the reader is never stranded with no room navigation.
 #[component]
-pub fn RoomsWorkspace(rooms: Rooms) -> impl IntoView {
+pub fn RoomsWorkspace(
+    rooms: Rooms,
+    /// Called when the user wants to leave the Rooms workspace entirely
+    /// (e.g. switch to Direct Messages). If `None` the close button is
+    /// hidden.
+    #[prop(optional)]
+    on_close: Option<Callback<()>>,
+) -> impl IntoView {
     // ── Left-rail: create form signals ────────────────────────────────
     let new_room_name = RwSignal::new(String::new());
 
@@ -211,9 +218,12 @@ pub fn RoomsWorkspace(rooms: Rooms) -> impl IntoView {
                         class="rooms-workspace__left-close"
                         type="button"
                         aria-label="Close rooms workspace"
-                        on:click=move |_| {
-                            rooms.close_room();
-                            rooms.panel_open.set(true);
+                        on:click={
+                            let close = on_close.clone();
+                            move |_| {
+                                rooms.close_room();
+                                if let Some(ref cb) = close { cb.run(()); }
+                            }
                         }
                     >
                         <svg viewBox="0 0 16 16" width="14" height="14"
@@ -513,43 +523,90 @@ pub fn RoomsWorkspace(rooms: Rooms) -> impl IntoView {
                                 let participants = rooms.open_room.get()
                                     .map(|r| r.participants)
                                     .unwrap_or_default();
-                                if participants.is_empty() {
-                                    view! {
-                                        <div class="rooms-workspace__right-empty">
-                                            "No members yet."
-                                        </div>
-                                    }.into_any()
-                                } else {
-                                    view! {
-                                        <For
-                                            each=move || rooms.open_room.get()
-                                                .map(|r| r.participants)
-                                                .unwrap_or_default()
-                                            key=|p: &RoomParticipant| p.id.clone()
-                                            children=move |p: RoomParticipant| {
-                                                view! {
-                                                    <div class="rooms-workspace__member">
-                                                        <div class="rooms-workspace__member-avatar">
-                                                            {p.display_name.chars().take(2).collect::<String>()}
+                                let show_add_agent = RwSignal::new(false);
+                                view! {
+                                    {if participants.is_empty() {
+                                        view! {
+                                            <div class="rooms-workspace__right-empty">
+                                                "No members yet."
+                                            </div>
+                                        }.into_any()
+                                    } else {
+                                        view! {
+                                            <For
+                                                each=move || rooms.open_room.get()
+                                                    .map(|r| r.participants)
+                                                    .unwrap_or_default()
+                                                key=|p: &RoomParticipant| p.id.clone()
+                                                children=move |p: RoomParticipant| {
+                                                    view! {
+                                                        <div class="rooms-workspace__member">
+                                                            <div class="rooms-workspace__member-avatar">
+                                                                {p.display_name.chars().take(2).collect::<String>()}
+                                                            </div>
+                                                            <span class="rooms-workspace__member-name">
+                                                                {p.display_name.clone()}
+                                                            </span>
+                                                            <span class="rooms-workspace__member-kind">
+                                                            {match p.kind {
+                                                                RoomParticipantKind::Human => "human",
+                                                                RoomParticipantKind::Agent => "agent",
+                                                                RoomParticipantKind::Bot => "bot",
+                                                                RoomParticipantKind::Tool => "tool",
+                                                                RoomParticipantKind::System => "system",
+                                                            }}
+                                                            </span>
                                                         </div>
-                                                        <span class="rooms-workspace__member-name">
-                                                            {p.display_name.clone()}
-                                                        </span>
-                                                        <span class="rooms-workspace__member-kind">
-                                                        {match p.kind {
-                                                            RoomParticipantKind::Human => "human",
-                                                            RoomParticipantKind::Agent => "agent",
-                                                            RoomParticipantKind::Bot => "bot",
-                                                            RoomParticipantKind::Tool => "tool",
-                                                            RoomParticipantKind::System => "system",
-                                                        }}
-                                                        </span>
-                                                    </div>
+                                                    }
                                                 }
-                                            }
-                                        />
-                                    }.into_any()
-                                }
+                                            />
+                                        }.into_any()
+                                    }}
+
+                                    // Add-agent control (local rooms only)
+                                    <button
+                                        class="rooms-workspace__addagent"
+                                        type="button"
+                                        title="Add an agent participant"
+                                        on:click=move |_| show_add_agent.update(|v: &mut bool| *v = !*v)
+                                    >
+                                        "+ agent"
+                                    </button>
+                                    {move || {
+                                        if show_add_agent.get() {
+                                            view! {
+                                                <div class="rooms-workspace__addagent-picker">
+                                                    <select
+                                                        class="rooms-workspace__addagent-select"
+                                                        on:change=move |ev| {
+                                                            let val = event_target_value(&ev);
+                                                            if !val.is_empty() {
+                                                                rooms.add_agent(val);
+                                                                show_add_agent.set(false);
+                                                            }
+                                                        }
+                                                    >
+                                                        <option value="" selected=true>
+                                                            "-- pick an agent --"
+                                                        </option>
+                                                        <For
+                                                            each=move || rooms.available_agents.get()
+                                                            key=|id: &String| id.clone()
+                                                            children=move |id: String| {
+                                                                let v = id.clone();
+                                                                view! {
+                                                                    <option value=v>{id}</option>
+                                                                }
+                                                            }
+                                                        />
+                                                    </select>
+                                                </div>
+                                            }.into_any()
+                                        } else {
+                                            ().into_any()
+                                        }
+                                    }}
+                                }.into_any()
                             }
                             Some(ref access)
                                 if matches!(

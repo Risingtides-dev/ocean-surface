@@ -811,6 +811,44 @@
   line-height: 1.35;
 }
 
+/* ── Add-agent control ────────────────────────────────────────────── */
+
+.rooms-workspace__addagent {
+  appearance: none;
+  display: block;
+  width: 100%;
+  padding: 6px 12px;
+  margin-top: 8px;
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-3);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__addagent:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__addagent-picker {
+  margin-top: 4px;
+}
+
+.rooms-workspace__addagent-select {
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--fg);
+  font-size: 12px;
+}
+
 /* ── Scrollbar ────────────────────────────────────────────────────── */
 
 .rooms-workspace__left-list,
