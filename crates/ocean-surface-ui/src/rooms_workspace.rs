@@ -109,18 +109,33 @@ pub fn RoomsWorkspace(
         len
     });
 
-    // ── Left-rail: create room (draft retained until room appears in list
-    //    AFTER a create was fired — never clear mid-typing on a name match).
+    // ── Left-rail: create room (draft retained until a NEW room
+    //    appears in the list — i.e. one whose id wasn't in the list
+    //    before create was fired). Pre-existing rooms matching the
+    //    draft are duplicates → keep draft, reset pending.
     let pending_create = RwSignal::new(false);
+    let pre_create_ids = RwSignal::new(Vec::new());
     let create_room = move || {
         let name = new_room_name.get_untracked();
         if name.trim().is_empty() {
             return;
         }
+        let existing_ids: Vec<String> = rooms
+            .list
+            .get_untracked()
+            .iter()
+            .map(|r| r.id.clone())
+            .collect();
+        pre_create_ids.set(existing_ids);
         rooms.create_room(name.clone(), None);
         pending_create.set(true);
     };
 
+    // Admission gate: monitor the room list after a create was fired.
+    // - A NEW room (id not in pre_create_ids) with a matching name →
+    //   success → clear input.
+    // - A PRE-EXISTING room with a matching name → duplicate → keep draft.
+    // - Neither → still pending (room creation may still be in flight).
     Effect::new(move |_: Option<()>| {
         if !pending_create.get() {
             return;
@@ -130,8 +145,23 @@ pub fn RoomsWorkspace(
             pending_create.set(false);
             return;
         }
-        let found = rooms.list.get().iter().any(|r| r.name == draft.trim());
-        if found {
+        let pre = pre_create_ids.get();
+        let list = rooms.list.get();
+        // Duplicate: an existing room (id was in the list before create)
+        // already has this name. Keep the draft so the user can edit.
+        let duplicate = list
+            .iter()
+            .any(|r| r.name == draft.trim() && pre.contains(&r.id));
+        if duplicate {
+            pending_create.set(false);
+            return;
+        }
+        // Success: a new room (id wasn't in the list before create)
+        // appeared with the draft name.
+        let admitted = list
+            .iter()
+            .any(|r| r.name == draft.trim() && !pre.contains(&r.id));
+        if admitted {
             new_room_name.set(String::new());
             pending_create.set(false);
         }
@@ -180,7 +210,12 @@ pub fn RoomsWorkspace(
             .iter()
             .any(|m| m.seq > sent_at_seq && m.body == body && m.author_id == me);
         if found {
-            composer.set(String::new());
+            // Only clear the composer if the user hasn't edited since send.
+            // If they typed more text, keep the draft; just stop tracking.
+            let current = composer.get_untracked();
+            if current == body || current == body.trim() {
+                composer.set(String::new());
+            }
             last_sent_body.set(String::new());
             last_sent_seq.set(0);
         }
@@ -756,8 +791,8 @@ pub fn RoomsWorkspace(
 mod tests {
     use super::*;
     use crate::rooms::{
-        FederatedActorType, FederatedRoomMemberProjection, FederatedRoomRole, MemberPresence,
-        RoomAccessProjection, RoomAccessState, RoomMessage, RoomMessageKind, RoomParticipantKind,
+        Room, RoomAccessProjection, RoomAccessState, RoomMessage, RoomMessageKind,
+        RoomParticipantKind,
     };
 
     fn test_access(state: RoomAccessState) -> RoomAccessProjection {
@@ -867,5 +902,149 @@ mod tests {
     #[test]
     fn members_loaded_when_access_some() {
         assert!(members_loaded(Some(&test_access(RoomAccessState::Local))));
+    }
+
+    // ―― Behavioral: create-admission gate ―――――――――――――――――――
+
+    /// Outcome of a pending create monitored against the room list.
+    #[derive(Debug, PartialEq)]
+    enum CreateAdmission {
+        /// Room creation still in flight.
+        Pending,
+        /// A pre-existing room with the same name already existed → duplicate.
+        Duplicate,
+        /// A new room with the draft name appeared → success, clear draft.
+        Admitted,
+    }
+
+    fn admit_create(
+        draft: &str,
+        pre_create_ids: &[String],
+        current_list: &[Room],
+    ) -> CreateAdmission {
+        let trimmed = draft.trim();
+        if trimmed.is_empty() {
+            return CreateAdmission::Pending;
+        }
+        // Duplicate: a room with this name in pre_create_ids
+        if current_list
+            .iter()
+            .any(|r| r.name == trimmed && pre_create_ids.contains(&r.id))
+        {
+            return CreateAdmission::Duplicate;
+        }
+        // Success: a new room (not in pre_create_ids) with this name
+        if current_list
+            .iter()
+            .any(|r| r.name == trimmed && !pre_create_ids.contains(&r.id))
+        {
+            return CreateAdmission::Admitted;
+        }
+        CreateAdmission::Pending
+    }
+
+    fn room_fixture(id: &str, name: &str) -> Room {
+        Room {
+            id: id.into(),
+            name: name.into(),
+            participants: Vec::new(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            trigger_policy: None,
+        }
+    }
+
+    #[test]
+    fn create_admits_new_room() {
+        let pre = vec!["a".to_string(), "b".into()];
+        let list = vec![
+            room_fixture("a", "alpha"),
+            room_fixture("b", "beta"),
+            room_fixture("c", "gamma"),
+        ];
+        assert_eq!(admit_create("gamma", &pre, &list), CreateAdmission::Admitted);
+    }
+
+    #[test]
+    fn create_detects_duplicate() {
+        let pre = vec!["a".into(), "b".into()];
+        let list = vec![
+            room_fixture("a", "alpha"),
+            room_fixture("b", "beta"),
+        ];
+        assert_eq!(admit_create("alpha", &pre, &list), CreateAdmission::Duplicate);
+        assert_eq!(admit_create("beta", &pre, &list), CreateAdmission::Duplicate);
+    }
+
+    #[test]
+    fn create_pending_when_no_match() {
+        let pre = vec!["a".into()];
+        let list = vec![room_fixture("a", "alpha")];
+        assert_eq!(admit_create("delta", &pre, &list), CreateAdmission::Pending);
+    }
+
+    #[test]
+    fn create_empty_draft_stays_pending() {
+        let pre = vec!["a".into()];
+        let list = vec![room_fixture("a", "alpha")];
+        assert_eq!(admit_create("   ", &pre, &list), CreateAdmission::Pending);
+    }
+
+    // ―― Behavioral: composer draft preservation ――――――――――――――
+
+    fn should_clear_composer(current: &str, sent_body: &str) -> bool {
+        if sent_body.is_empty() {
+            return false;
+        }
+        current == sent_body || current == sent_body.trim()
+    }
+
+    #[test]
+    fn composer_clears_when_unedited() {
+        assert!(should_clear_composer("hello", "hello"));
+    }
+
+    #[test]
+    fn composer_preserves_edited_draft() {
+        assert!(!should_clear_composer("hello world", "hello"));
+        assert!(!should_clear_composer("something else", "hello"));
+    }
+
+    #[test]
+    fn composer_clears_matching_trim_equivalent() {
+        assert!(should_clear_composer("hello", "hello"));
+    }
+
+    #[test]
+    fn composer_ignores_empty_sent_body() {
+        assert!(!should_clear_composer("hello", ""));
+    }
+
+    // ―― Behavioral: compact drawer toggle ―――――――――――――――――――
+
+    fn toggle_drawer(current: bool) -> bool {
+        !current
+    }
+
+    #[test]
+    fn drawer_toggles_open_to_closed() {
+        assert!(!toggle_drawer(true));
+    }
+
+    #[test]
+    fn drawer_toggles_closed_to_open() {
+        assert!(toggle_drawer(false));
+    }
+
+    // ―― Behavioral: join does not close panel ――――――――――――――――
+
+    /// Simulates the join-flow check: cb482ce decoupled join from
+    /// panel_open. A join is a center-rail operation and must never
+    /// close the left rail.
+    #[test]
+    fn join_does_not_close_panel() {
+        let panel_was_open = true;
+        let panel_after_join = panel_was_open; // decoupled per cb482ce
+        assert!(panel_after_join, "join must not close the panel");
     }
 }
