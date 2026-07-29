@@ -731,7 +731,6 @@ impl Rooms {
                             status.set("joined".into());
                             me.refresh_open_transcript(&key);
                             me.fetch_rooms();
-                            me.panel_open.set(false);
                         }
                         Ok(r) => status.set(format!(
                             "join failed: {}",
