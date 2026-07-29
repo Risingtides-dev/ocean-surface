@@ -7,6 +7,7 @@
 //! beyond the module declaration.
 
 use leptos::prelude::*;
+use std::collections::HashMap;
 
 use crate::rooms::{
     FederatedActorType, FederatedRoomMemberProjection, FederatedRoomRole, MemberPresence, Room,
@@ -20,10 +21,10 @@ use crate::rooms::{
 /// projection.
 #[allow(dead_code)]
 fn access_allows_writes(access: Option<&RoomAccessProjection>) -> bool {
-    match access.map(|a| a.state) {
-        Some(RoomAccessState::Local) | Some(RoomAccessState::Live) => true,
-        _ => false,
-    }
+    matches!(
+        access.map(|a| a.state),
+        Some(RoomAccessState::Local) | Some(RoomAccessState::Live)
+    )
 }
 
 /// Render a compact time label from an ISO-8601 timestamp. Mirrors
@@ -61,11 +62,12 @@ fn members_loaded(access: Option<&RoomAccessProjection>) -> bool {
 ///
 /// Takes a [`Rooms`] handle (Clone, Copy) and drives the three rails:
 ///
-/// - **Left:** room list with active highlight, new-room create input.
+/// - **Left:** room list with active highlight, unread badges, new-room
+///   create input.
 /// - **Center:** selected room header, message timeline, composer form,
 ///   status bar.
 /// - **Right:** participant / member roster with kind, role, and presence
-///   badges.
+///   badges, close/toggle button, thread reply pane.
 ///
 /// On narrow screens (&lt;650px) a compact top nav reveals the hidden left
 /// rail so the reader is never stranded with no room navigation.
@@ -186,6 +188,13 @@ pub fn RoomsWorkspace(
         }
     });
 
+    // ── Unread tracking: per-room last-opened timestamp ─────────────
+    let last_opened: RwSignal<HashMap<String, String>> = RwSignal::new(HashMap::new());
+
+    // ── Thread panel / right-rail toggle ────────────────────────────
+    let focused_thread_seq: RwSignal<Option<u64>> = RwSignal::new(None);
+    let show_members = RwSignal::new(true);
+
     view! {
         <div class="rooms-workspace" role="region" aria-label="Rooms workspace">
 
@@ -242,7 +251,7 @@ pub fn RoomsWorkspace(
                         type="button"
                         aria-label="Close rooms workspace"
                         on:click={
-                            let close = on_close.clone();
+                            let close = on_close;
                             move |_| {
                                 rooms.close_room();
                                 if let Some(ref cb) = close { cb.run(()); }
@@ -281,14 +290,22 @@ pub fn RoomsWorkspace(
                                     children=move |room: Room| {
                                         let key = room.id.clone();
                                         let key2 = key.clone();
+                                        let key3 = key.clone();
+                                        let updated = room.updated_at.clone();
                                         let active = move || rooms.open_key.get().as_deref() == Some(&*key);
+                                        let unread = move || {
+                                            let last = last_opened.get();
+                                            let seen = last.get(&key2).cloned().unwrap_or_default();
+                                            !seen.is_empty() && updated > seen
+                                        };
                                         view! {
                                             <button
                                                 class="rooms-workspace__room"
                                                 class:is-active=active
                                                 type="button"
                                                 on:click=move |_| {
-                                                    rooms.open_room(key2.clone());
+                                                    last_opened.update(|m| { m.insert(key3.clone(), room.updated_at.clone()); });
+                                                    rooms.open_room(key3.clone());
                                                     show_left_rail.set(false);
                                                 }
                                             >
@@ -296,6 +313,11 @@ pub fn RoomsWorkspace(
                                                 <span class="rooms-workspace__room-name">
                                                     {room.name.clone()}
                                                 </span>
+                                                {move || if unread() {
+                                                    view! { <span class="rooms-workspace__room-unread"></span> }.into_any()
+                                                } else {
+                                                    ().into_any()
+                                                }}
                                             </button>
                                         }
                                     }
@@ -431,10 +453,15 @@ pub fn RoomsWorkspace(
                                                     | RoomMessageKind::ParticipantLeft
                                             );
                                             let ts = short_time(&m.created_at);
+                                            let msg_seq = m.seq;
                                             view! {
                                                 <div
                                                     class="rooms-workspace__msg"
                                                     class:rooms-workspace__msg--system=is_system
+                                                    on:click=move |_| {
+                                                        focused_thread_seq.set(Some(msg_seq));
+                                                        show_members.set(false);
+                                                    }
                                                 >
                                                     <div class="rooms-workspace__msg-avatar">
                                                         {if is_system {
@@ -524,13 +551,36 @@ pub fn RoomsWorkspace(
                 }}
             </div>
 
-            // ═══ RIGHT RAIL — members / details ═════════════════════════
+            // ═══ RIGHT RAIL — members / thread pane ═════════════════════════
             <div class="rooms-workspace__right">
                 <div class="rooms-workspace__right-head">
-                    <h3 class="rooms-workspace__right-title">"Members"</h3>
+                    <h3 class="rooms-workspace__right-title">
+                        {move || if show_members.get() { "Members" } else { "Thread" }}
+                    </h3>
+                    <button
+                        class="rooms-workspace__right-close"
+                        type="button"
+                        aria-label="Toggle details panel"
+                        on:click=move |_| {
+                            if show_members.get() {
+                                show_members.set(false);
+                                focused_thread_seq.set(None);
+                            } else {
+                                focused_thread_seq.set(None);
+                                show_members.set(true);
+                            }
+                        }
+                    >
+                        <svg viewBox="0 0 16 16" width="14" height="14"
+                            fill="none" stroke="currentColor" stroke-width="1.6"
+                            stroke-linecap="round">
+                            <path d="M3 3l10 10M13 3L3 13"/>
+                        </svg>
+                    </button>
                 </div>
 
-                <div class="rooms-workspace__right-list">
+                // ── Members list (shown when show_members is true) ────
+                <div class="rooms-workspace__right-list" style:display=move || if show_members.get() { "flex" } else { "none" }>
                     {move || {
                         match rooms.access.get() {
                             None => {
@@ -720,7 +770,56 @@ pub fn RoomsWorkspace(
                     }}
                 </div>
 
-                // Trigger-policy summary at bottom of right rail
+                // ── Thread pane (shown when show_members is false) ────
+                <div class="rooms-workspace__right-thread" style:display=move || if show_members.get() { "none" } else { "flex" }>
+                    {move || {
+                        let thread_root = focused_thread_seq.get();
+                        let root_msg = thread_root.and_then(|seq| {
+                            rooms.transcript.get().iter().find(|m| m.seq == seq).cloned()
+                        });
+                        view! {
+                            <div class="rooms-workspace__right-thread-head">
+                                <div class="rooms-workspace__right-thread-title">
+                                    {root_msg.as_ref()
+                                        .map(|m| {
+                                            let preview: String = m.body.chars().take(60).collect();
+                                            if m.body.len() > 60 {
+                                                format!("{preview}…")
+                                            } else {
+                                                preview
+                                            }
+                                        })
+                                        .unwrap_or_else(|| "Thread".into())
+                                    }
+                                </div>
+                                <div class="rooms-workspace__right-thread-subtitle">
+                                    {if root_msg.is_some() {
+                                        "0 replies"
+                                    } else {
+                                        "Click a message to view its thread"
+                                    }}
+                                </div>
+                            </div>
+                            <div class="rooms-workspace__right-thread-transcript">
+                                {if root_msg.is_some() {
+                                    view! {
+                                        <div class="rooms-workspace__empty">
+                                            "Thread replies will appear here."
+                                        </div>
+                                    }.into_any()
+                                } else {
+                                    view! {
+                                        <div class="rooms-workspace__right-empty">
+                                            "Select a message to see its thread."
+                                        </div>
+                                    }.into_any()
+                                }}
+                            </div>
+                        }
+                    }}
+                </div>
+
+                // Trigger-policy summary (bottom of right rail)
                 {move || {
                     rooms.open_room.get()
                         .and_then(|r| r.trigger_policy)
