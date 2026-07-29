@@ -679,19 +679,30 @@
   }
 }
 
-/* Below 650px: left rail also collapses, replaced by mobile nav. */
+/* Below 650px: shell stacks vertically (top nav + center), left rail
+   becomes a fixed drawer with a backdrop. */
 @media (max-width: 650px) {
+  .rooms-workspace {
+    flex-direction: column;
+  }
   .rooms-workspace__left {
     display: none;
   }
   .rooms-workspace__left--visible {
     display: flex;
     position: fixed;
-    inset: 0 0 0 0;
+    inset: 0;
     z-index: 400;
     max-width: 280px;
     border-right: 1px solid var(--border-subtle);
-    box-shadow: 2px 0 24px rgba(0, 0, 0, 0.35);
+    box-shadow: var(--shadow-md);
+  }
+  .rooms-workspace__left-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 399;
+    background: rgba(0, 0, 0, 0.35);
   }
   .rooms-workspace__mobile-nav {
     display: flex;
@@ -746,6 +757,12 @@
   color: var(--fg);
 }
 
+/* ── Left-rail backdrop (mobile only) ──────────────────────────────── */
+
+.rooms-workspace__left-backdrop {
+  display: none;
+}
+
 /* ── Member presence dot ──────────────────────────────────────────── */
 
 .rooms-workspace__member-presence {
@@ -757,7 +774,7 @@
 }
 
 .rooms-workspace__member-presence--live {
-  background: var(--color-success, #4caf50);
+  background: var(--ok);
 }
 
 .rooms-workspace__member-presence--unavailable {

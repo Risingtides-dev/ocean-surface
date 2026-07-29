@@ -102,19 +102,34 @@ pub fn RoomsWorkspace(rooms: Rooms) -> impl IntoView {
         len
     });
 
-    // ── Left-rail: create room ────────────────────────────────────────
+    // ── Left-rail: create room (draft retained until room appears in list)
     let do_create = move || {
         let name = new_room_name.get_untracked().trim().to_string();
         if name.is_empty() {
             return;
         }
         rooms.create_room(name, None);
-        new_room_name.set(String::new());
+        // Do NOT clear here — the Effect below clears on admission.
     };
 
-    // ── Composer: preserve draft until admission. post_message is
-    //    fire-and-forget, but we only clear after sending so the user can
-    //    retry if the status line shows an error.
+    // Clear create input once the new room name appears in the room list.
+    Effect::new(move |_: Option<()>| {
+        let draft = new_room_name.get();
+        if draft.trim().is_empty() {
+            return;
+        }
+        let found = rooms.list.get().iter().any(|r| r.name == draft.trim());
+        if found {
+            new_room_name.set(String::new());
+        }
+    });
+
+    // ── Composer: preserve draft until confirmed admission. post_message
+    //    is fire-and-forget; clearing before the message reaches the
+    //    transcript discards the user's text on any failure. We mark the
+    //    draft as "sent" and clear only when the transcript visibly
+    //    contains a matching message body.
+    let last_sent = RwSignal::new(String::new());
     let do_send = move || {
         if !access_allows_writes(rooms.access.get_untracked().as_ref()) {
             return;
@@ -123,11 +138,23 @@ pub fn RoomsWorkspace(rooms: Rooms) -> impl IntoView {
         if text.trim().is_empty() {
             return;
         }
-        rooms.post_message(text);
-        // Clear only after attempting send — if it fails the draft is still
-        // visible and the status signal will carry the error.
-        composer.set(String::new());
+        rooms.post_message(text.clone());
+        last_sent.set(text);
+        // Do NOT clear here — the Effect below clears on confirmed admission.
     };
+
+    // Clear composer once the last-sent draft appears in the transcript.
+    Effect::new(move |_: Option<()>| {
+        let sent = last_sent.get();
+        if sent.is_empty() {
+            return;
+        }
+        let found = rooms.transcript.get().iter().any(|m| m.body == sent);
+        if found {
+            composer.set(String::new());
+            last_sent.set(String::new());
+        }
+    });
 
     view! {
         <div class="rooms-workspace" role="region" aria-label="Rooms workspace">
@@ -158,12 +185,28 @@ pub fn RoomsWorkspace(rooms: Rooms) -> impl IntoView {
             </div>
 
             // ═══ LEFT RAIL — room list ═══════════════════════════════════
+            // Backdrop closes the drawer on narrow screens (tapping outside).
+            {move || {
+                if show_left_rail.get() {
+                    view! {
+                        <div
+                            class="rooms-workspace__left-backdrop"
+                            on:click=move |_| show_left_rail.set(false)
+                        ></div>
+                    }.into_any()
+                } else {
+                    ().into_any()
+                }
+            }}
             <div
                 class="rooms-workspace__left"
                 class:rooms-workspace__left--visible=move || show_left_rail.get()
             >
                 <div class="rooms-workspace__left-head">
                     <h2 class="rooms-workspace__left-title">"Rooms"</h2>
+                    // Close: on wide screens exits rooms entirely; on narrow
+                    // the backdrop closes the drawer and this X remains the
+                    // escape-hatch to close rooms.
                     <button
                         class="rooms-workspace__left-close"
                         type="button"
@@ -624,5 +667,125 @@ pub fn RoomsWorkspace(rooms: Rooms) -> impl IntoView {
                 }}
             </div>
         </div>
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rooms::{
+        FederatedActorType, FederatedRoomMemberProjection, FederatedRoomRole, MemberPresence,
+        RoomAccessProjection, RoomAccessState, RoomMessage, RoomMessageKind, RoomParticipantKind,
+    };
+
+    fn test_access(state: RoomAccessState) -> RoomAccessProjection {
+        RoomAccessProjection {
+            state,
+            last_confirmed_global_sequence: None,
+            members: vec![],
+            outbox: vec![],
+        }
+    }
+
+    // ── access_allows_writes ──────────────────────────────────────────
+
+    #[test]
+    fn access_allows_writes_local() {
+        assert!(access_allows_writes(Some(&test_access(
+            RoomAccessState::Local
+        ))));
+    }
+
+    #[test]
+    fn access_allows_writes_live() {
+        assert!(access_allows_writes(Some(&test_access(
+            RoomAccessState::Live
+        ))));
+    }
+
+    #[test]
+    fn access_blocks_writes_federated_connecting() {
+        assert!(!access_allows_writes(Some(&test_access(
+            RoomAccessState::Connecting
+        ))));
+    }
+
+    #[test]
+    fn access_blocks_writes_none() {
+        assert!(!access_allows_writes(None));
+    }
+
+    #[test]
+    fn access_blocks_writes_revoked() {
+        assert!(!access_allows_writes(Some(&test_access(
+            RoomAccessState::Revoked
+        ))));
+    }
+
+    // ── short_time ────────────────────────────────────────────────────
+
+    #[test]
+    fn short_time_extracts_hhmm_from_iso() {
+        assert_eq!(short_time("2026-07-25T03:43:12Z"), "03:43");
+    }
+
+    #[test]
+    fn short_time_passthrough_short_string() {
+        assert_eq!(short_time("abc"), "abc");
+    }
+
+    #[test]
+    fn short_time_handles_minimum_16_chars() {
+        assert_eq!(short_time("2026-01-01T00:00"), "00:00");
+    }
+
+    // ── transcript_is_empty ───────────────────────────────────────────
+
+    fn test_msg(body: &str) -> RoomMessage {
+        RoomMessage {
+            seq: 1,
+            kind: RoomMessageKind::Message,
+            author_id: "user".into(),
+            author_kind: RoomParticipantKind::Human,
+            body: body.into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            federated: None,
+        }
+    }
+
+    #[test]
+    fn transcript_not_empty_returns_false() {
+        let msgs = vec![test_msg("hello")];
+        assert!(!transcript_is_empty(
+            &msgs,
+            Some(&test_access(RoomAccessState::Local))
+        ));
+    }
+
+    #[test]
+    fn transcript_empty_without_access_returns_false() {
+        assert!(!transcript_is_empty(&[], None));
+    }
+
+    #[test]
+    fn transcript_empty_with_access_returns_true() {
+        assert!(transcript_is_empty(
+            &[],
+            Some(&test_access(RoomAccessState::Local))
+        ));
+    }
+
+    // ── members_loaded ────────────────────────────────────────────────
+
+    #[test]
+    fn members_not_loaded_when_access_none() {
+        assert!(!members_loaded(None));
+    }
+
+    #[test]
+    fn members_loaded_when_access_some() {
+        assert!(members_loaded(Some(&test_access(RoomAccessState::Local))));
     }
 }
