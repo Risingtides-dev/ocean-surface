@@ -640,12 +640,14 @@ impl Rooms {
                 Ok(req) => req.send().await,
                 Err(err) => {
                     status.set(format!("create encode error: {err}"));
-                    signal.set((
-                        op_id,
-                        Some(CreateOutcome::Failed {
-                            error: format!("encode: {err}"),
-                        }),
-                    ));
+                    // CAS: only publish if the slot still belongs to this op.
+                    signal.update(|(cur, out)| {
+                        if *cur == op_id {
+                            *out = Some(CreateOutcome::Failed {
+                                error: format!("encode: {err}"),
+                            });
+                        }
+                    });
                     return;
                 }
             };
@@ -679,7 +681,12 @@ impl Rooms {
                     CreateOutcome::Failed { error: msg }
                 }
             };
-            signal.set((op_id, Some(outcome)));
+            // CAS: only publish if the slot still belongs to this op.
+            signal.update(|(cur, out)| {
+                if *cur == op_id {
+                    *out = Some(outcome);
+                }
+            });
         });
         op_id
     }
