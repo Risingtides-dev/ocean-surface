@@ -109,34 +109,41 @@ pub fn RoomsWorkspace(
         len
     });
 
-    // ── Left-rail: create room (draft retained until room appears in list)
-    let do_create = move || {
-        let name = new_room_name.get_untracked().trim().to_string();
-        if name.is_empty() {
+    // ── Left-rail: create room (draft retained until room appears in list
+    //    AFTER a create was fired — never clear mid-typing on a name match).
+    let pending_create = RwSignal::new(false);
+    let create_room = move || {
+        let name = new_room_name.get_untracked();
+        if name.trim().is_empty() {
             return;
         }
-        rooms.create_room(name, None);
-        // Do NOT clear here — the Effect below clears on admission.
+        rooms.create_room(name.clone(), None);
+        pending_create.set(true);
     };
 
-    // Clear create input once the new room name appears in the room list.
     Effect::new(move |_: Option<()>| {
+        if !pending_create.get() {
+            return;
+        }
         let draft = new_room_name.get();
         if draft.trim().is_empty() {
+            pending_create.set(false);
             return;
         }
         let found = rooms.list.get().iter().any(|r| r.name == draft.trim());
         if found {
             new_room_name.set(String::new());
+            pending_create.set(false);
         }
     });
 
     // ── Composer: preserve draft until confirmed admission. post_message
     //    is fire-and-forget; clearing before the message reaches the
-    //    transcript discards the user's text on any failure. We mark the
-    //    draft as "sent" and clear only when the transcript visibly
-    //    contains a matching message body.
-    let last_sent = RwSignal::new(String::new());
+    //    transcript discards the user's text on any failure. We capture the
+    //    max seq at send time, then clear only when a message by this author
+    //    with the same body appears at a seq beyond that watermark.
+    let last_sent_body = RwSignal::new(String::new());
+    let last_sent_seq = RwSignal::new(0u64);
     let do_send = move || {
         if !access_allows_writes(rooms.access.get_untracked().as_ref()) {
             return;
@@ -145,21 +152,37 @@ pub fn RoomsWorkspace(
         if text.trim().is_empty() {
             return;
         }
+        let max_seq = rooms
+            .transcript
+            .get_untracked()
+            .iter()
+            .map(|m| m.seq)
+            .max()
+            .unwrap_or(0);
         rooms.post_message(text.clone());
-        last_sent.set(text);
+        last_sent_body.set(text);
+        last_sent_seq.set(max_seq);
         // Do NOT clear here — the Effect below clears on confirmed admission.
     };
 
-    // Clear composer once the last-sent draft appears in the transcript.
+    // Clear composer once the last-sent draft appears in the transcript
+    // beyond the pre-send watermark, authored by this identity.
     Effect::new(move |_: Option<()>| {
-        let sent = last_sent.get();
-        if sent.is_empty() {
+        let body = last_sent_body.get();
+        if body.is_empty() {
             return;
         }
-        let found = rooms.transcript.get().iter().any(|m| m.body == sent);
+        let sent_at_seq = last_sent_seq.get();
+        let me = rooms.identity_id.get_untracked();
+        let found = rooms
+            .transcript
+            .get()
+            .iter()
+            .any(|m| m.seq > sent_at_seq && m.body == body && m.author_id == me);
         if found {
             composer.set(String::new());
-            last_sent.set(String::new());
+            last_sent_body.set(String::new());
+            last_sent_seq.set(0);
         }
     });
 
@@ -293,7 +316,7 @@ pub fn RoomsWorkspace(
                         on:keydown=move |ev| {
                             if ev.key() == "Enter" {
                                 ev.prevent_default();
-                                do_create();
+                                create_room();
                             }
                         }
                     />

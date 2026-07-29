@@ -7,9 +7,10 @@
 /* ── Shell ─────────────────────────────────────────────────────────── */
 
 .rooms-workspace {
-  position: fixed;
-  inset: 0;
-  z-index: 200;
+  /* Persistent flex child inside the app shell — NOT an overlay.
+     The parent flex container sets the available height; we fill it. */
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: row;
   background: var(--bg);
@@ -702,7 +703,7 @@
     position: fixed;
     inset: 0;
     z-index: 399;
-    background: rgba(0, 0, 0, 0.35);
+    background: #00000059; /* scrim */
   }
   .rooms-workspace__mobile-nav {
     display: flex;

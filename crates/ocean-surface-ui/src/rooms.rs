@@ -65,6 +65,7 @@ impl RoomParticipantKind {
     /// The author/roster chip mark — hand-drawn SVGs from `icons.rs`, same
     /// stroke family as the rest of the surface (emoji glyphs are forbidden
     /// in product UI; the 07-08 purge missed this path — QA-006).
+    #[allow(dead_code)]
     fn icon(self) -> AnyView {
         match self {
             RoomParticipantKind::Human => view! { <crate::icons::Person /> }.into_any(),
@@ -77,6 +78,7 @@ impl RoomParticipantKind {
 
     /// A lowercase word for the kind — shown next to the icon so the roster makes
     /// it explicit who's an agent (i.e. auto-convene-able) vs. a human.
+    #[allow(dead_code)]
     fn label(self) -> &'static str {
         match self {
             RoomParticipantKind::Human => "human",
@@ -161,6 +163,7 @@ pub enum FederatedActorType {
 }
 
 impl FederatedActorType {
+    #[allow(dead_code)]
     fn icon(self) -> AnyView {
         match self {
             Self::User => view! { <crate::icons::Person /> }.into_any(),
@@ -352,17 +355,20 @@ struct PostMessageBody<'a> {
     body: &'a str,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
 struct RetryOutboxBody<'a> {
     client_event_id: &'a str,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 struct RetryOutboxSuccess {
     ok: bool,
     access: RoomAccessProjection,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 struct RetryOutboxErrorResponse {
     #[serde(default)]
@@ -645,9 +651,9 @@ impl Rooms {
         open_key.set(Some(key.clone()));
         me.reset_room_state();
         status.set("loading room…".into());
-        // Entering a room takes the stage (RoomStage swaps in for the chat
-        // surface), so the browser panel folds away.
-        self.panel_open.set(false);
+        // Keep the workspace visible when opening a room (no panel toggle).
+        // The workspace is a persistent shell — opening a room selects it
+        // in-place, it does not unmount or overlay-swap.
 
         spawn_local(async move {
             let get_url = format!("{base}/v1/rooms/persistent/{}", encode(&key));
@@ -793,6 +799,7 @@ impl Rooms {
     /// Ids of the open room's **agent** participants — the actors a human can
     /// `@mention` to auto-convene. Used to render the composer's discoverability
     /// hint.
+    #[allow(dead_code)]
     pub fn agent_ids(&self) -> Vec<String> {
         let access = self.access.get();
         let room = self.open_room.get();
@@ -881,6 +888,7 @@ impl Rooms {
     /// Retry a failed outbox item (`POST …/outbox/retry`). On 202 the daemon
     /// returns the fresh access projection; apply it immediately with
     /// generation + open_key guard, then idempotently accept the duplicate SSE
+    #[allow(dead_code)]
     /// `room_access` wake when it arrives later.
     pub fn retry_outbox(&self, client_event_id: String) {
         let Some(key) = self.open_key.get_untracked() else {
@@ -1239,12 +1247,14 @@ fn last_transcript_seq(transcript: &[RoomMessage]) -> u64 {
 /// `Empty` stops the panel from flashing "No rooms yet" while the initial
 /// request is still in flight — an empty list only *means* empty once loaded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) enum RoomsListState {
     Loading,
     Empty,
     Populated,
 }
 
+#[allow(dead_code)]
 pub(crate) fn rooms_list_state(loaded: bool, room_count: usize) -> RoomsListState {
     if room_count > 0 {
         // Rooms are present — always render them, even if a refetch is in
@@ -1263,6 +1273,7 @@ pub(crate) fn rooms_list_state(loaded: bool, room_count: usize) -> RoomsListStat
 /// `Reconnecting` gap) an empty transcript means "still loading", not
 /// "genuinely empty", so the stage must not flash the empty copy on room open
 /// before history arrives (same bug class as [`rooms_list_state`]).
+#[allow(dead_code)]
 fn show_transcript_empty(tail: TailState, transcript_empty: bool) -> bool {
     transcript_empty && matches!(tail, TailState::Live)
 }
@@ -1271,6 +1282,7 @@ fn show_transcript_empty(tail: TailState, transcript_empty: bool) -> bool {
 /// `/v1/agents` has resolved AND the list is empty. During the initial fetch an
 /// empty list means "still loading", not "no agents" (same flash class as the
 /// rooms-list and transcript empties).
+#[allow(dead_code)]
 fn show_no_agents(agents_loaded: bool, agent_count: usize) -> bool {
     agents_loaded && agent_count == 0
 }
@@ -1291,6 +1303,7 @@ fn access_allows_writes(access: Option<&RoomAccessProjection>) -> bool {
     )
 }
 
+#[allow(dead_code)]
 fn access_banner(access: Option<&RoomAccessProjection>) -> Option<&'static str> {
     match access.map(|projection| projection.state) {
         Some(RoomAccessState::Connecting) => Some("Connecting"),
@@ -1300,6 +1313,7 @@ fn access_banner(access: Option<&RoomAccessProjection>) -> Option<&'static str> 
     }
 }
 
+#[allow(dead_code)]
 fn agent_ids_for(access: Option<&RoomAccessProjection>, room: Option<&Room>) -> Vec<String> {
     let Some(access) = access else {
         return Vec::new();
@@ -1374,6 +1388,7 @@ fn encode(s: &str) -> String {
 
 /// A compact "last activity" label from an ISO-8601 timestamp — just the
 /// date+time portion, trimmed. Empty input → empty string.
+#[allow(dead_code)]
 fn short_time(ts: &str) -> String {
     if ts.is_empty() {
         return String::new();
@@ -1892,8 +1907,11 @@ mod tests {
 /// sessions panel). Lists persistent rooms + create-with-policy; selecting a
 /// room ENTERS it: the panel closes and [`RoomStage`] takes over the main
 /// surface (rooms are a mode, not a drawer).
+#[allow(dead_code)]
 #[component]
-pub fn RoomsPanel(rooms: Rooms, open: RwSignal<bool>) -> impl IntoView {
+pub fn RoomsPanel(_rooms: Rooms, _open: RwSignal<bool>) -> impl IntoView {
+    let rooms = _rooms;
+    let open = _open;
     // Fetch the room list whenever the panel opens.
     Effect::new(move |_| {
         if open.get() {
@@ -2095,6 +2113,7 @@ pub fn RoomsPanel(rooms: Rooms, open: RwSignal<bool>) -> impl IntoView {
 /// LiveKit configuration: the text room is daemon-native
 /// (`/v1/rooms/persistent/*`); the call strip above the stage upgrades the
 /// room to audio when LiveKit credentials exist.
+#[allow(dead_code)]
 #[component]
 pub fn RoomStage(rooms: Rooms) -> impl IntoView {
     let composer = RwSignal::new(String::new());
