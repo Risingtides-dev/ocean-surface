@@ -18,7 +18,8 @@ use crate::host::DaemonStatus;
 use crate::island_dynamic::{DynamicIsland, IslandMode};
 use crate::model::{Block, Role, Turn};
 use crate::palette::{Command, CommandRegistry, CommandScope, PaletteView};
-use crate::rooms::{RoomStage, Rooms, RoomsPanel};
+use crate::rooms::Rooms;
+use crate::rooms_workspace::RoomsWorkspace;
 use crate::sessions::SessionsPanel;
 use crate::slash_menu::{
     clamp_selection, next_selection, prev_selection, project_rows, SlashMenu, SlashRow,
@@ -1552,11 +1553,10 @@ pub fn App() -> impl IntoView {
     // same signals. They remain absent while false.
     let show_livekit_controls = RwSignal::new(false);
     let show_phone_dialer = RwSignal::new(false);
-    let show_rooms = RwSignal::new(false);
-    // Sessions and Rooms are sibling browse overlays (same right-hand modal
-    // pattern) — opening one closes the other so they never stack. Every
-    // entry point (palette command, header buttons) routes through these two
-    // closures; a second toggle convention beside them is a bug.
+    // Rooms is the primary product workspace in web and Tauri. Start there;
+    // the legacy one-to-one session transcript remains reachable as Direct
+    // messages, rather than making Rooms a slide-over browser or room stage.
+    let show_rooms = RwSignal::new(true);
     let toggle_sessions = move || {
         let opening = !show_sessions.get_untracked();
         if opening {
@@ -1571,15 +1571,7 @@ pub fn App() -> impl IntoView {
         }
         show_rooms.set(opening);
     };
-    // Persistent Rooms panel (OCEAN-108). Shares the Daemon's `url` signal so it
-    // targets the same origin; opens a right-hand overlay like Sessions.
     let rooms = Rooms::new(&daemon, show_rooms);
-    // Room mode: a room is a mode of operation you ENTER — opening one from
-    // the rooms browser swaps the chat surface for the room's own stage
-    // (roster + transcript + composer). Purely daemon-native text; the LiveKit
-    // call is an optional in-mode upgrade, so no credential or call state
-    // gates the mode.
-    let in_room_mode = Signal::derive(move || rooms.open_key.get().is_some());
 
     // Context deck (north star): the WEB/EXTENSION reveal rail. At most ONE
     // panel revealed at a time, reveal-on-intent via ⌘K commands, never
@@ -2458,7 +2450,7 @@ pub fn App() -> impl IntoView {
     view! {
         <main
             class=root_class
-            class:has-workspace-open=move || in_tauri && workspace_open.get()
+            class:has-workspace-open=move || in_tauri && workspace_open.get() && !show_rooms.get()
             // Desktop-only: the header doubles as the window titlebar (Tauri
             // overlay traffic lights float over it) — pads the brand clear.
             class:is-titlebar=in_tauri
@@ -2669,7 +2661,7 @@ pub fn App() -> impl IntoView {
                                     toggle_rooms();
                                 }
                             >
-                                "Rooms"
+                                {move || if show_rooms.get() { "Direct messages" } else { "Rooms" }}
                             </button>
                             <Show when=crate::daemon::running_as_extension>
                                 <button
@@ -2731,13 +2723,15 @@ pub fn App() -> impl IntoView {
                 open=show_livekit_controls
             />
 
-            // Room mode: the entered room takes the surface over in place of
-            // the chat transcript + composer below.
-            <Show when=move || in_room_mode.get()>
-                <RoomStage rooms=rooms />
+            // Rooms is the default collaboration workspace. Direct messages
+            // retain the existing session transcript/composer and are reached
+            // explicitly from the app menu; selecting a room never swaps in a
+            // separate stage or overlay.
+            <Show when=move || show_rooms.get()>
+                <RoomsWorkspace rooms=rooms />
             </Show>
 
-            <Show when=move || !in_room_mode.get()>
+            <Show when=move || !show_rooms.get()>
 
                         // Live call-mode view (OCEAN-CALL). Self-contained: it
                         // subscribes to the daemon's `/v1/events` control stream
@@ -3196,10 +3190,6 @@ pub fn App() -> impl IntoView {
 
             <SessionsPanel daemon=daemon_for_panel open=show_sessions />
 
-            // Persistent Rooms panel (OCEAN-108). Lightweight browse/create
-            // overlay only — a successful join closes this panel and promotes
-            // the main surface into room mode.
-            <RoomsPanel rooms=rooms open=show_rooms />
 
             // Context deck (north star): the web/extension reveal rail. On
             // Tauri it can never mount (hard-gated on !in_tauri) — the desktop
@@ -3245,7 +3235,7 @@ pub fn App() -> impl IntoView {
             // layout is untouched — the pane never mounts there.
             // `focus_intent` carries one-shot tab-focus intents from the
             // toggle-* commands.
-            <Show when=move || in_tauri>
+            <Show when=move || in_tauri && !show_rooms.get()>
                 <crate::workspace::WorkspacePane
                     daemon=daemon_for_workspace.get_value()
                     open=workspace_open
@@ -3258,7 +3248,9 @@ pub fn App() -> impl IntoView {
             // renders nothing when empty (see `PinnedRail`). position:fixed
             // (styles/panels.css) so it rides the free viewport margin beside
             // the centered shell, mirroring the right-side workspace pane.
-            <PinnedRail daemon=daemon_for_pinned.get_value() />
+            <Show when=move || !show_rooms.get()>
+                <PinnedRail daemon=daemon_for_pinned.get_value() />
+            </Show>
 
             // ⌘K command palette — the deep-menu engine over the registry.
             <PaletteView registry=registry_for_view open=palette_open />
