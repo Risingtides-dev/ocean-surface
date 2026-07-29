@@ -3,15 +3,16 @@
 //! Left rail (room list + create), center rail (header + transcript + composer),
 //! right rail (members / details). Renders against the existing CSS classes in
 //! `styles/rooms-workspace.css` and the existing [`crate::rooms::Rooms`] signals
-//! and API surface. No new styles; no edits to rooms.rs, app.rs, or main.rs
-//! beyond the module declaration.
+//! and API surface. Mounted as the default web+Tauri collaboration surface in
+//! [`crate::app`]; the legacy RoomStage/RoomsPanel components in rooms.rs are
+//! deleted.
 
 use leptos::prelude::*;
 
 use crate::rooms::{
-    FederatedActorType, FederatedRoomMemberProjection, FederatedRoomRole, MemberPresence, Room,
-    RoomAccessProjection, RoomAccessState, RoomMessage, RoomMessageKind, RoomParticipant,
-    RoomParticipantKind, Rooms,
+    CreateOutcome, FederatedActorType, FederatedRoomMemberProjection, FederatedRoomRole,
+    MemberPresence, Room, RoomAccessProjection, RoomAccessState, RoomMessage, RoomMessageKind,
+    RoomParticipant, RoomParticipantKind, Rooms,
 };
 
 // ── Production helpers (testable directly, called from Effects) ─
@@ -60,28 +61,10 @@ fn should_clear_composer(current: &str, sent_body: &str) -> bool {
     current == sent_body
 }
 
-/// Action the create-admission Effect should take after evaluating
-/// the verdict and epoch state.
-#[derive(Debug, PartialEq)]
-enum CreateAction {
-    /// Clear the draft and reset pending — new room appeared.
-    AdmitNewRoom,
-    /// Reset pending but keep the draft so the user can edit — duplicate
-    /// room name, or server-side failure after epoch advanced.
-    KeepDraft,
-    /// Still in flight — do nothing, retry on next signal.
-    StayPending,
-}
-
-/// Resolve what the create Effect should do given the admission
-/// verdict and whether the create_epoch advanced since dispatch.
-fn resolve_create(verdict: CreateAdmission, epoch_advanced: bool) -> CreateAction {
-    match verdict {
-        CreateAdmission::Admitted => CreateAction::AdmitNewRoom,
-        CreateAdmission::Duplicate => CreateAction::KeepDraft,
-        CreateAdmission::Pending if epoch_advanced => CreateAction::KeepDraft,
-        CreateAdmission::Pending => CreateAction::StayPending,
-    }
+/// Toggle a boolean signal — the exact logic consumed by hamburger
+/// drawer open/close clicks.
+fn toggle_drawer(current: bool) -> bool {
+    !current
 }
 
 // ── Inline helpers (mirrors of private fns in rooms.rs) ──────────────
@@ -90,10 +73,10 @@ fn resolve_create(verdict: CreateAdmission, epoch_advanced: bool) -> CreateActio
 /// projection.
 #[allow(dead_code)]
 fn access_allows_writes(access: Option<&RoomAccessProjection>) -> bool {
-    match access.map(|a| a.state) {
-        Some(RoomAccessState::Local) | Some(RoomAccessState::Live) => true,
-        _ => false,
-    }
+    matches!(
+        access.map(|a| a.state),
+        Some(RoomAccessState::Local) | Some(RoomAccessState::Live)
+    )
 }
 
 /// Render a compact time label from an ISO-8601 timestamp. Mirrors
@@ -179,13 +162,12 @@ pub fn RoomsWorkspace(
         len
     });
 
-    // ── Left-rail: create room (draft retained until a NEW room
-    //    appears in the list — i.e. one whose id wasn't in the list
-    //    before create was fired — OR the create_epoch advances
-    //    without a match, signalling a silent failure).
+    // ── Left-rail: create room (draft retained until the typed
+    //    create_op delivers a matching outcome — op-id gating so
+    //    concurrent submits never cross-resolve).
     let pending_create = RwSignal::new(false);
     let pre_create_ids = RwSignal::new(Vec::new());
-    let last_create_epoch = RwSignal::new(0u64);
+    let create_op_id: RwSignal<u64> = RwSignal::new(0);
     let create_room = move || {
         let name = new_room_name.get_untracked();
         if name.trim().is_empty() {
@@ -198,32 +180,67 @@ pub fn RoomsWorkspace(
             .map(|r| r.id.clone())
             .collect();
         pre_create_ids.set(existing_ids);
-        last_create_epoch.set(rooms.create_epoch.get_untracked());
-        rooms.create_room(name.clone(), None);
+        let op_id = rooms.create_room(name.clone(), None);
+        if op_id == 0 {
+            // Synchronous rejection — empty name or slug. Don't set
+            // pending; the name field already shows the error via status.
+            return;
+        }
+        create_op_id.set(op_id);
         pending_create.set(true);
     };
 
-    // Admission gate: triggered by list changes OR create_epoch bumps.
+    // Admission gate: triggered by list changes OR create_op updates.
+    // Only the matching op_id resolves — concurrent submits are unaffected.
     Effect::new(move |_: Option<()>| {
         if !pending_create.get() {
             return;
+        }
+        let my_op = create_op_id.get();
+        let (current_op, outcome) = rooms.create_op.get();
+        if current_op != my_op {
+            // Not our turn yet; list-change-only check below.
+            if outcome.is_some() {
+                // A prior attempt resolved after ours was dispatched —
+                // still check the list.
+            } else {
+                return;
+            }
         }
         let draft = new_room_name.get();
         if draft.trim().is_empty() {
             pending_create.set(false);
             return;
         }
+        // Check list admission first (for the normal success path where
+        // fetch_rooms completes before the next signal).
         let verdict = admit_create(&draft, &pre_create_ids.get(), &rooms.list.get());
-        let epoch_advanced = rooms.create_epoch.get() != last_create_epoch.get();
-        match resolve_create(verdict, epoch_advanced) {
-            CreateAction::AdmitNewRoom => {
+        match verdict {
+            CreateAdmission::Admitted => {
                 new_room_name.set(String::new());
                 pending_create.set(false);
+                return;
             }
-            CreateAction::KeepDraft => {
+            CreateAdmission::Duplicate => {
+                pending_create.set(false);
+                return;
+            }
+            CreateAdmission::Pending => { /* fall through to typed outcome */ }
+        }
+        // If our op_id matches and we have a typed outcome, resolve directly.
+        if current_op == my_op {
+            if let Some(outcome) = outcome {
+                match outcome {
+                    CreateOutcome::Success { .. } => {
+                        // fetch_rooms + open_room already called by create_room;
+                        // the list will reflect it on next Effect tick.
+                        new_room_name.set(String::new());
+                    }
+                    CreateOutcome::Duplicate => { /* draft stays */ }
+                    CreateOutcome::Failed { .. } => { /* draft stays */ }
+                }
                 pending_create.set(false);
             }
-            CreateAction::StayPending => { /* retry on next signal */ }
         }
     });
 
@@ -292,7 +309,7 @@ pub fn RoomsWorkspace(
                     class="rooms-workspace__mobile-nav-toggle"
                     type="button"
                     aria-label="Toggle room list"
-                    on:click=move |_| show_left_rail.update(|v: &mut bool| *v = !*v)
+                    on:click=move |_| show_left_rail.update(|v| *v = toggle_drawer(*v))
                 >
                     <svg viewBox="0 0 16 16" width="16" height="16"
                         fill="none" stroke="currentColor" stroke-width="1.5"
@@ -336,7 +353,7 @@ pub fn RoomsWorkspace(
                         type="button"
                         aria-label="Close rooms workspace"
                         on:click={
-                            let close = on_close.clone();
+                            let close = on_close;
                             move |_| {
                                 rooms.close_room();
                                 if let Some(ref cb) = close { cb.run(()); }
@@ -1042,59 +1059,7 @@ mod tests {
         assert!(!should_clear_composer("hello", ""));
     }
 
-    // ── Behavioral: create-resolution gate (production helper) ──
-
-    #[test]
-    fn resolve_admitted_clears_draft() {
-        assert_eq!(
-            resolve_create(CreateAdmission::Admitted, false),
-            CreateAction::AdmitNewRoom
-        );
-        // epoch state is irrelevant for Admitted
-        assert_eq!(
-            resolve_create(CreateAdmission::Admitted, true),
-            CreateAction::AdmitNewRoom
-        );
-    }
-
-    #[test]
-    fn resolve_duplicate_keeps_draft() {
-        assert_eq!(
-            resolve_create(CreateAdmission::Duplicate, false),
-            CreateAction::KeepDraft
-        );
-        // epoch state is irrelevant for Duplicate
-        assert_eq!(
-            resolve_create(CreateAdmission::Duplicate, true),
-            CreateAction::KeepDraft
-        );
-    }
-
-    #[test]
-    fn resolve_pending_failure_resets_on_epoch_advance() {
-        // Server completed (epoch bumped) but no room appeared →
-        // silent failure → KeepDraft so user can retry.
-        assert_eq!(
-            resolve_create(CreateAdmission::Pending, true),
-            CreateAction::KeepDraft
-        );
-    }
-
-    #[test]
-    fn resolve_pending_stays_on_same_epoch() {
-        // Epoch hasn't changed → request is still in flight.
-        assert_eq!(
-            resolve_create(CreateAdmission::Pending, false),
-            CreateAction::StayPending
-        );
-    }
-
     // ── Behavioral: compact drawer reachability (production helper) ──
-
-    /// The exact toggle logic from the component's on:click handler.
-    fn toggle_drawer(current: bool) -> bool {
-        !current
-    }
 
     #[test]
     fn drawer_opens_when_closed() {

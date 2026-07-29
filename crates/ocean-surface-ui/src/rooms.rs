@@ -405,6 +405,20 @@ impl RoomIdentity {
     }
 }
 
+/// Outcome of a typed create-room operation. Each outcome carries the
+/// request it resolves, so surfaces can gate only the matching attempt
+/// and leave concurrent submits untouched.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CreateOutcome {
+    /// Room created successfully (key).
+    Success { key: String },
+    /// Daemon rejected as a duplicate.
+    Duplicate,
+    /// Daemon rejected for another reason, or client-side reject
+    /// (empty name, encode error, network failure).
+    Failed { error: String },
+}
+
 /// Reactive handle for the rooms panel. Holds the room list, the open room +
 /// its transcript, status text, and the SSE-tail generation counter. Cloned
 /// freely (all fields are `Copy` signal handles), like [`crate::daemon::Daemon`].
@@ -435,10 +449,6 @@ pub struct Rooms {
     pub identity_id: RwSignal<&'static str>,
     /// This browser's display name.
     pub identity_name: RwSignal<&'static str>,
-    /// Whether the rooms browse panel itself is open.
-    #[allow(dead_code)]
-    // consumed externally by sessions; no local reads after RoomStage removal
-    pub panel_open: RwSignal<bool>,
     /// Tail state for the live connection indicator. Starts as Replaying during
     /// initial catch-up, switches to Live once connected, and to Reconnecting on
     /// drop/retry. The view reads this to render the status bar indicator.
@@ -453,18 +463,17 @@ pub struct Rooms {
     /// Required access projection for the open room. `None` means loading or
     /// no room is open; local rooms carry `Some(state = Local)`.
     pub access: RwSignal<Option<RoomAccessProjection>>,
-    /// Monotonic epoch bumped on every create_room completion (success or
-    /// failure). Surfaces watch this to gate create-admission effects; without
-    /// it, a network-level create failure is indistinguishable from "still
-    /// in flight" from the list alone.
-    pub create_epoch: RwSignal<u64>,
+    /// Typed operation-id pair for create-room: (next_op_id, last_outcome).
+    /// Surfaces snapshot the op_id before dispatching and gate only on the
+    /// outcome carrying a matching id — concurrent submits never cross-resolve.
+    pub create_op: RwSignal<(u64, Option<CreateOutcome>)>,
 }
 
 impl Rooms {
     /// Construct a rooms handle that shares the live `Daemon::url` signal, so it
     /// always targets the origin resolved by bootstrap. Room collaboration is
     /// daemon-native text; LiveKit state is intentionally outside this type.
-    pub fn new(daemon: &crate::daemon::Daemon, panel_open: RwSignal<bool>) -> Self {
+    pub fn new(daemon: &crate::daemon::Daemon) -> Self {
         let identity = RoomIdentity::current();
         // Leak the small, app-lifetime identity strings to obtain `&'static str`
         // signals, so the panel can pass them into request closures without a
@@ -482,12 +491,11 @@ impl Rooms {
             generation: RwSignal::new(0),
             identity_id: RwSignal::new(id_static),
             identity_name: RwSignal::new(name_static),
-            panel_open,
             tail_state: RwSignal::new(TailState::Replaying),
             available_agents: RwSignal::new(Vec::new()),
             agents_loaded: RwSignal::new(false),
             access: RwSignal::new(None),
-            create_epoch: RwSignal::new(0),
+            create_op: RwSignal::new((0, None)),
         }
     }
 
@@ -592,21 +600,32 @@ impl Rooms {
     /// Create a room (`POST /v1/rooms/persistent`) with an optional auto-convene
     /// `trigger_policy`, then select it. The daemon keys rooms by `key`; we
     /// derive a url-safe key from the name but keep the human name intact.
-    pub fn create_room(&self, name: String, policy: Option<RoomTriggerPolicy>) {
+    /// Atomically dispatch a create-room request, returning the op_id the
+    /// caller should snapshot. When the request resolves, `create_op` carries
+    /// a typed outcome tagged with that id — surfaces gate only on their own
+    /// id and leave concurrent submits untouched.
+    pub fn create_room(&self, name: String, policy: Option<RoomTriggerPolicy>) -> u64 {
         let name = name.trim().to_string();
         if name.is_empty() {
-            return;
+            return 0;
         }
         let key = slugify(&name);
         if key.is_empty() {
             self.status
                 .set("room name needs at least one letter/number".into());
-            return;
+            return 0;
         }
         let base = self.base();
         let me = *self;
         let status = self.status;
-        let epoch = self.create_epoch;
+        let signal = self.create_op;
+        let op_id = {
+            let (n, _) = signal.get_untracked();
+            n.wrapping_add(1)
+        };
+        // Set "in flight" immediately so the caller doesn't immediately
+        // observe a stale-success resolution from a prior request.
+        signal.set((op_id, None));
         spawn_local(async move {
             let body = CreateRoomBody {
                 key: &key,
@@ -621,28 +640,48 @@ impl Rooms {
                 Ok(req) => req.send().await,
                 Err(err) => {
                     status.set(format!("create encode error: {err}"));
-                    epoch.update(|e| *e = e.wrapping_add(1));
+                    signal.set((
+                        op_id,
+                        Some(CreateOutcome::Failed {
+                            error: format!("encode: {err}"),
+                        }),
+                    ));
                     return;
                 }
             };
-            match res {
+            let outcome = match res {
                 Ok(resp) => match resp.json::<RoomMutateResponse>().await {
                     Ok(r) if r.ok => {
                         status.set(format!("room '{name}' created"));
                         // Refresh the list and open the new room.
                         me.fetch_rooms();
                         me.open_room(key.clone());
+                        CreateOutcome::Success { key: key.clone() }
                     }
-                    Ok(r) => status.set(format!(
-                        "create failed: {}",
-                        r.error.unwrap_or_else(|| "unknown error".into())
-                    )),
-                    Err(err) => status.set(format!("create decode error: {err}")),
+                    Ok(r) => {
+                        let msg = r.error.unwrap_or_else(|| "unknown error".into());
+                        status.set(format!("create failed: {msg}"));
+                        if msg.to_lowercase().contains("duplicate") {
+                            CreateOutcome::Duplicate
+                        } else {
+                            CreateOutcome::Failed { error: msg }
+                        }
+                    }
+                    Err(err) => {
+                        let msg = format!("create decode error: {err}");
+                        status.set(msg.clone());
+                        CreateOutcome::Failed { error: msg }
+                    }
                 },
-                Err(err) => status.set(format!("create post error: {err}")),
-            }
-            epoch.update(|e| *e = e.wrapping_add(1));
+                Err(err) => {
+                    let msg = format!("create post error: {err}");
+                    status.set(msg.clone());
+                    CreateOutcome::Failed { error: msg }
+                }
+            };
+            signal.set((op_id, Some(outcome)));
         });
+        op_id
     }
 
     /// Open a room: load its record + full transcript, bump the generation, and
@@ -1850,12 +1889,11 @@ mod tests {
             generation: RwSignal::new(0),
             identity_id: RwSignal::new("test-member"),
             identity_name: RwSignal::new("Test Member"),
-            panel_open: RwSignal::new(false),
             tail_state: RwSignal::new(TailState::Replaying),
             available_agents: RwSignal::new(Vec::new()),
             agents_loaded: RwSignal::new(false),
             access: RwSignal::new(None),
-            create_epoch: RwSignal::new(0),
+            create_op: RwSignal::new((0, None)),
         };
 
         // Not-yet-opened: no key, gen=0 → room_is_current rejects.
@@ -1886,233 +1924,5 @@ mod tests {
             TailState::Replaying,
             "reset_room_state must pin tail_state to Replaying"
         );
-    }
-
-    // Regression for TASK-29 finding 3: participant display names must render
-    // inside a `.rooms-chip__name` child (the only shrinkable/ellipsizing part
-    // of the chip), not as bare flex text nodes that clip the fixed suffixes.
-    // The needles are assembled at runtime so this test's own literals cannot
-    // self-satisfy the assertions against the source.
-    #[test]
-    fn participant_display_names_render_inside_shrinkable_name_span() {
-        let compact: String = include_str!("rooms.rs")
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect();
-        let name_span = |expr: &str| format!("class=\"rooms-chip__name\">{{{expr}}}</span>");
-
-        assert!(
-            compact.contains(&name_span("p.display_name.clone()")),
-            "local roster participant name must render inside a .rooms-chip__name child span"
-        );
-        assert!(
-            compact.contains(&name_span("member.display_name.clone()")),
-            "federated roster member name must render inside a .rooms-chip__name child span"
-        );
-    }
-}
-
-// ---- View -------------------------------------------------------------------
-
-/// Rooms browser panel — slides in from the right (same overlay pattern as the
-/// sessions panel). Lists persistent rooms + create-with-policy; selecting a
-/// room ENTERS it: the panel closes and [`RoomStage`] takes over the main
-/// surface (rooms are a mode, not a drawer).
-#[allow(dead_code)]
-#[component]
-pub fn RoomsPanel(_rooms: Rooms, _open: RwSignal<bool>) -> impl IntoView {
-    let rooms = _rooms;
-    let open = _open;
-    // Fetch the room list whenever the panel opens.
-    Effect::new(move |_| {
-        if open.get() {
-            rooms.fetch_rooms();
-        }
-    });
-
-    let is_open = move || open.get();
-    let new_room_name = RwSignal::new(String::new());
-
-    // ---- Trigger-policy toggles for room creation ---------------------------
-    // `on_mention` defaults on (the common auto-convene case); the rest default
-    // off. `on_schedule` is a free-form cron string (empty = no schedule).
-    let policy_on_mention = RwSignal::new(true);
-    let policy_on_thread_reply = RwSignal::new(false);
-    let policy_on_component_event = RwSignal::new(false);
-    let policy_on_schedule = RwSignal::new(String::new());
-
-    // Assemble the trigger policy from the toggles, or `None` if nothing is set
-    // (so the daemon stores no policy rather than an all-off one).
-    let collect_policy = move || -> Option<RoomTriggerPolicy> {
-        let cron = policy_on_schedule.get_untracked().trim().to_string();
-        let on_schedule = if cron.is_empty() { None } else { Some(cron) };
-        let policy = RoomTriggerPolicy {
-            on_mention: policy_on_mention.get_untracked(),
-            on_thread_reply: policy_on_thread_reply.get_untracked(),
-            on_component_event: policy_on_component_event.get_untracked(),
-            on_schedule,
-        };
-        if policy == RoomTriggerPolicy::default() {
-            None
-        } else {
-            Some(policy)
-        }
-    };
-
-    let room_list = rooms.list;
-    let rooms_loaded = rooms.rooms_loaded;
-    let list_state = move || rooms_list_state(rooms_loaded.get(), room_list.get().len());
-    let status = rooms.status;
-
-    view! {
-        <div
-            class="rooms-overlay"
-            class:rooms-overlay--open=is_open
-            on:click=move |ev| {
-                let target = event_target::<web_sys::HtmlElement>(&ev);
-                if target.class_list().contains("rooms-overlay") {
-                    open.set(false);
-                }
-            }
-        >
-            <div class="rooms-panel">
-                <div class="rooms-panel__head">
-                    <h2 class="rooms-panel__title">"Rooms"</h2>
-                    <button
-                        class="rooms-panel__close"
-                        type="button"
-                        aria-label="close rooms panel"
-                        on:click=move |_| open.set(false)
-                    >
-                        <crate::icons::Close />
-                    </button>
-                </div>
-
-                // ---- List view (no room open) -------------------------------
-                    <div class="rooms-panel__create">
-                        <input
-                            class="rooms-panel__create-input"
-                            type="text"
-                            placeholder="New room name…"
-                            prop:value=move || new_room_name.get()
-                            on:input=move |ev| new_room_name.set(event_target_value(&ev))
-                            on:keydown=move |ev| {
-                                if ev.key() == "Enter" {
-                                    ev.prevent_default();
-                                    let name = new_room_name.get_untracked();
-                                    rooms.create_room(name, collect_policy());
-                                    new_room_name.set(String::new());
-                                }
-                            }
-                        />
-                        <button
-                            class="rooms-panel__create-btn"
-                            type="button"
-                            on:click=move |_| {
-                                let name = new_room_name.get_untracked();
-                                rooms.create_room(name, collect_policy());
-                                new_room_name.set(String::new());
-                            }
-                        >
-                            "+ Create"
-                        </button>
-                    </div>
-
-                    // Trigger-policy toggles applied at room creation (OCEAN-117).
-                    // These wire into the daemon's `room_create` body; there is no
-                    // room-update route yet, so policy is set once at create time.
-                    <details class="rooms-policy">
-                        <summary class="rooms-policy__summary">
-                            <span class="rooms-policy__summary-label">"Response Policy"</span>
-                            <span class="rooms-policy__summary-hint">
-                                "when should agents respond — set at create"
-                            </span>
-                        </summary>
-                        <label class="rooms-policy__row">
-                            <input
-                                type="checkbox"
-                                prop:checked=move || policy_on_mention.get()
-                                on:change=move |ev| policy_on_mention.set(event_target_checked(&ev))
-                            />
-                            <span>"On mention"</span>
-                            <span class="rooms-policy__hint">"wake a mentioned agent"</span>
-                        </label>
-                        <label class="rooms-policy__row">
-                            <input
-                                type="checkbox"
-                                prop:checked=move || policy_on_thread_reply.get()
-                                on:change=move |ev| policy_on_thread_reply.set(event_target_checked(&ev))
-                            />
-                            <span>"On thread reply"</span>
-                        </label>
-                        <label class="rooms-policy__row">
-                            <input
-                                type="checkbox"
-                                prop:checked=move || policy_on_component_event.get()
-                                on:change=move |ev| policy_on_component_event.set(event_target_checked(&ev))
-                            />
-                            <span>"On interaction"</span>
-                        </label>
-                        <label class="rooms-policy__row rooms-policy__row--cron">
-                            <span>"On schedule"</span>
-                            <input
-                                class="rooms-policy__cron"
-                                type="text"
-                                placeholder="e.g. 0 9 * * *"
-                                prop:value=move || policy_on_schedule.get()
-                                on:input=move |ev| policy_on_schedule.set(event_target_value(&ev))
-                            />
-                        </label>
-                    </details>
-
-                    <div class="rooms-panel__list">
-                        <For
-                            each=move || room_list.get()
-                            key=|r| (r.id.clone(), r.participants.len(), r.updated_at.clone())
-                            children=move |room: Room| {
-                                let key = room.id.clone();
-                                let count = room.participants.len();
-                                let last = short_time(&room.updated_at);
-                                view! {
-                                    <button
-                                        class="rooms-item"
-                                        type="button"
-                                        on:click=move |_| rooms.open_room(key.clone())
-                                    >
-                                        <div class="rooms-item__name">{room.name.clone()}</div>
-                                        <div class="rooms-item__meta">
-                                            <span class="rooms-item__count">
-                                                {format!("{count} participant{}", if count == 1 { "" } else { "s" })}
-                                            </span>
-                                            <Show when={
-                                                let last = last.clone();
-                                                move || !last.is_empty()
-                                            }>
-                                                <span class="rooms-item__time">{last.clone()}</span>
-                                            </Show>
-                                        </div>
-                                    </button>
-                                }
-                            }
-                        />
-                    </div>
-
-                    <Show when=move || list_state() == RoomsListState::Loading>
-                        <div class="rooms-panel__loading">"Loading rooms…"</div>
-                    </Show>
-
-                    <Show when=move || list_state() == RoomsListState::Empty>
-                        <div class="rooms-panel__empty">
-                            "No rooms yet. Create one above to start collaborating."
-                        </div>
-                    </Show>
-
-
-                // Status line (errors / notices).
-                <Show when=move || !status.get().is_empty()>
-                    <div class="rooms-panel__status">{move || status.get()}</div>
-                </Show>
-            </div>
-        </div>
     }
 }

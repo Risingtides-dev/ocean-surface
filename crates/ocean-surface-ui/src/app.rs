@@ -1571,7 +1571,7 @@ pub fn App() -> impl IntoView {
         }
         show_rooms.set(opening);
     };
-    let rooms = Rooms::new(&daemon, show_rooms);
+    let rooms = Rooms::new(&daemon);
 
     // Context deck (north star): the WEB/EXTENSION reveal rail. At most ONE
     // panel revealed at a time, reveal-on-intent via ⌘K commands, never
