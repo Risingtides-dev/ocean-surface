@@ -436,6 +436,8 @@ pub struct Rooms {
     /// This browser's display name.
     pub identity_name: RwSignal<&'static str>,
     /// Whether the rooms browse panel itself is open.
+    #[allow(dead_code)]
+    // consumed externally by sessions; no local reads after RoomStage removal
     pub panel_open: RwSignal<bool>,
     /// Tail state for the live connection indicator. Starts as Replaying during
     /// initial catch-up, switches to Live once connected, and to Reconnecting on
@@ -451,6 +453,11 @@ pub struct Rooms {
     /// Required access projection for the open room. `None` means loading or
     /// no room is open; local rooms carry `Some(state = Local)`.
     pub access: RwSignal<Option<RoomAccessProjection>>,
+    /// Monotonic epoch bumped on every create_room completion (success or
+    /// failure). Surfaces watch this to gate create-admission effects; without
+    /// it, a network-level create failure is indistinguishable from "still
+    /// in flight" from the list alone.
+    pub create_epoch: RwSignal<u64>,
 }
 
 impl Rooms {
@@ -480,6 +487,7 @@ impl Rooms {
             available_agents: RwSignal::new(Vec::new()),
             agents_loaded: RwSignal::new(false),
             access: RwSignal::new(None),
+            create_epoch: RwSignal::new(0),
         }
     }
 
@@ -598,6 +606,7 @@ impl Rooms {
         let base = self.base();
         let me = *self;
         let status = self.status;
+        let epoch = self.create_epoch;
         spawn_local(async move {
             let body = CreateRoomBody {
                 key: &key,
@@ -612,6 +621,7 @@ impl Rooms {
                 Ok(req) => req.send().await,
                 Err(err) => {
                     status.set(format!("create encode error: {err}"));
+                    epoch.update(|e| *e = e.wrapping_add(1));
                     return;
                 }
             };
@@ -631,6 +641,7 @@ impl Rooms {
                 },
                 Err(err) => status.set(format!("create post error: {err}")),
             }
+            epoch.update(|e| *e = e.wrapping_add(1));
         });
     }
 
@@ -1844,6 +1855,7 @@ mod tests {
             available_agents: RwSignal::new(Vec::new()),
             agents_loaded: RwSignal::new(false),
             access: RwSignal::new(None),
+            create_epoch: RwSignal::new(0),
         };
 
         // Not-yet-opened: no key, gen=0 → room_is_current rejects.
@@ -2097,448 +2109,6 @@ pub fn RoomsPanel(_rooms: Rooms, _open: RwSignal<bool>) -> impl IntoView {
 
 
                 // Status line (errors / notices).
-                <Show when=move || !status.get().is_empty()>
-                    <div class="rooms-panel__status">{move || status.get()}</div>
-                </Show>
-            </div>
-        </div>
-    }
-}
-
-/// Full-surface room mode: entering a room from the browser panel promotes it
-/// to the main stage — the chat transcript/composer swap out and the room's
-/// own roster, transcript, and composer take the surface over (a room is a
-/// mode of operation you enter, not a drawer you peek at). Works with ZERO
-/// LiveKit configuration: the text room is daemon-native
-/// (`/v1/rooms/persistent/*`); the call strip above the stage upgrades the
-/// room to audio when LiveKit credentials exist.
-#[allow(dead_code)]
-#[component]
-pub fn RoomStage(rooms: Rooms) -> impl IntoView {
-    let composer = RwSignal::new(String::new());
-    // Add-agent picker (TASK-9/TASK-11): reveal-on-intent ghost chip,
-    // choices populated from `GET /v1/agents` → `available_agents`.
-    let show_add_agent = RwSignal::new(false);
-
-    let open_room = rooms.open_room;
-    let transcript = rooms.transcript;
-    let tail_state = rooms.tail_state;
-    let status = rooms.status;
-
-    // Keep the transcript pinned to the newest message: jump to the bottom
-    // when the room's history first fills, and follow new messages tailing in
-    // unless the reader has scrolled up into history (same stick pattern as
-    // the chat transcript). The effect returns the seen length so the first
-    // fill is distinguishable from a live append.
-    let list_ref: NodeRef<leptos::html::Div> = NodeRef::new();
-    Effect::new(move |prev: Option<usize>| {
-        let len = transcript.with(|t| t.len());
-        if len > 0 {
-            if let Some(el) = list_ref.get() {
-                let first_fill = prev.unwrap_or(0) == 0;
-                let near_bottom = el.scroll_height() - el.scroll_top() - el.client_height() < 120;
-                if first_fill || near_bottom {
-                    request_animation_frame(move || el.set_scroll_top(el.scroll_height()));
-                }
-            }
-        }
-        len
-    });
-
-    view! {
-        <div class="room-stage">
-            <div class="room-stage__head">
-                <button
-                    class="room-stage__back"
-                    type="button"
-                    title="Back to rooms"
-                    on:click=move |_| {
-                        rooms.close_room();
-                        rooms.panel_open.set(true);
-                    }
-                >
-                    "‹ Rooms"
-                </button>
-                <h2 class="room-stage__title">
-                    {move || open_room.get().map(|r| r.name).unwrap_or_default()}
-                </h2>
-                <span class="room-stage__tail-state">
-                    {move || match rooms.tail_state.get() {
-                        TailState::Replaying => "● replaying",
-                        TailState::Live => "● live",
-                        TailState::Reconnecting => "○ reconnecting",
-                    }}
-                </span>
-                <Show
-                    when=move || rooms.joined_open()
-                    fallback=move || view! {
-                        <button
-                            class="room-stage__join"
-                            type="button"
-                            on:click=move |_| rooms.join_open()
-                        >
-                            "Join room"
-                        </button>
-                    }
-                >
-                    <button
-                        class="room-stage__leave"
-                        type="button"
-                        on:click=move |_| rooms.leave_open()
-                    >
-                        "Leave"
-                    </button>
-                </Show>
-            </div>
-
-            <Show when=move || access_banner(rooms.access.get().as_ref()).is_some()>
-                <div
-                    class="room-stage__access-state"
-                    class:room-stage__access-state--connecting=move || matches!(
-                        rooms.access.get().map(|access| access.state),
-                        Some(RoomAccessState::Connecting)
-                    )
-                    class:room-stage__access-state--recovering=move || matches!(
-                        rooms.access.get().map(|access| access.state),
-                        Some(RoomAccessState::Recovering)
-                    )
-                    class:room-stage__access-state--revoked=move || matches!(
-                        rooms.access.get().map(|access| access.state),
-                        Some(RoomAccessState::Revoked)
-                    )
-                >
-                    {move || access_banner(rooms.access.get().as_ref()).unwrap_or_default()}
-                </div>
-            </Show>
-
-            // Local rooms retain the daemon roster. Federated rooms render only
-            // the safe access projection, with binding locality applied to
-            // agents (never humans) and no role or secret-bearing fallback.
-            <div class="room-stage__roster">
-                <Show when=move || matches!(
-                    rooms.access.get().map(|access| access.state),
-                    Some(RoomAccessState::Local)
-                )>
-                    <For
-                        each=move || open_room.get().map(|r| r.participants).unwrap_or_default()
-                        key=|p| p.id.clone()
-                        children=move |p: RoomParticipant| {
-                            let is_agent = p.kind == RoomParticipantKind::Agent;
-                            view! {
-                                <span
-                                    class="rooms-chip"
-                                    class:rooms-chip--agent=is_agent
-                                    title=format!("{} ({})", p.id, p.kind.label())
-                                >
-                                    <span class="rooms-chip__glyph">{p.kind.icon()}</span>
-                                    <span class="rooms-chip__name">{p.display_name.clone()}</span>
-                                    <span class="rooms-chip__kind">{p.kind.label()}</span>
-                                </span>
-                            }
-                        }
-                    />
-                    <button
-                        class="room-stage__addagent-toggle"
-                        type="button"
-                        title="Add an agent participant"
-                        on:click=move |_| show_add_agent.update(|v| *v = !*v)
-                    >
-                        "+ agent"
-                    </button>
-                </Show>
-                <Show
-                    when=move || matches!(
-                        rooms.access.get().map(|access| access.state),
-                        Some(
-                            RoomAccessState::Connecting
-                                | RoomAccessState::Live
-                                | RoomAccessState::Recovering
-                                | RoomAccessState::Revoked
-                        )
-                    )
-                >
-                    <For
-                        each=move || rooms.access.get()
-                            .map(|access| access.members)
-                            .unwrap_or_default()
-                        key=|member| member.member_id.clone()
-                        children=move |member: FederatedRoomMemberProjection| {
-                            let actor_type = member.actor_type;
-                            let presence = member.derived_presence;
-                            let presence_label = match presence {
-                                Some(MemberPresence::Live) => "live",
-                                Some(MemberPresence::Unavailable) => "unavailable",
-                                None => "",
-                            };
-                            let local_agent = actor_type == FederatedActorType::Agent
-                                && member.local_binding_available == Some(true);
-                            let remote_agent = actor_type == FederatedActorType::Agent
-                                && member.local_binding_available == Some(false);
-                            view! {
-                                <span
-                                    class="rooms-chip rooms-chip--federated"
-                                    class:rooms-chip--local=local_agent
-                                    class:rooms-chip--remote=remote_agent
-                                    title=member.member_id.clone()
-                                >
-                                    <Show when=move || presence.is_some()>
-                                        <span
-                                            class="rooms-chip__presence"
-                                            class:rooms-chip__presence--live=move || {
-                                                presence == Some(MemberPresence::Live)
-                                            }
-                                            class:rooms-chip__presence--unavailable=move || {
-                                                presence == Some(MemberPresence::Unavailable)
-                                            }
-                                            aria-label=presence_label
-                                            title=presence_label
-                                        ></span>
-                                    </Show>
-                                    <span class="rooms-chip__glyph">{actor_type.icon()}</span>
-                                    <span class="rooms-chip__name">{member.display_name.clone()}</span>
-                                    <Show when=move || remote_agent>
-                                        <span
-                                            class="rooms-chip__remote"
-                                            aria-label="remote agent"
-                                            title="remote agent"
-                                        >
-                                            <crate::icons::Globe />
-                                        </span>
-                                    </Show>
-                                </span>
-                            }
-                        }
-                    />
-                </Show>
-            </div>
-
-            <Show when=move || {
-                show_add_agent.get()
-                    && matches!(
-                        rooms.access.get().map(|access| access.state),
-                        Some(RoomAccessState::Local)
-                    )
-            }>
-                <div class="rooms-addagent">
-                    <select
-                        class="rooms-addagent__input"
-                        on:change=move |ev| {
-                            let val = event_target_value(&ev);
-                            if !val.is_empty() {
-                                rooms.add_agent(val);
-                                show_add_agent.set(false);
-                            }
-                        }
-                    >
-                        <option value="" selected=move || {
-                            // Keep "pick an agent" as the visible label whenever
-                            // the picker opens — the select isn't controlled.
-                            true
-                        }>
-                            "-- pick an agent --"
-                        </option>
-                        <For
-                            each=move || rooms.available_agents.get()
-                            key=|id: &String| id.clone()
-                            children=move |agent_id: String| {
-                                let id = agent_id.clone();
-                                view! {
-                                    <option value=agent_id>
-                                        {id}
-                                    </option>
-                                }
-                            }
-                        />
-                    </select>
-                    <Show when=move || show_no_agents(
-                        rooms.agents_loaded.get(),
-                        rooms.available_agents.get().len(),
-                    )>
-                        <span class="rooms-addagent__empty">
-                            "No agents"
-                        </span>
-                    </Show>
-                </div>
-            </Show>
-
-            // Trigger-policy summary — read-only (no daemon room-update route).
-            <Show when=move || {
-                open_room.get().and_then(|r| r.trigger_policy).is_some()
-            }>
-                <div class="rooms-policy-summary">
-                    {move || {
-                        let p = open_room.get().and_then(|r| r.trigger_policy)
-                            .unwrap_or_default();
-                        let mut on: Vec<&str> = Vec::new();
-                        if p.on_mention { on.push("mention"); }
-                        if p.on_thread_reply { on.push("thread reply"); }
-                        if p.on_component_event { on.push("interaction"); }
-                        if p.on_schedule.is_some() { on.push("schedule"); }
-                        let triggers = if on.is_empty() {
-                            "none".to_string()
-                        } else {
-                            on.join(", ")
-                        };
-                        format!("Response Policy: {triggers}")
-                    }}
-                </div>
-            </Show>
-
-            // Transcript — the main column.
-            <div class="room-stage__transcript" node_ref=list_ref>
-                <For
-                    each=move || transcript.get()
-                    key=|m| m.seq
-                    children=move |m: RoomMessage| {
-                        let is_system = matches!(
-                            m.kind,
-                            RoomMessageKind::System
-                                | RoomMessageKind::ParticipantJoined
-                                | RoomMessageKind::ParticipantLeft
-                        );
-                        view! {
-                            <div
-                                class="rooms-msg"
-                                class:rooms-msg--system=is_system
-                            >
-                                <Show when=move || !is_system>
-                                    <div class="rooms-msg__author">
-                                        <span class="rooms-msg__glyph">
-                                            {m.author_kind.icon()}
-                                        </span>
-                                        {m.author_id.clone()}
-                                    </div>
-                                </Show>
-                                <div class="rooms-msg__body">{m.body.clone()}</div>
-                            </div>
-                        }
-                    }
-                />
-                <Show when=move || show_transcript_empty(tail_state.get(), transcript.get().is_empty())>
-                    <div class="room-stage__empty">
-                        "No messages yet. Say something — use @id to convene an agent."
-                    </div>
-                </Show>
-            </div>
-
-            <Show when=move || rooms.access.get()
-                .map(|access| !access.outbox.is_empty())
-                .unwrap_or(false)
-            >
-                <div class="rooms-outbox" aria-label="Room outbox">
-                    <For
-                        each=move || rooms.access.get()
-                            .map(|access| access.outbox)
-                            .unwrap_or_default()
-                        key=|item| item.client_event_id.clone()
-                        children=move |item: RoomOutboxItem| {
-                            let failed = item.state == OutboxItemState::Failed;
-                            let retry_id = item.client_event_id.clone();
-                            let state_label = match item.state {
-                                OutboxItemState::Pending => "pending",
-                                OutboxItemState::Failed => "failed",
-                            };
-                            let retry_button = failed.then(|| {
-                                let retry_id = retry_id.clone();
-                                view! {
-                                    <button
-                                        class="rooms-outbox__retry"
-                                        type="button"
-                                        aria-label="Retry failed outbox item"
-                                        title="Retry failed outbox item"
-                                        on:click=move |_| rooms.retry_outbox(retry_id.clone())
-                                    >
-                                        <crate::icons::Refresh />
-                                    </button>
-                                }
-                            });
-                            view! {
-                                <div
-                                    class="rooms-outbox__item"
-                                    class:rooms-outbox__item--failed=failed
-                                >
-                                    <span class="rooms-outbox__event">{item.event_type}</span>
-                                    <span class="rooms-outbox__state">{state_label}</span>
-                                    {retry_button}
-                                </div>
-                            }
-                        }
-                    />
-                </div>
-            </Show>
-
-            <div class="room-stage__foot">
-                // @mention discoverability: click a chip to insert `@id `.
-                <Show when=move || !rooms.agent_ids().is_empty()>
-                    <div class="rooms-mention-hint">
-                        <span class="rooms-mention-hint__label">"@agents:"</span>
-                        <For
-                            each=move || rooms.agent_ids()
-                            key=|id| id.clone()
-                            children=move |id: String| {
-                                let insert = id.clone();
-                                view! {
-                                    <button
-                                        class="rooms-mention-hint__chip"
-                                        type="button"
-                                        title="insert mention"
-                                        disabled=move || !access_allows_writes(
-                                            rooms.access.get().as_ref()
-                                        )
-                                        on:click=move |_| {
-                                            composer.update(|c| {
-                                                if !c.is_empty() && !c.ends_with(' ') {
-                                                    c.push(' ');
-                                                }
-                                                c.push('@');
-                                                c.push_str(&insert);
-                                                c.push(' ');
-                                            });
-                                        }
-                                    >
-                                        {format!("@{id}")}
-                                    </button>
-                                }
-                            }
-                        />
-                    </div>
-                </Show>
-
-                <form
-                    class="rooms-composer"
-                    on:submit=move |ev| {
-                        ev.prevent_default();
-                        if !access_allows_writes(rooms.access.get_untracked().as_ref()) {
-                            return;
-                        }
-                        let text = composer.get_untracked();
-                        if text.trim().is_empty() {
-                            return;
-                        }
-                        rooms.post_message(text);
-                        composer.set(String::new());
-                    }
-                >
-                    <input
-                        class="rooms-composer__input"
-                        type="text"
-                        placeholder="Message… (@id to mention)"
-                        prop:value=move || composer.get()
-                        on:input=move |ev| composer.set(event_target_value(&ev))
-                        disabled=move || !access_allows_writes(rooms.access.get().as_ref())
-                    />
-                    <button
-                        class="rooms-composer__send"
-                        type="submit"
-                        disabled=move || {
-                            composer.get().trim().is_empty()
-                                || !access_allows_writes(rooms.access.get().as_ref())
-                        }
-                    >
-                        "Send"
-                    </button>
-                </form>
-
                 <Show when=move || !status.get().is_empty()>
                     <div class="rooms-panel__status">{move || status.get()}</div>
                 </Show>

@@ -28,7 +28,6 @@ mod model;
 mod observatory;
 mod palette;
 mod place_call;
-#[allow(dead_code)] // Repair 5: RoomStage generated props struct false positive in Leptos 0.8
 mod rooms;
 mod rooms_workspace;
 mod search;
