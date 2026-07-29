@@ -679,11 +679,119 @@
   }
 }
 
-/* Below 650px: left rail also collapses. Center only. */
+/* Below 650px: left rail also collapses, replaced by mobile nav. */
 @media (max-width: 650px) {
   .rooms-workspace__left {
     display: none;
   }
+  .rooms-workspace__left--visible {
+    display: flex;
+    position: fixed;
+    inset: 0 0 0 0;
+    z-index: 400;
+    max-width: 280px;
+    border-right: 1px solid var(--border-subtle);
+    box-shadow: 2px 0 24px rgba(0, 0, 0, 0.35);
+  }
+  .rooms-workspace__mobile-nav {
+    display: flex;
+  }
+}
+
+/* ── Mobile nav ────────────────────────────────────────────────────── */
+
+/* Hidden above 650px; revealed as a compact top bar with hamburger
+   toggle and active-room name so mobile users are never stranded. */
+.rooms-workspace__mobile-nav {
+  display: none;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__mobile-nav-toggle {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 16px;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__mobile-nav-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__mobile-nav-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+/* ── Member presence dot ──────────────────────────────────────────── */
+
+.rooms-workspace__member-presence {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-left: auto;
+}
+
+.rooms-workspace__member-presence--live {
+  background: var(--color-success, #4caf50);
+}
+
+.rooms-workspace__member-presence--unavailable {
+  background: var(--fg-4);
+}
+
+/* ── Member role badge ────────────────────────────────────────────── */
+
+.rooms-workspace__member-role {
+  flex: 0 0 auto;
+  color: var(--fg-4);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* ── Member local/remote agent states ─────────────────────────────── */
+
+.rooms-workspace__member--local-agent .rooms-workspace__member-name {
+  color: var(--accent);
+}
+
+.rooms-workspace__member--remote-agent .rooms-workspace__member-name {
+  color: var(--fg-3);
+}
+
+/* ── Status bar ───────────────────────────────────────────────────── */
+
+.rooms-workspace__status {
+  padding: 6px 12px 2px;
+  color: var(--fg-3);
+  font-size: 11px;
+  font-style: italic;
+  line-height: 1.35;
 }
 
 /* ── Scrollbar ────────────────────────────────────────────────────── */
@@ -693,7 +801,7 @@
 .rooms-workspace__transcript,
 .rooms-workspace__right-thread-transcript {
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+  scrollbar-color: var(--border-subtle) transparent;
 }
 
 .rooms-workspace__left-list::-webkit-scrollbar,
@@ -708,14 +816,14 @@
 .rooms-workspace__transcript::-webkit-scrollbar-thumb,
 .rooms-workspace__right-thread-transcript::-webkit-scrollbar-thumb {
   border-radius: var(--radius-pill);
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--border-subtle);
 }
 
 .rooms-workspace__left-list::-webkit-scrollbar-thumb:hover,
 .rooms-workspace__right-list::-webkit-scrollbar-thumb:hover,
 .rooms-workspace__transcript::-webkit-scrollbar-thumb:hover,
 .rooms-workspace__right-thread-transcript::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.22);
+  background: var(--border-strong);
 }
 
 /* ── Reduced motion ───────────────────────────────────────────────── */

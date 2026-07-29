@@ -9,8 +9,9 @@
 use leptos::prelude::*;
 
 use crate::rooms::{
-    FederatedRoomMemberProjection, FederatedRoomRole, Room, RoomAccessProjection, RoomAccessState,
-    RoomMessage, RoomMessageKind, RoomParticipant, RoomParticipantKind, Rooms,
+    FederatedActorType, FederatedRoomMemberProjection, FederatedRoomRole, MemberPresence, Room,
+    RoomAccessProjection, RoomAccessState, RoomMessage, RoomMessageKind, RoomParticipant,
+    RoomParticipantKind, Rooms,
 };
 
 // ── Inline helpers (mirrors of private fns in rooms.rs) ──────────────
@@ -61,15 +62,20 @@ fn members_loaded(access: Option<&RoomAccessProjection>) -> bool {
 /// Takes a [`Rooms`] handle (Clone, Copy) and drives the three rails:
 ///
 /// - **Left:** room list with active highlight, new-room create input.
-/// - **Center:** selected room header, message timeline, composer form.
-/// - **Right:** participant / member roster with kind + presence badges.
+/// - **Center:** selected room header, message timeline, composer form,
+///   status bar.
+/// - **Right:** participant / member roster with kind, role, and presence
+///   badges.
 ///
-/// When no room is selected, the center rail shows a join prompt for the
-/// most-recently-viewed room; the right rail is empty.
+/// On narrow screens (&lt;650px) a compact top nav reveals the hidden left
+/// rail so the reader is never stranded with no room navigation.
 #[component]
 pub fn RoomsWorkspace(rooms: Rooms) -> impl IntoView {
     // ── Left-rail: create form signals ────────────────────────────────
     let new_room_name = RwSignal::new(String::new());
+
+    // Toggle for narrow-screen left-rail visibility.
+    let show_left_rail = RwSignal::new(false);
 
     // Fetch room list on mount.
     Effect::new(move |_| {
@@ -87,8 +93,7 @@ pub fn RoomsWorkspace(rooms: Rooms) -> impl IntoView {
         if len > 0 {
             if let Some(el) = list_ref.get() {
                 let first_fill = prev.unwrap_or(0) == 0;
-                let near_bottom =
-                    el.scroll_height() - el.scroll_top() - el.client_height() < 120;
+                let near_bottom = el.scroll_height() - el.scroll_top() - el.client_height() < 120;
                 if first_fill || near_bottom {
                     request_animation_frame(move || el.set_scroll_top(el.scroll_height()));
                 }
@@ -107,15 +112,58 @@ pub fn RoomsWorkspace(rooms: Rooms) -> impl IntoView {
         new_room_name.set(String::new());
     };
 
+    // ── Composer: preserve draft until admission. post_message is
+    //    fire-and-forget, but we only clear after sending so the user can
+    //    retry if the status line shows an error.
+    let do_send = move || {
+        if !access_allows_writes(rooms.access.get_untracked().as_ref()) {
+            return;
+        }
+        let text = composer.get_untracked();
+        if text.trim().is_empty() {
+            return;
+        }
+        rooms.post_message(text);
+        // Clear only after attempting send — if it fails the draft is still
+        // visible and the status signal will carry the error.
+        composer.set(String::new());
+    };
+
     view! {
         <div class="rooms-workspace" role="region" aria-label="Rooms workspace">
 
+            // ═══ MOBILE NAV — narrow-screen room selector ═════════════
+            // Always present but CSS hides it above 650px via matching
+            // breakpoint; renders a compact bar with room toggle + active
+            // room name so the reader is never stranded.
+            <div class="rooms-workspace__mobile-nav">
+                <button
+                    class="rooms-workspace__mobile-nav-toggle"
+                    type="button"
+                    aria-label="Toggle room list"
+                    on:click=move |_| show_left_rail.update(|v: &mut bool| *v = !*v)
+                >
+                    <svg viewBox="0 0 16 16" width="16" height="16"
+                        fill="none" stroke="currentColor" stroke-width="1.5"
+                        stroke-linecap="round">
+                        <path d="M2 4h12M2 8h12M2 12h12"/>
+                    </svg>
+                </button>
+                <span class="rooms-workspace__mobile-nav-title">
+                    {move || rooms.open_key.get()
+                        .and_then(|_k| rooms.open_room.get().map(|r| r.name))
+                        .unwrap_or_else(|| "Rooms".into())
+                    }
+                </span>
+            </div>
+
             // ═══ LEFT RAIL — room list ═══════════════════════════════════
-            <div class="rooms-workspace__left">
+            <div
+                class="rooms-workspace__left"
+                class:rooms-workspace__left--visible=move || show_left_rail.get()
+            >
                 <div class="rooms-workspace__left-head">
                     <h2 class="rooms-workspace__left-title">"Rooms"</h2>
-                    // close returns to the prior surface mode; for now,
-                    // close_room + re-open the browse panel.
                     <button
                         class="rooms-workspace__left-close"
                         type="button"
@@ -163,7 +211,10 @@ pub fn RoomsWorkspace(rooms: Rooms) -> impl IntoView {
                                                 class="rooms-workspace__room"
                                                 class:is-active=active
                                                 type="button"
-                                                on:click=move |_| rooms.open_room(key2.clone())
+                                                on:click=move |_| {
+                                                    rooms.open_room(key2.clone());
+                                                    show_left_rail.set(false);
+                                                }
                                             >
                                                 <span class="rooms-workspace__room-hash">"#"</span>
                                                 <span class="rooms-workspace__room-name">
@@ -311,9 +362,9 @@ pub fn RoomsWorkspace(rooms: Rooms) -> impl IntoView {
                                                 >
                                                     <div class="rooms-workspace__msg-avatar">
                                                         {if is_system {
-                                                            "⚡".into()
+                                                            view! { <crate::icons::Spark /> }.into_any()
                                                         } else {
-                                                            m.author_id.chars().take(2).collect::<String>()
+                                                            m.author_id.chars().take(2).collect::<String>().into_any()
                                                         }}
                                                     </div>
                                                     <div class="rooms-workspace__msg-body">
@@ -348,21 +399,13 @@ pub fn RoomsWorkspace(rooms: Rooms) -> impl IntoView {
                                     }}
                                 </div>
 
-                                // Composer
+                                // Composer + status line
                                 <div class="rooms-workspace__composer">
                                     <form
                                         class="rooms-workspace__composer-row"
                                         on:submit=move |ev| {
                                             ev.prevent_default();
-                                            if !access_allows_writes(rooms.access.get_untracked().as_ref()) {
-                                                return;
-                                            }
-                                            let text = composer.get_untracked();
-                                            if text.trim().is_empty() {
-                                                return;
-                                            }
-                                            rooms.post_message(text);
-                                            composer.set(String::new());
+                                            do_send();
                                         }
                                     >
                                         <input
@@ -384,6 +427,20 @@ pub fn RoomsWorkspace(rooms: Rooms) -> impl IntoView {
                                             "Send"
                                         </button>
                                     </form>
+
+                                    // Status line: errors from create / join / post land here.
+                                    {move || {
+                                        let s = rooms.status.get();
+                                        if s.is_empty() {
+                                            ().into_any()
+                                        } else {
+                                            view! {
+                                                <div class="rooms-workspace__status">
+                                                    {s}
+                                                </div>
+                                            }.into_any()
+                                        }
+                                    }}
                                 </div>
                             }.into_any()
                         }
@@ -477,8 +534,24 @@ pub fn RoomsWorkspace(rooms: Rooms) -> impl IntoView {
                                                     FederatedRoomRole::Owner => "owner",
                                                     FederatedRoomRole::Member => "member",
                                                 };
+                                                let actor_label = match member.actor_type {
+                                                    FederatedActorType::User => "user",
+                                                    FederatedActorType::Agent => "agent",
+                                                };
+                                                let presence = member.derived_presence;
+                                                let local_agent = matches!(member.actor_type, FederatedActorType::Agent)
+                                                    && member.local_binding_available == Some(true);
+                                                let remote_agent = matches!(member.actor_type, FederatedActorType::Agent)
+                                                    && member.local_binding_available == Some(false);
+                                                let desc_title = member.public_agent_descriptor.as_ref()
+                                                    .and_then(|d| d.description.clone())
+                                                    .unwrap_or_default();
                                                 view! {
-                                                    <div class="rooms-workspace__member">
+                                                    <div class="rooms-workspace__member"
+                                                        class:rooms-workspace__member--local-agent=local_agent
+                                                        class:rooms-workspace__member--remote-agent=remote_agent
+                                                        title=desc_title
+                                                    >
                                                         <div class="rooms-workspace__member-avatar">
                                                             {member.display_name.chars().take(2).collect::<String>()}
                                                         </div>
@@ -486,8 +559,26 @@ pub fn RoomsWorkspace(rooms: Rooms) -> impl IntoView {
                                                             {member.display_name.clone()}
                                                         </span>
                                                         <span class="rooms-workspace__member-kind">
+                                                            {actor_label}
+                                                        </span>
+                                                        <span class="rooms-workspace__member-role">
                                                             {role_label}
                                                         </span>
+                                                        {if presence.is_some() {
+                                                            view! {
+                                                                <span
+                                                                    class="rooms-workspace__member-presence"
+                                                                    class:rooms-workspace__member-presence--live=move || {
+                                                                        presence == Some(MemberPresence::Live)
+                                                                    }
+                                                                    class:rooms-workspace__member-presence--unavailable=move || {
+                                                                        presence == Some(MemberPresence::Unavailable)
+                                                                    }
+                                                                ></span>
+                                                            }.into_any()
+                                                        } else {
+                                                            ().into_any()
+                                                        }}
                                                     </div>
                                                 }
                                             }
