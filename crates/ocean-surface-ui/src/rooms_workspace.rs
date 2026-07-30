@@ -10,7 +10,7 @@
 use leptos::prelude::*;
 
 use crate::rooms::{
-    CreateOutcome, FederatedActorType, FederatedRoomMemberProjection, FederatedRoomRole,
+    CreateResolution, FederatedActorType, FederatedRoomMemberProjection, FederatedRoomRole,
     MemberPresence, Room, RoomAccessProjection, RoomAccessState, RoomMessage, RoomMessageKind,
     RoomParticipant, RoomParticipantKind, Rooms,
 };
@@ -172,18 +172,15 @@ pub fn RoomsWorkspace(
             pending_create.set(false);
             return;
         }
-        match outcome {
-            Some(CreateOutcome::Success { .. }) => {
-                // fetch_rooms + open_room already called by create_room;
-                // the list will reflect it on the next reactive tick.
+        match Rooms::resolve_create_op(current_op, my_op, outcome.as_ref()) {
+            CreateResolution::Success => {
                 new_room_name.set(String::new());
                 pending_create.set(false);
             }
-            Some(CreateOutcome::Duplicate) | Some(CreateOutcome::Failed { .. }) => {
-                // Draft stays for retry.
+            CreateResolution::KeepDraft => {
                 pending_create.set(false);
             }
-            None => { /* still in flight */ }
+            CreateResolution::Pending => { /* still in flight */ }
         }
     });
 
@@ -810,42 +807,9 @@ pub fn RoomsWorkspace(
 mod tests {
     use super::*;
     use crate::rooms::{
-        CreateOutcome, Room, RoomAccessProjection, RoomAccessState, RoomMessage, RoomMessageKind,
-        RoomParticipantKind,
+        CreateOutcome, CreateResolution, RoomAccessProjection, RoomAccessState, RoomMessage,
+        RoomMessageKind, RoomParticipantKind,
     };
-
-    /// Outcome of a pending create monitored against the room list.
-    /// (Tested directly; production uses typed CreateOutcome instead.)
-    #[derive(Debug, PartialEq)]
-    enum CreateAdmission {
-        Pending,
-        Duplicate,
-        Admitted,
-    }
-
-    fn admit_create(
-        draft: &str,
-        pre_create_ids: &[String],
-        current_list: &[Room],
-    ) -> CreateAdmission {
-        let trimmed = draft.trim();
-        if trimmed.is_empty() {
-            return CreateAdmission::Pending;
-        }
-        if current_list
-            .iter()
-            .any(|r| r.name == trimmed && pre_create_ids.contains(&r.id))
-        {
-            return CreateAdmission::Duplicate;
-        }
-        if current_list
-            .iter()
-            .any(|r| r.name == trimmed && !pre_create_ids.contains(&r.id))
-        {
-            return CreateAdmission::Admitted;
-        }
-        CreateAdmission::Pending
-    }
 
     fn test_access(state: RoomAccessState) -> RoomAccessProjection {
         RoomAccessProjection {
@@ -956,61 +920,6 @@ mod tests {
         assert!(members_loaded(Some(&test_access(RoomAccessState::Local))));
     }
 
-    // ── Behavioral: create-admission gate (production helpers) ───
-
-    fn room_fixture(id: &str, name: &str) -> Room {
-        Room {
-            id: id.into(),
-            name: name.into(),
-            participants: Vec::new(),
-            created_at: "2026-01-01T00:00:00Z".into(),
-            updated_at: "2026-01-01T00:00:00Z".into(),
-            trigger_policy: None,
-        }
-    }
-
-    #[test]
-    fn create_admits_new_room() {
-        let pre = vec!["a".to_string(), "b".into()];
-        let list = vec![
-            room_fixture("a", "alpha"),
-            room_fixture("b", "beta"),
-            room_fixture("c", "gamma"),
-        ];
-        assert_eq!(
-            admit_create("gamma", &pre, &list),
-            CreateAdmission::Admitted
-        );
-    }
-
-    #[test]
-    fn create_detects_duplicate() {
-        let pre = vec!["a".into(), "b".into()];
-        let list = vec![room_fixture("a", "alpha"), room_fixture("b", "beta")];
-        assert_eq!(
-            admit_create("alpha", &pre, &list),
-            CreateAdmission::Duplicate
-        );
-        assert_eq!(
-            admit_create("beta", &pre, &list),
-            CreateAdmission::Duplicate
-        );
-    }
-
-    #[test]
-    fn create_pending_when_no_match() {
-        let pre = vec!["a".into()];
-        let list = vec![room_fixture("a", "alpha")];
-        assert_eq!(admit_create("delta", &pre, &list), CreateAdmission::Pending);
-    }
-
-    #[test]
-    fn create_empty_draft_stays_pending() {
-        let pre = vec!["a".into()];
-        let list = vec![room_fixture("a", "alpha")];
-        assert_eq!(admit_create("   ", &pre, &list), CreateAdmission::Pending);
-    }
-
     // ── Behavioral: composer draft preservation (production helper) ──
 
     #[test]
@@ -1035,159 +944,78 @@ mod tests {
         assert!(!should_clear_composer("hello", ""));
     }
 
-    // ── Behavioral: create-op CAS publication (production pattern) ──
+    // ── Behavioral: resolve_create_op (production helper from rooms.rs) ──
+    // Uses the real pub fn that the Effect calls — no cfg(test)-only copies.
 
-    /// The exact CAS logic from create_room's spawn_local: publish an
-    /// outcome only if the slot's current op_id still matches ours.
-    /// A stale completion must never overwrite a later dispatch.
-    fn cas_publish(slot: &mut (u64, Option<CreateOutcome>), op_id: u64, outcome: CreateOutcome) {
-        if slot.0 == op_id {
-            slot.1 = Some(outcome);
-        }
-    }
-
-    /// Simulate the dispatch-and-resolve pattern from rooms_workspace:
-    /// given the slot and our snapshot op_id, produce the resolved
-    /// action (Some(clear) or None for in-flight/stale).
-    fn resolve_op(slot: &(u64, Option<CreateOutcome>), my_op: u64) -> Option<bool> {
-        if slot.0 != my_op {
-            return None;
-        }
-        match &slot.1 {
-            Some(CreateOutcome::Success { .. }) => Some(true), // clear draft
-            Some(CreateOutcome::Duplicate) | Some(CreateOutcome::Failed { .. }) => Some(false), // keep
-            None => None, // in flight
-        }
+    #[test]
+    fn resolve_success_clears_draft() {
+        let outcome = Some(CreateOutcome::Success { key: "room".into() });
+        assert_eq!(
+            crate::rooms::Rooms::resolve_create_op(1, 1, outcome.as_ref()),
+            CreateResolution::Success
+        );
     }
 
     #[test]
-    fn cas_stale_a_cannot_overwrite_b() {
-        let mut slot = (0, None);
-        // Dispatch A (op 1) — sets slot to (1, None)
-        slot = (1, None);
-        // Dispatch B (op 2) — sets slot to (2, None)
-        slot = (2, None);
-        // B completes with Success
-        cas_publish(
-            &mut slot,
-            2,
-            CreateOutcome::Success {
-                key: "b-room".into(),
-            },
+    fn resolve_duplicate_keeps_draft() {
+        assert_eq!(
+            crate::rooms::Rooms::resolve_create_op(1, 1, Some(&CreateOutcome::Duplicate)),
+            CreateResolution::KeepDraft
         );
-        assert_eq!(slot.0, 2);
-        assert!(matches!(slot.1, Some(CreateOutcome::Success { .. })));
-        // A completes with Success — CAS must reject
-        cas_publish(
-            &mut slot,
-            1,
-            CreateOutcome::Success {
-                key: "a-room".into(),
-            },
-        );
-        // Slot must still contain B's outcome
-        assert_eq!(slot.0, 2);
-        assert!(matches!(slot.1, Some(CreateOutcome::Success { .. })));
     }
 
     #[test]
-    fn cas_stale_a_cannot_clear_b_draft() {
-        let mut slot = (0, None);
-        // Dispatch A (op 1), then B (op 2)
-        slot = (1, None);
-        slot = (2, None);
-        // B completes with Duplicate
-        cas_publish(&mut slot, 2, CreateOutcome::Duplicate);
-        // A completes later — CAS rejects
-        cas_publish(
-            &mut slot,
-            1,
-            CreateOutcome::Success {
-                key: "a-room".into(),
-            },
+    fn resolve_failed_keeps_draft() {
+        assert_eq!(
+            crate::rooms::Rooms::resolve_create_op(
+                1,
+                1,
+                Some(&CreateOutcome::Failed {
+                    error: "timeout".into(),
+                }),
+            ),
+            CreateResolution::KeepDraft
         );
-        // Slot must still be B's Duplicate
-        let action = resolve_op(&slot, 2);
-        assert_eq!(action, Some(false)); // B: keep draft
-                                         // A's Effect (my_op=1) must see no match
-        assert_eq!(resolve_op(&slot, 1), None);
     }
 
     #[test]
-    fn cas_matching_b_success_clears_draft() {
-        let mut slot = (0, None);
-        // Dispatch A, then B
-        slot = (1, None);
-        slot = (2, None);
-        // B completes with Success
-        cas_publish(
-            &mut slot,
-            2,
-            CreateOutcome::Success {
-                key: "b-room".into(),
-            },
+    fn resolve_in_flight_stays_pending() {
+        assert_eq!(
+            crate::rooms::Rooms::resolve_create_op(1, 1, None),
+            CreateResolution::Pending
         );
-        // B's Effect sees match → clear
-        assert_eq!(resolve_op(&slot, 2), Some(true));
-        // A's Effect sees no match → stale
-        assert_eq!(resolve_op(&slot, 1), None);
     }
 
     #[test]
-    fn cas_matching_b_failure_keeps_draft() {
-        let mut slot = (0, None);
-        slot = (1, None);
-        // Only one dispatch — op 1
-        cas_publish(
-            &mut slot,
-            1,
-            CreateOutcome::Failed {
-                error: "timeout".into(),
-            },
+    fn resolve_stale_op_id_returns_pending() {
+        // current_op (2) != my_op (1) → stale, no match
+        assert_eq!(
+            crate::rooms::Rooms::resolve_create_op(
+                2,
+                1,
+                Some(&CreateOutcome::Success { key: "x".into() }),
+            ),
+            CreateResolution::Pending
         );
-        assert_eq!(resolve_op(&slot, 1), Some(false)); // keep draft
     }
 
     #[test]
-    fn cas_single_dispatch_success_clears() {
-        let mut slot = (0, None);
-        slot = (1, None);
-        cas_publish(
-            &mut slot,
-            1,
-            CreateOutcome::Success {
-                key: "my-room".into(),
-            },
+    fn resolve_concurrent_b_sees_own_outcome_a_sees_stale() {
+        // Op 2 is the active dispatch; op 1 was superseded.
+        // Both check the same slot (current_op=2, outcome=Success for room-b).
+        let outcome = Some(CreateOutcome::Success {
+            key: "b-room".into(),
+        });
+        // B (my_op=2) resolves → Success
+        assert_eq!(
+            crate::rooms::Rooms::resolve_create_op(2, 2, outcome.as_ref()),
+            CreateResolution::Success
         );
-        assert_eq!(resolve_op(&slot, 1), Some(true));
-    }
-
-    #[test]
-    fn cas_in_flight_returns_none() {
-        let mut slot = (0, None);
-        slot = (1, None);
-        // No outcome yet — still in flight
-        assert_eq!(resolve_op(&slot, 1), None);
-    }
-
-    #[test]
-    fn cas_stale_slot_ignored_by_active_op() {
-        let mut slot = (0, None);
-        // Dispatch A (op 1), completes with Success
-        slot = (1, None);
-        cas_publish(
-            &mut slot,
-            1,
-            CreateOutcome::Success {
-                key: "a-room".into(),
-            },
+        // A (my_op=1) resolves → Pending (stale)
+        assert_eq!(
+            crate::rooms::Rooms::resolve_create_op(2, 1, outcome.as_ref()),
+            CreateResolution::Pending
         );
-        // Dispatch B (op 2) — overwrites slot to in-flight
-        slot = (2, None);
-        // B's Effect is active; A's Effect should see no match
-        assert_eq!(resolve_op(&slot, 1), None);
-        // B in flight
-        assert_eq!(resolve_op(&slot, 2), None);
     }
 
     // ── Behavioral: compact drawer reachability (production helper) ──

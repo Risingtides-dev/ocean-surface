@@ -419,6 +419,18 @@ pub enum CreateOutcome {
     Failed { error: String },
 }
 
+/// Resolved action for a create-room dispatch — what the surface
+/// Effect should do after inspecting the op-id slot.
+#[derive(Debug, PartialEq)]
+pub enum CreateResolution {
+    /// Creation succeeded — clear the draft.
+    Success,
+    /// Creation failed or was rejected — keep the draft for retry.
+    KeepDraft,
+    /// No outcome yet (in flight) or op_id belongs to another attempt.
+    Pending,
+}
+
 /// Reactive handle for the rooms panel. Holds the room list, the open room +
 /// its transcript, status text, and the SSE-tail generation counter. Cloned
 /// freely (all fields are `Copy` signal handles), like [`crate::daemon::Daemon`].
@@ -604,6 +616,10 @@ impl Rooms {
     /// caller should snapshot. When the request resolves, `create_op` carries
     /// a typed outcome tagged with that id — surfaces gate only on their own
     /// id and leave concurrent submits untouched.
+    ///
+    /// Every side effect (status, fetch_rooms, open_room) is gated on CAS
+    /// admission: a stale completion superseded by a later dispatch must
+    /// never select the wrong room or overwrite the current attempt's status.
     pub fn create_room(&self, name: String, policy: Option<RoomTriggerPolicy>) -> u64 {
         let name = name.trim().to_string();
         if name.is_empty() {
@@ -639,10 +655,10 @@ impl Rooms {
             let res = match res {
                 Ok(req) => req.send().await,
                 Err(err) => {
-                    status.set(format!("create encode error: {err}"));
-                    // CAS: only publish if the slot still belongs to this op.
+                    // Encode error: CAS-gate the status + outcome together.
                     signal.update(|(cur, out)| {
                         if *cur == op_id {
+                            status.set(format!("create encode error: {err}"));
                             *out = Some(CreateOutcome::Failed {
                                 error: format!("encode: {err}"),
                             });
@@ -653,42 +669,68 @@ impl Rooms {
             };
             let outcome = match res {
                 Ok(resp) => match resp.json::<RoomMutateResponse>().await {
-                    Ok(r) if r.ok => {
-                        status.set(format!("room '{name}' created"));
-                        // Refresh the list and open the new room.
-                        me.fetch_rooms();
-                        me.open_room(key.clone());
-                        CreateOutcome::Success { key: key.clone() }
-                    }
+                    Ok(r) if r.ok => CreateOutcome::Success { key: key.clone() },
                     Ok(r) => {
                         let msg = r.error.unwrap_or_else(|| "unknown error".into());
-                        status.set(format!("create failed: {msg}"));
                         if msg.to_lowercase().contains("duplicate") {
                             CreateOutcome::Duplicate
                         } else {
                             CreateOutcome::Failed { error: msg }
                         }
                     }
-                    Err(err) => {
-                        let msg = format!("create decode error: {err}");
-                        status.set(msg.clone());
-                        CreateOutcome::Failed { error: msg }
-                    }
+                    Err(err) => CreateOutcome::Failed {
+                        error: format!("decode: {err}"),
+                    },
                 },
-                Err(err) => {
-                    let msg = format!("create post error: {err}");
-                    status.set(msg.clone());
-                    CreateOutcome::Failed { error: msg }
-                }
+                Err(err) => CreateOutcome::Failed {
+                    error: format!("post: {err}"),
+                },
             };
-            // CAS: only publish if the slot still belongs to this op.
+            // Publish outcome AND apply every side effect under a single
+            // CAS: stale A must never select the wrong room or overwrite
+            // B's status, even if A's HTTP response arrives after B was
+            // dispatched and completed.
             signal.update(|(cur, out)| {
-                if *cur == op_id {
-                    *out = Some(outcome);
+                if *cur != op_id {
+                    return; // stale — another dispatch superseded us
+                }
+                *out = Some(outcome.clone());
+                match &outcome {
+                    CreateOutcome::Success { key } => {
+                        status.set(format!("room '{name}' created"));
+                        me.fetch_rooms();
+                        me.open_room(key.clone());
+                    }
+                    CreateOutcome::Duplicate => {
+                        status.set(format!("room '{name}' already exists"));
+                    }
+                    CreateOutcome::Failed { error } => {
+                        status.set(format!("create failed: {error}"));
+                    }
                 }
             });
         });
         op_id
+    }
+
+    /// Resolve a pending create-room dispatch from the op-id slot.
+    /// Called by the surface Effect — only the matching op_id's outcome
+    /// determines whether to clear the draft.
+    pub fn resolve_create_op(
+        current_op: u64,
+        my_op: u64,
+        outcome: Option<&CreateOutcome>,
+    ) -> CreateResolution {
+        if current_op != my_op {
+            return CreateResolution::Pending;
+        }
+        match outcome {
+            Some(CreateOutcome::Success { .. }) => CreateResolution::Success,
+            Some(CreateOutcome::Duplicate) | Some(CreateOutcome::Failed { .. }) => {
+                CreateResolution::KeepDraft
+            }
+            None => CreateResolution::Pending,
+        }
     }
 
     /// Open a room: load its record + full transcript, bump the generation, and
