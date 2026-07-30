@@ -431,6 +431,18 @@ pub enum CreateResolution {
     Pending,
 }
 
+/// CAS admission guard for the create-room result channel.
+/// Simple op-id comparison — only the dispatch that currently owns
+/// the slot may publish status and select its room.
+pub struct CasAdmission;
+
+impl CasAdmission {
+    /// True when `slot_op` matches `my_op` — the completion is current.
+    pub fn admit(slot_op: u64, my_op: u64) -> bool {
+        slot_op == my_op
+    }
+}
+
 /// Reactive handle for the rooms panel. Holds the room list, the open room +
 /// its transcript, status text, and the SSE-tail generation counter. Cloned
 /// freely (all fields are `Copy` signal handles), like [`crate::daemon::Daemon`].
@@ -617,9 +629,13 @@ impl Rooms {
     /// a typed outcome tagged with that id — surfaces gate only on their own
     /// id and leave concurrent submits untouched.
     ///
-    /// Every side effect (status, fetch_rooms, open_room) is gated on CAS
-    /// admission: a stale completion superseded by a later dispatch must
-    /// never select the wrong room or overwrite the current attempt's status.
+    /// Every side effect is gated on CAS admission: a stale completion
+    /// superseded by a later dispatch must never select the wrong room or
+    /// overwrite the current attempt's status. Stale successes still refresh
+    /// the room list so a server-created room is discoverable.
+    ///
+    /// Callers should gate dispatch on `pending_create` to prevent concurrent
+    /// attempts — the closure in `rooms_workspace.rs` does this.
     pub fn create_room(&self, name: String, policy: Option<RoomTriggerPolicy>) -> u64 {
         let name = name.trim().to_string();
         if name.is_empty() {
@@ -656,8 +672,10 @@ impl Rooms {
                 Ok(req) => req.send().await,
                 Err(err) => {
                     // Encode error: CAS-gate the status + outcome together.
+                    // Stale encode errors are fully suppressed — they carry
+                    // no server-side state.
                     signal.update(|(cur, out)| {
-                        if *cur == op_id {
+                        if Self::cas_admit_create(*cur, op_id) {
                             status.set(format!("create encode error: {err}"));
                             *out = Some(CreateOutcome::Failed {
                                 error: format!("encode: {err}"),
@@ -686,31 +704,41 @@ impl Rooms {
                     error: format!("post: {err}"),
                 },
             };
-            // Publish outcome AND apply every side effect under a single
-            // CAS: stale A must never select the wrong room or overwrite
-            // B's status, even if A's HTTP response arrives after B was
-            // dispatched and completed.
+            // CAS-gated publish. Admitted: full status + select + list refresh.
+            // Stale success: list refresh only (server-created room must be
+            // discoverable). Stale failure/duplicate: fully suppressed.
             signal.update(|(cur, out)| {
-                if *cur != op_id {
-                    return; // stale — another dispatch superseded us
+                if Self::cas_admit_create(*cur, op_id) {
+                    *out = Some(outcome.clone());
+                    match &outcome {
+                        CreateOutcome::Success { key } => {
+                            status.set(format!("room '{name}' created"));
+                            me.fetch_rooms();
+                            me.open_room(key.clone());
+                        }
+                        CreateOutcome::Duplicate => {
+                            status.set(format!("room '{name}' already exists"));
+                        }
+                        CreateOutcome::Failed { error } => {
+                            status.set(format!("create failed: {error}"));
+                        }
+                    }
+                } else if matches!(&outcome, CreateOutcome::Success { .. }) {
+                    // Stale success: room exists server-side — refresh the
+                    // list so it's discoverable, but never select or report.
+                    me.fetch_rooms();
                 }
-                *out = Some(outcome.clone());
-                match &outcome {
-                    CreateOutcome::Success { key } => {
-                        status.set(format!("room '{name}' created"));
-                        me.fetch_rooms();
-                        me.open_room(key.clone());
-                    }
-                    CreateOutcome::Duplicate => {
-                        status.set(format!("room '{name}' already exists"));
-                    }
-                    CreateOutcome::Failed { error } => {
-                        status.set(format!("create failed: {error}"));
-                    }
-                }
+                // Stale failure/duplicate: no side effects.
             });
         });
         op_id
+    }
+
+    /// Whether a create-room completion is still current (not superseded
+    /// by a later dispatch). Admitted = the slot op matches ours; stale
+    /// = the slot was claimed by a newer dispatch.
+    pub fn cas_admit_create(slot_op: u64, my_op: u64) -> bool {
+        CasAdmission::admit(slot_op, my_op)
     }
 
     /// Resolve a pending create-room dispatch from the op-id slot.

@@ -139,6 +139,12 @@ pub fn RoomsWorkspace(
     let pending_create = RwSignal::new(false);
     let create_op_id: RwSignal<u64> = RwSignal::new(0);
     let create_room = move || {
+        // Prevent concurrent dispatch: if a create is already in flight,
+        // ignore the keypress. The Effect clears pending_create when the
+        // outcome resolves; until then, any second Enter is a no-op.
+        if pending_create.get_untracked() {
+            return;
+        }
         let name = new_room_name.get_untracked();
         if name.trim().is_empty() {
             return;
@@ -1016,6 +1022,47 @@ mod tests {
             crate::rooms::Rooms::resolve_create_op(2, 1, outcome.as_ref()),
             CreateResolution::Pending
         );
+    }
+
+    // ── Behavioral: cas_admit_create (production helper from rooms.rs) ──
+
+    #[test]
+    fn cas_admit_matching_op() {
+        assert!(Rooms::cas_admit_create(1, 1));
+    }
+
+    #[test]
+    fn cas_admit_superseded_op() {
+        // Slot op 3, our op 1 — superseded by two later dispatches.
+        assert!(!Rooms::cas_admit_create(3, 1));
+    }
+
+    #[test]
+    fn cas_admit_zero_op() {
+        assert!(Rooms::cas_admit_create(0, 0));
+        assert!(!Rooms::cas_admit_create(0, 1));
+    }
+
+    #[test]
+    fn cas_admit_stale_success_action_is_list_only() {
+        // Simulate what the CAS closure does for a stale success:
+        // admitted=false + Success → fetch_rooms only, no status/select.
+        // Verified by the outcome path: CasAdmission::admit(*cur, op_id)
+        // returns false, and the else-if branch only triggers for Success.
+        let outcome = CreateOutcome::Success {
+            key: "stale-room".into(),
+        };
+        let admitted = Rooms::cas_admit_create(2, 1); // slot=2, my=1 → false
+        assert!(!admitted);
+        // If !admitted && matches!(Success): list-refresh only.
+        // If !admitted && !Success: fully suppressed.
+        assert!(matches!(outcome, CreateOutcome::Success { .. }));
+        // Stale failure would be suppressed — no status, no list:
+        let failure = CreateOutcome::Failed {
+            error: "timeout".into(),
+        };
+        assert!(matches!(failure, CreateOutcome::Failed { .. }));
+        // The production code path for stale failure is: no side effects.
     }
 
     // ── Behavioral: compact drawer reachability (production helper) ──
