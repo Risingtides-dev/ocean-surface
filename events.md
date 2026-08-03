@@ -2802,3 +2802,18 @@ status, labels, presence semantics, and extension stylesheet inventory. Verified
 755 UI tests, strict WASM Clippy, WASM and proxy checks, Tauri check, formatting,
 script syntax, and diff hygiene; independent defect-first review returned CLEAR.
 _________________________________________________________________________________
+time:      [03:03pm] [08-03-26]
+agent:     [ocean] [gpt-5.6-sol]
+worktree:  [rooms-workspace]
+type:      [feature]
+area:      [frontend]
+
+Completed the TASK-49 Rooms interaction-layer checkpoint on top of the reviewed
+Slice 1 branch. The additive stylesheet supplies channel selection/focus states,
+unread and timeline forward contracts, compact touch refinements, and reduced-
+motion coverage without rendering fake presence; current live/unavailable
+presence remains owned by the daemon-backed base layer. Synced web and extension
+stylesheet inventories. Verified 755 UI tests plus integration suites, strict
+WASM Clippy, formatting, diff/script hygiene, and a Trunk release bundle; an
+independent exact-commit review returned CLEAR.
+_________________________________________________________________________________
