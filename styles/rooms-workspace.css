@@ -380,7 +380,28 @@
   font-style: italic;
 }
 
-/* ── Center rail — unconfirmed federation outbox ─────────────────── */
+/* ── Center rail — thread affordances ─────────────────────────────── */
+
+.rooms-workspace__thread-toggle {
+  appearance: none;
+  margin-top: 8px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-3);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.rooms-workspace__thread-toggle:hover,
+.rooms-workspace__thread-toggle--active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
 
 .rooms-workspace__outbox {
   flex: 0 0 auto;
@@ -647,7 +668,6 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border-top: 1px solid var(--border-subtle);
 }
 
 .rooms-workspace__right-thread-head {
@@ -675,6 +695,19 @@
   min-height: 0;
   overflow-y: auto;
   padding: 8px 12px;
+}
+
+.rooms-workspace__composer--thread {
+  padding: 10px 12px;
+}
+
+.rooms-workspace__msg--thread-root {
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__msg--thread-reply {
+  padding-top: 10px;
 }
 
 /* ── Join button (center rail placeholder) ────────────────────────── */
@@ -753,15 +786,29 @@
 
 /* ── Responsive collapse ──────────────────────────────────────────── */
 
-/* Below 900px: right rail collapses. Left rail stays visible. */
 @media (max-width: 900px) {
+  .rooms-workspace {
+    position: relative;
+  }
+
   .rooms-workspace__right {
     display: none;
+  }
+
+  .rooms-workspace__right--thread {
+    display: flex;
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(360px, 46vw);
+    z-index: 220;
+    box-shadow: var(--shadow-md);
   }
 }
 
 /* Below 650px: shell stacks vertically (top nav + center), left rail
-   becomes a fixed drawer with a backdrop. */
+   becomes a fixed drawer with a backdrop. Thread rail takes full width. */
 @media (max-width: 650px) {
   .rooms-workspace {
     flex-direction: column;
@@ -787,6 +834,12 @@
   }
   .rooms-workspace__mobile-nav {
     display: flex;
+  }
+  .rooms-workspace__right--thread {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    z-index: 410;
   }
 }
 

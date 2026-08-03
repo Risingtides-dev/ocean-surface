@@ -31,8 +31,16 @@ fn normalized_message_body(draft: &str) -> String {
     draft.trim().to_string()
 }
 
-fn message_send_admitted(in_flight: bool, writes_allowed: bool, draft: &str) -> bool {
-    !in_flight && writes_allowed && !normalized_message_body(draft).is_empty()
+fn message_send_admitted(
+    own_in_flight: bool,
+    other_in_flight: bool,
+    writes_allowed: bool,
+    draft: &str,
+) -> bool {
+    !own_in_flight
+        && !other_in_flight
+        && writes_allowed
+        && !normalized_message_body(draft).is_empty()
 }
 
 /// Toggle a boolean signal — the exact logic consumed by hamburger
@@ -67,19 +75,82 @@ fn short_time(ts: &str) -> String {
 
 /// Whether to show the "No messages yet" empty state in the transcript.
 #[allow(dead_code)]
-fn transcript_is_empty(transcript: &[RoomMessage], access: Option<&RoomAccessProjection>) -> bool {
-    if !transcript.is_empty() {
-        return false;
-    }
-    // Only show empty state once the room is loaded (access is Some).
-    // During loading, access is None — don't flash "no messages".
-    access.is_some()
+fn show_transcript_empty(tail_is_live: bool, roots_empty: bool) -> bool {
+    roots_empty && tail_is_live
 }
 
 /// Whether the right-rail member list is genuinely empty after load.
 #[allow(dead_code)]
 fn members_loaded(access: Option<&RoomAccessProjection>) -> bool {
     access.is_some()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ThreadPartition {
+    roots: Vec<RoomMessage>,
+    replies: Vec<RoomMessage>,
+}
+
+fn partition_thread_messages(transcript: &[RoomMessage], root_seq: u64) -> ThreadPartition {
+    let mut roots = Vec::new();
+    let mut replies = Vec::new();
+    for message in transcript {
+        match message.thread_parent_seq {
+            None => roots.push(message.clone()),
+            Some(parent) if parent == root_seq => replies.push(message.clone()),
+            Some(_) => {}
+        }
+    }
+    ThreadPartition { roots, replies }
+}
+
+fn reply_count_for(transcript: &[RoomMessage], root_seq: u64) -> usize {
+    transcript
+        .iter()
+        .filter(|message| message.thread_parent_seq == Some(root_seq))
+        .count()
+}
+
+fn thread_root_for(transcript: &[RoomMessage], root_seq: Option<u64>) -> Option<RoomMessage> {
+    let root_seq = root_seq?;
+    transcript
+        .iter()
+        .find(|message| message.seq == root_seq && message.thread_parent_seq.is_none())
+        .cloned()
+}
+
+fn sync_thread_selection(
+    current_root_seq: Option<u64>,
+    open_room_key: Option<&str>,
+    transcript: &[RoomMessage],
+) -> Option<u64> {
+    let root_seq = current_root_seq?;
+    open_room_key?;
+    thread_root_for(transcript, Some(root_seq)).map(|_| root_seq)
+}
+
+fn should_show_thread_button(message: &RoomMessage) -> bool {
+    message.thread_parent_seq.is_none() && matches!(message.kind, RoomMessageKind::Message)
+}
+
+fn outbox_matches_failed_message(
+    item: &crate::rooms::RoomOutboxItem,
+    author_member_id: &str,
+    wire: &str,
+    thread_parent_seq: Option<u64>,
+) -> bool {
+    item.state == OutboxItemState::Failed
+        && item.author_member_id == author_member_id
+        && item.payload.get("body").and_then(|body| body.as_str()) == Some(wire)
+        && item
+            .payload
+            .get("thread_parent_seq")
+            .and_then(|value| value.as_u64())
+            == thread_parent_seq
+}
+
+fn is_thread_open(selected_thread_root_seq: Option<u64>, root_seq: u64) -> bool {
+    selected_thread_root_seq == Some(root_seq)
 }
 
 // ── Component ─────────────────────────────────────────────────────────
@@ -118,6 +189,12 @@ pub fn RoomsWorkspace(
 
     // ── Center-rail: composer signal + focus/scroll refs ────────────────
     let composer = RwSignal::new(String::new());
+    let thread_composer = RwSignal::new(String::new());
+    let selected_thread_root_seq = RwSignal::new(None::<u64>);
+    let thread_send_in_flight = RwSignal::new(false);
+    let thread_last_sent_draft = RwSignal::new(String::new());
+    let thread_last_sent_wire = RwSignal::new(String::new());
+    let thread_last_sent_seq = RwSignal::new(0u64);
     let list_ref: NodeRef<leptos::html::Div> = NodeRef::new();
     let mobile_toggle_ref: NodeRef<leptos::html::Button> = NodeRef::new();
     let create_input_ref: NodeRef<leptos::html::Input> = NodeRef::new();
@@ -146,6 +223,24 @@ pub fn RoomsWorkspace(
             }
         }
         len
+    });
+
+    Effect::new(move |_| {
+        let next = sync_thread_selection(
+            selected_thread_root_seq.get(),
+            rooms.open_key.get().as_deref(),
+            &rooms.transcript.get(),
+        );
+        if next != selected_thread_root_seq.get_untracked() {
+            selected_thread_root_seq.set(next);
+        }
+        if next.is_none() {
+            thread_composer.set(String::new());
+            thread_send_in_flight.set(false);
+            thread_last_sent_draft.set(String::new());
+            thread_last_sent_wire.set(String::new());
+            thread_last_sent_seq.set(0);
+        }
     });
 
     // ── Left-rail: create room (draft retained until the typed
@@ -217,6 +312,7 @@ pub fn RoomsWorkspace(
         let draft = composer.get_untracked();
         if !message_send_admitted(
             send_in_flight.get_untracked(),
+            thread_send_in_flight.get_untracked(),
             access_allows_writes(rooms.access.get_untracked().as_ref()),
             &draft,
         ) {
@@ -235,7 +331,36 @@ pub fn RoomsWorkspace(
         last_sent_wire.set(wire.clone());
         last_sent_seq.set(max_seq);
         send_in_flight.set(true);
-        rooms.post_message(wire);
+        rooms.post_message(wire, None);
+    };
+
+    let do_send_thread_reply = move || {
+        let Some(root_seq) = selected_thread_root_seq.get_untracked() else {
+            return;
+        };
+        let draft = thread_composer.get_untracked();
+        if !message_send_admitted(
+            thread_send_in_flight.get_untracked(),
+            send_in_flight.get_untracked(),
+            access_allows_writes(rooms.access.get_untracked().as_ref()),
+            &draft,
+        ) {
+            return;
+        }
+        let wire = normalized_message_body(&draft);
+        let max_seq = rooms
+            .transcript
+            .get_untracked()
+            .iter()
+            .map(|m| m.seq)
+            .max()
+            .unwrap_or(0);
+        rooms.status.set(String::new());
+        thread_last_sent_draft.set(draft);
+        thread_last_sent_wire.set(wire.clone());
+        thread_last_sent_seq.set(max_seq);
+        thread_send_in_flight.set(true);
+        rooms.post_message(wire, Some(root_seq));
     };
 
     Effect::new(move |_: Option<()>| {
@@ -245,11 +370,12 @@ pub fn RoomsWorkspace(
         let wire = last_sent_wire.get();
         let sent_at_seq = last_sent_seq.get();
         let me = rooms.identity_id.get_untracked();
-        let confirmed = rooms
-            .transcript
-            .get()
-            .iter()
-            .any(|m| m.seq > sent_at_seq && m.body == wire && m.author_id == me);
+        let confirmed = rooms.transcript.get().iter().any(|m| {
+            m.seq > sent_at_seq
+                && m.body == wire
+                && m.author_id == me
+                && m.thread_parent_seq.is_none()
+        });
         if confirmed {
             let original = last_sent_draft.get_untracked();
             if should_clear_composer(&composer.get_untracked(), &original) {
@@ -263,12 +389,10 @@ pub fn RoomsWorkspace(
         }
 
         let failed_outbox = rooms.access.get().is_some_and(|access| {
-            access.outbox.iter().any(|item| {
-                item.state == OutboxItemState::Failed
-                    && item.author_member_id == me
-                    && item.payload.get("body").and_then(|body| body.as_str())
-                        == Some(wire.as_str())
-            })
+            access
+                .outbox
+                .iter()
+                .any(|item| outbox_matches_failed_message(item, me, &wire, None))
         });
         let request_failed = rooms.status.get().starts_with("message ");
         if failed_outbox || request_failed {
@@ -276,6 +400,49 @@ pub fn RoomsWorkspace(
             last_sent_wire.set(String::new());
             last_sent_seq.set(0);
             send_in_flight.set(false);
+        }
+    });
+
+    Effect::new(move |_: Option<()>| {
+        if !thread_send_in_flight.get() {
+            return;
+        }
+        let Some(root_seq) = selected_thread_root_seq.get() else {
+            return;
+        };
+        let wire = thread_last_sent_wire.get();
+        let sent_at_seq = thread_last_sent_seq.get();
+        let me = rooms.identity_id.get_untracked();
+        let confirmed = rooms.transcript.get().iter().any(|m| {
+            m.seq > sent_at_seq
+                && m.body == wire
+                && m.author_id == me
+                && m.thread_parent_seq == Some(root_seq)
+        });
+        if confirmed {
+            let original = thread_last_sent_draft.get_untracked();
+            if should_clear_composer(&thread_composer.get_untracked(), &original) {
+                thread_composer.set(String::new());
+            }
+            thread_last_sent_draft.set(String::new());
+            thread_last_sent_wire.set(String::new());
+            thread_last_sent_seq.set(0);
+            thread_send_in_flight.set(false);
+            return;
+        }
+
+        let failed_outbox = rooms.access.get().is_some_and(|access| {
+            access
+                .outbox
+                .iter()
+                .any(|item| outbox_matches_failed_message(item, me, &wire, Some(root_seq)))
+        });
+        let request_failed = rooms.status.get().starts_with("message ");
+        if failed_outbox || request_failed {
+            thread_last_sent_draft.set(String::new());
+            thread_last_sent_wire.set(String::new());
+            thread_last_sent_seq.set(0);
+            thread_send_in_flight.set(false);
         }
     });
 
@@ -585,7 +752,7 @@ pub fn RoomsWorkspace(
                                 // Transcript + empty state
                                 <div class="rooms-workspace__transcript" node_ref=list_ref>
                                     <For
-                                        each=move || rooms.transcript.get()
+                                        each=move || partition_thread_messages(&rooms.transcript.get(), 0).roots
                                         key=|m: &RoomMessage| m.seq
                                         children=move |m: RoomMessage| {
                                             let is_system = matches!(
@@ -595,6 +762,7 @@ pub fn RoomsWorkspace(
                                                     | RoomMessageKind::ParticipantLeft
                                             );
                                             let ts = short_time(&m.created_at);
+                                            let root_seq = m.seq;
                                             view! {
                                                 <div
                                                     class="rooms-workspace__msg"
@@ -619,15 +787,57 @@ pub fn RoomsWorkspace(
                                                         <div class="rooms-workspace__msg-text">
                                                             {m.body.clone()}
                                                         </div>
+                                                        {move || {
+                                                            if should_show_thread_button(&m) {
+                                                                let reply_count = reply_count_for(&rooms.transcript.get(), root_seq);
+                                                                view! {
+                                                                    <button
+                                                                        class="rooms-workspace__thread-toggle"
+                                                                        class:rooms-workspace__thread-toggle--active=move || {
+                                                                            selected_thread_root_seq.get() == Some(root_seq)
+                                                                        }
+                                                                        type="button"
+                                                                        aria-label=move || {
+                                                                            if is_thread_open(selected_thread_root_seq.get(), root_seq) {
+                                                                                format!("Close thread for message {}", root_seq)
+                                                                            } else {
+                                                                                format!("Open thread for message {}", root_seq)
+                                                                            }
+                                                                        }
+                                                                        aria-pressed=move || {
+                                                                            is_thread_open(selected_thread_root_seq.get(), root_seq)
+                                                                                .to_string()
+                                                                        }
+                                                                        on:click=move |_| {
+                                                                            selected_thread_root_seq.update(|selected| {
+                                                                                *selected = if *selected == Some(root_seq) {
+                                                                                    None
+                                                                                } else {
+                                                                                    Some(root_seq)
+                                                                                };
+                                                                            });
+                                                                        }
+                                                                    >
+                                                                        {if reply_count > 0 {
+                                                                            format!("Open thread ({reply_count})")
+                                                                        } else {
+                                                                            "Open thread".to_string()
+                                                                        }}
+                                                                    </button>
+                                                                }.into_any()
+                                                            } else {
+                                                                ().into_any()
+                                                            }
+                                                        }}
                                                     </div>
                                                 </div>
                                             }
                                         }
                                     />
                                     {move || {
-                                        let empty = rooms.transcript.get().is_empty();
-                                        let loaded = rooms.access.get().is_some();
-                                        if empty && loaded {
+                                        let roots = partition_thread_messages(&rooms.transcript.get(), 0).roots;
+                                        let roots_empty = roots.is_empty();
+                                        if show_transcript_empty(rooms.transcript_tail_is_live(), roots_empty) {
                                             view! {
                                                 <div class="rooms-workspace__empty">
                                                     "No messages yet. Say something — use @id to mention an agent."
@@ -759,209 +969,339 @@ pub fn RoomsWorkspace(
             </div>
 
             // ═══ RIGHT RAIL — members / details ═════════════════════════
-            <div class="rooms-workspace__right">
+            <div
+                class="rooms-workspace__right"
+                class:rooms-workspace__right--thread=move || selected_thread_root_seq.get().is_some()
+            >
                 <div class="rooms-workspace__right-head">
-                    <h3 class="rooms-workspace__right-title">"Members"</h3>
+                    <h3 class="rooms-workspace__right-title">
+                        {move || if selected_thread_root_seq.get().is_some() { "Thread" } else { "Members" }}
+                    </h3>
+                    {move || {
+                        if selected_thread_root_seq.get().is_some() {
+                            view! {
+                                <button
+                                    class="rooms-workspace__right-close"
+                                    type="button"
+                                    aria-label="Close thread"
+                                    on:click=move |_| selected_thread_root_seq.set(None)
+                                >
+                                    <svg viewBox="0 0 16 16" width="14" height="14"
+                                        fill="none" stroke="currentColor" stroke-width="1.6"
+                                        stroke-linecap="round">
+                                        <path d="M3 3l10 10M13 3L3 13"/>
+                                    </svg>
+                                </button>
+                            }.into_any()
+                        } else {
+                            ().into_any()
+                        }
+                    }}
                 </div>
 
                 <div class="rooms-workspace__right-list">
                     {move || {
-                        match rooms.access.get() {
-                            None => {
-                                view! {
-                                    <div class="rooms-workspace__right-empty">
-                                        "Open a room to see members."
+                        if let Some(root) = thread_root_for(&rooms.transcript.get(), selected_thread_root_seq.get()) {
+                            let root_seq = root.seq;
+                            let ts = short_time(&root.created_at);
+                            let root_is_system = matches!(
+                                root.kind,
+                                RoomMessageKind::System
+                                    | RoomMessageKind::ParticipantJoined
+                                    | RoomMessageKind::ParticipantLeft
+                            );
+                            view! {
+                                <div class="rooms-workspace__right-thread">
+                                    <div class="rooms-workspace__right-thread-head">
+                                        <p class="rooms-workspace__right-thread-title">"Thread"</p>
+                                        <div class="rooms-workspace__right-thread-subtitle">
+                                            {format!("Replying to {}", root.author_id)}
+                                        </div>
                                     </div>
-                                }.into_any()
-                            }
-                            Some(ref access)
-                                if access.state == RoomAccessState::Local =>
-                            {
-                                let participants = rooms.open_room.get()
-                                    .map(|r| r.participants)
-                                    .unwrap_or_default();
-                                let show_add_agent = RwSignal::new(false);
-                                view! {
-                                    {if participants.is_empty() {
+                                    <div class="rooms-workspace__right-thread-transcript">
+                                        <div
+                                            class="rooms-workspace__msg rooms-workspace__msg--thread-root"
+                                            class:rooms-workspace__msg--system=root_is_system
+                                        >
+                                            <div class="rooms-workspace__msg-avatar">
+                                                {if root_is_system {
+                                                    view! { <crate::icons::Spark /> }.into_any()
+                                                } else {
+                                                    root.author_id.chars().take(2).collect::<String>().to_uppercase().into_any()
+                                                }}
+                                            </div>
+                                            <div class="rooms-workspace__msg-body">
+                                                <div class="rooms-workspace__msg-author">
+                                                    <span class="rooms-workspace__msg-name">{root.author_id.clone()}</span>
+                                                    <span class="rooms-workspace__msg-time">{ts}</span>
+                                                </div>
+                                                <div class="rooms-workspace__msg-text">{root.body.clone()}</div>
+                                            </div>
+                                        </div>
+                                        <For
+                                            each=move || partition_thread_messages(&rooms.transcript.get(), root_seq).replies
+                                            key=|m: &RoomMessage| m.seq
+                                            children=move |reply: RoomMessage| {
+                                                let ts = short_time(&reply.created_at);
+                                                let is_system = matches!(
+                                                    reply.kind,
+                                                    RoomMessageKind::System
+                                                        | RoomMessageKind::ParticipantJoined
+                                                        | RoomMessageKind::ParticipantLeft
+                                                );
+                                                view! {
+                                                    <div
+                                                        class="rooms-workspace__msg rooms-workspace__msg--thread-reply"
+                                                        class:rooms-workspace__msg--system=is_system
+                                                    >
+                                                        <div class="rooms-workspace__msg-avatar">
+                                                            {if is_system {
+                                                                view! { <crate::icons::Spark /> }.into_any()
+                                                            } else {
+                                                                reply.author_id.chars().take(2).collect::<String>().to_uppercase().into_any()
+                                                            }}
+                                                        </div>
+                                                        <div class="rooms-workspace__msg-body">
+                                                            <div class="rooms-workspace__msg-author">
+                                                                <span class="rooms-workspace__msg-name">{reply.author_id.clone()}</span>
+                                                                <span class="rooms-workspace__msg-time">{ts}</span>
+                                                            </div>
+                                                            <div class="rooms-workspace__msg-text">{reply.body.clone()}</div>
+                                                        </div>
+                                                    </div>
+                                                }
+                                            }
+                                        />
+                                    </div>
+                                    <div class="rooms-workspace__composer rooms-workspace__composer--thread">
+                                        <form
+                                            class="rooms-workspace__composer-row"
+                                            on:submit=move |ev| {
+                                                ev.prevent_default();
+                                                do_send_thread_reply();
+                                            }
+                                        >
+                                            <input
+                                                class="rooms-workspace__composer-input"
+                                                type="text"
+                                                aria-label="Thread reply"
+                                                placeholder="Reply in thread…"
+                                                prop:value=move || thread_composer.get()
+                                                on:input=move |ev| thread_composer.set(event_target_value(&ev))
+                                                disabled=move || !access_allows_writes(rooms.access.get().as_ref())
+                                            />
+                                            <button
+                                                class="rooms-workspace__composer-send"
+                                                type="submit"
+                                                disabled=move || {
+                                                    thread_send_in_flight.get()
+                                                        || thread_composer.get().trim().is_empty()
+                                                        || !access_allows_writes(rooms.access.get().as_ref())
+                                                }
+                                            >
+                                                {move || if thread_send_in_flight.get() { "Sending…" } else { "Reply" }}
+                                            </button>
+                                        </form>
+                                    </div>
+                                </div>
+                            }.into_any()
+                        } else {
+                            match rooms.access.get() {
+                                None => {
+                                    view! {
+                                        <div class="rooms-workspace__right-empty">
+                                            "Open a room to see members."
+                                        </div>
+                                    }.into_any()
+                                }
+                                Some(ref access)
+                                    if access.state == RoomAccessState::Local =>
+                                {
+                                    let participants = rooms.open_room.get()
+                                        .map(|r| r.participants)
+                                        .unwrap_or_default();
+                                    let show_add_agent = RwSignal::new(false);
+                                    view! {
+                                        {if participants.is_empty() {
+                                            view! {
+                                                <div class="rooms-workspace__right-empty">
+                                                    "No members yet."
+                                                </div>
+                                            }.into_any()
+                                        } else {
+                                            view! {
+                                                <For
+                                                    each=move || rooms.open_room.get()
+                                                        .map(|r| r.participants)
+                                                        .unwrap_or_default()
+                                                    key=|p: &RoomParticipant| p.id.clone()
+                                                    children=move |p: RoomParticipant| {
+                                                        view! {
+                                                            <div class="rooms-workspace__member">
+                                                                <div class="rooms-workspace__member-avatar">
+                                                                    {p.display_name.chars().take(2).collect::<String>().to_uppercase()}
+                                                                </div>
+                                                                <span class="rooms-workspace__member-name">
+                                                                    {p.display_name.clone()}
+                                                                </span>
+                                                                <span class="rooms-workspace__member-kind">
+                                                                {match p.kind {
+                                                                    RoomParticipantKind::Human => "human",
+                                                                    RoomParticipantKind::Agent => "agent",
+                                                                    RoomParticipantKind::Bot => "bot",
+                                                                    RoomParticipantKind::Tool => "tool",
+                                                                    RoomParticipantKind::System => "system",
+                                                                }}
+                                                                </span>
+                                                            </div>
+                                                        }
+                                                    }
+                                                />
+                                            }.into_any()
+                                        }}
+
+                                        <button
+                                            class="rooms-workspace__addagent"
+                                            type="button"
+                                            title="Add an agent participant"
+                                            aria-controls="rooms-workspace-agent-picker"
+                                            aria-expanded=move || show_add_agent.get().to_string()
+                                            on:click=move |_| show_add_agent.update(|v: &mut bool| *v = !*v)
+                                        >
+                                            "+ agent"
+                                        </button>
+                                        {move || {
+                                            if show_add_agent.get() {
+                                                view! {
+                                                    <div
+                                                        id="rooms-workspace-agent-picker"
+                                                        class="rooms-workspace__addagent-picker"
+                                                    >
+                                                        <select
+                                                            class="rooms-workspace__addagent-select"
+                                                            aria-label="Choose an agent to add"
+                                                            on:change=move |ev| {
+                                                                let val = event_target_value(&ev);
+                                                                if !val.is_empty() {
+                                                                    rooms.add_agent(val);
+                                                                    show_add_agent.set(false);
+                                                                }
+                                                            }
+                                                        >
+                                                            <option value="" selected=true>
+                                                                "-- pick an agent --"
+                                                            </option>
+                                                            <For
+                                                                each=move || rooms.available_agents.get()
+                                                                key=|id: &String| id.clone()
+                                                                children=move |id: String| {
+                                                                    let v = id.clone();
+                                                                    view! {
+                                                                        <option value=v>{id}</option>
+                                                                    }
+                                                                }
+                                                            />
+                                                        </select>
+                                                    </div>
+                                                }.into_any()
+                                            } else {
+                                                ().into_any()
+                                            }
+                                        }}
+                                    }.into_any()
+                                }
+                                Some(ref access)
+                                    if matches!(
+                                        access.state,
+                                        RoomAccessState::Connecting
+                                            | RoomAccessState::Live
+                                            | RoomAccessState::Recovering
+                                            | RoomAccessState::Revoked
+                                    ) =>
+                                {
+                                    if access.members.is_empty() {
                                         view! {
                                             <div class="rooms-workspace__right-empty">
-                                                "No members yet."
+                                                "No members visible."
                                             </div>
                                         }.into_any()
                                     } else {
+                                        let members = access.members.clone();
                                         view! {
                                             <For
-                                                each=move || rooms.open_room.get()
-                                                    .map(|r| r.participants)
-                                                    .unwrap_or_default()
-                                                key=|p: &RoomParticipant| p.id.clone()
-                                                children=move |p: RoomParticipant| {
+                                                each=move || members.clone()
+                                                key=|m: &FederatedRoomMemberProjection| m.member_id.clone()
+                                                children=move |member: FederatedRoomMemberProjection| {
+                                                    let role_label = match member.role_in_room {
+                                                        FederatedRoomRole::Owner => "owner",
+                                                        FederatedRoomRole::Member => "member",
+                                                    };
+                                                    let actor_label = match member.actor_type {
+                                                        FederatedActorType::User => "user",
+                                                        FederatedActorType::Agent => "agent",
+                                                    };
+                                                    let presence = member.derived_presence;
+                                                    let presence_label = match presence {
+                                                        Some(MemberPresence::Live) => "Live",
+                                                        Some(MemberPresence::Unavailable) => "Unavailable",
+                                                        None => "",
+                                                    };
+                                                    let local_agent = matches!(member.actor_type, FederatedActorType::Agent)
+                                                        && member.local_binding_available == Some(true);
+                                                    let remote_agent = matches!(member.actor_type, FederatedActorType::Agent)
+                                                        && member.local_binding_available == Some(false);
+                                                    let desc_title = member.public_agent_descriptor.as_ref()
+                                                        .and_then(|d| d.description.clone())
+                                                        .unwrap_or_default();
                                                     view! {
-                                                        <div class="rooms-workspace__member">
+                                                        <div class="rooms-workspace__member"
+                                                            class:rooms-workspace__member--local-agent=local_agent
+                                                            class:rooms-workspace__member--remote-agent=remote_agent
+                                                            title=desc_title
+                                                        >
                                                             <div class="rooms-workspace__member-avatar">
-                                                                {p.display_name.chars().take(2).collect::<String>().to_uppercase()}
+                                                                {member.display_name.chars().take(2).collect::<String>().to_uppercase()}
                                                             </div>
                                                             <span class="rooms-workspace__member-name">
-                                                                {p.display_name.clone()}
+                                                                {member.display_name.clone()}
                                                             </span>
                                                             <span class="rooms-workspace__member-kind">
-                                                            {match p.kind {
-                                                                RoomParticipantKind::Human => "human",
-                                                                RoomParticipantKind::Agent => "agent",
-                                                                RoomParticipantKind::Bot => "bot",
-                                                                RoomParticipantKind::Tool => "tool",
-                                                                RoomParticipantKind::System => "system",
-                                                            }}
+                                                                {actor_label}
                                                             </span>
+                                                            <span class="rooms-workspace__member-role">
+                                                                {role_label}
+                                                            </span>
+                                                            {if presence.is_some() {
+                                                                view! {
+                                                                    <span
+                                                                        class="rooms-workspace__member-presence"
+                                                                        class:rooms-workspace__member-presence--live=move || {
+                                                                            presence == Some(MemberPresence::Live)
+                                                                        }
+                                                                        class:rooms-workspace__member-presence--unavailable=move || {
+                                                                            presence == Some(MemberPresence::Unavailable)
+                                                                        }
+                                                                        role="img"
+                                                                        aria-label=presence_label
+                                                                    ></span>
+                                                                }.into_any()
+                                                            } else {
+                                                                ().into_any()
+                                                            }}
                                                         </div>
                                                     }
                                                 }
                                             />
                                         }.into_any()
-                                    }}
-
-                                    // Add-agent control (local rooms only)
-                                    <button
-                                        class="rooms-workspace__addagent"
-                                        type="button"
-                                        title="Add an agent participant"
-                                        aria-controls="rooms-workspace-agent-picker"
-                                        aria-expanded=move || show_add_agent.get().to_string()
-                                        on:click=move |_| show_add_agent.update(|v: &mut bool| *v = !*v)
-                                    >
-                                        "+ agent"
-                                    </button>
-                                    {move || {
-                                        if show_add_agent.get() {
-                                            view! {
-                                                <div
-                                                    id="rooms-workspace-agent-picker"
-                                                    class="rooms-workspace__addagent-picker"
-                                                >
-                                                    <select
-                                                        class="rooms-workspace__addagent-select"
-                                                        aria-label="Choose an agent to add"
-                                                        on:change=move |ev| {
-                                                            let val = event_target_value(&ev);
-                                                            if !val.is_empty() {
-                                                                rooms.add_agent(val);
-                                                                show_add_agent.set(false);
-                                                            }
-                                                        }
-                                                    >
-                                                        <option value="" selected=true>
-                                                            "-- pick an agent --"
-                                                        </option>
-                                                        <For
-                                                            each=move || rooms.available_agents.get()
-                                                            key=|id: &String| id.clone()
-                                                            children=move |id: String| {
-                                                                let v = id.clone();
-                                                                view! {
-                                                                    <option value=v>{id}</option>
-                                                                }
-                                                            }
-                                                        />
-                                                    </select>
-                                                </div>
-                                            }.into_any()
-                                        } else {
-                                            ().into_any()
-                                        }
-                                    }}
-                                }.into_any()
-                            }
-                            Some(ref access)
-                                if matches!(
-                                    access.state,
-                                    RoomAccessState::Connecting
-                                        | RoomAccessState::Live
-                                        | RoomAccessState::Recovering
-                                        | RoomAccessState::Revoked
-                                ) =>
-                            {
-                                if access.members.is_empty() {
+                                    }
+                                }
+                                _ => {
                                     view! {
                                         <div class="rooms-workspace__right-empty">
-                                            "No members visible."
+                                            "Members unavailable."
                                         </div>
                                     }.into_any()
-                                } else {
-                                    let members = access.members.clone();
-                                    view! {
-                                        <For
-                                            each=move || members.clone()
-                                            key=|m: &FederatedRoomMemberProjection| m.member_id.clone()
-                                            children=move |member: FederatedRoomMemberProjection| {
-                                                let role_label = match member.role_in_room {
-                                                    FederatedRoomRole::Owner => "owner",
-                                                    FederatedRoomRole::Member => "member",
-                                                };
-                                                let actor_label = match member.actor_type {
-                                                    FederatedActorType::User => "user",
-                                                    FederatedActorType::Agent => "agent",
-                                                };
-                                                let presence = member.derived_presence;
-                                                let presence_label = match presence {
-                                                    Some(MemberPresence::Live) => "Live",
-                                                    Some(MemberPresence::Unavailable) => "Unavailable",
-                                                    None => "",
-                                                };
-                                                let local_agent = matches!(member.actor_type, FederatedActorType::Agent)
-                                                    && member.local_binding_available == Some(true);
-                                                let remote_agent = matches!(member.actor_type, FederatedActorType::Agent)
-                                                    && member.local_binding_available == Some(false);
-                                                let desc_title = member.public_agent_descriptor.as_ref()
-                                                    .and_then(|d| d.description.clone())
-                                                    .unwrap_or_default();
-                                                view! {
-                                                    <div class="rooms-workspace__member"
-                                                        class:rooms-workspace__member--local-agent=local_agent
-                                                        class:rooms-workspace__member--remote-agent=remote_agent
-                                                        title=desc_title
-                                                    >
-                                                        <div class="rooms-workspace__member-avatar">
-                                                            {member.display_name.chars().take(2).collect::<String>().to_uppercase()}
-                                                        </div>
-                                                        <span class="rooms-workspace__member-name">
-                                                            {member.display_name.clone()}
-                                                        </span>
-                                                        <span class="rooms-workspace__member-kind">
-                                                            {actor_label}
-                                                        </span>
-                                                        <span class="rooms-workspace__member-role">
-                                                            {role_label}
-                                                        </span>
-                                                        {if presence.is_some() {
-                                                            view! {
-                                                                <span
-                                                                    class="rooms-workspace__member-presence"
-                                                                    class:rooms-workspace__member-presence--live=move || {
-                                                                        presence == Some(MemberPresence::Live)
-                                                                    }
-                                                                    class:rooms-workspace__member-presence--unavailable=move || {
-                                                                        presence == Some(MemberPresence::Unavailable)
-                                                                    }
-                                                                    role="img"
-                                                                    aria-label=presence_label
-                                                                ></span>
-                                                            }.into_any()
-                                                        } else {
-                                                            ().into_any()
-                                                        }}
-                                                    </div>
-                                                }
-                                            }
-                                        />
-                                    }.into_any()
                                 }
-                            }
-                            _ => {
-                                view! {
-                                    <div class="rooms-workspace__right-empty">
-                                        "Members unavailable."
-                                    </div>
-                                }.into_any()
                             }
                         }
                     }}
@@ -1070,38 +1410,33 @@ mod tests {
 
     // ── transcript_is_empty ───────────────────────────────────────────
 
-    fn test_msg(body: &str) -> RoomMessage {
+    fn test_msg(seq: u64, body: &str, thread_parent_seq: Option<u64>) -> RoomMessage {
         RoomMessage {
-            seq: 1,
+            seq,
             kind: RoomMessageKind::Message,
             author_id: "user".into(),
             author_kind: RoomParticipantKind::Human,
             body: body.into(),
             created_at: "2026-01-01T00:00:00Z".into(),
             federated: None,
+            thread_parent_seq,
         }
     }
 
     #[test]
-    fn transcript_not_empty_returns_false() {
-        let msgs = vec![test_msg("hello")];
-        assert!(!transcript_is_empty(
-            &msgs,
-            Some(&test_access(RoomAccessState::Local))
+    fn transcript_with_root_is_not_empty_when_live() {
+        let msgs = vec![test_msg(1, "hello", None)];
+        assert!(!show_transcript_empty(
+            true,
+            partition_thread_messages(&msgs, 0).roots.is_empty()
         ));
     }
 
     #[test]
-    fn transcript_empty_without_access_returns_false() {
-        assert!(!transcript_is_empty(&[], None));
-    }
-
-    #[test]
-    fn transcript_empty_with_access_returns_true() {
-        assert!(transcript_is_empty(
-            &[],
-            Some(&test_access(RoomAccessState::Local))
-        ));
+    fn transcript_empty_is_hidden_until_tail_is_live() {
+        assert!(!show_transcript_empty(false, true));
+        assert!(show_transcript_empty(true, true));
+        assert!(!show_transcript_empty(true, false));
     }
 
     // ── members_loaded ────────────────────────────────────────────────
@@ -1114,6 +1449,87 @@ mod tests {
     #[test]
     fn members_loaded_when_access_some() {
         assert!(members_loaded(Some(&test_access(RoomAccessState::Local))));
+    }
+
+    #[test]
+    fn failed_outbox_matching_discriminates_thread_parent_seq() {
+        let top_level = crate::rooms::RoomOutboxItem {
+            client_event_id: "client-1".into(),
+            source_id: "surface-web".into(),
+            source_sequence: 1,
+            author_member_id: "user".into(),
+            event_type: "room_message".into(),
+            payload: serde_json::json!({"body": "hello"}),
+            mention_member_ids: vec![],
+            state: OutboxItemState::Failed,
+        };
+        assert!(outbox_matches_failed_message(
+            &top_level, "user", "hello", None
+        ));
+        assert!(!outbox_matches_failed_message(
+            &top_level,
+            "user",
+            "hello",
+            Some(7)
+        ));
+
+        let threaded = crate::rooms::RoomOutboxItem {
+            payload: serde_json::json!({"body": "hello", "thread_parent_seq": 7}),
+            ..top_level.clone()
+        };
+        assert!(outbox_matches_failed_message(
+            &threaded,
+            "user",
+            "hello",
+            Some(7)
+        ));
+        assert!(!outbox_matches_failed_message(
+            &threaded, "user", "hello", None
+        ));
+    }
+
+    #[test]
+    fn thread_open_helper_is_exact() {
+        assert!(is_thread_open(Some(7), 7));
+        assert!(!is_thread_open(Some(8), 7));
+        assert!(!is_thread_open(None, 7));
+    }
+
+    #[test]
+    fn partition_thread_messages_separates_roots_and_direct_replies() {
+        let transcript = vec![
+            test_msg(1, "root 1", None),
+            test_msg(2, "reply to 1", Some(1)),
+            test_msg(3, "root 3", None),
+            test_msg(4, "reply to 3", Some(3)),
+            test_msg(5, "orphan nested", Some(2)),
+        ];
+
+        let partition = partition_thread_messages(&transcript, 1);
+        assert_eq!(
+            partition.roots.iter().map(|m| m.seq).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        assert_eq!(
+            partition.replies.iter().map(|m| m.seq).collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert_eq!(reply_count_for(&transcript, 3), 1);
+        assert_eq!(reply_count_for(&transcript, 2), 1);
+    }
+
+    #[test]
+    fn sync_thread_selection_clears_on_room_close_or_missing_root() {
+        let transcript = vec![test_msg(1, "root 1", None), test_msg(2, "reply", Some(1))];
+        assert_eq!(
+            sync_thread_selection(Some(1), Some("room-1"), &transcript),
+            Some(1)
+        );
+        assert_eq!(sync_thread_selection(Some(1), None, &transcript), None);
+        assert_eq!(
+            sync_thread_selection(Some(9), Some("room-1"), &transcript),
+            None
+        );
     }
 
     // ── Behavioral: composer draft preservation (production helper) ──
@@ -1147,10 +1563,11 @@ mod tests {
 
     #[test]
     fn composer_admission_rejects_empty_blocked_and_concurrent_sends() {
-        assert!(!message_send_admitted(false, true, " \n\t "));
-        assert!(!message_send_admitted(false, false, "hello"));
-        assert!(!message_send_admitted(true, true, "hello"));
-        assert!(message_send_admitted(false, true, " hello "));
+        assert!(!message_send_admitted(false, false, true, " \n\t "));
+        assert!(!message_send_admitted(false, false, false, "hello"));
+        assert!(!message_send_admitted(true, false, true, "hello"));
+        assert!(!message_send_admitted(false, true, true, "hello"));
+        assert!(message_send_admitted(false, false, true, " hello "));
     }
 
     // ── Behavioral: resolve_create_op (production helper from rooms.rs) ──

@@ -123,6 +123,9 @@ pub struct RoomMessage {
     /// messages. Present only after Bedrock confirms.
     #[serde(default)]
     pub federated: Option<FederatedMessageMeta>,
+    /// Root message sequence for a one-level thread reply. `None` for roots.
+    #[serde(default)]
+    pub thread_parent_seq: Option<u64>,
 }
 
 // ---- Federated wire types (exact mirror of ocean-core 786c6ba4) -------------
@@ -353,6 +356,8 @@ struct PostMessageBody<'a> {
     author_id: &'a str,
     author_kind: RoomParticipantKind,
     body: &'a str,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    thread_parent_seq: Option<u64>,
 }
 
 #[allow(dead_code)]
@@ -535,6 +540,11 @@ impl Rooms {
 
     fn base(&self) -> String {
         self.url.get_untracked().trim_end_matches('/').to_string()
+    }
+    /// Reactive projection used by the workspace to suppress its empty state
+    /// until snapshot replay has reached the live room tail.
+    pub fn transcript_tail_is_live(&self) -> bool {
+        self.tail_state.get() == TailState::Live
     }
 
     /// Current-room predicate over the live `generation` and `open_key`
@@ -1007,7 +1017,7 @@ impl Rooms {
 
     /// Post a message to the open room (`POST .../messages`). `@id` mentions in
     /// the body drive the daemon's trigger-policy auto-convene.
-    pub fn post_message(&self, body: String) {
+    pub fn post_message(&self, body: String, thread_parent_seq: Option<u64>) {
         if !access_allows_writes(self.access.get_untracked().as_ref()) {
             return;
         }
@@ -1027,6 +1037,7 @@ impl Rooms {
                 author_id: id,
                 author_kind: RoomParticipantKind::Human,
                 body: &body,
+                thread_parent_seq,
             };
             let post_url = format!("{base}/v1/rooms/persistent/{}/messages", encode(&key));
             let result = match Request::post(&post_url)
@@ -1631,7 +1642,44 @@ mod tests {
             body: format!("message {seq}"),
             created_at: "2026-07-16T22:00:00Z".into(),
             federated: None,
+            thread_parent_seq: None,
         }
+    }
+
+    #[test]
+    fn post_message_wire_omits_none_thread_parent_and_includes_some() {
+        let root = serde_json::to_value(PostMessageBody {
+            author_id: "human-1",
+            author_kind: RoomParticipantKind::Human,
+            body: "root body",
+            thread_parent_seq: None,
+        })
+        .expect("root post message body should serialize");
+        assert_eq!(
+            root,
+            serde_json::json!({
+                "author_id": "human-1",
+                "author_kind": "human",
+                "body": "root body"
+            })
+        );
+
+        let reply = serde_json::to_value(PostMessageBody {
+            author_id: "human-1",
+            author_kind: RoomParticipantKind::Human,
+            body: "reply body",
+            thread_parent_seq: Some(7),
+        })
+        .expect("reply post message body should serialize");
+        assert_eq!(
+            reply,
+            serde_json::json!({
+                "author_id": "human-1",
+                "author_kind": "human",
+                "body": "reply body",
+                "thread_parent_seq": 7
+            })
+        );
     }
 
     fn local_room() -> Room {
@@ -1697,6 +1745,32 @@ mod tests {
         .expect("G1 message should decode");
 
         assert_eq!(message.federated, None);
+    }
+
+    #[test]
+    fn room_message_thread_parent_seq_decodes_and_defaults_to_none() {
+        let reply: RoomMessage = serde_json::from_value(serde_json::json!({
+            "seq": 2,
+            "author_id": "local-human",
+            "author_kind": "human",
+            "kind": "message",
+            "body": "reply",
+            "created_at": "2026-07-16T22:01:00Z",
+            "thread_parent_seq": 1
+        }))
+        .expect("reply should decode");
+        assert_eq!(reply.thread_parent_seq, Some(1));
+
+        let root: RoomMessage = serde_json::from_value(serde_json::json!({
+            "seq": 1,
+            "author_id": "local-human",
+            "author_kind": "human",
+            "kind": "message",
+            "body": "root",
+            "created_at": "2026-07-16T22:00:00Z"
+        }))
+        .expect("root should decode");
+        assert_eq!(root.thread_parent_seq, None);
     }
 
     #[test]
