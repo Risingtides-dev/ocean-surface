@@ -28,6 +28,7 @@ mod model;
 mod observatory;
 mod palette;
 mod place_call;
+mod room_messages;
 mod rooms;
 mod rooms_workspace;
 mod search;
