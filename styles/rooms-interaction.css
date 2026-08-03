@@ -14,6 +14,11 @@
    class/ARIA names fixed in .stitchpad/artifacts/rooms-acceptance-checklist-v2.md
    so the Rust lane can adopt them without a CSS follow-up:
      - room row selected: .rooms-workspace__room[aria-selected="true"]
+                          (ADOPTED at the ARIA slice: rows are role="option"
+                          with roving tabindex inside .rooms-workspace__left-
+                          options role="listbox" — wrapper is intentionally
+                          unstyled/layout-neutral, scrolling stays on
+                          __left-list)
      - unread room:       .rooms-workspace__room--unread + __room-unread badge
      - first-unread line: .rooms-workspace__unread-divider
      - grouped message:   .rooms-workspace__msg--grouped

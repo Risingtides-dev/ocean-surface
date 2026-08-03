@@ -8,6 +8,7 @@
 //! deleted.
 
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 
 use crate::rooms::{
     CreateResolution, FederatedActorType, FederatedRoomMemberProjection, FederatedRoomRole,
@@ -77,6 +78,46 @@ fn short_time(ts: &str) -> String {
 #[allow(dead_code)]
 fn show_transcript_empty(tail_is_live: bool, roots_empty: bool) -> bool {
     roots_empty && tail_is_live
+}
+
+// ── Room-list ARIA listbox helpers (pure, unit-testable) ───────────────────
+
+/// Roving-tabindex keyboard model for the room-list listbox. Given the
+/// ordered room keys, the key of the option that currently has DOM focus,
+/// and the pressed key, returns the index that should receive focus next.
+/// `None` means "not a navigation key — leave the event alone".
+/// ArrowDown/ArrowUp wrap (listbox convention); Home/End jump.
+fn room_list_next_focus(keys: &[String], focused: Option<&str>, pressed: &str) -> Option<usize> {
+    if keys.is_empty() {
+        return None;
+    }
+    let cur = focused.and_then(|f| keys.iter().position(|k| k == f));
+    match pressed {
+        "ArrowDown" => Some(cur.map_or(0, |i| (i + 1) % keys.len())),
+        "ArrowUp" => Some(cur.map_or(keys.len() - 1, |i| (i + keys.len() - 1) % keys.len())),
+        "Home" => Some(0),
+        "End" => Some(keys.len() - 1),
+        _ => None,
+    }
+}
+
+/// The single tab stop of the roving-tabindex listbox: the open room when it
+/// is present in the list, else the first room. Exactly one option carries
+/// tabindex=0 so Tab enters the list once and arrows move within it.
+fn room_list_tab_stop(keys: &[String], open: Option<&str>) -> Option<usize> {
+    if keys.is_empty() {
+        return None;
+    }
+    Some(
+        open.and_then(|o| keys.iter().position(|k| k == o))
+            .unwrap_or(0),
+    )
+}
+
+/// DOM id for a room option — the stable hook the keydown handler uses to
+/// move real focus (roving tabindex needs actual `.focus()` calls).
+fn room_option_dom_id(key: &str) -> String {
+    format!("rooms-opt-{key}")
 }
 
 /// Whether the right-rail member list is genuinely empty after load.
@@ -571,32 +612,97 @@ pub fn RoomsWorkspace(
                                 </div>
                             }.into_any()
                         } else {
+                            // ARIA listbox with roving tabindex: exactly one
+                            // option (open room, else first) is the Tab stop;
+                            // arrows/Home/End move REAL focus between options
+                            // via their DOM ids. Enter/Space activate through
+                            // the button default. aria-selected drives the
+                            // interaction stylesheet's selected treatment.
                             view! {
-                                <For
-                                    each=move || rooms.list.get()
-                                    key=|r: &Room| (r.id.clone(), r.participants.len(), r.updated_at.clone())
-                                    children=move |room: Room| {
-                                        let key = room.id.clone();
-                                        let key2 = key.clone();
-                                        let active = move || rooms.open_key.get().as_deref() == Some(&*key);
-                                        view! {
-                                            <button
-                                                class="rooms-workspace__room"
-                                                class:is-active=active
-                                                type="button"
-                                                on:click=move |_| {
-                                                    rooms.open_room(key2.clone());
-                                                    show_left_rail.set(false);
-                                                }
-                                            >
-                                                <span class="rooms-workspace__room-hash">"#"</span>
-                                                <span class="rooms-workspace__room-name">
-                                                    {room.name.clone()}
-                                                </span>
-                                            </button>
+                                <div
+                                    class="rooms-workspace__left-options"
+                                    role="listbox"
+                                    aria-label="Rooms"
+                                    on:keydown=move |ev: web_sys::KeyboardEvent| {
+                                        let keys: Vec<String> = rooms
+                                            .list
+                                            .get_untracked()
+                                            .iter()
+                                            .map(|r| r.id.clone())
+                                            .collect();
+                                        let focused = web_sys::window()
+                                            .and_then(|w| w.document())
+                                            .and_then(|d| d.active_element())
+                                            .map(|el| el.id());
+                                        let focused_key = focused
+                                            .as_deref()
+                                            .and_then(|id| id.strip_prefix("rooms-opt-"));
+                                        let Some(idx) =
+                                            room_list_next_focus(&keys, focused_key, &ev.key())
+                                        else {
+                                            return;
+                                        };
+                                        ev.prevent_default();
+                                        if let Some(el) = web_sys::window()
+                                            .and_then(|w| w.document())
+                                            .and_then(|d| {
+                                                d.get_element_by_id(&room_option_dom_id(&keys[idx]))
+                                            })
+                                            .and_then(|el| {
+                                                el.dyn_into::<web_sys::HtmlElement>().ok()
+                                            })
+                                        {
+                                            let _ = el.focus();
                                         }
                                     }
-                                />
+                                >
+                                    <For
+                                        each=move || rooms.list.get()
+                                        key=|r: &Room| (r.id.clone(), r.participants.len(), r.updated_at.clone())
+                                        children=move |room: Room| {
+                                            let key = room.id.clone();
+                                            let key2 = key.clone();
+                                            let key_tab = key.clone();
+                                            let key_sel = key.clone();
+                                            let active = move || rooms.open_key.get().as_deref() == Some(&*key);
+                                            let selected =
+                                                move || rooms.open_key.get().as_deref() == Some(&*key_sel);
+                                            let is_tab_stop = move || {
+                                                let keys: Vec<String> = rooms
+                                                    .list
+                                                    .get()
+                                                    .iter()
+                                                    .map(|r| r.id.clone())
+                                                    .collect();
+                                                let open = rooms.open_key.get();
+                                                room_list_tab_stop(&keys, open.as_deref())
+                                                    .and_then(|i| keys.get(i).cloned())
+                                                    .as_deref()
+                                                    == Some(&*key_tab)
+                                            };
+                                            view! {
+                                                <button
+                                                    class="rooms-workspace__room"
+                                                    class:is-active=active
+                                                    type="button"
+                                                    role="option"
+                                                    id=room_option_dom_id(&room.id)
+                                                    aria-selected=move || selected().to_string()
+                                                    tabindex=move || if is_tab_stop() { "0" } else { "-1" }
+                                                    on:click=move |_| {
+                                                        rooms.open_room(key2.clone());
+                                                        show_left_rail.set(false);
+                                                    }
+                                                >
+                                                    <span class="rooms-workspace__room-hash">"#"</span>
+                                                    <span class="rooms-workspace__room-name">
+                                                        {room.name.clone()}
+                                                    </span>
+                                                </button>
+                                            }
+                                        }
+                                    />
+                                </div>
                             }.into_any()
                         }
                     }}
@@ -1703,5 +1809,57 @@ mod tests {
         // state, which is the contract for a compact-nav hamburger.
         assert!(!toggle_drawer(toggle_drawer(false)));
         assert!(toggle_drawer(toggle_drawer(true)));
+    }
+
+    // ── room-list ARIA listbox helpers ───────────────────────────────────
+
+    fn keys(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn next_focus_arrows_wrap_and_home_end_jump() {
+        let k = keys(&["a", "b", "c"]);
+        assert_eq!(room_list_next_focus(&k, Some("a"), "ArrowDown"), Some(1));
+        assert_eq!(room_list_next_focus(&k, Some("c"), "ArrowDown"), Some(0));
+        assert_eq!(room_list_next_focus(&k, Some("a"), "ArrowUp"), Some(2));
+        assert_eq!(room_list_next_focus(&k, Some("b"), "Home"), Some(0));
+        assert_eq!(room_list_next_focus(&k, Some("b"), "End"), Some(2));
+    }
+
+    #[test]
+    fn next_focus_without_focused_option_enters_at_edges() {
+        let k = keys(&["a", "b"]);
+        assert_eq!(room_list_next_focus(&k, None, "ArrowDown"), Some(0));
+        assert_eq!(room_list_next_focus(&k, None, "ArrowUp"), Some(1));
+    }
+
+    #[test]
+    fn next_focus_ignores_non_nav_keys_and_empty_list() {
+        let k = keys(&["a"]);
+        assert_eq!(room_list_next_focus(&k, Some("a"), "Enter"), None);
+        assert_eq!(room_list_next_focus(&k, Some("a"), "j"), None);
+        assert_eq!(room_list_next_focus(&[], None, "ArrowDown"), None);
+    }
+
+    #[test]
+    fn next_focus_with_stale_focused_key_recovers_at_edges() {
+        // Focused option was removed by a refetch: treat as unfocused.
+        let k = keys(&["a", "b"]);
+        assert_eq!(room_list_next_focus(&k, Some("gone"), "ArrowDown"), Some(0));
+    }
+
+    #[test]
+    fn tab_stop_is_open_room_else_first_else_none() {
+        let k = keys(&["a", "b", "c"]);
+        assert_eq!(room_list_tab_stop(&k, Some("b")), Some(1));
+        assert_eq!(room_list_tab_stop(&k, Some("zz")), Some(0));
+        assert_eq!(room_list_tab_stop(&k, None), Some(0));
+        assert_eq!(room_list_tab_stop(&[], Some("a")), None);
+    }
+
+    #[test]
+    fn option_dom_id_is_prefix_stable() {
+        assert_eq!(room_option_dom_id("r1"), "rooms-opt-r1");
     }
 }
