@@ -1109,16 +1109,15 @@
 }
 
 .rooms-workspace__msg {
-  max-width: 920px;
-  margin: 0 auto;
+  /* Full-bleed left-aligned rows (Slack/Discord). A centered max-width
+     column reads as a floating chat box — banned by the layout ruling;
+     readable measure comes from the timeline's padding, not centering. */
   padding: 6px 10px;
   border-radius: var(--radius);
   transition: background var(--dur-fast) var(--ease);
 }
 
 .rooms-workspace__msg:hover {
-  margin: 0 auto;
-  padding: 6px 10px;
   background: var(--bg-hover);
 }
 
@@ -1145,12 +1144,7 @@
   box-shadow: 0 -8px 24px var(--bg);
 }
 
-.rooms-workspace__composer-row,
-.rooms-workspace__status {
-  max-width: 920px;
-  margin-right: auto;
-  margin-left: auto;
-}
+/* Composer + status follow the timeline: full-width, no centered column. */
 
 .rooms-workspace__composer-input {
   height: 40px;
