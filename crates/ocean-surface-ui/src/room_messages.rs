@@ -120,6 +120,23 @@ pub(crate) fn day_separator_label(prev: Option<&RoomMessage>, cur: &RoomMessage)
     }
 }
 
+/// Humanize a `YYYY-MM-DD` separator label against the client's current
+/// day key: "Today", "Yesterday", or the date itself. Pure — the caller
+/// supplies `today` (client clock is a view concern), so this stays
+/// deterministic under test.
+pub(crate) fn humanize_day_label(day: &str, today: &str) -> String {
+    if day == today {
+        return "Today".to_string();
+    }
+    match (
+        parse_iso_epoch(&format!("{day}T00:00:00Z")),
+        parse_iso_epoch(&format!("{today}T00:00:00Z")),
+    ) {
+        (Some(d), Some(t)) if t - d == 86_400 => "Yesterday".to_string(),
+        _ => day.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,5 +246,17 @@ mod tests {
             "t"
         )));
         assert!(!is_compact_system_row(&m(1, "u", "t")));
+    }
+
+    #[test]
+    fn humanized_day_labels_today_yesterday_else_date() {
+        assert_eq!(humanize_day_label("2026-07-29", "2026-07-29"), "Today");
+        assert_eq!(humanize_day_label("2026-07-28", "2026-07-29"), "Yesterday");
+        // month boundary yesterday
+        assert_eq!(humanize_day_label("2026-06-30", "2026-07-01"), "Yesterday");
+        assert_eq!(humanize_day_label("2026-07-20", "2026-07-29"), "2026-07-20");
+        // future or garbage: plain date, never a wrong "Yesterday"
+        assert_eq!(humanize_day_label("2026-07-30", "2026-07-29"), "2026-07-30");
+        assert_eq!(humanize_day_label("bad", "2026-07-29"), "bad");
     }
 }
