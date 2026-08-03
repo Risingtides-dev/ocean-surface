@@ -856,7 +856,15 @@ pub fn RoomsWorkspace(
                                 }}
 
                                 // Transcript + empty state
-                                <div class="rooms-workspace__transcript" node_ref=list_ref>
+                                // role=log: AT treats the timeline as a
+                                // polite live region — new messages are
+                                // announced without stealing focus.
+                                <div
+                                    class="rooms-workspace__transcript"
+                                    role="log"
+                                    aria-label="Messages"
+                                    node_ref=list_ref
+                                >
                                     <For
                                         each=move || partition_thread_messages(&rooms.transcript.get(), 0).roots
                                         key=|m: &RoomMessage| m.seq
@@ -1124,7 +1132,11 @@ pub fn RoomsWorkspace(
                                             {format!("Replying to {}", root.author_id)}
                                         </div>
                                     </div>
-                                    <div class="rooms-workspace__right-thread-transcript">
+                                    <div
+                                        class="rooms-workspace__right-thread-transcript"
+                                        role="log"
+                                        aria-label="Thread replies"
+                                    >
                                         <div
                                             class="rooms-workspace__msg rooms-workspace__msg--thread-root"
                                             class:rooms-workspace__msg--system=root_is_system
