@@ -458,6 +458,13 @@ pub struct Rooms {
     /// false so the panel shows a loading placeholder instead of falsely
     /// asserting "No rooms yet" during the initial in-flight fetch.
     pub rooms_loaded: RwSignal<bool>,
+    /// Whether the latest room-list request is still in flight.
+    pub rooms_loading: RwSignal<bool>,
+    /// Error from the latest room-list request, if that request failed.
+    pub rooms_error: RwSignal<Option<String>>,
+    /// Monotonic ticket ensuring only the latest overlapping list request may
+    /// publish list/loading/error state.
+    list_request_ticket: RwSignal<u64>,
     /// The currently selected room key, if any.
     pub open_key: RwSignal<Option<String>>,
     /// The open room's full record (roster + metadata).
@@ -508,6 +515,9 @@ impl Rooms {
             url: daemon.url,
             list: RwSignal::new(Vec::new()),
             rooms_loaded: RwSignal::new(false),
+            rooms_loading: RwSignal::new(false),
+            rooms_error: RwSignal::new(None),
+            list_request_ticket: RwSignal::new(0),
             open_key: RwSignal::new(None),
             open_room: RwSignal::new(None),
             transcript: RwSignal::new(Vec::new()),
@@ -549,38 +559,55 @@ impl Rooms {
         self.tail_state.set(TailState::Replaying);
     }
 
-    /// Whether the current identity is in the open room's roster.
+    /// Whether the current identity is joined according to the room's explicit
+    /// access authority. Local rooms use the daemon-native roster; every
+    /// non-local state uses only the safe access-member projection.
     pub fn joined_open(&self) -> bool {
-        let me = self.identity_id.get();
-        self.open_room
-            .get()
-            .map(|r| r.participants.iter().any(|p| p.id == me))
-            .unwrap_or(false)
+        joined_open_for(
+            self.access.get().as_ref(),
+            self.open_room.get().as_ref(),
+            self.identity_id.get(),
+        )
     }
 
-    /// Fetch the room list (`GET /v1/rooms/persistent`).
+    /// Fetch the room list (`GET /v1/rooms/persistent`). Overlapping requests
+    /// are latest-wins: an older completion cannot publish any list lifecycle
+    /// state after a newer request has started.
     pub fn fetch_rooms(&self) {
         let base = self.base();
-        let list = self.list;
-        let status = self.status;
-        let loaded = self.rooms_loaded;
+        let me = *self;
+        let ticket = self.list_request_ticket.get_untracked().wrapping_add(1);
+        self.list_request_ticket.set(ticket);
+        self.rooms_loading.set(true);
+        self.rooms_error.set(None);
         spawn_local(async move {
             let get_url = format!("{base}/v1/rooms/persistent");
-            match Request::get(&get_url).send().await {
+            let result = match Request::get(&get_url).send().await {
                 Ok(resp) => match resp.json::<RoomsListResponse>().await {
-                    Ok(r) if r.ok => list.set(r.rooms),
-                    Ok(r) => status.set(format!(
+                    Ok(r) if r.ok => Ok(r.rooms),
+                    Ok(r) => Err(format!(
                         "rooms list failed: {}",
                         r.error.unwrap_or_else(|| "unknown error".into())
                     )),
-                    Err(err) => status.set(format!("rooms decode error: {err}")),
+                    Err(err) => Err(format!("rooms decode error: {err}")),
                 },
-                Err(err) => status.set(format!("rooms fetch error: {err}")),
+                Err(err) => Err(format!("rooms fetch error: {err}")),
+            };
+            if !list_request_is_current(ticket, me.list_request_ticket.get_untracked()) {
+                return;
             }
-            // The first fetch has now resolved — the panel may distinguish
-            // "still loading" from "genuinely empty". Set on every outcome so a
-            // failed fetch stops claiming the list is loading forever.
-            loaded.set(true);
+            match result {
+                Ok(rooms) => {
+                    me.list.set(rooms);
+                    me.rooms_error.set(None);
+                }
+                Err(error) => {
+                    me.status.set(error.clone());
+                    me.rooms_error.set(Some(error));
+                }
+            }
+            me.rooms_loaded.set(true);
+            me.rooms_loading.set(false);
         });
     }
 
@@ -766,59 +793,48 @@ impl Rooms {
     pub fn open_room(&self, key: String) {
         let base = self.base();
         let me = *self;
-        let open_key = self.open_key;
-        let open_room = self.open_room;
-        let transcript = self.transcript;
-        let status = self.status;
-        let generation = self.generation;
-
-        // Retire any prior room's live loops and reset state synchronously.
-        let generation_id = generation.get_untracked().wrapping_add(1);
-        generation.set(generation_id);
-        open_key.set(Some(key.clone()));
-        me.reset_room_state();
-        status.set("loading room…".into());
-        // Keep the workspace visible when opening a room (no panel toggle).
-        // The workspace is a persistent shell — opening a room selects it
-        // in-place, it does not unmount or overlay-swap.
+        let generation_id = self.generation.get_untracked().wrapping_add(1);
+        self.generation.set(generation_id);
+        self.open_key.set(Some(key.clone()));
+        self.reset_room_state();
+        self.status.set("loading room…".into());
 
         spawn_local(async move {
             let get_url = format!("{base}/v1/rooms/persistent/{}", encode(&key));
-            match Request::get(&get_url).send().await {
+            let result = match Request::get(&get_url).send().await {
                 Ok(resp) if resp.ok() => match resp.json::<RoomGetResponse>().await {
-                    Ok(r) if r.ok => {
-                        // Guard against a fast re-select before this landed.
-                        if generation.get_untracked() != generation_id {
-                            return;
-                        }
-                        open_room.set(r.room);
-                        transcript.set(r.transcript);
-                        me.access.set(Some(r.access));
-                        status.set(String::new());
-                        // Pre-fetch agent list for the picker (TASK-11).
-                        me.fetch_agents();
-                        // Start live updates for this generation.
-                        me.start_live_tail(key.clone(), generation_id);
-                    }
-                    Ok(r) => status.set(format!(
+                    Ok(r) if r.ok => Ok((r.room, r.transcript, r.access)),
+                    Ok(r) => Err(format!(
                         "room load failed: {}",
                         r.error.unwrap_or_else(|| "unknown error".into())
                     )),
-                    Err(err) => status.set(format!("room decode error: {err}")),
+                    Err(err) => Err(format!("room decode error: {err}")),
                 },
                 Ok(resp) => {
                     let http_status = resp.status();
                     match resp.json::<RoomErrorResponse>().await {
-                        Ok(r) => status.set(format!(
+                        Ok(r) => Err(format!(
                             "room load failed: {}",
                             r.error.unwrap_or_else(|| format!("HTTP {http_status}"))
                         )),
-                        Err(err) => {
-                            status.set(format!("room load failed: HTTP {http_status} ({err})"))
-                        }
+                        Err(err) => Err(format!("room load failed: HTTP {http_status} ({err})")),
                     }
                 }
-                Err(err) => status.set(format!("room fetch error: {err}")),
+                Err(err) => Err(format!("room fetch error: {err}")),
+            };
+            if !me.room_is_current(generation_id, &key) {
+                return;
+            }
+            match result {
+                Ok((room, transcript, access)) => {
+                    me.open_room.set(room);
+                    me.transcript.set(transcript);
+                    me.access.set(Some(access));
+                    me.status.set(String::new());
+                    me.fetch_agents();
+                    me.start_live_tail(key, generation_id);
+                }
+                Err(error) => me.status.set(error),
             }
         });
     }
@@ -837,7 +853,7 @@ impl Rooms {
         };
         let base = self.base();
         let me = *self;
-        let status = self.status;
+        let generation_id = self.generation.get_untracked();
         let id = self.identity_id.get_untracked();
         let name = self.identity_name.get_untracked();
         spawn_local(async move {
@@ -847,37 +863,41 @@ impl Rooms {
                 kind: RoomParticipantKind::Human,
             };
             let post_url = format!("{base}/v1/rooms/persistent/{}/participants", encode(&key));
-            let res = Request::post(&post_url)
+            let result = match Request::post(&post_url)
                 .header("content-type", "application/json")
-                .json(&body);
-            match res {
+                .json(&body)
+            {
                 Ok(req) => match req.send().await {
                     Ok(resp) => match resp.json::<RoomMutateResponse>().await {
-                        Ok(r) if r.ok => {
-                            me.open_room.set(r.room);
-                            status.set("joined".into());
-                            me.refresh_open_transcript(&key);
-                            me.fetch_rooms();
-                        }
-                        Ok(r) => status.set(format!(
+                        Ok(r) if r.ok => Ok(r.room),
+                        Ok(r) => Err(format!(
                             "join failed: {}",
                             r.error.unwrap_or_else(|| "unknown error".into())
                         )),
-                        Err(err) => status.set(format!("join decode error: {err}")),
+                        Err(err) => Err(format!("join decode error: {err}")),
                     },
-                    Err(err) => status.set(format!("join post error: {err}")),
+                    Err(err) => Err(format!("join post error: {err}")),
                 },
-                Err(err) => status.set(format!("join encode error: {err}")),
+                Err(err) => Err(format!("join encode error: {err}")),
+            };
+            if result.is_ok() {
+                me.fetch_rooms();
+            }
+            if !me.room_is_current(generation_id, &key) {
+                return;
+            }
+            match result {
+                Ok(room) => {
+                    me.open_room.set(room);
+                    me.status.set("joined".into());
+                    me.refresh_open_transcript(&key, generation_id);
+                }
+                Err(error) => me.status.set(error),
             }
         });
     }
 
-    /// Add a real named agent to the open room via the daemon's validated join
-    /// (`POST .../participants` with `kind = agent`). TASK-9/TASK-11: the daemon
-    /// resolves `agent_id` against `agentdir::resolve` and rejects bogus ids
-    /// with a typed 400. The surface picks from `available_agents` (fetched via
-    /// `GET /v1/agents`) — free-text fake agents are gone. Once joined, the
-    /// agent is mentionable and auto-convenes per the room's trigger policy.
+    /// Add a daemon-owned agent identity to the open room.
     pub fn add_agent(&self, agent_id: String) {
         let agent_id = agent_id.trim().to_string();
         if agent_id.is_empty() {
@@ -889,7 +909,7 @@ impl Rooms {
         };
         let base = self.base();
         let me = *self;
-        let status = self.status;
+        let generation_id = self.generation.get_untracked();
         spawn_local(async move {
             let body = JoinBody {
                 id: &agent_id,
@@ -897,27 +917,37 @@ impl Rooms {
                 kind: RoomParticipantKind::Agent,
             };
             let post_url = format!("{base}/v1/rooms/persistent/{}/participants", encode(&key));
-            let res = Request::post(&post_url)
+            let result = match Request::post(&post_url)
                 .header("content-type", "application/json")
-                .json(&body);
-            match res {
+                .json(&body)
+            {
                 Ok(req) => match req.send().await {
                     Ok(resp) => match resp.json::<RoomMutateResponse>().await {
-                        Ok(r) if r.ok => {
-                            me.open_room.set(r.room);
-                            status.set(format!("agent '{agent_id}' added — mention @{agent_id}"));
-                            me.refresh_open_transcript(&key);
-                            me.fetch_rooms();
-                        }
-                        Ok(r) => status.set(format!(
+                        Ok(r) if r.ok => Ok(r.room),
+                        Ok(r) => Err(format!(
                             "add agent failed: {}",
                             r.error.unwrap_or_else(|| "unknown error".into())
                         )),
-                        Err(err) => status.set(format!("add agent decode error: {err}")),
+                        Err(err) => Err(format!("add agent decode error: {err}")),
                     },
-                    Err(err) => status.set(format!("add agent post error: {err}")),
+                    Err(err) => Err(format!("add agent post error: {err}")),
                 },
-                Err(err) => status.set(format!("add agent encode error: {err}")),
+                Err(err) => Err(format!("add agent encode error: {err}")),
+            };
+            if result.is_ok() {
+                me.fetch_rooms();
+            }
+            if !me.room_is_current(generation_id, &key) {
+                return;
+            }
+            match result {
+                Ok(room) => {
+                    me.open_room.set(room);
+                    me.status
+                        .set(format!("agent '{agent_id}' added — mention @{agent_id}"));
+                    me.refresh_open_transcript(&key, generation_id);
+                }
+                Err(error) => me.status.set(error),
             }
         });
     }
@@ -939,7 +969,7 @@ impl Rooms {
         };
         let base = self.base();
         let me = *self;
-        let status = self.status;
+        let generation_id = self.generation.get_untracked();
         let id = self.identity_id.get_untracked();
         spawn_local(async move {
             let del_url = format!(
@@ -947,21 +977,30 @@ impl Rooms {
                 encode(&key),
                 encode(id)
             );
-            match Request::delete(&del_url).send().await {
+            let result = match Request::delete(&del_url).send().await {
                 Ok(resp) => match resp.json::<RoomMutateResponse>().await {
-                    Ok(r) if r.ok => {
-                        me.open_room.set(r.room);
-                        status.set("left".into());
-                        me.refresh_open_transcript(&key);
-                        me.fetch_rooms();
-                    }
-                    Ok(r) => status.set(format!(
+                    Ok(r) if r.ok => Ok(r.room),
+                    Ok(r) => Err(format!(
                         "leave failed: {}",
                         r.error.unwrap_or_else(|| "unknown error".into())
                     )),
-                    Err(err) => status.set(format!("leave decode error: {err}")),
+                    Err(err) => Err(format!("leave decode error: {err}")),
                 },
-                Err(err) => status.set(format!("leave error: {err}")),
+                Err(err) => Err(format!("leave error: {err}")),
+            };
+            if result.is_ok() {
+                me.fetch_rooms();
+            }
+            if !me.room_is_current(generation_id, &key) {
+                return;
+            }
+            match result {
+                Ok(room) => {
+                    me.open_room.set(room);
+                    me.status.set("left".into());
+                    me.refresh_open_transcript(&key, generation_id);
+                }
+                Err(error) => me.status.set(error),
             }
         });
     }
@@ -981,7 +1020,7 @@ impl Rooms {
         };
         let base = self.base();
         let me = *self;
-        let status = self.status;
+        let generation_id = self.generation.get_untracked();
         let id = self.identity_id.get_untracked();
         spawn_local(async move {
             let payload = PostMessageBody {
@@ -990,80 +1029,59 @@ impl Rooms {
                 body: &body,
             };
             let post_url = format!("{base}/v1/rooms/persistent/{}/messages", encode(&key));
-            let res = Request::post(&post_url)
+            let result = match Request::post(&post_url)
                 .header("content-type", "application/json")
-                .json(&payload);
-            match res {
+                .json(&payload)
+            {
                 Ok(req) => match req.send().await {
-                    Ok(resp) if resp.ok() => {
-                        // The daemon also appends a System line on auto-convene;
-                        // re-tail to pick up our message + any trigger notice.
-                        me.refresh_open_transcript(&key);
-                    }
-                    Ok(resp) => {
-                        let text = resp.text().await.unwrap_or_default();
-                        status.set(format!("message failed: {text}"));
-                    }
-                    Err(err) => status.set(format!("message post error: {err}")),
+                    Ok(resp) if resp.ok() => Ok(()),
+                    Ok(resp) => Err(format!(
+                        "message failed: {}",
+                        resp.text().await.unwrap_or_default()
+                    )),
+                    Err(err) => Err(format!("message post error: {err}")),
                 },
-                Err(err) => status.set(format!("message encode error: {err}")),
+                Err(err) => Err(format!("message encode error: {err}")),
+            };
+            if !me.room_is_current(generation_id, &key) {
+                return;
+            }
+            match result {
+                Ok(()) => me.refresh_open_transcript(&key, generation_id),
+                Err(error) => me.status.set(error),
             }
         });
     }
 
-    /// Retry a failed outbox item (`POST …/outbox/retry`). On 202 the daemon
-    /// returns the fresh access projection; apply it immediately with
-    /// generation + open_key guard, then idempotently accept the duplicate SSE
+    /// Retry a failed outbox item (`POST …/outbox/retry`).
     #[allow(dead_code)]
-    /// `room_access` wake when it arrives later.
     pub fn retry_outbox(&self, client_event_id: String) {
         let Some(key) = self.open_key.get_untracked() else {
             return;
         };
         let base = self.base();
         let me = *self;
-        let status = self.status;
         let generation_id = self.generation.get_untracked();
         spawn_local(async move {
             let payload = RetryOutboxBody {
                 client_event_id: &client_event_id,
             };
             let post_url = format!("{base}/v1/rooms/persistent/{}/outbox/retry", encode(&key));
-            let res = Request::post(&post_url)
+            let result = match Request::post(&post_url)
                 .header("content-type", "application/json")
-                .json(&payload);
-            match res {
+                .json(&payload)
+            {
                 Ok(req) => match req.send().await {
                     Ok(resp) if resp.status() == 202 => {
                         match resp.json::<RetryOutboxSuccess>().await {
-                            Ok(r) if r.ok => {
-                                if !room_request_is_current(
-                                    generation_id,
-                                    me.generation.get_untracked(),
-                                    &key,
-                                    me.open_key.get_untracked().as_deref(),
-                                ) {
-                                    return;
-                                }
-                                apply_access_projection(&me.access, r.access);
-                                status.set("retry queued".into());
-                            }
-                            Ok(_) => status.set("retry response invalid".into()),
-                            Err(err) => status.set(format!("retry decode error: {err}")),
+                            Ok(r) if r.ok => Ok(r.access),
+                            Ok(_) => Err("retry response invalid".into()),
+                            Err(err) => Err(format!("retry decode error: {err}")),
                         }
                     }
                     Ok(resp) => {
                         let http_status = resp.status();
-                        let error = resp.json::<RetryOutboxErrorResponse>().await;
-                        if !room_request_is_current(
-                            generation_id,
-                            me.generation.get_untracked(),
-                            &key,
-                            me.open_key.get_untracked().as_deref(),
-                        ) {
-                            return;
-                        }
-                        match error {
+                        match resp.json::<RetryOutboxErrorResponse>().await {
                             Ok(r) => {
                                 let detail = match (r.code, r.error) {
                                     (Some(code), Some(error)) => format!("{code}: {error}"),
@@ -1071,53 +1089,50 @@ impl Rooms {
                                     (None, Some(error)) => error,
                                     (None, None) => format!("HTTP {http_status}"),
                                 };
-                                status.set(format!("retry failed: {detail}"));
+                                Err(format!("retry failed: {detail}"))
                             }
-                            Err(err) => {
-                                status.set(format!("retry failed: HTTP {http_status} ({err})"))
-                            }
+                            Err(err) => Err(format!("retry failed: HTTP {http_status} ({err})")),
                         }
                     }
-                    Err(err) => status.set(format!("retry post error: {err}")),
+                    Err(err) => Err(format!("retry post error: {err}")),
                 },
-                Err(err) => status.set(format!("retry encode error: {err}")),
+                Err(err) => Err(format!("retry encode error: {err}")),
+            };
+            if !me.room_is_current(generation_id, &key) {
+                return;
+            }
+            match result {
+                Ok(access) => {
+                    apply_access_projection(&me.access, access);
+                    me.status.set("retry queued".into());
+                }
+                Err(error) => me.status.set(error),
             }
         });
     }
 
-    /// Re-fetch the open room's transcript tail (`after_seq` = our highest seq)
-    /// and append only new entries. Used after our own writes; the SSE stream
-    /// remains the primary source for remote updates.
-    fn refresh_open_transcript(&self, key: &str) {
+    /// Re-fetch the open room's transcript tail and append only new entries.
+    fn refresh_open_transcript(&self, key: &str, generation_id: u64) {
         let base = self.base();
-        let transcript = self.transcript;
-        let open_key = self.open_key;
+        let me = *self;
         let key = key.to_string();
         spawn_local(async move {
-            // Only tail if this is still the open room.
-            if open_key.get_untracked().as_deref() != Some(key.as_str()) {
+            if !me.room_is_current(generation_id, &key) {
                 return;
             }
-            let after = transcript
-                .get_untracked()
-                .last()
-                .map(|m| m.seq)
-                .unwrap_or(0);
+            let after = last_transcript_seq(&me.transcript.get_untracked());
             let get_url = format!(
                 "{base}/v1/rooms/persistent/{}/transcript?after_seq={after}",
                 encode(&key)
             );
             if let Ok(resp) = Request::get(&get_url).send().await {
                 if let Ok(r) = resp.json::<TranscriptResponse>().await {
-                    if r.ok && !r.transcript.is_empty() {
-                        // Guard: room may have changed during the await.
-                        if open_key.get_untracked().as_deref() != Some(key.as_str()) {
-                            return;
-                        }
-                        transcript.update(|t| {
-                            for m in r.transcript {
-                                if t.last().map(|l| l.seq).unwrap_or(0) < m.seq {
-                                    t.push(m);
+                    if r.ok && !r.transcript.is_empty() && me.room_is_current(generation_id, &key) {
+                        me.transcript.update(|transcript| {
+                            for message in r.transcript {
+                                if transcript.last().map(|last| last.seq).unwrap_or(0) < message.seq
+                                {
+                                    transcript.push(message);
                                 }
                             }
                         });
@@ -1366,6 +1381,30 @@ fn replace_access_projection(
 
 fn last_transcript_seq(transcript: &[RoomMessage]) -> u64 {
     transcript.last().map(|message| message.seq).unwrap_or(0)
+}
+
+fn list_request_is_current(expected_ticket: u64, current_ticket: u64) -> bool {
+    expected_ticket == current_ticket
+}
+
+fn joined_open_for(
+    access: Option<&RoomAccessProjection>,
+    room: Option<&Room>,
+    identity_id: &str,
+) -> bool {
+    let Some(access) = access else {
+        return false;
+    };
+    if access.state == RoomAccessState::Local {
+        return room.is_some_and(|room| {
+            room.participants
+                .iter()
+                .any(|participant| participant.id == identity_id)
+        });
+    }
+    access.members.iter().any(|member| {
+        member.member_id == identity_id || member.owner_member_id.as_deref() == Some(identity_id)
+    })
 }
 
 /// Which placeholder the rooms list should render, given whether the first
@@ -1902,6 +1941,42 @@ mod tests {
     }
 
     #[test]
+    fn joined_open_uses_only_the_authoritative_roster_for_access_mode() {
+        let room = local_room();
+        let local = access_projection(RoomAccessState::Local);
+        assert!(joined_open_for(Some(&local), Some(&room), "local-human"));
+        assert!(!joined_open_for(Some(&local), Some(&room), "remote-owner"));
+        assert!(!joined_open_for(None, Some(&room), "local-human"));
+
+        let mut federated = access_projection(RoomAccessState::Live);
+        federated.members = vec![FederatedRoomMemberProjection {
+            member_id: "federated-user".into(),
+            owner_member_id: Some("local-human".into()),
+            actor_type: FederatedActorType::User,
+            role_in_room: FederatedRoomRole::Member,
+            display_name: "Federated User".into(),
+            public_agent_descriptor: None,
+            joined_at: String::new(),
+            derived_presence: None,
+            local_binding_available: Some(true),
+        }];
+        assert!(joined_open_for(Some(&federated), None, "federated-user"));
+        assert!(joined_open_for(Some(&federated), None, "local-human"));
+        assert!(!joined_open_for(
+            Some(&federated),
+            Some(&room),
+            "local-agent"
+        ));
+    }
+
+    #[test]
+    fn room_list_ticket_is_strictly_latest_request_wins() {
+        assert!(list_request_is_current(8, 8));
+        assert!(!list_request_is_current(7, 8));
+        assert!(!list_request_is_current(8, 9));
+    }
+
+    #[test]
     fn outbox_states_keep_pending_and_failed_distinct() {
         assert_eq!(
             serde_json::from_str::<OutboxItemState>(r#""pending""#).unwrap(),
@@ -1959,6 +2034,9 @@ mod tests {
             url: RwSignal::new(String::new()),
             list: RwSignal::new(Vec::new()),
             rooms_loaded: RwSignal::new(false),
+            rooms_loading: RwSignal::new(false),
+            rooms_error: RwSignal::new(None),
+            list_request_ticket: RwSignal::new(0),
             open_key: RwSignal::new(None),
             open_room: RwSignal::new(None),
             transcript: RwSignal::new(Vec::new()),

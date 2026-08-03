@@ -1566,3 +1566,138 @@
     flex: 0 0 auto;
   }
 }
+
+/* ── Sessions drawer polish ──────────────────────────────────────────
+   The session switcher is supporting navigation, not a full-screen mode.
+   Keep it compact on desktop, soften the scrim, and let row metadata breathe. */
+
+.sessions-overlay {
+  background: var(--scrim);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.sessions-panel {
+  width: min(336px, calc(100vw - 48px));
+  height: calc(100dvh - 16px);
+  margin: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  box-shadow: var(--elev-3);
+  overflow: hidden;
+}
+
+.sessions-panel__head {
+  min-height: 52px;
+  box-sizing: border-box;
+  padding: 0 14px;
+  background: var(--bg-raised);
+}
+
+.sessions-panel__title {
+  font-size: 14px;
+  letter-spacing: 0.01em;
+}
+
+.sessions-panel__list {
+  padding: 8px;
+  background: var(--bg);
+}
+
+.sessions-group + .sessions-group {
+  margin-top: 8px;
+}
+
+.sessions-group__bar {
+  padding: 0 4px;
+}
+
+.sessions-group__head {
+  padding: 7px 6px;
+}
+
+.sessions-group__body {
+  padding-top: 3px;
+}
+
+.sessions-item {
+  position: relative;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+  margin: 1px 0;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+}
+
+.sessions-item:hover:not(:disabled) {
+  box-shadow: none;
+}
+
+.sessions-item--active {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.sessions-item__title {
+  width: 100%;
+}
+
+.sessions-item__name {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.sessions-item__meta {
+  width: 100%;
+  min-width: 0;
+  margin-left: 13px;
+  gap: 6px;
+}
+
+.sessions-item__path {
+  flex: 1 1 auto;
+  max-width: none;
+  font-size: 10px;
+}
+
+.sessions-item__branch,
+.sessions-item__time,
+.sessions-item__turns {
+  font-size: 10px;
+}
+
+.sessions-item__branch {
+  max-width: 92px;
+}
+
+.sessions-panel__actions {
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--bg-raised);
+}
+
+.sessions-panel__new-btn {
+  width: 100%;
+  justify-content: center;
+  height: 32px;
+}
+
+.worktree-group {
+  margin-left: 8px;
+  padding-left: 8px;
+}
+
+@media (max-width: 600px) {
+  .sessions-overlay {
+    background: var(--bg);
+  }
+
+  .sessions-panel {
+    width: 100%;
+    height: 100dvh;
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+  }
+}

@@ -2785,3 +2785,20 @@ production-wrapper regression for a live session with partial persisted output.
 Verified 722 UI unit tests plus the integration suites, WASM check, strict WASM
 Clippy, formatting, and diff hygiene before deployment.
 _________________________________________________________________________________
+time:      [01:25pm] [08-03-26]
+agent:     [ocean] [gpt-5.6-sol]
+worktree:  [rooms-workspace]
+type:      [bug report]
+area:      [frontend]
+
+Closed the reviewed Rooms Slice 1 landing blockers without changing the product
+boundary. Room-list publication is latest-request-wins and exposes truthful
+loading/error state; room mutations, transcript refreshes, posts, and federated
+outbox retries admit results only for the current room generation. Non-local
+membership uses only the safe access projection. The workspace restores the
+unconfirmed outbox outside the transcript with failed-only retry, normalizes and
+single-flights sends while preserving edited drafts, and adds drawer focus,
+status, labels, presence semantics, and extension stylesheet inventory. Verified
+755 UI tests, strict WASM Clippy, WASM and proxy checks, Tauri check, formatting,
+script syntax, and diff hygiene; independent defect-first review returned CLEAR.
+_________________________________________________________________________________

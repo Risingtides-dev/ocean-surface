@@ -11,8 +11,8 @@ use leptos::prelude::*;
 
 use crate::rooms::{
     CreateResolution, FederatedActorType, FederatedRoomMemberProjection, FederatedRoomRole,
-    MemberPresence, Room, RoomAccessProjection, RoomAccessState, RoomMessage, RoomMessageKind,
-    RoomParticipant, RoomParticipantKind, Rooms,
+    MemberPresence, OutboxItemState, Room, RoomAccessProjection, RoomAccessState, RoomMessage,
+    RoomMessageKind, RoomParticipant, RoomParticipantKind, Rooms,
 };
 
 // ── Production helpers (testable directly, called from Effects) ─
@@ -20,15 +20,19 @@ use crate::rooms::{
 // These are only exercised by tests now that create admission is
 // gated by typed op-id outcomes rather than list inspection.
 
-/// Whether the composer should clear — true only when the current
-/// draft is character-for-character identical to the body that was
-/// sent. Trim-equivalence is NOT a match; the user may have typed
-/// extra whitespace intentionally.
-fn should_clear_composer(current: &str, sent_body: &str) -> bool {
-    if sent_body.is_empty() {
-        return false;
-    }
-    current == sent_body
+/// Whether the composer should clear after the normalized wire body is
+/// confirmed. The current draft must still be the exact original draft so
+/// typing that happened while the send was in flight is never discarded.
+fn should_clear_composer(current: &str, original_draft: &str) -> bool {
+    !original_draft.is_empty() && current == original_draft
+}
+
+fn normalized_message_body(draft: &str) -> String {
+    draft.trim().to_string()
+}
+
+fn message_send_admitted(in_flight: bool, writes_allowed: bool, draft: &str) -> bool {
+    !in_flight && writes_allowed && !normalized_message_body(draft).is_empty()
 }
 
 /// Toggle a boolean signal — the exact logic consumed by hamburger
@@ -112,9 +116,21 @@ pub fn RoomsWorkspace(
         rooms.fetch_rooms();
     });
 
-    // ── Center-rail: composer signal + auto-scroll ref ────────────────
+    // ── Center-rail: composer signal + focus/scroll refs ────────────────
     let composer = RwSignal::new(String::new());
     let list_ref: NodeRef<leptos::html::Div> = NodeRef::new();
+    let mobile_toggle_ref: NodeRef<leptos::html::Button> = NodeRef::new();
+    let create_input_ref: NodeRef<leptos::html::Input> = NodeRef::new();
+
+    Effect::new(move |_| {
+        if show_left_rail.get() {
+            request_animation_frame(move || {
+                if let Some(input) = create_input_ref.get() {
+                    let _ = input.focus();
+                }
+            });
+        }
+    });
 
     // Keep transcript pinned to newest message.
     let transcript = rooms.transcript;
@@ -190,21 +206,23 @@ pub fn RoomsWorkspace(
         }
     });
 
-    // ── Composer: preserve draft until confirmed admission. post_message
-    //    is fire-and-forget; clearing before the message reaches the
-    //    transcript discards the user's text on any failure. We capture the
-    //    max seq at send time, then clear only when a message by this author
-    //    with the same body appears at a seq beyond that watermark.
-    let last_sent_body = RwSignal::new(String::new());
+    // ── Composer: one admitted send at a time. Keep both the exact draft and
+    // the normalized wire body: daemon messages are trimmed, while clearing is
+    // allowed only if the operator has not edited the original draft.
+    let last_sent_draft = RwSignal::new(String::new());
+    let last_sent_wire = RwSignal::new(String::new());
     let last_sent_seq = RwSignal::new(0u64);
+    let send_in_flight = RwSignal::new(false);
     let do_send = move || {
-        if !access_allows_writes(rooms.access.get_untracked().as_ref()) {
+        let draft = composer.get_untracked();
+        if !message_send_admitted(
+            send_in_flight.get_untracked(),
+            access_allows_writes(rooms.access.get_untracked().as_ref()),
+            &draft,
+        ) {
             return;
         }
-        let text = composer.get_untracked();
-        if text.trim().is_empty() {
-            return;
-        }
+        let wire = normalized_message_body(&draft);
         let max_seq = rooms
             .transcript
             .get_untracked()
@@ -212,39 +230,70 @@ pub fn RoomsWorkspace(
             .map(|m| m.seq)
             .max()
             .unwrap_or(0);
-        rooms.post_message(text.clone());
-        last_sent_body.set(text);
+        rooms.status.set(String::new());
+        last_sent_draft.set(draft);
+        last_sent_wire.set(wire.clone());
         last_sent_seq.set(max_seq);
-        // Do NOT clear here — the Effect below clears on confirmed admission.
+        send_in_flight.set(true);
+        rooms.post_message(wire);
     };
 
-    // Clear composer once the last-sent draft appears in the transcript
-    // beyond the pre-send watermark, authored by this identity — and only
-    // when the current composer text is exact-character-match to the sent body.
     Effect::new(move |_: Option<()>| {
-        let body = last_sent_body.get();
-        if body.is_empty() {
+        if !send_in_flight.get() {
             return;
         }
+        let wire = last_sent_wire.get();
         let sent_at_seq = last_sent_seq.get();
         let me = rooms.identity_id.get_untracked();
-        let found = rooms
+        let confirmed = rooms
             .transcript
             .get()
             .iter()
-            .any(|m| m.seq > sent_at_seq && m.body == body && m.author_id == me);
-        if found {
-            let current = composer.get_untracked();
-            if should_clear_composer(&current, &body) {
+            .any(|m| m.seq > sent_at_seq && m.body == wire && m.author_id == me);
+        if confirmed {
+            let original = last_sent_draft.get_untracked();
+            if should_clear_composer(&composer.get_untracked(), &original) {
                 composer.set(String::new());
             }
-            last_sent_body.set(String::new());
+            last_sent_draft.set(String::new());
+            last_sent_wire.set(String::new());
             last_sent_seq.set(0);
+            send_in_flight.set(false);
+            return;
+        }
+
+        let failed_outbox = rooms.access.get().is_some_and(|access| {
+            access.outbox.iter().any(|item| {
+                item.state == OutboxItemState::Failed
+                    && item.author_member_id == me
+                    && item.payload.get("body").and_then(|body| body.as_str())
+                        == Some(wire.as_str())
+            })
+        });
+        let request_failed = rooms.status.get().starts_with("message ");
+        if failed_outbox || request_failed {
+            last_sent_draft.set(String::new());
+            last_sent_wire.set(String::new());
+            last_sent_seq.set(0);
+            send_in_flight.set(false);
         }
     });
 
     view! {
-        <div class="rooms-workspace" role="region" aria-label="Rooms workspace">
+        <div
+            class="rooms-workspace"
+            role="region"
+            aria-label="Rooms workspace"
+            on:keydown=move |ev| {
+                if ev.key() == "Escape" && show_left_rail.get_untracked() {
+                    ev.prevent_default();
+                    show_left_rail.set(false);
+                    if let Some(toggle) = mobile_toggle_ref.get() {
+                        let _ = toggle.focus();
+                    }
+                }
+            }
+        >
 
             // ═══ MOBILE NAV — narrow-screen room selector ═════════════
             // Always present but CSS hides it above 650px via matching
@@ -254,7 +303,10 @@ pub fn RoomsWorkspace(
                 <button
                     class="rooms-workspace__mobile-nav-toggle"
                     type="button"
+                    node_ref=mobile_toggle_ref
                     aria-label="Toggle room list"
+                    aria-controls="rooms-workspace-room-list"
+                    aria-expanded=move || show_left_rail.get().to_string()
                     on:click=move |_| show_left_rail.update(|v| *v = toggle_drawer(*v))
                 >
                     <svg viewBox="0 0 16 16" width="16" height="16"
@@ -278,7 +330,13 @@ pub fn RoomsWorkspace(
                     view! {
                         <div
                             class="rooms-workspace__left-backdrop"
-                            on:click=move |_| show_left_rail.set(false)
+                            aria-hidden="true"
+                            on:click=move |_| {
+                                show_left_rail.set(false);
+                                if let Some(toggle) = mobile_toggle_ref.get() {
+                                    let _ = toggle.focus();
+                                }
+                            }
                         ></div>
                     }.into_any()
                 } else {
@@ -286,8 +344,11 @@ pub fn RoomsWorkspace(
                 }
             }}
             <div
+                id="rooms-workspace-room-list"
                 class="rooms-workspace__left"
                 class:rooms-workspace__left--visible=move || show_left_rail.get()
+                role="navigation"
+                aria-label="Room list"
             >
                 <div class="rooms-workspace__left-head">
                     <h2 class="rooms-workspace__left-title">"Rooms"</h2>
@@ -318,9 +379,21 @@ pub fn RoomsWorkspace(
                 <div class="rooms-workspace__left-list">
                     {move || {
                         let list = rooms.list.get();
-                        if list.is_empty() && !rooms.rooms_loaded.get() {
+                        let error = rooms.rooms_error.get();
+                        if let Some(error) = error {
                             view! {
-                                <div class="rooms-workspace__left-empty">
+                                <div
+                                    class="rooms-workspace__left-empty rooms-workspace__left-empty--error"
+                                    role="alert"
+                                >
+                                    {format!("Unable to load rooms: {error}")}
+                                </div>
+                            }.into_any()
+                        } else if list.is_empty()
+                            && (rooms.rooms_loading.get() || !rooms.rooms_loaded.get())
+                        {
+                            view! {
+                                <div class="rooms-workspace__left-empty" role="status">
                                     "Loading…"
                                 </div>
                             }.into_any()
@@ -362,11 +435,31 @@ pub fn RoomsWorkspace(
                     }}
                 </div>
 
+                {move || {
+                    let status = rooms.status.get();
+                    if status.starts_with("rooms ") || status.starts_with("create ") {
+                        view! {
+                            <div
+                                class="rooms-workspace__left-status"
+                                role="status"
+                                aria-live="polite"
+                            >
+                                {status}
+                            </div>
+                        }.into_any()
+                    } else {
+                        ().into_any()
+                    }
+                }}
+
                 // Create input at bottom of left rail
                 <div class="rooms-workspace__left-create">
                     <input
                         class="rooms-workspace__left-input"
                         type="text"
+                        node_ref=create_input_ref
+                        aria-label="New room name"
+                        aria-busy=move || pending_create.get().to_string()
                         placeholder="New room name…"
                         prop:value=move || new_room_name.get()
                         on:input=move |ev| new_room_name.set(event_target_value(&ev))
@@ -376,6 +469,8 @@ pub fn RoomsWorkspace(
                                 create_room();
                             }
                         }
+                        disabled=move || pending_create.get()
+                    />
                     />
                 </div>
             </div>
@@ -435,6 +530,7 @@ pub fn RoomsWorkspace(
                                             class="rooms-workspace__center-back"
                                             type="button"
                                             title="Back to room list"
+                                            aria-label="Close current room"
                                             on:click=move |_| rooms.close_room()
                                         >
                                             <svg viewBox="0 0 16 16" width="14" height="14"
@@ -452,21 +548,32 @@ pub fn RoomsWorkspace(
                                     match state {
                                         Some(RoomAccessState::Connecting) => {
                                             view! {
-                                                <div class="room-stage__access-state room-stage__access-state--connecting">
+                                                <div
+                                                    class="room-stage__access-state room-stage__access-state--connecting"
+                                                    role="status"
+                                                    aria-live="polite"
+                                                >
                                                     "Connecting to federated room…"
                                                 </div>
                                             }.into_any()
                                         }
                                         Some(RoomAccessState::Recovering) => {
                                             view! {
-                                                <div class="room-stage__access-state room-stage__access-state--recovering">
+                                                <div
+                                                    class="room-stage__access-state room-stage__access-state--recovering"
+                                                    role="status"
+                                                    aria-live="polite"
+                                                >
                                                     "Recovering connection…"
                                                 </div>
                                             }.into_any()
                                         }
                                         Some(RoomAccessState::Revoked) => {
                                             view! {
-                                                <div class="room-stage__access-state room-stage__access-state--revoked">
+                                                <div
+                                                    class="room-stage__access-state room-stage__access-state--revoked"
+                                                    role="alert"
+                                                >
                                                     "Access revoked"
                                                 </div>
                                             }.into_any()
@@ -497,7 +604,7 @@ pub fn RoomsWorkspace(
                                                         {if is_system {
                                                             view! { <crate::icons::Spark /> }.into_any()
                                                         } else {
-                                                            m.author_id.chars().take(2).collect::<String>().into_any()
+                                                            m.author_id.chars().take(2).collect::<String>().to_uppercase().into_any()
                                                         }}
                                                     </div>
                                                     <div class="rooms-workspace__msg-body">
@@ -532,6 +639,68 @@ pub fn RoomsWorkspace(
                                     }}
                                 </div>
 
+                                // Federation outbox is explicitly outside the
+                                // confirmed transcript. Pending items are
+                                // informational; only failed items can retry.
+                                {move || {
+                                    let outbox = rooms.access.get()
+                                        .map(|access| access.outbox)
+                                        .unwrap_or_default();
+                                    if outbox.is_empty() {
+                                        ().into_any()
+                                    } else {
+                                        view! {
+                                            <div
+                                                class="rooms-workspace__outbox"
+                                                aria-label="Messages awaiting federation"
+                                                aria-live="polite"
+                                            >
+                                                <For
+                                                    each=move || rooms.access.get()
+                                                        .map(|access| access.outbox)
+                                                        .unwrap_or_default()
+                                                    key=|item| item.client_event_id.clone()
+                                                    children=move |item| {
+                                                        let failed = item.state == OutboxItemState::Failed;
+                                                        let body = item.payload.get("body")
+                                                            .and_then(|body| body.as_str())
+                                                            .unwrap_or("Message awaiting confirmation")
+                                                            .to_string();
+                                                        let event_id = item.client_event_id.clone();
+                                                        view! {
+                                                            <div
+                                                                class="rooms-workspace__outbox-item"
+                                                                class:rooms-workspace__outbox-item--failed=failed
+                                                            >
+                                                                <span class="rooms-workspace__outbox-state">
+                                                                    {if failed { "Failed" } else { "Pending" }}
+                                                                </span>
+                                                                <span class="rooms-workspace__outbox-body">
+                                                                    {body}
+                                                                </span>
+                                                                {if failed {
+                                                                    view! {
+                                                                        <button
+                                                                            class="rooms-workspace__outbox-retry"
+                                                                            type="button"
+                                                                            aria-label="Retry failed message"
+                                                                            on:click=move |_| rooms.retry_outbox(event_id.clone())
+                                                                        >
+                                                                            "Retry"
+                                                                        </button>
+                                                                    }.into_any()
+                                                                } else {
+                                                                    ().into_any()
+                                                                }}
+                                                            </div>
+                                                        }
+                                                    }
+                                                />
+                                            </div>
+                                        }.into_any()
+                                    }
+                                }}
+
                                 // Composer + status line
                                 <div class="rooms-workspace__composer">
                                     <form
@@ -544,6 +713,7 @@ pub fn RoomsWorkspace(
                                         <input
                                             class="rooms-workspace__composer-input"
                                             type="text"
+                                            aria-label="Message"
                                             placeholder="Message… (@id to mention)"
                                             prop:value=move || composer.get()
                                             on:input=move |ev| composer.set(event_target_value(&ev))
@@ -553,22 +723,29 @@ pub fn RoomsWorkspace(
                                             class="rooms-workspace__composer-send"
                                             type="submit"
                                             disabled=move || {
-                                                composer.get().trim().is_empty()
+                                                send_in_flight.get()
+                                                    || composer.get().trim().is_empty()
                                                     || !access_allows_writes(rooms.access.get().as_ref())
                                             }
                                         >
-                                            "Send"
+                                            {move || if send_in_flight.get() { "Sending…" } else { "Send" }}
                                         </button>
                                     </form>
 
-                                    // Status line: errors from create / join / post land here.
                                     {move || {
                                         let s = rooms.status.get();
-                                        if s.is_empty() {
+                                        if s.is_empty()
+                                            || s.starts_with("rooms ")
+                                            || s.starts_with("create ")
+                                        {
                                             ().into_any()
                                         } else {
                                             view! {
-                                                <div class="rooms-workspace__status">
+                                                <div
+                                                    class="rooms-workspace__status"
+                                                    role="status"
+                                                    aria-live="polite"
+                                                >
                                                     {s}
                                                 </div>
                                             }.into_any()
@@ -622,7 +799,7 @@ pub fn RoomsWorkspace(
                                                     view! {
                                                         <div class="rooms-workspace__member">
                                                             <div class="rooms-workspace__member-avatar">
-                                                                {p.display_name.chars().take(2).collect::<String>()}
+                                                                {p.display_name.chars().take(2).collect::<String>().to_uppercase()}
                                                             </div>
                                                             <span class="rooms-workspace__member-name">
                                                                 {p.display_name.clone()}
@@ -648,6 +825,8 @@ pub fn RoomsWorkspace(
                                         class="rooms-workspace__addagent"
                                         type="button"
                                         title="Add an agent participant"
+                                        aria-controls="rooms-workspace-agent-picker"
+                                        aria-expanded=move || show_add_agent.get().to_string()
                                         on:click=move |_| show_add_agent.update(|v: &mut bool| *v = !*v)
                                     >
                                         "+ agent"
@@ -655,9 +834,13 @@ pub fn RoomsWorkspace(
                                     {move || {
                                         if show_add_agent.get() {
                                             view! {
-                                                <div class="rooms-workspace__addagent-picker">
+                                                <div
+                                                    id="rooms-workspace-agent-picker"
+                                                    class="rooms-workspace__addagent-picker"
+                                                >
                                                     <select
                                                         class="rooms-workspace__addagent-select"
+                                                        aria-label="Choose an agent to add"
                                                         on:change=move |ev| {
                                                             let val = event_target_value(&ev);
                                                             if !val.is_empty() {
@@ -719,6 +902,11 @@ pub fn RoomsWorkspace(
                                                     FederatedActorType::Agent => "agent",
                                                 };
                                                 let presence = member.derived_presence;
+                                                let presence_label = match presence {
+                                                    Some(MemberPresence::Live) => "Live",
+                                                    Some(MemberPresence::Unavailable) => "Unavailable",
+                                                    None => "",
+                                                };
                                                 let local_agent = matches!(member.actor_type, FederatedActorType::Agent)
                                                     && member.local_binding_available == Some(true);
                                                 let remote_agent = matches!(member.actor_type, FederatedActorType::Agent)
@@ -733,7 +921,7 @@ pub fn RoomsWorkspace(
                                                         title=desc_title
                                                     >
                                                         <div class="rooms-workspace__member-avatar">
-                                                            {member.display_name.chars().take(2).collect::<String>()}
+                                                            {member.display_name.chars().take(2).collect::<String>().to_uppercase()}
                                                         </div>
                                                         <span class="rooms-workspace__member-name">
                                                             {member.display_name.clone()}
@@ -754,6 +942,8 @@ pub fn RoomsWorkspace(
                                                                     class:rooms-workspace__member-presence--unavailable=move || {
                                                                         presence == Some(MemberPresence::Unavailable)
                                                                     }
+                                                                    role="img"
+                                                                    aria-label=presence_label
                                                                 ></span>
                                                             }.into_any()
                                                         } else {
@@ -950,6 +1140,19 @@ mod tests {
         assert!(!should_clear_composer("hello", ""));
     }
 
+    #[test]
+    fn composer_normalizes_wire_body_once() {
+        assert_eq!(normalized_message_body("  hello world \n"), "hello world");
+    }
+
+    #[test]
+    fn composer_admission_rejects_empty_blocked_and_concurrent_sends() {
+        assert!(!message_send_admitted(false, true, " \n\t "));
+        assert!(!message_send_admitted(false, false, "hello"));
+        assert!(!message_send_admitted(true, true, "hello"));
+        assert!(message_send_admitted(false, true, " hello "));
+    }
+
     // ── Behavioral: resolve_create_op (production helper from rooms.rs) ──
     // Uses the real pub fn that the Effect calls — no cfg(test)-only copies.
 
@@ -1081,7 +1284,7 @@ mod tests {
     fn drawer_toggle_is_idempotent() {
         // Two toggles = identity — the drawer returns to its previous
         // state, which is the contract for a compact-nav hamburger.
-        assert_eq!(toggle_drawer(toggle_drawer(false)), false);
-        assert_eq!(toggle_drawer(toggle_drawer(true)), true);
+        assert!(!toggle_drawer(toggle_drawer(false)));
+        assert!(toggle_drawer(toggle_drawer(true)));
     }
 }
