@@ -1236,6 +1236,11 @@ pub fn RoomsWorkspace(
                                             }.into_any()
                                         } else {
                                             view! {
+                                                <div
+                                                    class="rooms-workspace__member-list"
+                                                    role="list"
+                                                    aria-label="Room members"
+                                                >
                                                 <For
                                                     each=move || rooms.open_room.get()
                                                         .map(|r| r.participants)
@@ -1243,7 +1248,7 @@ pub fn RoomsWorkspace(
                                                     key=|p: &RoomParticipant| p.id.clone()
                                                     children=move |p: RoomParticipant| {
                                                         view! {
-                                                            <div class="rooms-workspace__member">
+                                                            <div class="rooms-workspace__member" role="listitem">
                                                                 <div class="rooms-workspace__member-avatar">
                                                                     {p.display_name.chars().take(2).collect::<String>().to_uppercase()}
                                                                 </div>
@@ -1263,6 +1268,7 @@ pub fn RoomsWorkspace(
                                                         }
                                                     }
                                                 />
+                                                </div>
                                             }.into_any()
                                         }}
 
@@ -1334,6 +1340,14 @@ pub fn RoomsWorkspace(
                                     } else {
                                         let members = access.members.clone();
                                         view! {
+                                            // Roster is a real list: give AT an
+                                            // item count + boundaries instead of
+                                            // an undifferentiated div run.
+                                            <div
+                                                class="rooms-workspace__member-list"
+                                                role="list"
+                                                aria-label="Room members"
+                                            >
                                             <For
                                                 each=move || members.clone()
                                                 key=|m: &FederatedRoomMemberProjection| m.member_id.clone()
@@ -1361,6 +1375,7 @@ pub fn RoomsWorkspace(
                                                         .unwrap_or_default();
                                                     view! {
                                                         <div class="rooms-workspace__member"
+                                                            role="listitem"
                                                             class:rooms-workspace__member--local-agent=local_agent
                                                             class:rooms-workspace__member--remote-agent=remote_agent
                                                             title=desc_title
@@ -1398,6 +1413,7 @@ pub fn RoomsWorkspace(
                                                     }
                                                 }
                                             />
+                                            </div>
                                         }.into_any()
                                     }
                                 }
