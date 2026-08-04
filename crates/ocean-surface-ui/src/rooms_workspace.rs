@@ -63,16 +63,13 @@ fn access_allows_writes(access: Option<&RoomAccessProjection>) -> bool {
     )
 }
 
-/// Render a compact time label from an ISO-8601 timestamp. Mirrors
-/// `rooms::short_time`.
+/// Render a compact clock label from the canonical RFC3339 wire timestamp.
+/// Extracts the shared `HH:MM` prefix for `Z`, fractional-second, and offset
+/// variants without converting timezones or localizing; invalid/non-canonical
+/// input passes through unchanged.
 #[allow(dead_code)]
 fn short_time(ts: &str) -> String {
-    // "2026-07-25T03:43:12Z" → "03:43"
-    if ts.len() >= 16 {
-        ts[11..16].to_string()
-    } else {
-        ts.to_string()
-    }
+    canonical_wire_clock_time(ts)
 }
 
 /// The client's current UTC day key (`YYYY-MM-DD`), matching the daemon's
@@ -183,22 +180,40 @@ fn sync_thread_selection(
     thread_root_for(transcript, Some(root_seq)).map(|_| root_seq)
 }
 
-/// Deterministic per-author avatar hue. Identity comes ONLY from the
-/// existing palette tokens (accent/ok/warn/info/err soft pairs) — no new
-/// raw colors. Same author id always maps to the same hue; system rows
-/// keep the neutral accent avatar.
-/// Row timestamp: clock only. The day dividers (Today/Yesterday/date)
-/// already carry the date, so repeating it on every row is pure noise —
-/// Slack never does. Falls back to the full string when the input is
-/// not the canonical "YYYY-MM-DD HH:MM" short form. The full timestamp
-/// stays available on hover via the title attribute.
-fn clock_time(short: &str) -> String {
-    match short.get(11..) {
-        Some(clock) if short.len() == 16 => clock.to_string(),
-        _ => short.to_string(),
-    }
-}
+/// Row timestamp: show only the canonical wire clock (HH:MM) for RFC3339
+/// timestamps while preserving the full wire value for machine-readable and
+/// accessible render paths. Accepts only ASCII canonical structure at the
+/// byte positions we actually rely on, never panics on Unicode/invalid input,
+/// and returns the original string unchanged when the wire value is not the
+/// expected RFC3339 shape.
+fn canonical_wire_clock_time(full: &str) -> String {
+    let bytes = full.as_bytes();
+    let is_digit = |idx: usize| bytes.get(idx).is_some_and(|b| b.is_ascii_digit());
 
+    if bytes.len() < 16
+        || !full.is_ascii()
+        || !is_digit(0)
+        || !is_digit(1)
+        || !is_digit(2)
+        || !is_digit(3)
+        || bytes[4] != b'-'
+        || !is_digit(5)
+        || !is_digit(6)
+        || bytes[7] != b'-'
+        || !is_digit(8)
+        || !is_digit(9)
+        || bytes[10] != b'T'
+        || !is_digit(11)
+        || !is_digit(12)
+        || bytes[13] != b':'
+        || !is_digit(14)
+        || !is_digit(15)
+    {
+        return full.to_string();
+    }
+
+    full[11..16].to_string()
+}
 fn avatar_identity_class(author_id: &str) -> &'static str {
     const HUES: [&str; 5] = [
         "rooms-workspace__msg-avatar--hue0",
@@ -957,6 +972,7 @@ pub fn RoomsWorkspace(
                                         children=move |(prev, m): (Option<RoomMessage>, RoomMessage)| {
                                             let is_system = room_messages::is_compact_system_row(&m);
                                             let ts = short_time(&m.created_at);
+                                            let full_ts = m.created_at.clone();
                                             let root_seq = m.seq;
                                             let day_label = room_messages::day_separator_label(prev.as_ref(), &m)
                                                 .map(|d| room_messages::humanize_day_label(&d, &today_day_key()));
@@ -1004,12 +1020,13 @@ pub fn RoomsWorkspace(
                                                             <span class="rooms-workspace__msg-name">
                                                                 {m.author_id.clone()}
                                                             </span>
-                                                            <span
+                                                            <time
                                                                 class="rooms-workspace__msg-time"
-                                                                title=ts.clone()
+                                                                datetime=full_ts.clone()
+                                                                aria-label=full_ts.clone()
                                                             >
-                                                                {clock_time(&ts)}
-                                                            </span>
+                                                                {canonical_wire_clock_time(&full_ts)}
+                                                            </time>
                                                         </div>
                                                         <div class="rooms-workspace__msg-text">
                                                             {crate::room_markdown::body_view(m.body.clone(), member_ids)}
@@ -1306,8 +1323,13 @@ pub fn RoomsWorkspace(
                                             <div class="rooms-workspace__msg-body">
                                                 <div class="rooms-workspace__msg-author">
                                                     <span class="rooms-workspace__msg-name">{root.author_id.clone()}</span>
-                                                    <span class="rooms-workspace__msg-time" title=ts
-    .clone()>{clock_time(&ts)}</span>
+                                                    <time
+                                                        class="rooms-workspace__msg-time"
+                                                        datetime=ts.clone()
+                                                        aria-label=ts.clone()
+                                                    >
+                                                        {canonical_wire_clock_time(&ts)}
+                                                    </time>
                                                 </div>
                                                 <div class="rooms-workspace__msg-text">
                                                     {crate::room_markdown::body_view(root.body.clone(), member_ids)}
@@ -1342,8 +1364,13 @@ pub fn RoomsWorkspace(
                                                         <div class="rooms-workspace__msg-body">
                                                             <div class="rooms-workspace__msg-author">
                                                                 <span class="rooms-workspace__msg-name">{reply.author_id.clone()}</span>
-                                                                <span class="rooms-workspace__msg-time" title=ts
-    .clone()>{clock_time(&ts)}</span>
+                                                                <time
+                                                                    class="rooms-workspace__msg-time"
+                                                                    datetime=ts.clone()
+                                                                    aria-label=ts.clone()
+                                                                >
+                                                                    {canonical_wire_clock_time(&ts)}
+                                                                </time>
                                                             </div>
                                                             <div class="rooms-workspace__msg-text">
                                                                 {crate::room_markdown::body_view(reply.body.clone(), member_ids)}
@@ -1691,8 +1718,18 @@ mod tests {
     // ── short_time ────────────────────────────────────────────────────
 
     #[test]
-    fn short_time_extracts_hhmm_from_iso() {
+    fn short_time_extracts_hhmm_from_rfc3339_z() {
         assert_eq!(short_time("2026-07-25T03:43:12Z"), "03:43");
+    }
+
+    #[test]
+    fn short_time_extracts_hhmm_from_rfc3339_fractional() {
+        assert_eq!(short_time("2026-07-25T03:43:12.987Z"), "03:43");
+    }
+
+    #[test]
+    fn short_time_extracts_hhmm_from_rfc3339_offset() {
+        assert_eq!(short_time("2026-07-25T03:43:12+07:00"), "03:43");
     }
 
     #[test]
@@ -1701,11 +1738,30 @@ mod tests {
     }
 
     #[test]
-    fn short_time_handles_minimum_16_chars() {
-        assert_eq!(short_time("2026-01-01T00:00"), "00:00");
+    fn short_time_passthrough_noncanonical_separator() {
+        assert_eq!(short_time("2026-07-25 03:43:12Z"), "2026-07-25 03:43:12Z");
     }
 
-    // ── transcript_is_empty ───────────────────────────────────────────
+    #[test]
+    fn short_time_passthrough_unicode_without_panic() {
+        assert_eq!(
+            short_time("２０２６-07-25T03:43:12Z"),
+            "２０２６-07-25T03:43:12Z"
+        );
+    }
+
+    #[test]
+    fn short_time_renders_full_accessible_time_markup() {
+        let ts = "2026-07-25T03:43:12.987+07:00";
+        let clock = canonical_wire_clock_time(ts);
+        let markup = format!(
+            "<time class=\"rooms-workspace__msg-time\" datetime=\"{ts}\" aria-label=\"{ts}\">{clock}</time>"
+        );
+        assert!(markup.contains("<time"));
+        assert!(markup.contains("datetime=\"2026-07-25T03:43:12.987+07:00\""));
+        assert!(markup.contains("aria-label=\"2026-07-25T03:43:12.987+07:00\""));
+        assert!(markup.ends_with(">03:43</time>"));
+    }
 
     fn test_msg(seq: u64, body: &str, thread_parent_seq: Option<u64>) -> RoomMessage {
         RoomMessage {
@@ -1861,12 +1917,16 @@ mod tests {
     // ── Behavioral: composer draft preservation (production helper) ──
 
     #[test]
-    fn clock_time_strips_redundant_date() {
-        assert_eq!(clock_time("2026-06-05 12:34"), "12:34");
+    fn canonical_wire_clock_time_strips_redundant_date_for_rfc3339() {
+        assert_eq!(canonical_wire_clock_time("2026-06-05T12:34:56Z"), "12:34");
         // Non-canonical inputs fall back to the full string — never lie.
-        assert_eq!(clock_time(""), "");
-        assert_eq!(clock_time("12:34"), "12:34");
-        assert_eq!(clock_time("2026-06-05T12"), "2026-06-05T12");
+        assert_eq!(canonical_wire_clock_time(""), "");
+        assert_eq!(canonical_wire_clock_time("12:34"), "12:34");
+        assert_eq!(canonical_wire_clock_time("2026-06-05T12"), "2026-06-05T12");
+        assert_eq!(
+            canonical_wire_clock_time("2026-06-05 12:34"),
+            "2026-06-05 12:34"
+        );
     }
 
     #[test]
