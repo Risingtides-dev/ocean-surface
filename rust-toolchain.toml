@@ -1,3 +1,10 @@
 [toolchain]
 channel = "1.97.0"
 components = ["rustfmt", "clippy"]
+# The canonical UI is a Leptos CSR app whose shipped artifact is wasm, and
+# CLAUDE.md documents `cargo check -p ocean-surface-ui --target
+# wasm32-unknown-unknown` as a standard check. CI provisioned that target in
+# its toolchain step while this file did not, so the documented command
+# failed on a fresh clone with `error[E0463]: can't find crate for `core``.
+# Declaring it here makes a fresh checkout behave like CI.
+targets = ["wasm32-unknown-unknown"]
