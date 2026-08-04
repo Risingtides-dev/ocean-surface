@@ -1424,3 +1424,32 @@
     transition: none;
   }
 }
+
+/* ── Avatar identity hues ───────────────────────────────────────────
+   Deterministic per-author hue from avatar_identity_class(). Existing
+   palette tokens ONLY (accent/ok/warn/info/err soft pairs) — no new
+   raw colors. System rows keep the neutral accent avatar. */
+.rooms-workspace__msg-avatar--hue0 {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.rooms-workspace__msg-avatar--hue1 {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.rooms-workspace__msg-avatar--hue2 {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.rooms-workspace__msg-avatar--hue3 {
+  background: var(--info-soft);
+  color: var(--info);
+}
+
+.rooms-workspace__msg-avatar--hue4 {
+  background: var(--err-soft);
+  color: var(--err);
+}

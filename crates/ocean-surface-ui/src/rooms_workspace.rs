@@ -183,6 +183,24 @@ fn sync_thread_selection(
     thread_root_for(transcript, Some(root_seq)).map(|_| root_seq)
 }
 
+/// Deterministic per-author avatar hue. Identity comes ONLY from the
+/// existing palette tokens (accent/ok/warn/info/err soft pairs) — no new
+/// raw colors. Same author id always maps to the same hue; system rows
+/// keep the neutral accent avatar.
+fn avatar_identity_class(author_id: &str) -> &'static str {
+    const HUES: [&str; 5] = [
+        "rooms-workspace__msg-avatar--hue0",
+        "rooms-workspace__msg-avatar--hue1",
+        "rooms-workspace__msg-avatar--hue2",
+        "rooms-workspace__msg-avatar--hue3",
+        "rooms-workspace__msg-avatar--hue4",
+    ];
+    let h = author_id.bytes().fold(0usize, |acc, b| {
+        acc.wrapping_mul(31).wrapping_add(b as usize)
+    });
+    HUES[h % HUES.len()]
+}
+
 fn should_show_thread_button(message: &RoomMessage) -> bool {
     message.thread_parent_seq.is_none() && matches!(message.kind, RoomMessageKind::Message)
 }
@@ -955,7 +973,14 @@ pub fn RoomsWorkspace(
                                                     class:rooms-workspace__msg--system=is_system
                                                     class:rooms-workspace__msg--grouped=grouped
                                                 >
-                                                    <div class="rooms-workspace__msg-avatar">
+                                                    <div class=if is_system {
+                                                        "rooms-workspace__msg-avatar".to_string()
+                                                    } else {
+                                                        format!(
+                                                            "rooms-workspace__msg-avatar {}",
+                                                            avatar_identity_class(&m.author_id)
+                                                        )
+                                                    }>
                                                         {if is_system {
                                                             view! { <crate::icons::Spark /> }.into_any()
                                                         } else {
@@ -1249,7 +1274,14 @@ pub fn RoomsWorkspace(
                                             class="rooms-workspace__msg rooms-workspace__msg--thread-root"
                                             class:rooms-workspace__msg--system=root_is_system
                                         >
-                                            <div class="rooms-workspace__msg-avatar">
+                                            <div class=if root_is_system {
+                                                "rooms-workspace__msg-avatar".to_string()
+                                            } else {
+                                                format!(
+                                                    "rooms-workspace__msg-avatar {}",
+                                                    avatar_identity_class(&root.author_id)
+                                                )
+                                            }>
                                                 {if root_is_system {
                                                     view! { <crate::icons::Spark /> }.into_any()
                                                 } else {
@@ -1277,7 +1309,14 @@ pub fn RoomsWorkspace(
                                                         class="rooms-workspace__msg rooms-workspace__msg--thread-reply"
                                                         class:rooms-workspace__msg--system=is_system
                                                     >
-                                                        <div class="rooms-workspace__msg-avatar">
+                                                        <div class=if is_system {
+                                                            "rooms-workspace__msg-avatar".to_string()
+                                                        } else {
+                                                            format!(
+                                                                "rooms-workspace__msg-avatar {}",
+                                                                avatar_identity_class(&reply.author_id)
+                                                            )
+                                                        }>
                                                             {if is_system {
                                                                 view! { <crate::icons::Spark /> }.into_any()
                                                             } else {
@@ -1803,6 +1842,30 @@ mod tests {
     }
 
     // ── Behavioral: composer draft preservation (production helper) ──
+
+    #[test]
+    fn avatar_identity_is_deterministic_and_bounded() {
+        let a = avatar_identity_class("ada");
+        assert_eq!(a, avatar_identity_class("ada"), "same id, same hue");
+        assert!(a.starts_with("rooms-workspace__msg-avatar--hue"));
+        // Different ids may collide (5 hues) but must all stay in range.
+        for id in ["ada", "grace", "linus", "smaths", "ocean-agent-7", ""] {
+            let c = avatar_identity_class(id);
+            assert!(
+                (0..5).any(|n| c == format!("rooms-workspace__msg-avatar--hue{n}")),
+                "out of palette: {c}"
+            );
+        }
+    }
+
+    #[test]
+    fn avatar_identity_distributes_across_hues() {
+        use std::collections::HashSet;
+        let hues: HashSet<_> = (0..50)
+            .map(|n| avatar_identity_class(&format!("agent-{n}")))
+            .collect();
+        assert!(hues.len() >= 3, "degenerate distribution: {hues:?}");
+    }
 
     #[test]
     fn composer_clears_when_unedited() {
