@@ -4,6 +4,93 @@
    tokens.css; no floating cards, centered stage, room-mode animation,
    or new raw colours. */
 
+/* ── Timeline density contract ─────────────────────────────────────── */
+
+.rooms-workspace__msg--grouped {
+  margin-top: 2px;
+}
+
+.rooms-workspace__msg--grouped .rooms-workspace__msg-avatar {
+  opacity: 0;
+  width: 0;
+  min-width: 0;
+  margin-right: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.rooms-workspace__msg--grouped .rooms-workspace__msg-name {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.rooms-workspace__msg--grouped .rooms-workspace__msg-time {
+  margin-left: auto;
+}
+
+.rooms-workspace__msg--grouped:hover .rooms-workspace__msg-time,
+.rooms-workspace__msg--grouped:focus-within .rooms-workspace__msg-time {
+  opacity: 1;
+}
+
+.rooms-workspace__day-separator {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin: 12px 0;
+  color: var(--fg-4);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  line-height: 1;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.rooms-workspace__day-separator::before,
+.rooms-workspace__day-separator::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--border-subtle);
+}
+
+.rooms-workspace__day-separator::after {
+  opacity: 0.7;
+}
+
+/* If the view reuses the same divider class for a gap timestamp, keep the
+   same full-width treatment but soften the emphasis slightly. */
+.rooms-workspace__day-separator:where(:not([data-day])) {
+  color: var(--fg-3);
+  font-weight: 500;
+}
+
+.rooms-workspace__day-separator:where(:not([data-day]))::before,
+.rooms-workspace__day-separator:where(:not([data-day]))::after {
+  opacity: 0.85;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rooms-workspace__msg--grouped,
+  .rooms-workspace__day-separator,
+  .rooms-workspace__msg--grouped .rooms-workspace__msg-time {
+    transition: none;
+  }
+}
+
+/* Rooms workspace — dense, restrained Slack/Discord desktop layout.
+   Three-rail: left (room list), center (header + timeline + composer),
+   right (members / thread). Compact responsive collapse. All colours from
+   tokens.css; no floating cards, centered stage, room-mode animation,
+   or new raw colours. */
+
 /* ── Shell ─────────────────────────────────────────────────────────── */
 
 .rooms-workspace {
@@ -1299,4 +1386,72 @@
 .rooms-workspace__jump-new:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
+}
+
+/* ── Timeline density: grouping + day separators (density slice) ─────── */
+
+/* Consecutive-author follow-up rows: suppress avatar/name/time VISUALLY,
+   tighten vertical rhythm, show time on hover in the gutter.
+   A11y: the author name stays in the accessibility tree via the clip
+   pattern (screen readers keep attribution on every row); only the avatar
+   is fully hidden (decorative — markup should also carry aria-hidden). */
+.rooms-workspace__msg--grouped {
+  margin-top: 0;
+  padding-top: 1px;
+}
+
+.rooms-workspace__msg--grouped .rooms-workspace__msg-avatar {
+  visibility: hidden;
+  height: 0;
+}
+
+.rooms-workspace__msg--grouped .rooms-workspace__msg-name {
+  /* visually hidden, AT-readable */
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.rooms-workspace__msg--grouped .rooms-workspace__msg-time {
+  /* opacity keeps the timestamp AT-readable while visually deferred */
+  opacity: 0;
+  font-size: 10px;
+  color: var(--fg-3);
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__msg--grouped:hover .rooms-workspace__msg-time,
+.rooms-workspace__msg--grouped:focus-within .rooms-workspace__msg-time {
+  opacity: 1;
+}
+
+.rooms-workspace__day-separator {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 0 8px;
+  color: var(--fg-3);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.rooms-workspace__day-separator::before,
+.rooms-workspace__day-separator::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border-subtle);
+}
+
+
+/* ── Semantic wrappers (parity audit) ───────────────────────────────
+   Pure a11y containers (listbox / list roles). Layout-neutral by
+   design: parents are plain block-flow scroll containers with no
+   child combinators, so these must stay display:block. */
+.rooms-workspace__left-options,
+.rooms-workspace__member-list {
+  display: block;
 }

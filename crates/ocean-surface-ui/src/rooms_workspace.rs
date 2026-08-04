@@ -930,10 +930,10 @@ pub fn RoomsWorkspace(
                                                 .unwrap_or(false);
                                             view! {
                                                 {day_label.map(|d| view! {
-                                                    <div class="rooms-workspace__day-separator">{d}</div>
+                                                    <div class="rooms-workspace__day-separator" data-day="true">{d}</div>
                                                 })}
                                                 {gap_label.map(|g| view! {
-                                                    <div class="rooms-workspace__day-separator">{g}</div>
+                                                    <div class="rooms-workspace__day-separator" data-gap="true">{g}</div>
                                                 })}
                                                 <div
                                                     class="rooms-workspace__msg"
