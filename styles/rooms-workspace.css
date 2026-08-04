@@ -31,8 +31,8 @@
 
 .rooms-workspace__msg--grouped .rooms-workspace__msg-time {
   margin-left: auto;
-  /* hidden until hover/focus — the reveal below needs this base state */
-  opacity: 0;
+  color: var(--fg-4);
+  opacity: 0.68;
   transition: opacity var(--dur-fast) var(--ease);
 }
 
