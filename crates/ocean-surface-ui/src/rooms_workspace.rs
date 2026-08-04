@@ -263,17 +263,25 @@ pub fn RoomsWorkspace(
         }
     });
 
-    // Keep transcript pinned to newest message.
+    // Keep transcript pinned to newest message. When the reader has
+    // scrolled up, never yank them — surface the missed append as a
+    // "New messages" jump affordance instead (client scroll state only;
+    // this is not read-cursor "unread" state).
     let transcript = rooms.transcript;
+    let new_below = RwSignal::new(false);
     Effect::new(move |prev: Option<usize>| {
         let len = transcript.with(|t| t.len());
-        if len > 0 {
-            if let Some(el) = list_ref.get() {
-                let first_fill = prev.unwrap_or(0) == 0;
-                let near_bottom = el.scroll_height() - el.scroll_top() - el.client_height() < 120;
-                if first_fill || near_bottom {
-                    request_animation_frame(move || el.set_scroll_top(el.scroll_height()));
-                }
+        if len == 0 {
+            // Generation reset / room switch: nothing below.
+            new_below.set(false);
+        } else if let Some(el) = list_ref.get() {
+            let first_fill = prev.unwrap_or(0) == 0;
+            let near_bottom = el.scroll_height() - el.scroll_top() - el.client_height() < 120;
+            if first_fill || near_bottom {
+                request_animation_frame(move || el.set_scroll_top(el.scroll_height()));
+                new_below.set(false);
+            } else if len > prev.unwrap_or(0) {
+                new_below.set(true);
             }
         }
         len
@@ -877,6 +885,13 @@ pub fn RoomsWorkspace(
                                     role="log"
                                     aria-label="Messages"
                                     node_ref=list_ref
+                                    on:scroll=move |_| {
+                                        if let Some(el) = list_ref.get() {
+                                            if el.scroll_height() - el.scroll_top() - el.client_height() < 120 {
+                                                new_below.set(false);
+                                            }
+                                        }
+                                    }
                                 >
                                     <For
                                         // Pair each root with its predecessor so
@@ -1005,6 +1020,24 @@ pub fn RoomsWorkspace(
                                         }
                                     }}
                                 </div>
+
+                                // Jump affordance for appends missed while
+                                // scrolled up. Scroll-state UX only — never
+                                // read-cursor "unread" semantics.
+                                {move || new_below.get().then(|| view! {
+                                    <button
+                                        type="button"
+                                        class="rooms-workspace__jump-new"
+                                        on:click=move |_| {
+                                            if let Some(el) = list_ref.get() {
+                                                el.set_scroll_top(el.scroll_height());
+                                            }
+                                            new_below.set(false);
+                                        }
+                                    >
+                                        "\u{2193} New messages"
+                                    </button>
+                                })}
 
                                 // Federation outbox is explicitly outside the
                                 // confirmed transcript. Pending items are

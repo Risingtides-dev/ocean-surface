@@ -1267,3 +1267,36 @@
     font-size: 16px;
   }
 }
+
+/* ── "New messages" jump affordance ─────────────────────────────────
+   Shown only when appends arrive while the reader is scrolled up.
+   Client scroll state — not read-cursor unread semantics. */
+.rooms-workspace__center {
+  position: relative;
+}
+
+.rooms-workspace__jump-new {
+  position: absolute;
+  left: 50%;
+  bottom: 88px;
+  transform: translateX(-50%);
+  z-index: 5;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  padding: 5px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-on-accent);
+  background: var(--accent);
+  box-shadow: var(--shadow-md);
+  cursor: pointer;
+}
+
+.rooms-workspace__jump-new:hover {
+  filter: brightness(1.08);
+}
+
+.rooms-workspace__jump-new:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
