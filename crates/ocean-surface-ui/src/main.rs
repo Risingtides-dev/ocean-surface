@@ -29,6 +29,7 @@ mod observatory;
 mod palette;
 mod place_call;
 mod rooms;
+mod rooms_workspace;
 mod search;
 mod sessions;
 mod slash_menu;

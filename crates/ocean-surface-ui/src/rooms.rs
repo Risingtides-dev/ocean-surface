@@ -65,6 +65,7 @@ impl RoomParticipantKind {
     /// The author/roster chip mark — hand-drawn SVGs from `icons.rs`, same
     /// stroke family as the rest of the surface (emoji glyphs are forbidden
     /// in product UI; the 07-08 purge missed this path — QA-006).
+    #[allow(dead_code)]
     fn icon(self) -> AnyView {
         match self {
             RoomParticipantKind::Human => view! { <crate::icons::Person /> }.into_any(),
@@ -77,6 +78,7 @@ impl RoomParticipantKind {
 
     /// A lowercase word for the kind — shown next to the icon so the roster makes
     /// it explicit who's an agent (i.e. auto-convene-able) vs. a human.
+    #[allow(dead_code)]
     fn label(self) -> &'static str {
         match self {
             RoomParticipantKind::Human => "human",
@@ -121,6 +123,9 @@ pub struct RoomMessage {
     /// messages. Present only after Bedrock confirms.
     #[serde(default)]
     pub federated: Option<FederatedMessageMeta>,
+    /// Root message sequence for a one-level thread reply. `None` for roots.
+    #[serde(default)]
+    pub thread_parent_seq: Option<u64>,
 }
 
 // ---- Federated wire types (exact mirror of ocean-core 786c6ba4) -------------
@@ -161,6 +166,7 @@ pub enum FederatedActorType {
 }
 
 impl FederatedActorType {
+    #[allow(dead_code)]
     fn icon(self) -> AnyView {
         match self {
             Self::User => view! { <crate::icons::Person /> }.into_any(),
@@ -350,19 +356,24 @@ struct PostMessageBody<'a> {
     author_id: &'a str,
     author_kind: RoomParticipantKind,
     body: &'a str,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    thread_parent_seq: Option<u64>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
 struct RetryOutboxBody<'a> {
     client_event_id: &'a str,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 struct RetryOutboxSuccess {
     ok: bool,
     access: RoomAccessProjection,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 struct RetryOutboxErrorResponse {
     #[serde(default)]
@@ -399,6 +410,44 @@ impl RoomIdentity {
     }
 }
 
+/// Outcome of a typed create-room operation. Each outcome carries the
+/// request it resolves, so surfaces can gate only the matching attempt
+/// and leave concurrent submits untouched.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CreateOutcome {
+    /// Room created successfully (key).
+    Success { key: String },
+    /// Daemon rejected as a duplicate.
+    Duplicate,
+    /// Daemon rejected for another reason, or client-side reject
+    /// (empty name, encode error, network failure).
+    Failed { error: String },
+}
+
+/// Resolved action for a create-room dispatch — what the surface
+/// Effect should do after inspecting the op-id slot.
+#[derive(Debug, PartialEq)]
+pub enum CreateResolution {
+    /// Creation succeeded — clear the draft.
+    Success,
+    /// Creation failed or was rejected — keep the draft for retry.
+    KeepDraft,
+    /// No outcome yet (in flight) or op_id belongs to another attempt.
+    Pending,
+}
+
+/// CAS admission guard for the create-room result channel.
+/// Simple op-id comparison — only the dispatch that currently owns
+/// the slot may publish status and select its room.
+pub struct CasAdmission;
+
+impl CasAdmission {
+    /// True when `slot_op` matches `my_op` — the completion is current.
+    pub fn admit(slot_op: u64, my_op: u64) -> bool {
+        slot_op == my_op
+    }
+}
+
 /// Reactive handle for the rooms panel. Holds the room list, the open room +
 /// its transcript, status text, and the SSE-tail generation counter. Cloned
 /// freely (all fields are `Copy` signal handles), like [`crate::daemon::Daemon`].
@@ -414,6 +463,13 @@ pub struct Rooms {
     /// false so the panel shows a loading placeholder instead of falsely
     /// asserting "No rooms yet" during the initial in-flight fetch.
     pub rooms_loaded: RwSignal<bool>,
+    /// Whether the latest room-list request is still in flight.
+    pub rooms_loading: RwSignal<bool>,
+    /// Error from the latest room-list request, if that request failed.
+    pub rooms_error: RwSignal<Option<String>>,
+    /// Monotonic ticket ensuring only the latest overlapping list request may
+    /// publish list/loading/error state.
+    list_request_ticket: RwSignal<u64>,
     /// The currently selected room key, if any.
     pub open_key: RwSignal<Option<String>>,
     /// The open room's full record (roster + metadata).
@@ -429,8 +485,6 @@ pub struct Rooms {
     pub identity_id: RwSignal<&'static str>,
     /// This browser's display name.
     pub identity_name: RwSignal<&'static str>,
-    /// Whether the rooms browse panel itself is open.
-    pub panel_open: RwSignal<bool>,
     /// Tail state for the live connection indicator. Starts as Replaying during
     /// initial catch-up, switches to Live once connected, and to Reconnecting on
     /// drop/retry. The view reads this to render the status bar indicator.
@@ -445,13 +499,17 @@ pub struct Rooms {
     /// Required access projection for the open room. `None` means loading or
     /// no room is open; local rooms carry `Some(state = Local)`.
     pub access: RwSignal<Option<RoomAccessProjection>>,
+    /// Typed operation-id pair for create-room: (next_op_id, last_outcome).
+    /// Surfaces snapshot the op_id before dispatching and gate only on the
+    /// outcome carrying a matching id — concurrent submits never cross-resolve.
+    pub create_op: RwSignal<(u64, Option<CreateOutcome>)>,
 }
 
 impl Rooms {
     /// Construct a rooms handle that shares the live `Daemon::url` signal, so it
     /// always targets the origin resolved by bootstrap. Room collaboration is
     /// daemon-native text; LiveKit state is intentionally outside this type.
-    pub fn new(daemon: &crate::daemon::Daemon, panel_open: RwSignal<bool>) -> Self {
+    pub fn new(daemon: &crate::daemon::Daemon) -> Self {
         let identity = RoomIdentity::current();
         // Leak the small, app-lifetime identity strings to obtain `&'static str`
         // signals, so the panel can pass them into request closures without a
@@ -462,6 +520,9 @@ impl Rooms {
             url: daemon.url,
             list: RwSignal::new(Vec::new()),
             rooms_loaded: RwSignal::new(false),
+            rooms_loading: RwSignal::new(false),
+            rooms_error: RwSignal::new(None),
+            list_request_ticket: RwSignal::new(0),
             open_key: RwSignal::new(None),
             open_room: RwSignal::new(None),
             transcript: RwSignal::new(Vec::new()),
@@ -469,16 +530,21 @@ impl Rooms {
             generation: RwSignal::new(0),
             identity_id: RwSignal::new(id_static),
             identity_name: RwSignal::new(name_static),
-            panel_open,
             tail_state: RwSignal::new(TailState::Replaying),
             available_agents: RwSignal::new(Vec::new()),
             agents_loaded: RwSignal::new(false),
             access: RwSignal::new(None),
+            create_op: RwSignal::new((0, None)),
         }
     }
 
     fn base(&self) -> String {
         self.url.get_untracked().trim_end_matches('/').to_string()
+    }
+    /// Reactive projection used by the workspace to suppress its empty state
+    /// until snapshot replay has reached the live room tail.
+    pub fn transcript_tail_is_live(&self) -> bool {
+        self.tail_state.get() == TailState::Live
     }
 
     /// Current-room predicate over the live `generation` and `open_key`
@@ -503,38 +569,55 @@ impl Rooms {
         self.tail_state.set(TailState::Replaying);
     }
 
-    /// Whether the current identity is in the open room's roster.
+    /// Whether the current identity is joined according to the room's explicit
+    /// access authority. Local rooms use the daemon-native roster; every
+    /// non-local state uses only the safe access-member projection.
     pub fn joined_open(&self) -> bool {
-        let me = self.identity_id.get();
-        self.open_room
-            .get()
-            .map(|r| r.participants.iter().any(|p| p.id == me))
-            .unwrap_or(false)
+        joined_open_for(
+            self.access.get().as_ref(),
+            self.open_room.get().as_ref(),
+            self.identity_id.get(),
+        )
     }
 
-    /// Fetch the room list (`GET /v1/rooms/persistent`).
+    /// Fetch the room list (`GET /v1/rooms/persistent`). Overlapping requests
+    /// are latest-wins: an older completion cannot publish any list lifecycle
+    /// state after a newer request has started.
     pub fn fetch_rooms(&self) {
         let base = self.base();
-        let list = self.list;
-        let status = self.status;
-        let loaded = self.rooms_loaded;
+        let me = *self;
+        let ticket = self.list_request_ticket.get_untracked().wrapping_add(1);
+        self.list_request_ticket.set(ticket);
+        self.rooms_loading.set(true);
+        self.rooms_error.set(None);
         spawn_local(async move {
             let get_url = format!("{base}/v1/rooms/persistent");
-            match Request::get(&get_url).send().await {
+            let result = match Request::get(&get_url).send().await {
                 Ok(resp) => match resp.json::<RoomsListResponse>().await {
-                    Ok(r) if r.ok => list.set(r.rooms),
-                    Ok(r) => status.set(format!(
+                    Ok(r) if r.ok => Ok(r.rooms),
+                    Ok(r) => Err(format!(
                         "rooms list failed: {}",
                         r.error.unwrap_or_else(|| "unknown error".into())
                     )),
-                    Err(err) => status.set(format!("rooms decode error: {err}")),
+                    Err(err) => Err(format!("rooms decode error: {err}")),
                 },
-                Err(err) => status.set(format!("rooms fetch error: {err}")),
+                Err(err) => Err(format!("rooms fetch error: {err}")),
+            };
+            if !list_request_is_current(ticket, me.list_request_ticket.get_untracked()) {
+                return;
             }
-            // The first fetch has now resolved — the panel may distinguish
-            // "still loading" from "genuinely empty". Set on every outcome so a
-            // failed fetch stops claiming the list is loading forever.
-            loaded.set(true);
+            match result {
+                Ok(rooms) => {
+                    me.list.set(rooms);
+                    me.rooms_error.set(None);
+                }
+                Err(error) => {
+                    me.status.set(error.clone());
+                    me.rooms_error.set(Some(error));
+                }
+            }
+            me.rooms_loaded.set(true);
+            me.rooms_loading.set(false);
         });
     }
 
@@ -578,20 +661,40 @@ impl Rooms {
     /// Create a room (`POST /v1/rooms/persistent`) with an optional auto-convene
     /// `trigger_policy`, then select it. The daemon keys rooms by `key`; we
     /// derive a url-safe key from the name but keep the human name intact.
-    pub fn create_room(&self, name: String, policy: Option<RoomTriggerPolicy>) {
+    /// Atomically dispatch a create-room request, returning the op_id the
+    /// caller should snapshot. When the request resolves, `create_op` carries
+    /// a typed outcome tagged with that id — surfaces gate only on their own
+    /// id and leave concurrent submits untouched.
+    ///
+    /// Every side effect is gated on CAS admission: a stale completion
+    /// superseded by a later dispatch must never select the wrong room or
+    /// overwrite the current attempt's status. Stale successes still refresh
+    /// the room list so a server-created room is discoverable.
+    ///
+    /// Callers should gate dispatch on `pending_create` to prevent concurrent
+    /// attempts — the closure in `rooms_workspace.rs` does this.
+    pub fn create_room(&self, name: String, policy: Option<RoomTriggerPolicy>) -> u64 {
         let name = name.trim().to_string();
         if name.is_empty() {
-            return;
+            return 0;
         }
         let key = slugify(&name);
         if key.is_empty() {
             self.status
                 .set("room name needs at least one letter/number".into());
-            return;
+            return 0;
         }
         let base = self.base();
         let me = *self;
         let status = self.status;
+        let signal = self.create_op;
+        let op_id = {
+            let (n, _) = signal.get_untracked();
+            n.wrapping_add(1)
+        };
+        // Set "in flight" immediately so the caller doesn't immediately
+        // observe a stale-success resolution from a prior request.
+        signal.set((op_id, None));
         spawn_local(async move {
             let body = CreateRoomBody {
                 key: &key,
@@ -605,27 +708,94 @@ impl Rooms {
             let res = match res {
                 Ok(req) => req.send().await,
                 Err(err) => {
-                    status.set(format!("create encode error: {err}"));
+                    // Encode error: CAS-gate the status + outcome together.
+                    // Stale encode errors are fully suppressed — they carry
+                    // no server-side state.
+                    signal.update(|(cur, out)| {
+                        if Self::cas_admit_create(*cur, op_id) {
+                            status.set(format!("create encode error: {err}"));
+                            *out = Some(CreateOutcome::Failed {
+                                error: format!("encode: {err}"),
+                            });
+                        }
+                    });
                     return;
                 }
             };
-            match res {
+            let outcome = match res {
                 Ok(resp) => match resp.json::<RoomMutateResponse>().await {
-                    Ok(r) if r.ok => {
-                        status.set(format!("room '{name}' created"));
-                        // Refresh the list and open the new room.
-                        me.fetch_rooms();
-                        me.open_room(key.clone());
+                    Ok(r) if r.ok => CreateOutcome::Success { key: key.clone() },
+                    Ok(r) => {
+                        let msg = r.error.unwrap_or_else(|| "unknown error".into());
+                        if msg.to_lowercase().contains("duplicate") {
+                            CreateOutcome::Duplicate
+                        } else {
+                            CreateOutcome::Failed { error: msg }
+                        }
                     }
-                    Ok(r) => status.set(format!(
-                        "create failed: {}",
-                        r.error.unwrap_or_else(|| "unknown error".into())
-                    )),
-                    Err(err) => status.set(format!("create decode error: {err}")),
+                    Err(err) => CreateOutcome::Failed {
+                        error: format!("decode: {err}"),
+                    },
                 },
-                Err(err) => status.set(format!("create post error: {err}")),
-            }
+                Err(err) => CreateOutcome::Failed {
+                    error: format!("post: {err}"),
+                },
+            };
+            // CAS-gated publish. Admitted: full status + select + list refresh.
+            // Stale success: list refresh only (server-created room must be
+            // discoverable). Stale failure/duplicate: fully suppressed.
+            signal.update(|(cur, out)| {
+                if Self::cas_admit_create(*cur, op_id) {
+                    *out = Some(outcome.clone());
+                    match &outcome {
+                        CreateOutcome::Success { key } => {
+                            status.set(format!("room '{name}' created"));
+                            me.fetch_rooms();
+                            me.open_room(key.clone());
+                        }
+                        CreateOutcome::Duplicate => {
+                            status.set(format!("room '{name}' already exists"));
+                        }
+                        CreateOutcome::Failed { error } => {
+                            status.set(format!("create failed: {error}"));
+                        }
+                    }
+                } else if matches!(&outcome, CreateOutcome::Success { .. }) {
+                    // Stale success: room exists server-side — refresh the
+                    // list so it's discoverable, but never select or report.
+                    me.fetch_rooms();
+                }
+                // Stale failure/duplicate: no side effects.
+            });
         });
+        op_id
+    }
+
+    /// Whether a create-room completion is still current (not superseded
+    /// by a later dispatch). Admitted = the slot op matches ours; stale
+    /// = the slot was claimed by a newer dispatch.
+    pub fn cas_admit_create(slot_op: u64, my_op: u64) -> bool {
+        CasAdmission::admit(slot_op, my_op)
+    }
+
+    /// Resolve a pending create-room dispatch from the op-id slot.
+    /// Called by the surface Effect — only the matching op_id's outcome
+    /// determines whether to clear the draft.
+    pub fn resolve_create_op(
+        current_op: u64,
+        my_op: u64,
+        outcome: Option<&CreateOutcome>,
+    ) -> CreateResolution {
+        if current_op != my_op {
+            return CreateResolution::Pending;
+        }
+        match outcome {
+            Some(CreateOutcome::Success { .. }) => CreateResolution::Success,
+            Some(CreateOutcome::Duplicate) | Some(CreateOutcome::Failed { .. }) => {
+                CreateResolution::KeepDraft
+            }
+            None => CreateResolution::Pending,
+        }
     }
 
     /// Open a room: load its record + full transcript, bump the generation, and
@@ -633,59 +803,48 @@ impl Rooms {
     pub fn open_room(&self, key: String) {
         let base = self.base();
         let me = *self;
-        let open_key = self.open_key;
-        let open_room = self.open_room;
-        let transcript = self.transcript;
-        let status = self.status;
-        let generation = self.generation;
-
-        // Retire any prior room's live loops and reset state synchronously.
-        let generation_id = generation.get_untracked().wrapping_add(1);
-        generation.set(generation_id);
-        open_key.set(Some(key.clone()));
-        me.reset_room_state();
-        status.set("loading room…".into());
-        // Entering a room takes the stage (RoomStage swaps in for the chat
-        // surface), so the browser panel folds away.
-        self.panel_open.set(false);
+        let generation_id = self.generation.get_untracked().wrapping_add(1);
+        self.generation.set(generation_id);
+        self.open_key.set(Some(key.clone()));
+        self.reset_room_state();
+        self.status.set("loading room…".into());
 
         spawn_local(async move {
             let get_url = format!("{base}/v1/rooms/persistent/{}", encode(&key));
-            match Request::get(&get_url).send().await {
+            let result = match Request::get(&get_url).send().await {
                 Ok(resp) if resp.ok() => match resp.json::<RoomGetResponse>().await {
-                    Ok(r) if r.ok => {
-                        // Guard against a fast re-select before this landed.
-                        if generation.get_untracked() != generation_id {
-                            return;
-                        }
-                        open_room.set(r.room);
-                        transcript.set(r.transcript);
-                        me.access.set(Some(r.access));
-                        status.set(String::new());
-                        // Pre-fetch agent list for the picker (TASK-11).
-                        me.fetch_agents();
-                        // Start live updates for this generation.
-                        me.start_live_tail(key.clone(), generation_id);
-                    }
-                    Ok(r) => status.set(format!(
+                    Ok(r) if r.ok => Ok((r.room, r.transcript, r.access)),
+                    Ok(r) => Err(format!(
                         "room load failed: {}",
                         r.error.unwrap_or_else(|| "unknown error".into())
                     )),
-                    Err(err) => status.set(format!("room decode error: {err}")),
+                    Err(err) => Err(format!("room decode error: {err}")),
                 },
                 Ok(resp) => {
                     let http_status = resp.status();
                     match resp.json::<RoomErrorResponse>().await {
-                        Ok(r) => status.set(format!(
+                        Ok(r) => Err(format!(
                             "room load failed: {}",
                             r.error.unwrap_or_else(|| format!("HTTP {http_status}"))
                         )),
-                        Err(err) => {
-                            status.set(format!("room load failed: HTTP {http_status} ({err})"))
-                        }
+                        Err(err) => Err(format!("room load failed: HTTP {http_status} ({err})")),
                     }
                 }
-                Err(err) => status.set(format!("room fetch error: {err}")),
+                Err(err) => Err(format!("room fetch error: {err}")),
+            };
+            if !me.room_is_current(generation_id, &key) {
+                return;
+            }
+            match result {
+                Ok((room, transcript, access)) => {
+                    me.open_room.set(room);
+                    me.transcript.set(transcript);
+                    me.access.set(Some(access));
+                    me.status.set(String::new());
+                    me.fetch_agents();
+                    me.start_live_tail(key, generation_id);
+                }
+                Err(error) => me.status.set(error),
             }
         });
     }
@@ -704,7 +863,7 @@ impl Rooms {
         };
         let base = self.base();
         let me = *self;
-        let status = self.status;
+        let generation_id = self.generation.get_untracked();
         let id = self.identity_id.get_untracked();
         let name = self.identity_name.get_untracked();
         spawn_local(async move {
@@ -714,38 +873,41 @@ impl Rooms {
                 kind: RoomParticipantKind::Human,
             };
             let post_url = format!("{base}/v1/rooms/persistent/{}/participants", encode(&key));
-            let res = Request::post(&post_url)
+            let result = match Request::post(&post_url)
                 .header("content-type", "application/json")
-                .json(&body);
-            match res {
+                .json(&body)
+            {
                 Ok(req) => match req.send().await {
                     Ok(resp) => match resp.json::<RoomMutateResponse>().await {
-                        Ok(r) if r.ok => {
-                            me.open_room.set(r.room);
-                            status.set("joined".into());
-                            me.refresh_open_transcript(&key);
-                            me.fetch_rooms();
-                            me.panel_open.set(false);
-                        }
-                        Ok(r) => status.set(format!(
+                        Ok(r) if r.ok => Ok(r.room),
+                        Ok(r) => Err(format!(
                             "join failed: {}",
                             r.error.unwrap_or_else(|| "unknown error".into())
                         )),
-                        Err(err) => status.set(format!("join decode error: {err}")),
+                        Err(err) => Err(format!("join decode error: {err}")),
                     },
-                    Err(err) => status.set(format!("join post error: {err}")),
+                    Err(err) => Err(format!("join post error: {err}")),
                 },
-                Err(err) => status.set(format!("join encode error: {err}")),
+                Err(err) => Err(format!("join encode error: {err}")),
+            };
+            if result.is_ok() {
+                me.fetch_rooms();
+            }
+            if !me.room_is_current(generation_id, &key) {
+                return;
+            }
+            match result {
+                Ok(room) => {
+                    me.open_room.set(room);
+                    me.status.set("joined".into());
+                    me.refresh_open_transcript(&key, generation_id);
+                }
+                Err(error) => me.status.set(error),
             }
         });
     }
 
-    /// Add a real named agent to the open room via the daemon's validated join
-    /// (`POST .../participants` with `kind = agent`). TASK-9/TASK-11: the daemon
-    /// resolves `agent_id` against `agentdir::resolve` and rejects bogus ids
-    /// with a typed 400. The surface picks from `available_agents` (fetched via
-    /// `GET /v1/agents`) — free-text fake agents are gone. Once joined, the
-    /// agent is mentionable and auto-convenes per the room's trigger policy.
+    /// Add a daemon-owned agent identity to the open room.
     pub fn add_agent(&self, agent_id: String) {
         let agent_id = agent_id.trim().to_string();
         if agent_id.is_empty() {
@@ -757,7 +919,7 @@ impl Rooms {
         };
         let base = self.base();
         let me = *self;
-        let status = self.status;
+        let generation_id = self.generation.get_untracked();
         spawn_local(async move {
             let body = JoinBody {
                 id: &agent_id,
@@ -765,27 +927,37 @@ impl Rooms {
                 kind: RoomParticipantKind::Agent,
             };
             let post_url = format!("{base}/v1/rooms/persistent/{}/participants", encode(&key));
-            let res = Request::post(&post_url)
+            let result = match Request::post(&post_url)
                 .header("content-type", "application/json")
-                .json(&body);
-            match res {
+                .json(&body)
+            {
                 Ok(req) => match req.send().await {
                     Ok(resp) => match resp.json::<RoomMutateResponse>().await {
-                        Ok(r) if r.ok => {
-                            me.open_room.set(r.room);
-                            status.set(format!("agent '{agent_id}' added — mention @{agent_id}"));
-                            me.refresh_open_transcript(&key);
-                            me.fetch_rooms();
-                        }
-                        Ok(r) => status.set(format!(
+                        Ok(r) if r.ok => Ok(r.room),
+                        Ok(r) => Err(format!(
                             "add agent failed: {}",
                             r.error.unwrap_or_else(|| "unknown error".into())
                         )),
-                        Err(err) => status.set(format!("add agent decode error: {err}")),
+                        Err(err) => Err(format!("add agent decode error: {err}")),
                     },
-                    Err(err) => status.set(format!("add agent post error: {err}")),
+                    Err(err) => Err(format!("add agent post error: {err}")),
                 },
-                Err(err) => status.set(format!("add agent encode error: {err}")),
+                Err(err) => Err(format!("add agent encode error: {err}")),
+            };
+            if result.is_ok() {
+                me.fetch_rooms();
+            }
+            if !me.room_is_current(generation_id, &key) {
+                return;
+            }
+            match result {
+                Ok(room) => {
+                    me.open_room.set(room);
+                    me.status
+                        .set(format!("agent '{agent_id}' added — mention @{agent_id}"));
+                    me.refresh_open_transcript(&key, generation_id);
+                }
+                Err(error) => me.status.set(error),
             }
         });
     }
@@ -793,6 +965,7 @@ impl Rooms {
     /// Ids of the open room's **agent** participants — the actors a human can
     /// `@mention` to auto-convene. Used to render the composer's discoverability
     /// hint.
+    #[allow(dead_code)]
     pub fn agent_ids(&self) -> Vec<String> {
         let access = self.access.get();
         let room = self.open_room.get();
@@ -806,7 +979,7 @@ impl Rooms {
         };
         let base = self.base();
         let me = *self;
-        let status = self.status;
+        let generation_id = self.generation.get_untracked();
         let id = self.identity_id.get_untracked();
         spawn_local(async move {
             let del_url = format!(
@@ -814,28 +987,37 @@ impl Rooms {
                 encode(&key),
                 encode(id)
             );
-            match Request::delete(&del_url).send().await {
+            let result = match Request::delete(&del_url).send().await {
                 Ok(resp) => match resp.json::<RoomMutateResponse>().await {
-                    Ok(r) if r.ok => {
-                        me.open_room.set(r.room);
-                        status.set("left".into());
-                        me.refresh_open_transcript(&key);
-                        me.fetch_rooms();
-                    }
-                    Ok(r) => status.set(format!(
+                    Ok(r) if r.ok => Ok(r.room),
+                    Ok(r) => Err(format!(
                         "leave failed: {}",
                         r.error.unwrap_or_else(|| "unknown error".into())
                     )),
-                    Err(err) => status.set(format!("leave decode error: {err}")),
+                    Err(err) => Err(format!("leave decode error: {err}")),
                 },
-                Err(err) => status.set(format!("leave error: {err}")),
+                Err(err) => Err(format!("leave error: {err}")),
+            };
+            if result.is_ok() {
+                me.fetch_rooms();
+            }
+            if !me.room_is_current(generation_id, &key) {
+                return;
+            }
+            match result {
+                Ok(room) => {
+                    me.open_room.set(room);
+                    me.status.set("left".into());
+                    me.refresh_open_transcript(&key, generation_id);
+                }
+                Err(error) => me.status.set(error),
             }
         });
     }
 
     /// Post a message to the open room (`POST .../messages`). `@id` mentions in
     /// the body drive the daemon's trigger-policy auto-convene.
-    pub fn post_message(&self, body: String) {
+    pub fn post_message(&self, body: String, thread_parent_seq: Option<u64>) {
         if !access_allows_writes(self.access.get_untracked().as_ref()) {
             return;
         }
@@ -848,88 +1030,69 @@ impl Rooms {
         };
         let base = self.base();
         let me = *self;
-        let status = self.status;
+        let generation_id = self.generation.get_untracked();
         let id = self.identity_id.get_untracked();
         spawn_local(async move {
             let payload = PostMessageBody {
                 author_id: id,
                 author_kind: RoomParticipantKind::Human,
                 body: &body,
+                thread_parent_seq,
             };
             let post_url = format!("{base}/v1/rooms/persistent/{}/messages", encode(&key));
-            let res = Request::post(&post_url)
+            let result = match Request::post(&post_url)
                 .header("content-type", "application/json")
-                .json(&payload);
-            match res {
+                .json(&payload)
+            {
                 Ok(req) => match req.send().await {
-                    Ok(resp) if resp.ok() => {
-                        // The daemon also appends a System line on auto-convene;
-                        // re-tail to pick up our message + any trigger notice.
-                        me.refresh_open_transcript(&key);
-                    }
-                    Ok(resp) => {
-                        let text = resp.text().await.unwrap_or_default();
-                        status.set(format!("message failed: {text}"));
-                    }
-                    Err(err) => status.set(format!("message post error: {err}")),
+                    Ok(resp) if resp.ok() => Ok(()),
+                    Ok(resp) => Err(format!(
+                        "message failed: {}",
+                        resp.text().await.unwrap_or_default()
+                    )),
+                    Err(err) => Err(format!("message post error: {err}")),
                 },
-                Err(err) => status.set(format!("message encode error: {err}")),
+                Err(err) => Err(format!("message encode error: {err}")),
+            };
+            if !me.room_is_current(generation_id, &key) {
+                return;
+            }
+            match result {
+                Ok(()) => me.refresh_open_transcript(&key, generation_id),
+                Err(error) => me.status.set(error),
             }
         });
     }
 
-    /// Retry a failed outbox item (`POST …/outbox/retry`). On 202 the daemon
-    /// returns the fresh access projection; apply it immediately with
-    /// generation + open_key guard, then idempotently accept the duplicate SSE
-    /// `room_access` wake when it arrives later.
+    /// Retry a failed outbox item (`POST …/outbox/retry`).
+    #[allow(dead_code)]
     pub fn retry_outbox(&self, client_event_id: String) {
         let Some(key) = self.open_key.get_untracked() else {
             return;
         };
         let base = self.base();
         let me = *self;
-        let status = self.status;
         let generation_id = self.generation.get_untracked();
         spawn_local(async move {
             let payload = RetryOutboxBody {
                 client_event_id: &client_event_id,
             };
             let post_url = format!("{base}/v1/rooms/persistent/{}/outbox/retry", encode(&key));
-            let res = Request::post(&post_url)
+            let result = match Request::post(&post_url)
                 .header("content-type", "application/json")
-                .json(&payload);
-            match res {
+                .json(&payload)
+            {
                 Ok(req) => match req.send().await {
                     Ok(resp) if resp.status() == 202 => {
                         match resp.json::<RetryOutboxSuccess>().await {
-                            Ok(r) if r.ok => {
-                                if !room_request_is_current(
-                                    generation_id,
-                                    me.generation.get_untracked(),
-                                    &key,
-                                    me.open_key.get_untracked().as_deref(),
-                                ) {
-                                    return;
-                                }
-                                apply_access_projection(&me.access, r.access);
-                                status.set("retry queued".into());
-                            }
-                            Ok(_) => status.set("retry response invalid".into()),
-                            Err(err) => status.set(format!("retry decode error: {err}")),
+                            Ok(r) if r.ok => Ok(r.access),
+                            Ok(_) => Err("retry response invalid".into()),
+                            Err(err) => Err(format!("retry decode error: {err}")),
                         }
                     }
                     Ok(resp) => {
                         let http_status = resp.status();
-                        let error = resp.json::<RetryOutboxErrorResponse>().await;
-                        if !room_request_is_current(
-                            generation_id,
-                            me.generation.get_untracked(),
-                            &key,
-                            me.open_key.get_untracked().as_deref(),
-                        ) {
-                            return;
-                        }
-                        match error {
+                        match resp.json::<RetryOutboxErrorResponse>().await {
                             Ok(r) => {
                                 let detail = match (r.code, r.error) {
                                     (Some(code), Some(error)) => format!("{code}: {error}"),
@@ -937,53 +1100,50 @@ impl Rooms {
                                     (None, Some(error)) => error,
                                     (None, None) => format!("HTTP {http_status}"),
                                 };
-                                status.set(format!("retry failed: {detail}"));
+                                Err(format!("retry failed: {detail}"))
                             }
-                            Err(err) => {
-                                status.set(format!("retry failed: HTTP {http_status} ({err})"))
-                            }
+                            Err(err) => Err(format!("retry failed: HTTP {http_status} ({err})")),
                         }
                     }
-                    Err(err) => status.set(format!("retry post error: {err}")),
+                    Err(err) => Err(format!("retry post error: {err}")),
                 },
-                Err(err) => status.set(format!("retry encode error: {err}")),
+                Err(err) => Err(format!("retry encode error: {err}")),
+            };
+            if !me.room_is_current(generation_id, &key) {
+                return;
+            }
+            match result {
+                Ok(access) => {
+                    apply_access_projection(&me.access, access);
+                    me.status.set("retry queued".into());
+                }
+                Err(error) => me.status.set(error),
             }
         });
     }
 
-    /// Re-fetch the open room's transcript tail (`after_seq` = our highest seq)
-    /// and append only new entries. Used after our own writes; the SSE stream
-    /// remains the primary source for remote updates.
-    fn refresh_open_transcript(&self, key: &str) {
+    /// Re-fetch the open room's transcript tail and append only new entries.
+    fn refresh_open_transcript(&self, key: &str, generation_id: u64) {
         let base = self.base();
-        let transcript = self.transcript;
-        let open_key = self.open_key;
+        let me = *self;
         let key = key.to_string();
         spawn_local(async move {
-            // Only tail if this is still the open room.
-            if open_key.get_untracked().as_deref() != Some(key.as_str()) {
+            if !me.room_is_current(generation_id, &key) {
                 return;
             }
-            let after = transcript
-                .get_untracked()
-                .last()
-                .map(|m| m.seq)
-                .unwrap_or(0);
+            let after = last_transcript_seq(&me.transcript.get_untracked());
             let get_url = format!(
                 "{base}/v1/rooms/persistent/{}/transcript?after_seq={after}",
                 encode(&key)
             );
             if let Ok(resp) = Request::get(&get_url).send().await {
                 if let Ok(r) = resp.json::<TranscriptResponse>().await {
-                    if r.ok && !r.transcript.is_empty() {
-                        // Guard: room may have changed during the await.
-                        if open_key.get_untracked().as_deref() != Some(key.as_str()) {
-                            return;
-                        }
-                        transcript.update(|t| {
-                            for m in r.transcript {
-                                if t.last().map(|l| l.seq).unwrap_or(0) < m.seq {
-                                    t.push(m);
+                    if r.ok && !r.transcript.is_empty() && me.room_is_current(generation_id, &key) {
+                        me.transcript.update(|transcript| {
+                            for message in r.transcript {
+                                if transcript.last().map(|last| last.seq).unwrap_or(0) < message.seq
+                                {
+                                    transcript.push(message);
                                 }
                             }
                         });
@@ -1234,17 +1394,43 @@ fn last_transcript_seq(transcript: &[RoomMessage]) -> u64 {
     transcript.last().map(|message| message.seq).unwrap_or(0)
 }
 
+fn list_request_is_current(expected_ticket: u64, current_ticket: u64) -> bool {
+    expected_ticket == current_ticket
+}
+
+fn joined_open_for(
+    access: Option<&RoomAccessProjection>,
+    room: Option<&Room>,
+    identity_id: &str,
+) -> bool {
+    let Some(access) = access else {
+        return false;
+    };
+    if access.state == RoomAccessState::Local {
+        return room.is_some_and(|room| {
+            room.participants
+                .iter()
+                .any(|participant| participant.id == identity_id)
+        });
+    }
+    access.members.iter().any(|member| {
+        member.member_id == identity_id || member.owner_member_id.as_deref() == Some(identity_id)
+    })
+}
+
 /// Which placeholder the rooms list should render, given whether the first
 /// fetch has resolved and how many rooms came back. Splitting `Loading` from
 /// `Empty` stops the panel from flashing "No rooms yet" while the initial
 /// request is still in flight — an empty list only *means* empty once loaded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) enum RoomsListState {
     Loading,
     Empty,
     Populated,
 }
 
+#[allow(dead_code)]
 pub(crate) fn rooms_list_state(loaded: bool, room_count: usize) -> RoomsListState {
     if room_count > 0 {
         // Rooms are present — always render them, even if a refetch is in
@@ -1263,6 +1449,7 @@ pub(crate) fn rooms_list_state(loaded: bool, room_count: usize) -> RoomsListStat
 /// `Reconnecting` gap) an empty transcript means "still loading", not
 /// "genuinely empty", so the stage must not flash the empty copy on room open
 /// before history arrives (same bug class as [`rooms_list_state`]).
+#[allow(dead_code)]
 fn show_transcript_empty(tail: TailState, transcript_empty: bool) -> bool {
     transcript_empty && matches!(tail, TailState::Live)
 }
@@ -1271,6 +1458,7 @@ fn show_transcript_empty(tail: TailState, transcript_empty: bool) -> bool {
 /// `/v1/agents` has resolved AND the list is empty. During the initial fetch an
 /// empty list means "still loading", not "no agents" (same flash class as the
 /// rooms-list and transcript empties).
+#[allow(dead_code)]
 fn show_no_agents(agents_loaded: bool, agent_count: usize) -> bool {
     agents_loaded && agent_count == 0
 }
@@ -1291,6 +1479,7 @@ fn access_allows_writes(access: Option<&RoomAccessProjection>) -> bool {
     )
 }
 
+#[allow(dead_code)]
 fn access_banner(access: Option<&RoomAccessProjection>) -> Option<&'static str> {
     match access.map(|projection| projection.state) {
         Some(RoomAccessState::Connecting) => Some("Connecting"),
@@ -1300,6 +1489,7 @@ fn access_banner(access: Option<&RoomAccessProjection>) -> Option<&'static str> 
     }
 }
 
+#[allow(dead_code)]
 fn agent_ids_for(access: Option<&RoomAccessProjection>, room: Option<&Room>) -> Vec<String> {
     let Some(access) = access else {
         return Vec::new();
@@ -1374,6 +1564,7 @@ fn encode(s: &str) -> String {
 
 /// A compact "last activity" label from an ISO-8601 timestamp — just the
 /// date+time portion, trimmed. Empty input → empty string.
+#[allow(dead_code)]
 fn short_time(ts: &str) -> String {
     if ts.is_empty() {
         return String::new();
@@ -1451,7 +1642,44 @@ mod tests {
             body: format!("message {seq}"),
             created_at: "2026-07-16T22:00:00Z".into(),
             federated: None,
+            thread_parent_seq: None,
         }
+    }
+
+    #[test]
+    fn post_message_wire_omits_none_thread_parent_and_includes_some() {
+        let root = serde_json::to_value(PostMessageBody {
+            author_id: "human-1",
+            author_kind: RoomParticipantKind::Human,
+            body: "root body",
+            thread_parent_seq: None,
+        })
+        .expect("root post message body should serialize");
+        assert_eq!(
+            root,
+            serde_json::json!({
+                "author_id": "human-1",
+                "author_kind": "human",
+                "body": "root body"
+            })
+        );
+
+        let reply = serde_json::to_value(PostMessageBody {
+            author_id: "human-1",
+            author_kind: RoomParticipantKind::Human,
+            body: "reply body",
+            thread_parent_seq: Some(7),
+        })
+        .expect("reply post message body should serialize");
+        assert_eq!(
+            reply,
+            serde_json::json!({
+                "author_id": "human-1",
+                "author_kind": "human",
+                "body": "reply body",
+                "thread_parent_seq": 7
+            })
+        );
     }
 
     fn local_room() -> Room {
@@ -1517,6 +1745,32 @@ mod tests {
         .expect("G1 message should decode");
 
         assert_eq!(message.federated, None);
+    }
+
+    #[test]
+    fn room_message_thread_parent_seq_decodes_and_defaults_to_none() {
+        let reply: RoomMessage = serde_json::from_value(serde_json::json!({
+            "seq": 2,
+            "author_id": "local-human",
+            "author_kind": "human",
+            "kind": "message",
+            "body": "reply",
+            "created_at": "2026-07-16T22:01:00Z",
+            "thread_parent_seq": 1
+        }))
+        .expect("reply should decode");
+        assert_eq!(reply.thread_parent_seq, Some(1));
+
+        let root: RoomMessage = serde_json::from_value(serde_json::json!({
+            "seq": 1,
+            "author_id": "local-human",
+            "author_kind": "human",
+            "kind": "message",
+            "body": "root",
+            "created_at": "2026-07-16T22:00:00Z"
+        }))
+        .expect("root should decode");
+        assert_eq!(root.thread_parent_seq, None);
     }
 
     #[test]
@@ -1761,6 +2015,42 @@ mod tests {
     }
 
     #[test]
+    fn joined_open_uses_only_the_authoritative_roster_for_access_mode() {
+        let room = local_room();
+        let local = access_projection(RoomAccessState::Local);
+        assert!(joined_open_for(Some(&local), Some(&room), "local-human"));
+        assert!(!joined_open_for(Some(&local), Some(&room), "remote-owner"));
+        assert!(!joined_open_for(None, Some(&room), "local-human"));
+
+        let mut federated = access_projection(RoomAccessState::Live);
+        federated.members = vec![FederatedRoomMemberProjection {
+            member_id: "federated-user".into(),
+            owner_member_id: Some("local-human".into()),
+            actor_type: FederatedActorType::User,
+            role_in_room: FederatedRoomRole::Member,
+            display_name: "Federated User".into(),
+            public_agent_descriptor: None,
+            joined_at: String::new(),
+            derived_presence: None,
+            local_binding_available: Some(true),
+        }];
+        assert!(joined_open_for(Some(&federated), None, "federated-user"));
+        assert!(joined_open_for(Some(&federated), None, "local-human"));
+        assert!(!joined_open_for(
+            Some(&federated),
+            Some(&room),
+            "local-agent"
+        ));
+    }
+
+    #[test]
+    fn room_list_ticket_is_strictly_latest_request_wins() {
+        assert!(list_request_is_current(8, 8));
+        assert!(!list_request_is_current(7, 8));
+        assert!(!list_request_is_current(8, 9));
+    }
+
+    #[test]
     fn outbox_states_keep_pending_and_failed_distinct() {
         assert_eq!(
             serde_json::from_str::<OutboxItemState>(r#""pending""#).unwrap(),
@@ -1818,6 +2108,9 @@ mod tests {
             url: RwSignal::new(String::new()),
             list: RwSignal::new(Vec::new()),
             rooms_loaded: RwSignal::new(false),
+            rooms_loading: RwSignal::new(false),
+            rooms_error: RwSignal::new(None),
+            list_request_ticket: RwSignal::new(0),
             open_key: RwSignal::new(None),
             open_room: RwSignal::new(None),
             transcript: RwSignal::new(Vec::new()),
@@ -1825,11 +2118,11 @@ mod tests {
             generation: RwSignal::new(0),
             identity_id: RwSignal::new("test-member"),
             identity_name: RwSignal::new("Test Member"),
-            panel_open: RwSignal::new(false),
             tail_state: RwSignal::new(TailState::Replaying),
             available_agents: RwSignal::new(Vec::new()),
             agents_loaded: RwSignal::new(false),
             access: RwSignal::new(None),
+            create_op: RwSignal::new((0, None)),
         };
 
         // Not-yet-opened: no key, gen=0 → room_is_current rejects.
@@ -1860,671 +2153,5 @@ mod tests {
             TailState::Replaying,
             "reset_room_state must pin tail_state to Replaying"
         );
-    }
-
-    // Regression for TASK-29 finding 3: participant display names must render
-    // inside a `.rooms-chip__name` child (the only shrinkable/ellipsizing part
-    // of the chip), not as bare flex text nodes that clip the fixed suffixes.
-    // The needles are assembled at runtime so this test's own literals cannot
-    // self-satisfy the assertions against the source.
-    #[test]
-    fn participant_display_names_render_inside_shrinkable_name_span() {
-        let compact: String = include_str!("rooms.rs")
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect();
-        let name_span = |expr: &str| format!("class=\"rooms-chip__name\">{{{expr}}}</span>");
-
-        assert!(
-            compact.contains(&name_span("p.display_name.clone()")),
-            "local roster participant name must render inside a .rooms-chip__name child span"
-        );
-        assert!(
-            compact.contains(&name_span("member.display_name.clone()")),
-            "federated roster member name must render inside a .rooms-chip__name child span"
-        );
-    }
-}
-
-// ---- View -------------------------------------------------------------------
-
-/// Rooms browser panel — slides in from the right (same overlay pattern as the
-/// sessions panel). Lists persistent rooms + create-with-policy; selecting a
-/// room ENTERS it: the panel closes and [`RoomStage`] takes over the main
-/// surface (rooms are a mode, not a drawer).
-#[component]
-pub fn RoomsPanel(rooms: Rooms, open: RwSignal<bool>) -> impl IntoView {
-    // Fetch the room list whenever the panel opens.
-    Effect::new(move |_| {
-        if open.get() {
-            rooms.fetch_rooms();
-        }
-    });
-
-    let is_open = move || open.get();
-    let new_room_name = RwSignal::new(String::new());
-
-    // ---- Trigger-policy toggles for room creation ---------------------------
-    // `on_mention` defaults on (the common auto-convene case); the rest default
-    // off. `on_schedule` is a free-form cron string (empty = no schedule).
-    let policy_on_mention = RwSignal::new(true);
-    let policy_on_thread_reply = RwSignal::new(false);
-    let policy_on_component_event = RwSignal::new(false);
-    let policy_on_schedule = RwSignal::new(String::new());
-
-    // Assemble the trigger policy from the toggles, or `None` if nothing is set
-    // (so the daemon stores no policy rather than an all-off one).
-    let collect_policy = move || -> Option<RoomTriggerPolicy> {
-        let cron = policy_on_schedule.get_untracked().trim().to_string();
-        let on_schedule = if cron.is_empty() { None } else { Some(cron) };
-        let policy = RoomTriggerPolicy {
-            on_mention: policy_on_mention.get_untracked(),
-            on_thread_reply: policy_on_thread_reply.get_untracked(),
-            on_component_event: policy_on_component_event.get_untracked(),
-            on_schedule,
-        };
-        if policy == RoomTriggerPolicy::default() {
-            None
-        } else {
-            Some(policy)
-        }
-    };
-
-    let room_list = rooms.list;
-    let rooms_loaded = rooms.rooms_loaded;
-    let list_state = move || rooms_list_state(rooms_loaded.get(), room_list.get().len());
-    let status = rooms.status;
-
-    view! {
-        <div
-            class="rooms-overlay"
-            class:rooms-overlay--open=is_open
-            on:click=move |ev| {
-                let target = event_target::<web_sys::HtmlElement>(&ev);
-                if target.class_list().contains("rooms-overlay") {
-                    open.set(false);
-                }
-            }
-        >
-            <div class="rooms-panel">
-                <div class="rooms-panel__head">
-                    <h2 class="rooms-panel__title">"Rooms"</h2>
-                    <button
-                        class="rooms-panel__close"
-                        type="button"
-                        aria-label="close rooms panel"
-                        on:click=move |_| open.set(false)
-                    >
-                        <crate::icons::Close />
-                    </button>
-                </div>
-
-                // ---- List view (no room open) -------------------------------
-                    <div class="rooms-panel__create">
-                        <input
-                            class="rooms-panel__create-input"
-                            type="text"
-                            placeholder="New room name…"
-                            prop:value=move || new_room_name.get()
-                            on:input=move |ev| new_room_name.set(event_target_value(&ev))
-                            on:keydown=move |ev| {
-                                if ev.key() == "Enter" {
-                                    ev.prevent_default();
-                                    let name = new_room_name.get_untracked();
-                                    rooms.create_room(name, collect_policy());
-                                    new_room_name.set(String::new());
-                                }
-                            }
-                        />
-                        <button
-                            class="rooms-panel__create-btn"
-                            type="button"
-                            on:click=move |_| {
-                                let name = new_room_name.get_untracked();
-                                rooms.create_room(name, collect_policy());
-                                new_room_name.set(String::new());
-                            }
-                        >
-                            "+ Create"
-                        </button>
-                    </div>
-
-                    // Trigger-policy toggles applied at room creation (OCEAN-117).
-                    // These wire into the daemon's `room_create` body; there is no
-                    // room-update route yet, so policy is set once at create time.
-                    <details class="rooms-policy">
-                        <summary class="rooms-policy__summary">
-                            <span class="rooms-policy__summary-label">"Response Policy"</span>
-                            <span class="rooms-policy__summary-hint">
-                                "when should agents respond — set at create"
-                            </span>
-                        </summary>
-                        <label class="rooms-policy__row">
-                            <input
-                                type="checkbox"
-                                prop:checked=move || policy_on_mention.get()
-                                on:change=move |ev| policy_on_mention.set(event_target_checked(&ev))
-                            />
-                            <span>"On mention"</span>
-                            <span class="rooms-policy__hint">"wake a mentioned agent"</span>
-                        </label>
-                        <label class="rooms-policy__row">
-                            <input
-                                type="checkbox"
-                                prop:checked=move || policy_on_thread_reply.get()
-                                on:change=move |ev| policy_on_thread_reply.set(event_target_checked(&ev))
-                            />
-                            <span>"On thread reply"</span>
-                        </label>
-                        <label class="rooms-policy__row">
-                            <input
-                                type="checkbox"
-                                prop:checked=move || policy_on_component_event.get()
-                                on:change=move |ev| policy_on_component_event.set(event_target_checked(&ev))
-                            />
-                            <span>"On interaction"</span>
-                        </label>
-                        <label class="rooms-policy__row rooms-policy__row--cron">
-                            <span>"On schedule"</span>
-                            <input
-                                class="rooms-policy__cron"
-                                type="text"
-                                placeholder="e.g. 0 9 * * *"
-                                prop:value=move || policy_on_schedule.get()
-                                on:input=move |ev| policy_on_schedule.set(event_target_value(&ev))
-                            />
-                        </label>
-                    </details>
-
-                    <div class="rooms-panel__list">
-                        <For
-                            each=move || room_list.get()
-                            key=|r| (r.id.clone(), r.participants.len(), r.updated_at.clone())
-                            children=move |room: Room| {
-                                let key = room.id.clone();
-                                let count = room.participants.len();
-                                let last = short_time(&room.updated_at);
-                                view! {
-                                    <button
-                                        class="rooms-item"
-                                        type="button"
-                                        on:click=move |_| rooms.open_room(key.clone())
-                                    >
-                                        <div class="rooms-item__name">{room.name.clone()}</div>
-                                        <div class="rooms-item__meta">
-                                            <span class="rooms-item__count">
-                                                {format!("{count} participant{}", if count == 1 { "" } else { "s" })}
-                                            </span>
-                                            <Show when={
-                                                let last = last.clone();
-                                                move || !last.is_empty()
-                                            }>
-                                                <span class="rooms-item__time">{last.clone()}</span>
-                                            </Show>
-                                        </div>
-                                    </button>
-                                }
-                            }
-                        />
-                    </div>
-
-                    <Show when=move || list_state() == RoomsListState::Loading>
-                        <div class="rooms-panel__loading">"Loading rooms…"</div>
-                    </Show>
-
-                    <Show when=move || list_state() == RoomsListState::Empty>
-                        <div class="rooms-panel__empty">
-                            "No rooms yet. Create one above to start collaborating."
-                        </div>
-                    </Show>
-
-
-                // Status line (errors / notices).
-                <Show when=move || !status.get().is_empty()>
-                    <div class="rooms-panel__status">{move || status.get()}</div>
-                </Show>
-            </div>
-        </div>
-    }
-}
-
-/// Full-surface room mode: entering a room from the browser panel promotes it
-/// to the main stage — the chat transcript/composer swap out and the room's
-/// own roster, transcript, and composer take the surface over (a room is a
-/// mode of operation you enter, not a drawer you peek at). Works with ZERO
-/// LiveKit configuration: the text room is daemon-native
-/// (`/v1/rooms/persistent/*`); the call strip above the stage upgrades the
-/// room to audio when LiveKit credentials exist.
-#[component]
-pub fn RoomStage(rooms: Rooms) -> impl IntoView {
-    let composer = RwSignal::new(String::new());
-    // Add-agent picker (TASK-9/TASK-11): reveal-on-intent ghost chip,
-    // choices populated from `GET /v1/agents` → `available_agents`.
-    let show_add_agent = RwSignal::new(false);
-
-    let open_room = rooms.open_room;
-    let transcript = rooms.transcript;
-    let tail_state = rooms.tail_state;
-    let status = rooms.status;
-
-    // Keep the transcript pinned to the newest message: jump to the bottom
-    // when the room's history first fills, and follow new messages tailing in
-    // unless the reader has scrolled up into history (same stick pattern as
-    // the chat transcript). The effect returns the seen length so the first
-    // fill is distinguishable from a live append.
-    let list_ref: NodeRef<leptos::html::Div> = NodeRef::new();
-    Effect::new(move |prev: Option<usize>| {
-        let len = transcript.with(|t| t.len());
-        if len > 0 {
-            if let Some(el) = list_ref.get() {
-                let first_fill = prev.unwrap_or(0) == 0;
-                let near_bottom = el.scroll_height() - el.scroll_top() - el.client_height() < 120;
-                if first_fill || near_bottom {
-                    request_animation_frame(move || el.set_scroll_top(el.scroll_height()));
-                }
-            }
-        }
-        len
-    });
-
-    view! {
-        <div class="room-stage">
-            <div class="room-stage__head">
-                <button
-                    class="room-stage__back"
-                    type="button"
-                    title="Back to rooms"
-                    on:click=move |_| {
-                        rooms.close_room();
-                        rooms.panel_open.set(true);
-                    }
-                >
-                    "‹ Rooms"
-                </button>
-                <h2 class="room-stage__title">
-                    {move || open_room.get().map(|r| r.name).unwrap_or_default()}
-                </h2>
-                <span class="room-stage__tail-state">
-                    {move || match rooms.tail_state.get() {
-                        TailState::Replaying => "● replaying",
-                        TailState::Live => "● live",
-                        TailState::Reconnecting => "○ reconnecting",
-                    }}
-                </span>
-                <Show
-                    when=move || rooms.joined_open()
-                    fallback=move || view! {
-                        <button
-                            class="room-stage__join"
-                            type="button"
-                            on:click=move |_| rooms.join_open()
-                        >
-                            "Join room"
-                        </button>
-                    }
-                >
-                    <button
-                        class="room-stage__leave"
-                        type="button"
-                        on:click=move |_| rooms.leave_open()
-                    >
-                        "Leave"
-                    </button>
-                </Show>
-            </div>
-
-            <Show when=move || access_banner(rooms.access.get().as_ref()).is_some()>
-                <div
-                    class="room-stage__access-state"
-                    class:room-stage__access-state--connecting=move || matches!(
-                        rooms.access.get().map(|access| access.state),
-                        Some(RoomAccessState::Connecting)
-                    )
-                    class:room-stage__access-state--recovering=move || matches!(
-                        rooms.access.get().map(|access| access.state),
-                        Some(RoomAccessState::Recovering)
-                    )
-                    class:room-stage__access-state--revoked=move || matches!(
-                        rooms.access.get().map(|access| access.state),
-                        Some(RoomAccessState::Revoked)
-                    )
-                >
-                    {move || access_banner(rooms.access.get().as_ref()).unwrap_or_default()}
-                </div>
-            </Show>
-
-            // Local rooms retain the daemon roster. Federated rooms render only
-            // the safe access projection, with binding locality applied to
-            // agents (never humans) and no role or secret-bearing fallback.
-            <div class="room-stage__roster">
-                <Show when=move || matches!(
-                    rooms.access.get().map(|access| access.state),
-                    Some(RoomAccessState::Local)
-                )>
-                    <For
-                        each=move || open_room.get().map(|r| r.participants).unwrap_or_default()
-                        key=|p| p.id.clone()
-                        children=move |p: RoomParticipant| {
-                            let is_agent = p.kind == RoomParticipantKind::Agent;
-                            view! {
-                                <span
-                                    class="rooms-chip"
-                                    class:rooms-chip--agent=is_agent
-                                    title=format!("{} ({})", p.id, p.kind.label())
-                                >
-                                    <span class="rooms-chip__glyph">{p.kind.icon()}</span>
-                                    <span class="rooms-chip__name">{p.display_name.clone()}</span>
-                                    <span class="rooms-chip__kind">{p.kind.label()}</span>
-                                </span>
-                            }
-                        }
-                    />
-                    <button
-                        class="room-stage__addagent-toggle"
-                        type="button"
-                        title="Add an agent participant"
-                        on:click=move |_| show_add_agent.update(|v| *v = !*v)
-                    >
-                        "+ agent"
-                    </button>
-                </Show>
-                <Show
-                    when=move || matches!(
-                        rooms.access.get().map(|access| access.state),
-                        Some(
-                            RoomAccessState::Connecting
-                                | RoomAccessState::Live
-                                | RoomAccessState::Recovering
-                                | RoomAccessState::Revoked
-                        )
-                    )
-                >
-                    <For
-                        each=move || rooms.access.get()
-                            .map(|access| access.members)
-                            .unwrap_or_default()
-                        key=|member| member.member_id.clone()
-                        children=move |member: FederatedRoomMemberProjection| {
-                            let actor_type = member.actor_type;
-                            let presence = member.derived_presence;
-                            let presence_label = match presence {
-                                Some(MemberPresence::Live) => "live",
-                                Some(MemberPresence::Unavailable) => "unavailable",
-                                None => "",
-                            };
-                            let local_agent = actor_type == FederatedActorType::Agent
-                                && member.local_binding_available == Some(true);
-                            let remote_agent = actor_type == FederatedActorType::Agent
-                                && member.local_binding_available == Some(false);
-                            view! {
-                                <span
-                                    class="rooms-chip rooms-chip--federated"
-                                    class:rooms-chip--local=local_agent
-                                    class:rooms-chip--remote=remote_agent
-                                    title=member.member_id.clone()
-                                >
-                                    <Show when=move || presence.is_some()>
-                                        <span
-                                            class="rooms-chip__presence"
-                                            class:rooms-chip__presence--live=move || {
-                                                presence == Some(MemberPresence::Live)
-                                            }
-                                            class:rooms-chip__presence--unavailable=move || {
-                                                presence == Some(MemberPresence::Unavailable)
-                                            }
-                                            aria-label=presence_label
-                                            title=presence_label
-                                        ></span>
-                                    </Show>
-                                    <span class="rooms-chip__glyph">{actor_type.icon()}</span>
-                                    <span class="rooms-chip__name">{member.display_name.clone()}</span>
-                                    <Show when=move || remote_agent>
-                                        <span
-                                            class="rooms-chip__remote"
-                                            aria-label="remote agent"
-                                            title="remote agent"
-                                        >
-                                            <crate::icons::Globe />
-                                        </span>
-                                    </Show>
-                                </span>
-                            }
-                        }
-                    />
-                </Show>
-            </div>
-
-            <Show when=move || {
-                show_add_agent.get()
-                    && matches!(
-                        rooms.access.get().map(|access| access.state),
-                        Some(RoomAccessState::Local)
-                    )
-            }>
-                <div class="rooms-addagent">
-                    <select
-                        class="rooms-addagent__input"
-                        on:change=move |ev| {
-                            let val = event_target_value(&ev);
-                            if !val.is_empty() {
-                                rooms.add_agent(val);
-                                show_add_agent.set(false);
-                            }
-                        }
-                    >
-                        <option value="" selected=move || {
-                            // Keep "pick an agent" as the visible label whenever
-                            // the picker opens — the select isn't controlled.
-                            true
-                        }>
-                            "-- pick an agent --"
-                        </option>
-                        <For
-                            each=move || rooms.available_agents.get()
-                            key=|id: &String| id.clone()
-                            children=move |agent_id: String| {
-                                let id = agent_id.clone();
-                                view! {
-                                    <option value=agent_id>
-                                        {id}
-                                    </option>
-                                }
-                            }
-                        />
-                    </select>
-                    <Show when=move || show_no_agents(
-                        rooms.agents_loaded.get(),
-                        rooms.available_agents.get().len(),
-                    )>
-                        <span class="rooms-addagent__empty">
-                            "No agents"
-                        </span>
-                    </Show>
-                </div>
-            </Show>
-
-            // Trigger-policy summary — read-only (no daemon room-update route).
-            <Show when=move || {
-                open_room.get().and_then(|r| r.trigger_policy).is_some()
-            }>
-                <div class="rooms-policy-summary">
-                    {move || {
-                        let p = open_room.get().and_then(|r| r.trigger_policy)
-                            .unwrap_or_default();
-                        let mut on: Vec<&str> = Vec::new();
-                        if p.on_mention { on.push("mention"); }
-                        if p.on_thread_reply { on.push("thread reply"); }
-                        if p.on_component_event { on.push("interaction"); }
-                        if p.on_schedule.is_some() { on.push("schedule"); }
-                        let triggers = if on.is_empty() {
-                            "none".to_string()
-                        } else {
-                            on.join(", ")
-                        };
-                        format!("Response Policy: {triggers}")
-                    }}
-                </div>
-            </Show>
-
-            // Transcript — the main column.
-            <div class="room-stage__transcript" node_ref=list_ref>
-                <For
-                    each=move || transcript.get()
-                    key=|m| m.seq
-                    children=move |m: RoomMessage| {
-                        let is_system = matches!(
-                            m.kind,
-                            RoomMessageKind::System
-                                | RoomMessageKind::ParticipantJoined
-                                | RoomMessageKind::ParticipantLeft
-                        );
-                        view! {
-                            <div
-                                class="rooms-msg"
-                                class:rooms-msg--system=is_system
-                            >
-                                <Show when=move || !is_system>
-                                    <div class="rooms-msg__author">
-                                        <span class="rooms-msg__glyph">
-                                            {m.author_kind.icon()}
-                                        </span>
-                                        {m.author_id.clone()}
-                                    </div>
-                                </Show>
-                                <div class="rooms-msg__body">{m.body.clone()}</div>
-                            </div>
-                        }
-                    }
-                />
-                <Show when=move || show_transcript_empty(tail_state.get(), transcript.get().is_empty())>
-                    <div class="room-stage__empty">
-                        "No messages yet. Say something — use @id to convene an agent."
-                    </div>
-                </Show>
-            </div>
-
-            <Show when=move || rooms.access.get()
-                .map(|access| !access.outbox.is_empty())
-                .unwrap_or(false)
-            >
-                <div class="rooms-outbox" aria-label="Room outbox">
-                    <For
-                        each=move || rooms.access.get()
-                            .map(|access| access.outbox)
-                            .unwrap_or_default()
-                        key=|item| item.client_event_id.clone()
-                        children=move |item: RoomOutboxItem| {
-                            let failed = item.state == OutboxItemState::Failed;
-                            let retry_id = item.client_event_id.clone();
-                            let state_label = match item.state {
-                                OutboxItemState::Pending => "pending",
-                                OutboxItemState::Failed => "failed",
-                            };
-                            let retry_button = failed.then(|| {
-                                let retry_id = retry_id.clone();
-                                view! {
-                                    <button
-                                        class="rooms-outbox__retry"
-                                        type="button"
-                                        aria-label="Retry failed outbox item"
-                                        title="Retry failed outbox item"
-                                        on:click=move |_| rooms.retry_outbox(retry_id.clone())
-                                    >
-                                        <crate::icons::Refresh />
-                                    </button>
-                                }
-                            });
-                            view! {
-                                <div
-                                    class="rooms-outbox__item"
-                                    class:rooms-outbox__item--failed=failed
-                                >
-                                    <span class="rooms-outbox__event">{item.event_type}</span>
-                                    <span class="rooms-outbox__state">{state_label}</span>
-                                    {retry_button}
-                                </div>
-                            }
-                        }
-                    />
-                </div>
-            </Show>
-
-            <div class="room-stage__foot">
-                // @mention discoverability: click a chip to insert `@id `.
-                <Show when=move || !rooms.agent_ids().is_empty()>
-                    <div class="rooms-mention-hint">
-                        <span class="rooms-mention-hint__label">"@agents:"</span>
-                        <For
-                            each=move || rooms.agent_ids()
-                            key=|id| id.clone()
-                            children=move |id: String| {
-                                let insert = id.clone();
-                                view! {
-                                    <button
-                                        class="rooms-mention-hint__chip"
-                                        type="button"
-                                        title="insert mention"
-                                        disabled=move || !access_allows_writes(
-                                            rooms.access.get().as_ref()
-                                        )
-                                        on:click=move |_| {
-                                            composer.update(|c| {
-                                                if !c.is_empty() && !c.ends_with(' ') {
-                                                    c.push(' ');
-                                                }
-                                                c.push('@');
-                                                c.push_str(&insert);
-                                                c.push(' ');
-                                            });
-                                        }
-                                    >
-                                        {format!("@{id}")}
-                                    </button>
-                                }
-                            }
-                        />
-                    </div>
-                </Show>
-
-                <form
-                    class="rooms-composer"
-                    on:submit=move |ev| {
-                        ev.prevent_default();
-                        if !access_allows_writes(rooms.access.get_untracked().as_ref()) {
-                            return;
-                        }
-                        let text = composer.get_untracked();
-                        if text.trim().is_empty() {
-                            return;
-                        }
-                        rooms.post_message(text);
-                        composer.set(String::new());
-                    }
-                >
-                    <input
-                        class="rooms-composer__input"
-                        type="text"
-                        placeholder="Message… (@id to mention)"
-                        prop:value=move || composer.get()
-                        on:input=move |ev| composer.set(event_target_value(&ev))
-                        disabled=move || !access_allows_writes(rooms.access.get().as_ref())
-                    />
-                    <button
-                        class="rooms-composer__send"
-                        type="submit"
-                        disabled=move || {
-                            composer.get().trim().is_empty()
-                                || !access_allows_writes(rooms.access.get().as_ref())
-                        }
-                    >
-                        "Send"
-                    </button>
-                </form>
-
-                <Show when=move || !status.get().is_empty()>
-                    <div class="rooms-panel__status">{move || status.get()}</div>
-                </Show>
-            </div>
-        </div>
     }
 }
