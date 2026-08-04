@@ -6,10 +6,9 @@
 //! Deliberately NOT wired into markup yet: the timeline region of
 //! `rooms_workspace.rs` is being restructured by the thread slice
 //! (root-only timeline + reply rail), so the density model lands here as a
-//! reviewed, test-locked contract that the post-merge timeline adopts
-//! verbatim. Class names it maps to are already defined and waiting in the
-//! stylesheets: `.rooms-workspace__msg--grouped`, `.rooms-workspace__day-separator`.
-#![allow(dead_code)]
+//! reviewed, test-locked contract that the timeline adopts. Class names it
+//! maps to are defined in the stylesheets:
+//! `.rooms-workspace__msg--grouped`, `.rooms-workspace__day-separator`.
 
 use crate::rooms::{RoomMessage, RoomMessageKind};
 
@@ -150,6 +149,7 @@ mod tests {
             kind,
             body: "b".to_string(),
             created_at: ts.to_string(),
+            thread_parent_seq: None,
             federated: None,
         }
     }

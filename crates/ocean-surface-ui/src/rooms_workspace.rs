@@ -10,6 +10,7 @@
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
+use crate::room_messages;
 use crate::rooms::{
     CreateResolution, FederatedActorType, FederatedRoomMemberProjection, FederatedRoomRole,
     MemberPresence, OutboxItemState, Room, RoomAccessProjection, RoomAccessState, RoomMessage,
@@ -72,6 +73,18 @@ fn short_time(ts: &str) -> String {
     } else {
         ts.to_string()
     }
+}
+
+/// The client's current UTC day key (`YYYY-MM-DD`), matching the daemon's
+/// ISO-8601 UTC timestamps, for humanizing day separators.
+fn today_day_key() -> String {
+    js_sys::Date::new_0()
+        .to_iso_string()
+        .as_string()
+        .unwrap_or_default()
+        .chars()
+        .take(10)
+        .collect()
 }
 
 /// Whether to show the "No messages yet" empty state in the transcript.
@@ -866,21 +879,51 @@ pub fn RoomsWorkspace(
                                     node_ref=list_ref
                                 >
                                     <For
-                                        each=move || partition_thread_messages(&rooms.transcript.get(), 0).roots
-                                        key=|m: &RoomMessage| m.seq
-                                        children=move |m: RoomMessage| {
-                                            let is_system = matches!(
-                                                m.kind,
-                                                RoomMessageKind::System
-                                                    | RoomMessageKind::ParticipantJoined
-                                                    | RoomMessageKind::ParticipantLeft
-                                            );
+                                        // Pair each root with its predecessor so
+                                        // density decisions (grouping, gap headers,
+                                        // day separators) are derived per row. The
+                                        // transcript is append-only under one
+                                        // generation, so a cached keyed child never
+                                        // sees its predecessor change; generation
+                                        // reset rebuilds the whole list.
+                                        each=move || {
+                                            let roots = partition_thread_messages(&rooms.transcript.get(), 0).roots;
+                                            std::iter::once(None)
+                                                .chain(roots.iter().cloned().map(Some))
+                                                .zip(roots.clone())
+                                                .collect::<Vec<_>>()
+                                        }
+                                        key=|(_, m): &(Option<RoomMessage>, RoomMessage)| m.seq
+                                        children=move |(prev, m): (Option<RoomMessage>, RoomMessage)| {
+                                            let is_system = room_messages::is_compact_system_row(&m);
                                             let ts = short_time(&m.created_at);
                                             let root_seq = m.seq;
+                                            let day_label = room_messages::day_separator_label(prev.as_ref(), &m)
+                                                .map(|d| room_messages::humanize_day_label(&d, &today_day_key()));
+                                            // A long silence gets a time header —
+                                            // unless a day separator already marks
+                                            // this row (no double dividers).
+                                            let gap_label = (day_label.is_none()
+                                                && prev
+                                                    .as_ref()
+                                                    .map(|p| room_messages::needs_gap_header(p, &m))
+                                                    .unwrap_or(false))
+                                            .then(|| ts.clone());
+                                            let grouped = prev
+                                                .as_ref()
+                                                .map(|p| room_messages::is_grouped(p, &m))
+                                                .unwrap_or(false);
                                             view! {
+                                                {day_label.map(|d| view! {
+                                                    <div class="rooms-workspace__day-separator">{d}</div>
+                                                })}
+                                                {gap_label.map(|g| view! {
+                                                    <div class="rooms-workspace__day-separator">{g}</div>
+                                                })}
                                                 <div
                                                     class="rooms-workspace__msg"
                                                     class:rooms-workspace__msg--system=is_system
+                                                    class:rooms-workspace__msg--grouped=grouped
                                                 >
                                                     <div class="rooms-workspace__msg-avatar">
                                                         {if is_system {
@@ -1161,12 +1204,7 @@ pub fn RoomsWorkspace(
                                             key=|m: &RoomMessage| m.seq
                                             children=move |reply: RoomMessage| {
                                                 let ts = short_time(&reply.created_at);
-                                                let is_system = matches!(
-                                                    reply.kind,
-                                                    RoomMessageKind::System
-                                                        | RoomMessageKind::ParticipantJoined
-                                                        | RoomMessageKind::ParticipantLeft
-                                                );
+                                                let is_system = room_messages::is_compact_system_row(&reply);
                                                 view! {
                                                     <div
                                                         class="rooms-workspace__msg rooms-workspace__msg--thread-reply"
