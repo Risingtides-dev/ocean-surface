@@ -29,9 +29,113 @@ pub enum MdSpan {
     Mention(String),
 }
 
+fn has_ascii_control_or_space(c: u8) -> bool {
+    c <= 0x20 || c == 0x7f
+}
+
+fn has_literal_ascii_control(href: &str) -> bool {
+    href.as_bytes()
+        .iter()
+        .copied()
+        .any(|b| b < 0x20 || b == 0x7f)
+}
+
+fn has_percent_encoded_ascii_control_or_space(href: &str) -> bool {
+    let bytes = href.as_bytes();
+    bytes.windows(3).any(|window| {
+        if window[0] != b'%' {
+            return false;
+        }
+        let hi = (window[1] as char).to_digit(16);
+        let lo = (window[2] as char).to_digit(16);
+        match (hi, lo) {
+            (Some(hi), Some(lo)) => has_ascii_control_or_space(((hi << 4) | lo) as u8),
+            _ => false,
+        }
+    })
+}
+
+fn host_is_valid(host: &str) -> bool {
+    if host.is_empty() {
+        return false;
+    }
+    if host.starts_with('[') && host.ends_with(']') {
+        return host.len() > 2;
+    }
+    host.split('.').all(|label| {
+        !label.is_empty()
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+    })
+}
+
+fn authority_is_valid(authority: &str) -> bool {
+    if authority.is_empty() || authority.contains('@') {
+        return false;
+    }
+
+    let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
+        let Some(close) = rest.find(']') else {
+            return false;
+        };
+        let host_end = close + 2;
+        let host = &authority[..host_end];
+        let remainder = &authority[host_end..];
+        if let Some(port) = remainder.strip_prefix(':') {
+            (host, Some(port))
+        } else if remainder.is_empty() {
+            (host, None)
+        } else {
+            return false;
+        }
+    } else if let Some((host, port)) = authority.rsplit_once(':') {
+        if port.bytes().all(|b| b.is_ascii_digit()) {
+            (host, Some(port))
+        } else {
+            (authority, None)
+        }
+    } else {
+        (authority, None)
+    };
+
+    if !host_is_valid(host) {
+        return false;
+    }
+    if let Some(port) = port {
+        if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+    }
+    true
+}
+
 fn scheme_allowed(href: &str) -> bool {
-    let lower = href.to_ascii_lowercase();
-    lower.starts_with("http://") || lower.starts_with("https://")
+    if href.is_empty()
+        || href.trim() != href
+        || href.contains('\\')
+        || has_literal_ascii_control(href)
+        || has_percent_encoded_ascii_control_or_space(href)
+    {
+        return false;
+    }
+
+    let Some((scheme, rest)) = href.split_once("://") else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return false;
+    }
+
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if !authority_is_valid(authority) {
+        return false;
+    }
+
+    true
 }
 
 fn is_mention_char(c: char) -> bool {
@@ -42,6 +146,10 @@ fn is_mention_char(c: char) -> bool {
 /// non-word character) — keeps `user@host` and `3*4*5` from tokenizing.
 fn at_boundary(prev: Option<char>) -> bool {
     prev.is_none_or(|c| !c.is_alphanumeric())
+}
+
+fn autolink_boundary(prev: Option<char>) -> bool {
+    prev.is_none_or(|c| c.is_ascii_whitespace() || matches!(c, '(' | '[' | '<' | '{'))
 }
 
 fn flush(out: &mut Vec<MdSpan>, text: &mut String) {
@@ -107,15 +215,23 @@ pub fn tokenize(body: &str, members: &HashSet<String>) -> Vec<MdSpan> {
                 let label = &rest[1..close];
                 let after = &rest[close + 1..];
                 if !label.is_empty() && after.starts_with('(') {
-                    if let Some(end) = after.find(')') {
-                        let href = &after[1..end];
-                        if scheme_allowed(href) {
-                            flush(&mut out, &mut text);
-                            out.push(MdSpan::Link {
-                                href: href.to_string(),
-                                label: label.to_string(),
-                            });
-                            i += close + 1 + end + 1;
+                    if let Some(raw) = after.strip_prefix('(') {
+                        let end = raw.find(')').unwrap_or(raw.len());
+                        if end < raw.len() {
+                            let href = &raw[..end];
+                            let consumed = close + 1 + 1 + end + 1;
+                            if !href.is_empty() && scheme_allowed(href) {
+                                flush(&mut out, &mut text);
+                                out.push(MdSpan::Link {
+                                    href: href.to_string(),
+                                    label: label.to_string(),
+                                });
+                                i += consumed;
+                                prev = Some(')');
+                                continue;
+                            }
+                            text.push_str(&rest[..consumed]);
+                            i += consumed;
                             prev = Some(')');
                             continue;
                         }
@@ -126,7 +242,7 @@ pub fn tokenize(body: &str, members: &HashSet<String>) -> Vec<MdSpan> {
 
         // Bare http(s) autolink.
         if (c == 'h' || c == 'H')
-            && at_boundary(prev)
+            && autolink_boundary(prev)
             && (rest[..7.min(rest.len())].eq_ignore_ascii_case("http://")
                 || rest[..8.min(rest.len())].eq_ignore_ascii_case("https://"))
         {
@@ -139,7 +255,7 @@ pub fn tokenize(body: &str, members: &HashSet<String>) -> Vec<MdSpan> {
             } else {
                 7
             };
-            if url.len() > scheme_len {
+            if url.len() > scheme_len && scheme_allowed(url) {
                 flush(&mut out, &mut text);
                 out.push(MdSpan::Link {
                     href: url.to_string(),
@@ -275,10 +391,42 @@ mod tests {
                 label: "docs".into()
             }]
         );
+        let mixed = tokenize("[docs](HTTPS://ocean.dev)", &members(&[]));
+        assert_eq!(
+            mixed,
+            vec![MdSpan::Link {
+                href: "HTTPS://ocean.dev".into(),
+                label: "docs".into()
+            }]
+        );
         let bad = tokenize("[x](javascript:alert(1))", &members(&[]));
         assert_eq!(bad, vec![MdSpan::Text("[x](javascript:alert(1))".into())]);
         let data = tokenize("[x](data:text/html,hi)", &members(&[]));
         assert_eq!(data, vec![MdSpan::Text("[x](data:text/html,hi)".into())]);
+    }
+
+    #[test]
+    fn unsafe_labeled_links_render_literal_text() {
+        let cases = [
+            "[x](https://ocean.dev\t)",
+            "[x](https://ocean.dev\n)",
+            "[x](https://ocean.dev/%0a)",
+            "[x](https://ocean.dev/%0D)",
+            "[x](https://ocean.dev/%09)",
+            "[x](https://ocean.dev/%20)",
+            "[x](https://ocean.dev/%7f)",
+            r"[x](https://ocean.dev\ )",
+            "[x](https://exa\\mple.com)",
+            "[x](https://user@example.com)",
+            "[x](javascript:alert(1))",
+            "[x](data:text/html,hi)",
+        ];
+        for body in cases {
+            assert_eq!(
+                tokenize(body, &members(&[])),
+                vec![MdSpan::Text(body.into())]
+            );
+        }
     }
 
     #[test]
@@ -295,6 +443,50 @@ mod tests {
                 MdSpan::Text(", ok".into()),
             ]
         );
+    }
+
+    #[test]
+    fn safe_bare_urls_preserve_queries_and_percent_escapes() {
+        let spans = tokenize(
+            "see HTTPS://ocean.dev/a?x=%2Fok&y=z and https://ocean.dev/a%2Fb",
+            &members(&[]),
+        );
+        assert_eq!(
+            spans,
+            vec![
+                MdSpan::Text("see ".into()),
+                MdSpan::Link {
+                    href: "HTTPS://ocean.dev/a?x=%2Fok&y=z".into(),
+                    label: "HTTPS://ocean.dev/a?x=%2Fok&y=z".into()
+                },
+                MdSpan::Text(" and ".into()),
+                MdSpan::Link {
+                    href: "https://ocean.dev/a%2Fb".into(),
+                    label: "https://ocean.dev/a%2Fb".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn unsafe_bare_urls_stay_literal_text() {
+        let cases = [
+            "see https://ocean.dev/%0a",
+            "see https://ocean.dev/%0D",
+            "see https://ocean.dev/%09",
+            "see https://ocean.dev/%20",
+            "see https://ocean.dev/%7f",
+            "see https://exa\\mple.com",
+            "see https://user@example.com",
+            "see javascript:alert(1)",
+            "see data:text/plain,hi",
+        ];
+        for body in cases {
+            assert_eq!(
+                tokenize(body, &members(&[])),
+                vec![MdSpan::Text(body.into())]
+            );
+        }
     }
 
     #[test]
