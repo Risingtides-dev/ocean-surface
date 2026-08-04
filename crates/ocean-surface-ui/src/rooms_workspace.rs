@@ -471,6 +471,21 @@ pub fn RoomsWorkspace(
     let thread_last_sent_wire = RwSignal::new(String::new());
     let thread_last_sent_seq = RwSignal::new(0u64);
     let list_ref: NodeRef<leptos::html::Div> = NodeRef::new();
+
+    // Mention truth source: the open room's daemon-provided roster ids.
+    // room_markdown highlights @id ONLY when it resolves here.
+    let member_ids = Memo::new(move |_| {
+        rooms
+            .open_room
+            .get()
+            .map(|r| {
+                r.participants
+                    .iter()
+                    .map(|p| p.id.clone())
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .unwrap_or_default()
+    });
     let mobile_toggle_ref: NodeRef<leptos::html::Button> = NodeRef::new();
     let create_input_ref: NodeRef<leptos::html::Input> = NodeRef::new();
 
@@ -1337,7 +1352,7 @@ pub fn RoomsWorkspace(
                                                             </span>
                                                         </div>
                                                         <div class="rooms-workspace__msg-text">
-                                                            {m.body.clone()}
+                                                            {crate::room_markdown::body_view(m.body.clone(), member_ids)}
                                                         </div>
                                                         {move || {
                                                             if should_show_thread_button(&m) {
@@ -1350,7 +1365,19 @@ pub fn RoomsWorkspace(
                                                                         "Open thread".to_string()
                                                                     }
                                                                 };
+                                                                // Hover/focus action rail. ONLY real actions live
+                                                                // here (reply-in-thread today); persistent when the
+                                                                // thread has replies or is open, so truthful state
+                                                                // never hides. Reveal is CSS (hover/focus-within,
+                                                                // always-on for no-hover pointers).
                                                                 view! {
+                                                                    <div
+                                                                        class="rooms-workspace__action-rail"
+                                                                        class:rooms-workspace__action-rail--persistent=move || {
+                                                                            reply_count() > 0
+                                                                                || selected_thread_root_seq.get() == Some(root_seq)
+                                                                        }
+                                                                    >
                                                                     <button
                                                                         class="rooms-workspace__thread-toggle"
                                                                         class:rooms-workspace__thread-toggle--active=move || {
@@ -1380,6 +1407,7 @@ pub fn RoomsWorkspace(
                                                                     >
                                                                         {move || thread_label()}
                                                                     </button>
+                                                                    </div>
                                                                 }.into_any()
                                                             } else {
                                                                 ().into_any()
@@ -1614,7 +1642,9 @@ pub fn RoomsWorkspace(
                                                     <span class="rooms-workspace__msg-name">{root.author_id.clone()}</span>
                                                     <span class="rooms-workspace__msg-time">{ts}</span>
                                                 </div>
-                                                <div class="rooms-workspace__msg-text">{root.body.clone()}</div>
+                                                <div class="rooms-workspace__msg-text">
+                                                    {crate::room_markdown::body_view(root.body.clone(), member_ids)}
+                                                </div>
                                             </div>
                                         </div>
                                         <For
@@ -1640,7 +1670,9 @@ pub fn RoomsWorkspace(
                                                                 <span class="rooms-workspace__msg-name">{reply.author_id.clone()}</span>
                                                                 <span class="rooms-workspace__msg-time">{ts}</span>
                                                             </div>
-                                                            <div class="rooms-workspace__msg-text">{reply.body.clone()}</div>
+                                                            <div class="rooms-workspace__msg-text">
+                                                                {crate::room_markdown::body_view(reply.body.clone(), member_ids)}
+                                                            </div>
                                                         </div>
                                                     </div>
                                                 }
