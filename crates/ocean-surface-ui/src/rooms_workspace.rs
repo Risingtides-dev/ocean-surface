@@ -67,11 +67,6 @@ fn access_allows_writes(access: Option<&RoomAccessProjection>) -> bool {
 /// Extracts the shared `HH:MM` prefix for `Z`, fractional-second, and offset
 /// variants without converting timezones or localizing; invalid/non-canonical
 /// input passes through unchanged.
-#[allow(dead_code)]
-fn short_time(ts: &str) -> String {
-    canonical_wire_clock_time(ts)
-}
-
 /// The client's current UTC day key (`YYYY-MM-DD`), matching the daemon's
 /// ISO-8601 UTC timestamps, for humanizing day separators.
 fn today_day_key() -> String {
@@ -1351,7 +1346,6 @@ pub fn RoomsWorkspace(
                                         key=|(_, m): &(Option<RoomMessage>, RoomMessage)| m.seq
                                         children=move |(prev, m): (Option<RoomMessage>, RoomMessage)| {
                                             let is_system = room_messages::is_compact_system_row(&m);
-                                            let ts = short_time(&m.created_at);
                                             let full_ts = m.created_at.clone();
                                             let root_seq = m.seq;
                                             let day_label = room_messages::day_separator_label(prev.as_ref(), &m)
@@ -1364,7 +1358,7 @@ pub fn RoomsWorkspace(
                                                     .as_ref()
                                                     .map(|p| room_messages::needs_gap_header(p, &m))
                                                     .unwrap_or(false))
-                                            .then(|| ts.clone());
+                                            .then(|| canonical_wire_clock_time(&full_ts));
                                             let grouped = prev
                                                 .as_ref()
                                                 .map(|p| room_messages::is_grouped(p, &m))
@@ -1404,6 +1398,7 @@ pub fn RoomsWorkspace(
                                                                 class="rooms-workspace__msg-time"
                                                                 datetime=full_ts.clone()
                                                                 aria-label=full_ts.clone()
+                                                                title=full_ts.clone()
                                                             >
                                                                 {canonical_wire_clock_time(&full_ts)}
                                                             </time>
@@ -1663,7 +1658,7 @@ pub fn RoomsWorkspace(
                     {move || {
                         if let Some(root) = thread_root_for(&rooms.transcript.get(), selected_thread_root_seq.get()) {
                             let root_seq = root.seq;
-                            let ts = short_time(&root.created_at);
+                            let full_ts = root.created_at.clone();
                             let root_is_system = matches!(
                                 root.kind,
                                 RoomMessageKind::System
@@ -1706,10 +1701,11 @@ pub fn RoomsWorkspace(
                                                     <span class="rooms-workspace__msg-name">{root.author_id.clone()}</span>
                                                     <time
                                                         class="rooms-workspace__msg-time"
-                                                        datetime=ts.clone()
-                                                        aria-label=ts.clone()
+                                                        datetime=full_ts.clone()
+                                                        aria-label=full_ts.clone()
+                                                        title=full_ts.clone()
                                                     >
-                                                        {canonical_wire_clock_time(&ts)}
+                                                        {canonical_wire_clock_time(&full_ts)}
                                                     </time>
                                                 </div>
                                                 <div class="rooms-workspace__msg-text">
@@ -1721,7 +1717,7 @@ pub fn RoomsWorkspace(
                                             each=move || partition_thread_messages(&rooms.transcript.get(), root_seq).replies
                                             key=|m: &RoomMessage| m.seq
                                             children=move |reply: RoomMessage| {
-                                                let ts = short_time(&reply.created_at);
+                                                let full_ts = reply.created_at.clone();
                                                 let is_system = room_messages::is_compact_system_row(&reply);
                                                 view! {
                                                     <div
@@ -1747,10 +1743,11 @@ pub fn RoomsWorkspace(
                                                                 <span class="rooms-workspace__msg-name">{reply.author_id.clone()}</span>
                                                                 <time
                                                                     class="rooms-workspace__msg-time"
-                                                                    datetime=ts.clone()
-                                                                    aria-label=ts.clone()
+                                                                    datetime=full_ts.clone()
+                                                                    aria-label=full_ts.clone()
+                                                                    title=full_ts.clone()
                                                                 >
-                                                                    {canonical_wire_clock_time(&ts)}
+                                                                    {canonical_wire_clock_time(&full_ts)}
                                                                 </time>
                                                             </div>
                                                             <div class="rooms-workspace__msg-text">
@@ -2625,31 +2622,9 @@ mod tests {
         ))));
     }
 
-    // ── short_time ────────────────────────────────────────────────────
-
     #[test]
-    fn short_time_extracts_hhmm_from_rfc3339_z() {
-        assert_eq!(short_time("2026-07-25T03:43:12Z"), "03:43");
-    }
-
-    #[test]
-    fn short_time_extracts_hhmm_from_rfc3339_fractional() {
-        assert_eq!(short_time("2026-07-25T03:43:12.987Z"), "03:43");
-    }
-
-    #[test]
-    fn short_time_extracts_hhmm_from_rfc3339_offset() {
-        assert_eq!(short_time("2026-07-25T03:43:12+07:00"), "03:43");
-    }
-
-    #[test]
-    fn short_time_passthrough_short_string() {
-        assert_eq!(short_time("abc"), "abc");
-    }
-
-    #[test]
-    fn short_time_passthrough_noncanonical_separator() {
-        assert_eq!(short_time("2026-07-25 03:43:12Z"), "2026-07-25 03:43:12Z");
+    fn canonical_wire_clock_time_extracts_hhmm_from_rfc3339_z() {
+        assert_eq!(canonical_wire_clock_time("2026-07-25T03:43:12Z"), "03:43");
     }
 
     #[test]
@@ -2707,9 +2682,38 @@ mod tests {
     }
 
     #[test]
-    fn short_time_passthrough_unicode_without_panic() {
+    fn canonical_wire_clock_time_extracts_hhmm_from_rfc3339_fractional() {
         assert_eq!(
-            short_time("２０２６-07-25T03:43:12Z"),
+            canonical_wire_clock_time("2026-07-25T03:43:12.987Z"),
+            "03:43"
+        );
+    }
+
+    #[test]
+    fn canonical_wire_clock_time_extracts_hhmm_from_rfc3339_offset() {
+        assert_eq!(
+            canonical_wire_clock_time("2026-07-25T03:43:12+07:00"),
+            "03:43"
+        );
+    }
+
+    #[test]
+    fn canonical_wire_clock_time_passthrough_short_string() {
+        assert_eq!(canonical_wire_clock_time("abc"), "abc");
+    }
+
+    #[test]
+    fn canonical_wire_clock_time_passthrough_noncanonical_separator() {
+        assert_eq!(
+            canonical_wire_clock_time("2026-07-25 03:43:12Z"),
+            "2026-07-25 03:43:12Z"
+        );
+    }
+
+    #[test]
+    fn canonical_wire_clock_time_passthrough_unicode_without_panic() {
+        assert_eq!(
+            canonical_wire_clock_time("２０２６-07-25T03:43:12Z"),
             "２０２６-07-25T03:43:12Z"
         );
     }
@@ -2767,15 +2771,16 @@ mod tests {
     }
 
     #[test]
-    fn short_time_renders_full_accessible_time_markup() {
+    fn room_timestamp_markup_preserves_full_wire_datetime_and_visible_clock() {
         let ts = "2026-07-25T03:43:12.987+07:00";
         let clock = canonical_wire_clock_time(ts);
         let markup = format!(
-            "<time class=\"rooms-workspace__msg-time\" datetime=\"{ts}\" aria-label=\"{ts}\">{clock}</time>"
+            "<time class=\"rooms-workspace__msg-time\" datetime=\"{ts}\" aria-label=\"{ts}\" title=\"{ts}\">{clock}</time>"
         );
         assert!(markup.contains("<time"));
         assert!(markup.contains("datetime=\"2026-07-25T03:43:12.987+07:00\""));
         assert!(markup.contains("aria-label=\"2026-07-25T03:43:12.987+07:00\""));
+        assert!(markup.contains("title=\"2026-07-25T03:43:12.987+07:00\""));
         assert!(markup.ends_with(">03:43</time>"));
     }
 
