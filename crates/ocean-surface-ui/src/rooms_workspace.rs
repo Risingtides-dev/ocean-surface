@@ -133,10 +133,50 @@ fn room_option_dom_id(key: &str) -> String {
     format!("rooms-opt-{key}")
 }
 
-/// Whether the right-rail member list is genuinely empty after load.
-#[allow(dead_code)]
-fn members_loaded(access: Option<&RoomAccessProjection>) -> bool {
-    access.is_some()
+fn transcript_is_near_bottom(
+    scroll_height: i32,
+    scroll_top: i32,
+    client_height: i32,
+    threshold: i32,
+) -> bool {
+    scroll_height - scroll_top - client_height < threshold
+}
+
+fn durable_read_candidate(
+    transcript: &[RoomMessage],
+    access: Option<&RoomAccessProjection>,
+) -> Option<u64> {
+    match access.map(|projection| projection.state) {
+        Some(RoomAccessState::Live) => {
+            access.and_then(|projection| projection.last_confirmed_global_sequence)
+        }
+        Some(RoomAccessState::Local) => transcript.last().map(|message| message.seq),
+        _ => None,
+    }
+}
+
+fn ready_to_mark_read(
+    transcript_hydrated: bool,
+    near_bottom: bool,
+    room_loaded: bool,
+    transcript: &[RoomMessage],
+    access: Option<&RoomAccessProjection>,
+) -> bool {
+    transcript_hydrated
+        && near_bottom
+        && room_loaded
+        && !transcript.is_empty()
+        && durable_read_candidate(transcript, access).is_some()
+}
+
+fn roster_presence_count(members: &[FederatedRoomMemberProjection]) -> usize {
+    members
+        .iter()
+        .filter(|member| {
+            matches!(member.actor_type, FederatedActorType::User)
+                && matches!(member.derived_presence, Some(MemberPresence::Live))
+        })
+        .count()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,22 +309,80 @@ pub fn RoomsWorkspace(
     // this is not read-cursor "unread" state).
     let transcript = rooms.transcript;
     let new_below = RwSignal::new(false);
+    let should_mark_read = RwSignal::new(false);
+    let refresh_handle = RwSignal::new(None::<IntervalHandle>);
     Effect::new(move |prev: Option<usize>| {
         let len = transcript.with(|t| t.len());
         if len == 0 {
             // Generation reset / room switch: nothing below.
             new_below.set(false);
+            should_mark_read.set(false);
         } else if let Some(el) = list_ref.get() {
             let first_fill = prev.unwrap_or(0) == 0;
-            let near_bottom = el.scroll_height() - el.scroll_top() - el.client_height() < 120;
+            let near_bottom = transcript_is_near_bottom(
+                el.scroll_height(),
+                el.scroll_top(),
+                el.client_height(),
+                120,
+            );
             if first_fill || near_bottom {
                 request_animation_frame(move || el.set_scroll_top(el.scroll_height()));
                 new_below.set(false);
+                should_mark_read.set(ready_to_mark_read(
+                    first_fill,
+                    near_bottom,
+                    rooms.open_room.get().is_some(),
+                    &rooms.transcript.get_untracked(),
+                    rooms.access.get_untracked().as_ref(),
+                ));
             } else if len > prev.unwrap_or(0) {
                 new_below.set(true);
+                should_mark_read.set(false);
             }
         }
         len
+    });
+
+    Effect::new(move |_| {
+        let open = rooms.open_key.get();
+        if open.is_none() {
+            should_mark_read.set(false);
+        }
+    });
+
+    Effect::new(move |_| {
+        if !should_mark_read.get() {
+            return;
+        }
+        let open = rooms.open_key.get();
+        let candidate =
+            durable_read_candidate(&rooms.transcript.get(), rooms.access.get().as_ref());
+        let ready = rooms.open_room.get().is_some();
+        if ready && open.is_some() {
+            if let Some(candidate) = candidate {
+                rooms.mark_open_read_if_current(candidate);
+            }
+            should_mark_read.set(false);
+        }
+    });
+
+    Effect::new(move |_| {
+        if refresh_handle.get().is_none() {
+            let rooms = rooms;
+            let handle = leptos::prelude::set_interval_with_handle(
+                move || rooms.fetch_rooms_silent(),
+                std::time::Duration::from_secs(8),
+            )
+            .expect("rooms refresh interval");
+            refresh_handle.set(Some(handle));
+        }
+    });
+
+    Owner::on_cleanup(move || {
+        if let Some(handle) = refresh_handle.get_untracked() {
+            handle.clear();
+        }
+        refresh_handle.set(None);
     });
 
     Effect::new(move |_| {
@@ -685,6 +783,7 @@ pub fn RoomsWorkspace(
                                             let key2 = key.clone();
                                             let key_tab = key.clone();
                                             let key_sel = key.clone();
+                                            let key_unread = key.clone();
                                             let active = move || rooms.open_key.get().as_deref() == Some(&*key);
                                             let selected =
                                                 move || rooms.open_key.get().as_deref() == Some(&*key_sel);
@@ -700,6 +799,13 @@ pub fn RoomsWorkspace(
                                                     .and_then(|i| keys.get(i).cloned())
                                                     .as_deref()
                                                     == Some(&*key_tab)
+                                            };
+                                            let unread = move || {
+                                                rooms.read_summaries.with(|summaries| {
+                                                    crate::rooms::room_has_durable_unread(
+                                                        summaries.get(&key_unread),
+                                                    )
+                                                })
                                             };
                                             view! {
                                                 <button
@@ -719,6 +825,13 @@ pub fn RoomsWorkspace(
                                                     <span class="rooms-workspace__room-name">
                                                         {room.name.clone()}
                                                     </span>
+                                                    <Show when=move || unread()>
+                                                        <span
+                                                            class="rooms-workspace__room-unread"
+                                                            role="img"
+                                                            aria-label="Unread messages"
+                                                        ></span>
+                                                    </Show>
                                                 </button>
                                             }
                                         }
@@ -887,8 +1000,20 @@ pub fn RoomsWorkspace(
                                     node_ref=list_ref
                                     on:scroll=move |_| {
                                         if let Some(el) = list_ref.get() {
-                                            if el.scroll_height() - el.scroll_top() - el.client_height() < 120 {
+                                            if transcript_is_near_bottom(
+                                                el.scroll_height(),
+                                                el.scroll_top(),
+                                                el.client_height(),
+                                                120,
+                                            ) {
                                                 new_below.set(false);
+                                                should_mark_read.set(ready_to_mark_read(
+                                                    false,
+                                                    true,
+                                                    rooms.open_room.get_untracked().is_some(),
+                                                    &rooms.transcript.get_untracked(),
+                                                    rooms.access.get_untracked().as_ref(),
+                                                ));
                                             }
                                         }
                                     }
@@ -1037,6 +1162,13 @@ pub fn RoomsWorkspace(
                                                 el.set_scroll_top(el.scroll_height());
                                             }
                                             new_below.set(false);
+                                            should_mark_read.set(ready_to_mark_read(
+                                                false,
+                                                true,
+                                                rooms.open_room.get_untracked().is_some(),
+                                                &rooms.transcript.get_untracked(),
+                                                rooms.access.get_untracked().as_ref(),
+                                            ));
                                         }
                                     >
                                         "\u{2193} New messages"
@@ -1426,6 +1558,7 @@ pub fn RoomsWorkspace(
                                         }.into_any()
                                     } else {
                                         let members = access.members.clone();
+                                        let members_for_label = members.clone();
                                         view! {
                                             // Roster is a real list: give AT an
                                             // item count + boundaries instead of
@@ -1433,7 +1566,14 @@ pub fn RoomsWorkspace(
                                             <div
                                                 class="rooms-workspace__member-list"
                                                 role="list"
-                                                aria-label="Room members"
+                                                aria-label=move || {
+                                                    let count = roster_presence_count(&members_for_label);
+                                                    if count == 0 {
+                                                        "Room members".to_string()
+                                                    } else {
+                                                        format!("Room members, {count} humans live")
+                                                    }
+                                                }
                                             >
                                             <For
                                                 each=move || members.clone()
@@ -1552,7 +1692,8 @@ pub fn RoomsWorkspace(
 mod tests {
     use super::*;
     use crate::rooms::{
-        CreateOutcome, CreateResolution, RoomAccessProjection, RoomAccessState, RoomMessage,
+        CreateOutcome, CreateResolution, FederatedActorType, FederatedRoomMemberProjection,
+        FederatedRoomRole, MemberPresence, RoomAccessProjection, RoomAccessState, RoomMessage,
         RoomMessageKind, RoomParticipantKind,
     };
 
@@ -1617,7 +1758,120 @@ mod tests {
         assert_eq!(short_time("2026-01-01T00:00"), "00:00");
     }
 
-    // ── transcript_is_empty ───────────────────────────────────────────
+    #[test]
+    fn transcript_bottom_threshold_matches_follow_contract() {
+        assert!(transcript_is_near_bottom(1000, 810, 100, 120));
+        assert!(!transcript_is_near_bottom(1000, 700, 100, 120));
+    }
+
+    #[test]
+    fn durable_read_candidate_uses_local_transcript_and_live_global_only() {
+        let transcript = vec![test_msg(4, "hello", None), test_msg(7, "world", None)];
+        let local = test_access(RoomAccessState::Local);
+        let mut live = test_access(RoomAccessState::Live);
+        live.last_confirmed_global_sequence = Some(44);
+        let connecting = test_access(RoomAccessState::Connecting);
+
+        assert_eq!(durable_read_candidate(&transcript, Some(&local)), Some(7));
+        assert_eq!(durable_read_candidate(&transcript, Some(&live)), Some(44));
+        assert_eq!(durable_read_candidate(&transcript, Some(&connecting)), None);
+        assert_eq!(durable_read_candidate(&[], Some(&local)), None);
+    }
+
+    #[test]
+    fn ready_to_mark_read_requires_hydrated_room_near_bottom_and_candidate() {
+        let transcript = vec![test_msg(4, "hello", None)];
+        let local = test_access(RoomAccessState::Local);
+
+        assert!(ready_to_mark_read(
+            true,
+            true,
+            true,
+            &transcript,
+            Some(&local)
+        ));
+        assert!(!ready_to_mark_read(
+            false,
+            true,
+            true,
+            &transcript,
+            Some(&local)
+        ));
+        assert!(!ready_to_mark_read(
+            true,
+            false,
+            true,
+            &transcript,
+            Some(&local)
+        ));
+        assert!(!ready_to_mark_read(
+            true,
+            true,
+            false,
+            &transcript,
+            Some(&local)
+        ));
+        assert!(!ready_to_mark_read(true, true, true, &[], Some(&local)));
+        assert!(!ready_to_mark_read(
+            true,
+            true,
+            true,
+            &transcript,
+            Some(&test_access(RoomAccessState::Connecting))
+        ));
+    }
+
+    #[test]
+    fn roster_presence_counts_humans_only() {
+        let members = vec![
+            FederatedRoomMemberProjection {
+                member_id: "user-live-1".into(),
+                owner_member_id: None,
+                actor_type: FederatedActorType::User,
+                role_in_room: FederatedRoomRole::Member,
+                display_name: "A".into(),
+                public_agent_descriptor: None,
+                joined_at: String::new(),
+                derived_presence: Some(MemberPresence::Live),
+                local_binding_available: Some(true),
+            },
+            FederatedRoomMemberProjection {
+                member_id: "user-live-2".into(),
+                owner_member_id: None,
+                actor_type: FederatedActorType::User,
+                role_in_room: FederatedRoomRole::Owner,
+                display_name: "B".into(),
+                public_agent_descriptor: None,
+                joined_at: String::new(),
+                derived_presence: Some(MemberPresence::Live),
+                local_binding_available: Some(true),
+            },
+            FederatedRoomMemberProjection {
+                member_id: "user-away".into(),
+                owner_member_id: None,
+                actor_type: FederatedActorType::User,
+                role_in_room: FederatedRoomRole::Member,
+                display_name: "C".into(),
+                public_agent_descriptor: None,
+                joined_at: String::new(),
+                derived_presence: Some(MemberPresence::Unavailable),
+                local_binding_available: Some(true),
+            },
+            FederatedRoomMemberProjection {
+                member_id: "agent-live".into(),
+                owner_member_id: None,
+                actor_type: FederatedActorType::Agent,
+                role_in_room: FederatedRoomRole::Member,
+                display_name: "Flux".into(),
+                public_agent_descriptor: None,
+                joined_at: String::new(),
+                derived_presence: Some(MemberPresence::Live),
+                local_binding_available: Some(true),
+            },
+        ];
+
+        assert_eq!(roster_presence_count(&members), 2);
+    }
 
     fn test_msg(seq: u64, body: &str, thread_parent_seq: Option<u64>) -> RoomMessage {
         RoomMessage {
@@ -1646,18 +1900,6 @@ mod tests {
         assert!(!show_transcript_empty(false, true));
         assert!(show_transcript_empty(true, true));
         assert!(!show_transcript_empty(true, false));
-    }
-
-    // ── members_loaded ────────────────────────────────────────────────
-
-    #[test]
-    fn members_not_loaded_when_access_none() {
-        assert!(!members_loaded(None));
-    }
-
-    #[test]
-    fn members_loaded_when_access_some() {
-        assert!(members_loaded(Some(&test_access(RoomAccessState::Local))));
     }
 
     #[test]
