@@ -961,7 +961,15 @@ pub fn RoomsWorkspace(
                                                         </div>
                                                         {move || {
                                                             if should_show_thread_button(&m) {
-                                                                let reply_count = reply_count_for(&rooms.transcript.get(), root_seq);
+                                                                let reply_count = move || reply_count_for(&rooms.transcript.get(), root_seq);
+                                                                let thread_label = move || {
+                                                                    let count = reply_count();
+                                                                    if count > 0 {
+                                                                        format!("Open thread ({count})")
+                                                                    } else {
+                                                                        "Open thread".to_string()
+                                                                    }
+                                                                };
                                                                 view! {
                                                                     <button
                                                                         class="rooms-workspace__thread-toggle"
@@ -990,11 +998,7 @@ pub fn RoomsWorkspace(
                                                                             });
                                                                         }
                                                                     >
-                                                                        {if reply_count > 0 {
-                                                                            format!("Open thread ({reply_count})")
-                                                                        } else {
-                                                                            "Open thread".to_string()
-                                                                        }}
+                                                                        {move || thread_label()}
                                                                     </button>
                                                                 }.into_any()
                                                             } else {
@@ -1721,6 +1725,35 @@ mod tests {
         );
         assert_eq!(reply_count_for(&transcript, 3), 1);
         assert_eq!(reply_count_for(&transcript, 2), 1);
+    }
+
+    #[test]
+    fn reply_only_append_keeps_root_keys_and_bumps_count() {
+        // The timeline For is keyed by root seq: a reply-only append must
+        // not churn root keys (children stay cached), which is exactly why
+        // the thread-toggle label must read the count reactively at the
+        // leaf — this locks both halves of that contract.
+        let mut transcript = vec![test_msg(0, "root", None), test_msg(1, "other root", None)];
+        let roots_before: Vec<u64> = partition_thread_messages(&transcript, 0)
+            .roots
+            .iter()
+            .map(|m| m.seq)
+            .collect();
+        assert_eq!(reply_count_for(&transcript, 0), 0);
+
+        transcript.push(test_msg(2, "reply", Some(0)));
+
+        let roots_after: Vec<u64> = partition_thread_messages(&transcript, 0)
+            .roots
+            .iter()
+            .map(|m| m.seq)
+            .collect();
+        assert_eq!(
+            roots_before, roots_after,
+            "reply-only appends must preserve root For keys"
+        );
+        assert_eq!(reply_count_for(&transcript, 0), 1);
+        assert_eq!(reply_count_for(&transcript, 1), 0);
     }
 
     #[test]
