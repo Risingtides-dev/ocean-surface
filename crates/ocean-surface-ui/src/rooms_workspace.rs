@@ -408,6 +408,18 @@ fn sync_thread_selection(
 /// existing palette tokens (accent/ok/warn/info/err soft pairs) — no new
 /// raw colors. Same author id always maps to the same hue; system rows
 /// keep the neutral accent avatar.
+/// Row timestamp: clock only. The day dividers (Today/Yesterday/date)
+/// already carry the date, so repeating it on every row is pure noise —
+/// Slack never does. Falls back to the full string when the input is
+/// not the canonical "YYYY-MM-DD HH:MM" short form. The full timestamp
+/// stays available on hover via the title attribute.
+fn clock_time(short: &str) -> String {
+    match short.get(11..) {
+        Some(clock) if short.len() == 16 => clock.to_string(),
+        _ => short.to_string(),
+    }
+}
+
 fn avatar_identity_class(author_id: &str) -> &'static str {
     const HUES: [&str; 5] = [
         "rooms-workspace__msg-avatar--hue0",
@@ -1372,8 +1384,11 @@ pub fn RoomsWorkspace(
                                                             <span class="rooms-workspace__msg-name">
                                                                 {m.author_id.clone()}
                                                             </span>
-                                                            <span class="rooms-workspace__msg-time">
-                                                                {ts}
+                                                            <span
+                                                                class="rooms-workspace__msg-time"
+                                                                title=ts.clone()
+                                                            >
+                                                                {clock_time(&ts)}
                                                             </span>
                                                         </div>
                                                         <div class="rooms-workspace__msg-text">
@@ -1672,7 +1687,8 @@ pub fn RoomsWorkspace(
                                             <div class="rooms-workspace__msg-body">
                                                 <div class="rooms-workspace__msg-author">
                                                     <span class="rooms-workspace__msg-name">{root.author_id.clone()}</span>
-                                                    <span class="rooms-workspace__msg-time">{ts}</span>
+                                                    <span class="rooms-workspace__msg-time" title=ts
+    .clone()>{clock_time(&ts)}</span>
                                                 </div>
                                                 <div class="rooms-workspace__msg-text">
                                                     {crate::room_markdown::body_view(root.body.clone(), member_ids)}
@@ -1707,7 +1723,8 @@ pub fn RoomsWorkspace(
                                                         <div class="rooms-workspace__msg-body">
                                                             <div class="rooms-workspace__msg-author">
                                                                 <span class="rooms-workspace__msg-name">{reply.author_id.clone()}</span>
-                                                                <span class="rooms-workspace__msg-time">{ts}</span>
+                                                                <span class="rooms-workspace__msg-time" title=ts
+    .clone()>{clock_time(&ts)}</span>
                                                             </div>
                                                             <div class="rooms-workspace__msg-text">
                                                                 {crate::room_markdown::body_view(reply.body.clone(), member_ids)}
@@ -2844,6 +2861,15 @@ mod tests {
     }
 
     // ── Behavioral: composer draft preservation (production helper) ──
+
+    #[test]
+    fn clock_time_strips_redundant_date() {
+        assert_eq!(clock_time("2026-06-05 12:34"), "12:34");
+        // Non-canonical inputs fall back to the full string — never lie.
+        assert_eq!(clock_time(""), "");
+        assert_eq!(clock_time("12:34"), "12:34");
+        assert_eq!(clock_time("2026-06-05T12"), "2026-06-05T12");
+    }
 
     #[test]
     fn avatar_identity_is_deterministic_and_bounded() {
