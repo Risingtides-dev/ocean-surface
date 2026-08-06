@@ -330,21 +330,14 @@ struct ReadCursorPatchBody {
 struct ReadCursorPatchEnvelope {
     #[serde(default)]
     ok: bool,
-    cursor: ReadCursorPatchResponse,
+    cursor: RoomReadCursorBody,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(untagged)]
-enum ReadCursorPatchResponse {
-    Local(RoomReadCursorProjection),
-    Live(RoomReadCursorLiveEnvelope),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-struct RoomReadCursorLiveEnvelope {
+struct RoomReadCursorBody {
     room_id: String,
     #[serde(default)]
-    sequence: Option<String>,
+    read_seq: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1602,8 +1595,9 @@ fn decode_room_tail_frame(name: &str, data: &str) -> Option<RoomTailFrame> {
     match name {
         "room_message" => serde_json::from_str(data).ok().map(RoomTailFrame::Message),
         "room_access" => serde_json::from_str(data).ok().map(RoomTailFrame::Access),
-        "room_read_cursor" => serde_json::from_str(data)
+        "room_read_cursor" => serde_json::from_str::<RoomReadCursorBody>(data)
             .ok()
+            .and_then(|body| parse_room_read_cursor_projection(None, body).ok())
             .map(RoomTailFrame::ReadCursor),
         _ => None,
     }
@@ -1665,30 +1659,33 @@ fn parse_optional_decimal_u64(raw: Option<&str>) -> Result<Option<u64>, String> 
         .map_err(|_| format!("invalid decimal read state '{trimmed}'"))
 }
 
-fn parse_patch_read_cursor_response(
-    expected_room_key: &str,
-    response: ReadCursorPatchResponse,
+fn parse_room_read_cursor_projection(
+    expected_room_key: Option<&str>,
+    body: RoomReadCursorBody,
 ) -> Result<RoomReadCursorProjection, String> {
-    match response {
-        ReadCursorPatchResponse::Local(cursor) => Ok(cursor),
-        ReadCursorPatchResponse::Live(envelope) => {
-            let room_id = envelope.room_id.trim();
-            if room_id.is_empty() {
-                return Err("read cursor decode error: empty room_id".into());
-            }
-            if room_id != expected_room_key {
-                return Err(format!(
-                    "read cursor decode error: wrong room_id '{room_id}' for '{expected_room_key}'"
-                ));
-            }
-            Ok(RoomReadCursorProjection {
-                read_seq: None,
-                mirrored_upstream_read_seq: parse_optional_decimal_u64(
-                    envelope.sequence.as_deref(),
-                )?,
-            })
+    let room_id = body.room_id.trim();
+    if room_id.is_empty() {
+        return Err("read cursor decode error: empty room_id".into());
+    }
+    if let Some(expected_room_key) = expected_room_key {
+        if room_id != expected_room_key {
+            return Err(format!(
+                "read cursor decode error: wrong room_id '{room_id}' for '{expected_room_key}'"
+            ));
         }
     }
+    let read_seq = parse_optional_decimal_u64(body.read_seq.as_deref())?;
+    Ok(RoomReadCursorProjection {
+        read_seq: read_seq.filter(|_| expected_room_key.is_some()),
+        mirrored_upstream_read_seq: read_seq.filter(|_| expected_room_key.is_none()),
+    })
+}
+
+fn parse_patch_read_cursor_response(
+    expected_room_key: &str,
+    response: RoomReadCursorBody,
+) -> Result<RoomReadCursorProjection, String> {
+    parse_room_read_cursor_projection(Some(expected_room_key), response)
 }
 
 fn current_durable_read_seq(cursor: &RoomReadCursorProjection) -> Option<u64> {
@@ -2571,12 +2568,12 @@ mod tests {
     }
 
     #[test]
-    fn patch_response_parses_full_local_and_live_envelopes_exactly() {
+    fn patch_response_parses_canonical_cursor_body_exactly() {
         let local: ReadCursorPatchEnvelope = serde_json::from_value(serde_json::json!({
             "ok": true,
             "cursor": {
-                "read_seq": 9,
-                "mirrored_upstream_read_seq": null
+                "room_id": "room-1",
+                "read_seq": "9"
             }
         }))
         .unwrap();
@@ -2588,32 +2585,50 @@ mod tests {
                 mirrored_upstream_read_seq: None,
             }
         );
+    }
 
-        let live: ReadCursorPatchEnvelope = serde_json::from_value(serde_json::json!({
+    #[test]
+    fn patch_response_parses_js_safe_decimal_strings_and_null() {
+        let big: ReadCursorPatchEnvelope = serde_json::from_value(serde_json::json!({
             "ok": true,
             "cursor": {
                 "room_id": "room-1",
-                "sequence": "44"
+                "read_seq": "9007199254740993"
             }
         }))
         .unwrap();
-        assert!(live.ok);
         assert_eq!(
-            parse_patch_read_cursor_response("room-1", live.cursor).unwrap(),
+            parse_patch_read_cursor_response("room-1", big.cursor).unwrap(),
+            RoomReadCursorProjection {
+                read_seq: Some(9_007_199_254_740_993),
+                mirrored_upstream_read_seq: None,
+            }
+        );
+
+        let null: ReadCursorPatchEnvelope = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "cursor": {
+                "room_id": "room-1",
+                "read_seq": null
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            parse_patch_read_cursor_response("room-1", null.cursor).unwrap(),
             RoomReadCursorProjection {
                 read_seq: None,
-                mirrored_upstream_read_seq: Some(44),
+                mirrored_upstream_read_seq: None,
             }
         );
     }
 
     #[test]
-    fn patch_response_rejects_bad_live_sequence() {
+    fn patch_response_rejects_bad_decimal_string() {
         let live: ReadCursorPatchEnvelope = serde_json::from_value(serde_json::json!({
             "ok": true,
             "cursor": {
                 "room_id": "room-1",
-                "sequence": "NaN"
+                "read_seq": "NaN"
             }
         }))
         .unwrap();
@@ -2621,12 +2636,12 @@ mod tests {
     }
 
     #[test]
-    fn patch_response_rejects_wrong_or_empty_live_room_id() {
+    fn patch_response_rejects_wrong_or_empty_room_id() {
         let wrong: ReadCursorPatchEnvelope = serde_json::from_value(serde_json::json!({
             "ok": true,
             "cursor": {
                 "room_id": "room-2",
-                "sequence": "44"
+                "read_seq": "44"
             }
         }))
         .unwrap();
@@ -2636,11 +2651,48 @@ mod tests {
             "ok": true,
             "cursor": {
                 "room_id": "",
-                "sequence": "44"
+                "read_seq": "44"
             }
         }))
         .unwrap();
         assert!(parse_patch_read_cursor_response("room-1", empty.cursor).is_err());
+    }
+
+    #[test]
+    fn sse_read_cursor_decodes_canonical_wire_and_rejects_malformed_room_id() {
+        assert_eq!(
+            decode_room_tail_frame(
+                "room_read_cursor",
+                r#"{"room_id":"room-1","read_seq":"9007199254740993"}"#
+            ),
+            Some(RoomTailFrame::ReadCursor(RoomReadCursorProjection {
+                read_seq: None,
+                mirrored_upstream_read_seq: Some(9_007_199_254_740_993),
+            }))
+        );
+
+        assert_eq!(
+            decode_room_tail_frame(
+                "room_read_cursor",
+                r#"{"room_id":"room-1","read_seq":null}"#
+            ),
+            Some(RoomTailFrame::ReadCursor(RoomReadCursorProjection {
+                read_seq: None,
+                mirrored_upstream_read_seq: None,
+            }))
+        );
+
+        assert_eq!(
+            decode_room_tail_frame("room_read_cursor", r#"{"room_id":"","read_seq":"44"}"#),
+            None
+        );
+        assert_eq!(
+            decode_room_tail_frame(
+                "room_read_cursor",
+                r#"{"room_id":"room-1","read_seq":"oops"}"#
+            ),
+            None
+        );
     }
 
     #[test]

@@ -41,6 +41,13 @@
   opacity: 1;
 }
 
+/* Touch and other non-hover surfaces need a persistent timestamp fallback. */
+@media (hover: none), (pointer: coarse) {
+  .rooms-workspace__msg--grouped .rooms-workspace__msg-time {
+    opacity: 1;
+  }
+}
+
 .rooms-workspace__day-separator {
   display: flex;
   align-items: center;
