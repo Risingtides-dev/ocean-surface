@@ -340,6 +340,12 @@ struct RoomReadCursorBody {
     read_seq: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadCursorProjectionTarget {
+    Local,
+    MirroredUpstream,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct RoomGetResponse {
     #[serde(default)]
@@ -619,13 +625,29 @@ impl Rooms {
     /// Current-room predicate over the live `generation` and `open_key`
     /// signals. Async tail work checks it before any non-frame state write;
     /// decoded frames pass through `accept_room_tail_frame` below.
-    fn room_is_current(&self, generation_id: u64, key: &str) -> bool {
+    ///
+    /// `pub(crate)` so sibling modules (`rooms_workspace.rs`) holding a
+    /// previously-captured `(generation, key)` pair — e.g. a pending
+    /// read-advance request built while a room was open — can re-validate it
+    /// before dispatching a mutating request. A same-key close/reopen bumps
+    /// `generation`, so a stale pair is rejected even though the key still
+    /// matches the newly-reopened room.
+    pub(crate) fn room_is_current(&self, generation_id: u64, key: &str) -> bool {
         room_request_is_current(
             generation_id,
             self.generation.get_untracked(),
             key,
             self.open_key.get_untracked().as_deref(),
         )
+    }
+
+    /// `pub(crate)` snapshot of the live room-identity generation counter —
+    /// bumped by every `open_room`/`close_room`. Exposed so a caller building
+    /// state that outlives one render (e.g. `ReadAdvanceRequest`) can stamp it
+    /// with "as of which room admission" it was computed, then re-validate
+    /// via `room_is_current` before acting on it later.
+    pub(crate) fn generation_snapshot(&self) -> u64 {
+        self.generation.get_untracked()
     }
 
     /// Synchronously clear the open-room signals and pin `tail_state` to
@@ -1380,7 +1402,7 @@ impl Rooms {
                     let Some(data) = msg.1.data().as_string() else {
                         continue;
                     };
-                    let Some(frame) = decode_room_tail_frame(name, &data) else {
+                    let Some(frame) = decode_room_tail_frame(name, &data, &key) else {
                         continue;
                     };
                     let Some(frame) = accept_room_tail_frame(
@@ -1405,13 +1427,20 @@ impl Rooms {
                             );
                         }
                         RoomTailFrame::ReadCursor(cursor) => {
-                            me.open_read_cursor.set(Some(cursor.clone()));
+                            // Mirrored SSE cursors merge monotonically with the
+                            // cursor already held for this room+generation, so a
+                            // lagging frame cannot lower the durable read.
+                            let merged = merge_read_cursor_projection(
+                                me.open_read_cursor.get_untracked().as_ref(),
+                                cursor,
+                            );
+                            me.open_read_cursor.set(Some(merged.clone()));
                             update_open_summary_from_open_room(
                                 &me.read_summaries,
                                 Some(&key),
                                 &me.transcript.get_untracked(),
                                 me.access.get_untracked().as_ref(),
-                                Some(&cursor),
+                                Some(&merged),
                             );
                         }
                         RoomTailFrame::Message(entry) => {
@@ -1497,7 +1526,7 @@ impl Rooms {
             .get_untracked()
             .as_ref()
             .and_then(current_durable_read_seq);
-        let applied_read_seq = current_summary.read_seq.or(durable_read_seq).unwrap_or(0);
+        let applied_read_seq = applied_open_read_seq(current_summary.read_seq, durable_read_seq);
         if candidate_read_seq <= applied_read_seq {
             return;
         }
@@ -1559,7 +1588,11 @@ impl Rooms {
             }
             match result {
                 Ok(cursor) => {
-                    me.open_read_cursor.set(Some(cursor));
+                    let merged = merge_read_cursor_projection(
+                        me.open_read_cursor.get_untracked().as_ref(),
+                        cursor,
+                    );
+                    me.open_read_cursor.set(Some(merged));
                     update_open_summary_from_open_room(
                         &me.read_summaries,
                         Some(&key),
@@ -1591,13 +1624,27 @@ enum RoomTailFrame {
     ReadCursor(RoomReadCursorProjection),
 }
 
-fn decode_room_tail_frame(name: &str, data: &str) -> Option<RoomTailFrame> {
+fn decode_room_tail_frame(
+    name: &str,
+    data: &str,
+    expected_room_key: &str,
+) -> Option<RoomTailFrame> {
     match name {
         "room_message" => serde_json::from_str(data).ok().map(RoomTailFrame::Message),
         "room_access" => serde_json::from_str(data).ok().map(RoomTailFrame::Access),
+        // Cursor frames carry a durable read position, so room identity is
+        // validated by construction here: the expected key is required and the
+        // frame is dropped unless the wire `room_id` matches it exactly.
         "room_read_cursor" => serde_json::from_str::<RoomReadCursorBody>(data)
             .ok()
-            .and_then(|body| parse_room_read_cursor_projection(None, body).ok())
+            .and_then(|body| {
+                parse_room_read_cursor_projection(
+                    expected_room_key,
+                    ReadCursorProjectionTarget::MirroredUpstream,
+                    body,
+                )
+                .ok()
+            })
             .map(RoomTailFrame::ReadCursor),
         _ => None,
     }
@@ -1660,24 +1707,29 @@ fn parse_optional_decimal_u64(raw: Option<&str>) -> Result<Option<u64>, String> 
 }
 
 fn parse_room_read_cursor_projection(
-    expected_room_key: Option<&str>,
+    expected_room_key: &str,
+    target: ReadCursorProjectionTarget,
     body: RoomReadCursorBody,
 ) -> Result<RoomReadCursorProjection, String> {
     let room_id = body.room_id.trim();
     if room_id.is_empty() {
         return Err("read cursor decode error: empty room_id".into());
     }
-    if let Some(expected_room_key) = expected_room_key {
-        if room_id != expected_room_key {
-            return Err(format!(
-                "read cursor decode error: wrong room_id '{room_id}' for '{expected_room_key}'"
-            ));
-        }
+    if room_id != expected_room_key {
+        return Err(format!(
+            "read cursor decode error: wrong room_id '{room_id}' for '{expected_room_key}'"
+        ));
     }
     let read_seq = parse_optional_decimal_u64(body.read_seq.as_deref())?;
-    Ok(RoomReadCursorProjection {
-        read_seq: read_seq.filter(|_| expected_room_key.is_some()),
-        mirrored_upstream_read_seq: read_seq.filter(|_| expected_room_key.is_none()),
+    Ok(match target {
+        ReadCursorProjectionTarget::Local => RoomReadCursorProjection {
+            read_seq,
+            mirrored_upstream_read_seq: None,
+        },
+        ReadCursorProjectionTarget::MirroredUpstream => RoomReadCursorProjection {
+            read_seq: None,
+            mirrored_upstream_read_seq: read_seq,
+        },
     })
 }
 
@@ -1685,11 +1737,46 @@ fn parse_patch_read_cursor_response(
     expected_room_key: &str,
     response: RoomReadCursorBody,
 ) -> Result<RoomReadCursorProjection, String> {
-    parse_room_read_cursor_projection(Some(expected_room_key), response)
+    parse_room_read_cursor_projection(
+        expected_room_key,
+        ReadCursorProjectionTarget::Local,
+        response,
+    )
 }
 
+/// Fold a newly observed cursor projection into the one already held for the
+/// open room. Both the local (PATCH-confirmed) and mirrored (SSE) positions
+/// advance monotonically, so a lagging mirrored frame can neither lower the
+/// durable read, drop a locally confirmed read, nor resurrect unread — while a
+/// later, higher mirrored frame still corrects the durable read upward.
+fn merge_read_cursor_projection(
+    current: Option<&RoomReadCursorProjection>,
+    incoming: RoomReadCursorProjection,
+) -> RoomReadCursorProjection {
+    let Some(current) = current else {
+        return incoming;
+    };
+    RoomReadCursorProjection {
+        read_seq: max_optional_u64(current.read_seq, incoming.read_seq),
+        mirrored_upstream_read_seq: max_optional_u64(
+            current.mirrored_upstream_read_seq,
+            incoming.mirrored_upstream_read_seq,
+        ),
+    }
+}
+
+/// The durable read position is the furthest confirmed read across both the
+/// local PATCH projection and the mirrored upstream projection.
 fn current_durable_read_seq(cursor: &RoomReadCursorProjection) -> Option<u64> {
-    cursor.read_seq.or(cursor.mirrored_upstream_read_seq)
+    max_optional_u64(cursor.read_seq, cursor.mirrored_upstream_read_seq)
+}
+
+/// The read position already applied for the open room: the furthest of the
+/// summary's confirmed read and the durable cursor projection. Folding with a
+/// monotonic max (rather than preferring the summary when present) keeps a
+/// lagging summary from re-sending a PATCH the durable cursor already covers.
+fn applied_open_read_seq(summary_read_seq: Option<u64>, durable_read_seq: Option<u64>) -> u64 {
+    max_optional_u64(summary_read_seq, durable_read_seq).unwrap_or(0)
 }
 
 fn latest_summary_seq_for_open_room(
@@ -1757,9 +1844,10 @@ fn update_open_summary_from_open_room(
     };
     let latest_seq = latest_summary_seq_for_open_room(transcript, access);
     let existing = summaries.get_untracked().get(open_key).copied();
-    let read_seq = cursor
-        .and_then(current_durable_read_seq)
-        .or(existing.and_then(|summary| summary.read_seq));
+    let read_seq = max_optional_u64(
+        cursor.and_then(current_durable_read_seq),
+        existing.and_then(|summary| summary.read_seq),
+    );
     summaries.update(|map| {
         map.insert(
             open_key.to_string(),
@@ -1900,7 +1988,11 @@ fn show_no_agents(agents_loaded: bool, agent_count: usize) -> bool {
     agents_loaded && agent_count == 0
 }
 
-fn room_request_is_current(
+/// Pure predicate: is `expected_generation`/`expected_key` still the current
+/// room admission? `pub(crate)` so sibling modules (`rooms_workspace.rs`) can
+/// unit-test the exact rejection logic behind [`Rooms::room_is_current`]
+/// without needing a live `Rooms` handle (which requires a browser runtime).
+pub(crate) fn room_request_is_current(
     expected_generation: u64,
     current_generation: u64,
     expected_key: &str,
@@ -2344,7 +2436,7 @@ mod tests {
     fn tail_frame_decoder_tags_access_and_messages_without_cursor_blending() {
         let access =
             serde_json::to_string(&access_projection(RoomAccessState::Recovering)).unwrap();
-        let frame = decode_room_tail_frame("room_access", &access).unwrap();
+        let frame = decode_room_tail_frame("room_access", &access, "room-1").unwrap();
         assert_eq!(
             frame,
             RoomTailFrame::Access(access_projection(RoomAccessState::Recovering))
@@ -2353,6 +2445,7 @@ mod tests {
         let frame = decode_room_tail_frame(
             "room_message",
             r#"{"seq":8,"author_id":"member-1","author_kind":"human","kind":"message","body":"hello","created_at":"2026-07-16T22:00:00Z"}"#,
+            "room-1",
         )
         .unwrap();
         match frame {
@@ -2360,7 +2453,7 @@ mod tests {
             RoomTailFrame::Access(_) => panic!("message frame decoded as access"),
             RoomTailFrame::ReadCursor(_) => panic!("message frame decoded as read cursor"),
         }
-        assert!(decode_room_tail_frame("unknown", "{}").is_none());
+        assert!(decode_room_tail_frame("unknown", "{}", "room-1").is_none());
     }
 
     #[test]
@@ -2409,6 +2502,45 @@ mod tests {
         assert!(!room_request_is_current(4, 5, "room-1", Some("room-1")));
         assert!(!room_request_is_current(4, 4, "room-1", Some("room-2")));
         assert!(!room_request_is_current(4, 4, "room-1", None));
+    }
+
+    /// Regression: a request scheduled while room "A" is open at generation N
+    /// must be rejected once "A" is closed and reopened under the SAME key —
+    /// which bumps the generation to N+1 without changing `open_key`. Key
+    /// equality alone (the pre-fix guard) would wrongly admit this stale
+    /// request; `room_request_is_current` — the exact predicate backing the
+    /// pub(crate) `Rooms::room_is_current` exposed for `rooms_workspace.rs` —
+    /// must reject it.
+    #[test]
+    fn room_request_is_current_rejects_stale_generation_across_same_key_close_reopen() {
+        let key = "room-a";
+        let scheduled_generation = 3; // captured "gen N" while room-a was open
+
+        // Sanity: the schedule-time snapshot is admitted against itself.
+        assert!(room_request_is_current(
+            scheduled_generation,
+            scheduled_generation,
+            key,
+            Some(key),
+        ));
+
+        // Close + reopen the SAME key: generation advances to N+1, `open_key`
+        // is still "room-a" — the pre-fix key-only guard would wrongly admit
+        // the stale request here.
+        let generation_after_close_reopen = scheduled_generation + 1;
+        assert!(!room_request_is_current(
+            scheduled_generation,
+            generation_after_close_reopen,
+            key,
+            Some(key),
+        ));
+        // A freshly-stamped request for the new admission is admitted.
+        assert!(room_request_is_current(
+            generation_after_close_reopen,
+            generation_after_close_reopen,
+            key,
+            Some(key),
+        ));
     }
 
     #[test]
@@ -2659,11 +2791,12 @@ mod tests {
     }
 
     #[test]
-    fn sse_read_cursor_decodes_canonical_wire_and_rejects_malformed_room_id() {
+    fn sse_read_cursor_decodes_canonical_wire_and_rejects_malformed_or_wrong_room_id() {
         assert_eq!(
             decode_room_tail_frame(
                 "room_read_cursor",
-                r#"{"room_id":"room-1","read_seq":"9007199254740993"}"#
+                r#"{"room_id":"room-1","read_seq":"9007199254740993"}"#,
+                "room-1",
             ),
             Some(RoomTailFrame::ReadCursor(RoomReadCursorProjection {
                 read_seq: None,
@@ -2674,7 +2807,8 @@ mod tests {
         assert_eq!(
             decode_room_tail_frame(
                 "room_read_cursor",
-                r#"{"room_id":"room-1","read_seq":null}"#
+                r#"{"room_id":"room-1","read_seq":null}"#,
+                "room-1",
             ),
             Some(RoomTailFrame::ReadCursor(RoomReadCursorProjection {
                 read_seq: None,
@@ -2683,13 +2817,26 @@ mod tests {
         );
 
         assert_eq!(
-            decode_room_tail_frame("room_read_cursor", r#"{"room_id":"","read_seq":"44"}"#),
+            decode_room_tail_frame(
+                "room_read_cursor",
+                r#"{"room_id":"room-2","read_seq":"44"}"#,
+                "room-1",
+            ),
             None
         );
         assert_eq!(
             decode_room_tail_frame(
                 "room_read_cursor",
-                r#"{"room_id":"room-1","read_seq":"oops"}"#
+                r#"{"room_id":"","read_seq":"44"}"#,
+                "room-1",
+            ),
+            None
+        );
+        assert_eq!(
+            decode_room_tail_frame(
+                "room_read_cursor",
+                r#"{"room_id":"room-1","read_seq":"oops"}"#,
+                "room-1",
             ),
             None
         );
@@ -2722,6 +2869,146 @@ mod tests {
                 read_seq: Some(2),
             })
         );
+    }
+
+    #[test]
+    fn lagging_mirrored_sse_cursor_cannot_lower_local_confirmed_read() {
+        // Local PATCH confirms read 100.
+        let local = parse_patch_read_cursor_response(
+            "room-1",
+            RoomReadCursorBody {
+                room_id: "room-1".into(),
+                read_seq: Some("100".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            local,
+            RoomReadCursorProjection {
+                read_seq: Some(100),
+                mirrored_upstream_read_seq: None,
+            }
+        );
+        assert_eq!(current_durable_read_seq(&local), Some(100));
+
+        // A lagging mirrored SSE frame reports 90.
+        let Some(RoomTailFrame::ReadCursor(lagging)) = decode_room_tail_frame(
+            "room_read_cursor",
+            r#"{"room_id":"room-1","read_seq":"90"}"#,
+            "room-1",
+        ) else {
+            panic!("mirrored cursor frame should decode");
+        };
+        let merged = merge_read_cursor_projection(Some(&local), lagging);
+        assert_eq!(
+            merged,
+            RoomReadCursorProjection {
+                read_seq: Some(100),
+                mirrored_upstream_read_seq: Some(90),
+            }
+        );
+        assert_eq!(current_durable_read_seq(&merged), Some(100));
+
+        // The room summary keeps the confirmed read; unread stays cleared.
+        let summaries = RwSignal::new(HashMap::from([(
+            "room-1".to_string(),
+            RoomReadSummary {
+                latest_seq: Some(100),
+                read_seq: Some(100),
+            },
+        )]));
+        update_open_summary_from_open_room(
+            &summaries,
+            Some("room-1"),
+            &[message(100)],
+            Some(&access_projection(RoomAccessState::Local)),
+            Some(&merged),
+        );
+        assert_eq!(
+            summaries.get_untracked().get("room-1"),
+            Some(&RoomReadSummary {
+                latest_seq: Some(100),
+                read_seq: Some(100),
+            })
+        );
+        assert!(!room_has_durable_unread(
+            summaries.get_untracked().get("room-1")
+        ));
+
+        // A later, higher mirrored frame still corrects the durable read up.
+        let Some(RoomTailFrame::ReadCursor(ahead)) = decode_room_tail_frame(
+            "room_read_cursor",
+            r#"{"room_id":"room-1","read_seq":"110"}"#,
+            "room-1",
+        ) else {
+            panic!("mirrored cursor frame should decode");
+        };
+        let corrected = merge_read_cursor_projection(Some(&merged), ahead);
+        assert_eq!(
+            corrected,
+            RoomReadCursorProjection {
+                read_seq: Some(100),
+                mirrored_upstream_read_seq: Some(110),
+            }
+        );
+        assert_eq!(current_durable_read_seq(&corrected), Some(110));
+
+        update_open_summary_from_open_room(
+            &summaries,
+            Some("room-1"),
+            &[message(110)],
+            Some(&access_projection(RoomAccessState::Local)),
+            Some(&corrected),
+        );
+        assert_eq!(
+            summaries.get_untracked().get("room-1"),
+            Some(&RoomReadSummary {
+                latest_seq: Some(110),
+                read_seq: Some(110),
+            })
+        );
+        assert!(!room_has_durable_unread(
+            summaries.get_untracked().get("room-1")
+        ));
+    }
+
+    #[test]
+    fn read_cursor_merge_seeds_from_empty_and_never_clears_known_positions() {
+        let mirrored = RoomReadCursorProjection {
+            read_seq: None,
+            mirrored_upstream_read_seq: Some(7),
+        };
+        assert_eq!(
+            merge_read_cursor_projection(None, mirrored.clone()),
+            mirrored
+        );
+
+        // An empty (null read_seq) frame cannot erase either known position.
+        let known = RoomReadCursorProjection {
+            read_seq: Some(12),
+            mirrored_upstream_read_seq: Some(9),
+        };
+        let Some(RoomTailFrame::ReadCursor(empty)) = decode_room_tail_frame(
+            "room_read_cursor",
+            r#"{"room_id":"room-1","read_seq":null}"#,
+            "room-1",
+        ) else {
+            panic!("null cursor frame should decode");
+        };
+        assert_eq!(merge_read_cursor_projection(Some(&known), empty), known);
+    }
+
+    #[test]
+    fn applied_open_read_seq_folds_summary_and_durable_cursor_monotonically() {
+        // Absent on both sides keeps the historical zero floor.
+        assert_eq!(applied_open_read_seq(None, None), 0);
+        // Either side alone still applies.
+        assert_eq!(applied_open_read_seq(Some(5), None), 5);
+        assert_eq!(applied_open_read_seq(None, Some(9)), 9);
+        // A lagging summary can no longer mask a further durable cursor.
+        assert_eq!(applied_open_read_seq(Some(5), Some(100)), 100);
+        // A further summary still wins over a lagging durable cursor.
+        assert_eq!(applied_open_read_seq(Some(100), Some(5)), 100);
     }
 
     #[test]
