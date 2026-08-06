@@ -10,6 +10,7 @@
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
+use crate::room_messages;
 use crate::rooms::{
     CreateResolution, FederatedActorType, FederatedRoomMemberProjection, FederatedRoomRole,
     MemberPresence, OutboxItemState, Room, RoomAccessProjection, RoomAccessState, RoomMessage,
@@ -74,6 +75,18 @@ fn short_time(ts: &str) -> String {
     }
 }
 
+/// The client's current UTC day key (`YYYY-MM-DD`), matching the daemon's
+/// ISO-8601 UTC timestamps, for humanizing day separators.
+fn today_day_key() -> String {
+    js_sys::Date::new_0()
+        .to_iso_string()
+        .as_string()
+        .unwrap_or_default()
+        .chars()
+        .take(10)
+        .collect()
+}
+
 /// Whether to show the "No messages yet" empty state in the transcript.
 #[allow(dead_code)]
 fn show_transcript_empty(tail_is_live: bool, roots_empty: bool) -> bool {
@@ -120,10 +133,50 @@ fn room_option_dom_id(key: &str) -> String {
     format!("rooms-opt-{key}")
 }
 
-/// Whether the right-rail member list is genuinely empty after load.
-#[allow(dead_code)]
-fn members_loaded(access: Option<&RoomAccessProjection>) -> bool {
-    access.is_some()
+fn transcript_is_near_bottom(
+    scroll_height: i32,
+    scroll_top: i32,
+    client_height: i32,
+    threshold: i32,
+) -> bool {
+    scroll_height - scroll_top - client_height < threshold
+}
+
+fn durable_read_candidate(
+    transcript: &[RoomMessage],
+    access: Option<&RoomAccessProjection>,
+) -> Option<u64> {
+    match access.map(|projection| projection.state) {
+        Some(RoomAccessState::Live) => {
+            access.and_then(|projection| projection.last_confirmed_global_sequence)
+        }
+        Some(RoomAccessState::Local) => transcript.last().map(|message| message.seq),
+        _ => None,
+    }
+}
+
+fn ready_to_mark_read(
+    transcript_hydrated: bool,
+    near_bottom: bool,
+    room_loaded: bool,
+    transcript: &[RoomMessage],
+    access: Option<&RoomAccessProjection>,
+) -> bool {
+    transcript_hydrated
+        && near_bottom
+        && room_loaded
+        && !transcript.is_empty()
+        && durable_read_candidate(transcript, access).is_some()
+}
+
+fn roster_presence_count(members: &[FederatedRoomMemberProjection]) -> usize {
+    members
+        .iter()
+        .filter(|member| {
+            matches!(member.actor_type, FederatedActorType::User)
+                && matches!(member.derived_presence, Some(MemberPresence::Live))
+        })
+        .count()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -250,20 +303,86 @@ pub fn RoomsWorkspace(
         }
     });
 
-    // Keep transcript pinned to newest message.
+    // Keep transcript pinned to newest message. When the reader has
+    // scrolled up, never yank them — surface the missed append as a
+    // "New messages" jump affordance instead (client scroll state only;
+    // this is not read-cursor "unread" state).
     let transcript = rooms.transcript;
+    let new_below = RwSignal::new(false);
+    let should_mark_read = RwSignal::new(false);
+    let refresh_handle = RwSignal::new(None::<IntervalHandle>);
     Effect::new(move |prev: Option<usize>| {
         let len = transcript.with(|t| t.len());
-        if len > 0 {
-            if let Some(el) = list_ref.get() {
-                let first_fill = prev.unwrap_or(0) == 0;
-                let near_bottom = el.scroll_height() - el.scroll_top() - el.client_height() < 120;
-                if first_fill || near_bottom {
-                    request_animation_frame(move || el.set_scroll_top(el.scroll_height()));
-                }
+        if len == 0 {
+            // Generation reset / room switch: nothing below.
+            new_below.set(false);
+            should_mark_read.set(false);
+        } else if let Some(el) = list_ref.get() {
+            let first_fill = prev.unwrap_or(0) == 0;
+            let near_bottom = transcript_is_near_bottom(
+                el.scroll_height(),
+                el.scroll_top(),
+                el.client_height(),
+                120,
+            );
+            if first_fill || near_bottom {
+                request_animation_frame(move || el.set_scroll_top(el.scroll_height()));
+                new_below.set(false);
+                should_mark_read.set(ready_to_mark_read(
+                    first_fill,
+                    near_bottom,
+                    rooms.open_room.get().is_some(),
+                    &rooms.transcript.get_untracked(),
+                    rooms.access.get_untracked().as_ref(),
+                ));
+            } else if len > prev.unwrap_or(0) {
+                new_below.set(true);
+                should_mark_read.set(false);
             }
         }
         len
+    });
+
+    Effect::new(move |_| {
+        let open = rooms.open_key.get();
+        if open.is_none() {
+            should_mark_read.set(false);
+        }
+    });
+
+    Effect::new(move |_| {
+        if !should_mark_read.get() {
+            return;
+        }
+        let open = rooms.open_key.get();
+        let candidate =
+            durable_read_candidate(&rooms.transcript.get(), rooms.access.get().as_ref());
+        let ready = rooms.open_room.get().is_some();
+        if ready && open.is_some() {
+            if let Some(candidate) = candidate {
+                rooms.mark_open_read_if_current(candidate);
+            }
+            should_mark_read.set(false);
+        }
+    });
+
+    Effect::new(move |_| {
+        if refresh_handle.get().is_none() {
+            let rooms = rooms;
+            let handle = leptos::prelude::set_interval_with_handle(
+                move || rooms.fetch_rooms_silent(),
+                std::time::Duration::from_secs(8),
+            )
+            .expect("rooms refresh interval");
+            refresh_handle.set(Some(handle));
+        }
+    });
+
+    Owner::on_cleanup(move || {
+        if let Some(handle) = refresh_handle.get_untracked() {
+            handle.clear();
+        }
+        refresh_handle.set(None);
     });
 
     Effect::new(move |_| {
@@ -664,6 +783,7 @@ pub fn RoomsWorkspace(
                                             let key2 = key.clone();
                                             let key_tab = key.clone();
                                             let key_sel = key.clone();
+                                            let key_unread = key.clone();
                                             let active = move || rooms.open_key.get().as_deref() == Some(&*key);
                                             let selected =
                                                 move || rooms.open_key.get().as_deref() == Some(&*key_sel);
@@ -679,6 +799,13 @@ pub fn RoomsWorkspace(
                                                     .and_then(|i| keys.get(i).cloned())
                                                     .as_deref()
                                                     == Some(&*key_tab)
+                                            };
+                                            let unread = move || {
+                                                rooms.read_summaries.with(|summaries| {
+                                                    crate::rooms::room_has_durable_unread(
+                                                        summaries.get(&key_unread),
+                                                    )
+                                                })
                                             };
                                             view! {
                                                 <button
@@ -698,6 +825,13 @@ pub fn RoomsWorkspace(
                                                     <span class="rooms-workspace__room-name">
                                                         {room.name.clone()}
                                                     </span>
+                                                    <Show when=move || unread()>
+                                                        <span
+                                                            class="rooms-workspace__room-unread"
+                                                            role="img"
+                                                            aria-label="Unread messages"
+                                                        ></span>
+                                                    </Show>
                                                 </button>
                                             }
                                         }
@@ -864,23 +998,72 @@ pub fn RoomsWorkspace(
                                     role="log"
                                     aria-label="Messages"
                                     node_ref=list_ref
+                                    on:scroll=move |_| {
+                                        if let Some(el) = list_ref.get() {
+                                            if transcript_is_near_bottom(
+                                                el.scroll_height(),
+                                                el.scroll_top(),
+                                                el.client_height(),
+                                                120,
+                                            ) {
+                                                new_below.set(false);
+                                                should_mark_read.set(ready_to_mark_read(
+                                                    false,
+                                                    true,
+                                                    rooms.open_room.get_untracked().is_some(),
+                                                    &rooms.transcript.get_untracked(),
+                                                    rooms.access.get_untracked().as_ref(),
+                                                ));
+                                            }
+                                        }
+                                    }
                                 >
                                     <For
-                                        each=move || partition_thread_messages(&rooms.transcript.get(), 0).roots
-                                        key=|m: &RoomMessage| m.seq
-                                        children=move |m: RoomMessage| {
-                                            let is_system = matches!(
-                                                m.kind,
-                                                RoomMessageKind::System
-                                                    | RoomMessageKind::ParticipantJoined
-                                                    | RoomMessageKind::ParticipantLeft
-                                            );
+                                        // Pair each root with its predecessor so
+                                        // density decisions (grouping, gap headers,
+                                        // day separators) are derived per row. The
+                                        // transcript is append-only under one
+                                        // generation, so a cached keyed child never
+                                        // sees its predecessor change; generation
+                                        // reset rebuilds the whole list.
+                                        each=move || {
+                                            let roots = partition_thread_messages(&rooms.transcript.get(), 0).roots;
+                                            std::iter::once(None)
+                                                .chain(roots.iter().cloned().map(Some))
+                                                .zip(roots.clone())
+                                                .collect::<Vec<_>>()
+                                        }
+                                        key=|(_, m): &(Option<RoomMessage>, RoomMessage)| m.seq
+                                        children=move |(prev, m): (Option<RoomMessage>, RoomMessage)| {
+                                            let is_system = room_messages::is_compact_system_row(&m);
                                             let ts = short_time(&m.created_at);
                                             let root_seq = m.seq;
+                                            let day_label = room_messages::day_separator_label(prev.as_ref(), &m)
+                                                .map(|d| room_messages::humanize_day_label(&d, &today_day_key()));
+                                            // A long silence gets a time header —
+                                            // unless a day separator already marks
+                                            // this row (no double dividers).
+                                            let gap_label = (day_label.is_none()
+                                                && prev
+                                                    .as_ref()
+                                                    .map(|p| room_messages::needs_gap_header(p, &m))
+                                                    .unwrap_or(false))
+                                            .then(|| ts.clone());
+                                            let grouped = prev
+                                                .as_ref()
+                                                .map(|p| room_messages::is_grouped(p, &m))
+                                                .unwrap_or(false);
                                             view! {
+                                                {day_label.map(|d| view! {
+                                                    <div class="rooms-workspace__day-separator" data-day="true">{d}</div>
+                                                })}
+                                                {gap_label.map(|g| view! {
+                                                    <div class="rooms-workspace__day-separator" data-gap="true">{g}</div>
+                                                })}
                                                 <div
                                                     class="rooms-workspace__msg"
                                                     class:rooms-workspace__msg--system=is_system
+                                                    class:rooms-workspace__msg--grouped=grouped
                                                 >
                                                     <div class="rooms-workspace__msg-avatar">
                                                         {if is_system {
@@ -903,7 +1086,15 @@ pub fn RoomsWorkspace(
                                                         </div>
                                                         {move || {
                                                             if should_show_thread_button(&m) {
-                                                                let reply_count = reply_count_for(&rooms.transcript.get(), root_seq);
+                                                                let reply_count = move || reply_count_for(&rooms.transcript.get(), root_seq);
+                                                                let thread_label = move || {
+                                                                    let count = reply_count();
+                                                                    if count > 0 {
+                                                                        format!("Open thread ({count})")
+                                                                    } else {
+                                                                        "Open thread".to_string()
+                                                                    }
+                                                                };
                                                                 view! {
                                                                     <button
                                                                         class="rooms-workspace__thread-toggle"
@@ -932,11 +1123,7 @@ pub fn RoomsWorkspace(
                                                                             });
                                                                         }
                                                                     >
-                                                                        {if reply_count > 0 {
-                                                                            format!("Open thread ({reply_count})")
-                                                                        } else {
-                                                                            "Open thread".to_string()
-                                                                        }}
+                                                                        {move || thread_label()}
                                                                     </button>
                                                                 }.into_any()
                                                             } else {
@@ -962,6 +1149,31 @@ pub fn RoomsWorkspace(
                                         }
                                     }}
                                 </div>
+
+                                // Jump affordance for appends missed while
+                                // scrolled up. Scroll-state UX only — never
+                                // read-cursor "unread" semantics.
+                                {move || new_below.get().then(|| view! {
+                                    <button
+                                        type="button"
+                                        class="rooms-workspace__jump-new"
+                                        on:click=move |_| {
+                                            if let Some(el) = list_ref.get() {
+                                                el.set_scroll_top(el.scroll_height());
+                                            }
+                                            new_below.set(false);
+                                            should_mark_read.set(ready_to_mark_read(
+                                                false,
+                                                true,
+                                                rooms.open_room.get_untracked().is_some(),
+                                                &rooms.transcript.get_untracked(),
+                                                rooms.access.get_untracked().as_ref(),
+                                            ));
+                                        }
+                                    >
+                                        "\u{2193} New messages"
+                                    </button>
+                                })}
 
                                 // Federation outbox is explicitly outside the
                                 // confirmed transcript. Pending items are
@@ -1161,12 +1373,7 @@ pub fn RoomsWorkspace(
                                             key=|m: &RoomMessage| m.seq
                                             children=move |reply: RoomMessage| {
                                                 let ts = short_time(&reply.created_at);
-                                                let is_system = matches!(
-                                                    reply.kind,
-                                                    RoomMessageKind::System
-                                                        | RoomMessageKind::ParticipantJoined
-                                                        | RoomMessageKind::ParticipantLeft
-                                                );
+                                                let is_system = room_messages::is_compact_system_row(&reply);
                                                 view! {
                                                     <div
                                                         class="rooms-workspace__msg rooms-workspace__msg--thread-reply"
@@ -1351,6 +1558,7 @@ pub fn RoomsWorkspace(
                                         }.into_any()
                                     } else {
                                         let members = access.members.clone();
+                                        let members_for_label = members.clone();
                                         view! {
                                             // Roster is a real list: give AT an
                                             // item count + boundaries instead of
@@ -1358,7 +1566,14 @@ pub fn RoomsWorkspace(
                                             <div
                                                 class="rooms-workspace__member-list"
                                                 role="list"
-                                                aria-label="Room members"
+                                                aria-label=move || {
+                                                    let count = roster_presence_count(&members_for_label);
+                                                    if count == 0 {
+                                                        "Room members".to_string()
+                                                    } else {
+                                                        format!("Room members, {count} humans live")
+                                                    }
+                                                }
                                             >
                                             <For
                                                 each=move || members.clone()
@@ -1477,7 +1692,8 @@ pub fn RoomsWorkspace(
 mod tests {
     use super::*;
     use crate::rooms::{
-        CreateOutcome, CreateResolution, RoomAccessProjection, RoomAccessState, RoomMessage,
+        CreateOutcome, CreateResolution, FederatedActorType, FederatedRoomMemberProjection,
+        FederatedRoomRole, MemberPresence, RoomAccessProjection, RoomAccessState, RoomMessage,
         RoomMessageKind, RoomParticipantKind,
     };
 
@@ -1542,7 +1758,120 @@ mod tests {
         assert_eq!(short_time("2026-01-01T00:00"), "00:00");
     }
 
-    // ── transcript_is_empty ───────────────────────────────────────────
+    #[test]
+    fn transcript_bottom_threshold_matches_follow_contract() {
+        assert!(transcript_is_near_bottom(1000, 810, 100, 120));
+        assert!(!transcript_is_near_bottom(1000, 700, 100, 120));
+    }
+
+    #[test]
+    fn durable_read_candidate_uses_local_transcript_and_live_global_only() {
+        let transcript = vec![test_msg(4, "hello", None), test_msg(7, "world", None)];
+        let local = test_access(RoomAccessState::Local);
+        let mut live = test_access(RoomAccessState::Live);
+        live.last_confirmed_global_sequence = Some(44);
+        let connecting = test_access(RoomAccessState::Connecting);
+
+        assert_eq!(durable_read_candidate(&transcript, Some(&local)), Some(7));
+        assert_eq!(durable_read_candidate(&transcript, Some(&live)), Some(44));
+        assert_eq!(durable_read_candidate(&transcript, Some(&connecting)), None);
+        assert_eq!(durable_read_candidate(&[], Some(&local)), None);
+    }
+
+    #[test]
+    fn ready_to_mark_read_requires_hydrated_room_near_bottom_and_candidate() {
+        let transcript = vec![test_msg(4, "hello", None)];
+        let local = test_access(RoomAccessState::Local);
+
+        assert!(ready_to_mark_read(
+            true,
+            true,
+            true,
+            &transcript,
+            Some(&local)
+        ));
+        assert!(!ready_to_mark_read(
+            false,
+            true,
+            true,
+            &transcript,
+            Some(&local)
+        ));
+        assert!(!ready_to_mark_read(
+            true,
+            false,
+            true,
+            &transcript,
+            Some(&local)
+        ));
+        assert!(!ready_to_mark_read(
+            true,
+            true,
+            false,
+            &transcript,
+            Some(&local)
+        ));
+        assert!(!ready_to_mark_read(true, true, true, &[], Some(&local)));
+        assert!(!ready_to_mark_read(
+            true,
+            true,
+            true,
+            &transcript,
+            Some(&test_access(RoomAccessState::Connecting))
+        ));
+    }
+
+    #[test]
+    fn roster_presence_counts_humans_only() {
+        let members = vec![
+            FederatedRoomMemberProjection {
+                member_id: "user-live-1".into(),
+                owner_member_id: None,
+                actor_type: FederatedActorType::User,
+                role_in_room: FederatedRoomRole::Member,
+                display_name: "A".into(),
+                public_agent_descriptor: None,
+                joined_at: String::new(),
+                derived_presence: Some(MemberPresence::Live),
+                local_binding_available: Some(true),
+            },
+            FederatedRoomMemberProjection {
+                member_id: "user-live-2".into(),
+                owner_member_id: None,
+                actor_type: FederatedActorType::User,
+                role_in_room: FederatedRoomRole::Owner,
+                display_name: "B".into(),
+                public_agent_descriptor: None,
+                joined_at: String::new(),
+                derived_presence: Some(MemberPresence::Live),
+                local_binding_available: Some(true),
+            },
+            FederatedRoomMemberProjection {
+                member_id: "user-away".into(),
+                owner_member_id: None,
+                actor_type: FederatedActorType::User,
+                role_in_room: FederatedRoomRole::Member,
+                display_name: "C".into(),
+                public_agent_descriptor: None,
+                joined_at: String::new(),
+                derived_presence: Some(MemberPresence::Unavailable),
+                local_binding_available: Some(true),
+            },
+            FederatedRoomMemberProjection {
+                member_id: "agent-live".into(),
+                owner_member_id: None,
+                actor_type: FederatedActorType::Agent,
+                role_in_room: FederatedRoomRole::Member,
+                display_name: "Flux".into(),
+                public_agent_descriptor: None,
+                joined_at: String::new(),
+                derived_presence: Some(MemberPresence::Live),
+                local_binding_available: Some(true),
+            },
+        ];
+
+        assert_eq!(roster_presence_count(&members), 2);
+    }
 
     fn test_msg(seq: u64, body: &str, thread_parent_seq: Option<u64>) -> RoomMessage {
         RoomMessage {
@@ -1571,18 +1900,6 @@ mod tests {
         assert!(!show_transcript_empty(false, true));
         assert!(show_transcript_empty(true, true));
         assert!(!show_transcript_empty(true, false));
-    }
-
-    // ── members_loaded ────────────────────────────────────────────────
-
-    #[test]
-    fn members_not_loaded_when_access_none() {
-        assert!(!members_loaded(None));
-    }
-
-    #[test]
-    fn members_loaded_when_access_some() {
-        assert!(members_loaded(Some(&test_access(RoomAccessState::Local))));
     }
 
     #[test]
@@ -1650,6 +1967,35 @@ mod tests {
         );
         assert_eq!(reply_count_for(&transcript, 3), 1);
         assert_eq!(reply_count_for(&transcript, 2), 1);
+    }
+
+    #[test]
+    fn reply_only_append_keeps_root_keys_and_bumps_count() {
+        // The timeline For is keyed by root seq: a reply-only append must
+        // not churn root keys (children stay cached), which is exactly why
+        // the thread-toggle label must read the count reactively at the
+        // leaf — this locks both halves of that contract.
+        let mut transcript = vec![test_msg(0, "root", None), test_msg(1, "other root", None)];
+        let roots_before: Vec<u64> = partition_thread_messages(&transcript, 0)
+            .roots
+            .iter()
+            .map(|m| m.seq)
+            .collect();
+        assert_eq!(reply_count_for(&transcript, 0), 0);
+
+        transcript.push(test_msg(2, "reply", Some(0)));
+
+        let roots_after: Vec<u64> = partition_thread_messages(&transcript, 0)
+            .roots
+            .iter()
+            .map(|m| m.seq)
+            .collect();
+        assert_eq!(
+            roots_before, roots_after,
+            "reply-only appends must preserve root For keys"
+        );
+        assert_eq!(reply_count_for(&transcript, 0), 1);
+        assert_eq!(reply_count_for(&transcript, 1), 0);
     }
 
     #[test]

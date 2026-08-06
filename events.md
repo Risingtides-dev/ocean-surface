@@ -1,3 +1,18 @@
+time:      [09:45am] [08-06-26]
+agent:     [ocean] [rooms-pm]
+worktree:  [feat/rooms-slack-workspace]
+type:      bugfix
+area:      frontend
+
+Aligned the Rooms Surface with ocean-os PR #366's unified JS-safe read-cursor
+wire: PATCH and room-scoped SSE now strictly decode `{room_id, read_seq}` with
+decimal strings, validate room identity, preserve Local/Live projection meaning,
+and fail closed on malformed payloads. Added >2^53, null, wrong-room, and malformed
+regressions. Grouped message timestamps now remain visible on touch/non-hover
+surfaces. Frozen gates passed: fmt/diff, wasm UI and proxy checks, strict wasm
+clippy, wasm test no-run, and native UI 787/787 plus auxiliary suites. Independent
+follow-up review was CLEAR.
+
 time:      [01:15pm] [07-19-26]
 agent:     [claude] [ocean TUI]
 worktree:  [main]

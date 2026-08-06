@@ -4,6 +4,99 @@
    tokens.css; no floating cards, centered stage, room-mode animation,
    or new raw colours. */
 
+/* ── Timeline density contract ─────────────────────────────────────── */
+
+.rooms-workspace__msg--grouped {
+  margin-top: 2px;
+}
+
+.rooms-workspace__msg--grouped .rooms-workspace__msg-avatar {
+  opacity: 0;
+  width: 0;
+  min-width: 0;
+  margin-right: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.rooms-workspace__msg--grouped .rooms-workspace__msg-name {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.rooms-workspace__msg--grouped .rooms-workspace__msg-time {
+  margin-left: auto;
+  /* hidden until hover/focus — the reveal below needs this base state */
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__msg--grouped:hover .rooms-workspace__msg-time,
+.rooms-workspace__msg--grouped:focus-within .rooms-workspace__msg-time {
+  opacity: 1;
+}
+
+/* Touch and other non-hover surfaces need a persistent timestamp fallback. */
+@media (hover: none), (pointer: coarse) {
+  .rooms-workspace__msg--grouped .rooms-workspace__msg-time {
+    opacity: 1;
+  }
+}
+
+.rooms-workspace__day-separator {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin: 12px 0;
+  color: var(--fg-4);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  line-height: 1;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.rooms-workspace__day-separator::before,
+.rooms-workspace__day-separator::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--border-subtle);
+}
+
+.rooms-workspace__day-separator::after {
+  opacity: 0.7;
+}
+
+/* If the view reuses the same divider class for a gap timestamp, keep the
+   same full-width treatment but soften the emphasis slightly. */
+.rooms-workspace__day-separator:where(:not([data-day])) {
+  color: var(--fg-3);
+  font-weight: 500;
+}
+
+.rooms-workspace__day-separator:where(:not([data-day]))::before,
+.rooms-workspace__day-separator:where(:not([data-day]))::after {
+  opacity: 0.85;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rooms-workspace__msg--grouped,
+  .rooms-workspace__day-separator,
+  .rooms-workspace__msg--grouped .rooms-workspace__msg-time {
+    transition: none;
+  }
+}
+
+
+
 /* ── Shell ─────────────────────────────────────────────────────────── */
 
 .rooms-workspace {
@@ -1266,4 +1359,46 @@
   .rooms-workspace__addagent-select {
     font-size: 16px;
   }
+}
+
+/* ── "New messages" jump affordance ─────────────────────────────────
+   Shown only when appends arrive while the reader is scrolled up.
+   Client scroll state — not read-cursor unread semantics. */
+.rooms-workspace__center {
+  position: relative;
+}
+
+.rooms-workspace__jump-new {
+  position: absolute;
+  left: 50%;
+  bottom: 88px;
+  transform: translateX(-50%);
+  z-index: 5;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  padding: 5px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-on-accent);
+  background: var(--accent);
+  box-shadow: var(--shadow-md);
+  cursor: pointer;
+}
+
+.rooms-workspace__jump-new:hover {
+  filter: brightness(1.08);
+}
+
+.rooms-workspace__jump-new:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* ── Semantic wrappers (parity audit) ───────────────────────────────
+   Pure a11y containers (listbox / list roles). Layout-neutral by
+   design: parents are plain block-flow scroll containers with no
+   child combinators, so these must stay display:block. */
+.rooms-workspace__left-options,
+.rooms-workspace__member-list {
+  display: block;
 }
