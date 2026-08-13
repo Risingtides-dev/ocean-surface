@@ -243,8 +243,12 @@ pub fn tokenize(body: &str, members: &HashSet<String>) -> Vec<MdSpan> {
         // Bare http(s) autolink.
         if (c == 'h' || c == 'H')
             && autolink_boundary(prev)
-            && (rest[..7.min(rest.len())].eq_ignore_ascii_case("http://")
-                || rest[..8.min(rest.len())].eq_ignore_ascii_case("https://"))
+            && (rest
+                .get(..7)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
+                || rest
+                    .get(..8)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://")))
         {
             let end = rest
                 .find(|ch: char| ch.is_whitespace() || matches!(ch, '<' | '>' | '"'))
@@ -482,6 +486,16 @@ mod tests {
             "see data:text/plain,hi",
         ];
         for body in cases {
+            assert_eq!(
+                tokenize(body, &members(&[])),
+                vec![MdSpan::Text(body.into())]
+            );
+        }
+    }
+
+    #[test]
+    fn bare_url_detection_is_safe_across_utf8_boundaries() {
+        for body in ["h12345💥", "h123456💥"] {
             assert_eq!(
                 tokenize(body, &members(&[])),
                 vec![MdSpan::Text(body.into())]
