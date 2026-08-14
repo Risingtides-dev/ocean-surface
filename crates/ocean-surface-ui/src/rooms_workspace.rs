@@ -592,6 +592,16 @@ fn mention_suggestions(participants: &[RoomParticipant], partial: &str) -> Vec<M
     ranked.into_iter().map(|(_, s)| s).take(8).collect()
 }
 
+fn mention_suggestion_at(
+    participants: &[RoomParticipant],
+    partial: &str,
+    index: usize,
+) -> Option<MentionSuggestion> {
+    mention_suggestions(participants, partial)
+        .get(index)
+        .cloned()
+}
+
 /// Replace the active `@partial` (spanning `at..cursor` bytes) with `@id `
 /// and return the new text plus the byte caret position after the space.
 fn apply_mention(text: &str, at: usize, cursor: usize, id: &str) -> (String, usize) {
@@ -698,16 +708,15 @@ pub fn RoomsWorkspace(
     // Mention truth source: the open room's daemon-provided roster ids.
     // room_markdown highlights @id ONLY when it resolves here.
     let member_ids = Memo::new(move |_| {
-        rooms
+        let local_participants = rooms
             .open_room
             .get()
-            .map(|r| {
-                r.participants
-                    .iter()
-                    .map(|p| p.id.clone())
-                    .collect::<std::collections::HashSet<_>>()
-            })
-            .unwrap_or_default()
+            .map(|room| room.participants)
+            .unwrap_or_default();
+        mention_roster(&local_participants, rooms.access.get().as_ref())
+            .into_iter()
+            .map(|participant| participant.id)
+            .collect::<std::collections::HashSet<_>>()
     });
     let mobile_toggle_ref: NodeRef<leptos::html::Button> = NodeRef::new();
     let create_input_ref: NodeRef<leptos::html::Input> = NodeRef::new();
@@ -746,8 +755,6 @@ pub fn RoomsWorkspace(
     });
 
     let accept_mention = move |idx: usize| {
-        let items = mention_items.get_untracked();
-        let Some(pick) = items.get(idx) else { return };
         let text = composer.get_untracked();
         let live_ctx = composer_input_ref
             .get()
@@ -756,6 +763,17 @@ pub fn RoomsWorkspace(
             })
             .or_else(|| mention_ctx.get_untracked());
         let Some((at, partial)) = live_ctx else {
+            mention_ctx.set(None);
+            mention_active.set(0);
+            return;
+        };
+        let local_participants = rooms
+            .open_room
+            .get_untracked()
+            .map(|room| room.participants)
+            .unwrap_or_default();
+        let roster = mention_roster(&local_participants, rooms.access.get_untracked().as_ref());
+        let Some(pick) = mention_suggestion_at(&roster, &partial, idx) else {
             mention_ctx.set(None);
             mention_active.set(0);
             return;
@@ -772,8 +790,6 @@ pub fn RoomsWorkspace(
         }
     };
     let accept_thread_mention = move |idx: usize| {
-        let items = thread_mention_items.get_untracked();
-        let Some(pick) = items.get(idx) else { return };
         let text = thread_composer.get_untracked();
         let live_ctx = thread_input_ref
             .get()
@@ -782,6 +798,17 @@ pub fn RoomsWorkspace(
             })
             .or_else(|| thread_mention_ctx.get_untracked());
         let Some((at, partial)) = live_ctx else {
+            thread_mention_ctx.set(None);
+            thread_mention_active.set(0);
+            return;
+        };
+        let local_participants = rooms
+            .open_room
+            .get_untracked()
+            .map(|room| room.participants)
+            .unwrap_or_default();
+        let roster = mention_roster(&local_participants, rooms.access.get_untracked().as_ref());
+        let Some(pick) = mention_suggestion_at(&roster, &partial, idx) else {
             thread_mention_ctx.set(None);
             thread_mention_active.set(0);
             return;
@@ -2306,18 +2333,10 @@ pub fn RoomsWorkspace(
                                                         .unwrap_or_default()
                                                     key=|p: &RoomParticipant| p.id.clone()
                                                     children=move |p: RoomParticipant| {
-                                                        let member_id = p.id.clone();
-                                                        let desc = Memo::new(move |_| {
-                                                            agent_descriptor_line(
-                                                                rooms.access.get().as_ref(),
-                                                                &member_id,
-                                                            )
-                                                        });
                                                         view! {
                                                             <div
                                                                 class="rooms-workspace__member"
                                                                 role="listitem"
-                                                                title=move || desc.get().unwrap_or_default()
                                                             >
                                                                 <div class="rooms-workspace__member-avatar">
                                                                     {p.display_name.chars().take(2).collect::<String>().to_uppercase()}
@@ -2328,9 +2347,6 @@ pub fn RoomsWorkspace(
                                                                 <span class="rooms-workspace__member-kind">
                                                                     {participant_kind_label(p.kind)}
                                                                 </span>
-                                                                {move || desc.get().map(|d| view! {
-                                                                    <span class="rooms-workspace__member-desc">{d}</span>
-                                                                })}
                                                             </div>
                                                         }
                                                     }
@@ -2484,7 +2500,7 @@ pub fn RoomsWorkspace(
                                                                 {member.display_name.clone()}
                                                             </span>
                                                             {desc_line.map(|desc| view! {
-                                                                <span class="rooms-workspace__member-meta">{desc}</span>
+                                                                <span class="rooms-workspace__member-desc">{desc}</span>
                                                             })}
                                                             <span class="rooms-workspace__member-kind">
                                                                 {actor_label}
@@ -3417,6 +3433,22 @@ mod tests {
         // Name prefix outranks substring.
         let got = mention_suggestions(&roster, "ada");
         assert_eq!(got[0].id, "zeta");
+    }
+
+    #[test]
+    fn mention_suggestion_pick_uses_the_live_partial() {
+        let roster = vec![
+            part("ada", "Ada", RoomParticipantKind::Human),
+            part("flux", "Flux", RoomParticipantKind::Agent),
+        ];
+        assert_eq!(
+            mention_suggestion_at(&roster, "fl", 0).map(|pick| pick.id),
+            Some("flux".to_string())
+        );
+        assert_eq!(
+            mention_suggestion_at(&roster, "ad", 0).map(|pick| pick.id),
+            Some("ada".to_string())
+        );
     }
 
     #[test]
