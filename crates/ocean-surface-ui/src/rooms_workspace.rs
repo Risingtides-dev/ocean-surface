@@ -526,6 +526,31 @@ fn mention_query(text: &str, cursor: usize) -> Option<(usize, String)> {
     Some((at, partial.to_string()))
 }
 
+/// Select the daemon-authoritative roster for mention completion. Local rooms
+/// use `Room.participants`; every non-Local room uses only the safe access
+/// member projection so stale/local identities never become mention ids.
+fn mention_roster(
+    local_participants: &[RoomParticipant],
+    access: Option<&RoomAccessProjection>,
+) -> Vec<RoomParticipant> {
+    match access {
+        Some(access) if access.state == RoomAccessState::Local => local_participants.to_vec(),
+        Some(access) => access
+            .members
+            .iter()
+            .map(|member| RoomParticipant {
+                id: member.member_id.clone(),
+                kind: match member.actor_type {
+                    FederatedActorType::User => RoomParticipantKind::Human,
+                    FederatedActorType::Agent => RoomParticipantKind::Agent,
+                },
+                display_name: member.display_name.clone(),
+            })
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
 /// Rank roster candidates for a mention partial: id prefix first, then
 /// display-name prefix, then substring anywhere; stable within each rank and
 /// capped at 8. An empty partial (caret right after `@`) lists the roster.
@@ -691,21 +716,25 @@ pub fn RoomsWorkspace(
         let Some((_, partial)) = mention_ctx.get() else {
             return Vec::new();
         };
-        rooms
+        let local_participants = rooms
             .open_room
             .get()
-            .map(|r| mention_suggestions(&r.participants, &partial))
-            .unwrap_or_default()
+            .map(|room| room.participants)
+            .unwrap_or_default();
+        let roster = mention_roster(&local_participants, rooms.access.get().as_ref());
+        mention_suggestions(&roster, &partial)
     });
     let thread_mention_items = Memo::new(move |_| {
         let Some((_, partial)) = thread_mention_ctx.get() else {
             return Vec::new();
         };
-        rooms
+        let local_participants = rooms
             .open_room
             .get()
-            .map(|r| mention_suggestions(&r.participants, &partial))
-            .unwrap_or_default()
+            .map(|room| room.participants)
+            .unwrap_or_default();
+        let roster = mention_roster(&local_participants, rooms.access.get().as_ref());
+        mention_suggestions(&roster, &partial)
     });
 
     let accept_mention = move |idx: usize| {
@@ -3256,6 +3285,58 @@ mod tests {
         assert_eq!(mention_query(text, text.len()), Some((7, "fl".to_string())));
         // Non-boundary cursor never panics.
         assert_eq!(mention_query("é@a", 1), None);
+    }
+
+    #[test]
+    fn mention_roster_uses_room_participants_only_for_local_access() {
+        let local = vec![part("local-human", "Local", RoomParticipantKind::Human)];
+        let mut access = test_access(RoomAccessState::Local);
+        access.members = vec![FederatedRoomMemberProjection {
+            member_id: "projected-agent".into(),
+            owner_member_id: None,
+            actor_type: FederatedActorType::Agent,
+            role_in_room: FederatedRoomRole::Member,
+            display_name: "Projected".into(),
+            public_agent_descriptor: None,
+            joined_at: String::new(),
+            derived_presence: None,
+            local_binding_available: None,
+        }];
+        assert_eq!(mention_roster(&local, Some(&access)), local);
+    }
+
+    #[test]
+    fn mention_roster_uses_safe_projection_for_every_non_local_state() {
+        let local = vec![part("stale-local", "Stale", RoomParticipantKind::Human)];
+        for state in [
+            RoomAccessState::Connecting,
+            RoomAccessState::Live,
+            RoomAccessState::Recovering,
+            RoomAccessState::Revoked,
+        ] {
+            let mut access = test_access(state);
+            access.members = vec![FederatedRoomMemberProjection {
+                member_id: "remote-agent".into(),
+                owner_member_id: None,
+                actor_type: FederatedActorType::Agent,
+                role_in_room: FederatedRoomRole::Member,
+                display_name: "Remote Agent".into(),
+                public_agent_descriptor: None,
+                joined_at: String::new(),
+                derived_presence: None,
+                local_binding_available: None,
+            }];
+            let roster = mention_roster(&local, Some(&access));
+            assert_eq!(
+                roster,
+                vec![part(
+                    "remote-agent",
+                    "Remote Agent",
+                    RoomParticipantKind::Agent
+                )]
+            );
+        }
+        assert!(mention_roster(&local, None).is_empty());
     }
 
     #[test]
