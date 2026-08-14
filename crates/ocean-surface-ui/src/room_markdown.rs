@@ -254,7 +254,10 @@ pub fn tokenize(body: &str, members: &HashSet<String>) -> Vec<MdSpan> {
                 .find(|ch: char| ch.is_whitespace() || matches!(ch, '<' | '>' | '"'))
                 .unwrap_or(rest.len());
             let url = rest[..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')']);
-            let scheme_len = if rest[..8.min(rest.len())].eq_ignore_ascii_case("https://") {
+            let scheme_len = if rest
+                .get(..8)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
+            {
                 8
             } else {
                 7
@@ -495,7 +498,7 @@ mod tests {
 
     #[test]
     fn bare_url_detection_is_safe_across_utf8_boundaries() {
-        for body in ["h12345💥", "h123456💥"] {
+        for body in ["h12345💥", "h123456💥", "http://é", "https://日"] {
             assert_eq!(
                 tokenize(body, &members(&[])),
                 vec![MdSpan::Text(body.into())]
