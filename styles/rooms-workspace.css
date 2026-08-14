@@ -31,8 +31,8 @@
 
 .rooms-workspace__msg--grouped .rooms-workspace__msg-time {
   margin-left: auto;
-  /* hidden until hover/focus — the reveal below needs this base state */
-  opacity: 0;
+  color: var(--fg-4);
+  opacity: 0.68;
   transition: opacity var(--dur-fast) var(--ease);
 }
 
@@ -1401,4 +1401,62 @@
 .rooms-workspace__left-options,
 .rooms-workspace__member-list {
   display: block;
+}
+
+/* ── Message action rail ────────────────────────────────────────────
+   Hover/focus-revealed row actions; ONLY real actions (reply-in-thread
+   today). Persistent when the thread has replies or is open — truthful
+   state never hides. Keyboard: the button stays in tab order and
+   focus-within reveals it. */
+.rooms-workspace__action-rail {
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__msg:hover .rooms-workspace__action-rail,
+.rooms-workspace__msg:focus-within .rooms-workspace__action-rail,
+.rooms-workspace__action-rail--persistent {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  /* Touch: no hover reveal exists — actions stay visible. */
+  .rooms-workspace__action-rail {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rooms-workspace__action-rail {
+    transition: none;
+  }
+}
+
+/* ── Avatar identity hues ───────────────────────────────────────────
+   Deterministic per-author hue from avatar_identity_class(). Existing
+   palette tokens ONLY (accent/ok/warn/info/err soft pairs) — no new
+   raw colors. System rows keep the neutral accent avatar. */
+.rooms-workspace__msg-avatar--hue0 {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.rooms-workspace__msg-avatar--hue1 {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.rooms-workspace__msg-avatar--hue2 {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.rooms-workspace__msg-avatar--hue3 {
+  background: var(--info-soft);
+  color: var(--info);
+}
+
+.rooms-workspace__msg-avatar--hue4 {
+  background: var(--err-soft);
+  color: var(--err);
 }

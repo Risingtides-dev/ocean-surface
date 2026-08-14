@@ -63,18 +63,10 @@ fn access_allows_writes(access: Option<&RoomAccessProjection>) -> bool {
     )
 }
 
-/// Render a compact time label from an ISO-8601 timestamp. Mirrors
-/// `rooms::short_time`.
-#[allow(dead_code)]
-fn short_time(ts: &str) -> String {
-    // "2026-07-25T03:43:12Z" → "03:43"
-    if ts.len() >= 16 {
-        ts[11..16].to_string()
-    } else {
-        ts.to_string()
-    }
-}
-
+/// Render a compact clock label from the canonical RFC3339 wire timestamp.
+/// Extracts the shared `HH:MM` prefix for `Z`, fractional-second, and offset
+/// variants without converting timezones or localizing; invalid/non-canonical
+/// input passes through unchanged.
 /// The client's current UTC day key (`YYYY-MM-DD`), matching the daemon's
 /// ISO-8601 UTC timestamps, for humanizing day separators.
 fn today_day_key() -> String {
@@ -404,6 +396,54 @@ fn sync_thread_selection(
     thread_root_for(transcript, Some(root_seq)).map(|_| root_seq)
 }
 
+/// Row timestamp: show only the canonical wire clock (HH:MM) for RFC3339
+/// timestamps while preserving the full wire value for machine-readable and
+/// accessible render paths. Accepts only ASCII canonical structure at the
+/// byte positions we actually rely on, never panics on Unicode/invalid input,
+/// and returns the original string unchanged when the wire value is not the
+/// expected RFC3339 shape.
+fn canonical_wire_clock_time(full: &str) -> String {
+    let bytes = full.as_bytes();
+    let is_digit = |idx: usize| bytes.get(idx).is_some_and(|b| b.is_ascii_digit());
+
+    if bytes.len() < 16
+        || !full.is_ascii()
+        || !is_digit(0)
+        || !is_digit(1)
+        || !is_digit(2)
+        || !is_digit(3)
+        || bytes[4] != b'-'
+        || !is_digit(5)
+        || !is_digit(6)
+        || bytes[7] != b'-'
+        || !is_digit(8)
+        || !is_digit(9)
+        || bytes[10] != b'T'
+        || !is_digit(11)
+        || !is_digit(12)
+        || bytes[13] != b':'
+        || !is_digit(14)
+        || !is_digit(15)
+    {
+        return full.to_string();
+    }
+
+    full[11..16].to_string()
+}
+fn avatar_identity_class(author_id: &str) -> &'static str {
+    const HUES: [&str; 5] = [
+        "rooms-workspace__msg-avatar--hue0",
+        "rooms-workspace__msg-avatar--hue1",
+        "rooms-workspace__msg-avatar--hue2",
+        "rooms-workspace__msg-avatar--hue3",
+        "rooms-workspace__msg-avatar--hue4",
+    ];
+    let h = author_id.bytes().fold(0usize, |acc, b| {
+        acc.wrapping_mul(31).wrapping_add(b as usize)
+    });
+    HUES[h % HUES.len()]
+}
+
 fn should_show_thread_button(message: &RoomMessage) -> bool {
     message.thread_parent_seq.is_none() && matches!(message.kind, RoomMessageKind::Message)
 }
@@ -471,6 +511,21 @@ pub fn RoomsWorkspace(
     let thread_last_sent_wire = RwSignal::new(String::new());
     let thread_last_sent_seq = RwSignal::new(0u64);
     let list_ref: NodeRef<leptos::html::Div> = NodeRef::new();
+
+    // Mention truth source: the open room's daemon-provided roster ids.
+    // room_markdown highlights @id ONLY when it resolves here.
+    let member_ids = Memo::new(move |_| {
+        rooms
+            .open_room
+            .get()
+            .map(|r| {
+                r.participants
+                    .iter()
+                    .map(|p| p.id.clone())
+                    .collect::<std::collections::HashSet<_>>()
+            })
+            .unwrap_or_default()
+    });
     let mobile_toggle_ref: NodeRef<leptos::html::Button> = NodeRef::new();
     let create_input_ref: NodeRef<leptos::html::Input> = NodeRef::new();
 
@@ -1291,7 +1346,7 @@ pub fn RoomsWorkspace(
                                         key=|(_, m): &(Option<RoomMessage>, RoomMessage)| m.seq
                                         children=move |(prev, m): (Option<RoomMessage>, RoomMessage)| {
                                             let is_system = room_messages::is_compact_system_row(&m);
-                                            let ts = short_time(&m.created_at);
+                                            let full_ts = m.created_at.clone();
                                             let root_seq = m.seq;
                                             let day_label = room_messages::day_separator_label(prev.as_ref(), &m)
                                                 .map(|d| room_messages::humanize_day_label(&d, &today_day_key()));
@@ -1303,7 +1358,7 @@ pub fn RoomsWorkspace(
                                                     .as_ref()
                                                     .map(|p| room_messages::needs_gap_header(p, &m))
                                                     .unwrap_or(false))
-                                            .then(|| ts.clone());
+                                            .then(|| canonical_wire_clock_time(&full_ts));
                                             let grouped = prev
                                                 .as_ref()
                                                 .map(|p| room_messages::is_grouped(p, &m))
@@ -1320,7 +1375,14 @@ pub fn RoomsWorkspace(
                                                     class:rooms-workspace__msg--system=is_system
                                                     class:rooms-workspace__msg--grouped=grouped
                                                 >
-                                                    <div class="rooms-workspace__msg-avatar">
+                                                    <div class=if is_system {
+                                                        "rooms-workspace__msg-avatar".to_string()
+                                                    } else {
+                                                        format!(
+                                                            "rooms-workspace__msg-avatar {}",
+                                                            avatar_identity_class(&m.author_id)
+                                                        )
+                                                    }>
                                                         {if is_system {
                                                             view! { <crate::icons::Spark /> }.into_any()
                                                         } else {
@@ -1332,12 +1394,17 @@ pub fn RoomsWorkspace(
                                                             <span class="rooms-workspace__msg-name">
                                                                 {m.author_id.clone()}
                                                             </span>
-                                                            <span class="rooms-workspace__msg-time">
-                                                                {ts}
-                                                            </span>
+                                                            <time
+                                                                class="rooms-workspace__msg-time"
+                                                                datetime=full_ts.clone()
+                                                                aria-label=full_ts.clone()
+                                                                title=full_ts.clone()
+                                                            >
+                                                                {canonical_wire_clock_time(&full_ts)}
+                                                            </time>
                                                         </div>
                                                         <div class="rooms-workspace__msg-text">
-                                                            {m.body.clone()}
+                                                            {crate::room_markdown::body_view(m.body.clone(), member_ids)}
                                                         </div>
                                                         {move || {
                                                             if should_show_thread_button(&m) {
@@ -1350,7 +1417,19 @@ pub fn RoomsWorkspace(
                                                                         "Open thread".to_string()
                                                                     }
                                                                 };
+                                                                // Hover/focus action rail. ONLY real actions live
+                                                                // here (reply-in-thread today); persistent when the
+                                                                // thread has replies or is open, so truthful state
+                                                                // never hides. Reveal is CSS (hover/focus-within,
+                                                                // always-on for no-hover pointers).
                                                                 view! {
+                                                                    <div
+                                                                        class="rooms-workspace__action-rail"
+                                                                        class:rooms-workspace__action-rail--persistent=move || {
+                                                                            reply_count() > 0
+                                                                                || selected_thread_root_seq.get() == Some(root_seq)
+                                                                        }
+                                                                    >
                                                                     <button
                                                                         class="rooms-workspace__thread-toggle"
                                                                         class:rooms-workspace__thread-toggle--active=move || {
@@ -1380,6 +1459,7 @@ pub fn RoomsWorkspace(
                                                                     >
                                                                         {move || thread_label()}
                                                                     </button>
+                                                                    </div>
                                                                 }.into_any()
                                                             } else {
                                                                 ().into_any()
@@ -1578,7 +1658,7 @@ pub fn RoomsWorkspace(
                     {move || {
                         if let Some(root) = thread_root_for(&rooms.transcript.get(), selected_thread_root_seq.get()) {
                             let root_seq = root.seq;
-                            let ts = short_time(&root.created_at);
+                            let full_ts = root.created_at.clone();
                             let root_is_system = matches!(
                                 root.kind,
                                 RoomMessageKind::System
@@ -1602,7 +1682,14 @@ pub fn RoomsWorkspace(
                                             class="rooms-workspace__msg rooms-workspace__msg--thread-root"
                                             class:rooms-workspace__msg--system=root_is_system
                                         >
-                                            <div class="rooms-workspace__msg-avatar">
+                                            <div class=if root_is_system {
+                                                "rooms-workspace__msg-avatar".to_string()
+                                            } else {
+                                                format!(
+                                                    "rooms-workspace__msg-avatar {}",
+                                                    avatar_identity_class(&root.author_id)
+                                                )
+                                            }>
                                                 {if root_is_system {
                                                     view! { <crate::icons::Spark /> }.into_any()
                                                 } else {
@@ -1612,23 +1699,39 @@ pub fn RoomsWorkspace(
                                             <div class="rooms-workspace__msg-body">
                                                 <div class="rooms-workspace__msg-author">
                                                     <span class="rooms-workspace__msg-name">{root.author_id.clone()}</span>
-                                                    <span class="rooms-workspace__msg-time">{ts}</span>
+                                                    <time
+                                                        class="rooms-workspace__msg-time"
+                                                        datetime=full_ts.clone()
+                                                        aria-label=full_ts.clone()
+                                                        title=full_ts.clone()
+                                                    >
+                                                        {canonical_wire_clock_time(&full_ts)}
+                                                    </time>
                                                 </div>
-                                                <div class="rooms-workspace__msg-text">{root.body.clone()}</div>
+                                                <div class="rooms-workspace__msg-text">
+                                                    {crate::room_markdown::body_view(root.body.clone(), member_ids)}
+                                                </div>
                                             </div>
                                         </div>
                                         <For
                                             each=move || partition_thread_messages(&rooms.transcript.get(), root_seq).replies
                                             key=|m: &RoomMessage| m.seq
                                             children=move |reply: RoomMessage| {
-                                                let ts = short_time(&reply.created_at);
+                                                let full_ts = reply.created_at.clone();
                                                 let is_system = room_messages::is_compact_system_row(&reply);
                                                 view! {
                                                     <div
                                                         class="rooms-workspace__msg rooms-workspace__msg--thread-reply"
                                                         class:rooms-workspace__msg--system=is_system
                                                     >
-                                                        <div class="rooms-workspace__msg-avatar">
+                                                        <div class=if is_system {
+                                                            "rooms-workspace__msg-avatar".to_string()
+                                                        } else {
+                                                            format!(
+                                                                "rooms-workspace__msg-avatar {}",
+                                                                avatar_identity_class(&reply.author_id)
+                                                            )
+                                                        }>
                                                             {if is_system {
                                                                 view! { <crate::icons::Spark /> }.into_any()
                                                             } else {
@@ -1638,9 +1741,18 @@ pub fn RoomsWorkspace(
                                                         <div class="rooms-workspace__msg-body">
                                                             <div class="rooms-workspace__msg-author">
                                                                 <span class="rooms-workspace__msg-name">{reply.author_id.clone()}</span>
-                                                                <span class="rooms-workspace__msg-time">{ts}</span>
+                                                                <time
+                                                                    class="rooms-workspace__msg-time"
+                                                                    datetime=full_ts.clone()
+                                                                    aria-label=full_ts.clone()
+                                                                    title=full_ts.clone()
+                                                                >
+                                                                    {canonical_wire_clock_time(&full_ts)}
+                                                                </time>
                                                             </div>
-                                                            <div class="rooms-workspace__msg-text">{reply.body.clone()}</div>
+                                                            <div class="rooms-workspace__msg-text">
+                                                                {crate::room_markdown::body_view(reply.body.clone(), member_ids)}
+                                                            </div>
                                                         </div>
                                                     </div>
                                                 }
@@ -2510,21 +2622,9 @@ mod tests {
         ))));
     }
 
-    // ── short_time ────────────────────────────────────────────────────
-
     #[test]
-    fn short_time_extracts_hhmm_from_iso() {
-        assert_eq!(short_time("2026-07-25T03:43:12Z"), "03:43");
-    }
-
-    #[test]
-    fn short_time_passthrough_short_string() {
-        assert_eq!(short_time("abc"), "abc");
-    }
-
-    #[test]
-    fn short_time_handles_minimum_16_chars() {
-        assert_eq!(short_time("2026-01-01T00:00"), "00:00");
+    fn canonical_wire_clock_time_extracts_hhmm_from_rfc3339_z() {
+        assert_eq!(canonical_wire_clock_time("2026-07-25T03:43:12Z"), "03:43");
     }
 
     #[test]
@@ -2582,6 +2682,43 @@ mod tests {
     }
 
     #[test]
+    fn canonical_wire_clock_time_extracts_hhmm_from_rfc3339_fractional() {
+        assert_eq!(
+            canonical_wire_clock_time("2026-07-25T03:43:12.987Z"),
+            "03:43"
+        );
+    }
+
+    #[test]
+    fn canonical_wire_clock_time_extracts_hhmm_from_rfc3339_offset() {
+        assert_eq!(
+            canonical_wire_clock_time("2026-07-25T03:43:12+07:00"),
+            "03:43"
+        );
+    }
+
+    #[test]
+    fn canonical_wire_clock_time_passthrough_short_string() {
+        assert_eq!(canonical_wire_clock_time("abc"), "abc");
+    }
+
+    #[test]
+    fn canonical_wire_clock_time_passthrough_noncanonical_separator() {
+        assert_eq!(
+            canonical_wire_clock_time("2026-07-25 03:43:12Z"),
+            "2026-07-25 03:43:12Z"
+        );
+    }
+
+    #[test]
+    fn canonical_wire_clock_time_passthrough_unicode_without_panic() {
+        assert_eq!(
+            canonical_wire_clock_time("２０２６-07-25T03:43:12Z"),
+            "２０２６-07-25T03:43:12Z"
+        );
+    }
+
+    #[test]
     fn roster_presence_counts_humans_only() {
         let members = vec![
             FederatedRoomMemberProjection {
@@ -2631,6 +2768,20 @@ mod tests {
         ];
 
         assert_eq!(roster_presence_count(&members), 2);
+    }
+
+    #[test]
+    fn room_timestamp_markup_preserves_full_wire_datetime_and_visible_clock() {
+        let ts = "2026-07-25T03:43:12.987+07:00";
+        let clock = canonical_wire_clock_time(ts);
+        let markup = format!(
+            "<time class=\"rooms-workspace__msg-time\" datetime=\"{ts}\" aria-label=\"{ts}\" title=\"{ts}\">{clock}</time>"
+        );
+        assert!(markup.contains("<time"));
+        assert!(markup.contains("datetime=\"2026-07-25T03:43:12.987+07:00\""));
+        assert!(markup.contains("aria-label=\"2026-07-25T03:43:12.987+07:00\""));
+        assert!(markup.contains("title=\"2026-07-25T03:43:12.987+07:00\""));
+        assert!(markup.ends_with(">03:43</time>"));
     }
 
     fn test_msg(seq: u64, body: &str, thread_parent_seq: Option<u64>) -> RoomMessage {
@@ -2773,6 +2924,43 @@ mod tests {
     }
 
     // ── Behavioral: composer draft preservation (production helper) ──
+
+    #[test]
+    fn canonical_wire_clock_time_strips_redundant_date_for_rfc3339() {
+        assert_eq!(canonical_wire_clock_time("2026-06-05T12:34:56Z"), "12:34");
+        // Non-canonical inputs fall back to the full string — never lie.
+        assert_eq!(canonical_wire_clock_time(""), "");
+        assert_eq!(canonical_wire_clock_time("12:34"), "12:34");
+        assert_eq!(canonical_wire_clock_time("2026-06-05T12"), "2026-06-05T12");
+        assert_eq!(
+            canonical_wire_clock_time("2026-06-05 12:34"),
+            "2026-06-05 12:34"
+        );
+    }
+
+    #[test]
+    fn avatar_identity_is_deterministic_and_bounded() {
+        let a = avatar_identity_class("ada");
+        assert_eq!(a, avatar_identity_class("ada"), "same id, same hue");
+        assert!(a.starts_with("rooms-workspace__msg-avatar--hue"));
+        // Different ids may collide (5 hues) but must all stay in range.
+        for id in ["ada", "grace", "linus", "smaths", "ocean-agent-7", ""] {
+            let c = avatar_identity_class(id);
+            assert!(
+                (0..5).any(|n| c == format!("rooms-workspace__msg-avatar--hue{n}")),
+                "out of palette: {c}"
+            );
+        }
+    }
+
+    #[test]
+    fn avatar_identity_distributes_across_hues() {
+        use std::collections::HashSet;
+        let hues: HashSet<_> = (0..50)
+            .map(|n| avatar_identity_class(&format!("agent-{n}")))
+            .collect();
+        assert!(hues.len() >= 3, "degenerate distribution: {hues:?}");
+    }
 
     #[test]
     fn composer_clears_when_unedited() {

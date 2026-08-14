@@ -1,0 +1,44 @@
+/* Rooms message content — markdown-lite spans emitted by
+   room_markdown.rs. Rendering is structurally safe (text nodes in a
+   fixed element set; scheme-allowlisted links; roster-resolved
+   mentions). Colors from tokens only. */
+
+.rooms-md__b {
+  font-weight: 700;
+}
+
+.rooms-md__i {
+  font-style: italic;
+}
+
+.rooms-md__code {
+  font-family: var(--mono);
+  font-size: 0.92em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--bg-well);
+  border: 1px solid var(--border-subtle);
+}
+
+.rooms-md__link {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.rooms-md__link:hover {
+  text-decoration: underline;
+}
+
+.rooms-md__link:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: 3px;
+}
+
+.rooms-md__mention {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 4px;
+  padding: 0 3px;
+  font-weight: 600;
+}
