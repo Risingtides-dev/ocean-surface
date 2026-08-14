@@ -900,8 +900,10 @@
   }
 }
 
-/* Below 650px: shell stacks vertically (top nav + center), left rail
-   becomes a fixed drawer with a backdrop. Thread rail takes full width. */
+/* At 650px and below: shell stacks vertically (top nav + center), left rail
+   becomes a fixed drawer with a backdrop. This breakpoint matches the native
+   shell's minimum width while preserving the denser desktop layout above it.
+   Thread rail takes full width. */
 @media (max-width: 650px) {
   .rooms-workspace {
     flex-direction: column;
@@ -918,16 +920,6 @@
     border-right: 1px solid var(--border-subtle);
     box-shadow: var(--shadow-md);
   }
-  .rooms-workspace__left-backdrop {
-    display: block;
-    position: fixed;
-    inset: 0;
-    z-index: 399;
-    background: var(--scrim);
-  }
-  .rooms-workspace__mobile-nav {
-    display: flex;
-  }
   .rooms-workspace__right--thread {
     position: fixed;
     inset: 0;
@@ -938,8 +930,8 @@
 
 /* ── Mobile nav ────────────────────────────────────────────────────── */
 
-/* Hidden above 650px; revealed as a compact top bar with hamburger
-   toggle and active-room name so mobile users are never stranded. */
+/* Hidden above the shared 650px compact breakpoint; revealed as a top bar
+   with a hamburger toggle and active-room name so readers are never stranded. */
 .rooms-workspace__mobile-nav {
   display: none;
   flex: 0 0 auto;
@@ -988,6 +980,22 @@
 
 .rooms-workspace__left-backdrop {
   display: none;
+}
+
+/* Visibility overrides must follow the hidden base rules above so the compact
+   drawer controls win the cascade at the shared native/mobile breakpoint. */
+@media (max-width: 650px) {
+  .rooms-workspace__left-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 399;
+    background: var(--scrim);
+  }
+
+  .rooms-workspace__mobile-nav {
+    display: flex;
+  }
 }
 
 /* ── Member presence dot ──────────────────────────────────────────── */
