@@ -138,7 +138,7 @@ fn scheme_allowed(href: &str) -> bool {
     true
 }
 
-fn is_mention_char(c: char) -> bool {
+pub(crate) fn is_mention_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')
 }
 

@@ -464,6 +464,156 @@ fn outbox_matches_failed_message(
             == thread_parent_seq
 }
 
+// ── Mention autosuggest (pure, unit-testable) ──────────────────────────────
+
+/// A ranked mention suggestion for the composer typeahead popup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MentionSuggestion {
+    id: String,
+    display_name: String,
+    kind: RoomParticipantKind,
+}
+
+/// Short human label for a participant kind, shown as the suggestion badge.
+fn participant_kind_label(kind: RoomParticipantKind) -> &'static str {
+    match kind {
+        RoomParticipantKind::Human => "human",
+        RoomParticipantKind::Agent => "agent",
+        RoomParticipantKind::Bot => "bot",
+        RoomParticipantKind::Tool => "tool",
+        RoomParticipantKind::System => "system",
+    }
+}
+
+/// Convert a UTF-16 code-unit offset (what `selectionStart` reports) into a
+/// byte offset into `s`, clamped to the string end.
+fn utf16_to_byte_idx(s: &str, utf16: usize) -> usize {
+    let mut units = 0usize;
+    for (byte_idx, ch) in s.char_indices() {
+        if units >= utf16 {
+            return byte_idx;
+        }
+        units += ch.len_utf16();
+    }
+    s.len()
+}
+
+/// Convert a byte offset into `s` into a UTF-16 code-unit offset, clamped.
+fn byte_to_utf16_idx(s: &str, byte: usize) -> usize {
+    s[..byte.min(s.len())].chars().map(|c| c.len_utf16()).sum()
+}
+
+/// If the caret sits directly after an `@token`, return the byte index of the
+/// `@` plus the partial token typed so far. Mirrors the tokenizer's rules:
+/// the `@` must start the text or follow a non-mention character (so email
+/// local parts never trigger the popup), and every character between `@` and
+/// the caret must be a mention character.
+fn mention_query(text: &str, cursor: usize) -> Option<(usize, String)> {
+    if cursor > text.len() || !text.is_char_boundary(cursor) {
+        return None;
+    }
+    let before = &text[..cursor];
+    let at = before.rfind('@')?;
+    let partial = &before[at + '@'.len_utf8()..];
+    if !partial.chars().all(crate::room_markdown::is_mention_char) {
+        return None;
+    }
+    if let Some(prev) = before[..at].chars().next_back() {
+        if crate::room_markdown::is_mention_char(prev) {
+            return None;
+        }
+    }
+    Some((at, partial.to_string()))
+}
+
+/// Rank roster candidates for a mention partial: id prefix first, then
+/// display-name prefix, then substring anywhere; stable within each rank and
+/// capped at 8. An empty partial (caret right after `@`) lists the roster.
+fn mention_suggestions(participants: &[RoomParticipant], partial: &str) -> Vec<MentionSuggestion> {
+    let q = partial.to_lowercase();
+    let mut ranked: Vec<(u8, MentionSuggestion)> = participants
+        .iter()
+        .filter_map(|p| {
+            let id = p.id.to_lowercase();
+            let name = p.display_name.to_lowercase();
+            let rank = if q.is_empty() || id.starts_with(&q) {
+                0
+            } else if name.starts_with(&q) {
+                1
+            } else if id.contains(&q) || name.contains(&q) {
+                2
+            } else {
+                return None;
+            };
+            Some((
+                rank,
+                MentionSuggestion {
+                    id: p.id.clone(),
+                    display_name: p.display_name.clone(),
+                    kind: p.kind,
+                },
+            ))
+        })
+        .collect();
+    ranked.sort_by_key(|(rank, _)| *rank);
+    ranked.into_iter().map(|(_, s)| s).take(8).collect()
+}
+
+/// Replace the active `@partial` (spanning `at..cursor` bytes) with `@id `
+/// and return the new text plus the byte caret position after the space.
+fn apply_mention(text: &str, at: usize, cursor: usize, id: &str) -> (String, usize) {
+    let mut out = String::with_capacity(text.len() + id.len() + 2);
+    out.push_str(&text[..at]);
+    out.push('@');
+    out.push_str(id);
+    out.push(' ');
+    let caret = out.len();
+    out.push_str(&text[cursor.min(text.len())..]);
+    (out, caret)
+}
+
+/// Keyboard model for the mention popup while it is open.
+#[derive(Debug, PartialEq, Eq)]
+enum MentionKey {
+    Move(usize),
+    Accept,
+    Close,
+    Pass,
+}
+
+fn mention_popup_key(len: usize, active: usize, key: &str) -> MentionKey {
+    if len == 0 {
+        return MentionKey::Pass;
+    }
+    match key {
+        "ArrowDown" => MentionKey::Move((active + 1) % len),
+        "ArrowUp" => MentionKey::Move((active + len - 1) % len),
+        "Enter" | "Tab" => MentionKey::Accept,
+        "Escape" => MentionKey::Close,
+        _ => MentionKey::Pass,
+    }
+}
+
+/// One-line identity summary for an agent member, from the federated roster
+/// descriptor when available: model alias and description. `None` for humans
+/// and for agents without a published descriptor — never fabricated.
+fn agent_descriptor_line(access: Option<&RoomAccessProjection>, member_id: &str) -> Option<String> {
+    let member = access?.members.iter().find(|m| m.member_id == member_id)?;
+    let descriptor = member.public_agent_descriptor.as_ref()?;
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(alias) = descriptor.model_alias.as_ref().filter(|a| !a.is_empty()) {
+        parts.push(alias.clone());
+    }
+    if let Some(desc) = descriptor.description.as_ref().filter(|d| !d.is_empty()) {
+        parts.push(desc.clone());
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" \u{b7} "))
+    }
+}
+
 fn is_thread_open(selected_thread_root_seq: Option<u64>, root_seq: u64) -> bool {
     selected_thread_root_seq == Some(root_seq)
 }
@@ -528,6 +678,72 @@ pub fn RoomsWorkspace(
     });
     let mobile_toggle_ref: NodeRef<leptos::html::Button> = NodeRef::new();
     let create_input_ref: NodeRef<leptos::html::Input> = NodeRef::new();
+
+    // ── Mention autosuggest state (channel + thread composers) ──
+    let composer_input_ref: NodeRef<leptos::html::Input> = NodeRef::new();
+    let thread_input_ref: NodeRef<leptos::html::Input> = NodeRef::new();
+    let mention_ctx = RwSignal::new(None::<(usize, String)>);
+    let mention_active = RwSignal::new(0usize);
+    let thread_mention_ctx = RwSignal::new(None::<(usize, String)>);
+    let thread_mention_active = RwSignal::new(0usize);
+
+    let mention_items = Memo::new(move |_| {
+        let Some((_, partial)) = mention_ctx.get() else {
+            return Vec::new();
+        };
+        rooms
+            .open_room
+            .get()
+            .map(|r| mention_suggestions(&r.participants, &partial))
+            .unwrap_or_default()
+    });
+    let thread_mention_items = Memo::new(move |_| {
+        let Some((_, partial)) = thread_mention_ctx.get() else {
+            return Vec::new();
+        };
+        rooms
+            .open_room
+            .get()
+            .map(|r| mention_suggestions(&r.participants, &partial))
+            .unwrap_or_default()
+    });
+
+    let accept_mention = move |idx: usize| {
+        let items = mention_items.get_untracked();
+        let Some(pick) = items.get(idx) else { return };
+        let Some((at, partial)) = mention_ctx.get_untracked() else {
+            return;
+        };
+        let text = composer.get_untracked();
+        let cursor = at + 1 + partial.len();
+        let (new_text, caret) = apply_mention(&text, at, cursor, &pick.id);
+        let caret16 = byte_to_utf16_idx(&new_text, caret) as u32;
+        composer.set(new_text);
+        mention_ctx.set(None);
+        mention_active.set(0);
+        if let Some(input) = composer_input_ref.get() {
+            let _ = input.focus();
+            let _ = input.set_selection_range(caret16, caret16);
+        }
+    };
+    let accept_thread_mention = move |idx: usize| {
+        let items = thread_mention_items.get_untracked();
+        let Some(pick) = items.get(idx) else { return };
+        let Some((at, partial)) = thread_mention_ctx.get_untracked() else {
+            return;
+        };
+        let text = thread_composer.get_untracked();
+        let cursor = at + 1 + partial.len();
+        let (new_text, caret) = apply_mention(&text, at, cursor, &pick.id);
+        let caret16 = byte_to_utf16_idx(&new_text, caret) as u32;
+        thread_composer.set(new_text);
+        thread_mention_ctx.set(None);
+        thread_mention_active.set(0);
+        if let Some(input) = thread_input_ref.get() {
+            let _ = input.focus();
+            let _ = input.set_selection_range(caret16, caret16);
+        }
+    };
 
     Effect::new(move |_| {
         if show_left_rail.get() {
@@ -1579,11 +1795,117 @@ pub fn RoomsWorkspace(
                                             class="rooms-workspace__composer-input"
                                             type="text"
                                             aria-label="Message"
-                                            placeholder="Message… (@id to mention)"
+                                            placeholder="Message… (@ to mention)"
+                                            node_ref=composer_input_ref
+                                            role="combobox"
+                                            aria-autocomplete="list"
+                                            aria-controls="rooms-mention-listbox"
+                                            aria-expanded=move || (!mention_items.get().is_empty()).to_string()
+                                            aria-activedescendant=move || {
+                                                if mention_items.get().is_empty() {
+                                                    String::new()
+                                                } else {
+                                                    format!("rooms-mention-opt-{}", mention_active.get())
+                                                }
+                                            }
                                             prop:value=move || composer.get()
-                                            on:input=move |ev| composer.set(event_target_value(&ev))
+                                            on:input=move |ev| {
+                                                let value = event_target_value(&ev);
+                                                let cursor = ev
+                                                    .target()
+                                                    .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
+                                                    .and_then(|el| el.selection_start().ok().flatten())
+                                                    .map(|u| utf16_to_byte_idx(&value, u as usize))
+                                                    .unwrap_or(value.len());
+                                                mention_ctx.set(mention_query(&value, cursor));
+                                                mention_active.set(0);
+                                                composer.set(value);
+                                            }
+                                            on:keydown=move |ev| {
+                                                if mention_ctx.get_untracked().is_none() {
+                                                    return;
+                                                }
+                                                let len = mention_items.get_untracked().len();
+                                                match mention_popup_key(len, mention_active.get_untracked(), &ev.key()) {
+                                                    MentionKey::Move(next) => {
+                                                        ev.prevent_default();
+                                                        mention_active.set(next);
+                                                    }
+                                                    MentionKey::Accept => {
+                                                        ev.prevent_default();
+                                                        accept_mention(mention_active.get_untracked());
+                                                    }
+                                                    MentionKey::Close => {
+                                                        ev.prevent_default();
+                                                        mention_ctx.set(None);
+                                                    }
+                                                    MentionKey::Pass => {}
+                                                }
+                                            }
+                                            on:blur=move |_| mention_ctx.set(None)
                                             disabled=move || !access_allows_writes(rooms.access.get().as_ref())
                                         />
+                                        {move || {
+                                            let items = mention_items.get();
+                                            if items.is_empty() {
+                                                return ().into_any();
+                                            }
+                                            let active = mention_active.get();
+                                            let access = rooms.access.get();
+                                            view! {
+                                                <div
+                                                    id="rooms-mention-listbox"
+                                                    class="rooms-workspace__mention-pop"
+                                                    role="listbox"
+                                                    aria-label="Mention suggestions"
+                                                >
+                                                    {items
+                                                        .into_iter()
+                                                        .enumerate()
+                                                        .map(|(i, item)| {
+                                                            let desc = agent_descriptor_line(access.as_ref(), &item.id);
+                                                            let initials = item
+                                                                .display_name
+                                                                .chars()
+                                                                .take(2)
+                                                                .collect::<String>()
+                                                                .to_uppercase();
+                                                            let avatar_class = format!(
+                                                                "rooms-workspace__member-avatar {}",
+                                                                avatar_identity_class(&item.id)
+                                                            );
+                                                            let id_label = format!("@{}", item.id);
+                                                            view! {
+                                                                <div
+                                                                    id=format!("rooms-mention-opt-{i}")
+                                                                    class="rooms-workspace__mention-opt"
+                                                                    class:rooms-workspace__mention-opt--active=i == active
+                                                                    role="option"
+                                                                    aria-selected=(i == active).to_string()
+                                                                    on:mousedown=move |ev: web_sys::MouseEvent| {
+                                                                        ev.prevent_default();
+                                                                        accept_mention(i);
+                                                                    }
+                                                                >
+                                                                    <span class=avatar_class>{initials}</span>
+                                                                    <span class="rooms-workspace__mention-name">
+                                                                        {item.display_name.clone()}
+                                                                    </span>
+                                                                    <span class="rooms-workspace__mention-id">{id_label}</span>
+                                                                    <span class="rooms-workspace__mention-kind">
+                                                                        {participant_kind_label(item.kind)}
+                                                                    </span>
+                                                                    {desc.map(|d| view! {
+                                                                        <span class="rooms-workspace__mention-desc">{d}</span>
+                                                                    })}
+                                                                </div>
+                                                            }
+                                                        })
+                                                        .collect_view()}
+                                                </div>
+                                            }
+                                            .into_any()
+                                        }}
                                         <button
                                             class="rooms-workspace__composer-send"
                                             type="submit"
@@ -1772,10 +2094,116 @@ pub fn RoomsWorkspace(
                                                 type="text"
                                                 aria-label="Thread reply"
                                                 placeholder="Reply in thread…"
+                                                node_ref=thread_input_ref
+                                                role="combobox"
+                                                aria-autocomplete="list"
+                                                aria-controls="rooms-mention-listbox-thread"
+                                                aria-expanded=move || (!thread_mention_items.get().is_empty()).to_string()
+                                                aria-activedescendant=move || {
+                                                    if thread_mention_items.get().is_empty() {
+                                                        String::new()
+                                                    } else {
+                                                        format!("rooms-mention-thread-opt-{}", thread_mention_active.get())
+                                                    }
+                                                }
                                                 prop:value=move || thread_composer.get()
-                                                on:input=move |ev| thread_composer.set(event_target_value(&ev))
+                                                on:input=move |ev| {
+                                                    let value = event_target_value(&ev);
+                                                    let cursor = ev
+                                                        .target()
+                                                        .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
+                                                        .and_then(|el| el.selection_start().ok().flatten())
+                                                        .map(|u| utf16_to_byte_idx(&value, u as usize))
+                                                        .unwrap_or(value.len());
+                                                    thread_mention_ctx.set(mention_query(&value, cursor));
+                                                    thread_mention_active.set(0);
+                                                    thread_composer.set(value);
+                                                }
+                                                on:keydown=move |ev| {
+                                                    if thread_mention_ctx.get_untracked().is_none() {
+                                                        return;
+                                                    }
+                                                    let len = thread_mention_items.get_untracked().len();
+                                                    match mention_popup_key(len, thread_mention_active.get_untracked(), &ev.key()) {
+                                                        MentionKey::Move(next) => {
+                                                            ev.prevent_default();
+                                                            thread_mention_active.set(next);
+                                                        }
+                                                        MentionKey::Accept => {
+                                                            ev.prevent_default();
+                                                            accept_thread_mention(thread_mention_active.get_untracked());
+                                                        }
+                                                        MentionKey::Close => {
+                                                            ev.prevent_default();
+                                                            thread_mention_ctx.set(None);
+                                                        }
+                                                        MentionKey::Pass => {}
+                                                    }
+                                                }
+                                                on:blur=move |_| thread_mention_ctx.set(None)
                                                 disabled=move || !access_allows_writes(rooms.access.get().as_ref())
                                             />
+                                            {move || {
+                                                let items = thread_mention_items.get();
+                                                if items.is_empty() {
+                                                    return ().into_any();
+                                                }
+                                                let active = thread_mention_active.get();
+                                                let access = rooms.access.get();
+                                                view! {
+                                                    <div
+                                                        id="rooms-mention-listbox-thread"
+                                                        class="rooms-workspace__mention-pop"
+                                                        role="listbox"
+                                                        aria-label="Mention suggestions"
+                                                    >
+                                                        {items
+                                                            .into_iter()
+                                                            .enumerate()
+                                                            .map(|(i, item)| {
+                                                                let desc = agent_descriptor_line(access.as_ref(), &item.id);
+                                                                let initials = item
+                                                                    .display_name
+                                                                    .chars()
+                                                                    .take(2)
+                                                                    .collect::<String>()
+                                                                    .to_uppercase();
+                                                                let avatar_class = format!(
+                                                                    "rooms-workspace__member-avatar {}",
+                                                                    avatar_identity_class(&item.id)
+                                                                );
+                                                                let id_label = format!("@{}", item.id);
+                                                                view! {
+                                                                    <div
+                                                                        id=format!("rooms-mention-thread-opt-{i}")
+                                                                        class="rooms-workspace__mention-opt"
+                                                                        class:rooms-workspace__mention-opt--active=i == active
+                                                                        role="option"
+                                                                        aria-selected=(i == active).to_string()
+                                                                        on:mousedown=move |ev: web_sys::MouseEvent| {
+                                                                            ev.prevent_default();
+                                                                            accept_thread_mention(i);
+                                                                        }
+                                                                    >
+                                                                        <span class=avatar_class>{initials}</span>
+                                                                        <span class="rooms-workspace__mention-name">
+                                                                            {item.display_name.clone()}
+                                                                        </span>
+                                                                        <span class="rooms-workspace__mention-id">{id_label}</span>
+                                                                        <span class="rooms-workspace__mention-kind">
+                                                                            {participant_kind_label(item.kind)}
+                                                                        </span>
+                                                                        {desc.map(|d| view! {
+                                                                            <span class="rooms-workspace__mention-desc">{d}</span>
+                                                                        })}
+                                                                    </div>
+                                                                }
+                                                            })
+                                                            .collect_view()}
+                                                    </div>
+                                                }
+                                                .into_any()
+                                            }}
                                             <button
                                                 class="rooms-workspace__composer-send"
                                                 type="submit"
@@ -1827,8 +2255,19 @@ pub fn RoomsWorkspace(
                                                         .unwrap_or_default()
                                                     key=|p: &RoomParticipant| p.id.clone()
                                                     children=move |p: RoomParticipant| {
+                                                        let member_id = p.id.clone();
+                                                        let desc = Memo::new(move |_| {
+                                                            agent_descriptor_line(
+                                                                rooms.access.get().as_ref(),
+                                                                &member_id,
+                                                            )
+                                                        });
                                                         view! {
-                                                            <div class="rooms-workspace__member" role="listitem">
+                                                            <div
+                                                                class="rooms-workspace__member"
+                                                                role="listitem"
+                                                                title=move || desc.get().unwrap_or_default()
+                                                            >
                                                                 <div class="rooms-workspace__member-avatar">
                                                                     {p.display_name.chars().take(2).collect::<String>().to_uppercase()}
                                                                 </div>
@@ -1836,14 +2275,11 @@ pub fn RoomsWorkspace(
                                                                     {p.display_name.clone()}
                                                                 </span>
                                                                 <span class="rooms-workspace__member-kind">
-                                                                {match p.kind {
-                                                                    RoomParticipantKind::Human => "human",
-                                                                    RoomParticipantKind::Agent => "agent",
-                                                                    RoomParticipantKind::Bot => "bot",
-                                                                    RoomParticipantKind::Tool => "tool",
-                                                                    RoomParticipantKind::System => "system",
-                                                                }}
+                                                                    {participant_kind_label(p.kind)}
                                                                 </span>
+                                                                {move || desc.get().map(|d| view! {
+                                                                    <span class="rooms-workspace__member-desc">{d}</span>
+                                                                })}
                                                             </div>
                                                         }
                                                     }
@@ -2782,6 +3218,135 @@ mod tests {
         assert!(markup.contains("aria-label=\"2026-07-25T03:43:12.987+07:00\""));
         assert!(markup.contains("title=\"2026-07-25T03:43:12.987+07:00\""));
         assert!(markup.ends_with(">03:43</time>"));
+    }
+
+    // ── Mention autosuggest helpers ──
+
+    fn part(id: &str, name: &str, kind: RoomParticipantKind) -> RoomParticipant {
+        RoomParticipant {
+            id: id.into(),
+            kind,
+            display_name: name.into(),
+        }
+    }
+
+    #[test]
+    fn mention_query_detects_partial_at_caret() {
+        assert_eq!(mention_query("hi @fl", 6), Some((3, "fl".to_string())));
+        assert_eq!(mention_query("@", 1), Some((0, String::new())));
+        assert_eq!(
+            mention_query("say @designer x", 13),
+            Some((4, "designer".to_string()))
+        );
+    }
+
+    #[test]
+    fn mention_query_rejects_email_local_parts_and_non_tokens() {
+        // '@' directly after a mention char = email shape, never a popup.
+        assert_eq!(mention_query("mail me a@b", 11), None);
+        // Whitespace inside the candidate token closes the query.
+        assert_eq!(mention_query("@fl x", 5), None);
+        // No '@' at all.
+        assert_eq!(mention_query("hello", 5), None);
+    }
+
+    #[test]
+    fn mention_query_is_unicode_safe() {
+        let text = "héllo @fl";
+        assert_eq!(mention_query(text, text.len()), Some((7, "fl".to_string())));
+        // Non-boundary cursor never panics.
+        assert_eq!(mention_query("é@a", 1), None);
+    }
+
+    #[test]
+    fn mention_suggestions_rank_id_prefix_then_name_then_substring() {
+        let roster = vec![
+            part("zeta", "Ada", RoomParticipantKind::Human),
+            part("flux", "Builder", RoomParticipantKind::Agent),
+            part("reflux", "Other", RoomParticipantKind::Agent),
+        ];
+        let got = mention_suggestions(&roster, "fl");
+        let ids: Vec<&str> = got.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["flux", "reflux"]);
+
+        // Name prefix outranks substring.
+        let got = mention_suggestions(&roster, "ada");
+        assert_eq!(got[0].id, "zeta");
+    }
+
+    #[test]
+    fn mention_suggestions_empty_partial_lists_roster_capped() {
+        let roster: Vec<RoomParticipant> = (0..12)
+            .map(|i| part(&format!("m{i}"), "M", RoomParticipantKind::Human))
+            .collect();
+        assert_eq!(mention_suggestions(&roster, "").len(), 8);
+        assert!(mention_suggestions(&roster, "zzz").is_empty());
+    }
+
+    #[test]
+    fn apply_mention_replaces_partial_and_positions_caret() {
+        let (text, caret) = apply_mention("hi @fl tail", 3, 6, "flux");
+        assert_eq!(text, "hi @flux  tail");
+        assert_eq!(caret, "hi @flux ".len());
+
+        let (text, caret) = apply_mention("@", 0, 1, "designer");
+        assert_eq!(text, "@designer ");
+        assert_eq!(caret, text.len());
+    }
+
+    #[test]
+    fn mention_popup_key_model() {
+        assert_eq!(mention_popup_key(3, 0, "ArrowDown"), MentionKey::Move(1));
+        assert_eq!(mention_popup_key(3, 0, "ArrowUp"), MentionKey::Move(2));
+        assert_eq!(mention_popup_key(3, 2, "ArrowDown"), MentionKey::Move(0));
+        assert_eq!(mention_popup_key(3, 1, "Enter"), MentionKey::Accept);
+        assert_eq!(mention_popup_key(3, 1, "Tab"), MentionKey::Accept);
+        assert_eq!(mention_popup_key(3, 1, "Escape"), MentionKey::Close);
+        assert_eq!(mention_popup_key(3, 1, "a"), MentionKey::Pass);
+        assert_eq!(mention_popup_key(0, 0, "Enter"), MentionKey::Pass);
+    }
+
+    #[test]
+    fn utf16_byte_offset_roundtrip() {
+        let s = "héllo @x";
+        // 'é' is 1 UTF-16 unit but 2 bytes.
+        assert_eq!(utf16_to_byte_idx(s, 2), 3);
+        assert_eq!(byte_to_utf16_idx(s, 3), 2);
+        assert_eq!(utf16_to_byte_idx(s, 99), s.len());
+        assert_eq!(
+            byte_to_utf16_idx(s, 99),
+            s.chars().map(|c| c.len_utf16()).sum::<usize>()
+        );
+    }
+
+    #[test]
+    fn agent_descriptor_line_is_truthful_only() {
+        use crate::rooms::PublicAgentDescriptor;
+        let mut access = test_access(RoomAccessState::Local);
+        access.members = vec![FederatedRoomMemberProjection {
+            member_id: "flux".into(),
+            owner_member_id: None,
+            actor_type: FederatedActorType::Agent,
+            role_in_room: FederatedRoomRole::Member,
+            display_name: "Flux".into(),
+            public_agent_descriptor: Some(PublicAgentDescriptor {
+                display_name: "Flux".into(),
+                description: Some("Rapid implementation".into()),
+                model_alias: Some("sonnet".into()),
+                skills_count: 0,
+                subagent_names: vec![],
+            }),
+            joined_at: String::new(),
+            derived_presence: None,
+            local_binding_available: None,
+        }];
+        assert_eq!(
+            agent_descriptor_line(Some(&access), "flux"),
+            Some("sonnet \u{b7} Rapid implementation".to_string())
+        );
+        // Unknown member / no descriptor / no access — never fabricated.
+        assert_eq!(agent_descriptor_line(Some(&access), "ghost"), None);
+        assert_eq!(agent_descriptor_line(None, "flux"), None);
     }
 
     fn test_msg(seq: u64, body: &str, thread_parent_seq: Option<u64>) -> RoomMessage {
