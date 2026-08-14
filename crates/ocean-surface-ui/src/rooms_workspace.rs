@@ -626,7 +626,10 @@ fn apply_mention(text: &str, at: usize, cursor: usize, id: &str) -> (String, usi
         .sum::<usize>();
     let replace_end = cursor + trailing_token_len;
     let suffix = &text[replace_end..];
-    let suffix = suffix.strip_prefix(' ').unwrap_or(suffix);
+    let suffix = match suffix.chars().next() {
+        Some(c) if c.is_whitespace() => &suffix[c.len_utf8()..],
+        _ => suffix,
+    };
     let mut out = String::with_capacity(text.len() + id.len() + 2);
     out.push_str(&text[..at]);
     out.push('@');
@@ -3657,6 +3660,10 @@ mod tests {
         let (text, caret) = apply_mention("@flux", 0, 3, "flux");
         assert_eq!(text, "@flux ");
         assert_eq!(caret, text.len());
+
+        let (text, caret) = apply_mention("@fl\u{00a0}tail", 0, 3, "flux");
+        assert_eq!(text, "@flux tail");
+        assert_eq!(caret, "@flux ".len());
     }
 
     #[test]
