@@ -756,12 +756,13 @@ pub fn RoomsWorkspace(
 
     let accept_mention = move |idx: usize| {
         let text = composer.get_untracked();
-        let live_ctx = composer_input_ref
-            .get()
-            .and_then(|input| {
-                live_mention_query_from_input(&text, input.selection_start().ok().flatten())
-            })
-            .or_else(|| mention_ctx.get_untracked());
+        let live_ctx = match composer_input_ref.get() {
+            Some(input) => match input.selection_start().ok().flatten() {
+                Some(cursor) => live_mention_query_from_input(&text, Some(cursor)),
+                None => mention_ctx.get_untracked(),
+            },
+            None => mention_ctx.get_untracked(),
+        };
         let Some((at, partial)) = live_ctx else {
             mention_ctx.set(None);
             mention_active.set(0);
@@ -791,12 +792,13 @@ pub fn RoomsWorkspace(
     };
     let accept_thread_mention = move |idx: usize| {
         let text = thread_composer.get_untracked();
-        let live_ctx = thread_input_ref
-            .get()
-            .and_then(|input| {
-                live_mention_query_from_input(&text, input.selection_start().ok().flatten())
-            })
-            .or_else(|| thread_mention_ctx.get_untracked());
+        let live_ctx = match thread_input_ref.get() {
+            Some(input) => match input.selection_start().ok().flatten() {
+                Some(cursor) => live_mention_query_from_input(&text, Some(cursor)),
+                None => thread_mention_ctx.get_untracked(),
+            },
+            None => thread_mention_ctx.get_untracked(),
+        };
         let Some((at, partial)) = live_ctx else {
             thread_mention_ctx.set(None);
             thread_mention_active.set(0);
@@ -1901,6 +1903,9 @@ pub fn RoomsWorkspace(
                                                 composer.set(value);
                                             }
                                             on:keydown=move |ev| {
+                                                if ev.is_composing() {
+                                                    return;
+                                                }
                                                 if mention_ctx.get_untracked().is_none() {
                                                     return;
                                                 }
@@ -2198,6 +2203,9 @@ pub fn RoomsWorkspace(
                                                     thread_composer.set(value);
                                                 }
                                                 on:keydown=move |ev| {
+                                                    if ev.is_composing() {
+                                                        return;
+                                                    }
                                                     if thread_mention_ctx.get_untracked().is_none() {
                                                         return;
                                                     }
