@@ -607,10 +607,11 @@ fn mention_accept_is_valid(
     selection_start_utf16: Option<u32>,
     participants: &[RoomParticipant],
     index: usize,
+    displayed_id: Option<&str>,
 ) -> bool {
     live_mention_query_from_input(text, selection_start_utf16)
         .and_then(|(_, partial)| mention_suggestion_at(participants, &partial, index))
-        .is_some()
+        .is_some_and(|candidate| displayed_id == Some(candidate.id.as_str()))
 }
 
 /// Replace the active `@partial` (spanning `at..cursor` bytes) with `@id `
@@ -1945,11 +1946,16 @@ pub fn RoomsWorkspace(
                                                         .and_then(|input| {
                                                             input.selection_start().ok().flatten()
                                                         });
+                                                    let displayed_id = mention_items
+                                                        .get_untracked()
+                                                        .get(active)
+                                                        .map(|item| item.id.clone());
                                                     if !mention_accept_is_valid(
                                                         &composer.get_untracked(),
                                                         selection,
                                                         &roster,
                                                         active,
+                                                        displayed_id.as_deref(),
                                                     ) {
                                                         mention_ctx.set(None);
                                                         mention_active.set(0);
@@ -2279,11 +2285,16 @@ pub fn RoomsWorkspace(
                                                             .and_then(|input| {
                                                                 input.selection_start().ok().flatten()
                                                             });
+                                                        let displayed_id = thread_mention_items
+                                                            .get_untracked()
+                                                            .get(active)
+                                                            .map(|item| item.id.clone());
                                                         if !mention_accept_is_valid(
                                                             &thread_composer.get_untracked(),
                                                             selection,
                                                             &roster,
                                                             active,
+                                                            displayed_id.as_deref(),
                                                         ) {
                                                             thread_mention_ctx.set(None);
                                                             thread_mention_active.set(0);
@@ -3545,9 +3556,49 @@ mod tests {
     fn mention_accept_validation_does_not_consume_keys_after_caret_moves() {
         let roster = vec![part("flux", "Flux", RoomParticipantKind::Agent)];
         let text = "@fl trailing";
-        assert!(mention_accept_is_valid(text, Some(3), &roster, 0));
-        assert!(!mention_accept_is_valid(text, Some(11), &roster, 0));
-        assert!(!mention_accept_is_valid(text, None, &roster, 0));
+        assert!(mention_accept_is_valid(
+            text,
+            Some(3),
+            &roster,
+            0,
+            Some("flux")
+        ));
+        assert!(!mention_accept_is_valid(
+            text,
+            Some(11),
+            &roster,
+            0,
+            Some("flux")
+        ));
+        assert!(!mention_accept_is_valid(
+            text,
+            None,
+            &roster,
+            0,
+            Some("flux")
+        ));
+    }
+
+    #[test]
+    fn mention_accept_validation_rejects_a_stale_displayed_candidate() {
+        let roster = vec![
+            part("ax", "Adel", RoomParticipantKind::Human),
+            part("ada", "Ada", RoomParticipantKind::Human),
+        ];
+        assert!(mention_accept_is_valid(
+            "@ad",
+            Some(3),
+            &roster,
+            0,
+            Some("ada")
+        ));
+        assert!(!mention_accept_is_valid(
+            "@ad",
+            Some(2),
+            &roster,
+            0,
+            Some("ada")
+        ));
     }
 
     #[test]
