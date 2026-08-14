@@ -769,7 +769,7 @@ pub fn RoomsWorkspace(
         mention_suggestions(&roster, &partial)
     });
 
-    let accept_mention = move |idx: usize| {
+    let accept_mention = move |idx: usize, displayed_id: Option<String>| {
         let text = composer.get_untracked();
         let live_ctx = match composer_input_ref.get() {
             Some(input) => match input.selection_start().ok().flatten() {
@@ -794,6 +794,11 @@ pub fn RoomsWorkspace(
             mention_active.set(0);
             return;
         };
+        if displayed_id.as_deref() != Some(pick.id.as_str()) {
+            mention_ctx.set(None);
+            mention_active.set(0);
+            return;
+        }
         let cursor = at + 1 + partial.len();
         let (new_text, caret) = apply_mention(&text, at, cursor, &pick.id);
         let caret16 = byte_to_utf16_idx(&new_text, caret) as u32;
@@ -805,7 +810,7 @@ pub fn RoomsWorkspace(
             let _ = input.set_selection_range(caret16, caret16);
         }
     };
-    let accept_thread_mention = move |idx: usize| {
+    let accept_thread_mention = move |idx: usize, displayed_id: Option<String>| {
         let text = thread_composer.get_untracked();
         let live_ctx = match thread_input_ref.get() {
             Some(input) => match input.selection_start().ok().flatten() {
@@ -830,6 +835,11 @@ pub fn RoomsWorkspace(
             thread_mention_active.set(0);
             return;
         };
+        if displayed_id.as_deref() != Some(pick.id.as_str()) {
+            thread_mention_ctx.set(None);
+            thread_mention_active.set(0);
+            return;
+        }
         let cursor = at + 1 + partial.len();
         let (new_text, caret) = apply_mention(&text, at, cursor, &pick.id);
         let caret16 = byte_to_utf16_idx(&new_text, caret) as u32;
@@ -1970,7 +1980,11 @@ pub fn RoomsWorkspace(
                                                     }
                                                     MentionKey::Accept => {
                                                         ev.prevent_default();
-                                                        accept_mention(active);
+                                                        let displayed_id = mention_items
+                                                            .get_untracked()
+                                                            .get(active)
+                                                            .map(|item| item.id.clone());
+                                                        accept_mention(active, displayed_id);
                                                     }
                                                     MentionKey::Close => {
                                                         ev.prevent_default();
@@ -2012,6 +2026,7 @@ pub fn RoomsWorkspace(
                                                                 avatar_identity_class(&item.id)
                                                             );
                                                             let id_label = format!("@{}", item.id);
+                                                            let clicked_id = item.id.clone();
                                                             view! {
                                                                 <div
                                                                     id=format!("rooms-mention-opt-{i}")
@@ -2023,7 +2038,9 @@ pub fn RoomsWorkspace(
                                                                         // Keep combobox focus until the click activation runs.
                                                                         ev.prevent_default();
                                                                     }
-                                                                    on:click=move |_| accept_mention(i)
+                                                                    on:click=move |_| {
+                                                                        accept_mention(i, Some(clicked_id.clone()))
+                                                                    }
                                                                 >
                                                                     <span class=avatar_class>{initials}</span>
                                                                     <span class="rooms-workspace__mention-name">
@@ -2309,7 +2326,11 @@ pub fn RoomsWorkspace(
                                                         }
                                                         MentionKey::Accept => {
                                                             ev.prevent_default();
-                                                            accept_thread_mention(active);
+                                                            let displayed_id = thread_mention_items
+                                                                .get_untracked()
+                                                                .get(active)
+                                                                .map(|item| item.id.clone());
+                                                            accept_thread_mention(active, displayed_id);
                                                         }
                                                         MentionKey::Close => {
                                                             ev.prevent_default();
@@ -2351,6 +2372,7 @@ pub fn RoomsWorkspace(
                                                                     avatar_identity_class(&item.id)
                                                                 );
                                                                 let id_label = format!("@{}", item.id);
+                                                                let clicked_id = item.id.clone();
                                                                 view! {
                                                                     <div
                                                                         id=format!("rooms-mention-thread-opt-{i}")
@@ -2362,7 +2384,12 @@ pub fn RoomsWorkspace(
                                                                             // Keep combobox focus until the click activation runs.
                                                                             ev.prevent_default();
                                                                         }
-                                                                        on:click=move |_| accept_thread_mention(i)
+                                                                        on:click=move |_| {
+                                                                            accept_thread_mention(
+                                                                                i,
+                                                                                Some(clicked_id.clone()),
+                                                                            )
+                                                                        }
                                                                     >
                                                                         <span class=avatar_class>{initials}</span>
                                                                         <span class="rooms-workspace__mention-name">
