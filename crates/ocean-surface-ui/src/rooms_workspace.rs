@@ -614,11 +614,18 @@ fn mention_accept_is_valid(
         .is_some_and(|candidate| displayed_id == Some(candidate.id.as_str()))
 }
 
-/// Replace the active `@partial` (spanning `at..cursor` bytes) with `@id `
-/// and return the new text plus the byte caret position after one separator.
+/// Replace the active mention token beginning at `at` with `@id `, extending
+/// beyond the caret through any remaining mention characters, and return the
+/// new text plus the byte caret position after one separator.
 fn apply_mention(text: &str, at: usize, cursor: usize, id: &str) -> (String, usize) {
     let cursor = cursor.min(text.len());
-    let suffix = &text[cursor..];
+    let trailing_token_len = text[cursor..]
+        .chars()
+        .take_while(|&c| crate::room_markdown::is_mention_char(c))
+        .map(char::len_utf8)
+        .sum::<usize>();
+    let replace_end = cursor + trailing_token_len;
+    let suffix = &text[replace_end..];
     let suffix = suffix.strip_prefix(' ').unwrap_or(suffix);
     let mut out = String::with_capacity(text.len() + id.len() + 2);
     out.push_str(&text[..at]);
@@ -3645,6 +3652,10 @@ mod tests {
 
         let (text, caret) = apply_mention("@", 0, 1, "designer");
         assert_eq!(text, "@designer ");
+        assert_eq!(caret, text.len());
+
+        let (text, caret) = apply_mention("@flux", 0, 3, "flux");
+        assert_eq!(text, "@flux ");
         assert_eq!(caret, text.len());
     }
 
