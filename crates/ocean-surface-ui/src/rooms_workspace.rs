@@ -51,6 +51,35 @@ fn toggle_drawer(current: bool) -> bool {
     !current
 }
 
+/// Escape behavior owned by the Rooms workspace. Only a visible compact
+/// drawer is handled here; every other Escape bubbles to the app-level
+/// topmost-surface hierarchy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompactEscapeAction {
+    CloseDrawer,
+}
+
+fn compact_escape_action(
+    is_compact: bool,
+    drawer_open: bool,
+    default_prevented: bool,
+) -> Option<CompactEscapeAction> {
+    if is_compact && drawer_open && !default_prevented {
+        Some(CompactEscapeAction::CloseDrawer)
+    } else {
+        None
+    }
+}
+
+/// Keep this aligned with the compact media queries in
+/// `styles/rooms-workspace.css` and Tauri's minimum window width.
+fn rooms_layout_is_compact() -> bool {
+    web_sys::window()
+        .and_then(|window| window.inner_width().ok())
+        .and_then(|width| width.as_f64())
+        .is_some_and(|width| width <= 650.0)
+}
+
 // ── Inline helpers (mirrors of private fns in rooms.rs) ──────────────
 
 /// Whether writes (composer, join, leave) are permitted under this access
@@ -698,8 +727,9 @@ fn is_thread_open(selected_thread_root_seq: Option<u64>, root_seq: u64) -> bool 
 /// - **Right:** participant / member roster with kind, role, and presence
 ///   badges.
 ///
-/// On narrow screens (&lt;650px) a compact top nav reveals the hidden left
-/// rail so the reader is never stranded with no room navigation.
+/// At 650px and below, a compact top nav reveals the hidden left rail so the
+/// reader is never stranded with no room navigation. Tauri can reach this at
+/// its matching minimum window width.
 #[component]
 pub fn RoomsWorkspace(
     rooms: Rooms,
@@ -1261,7 +1291,15 @@ pub fn RoomsWorkspace(
             role="region"
             aria-label="Rooms workspace"
             on:keydown=move |ev| {
-                if ev.key() == "Escape" && show_left_rail.get_untracked() {
+                if ev.key() != "Escape" {
+                    return;
+                }
+                let action = compact_escape_action(
+                    rooms_layout_is_compact(),
+                    show_left_rail.get_untracked(),
+                    ev.default_prevented(),
+                );
+                if action == Some(CompactEscapeAction::CloseDrawer) {
                     ev.prevent_default();
                     show_left_rail.set(false);
                     if let Some(toggle) = mobile_toggle_ref.get() {
@@ -1271,8 +1309,8 @@ pub fn RoomsWorkspace(
             }
         >
 
-            // ═══ MOBILE NAV — narrow-screen room selector ═════════════
-            // Always present but CSS hides it above 650px via matching
+            // ═══ COMPACT NAV — narrow-screen room selector ════════════
+            // Always present but CSS hides it above the shared 650px
             // breakpoint; renders a compact bar with room toggle + active
             // room name so the reader is never stranded.
             <div class="rooms-workspace__mobile-nav">
@@ -4095,6 +4133,110 @@ mod tests {
         // state, which is the contract for a compact-nav hamburger.
         assert!(!toggle_drawer(toggle_drawer(false)));
         assert!(toggle_drawer(toggle_drawer(true)));
+    }
+
+    #[test]
+    fn compact_escape_closes_an_open_unhandled_drawer() {
+        assert_eq!(
+            compact_escape_action(true, true, false),
+            Some(CompactEscapeAction::CloseDrawer)
+        );
+    }
+
+    #[test]
+    fn compact_escape_with_closed_drawer_bubbles_to_app() {
+        assert_eq!(compact_escape_action(true, false, false), None);
+    }
+
+    #[test]
+    fn desktop_escape_is_a_rooms_workspace_no_op() {
+        assert_eq!(compact_escape_action(false, true, false), None);
+    }
+
+    #[test]
+    fn already_handled_escape_does_not_also_close_drawer() {
+        assert_eq!(compact_escape_action(true, true, true), None);
+    }
+
+    fn strip_css_comments(input: &str) -> String {
+        let mut out = String::with_capacity(input.len());
+        let mut rest = input;
+        while let Some(open) = rest.find("/*") {
+            out.push_str(&rest[..open]);
+            if let Some(close) = rest[open + 2..].find("*/") {
+                rest = &rest[open + 2 + close + 2..];
+            } else {
+                break;
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// Brace-matched bodies for media rules with the requested prelude.
+    fn css_media_blocks(css: &str, needle: &str) -> Vec<String> {
+        let css = strip_css_comments(css);
+        let bytes = css.as_bytes();
+        let mut blocks = Vec::new();
+        let mut from = 0usize;
+        while let Some(relative) = css[from..].find(needle) {
+            let at = from + relative;
+            let Some(open_relative) = css[at..].find('{') else {
+                break;
+            };
+            let open = at + open_relative;
+            let mut depth = 0usize;
+            let mut end = None;
+            for (index, byte) in bytes.iter().enumerate().skip(open) {
+                match byte {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(index);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(end) = end else {
+                break;
+            };
+            blocks.push(css[open + 1..end].to_string());
+            from = end + 1;
+        }
+        blocks
+    }
+
+    fn css_without_whitespace(css: &str) -> String {
+        css.chars().filter(|char| !char.is_whitespace()).collect()
+    }
+
+    #[test]
+    fn compact_nav_visibility_override_follows_its_hidden_base_rule() {
+        let css = include_str!("../../../styles/rooms-workspace.css");
+        let stripped = strip_css_comments(css);
+        let compact_blocks = css_media_blocks(&stripped, "@media (max-width: 650px)");
+        let has_compact_override = compact_blocks.iter().any(|body| {
+            css_without_whitespace(body).contains(".rooms-workspace__mobile-nav{display:flex;")
+        });
+        assert!(
+            has_compact_override,
+            "compact media body must make the Rooms mobile nav visible"
+        );
+
+        let normalized = css_without_whitespace(&stripped);
+        let hidden = normalized
+            .find(".rooms-workspace__mobile-nav{display:none;")
+            .expect("compact nav needs a hidden desktop base rule");
+        let visible = normalized
+            .rfind(".rooms-workspace__mobile-nav{display:flex;")
+            .expect("compact nav needs a compact visibility override");
+        assert!(
+            hidden < visible,
+            "compact override must follow the base rule"
+        );
     }
 
     // ── room-list ARIA listbox helpers ───────────────────────────────────
