@@ -518,12 +518,20 @@ fn mention_query(text: &str, cursor: usize) -> Option<(usize, String)> {
     if !partial.chars().all(crate::room_markdown::is_mention_char) {
         return None;
     }
-    if let Some(prev) = before[..at].chars().next_back() {
-        if crate::room_markdown::is_mention_char(prev) {
-            return None;
-        }
+    if !crate::room_markdown::mention_start_boundary(before[..at].chars().next_back()) {
+        return None;
     }
     Some((at, partial.to_string()))
+}
+
+fn live_mention_query_from_input(
+    text: &str,
+    selection_start_utf16: Option<u32>,
+) -> Option<(usize, String)> {
+    let cursor = selection_start_utf16
+        .map(|u| utf16_to_byte_idx(text, u as usize))
+        .unwrap_or(text.len());
+    mention_query(text, cursor)
 }
 
 /// Select the daemon-authoritative roster for mention completion. Local rooms
@@ -740,10 +748,18 @@ pub fn RoomsWorkspace(
     let accept_mention = move |idx: usize| {
         let items = mention_items.get_untracked();
         let Some(pick) = items.get(idx) else { return };
-        let Some((at, partial)) = mention_ctx.get_untracked() else {
+        let text = composer.get_untracked();
+        let live_ctx = composer_input_ref
+            .get()
+            .and_then(|input| {
+                live_mention_query_from_input(&text, input.selection_start().ok().flatten())
+            })
+            .or_else(|| mention_ctx.get_untracked());
+        let Some((at, partial)) = live_ctx else {
+            mention_ctx.set(None);
+            mention_active.set(0);
             return;
         };
-        let text = composer.get_untracked();
         let cursor = at + 1 + partial.len();
         let (new_text, caret) = apply_mention(&text, at, cursor, &pick.id);
         let caret16 = byte_to_utf16_idx(&new_text, caret) as u32;
@@ -758,10 +774,18 @@ pub fn RoomsWorkspace(
     let accept_thread_mention = move |idx: usize| {
         let items = thread_mention_items.get_untracked();
         let Some(pick) = items.get(idx) else { return };
-        let Some((at, partial)) = thread_mention_ctx.get_untracked() else {
+        let text = thread_composer.get_untracked();
+        let live_ctx = thread_input_ref
+            .get()
+            .and_then(|input| {
+                live_mention_query_from_input(&text, input.selection_start().ok().flatten())
+            })
+            .or_else(|| thread_mention_ctx.get_untracked());
+        let Some((at, partial)) = live_ctx else {
+            thread_mention_ctx.set(None);
+            thread_mention_active.set(0);
             return;
         };
-        let text = thread_composer.get_untracked();
         let cursor = at + 1 + partial.len();
         let (new_text, caret) = apply_mention(&text, at, cursor, &pick.id);
         let caret16 = byte_to_utf16_idx(&new_text, caret) as u32;
@@ -1840,13 +1864,12 @@ pub fn RoomsWorkspace(
                                             prop:value=move || composer.get()
                                             on:input=move |ev| {
                                                 let value = event_target_value(&ev);
-                                                let cursor = ev
-                                                    .target()
-                                                    .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
-                                                    .and_then(|el| el.selection_start().ok().flatten())
-                                                    .map(|u| utf16_to_byte_idx(&value, u as usize))
-                                                    .unwrap_or(value.len());
-                                                mention_ctx.set(mention_query(&value, cursor));
+                                                mention_ctx.set(live_mention_query_from_input(
+                                                    &value,
+                                                    ev.target()
+                                                        .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
+                                                        .and_then(|el| el.selection_start().ok().flatten()),
+                                                ));
                                                 mention_active.set(0);
                                                 composer.set(value);
                                             }
@@ -2138,13 +2161,12 @@ pub fn RoomsWorkspace(
                                                 prop:value=move || thread_composer.get()
                                                 on:input=move |ev| {
                                                     let value = event_target_value(&ev);
-                                                    let cursor = ev
-                                                        .target()
-                                                        .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
-                                                        .and_then(|el| el.selection_start().ok().flatten())
-                                                        .map(|u| utf16_to_byte_idx(&value, u as usize))
-                                                        .unwrap_or(value.len());
-                                                    thread_mention_ctx.set(mention_query(&value, cursor));
+                                                    thread_mention_ctx.set(live_mention_query_from_input(
+                                                        &value,
+                                                        ev.target()
+                                                            .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
+                                                            .and_then(|el| el.selection_start().ok().flatten()),
+                                                    ));
                                                     thread_mention_active.set(0);
                                                     thread_composer.set(value);
                                                 }
@@ -2423,6 +2445,28 @@ pub fn RoomsWorkspace(
                                                         && member.local_binding_available == Some(true);
                                                     let remote_agent = matches!(member.actor_type, FederatedActorType::Agent)
                                                         && member.local_binding_available == Some(false);
+                                                    let desc_line = member
+                                                        .public_agent_descriptor
+                                                        .as_ref()
+                                                        .and_then(|descriptor| {
+                                                            let mut parts = Vec::new();
+                                                            if let Some(alias) = descriptor
+                                                                .model_alias
+                                                                .as_ref()
+                                                                .filter(|alias| !alias.is_empty())
+                                                            {
+                                                                parts.push(alias.clone());
+                                                            }
+                                                            if let Some(description) = descriptor
+                                                                .description
+                                                                .as_ref()
+                                                                .filter(|description| !description.is_empty())
+                                                            {
+                                                                parts.push(description.clone());
+                                                            }
+                                                            (!parts.is_empty())
+                                                                .then(|| parts.join(" \u{b7} "))
+                                                        });
                                                     let desc_title = member.public_agent_descriptor.as_ref()
                                                         .and_then(|d| d.description.clone())
                                                         .unwrap_or_default();
@@ -2439,6 +2483,9 @@ pub fn RoomsWorkspace(
                                                             <span class="rooms-workspace__member-name">
                                                                 {member.display_name.clone()}
                                                             </span>
+                                                            {desc_line.map(|desc| view! {
+                                                                <span class="rooms-workspace__member-meta">{desc}</span>
+                                                            })}
                                                             <span class="rooms-workspace__member-kind">
                                                                 {actor_label}
                                                             </span>
@@ -3288,6 +3335,23 @@ mod tests {
     }
 
     #[test]
+    fn mention_query_rejects_unicode_letter_before_at() {
+        assert_eq!(mention_query("é@fl", "é@fl".len()), None);
+    }
+
+    #[test]
+    fn live_mention_query_uses_current_selection_start() {
+        let text = "hello @fl tail";
+        let stale_cursor = text.len();
+        assert_eq!(mention_query(text, stale_cursor), None);
+        assert_eq!(
+            live_mention_query_from_input(text, Some(9)),
+            Some((6, "fl".to_string()))
+        );
+        assert_eq!(live_mention_query_from_input(text, Some(5)), None);
+    }
+
+    #[test]
     fn mention_roster_uses_room_participants_only_for_local_access() {
         let local = vec![part("local-human", "Local", RoomParticipantKind::Human)];
         let mut access = test_access(RoomAccessState::Local);
@@ -3397,6 +3461,33 @@ mod tests {
         assert_eq!(
             byte_to_utf16_idx(s, 99),
             s.chars().map(|c| c.len_utf16()).sum::<usize>()
+        );
+    }
+
+    #[test]
+    fn agent_descriptor_line_reads_projected_member_descriptor() {
+        use crate::rooms::PublicAgentDescriptor;
+        let mut access = test_access(RoomAccessState::Live);
+        access.members = vec![FederatedRoomMemberProjection {
+            member_id: "flux".into(),
+            owner_member_id: None,
+            actor_type: FederatedActorType::Agent,
+            role_in_room: FederatedRoomRole::Member,
+            display_name: "Flux".into(),
+            public_agent_descriptor: Some(PublicAgentDescriptor {
+                display_name: "Flux".into(),
+                description: Some("Rapid implementation".into()),
+                model_alias: Some("sonnet".into()),
+                skills_count: 0,
+                subagent_names: vec![],
+            }),
+            joined_at: String::new(),
+            derived_presence: None,
+            local_binding_available: Some(false),
+        }];
+        assert_eq!(
+            agent_descriptor_line(Some(&access), "flux"),
+            Some("sonnet \u{b7} Rapid implementation".to_string())
         );
     }
 

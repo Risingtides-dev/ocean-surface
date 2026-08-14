@@ -144,8 +144,12 @@ pub(crate) fn is_mention_char(c: char) -> bool {
 
 /// True when a token may start at this position (start of text or after a
 /// non-word character) — keeps `user@host` and `3*4*5` from tokenizing.
-fn at_boundary(prev: Option<char>) -> bool {
+pub(crate) fn mention_start_boundary(prev: Option<char>) -> bool {
     prev.is_none_or(|c| !c.is_alphanumeric())
+}
+
+fn at_boundary(prev: Option<char>) -> bool {
+    mention_start_boundary(prev)
 }
 
 fn autolink_boundary(prev: Option<char>) -> bool {
@@ -510,6 +514,14 @@ mod tests {
     fn bare_scheme_alone_is_not_a_link() {
         let spans = tokenize("https:// is empty", &members(&[]));
         assert_eq!(spans, vec![MdSpan::Text("https:// is empty".into())]);
+    }
+
+    #[test]
+    fn mention_boundary_is_unicode_aware() {
+        assert!(mention_start_boundary(None));
+        assert!(mention_start_boundary(Some(' ')));
+        assert!(!mention_start_boundary(Some('a')));
+        assert!(!mention_start_boundary(Some('é')));
     }
 
     #[test]
