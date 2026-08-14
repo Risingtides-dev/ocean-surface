@@ -602,6 +602,17 @@ fn mention_suggestion_at(
         .cloned()
 }
 
+fn mention_accept_is_valid(
+    text: &str,
+    selection_start_utf16: Option<u32>,
+    participants: &[RoomParticipant],
+    index: usize,
+) -> bool {
+    live_mention_query_from_input(text, selection_start_utf16)
+        .and_then(|(_, partial)| mention_suggestion_at(participants, &partial, index))
+        .is_some()
+}
+
 /// Replace the active `@partial` (spanning `at..cursor` bytes) with `@id `
 /// and return the new text plus the byte caret position after the space.
 fn apply_mention(text: &str, at: usize, cursor: usize, id: &str) -> (String, usize) {
@@ -1909,15 +1920,48 @@ pub fn RoomsWorkspace(
                                                 if mention_ctx.get_untracked().is_none() {
                                                     return;
                                                 }
+                                                let key = ev.key();
+                                                let active = mention_active.get_untracked();
+                                                if matches!(key.as_str(), "Enter" | "Tab") {
+                                                    let local_participants = rooms
+                                                        .open_room
+                                                        .get_untracked()
+                                                        .map(|room| room.participants)
+                                                        .unwrap_or_default();
+                                                    let roster = mention_roster(
+                                                        &local_participants,
+                                                        rooms.access.get_untracked().as_ref(),
+                                                    );
+                                                    let selection = ev
+                                                        .target()
+                                                        .and_then(|target| {
+                                                            target
+                                                                .dyn_into::<web_sys::HtmlInputElement>()
+                                                                .ok()
+                                                        })
+                                                        .and_then(|input| {
+                                                            input.selection_start().ok().flatten()
+                                                        });
+                                                    if !mention_accept_is_valid(
+                                                        &composer.get_untracked(),
+                                                        selection,
+                                                        &roster,
+                                                        active,
+                                                    ) {
+                                                        mention_ctx.set(None);
+                                                        mention_active.set(0);
+                                                        return;
+                                                    }
+                                                }
                                                 let len = mention_items.get_untracked().len();
-                                                match mention_popup_key(len, mention_active.get_untracked(), &ev.key()) {
+                                                match mention_popup_key(len, active, &key) {
                                                     MentionKey::Move(next) => {
                                                         ev.prevent_default();
                                                         mention_active.set(next);
                                                     }
                                                     MentionKey::Accept => {
                                                         ev.prevent_default();
-                                                        accept_mention(mention_active.get_untracked());
+                                                        accept_mention(active);
                                                     }
                                                     MentionKey::Close => {
                                                         ev.prevent_default();
@@ -2209,15 +2253,48 @@ pub fn RoomsWorkspace(
                                                     if thread_mention_ctx.get_untracked().is_none() {
                                                         return;
                                                     }
+                                                    let key = ev.key();
+                                                    let active = thread_mention_active.get_untracked();
+                                                    if matches!(key.as_str(), "Enter" | "Tab") {
+                                                        let local_participants = rooms
+                                                            .open_room
+                                                            .get_untracked()
+                                                            .map(|room| room.participants)
+                                                            .unwrap_or_default();
+                                                        let roster = mention_roster(
+                                                            &local_participants,
+                                                            rooms.access.get_untracked().as_ref(),
+                                                        );
+                                                        let selection = ev
+                                                            .target()
+                                                            .and_then(|target| {
+                                                                target
+                                                                    .dyn_into::<web_sys::HtmlInputElement>()
+                                                                    .ok()
+                                                            })
+                                                            .and_then(|input| {
+                                                                input.selection_start().ok().flatten()
+                                                            });
+                                                        if !mention_accept_is_valid(
+                                                            &thread_composer.get_untracked(),
+                                                            selection,
+                                                            &roster,
+                                                            active,
+                                                        ) {
+                                                            thread_mention_ctx.set(None);
+                                                            thread_mention_active.set(0);
+                                                            return;
+                                                        }
+                                                    }
                                                     let len = thread_mention_items.get_untracked().len();
-                                                    match mention_popup_key(len, thread_mention_active.get_untracked(), &ev.key()) {
+                                                    match mention_popup_key(len, active, &key) {
                                                         MentionKey::Move(next) => {
                                                             ev.prevent_default();
                                                             thread_mention_active.set(next);
                                                         }
                                                         MentionKey::Accept => {
                                                             ev.prevent_default();
-                                                            accept_thread_mention(thread_mention_active.get_untracked());
+                                                            accept_thread_mention(active);
                                                         }
                                                         MentionKey::Close => {
                                                             ev.prevent_default();
@@ -3457,6 +3534,15 @@ mod tests {
             mention_suggestion_at(&roster, "ad", 0).map(|pick| pick.id),
             Some("ada".to_string())
         );
+    }
+
+    #[test]
+    fn mention_accept_validation_does_not_consume_keys_after_caret_moves() {
+        let roster = vec![part("flux", "Flux", RoomParticipantKind::Agent)];
+        let text = "@fl trailing";
+        assert!(mention_accept_is_valid(text, Some(3), &roster, 0));
+        assert!(!mention_accept_is_valid(text, Some(11), &roster, 0));
+        assert!(!mention_accept_is_valid(text, None, &roster, 0));
     }
 
     #[test]
