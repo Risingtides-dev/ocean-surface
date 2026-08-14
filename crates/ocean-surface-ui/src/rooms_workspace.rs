@@ -614,15 +614,18 @@ fn mention_accept_is_valid(
 }
 
 /// Replace the active `@partial` (spanning `at..cursor` bytes) with `@id `
-/// and return the new text plus the byte caret position after the space.
+/// and return the new text plus the byte caret position after one separator.
 fn apply_mention(text: &str, at: usize, cursor: usize, id: &str) -> (String, usize) {
+    let cursor = cursor.min(text.len());
+    let suffix = &text[cursor..];
+    let suffix = suffix.strip_prefix(' ').unwrap_or(suffix);
     let mut out = String::with_capacity(text.len() + id.len() + 2);
     out.push_str(&text[..at]);
     out.push('@');
     out.push_str(id);
     out.push(' ');
     let caret = out.len();
-    out.push_str(&text[cursor.min(text.len())..]);
+    out.push_str(suffix);
     (out, caret)
 }
 
@@ -2011,9 +2014,10 @@ pub fn RoomsWorkspace(
                                                                     role="option"
                                                                     aria-selected=(i == active).to_string()
                                                                     on:mousedown=move |ev: web_sys::MouseEvent| {
+                                                                        // Keep combobox focus until the click activation runs.
                                                                         ev.prevent_default();
-                                                                        accept_mention(i);
                                                                     }
+                                                                    on:click=move |_| accept_mention(i)
                                                                 >
                                                                     <span class=avatar_class>{initials}</span>
                                                                     <span class="rooms-workspace__mention-name">
@@ -2344,9 +2348,10 @@ pub fn RoomsWorkspace(
                                                                         role="option"
                                                                         aria-selected=(i == active).to_string()
                                                                         on:mousedown=move |ev: web_sys::MouseEvent| {
+                                                                            // Keep combobox focus until the click activation runs.
                                                                             ev.prevent_default();
-                                                                            accept_thread_mention(i);
                                                                         }
+                                                                        on:click=move |_| accept_thread_mention(i)
                                                                     >
                                                                         <span class=avatar_class>{initials}</span>
                                                                         <span class="rooms-workspace__mention-name">
@@ -3557,7 +3562,7 @@ mod tests {
     #[test]
     fn apply_mention_replaces_partial_and_positions_caret() {
         let (text, caret) = apply_mention("hi @fl tail", 3, 6, "flux");
-        assert_eq!(text, "hi @flux  tail");
+        assert_eq!(text, "hi @flux tail");
         assert_eq!(caret, "hi @flux ".len());
 
         let (text, caret) = apply_mention("@", 0, 1, "designer");
