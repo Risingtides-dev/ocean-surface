@@ -2063,6 +2063,15 @@ mod operator_transport_tests {
     }
 }
 
+
+#[cfg(feature = "rooms-acceptance")]
+pub fn run_rooms_acceptance(context: tauri::Context<tauri::Wry>) {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_wdio_webdriver::init())
+        .run(context)
+        .expect("error while running Ocean Rooms acceptance shell");
+}
+
 pub fn run() {
     // Daemon probe target: parse once from `OCEAN_DAEMON_URL` so the shell
     // and the wasm bundle share one configurable origin (default 127.0.0.1:4780).
