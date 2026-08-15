@@ -5,6 +5,9 @@
 //! (replaces `rfd`) and recursive path watchers that debounce filesystem events
 //! back to the webview as `path-changed` (replaces `ocean-gui/shell/watcher.rs`).
 
+#[cfg(all(feature = "rooms-acceptance", not(debug_assertions)))]
+compile_error!("the rooms-acceptance feature is debug-only and must never ship in release builds");
+
 use std::collections::HashMap;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -1487,6 +1490,14 @@ mod external_url_tests {
         assert!(!allowed_external_url(" https://example.com"));
         assert!(!allowed_external_url("https://example.com\n"));
     }
+}
+
+#[cfg(feature = "rooms-acceptance")]
+pub fn run_rooms_acceptance(context: tauri::Context<tauri::Wry>) {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_wdio_webdriver::init())
+        .run(context)
+        .expect("error while running Ocean Rooms acceptance shell");
 }
 
 pub fn run() {
