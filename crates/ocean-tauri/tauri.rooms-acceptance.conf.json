@@ -14,8 +14,12 @@
       {
         "label": "main",
         "title": "Ocean Rooms Acceptance",
-        "width": 1280,
-        "height": 800
+        "width": 640,
+        "height": 720,
+        "x": -10000,
+        "y": 0,
+        "visible": true,
+        "resizable": false
       }
     ],
     "security": {
