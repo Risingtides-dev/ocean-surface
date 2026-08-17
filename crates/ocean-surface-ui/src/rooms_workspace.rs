@@ -487,6 +487,49 @@ fn store_view_state(room_key: Option<&str>, thread_root_seq: Option<u64>) {
     }
 }
 
+/// How an open thread is presented. Inline is the default: the conversation
+/// surfaces directly underneath its root message in the timeline. The side
+/// panel is an optional pop-out the reader chooses, and the choice sticks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ThreadViewMode {
+    #[default]
+    Inline,
+    Panel,
+}
+
+const ROOMS_THREAD_VIEW_MODE_KEY: &str = "ocean.rooms.thread-view.v1";
+
+fn encode_thread_view_mode(mode: ThreadViewMode) -> &'static str {
+    match mode {
+        ThreadViewMode::Inline => "inline",
+        ThreadViewMode::Panel => "panel",
+    }
+}
+
+/// Fail-closed: anything but the two known tokens falls back to the
+/// inline default rather than guessing.
+fn decode_thread_view_mode(raw: &str) -> Option<ThreadViewMode> {
+    match raw {
+        "inline" => Some(ThreadViewMode::Inline),
+        "panel" => Some(ThreadViewMode::Panel),
+        _ => None,
+    }
+}
+
+fn load_thread_view_mode() -> ThreadViewMode {
+    local_storage()
+        .and_then(|storage| storage.get_item(ROOMS_THREAD_VIEW_MODE_KEY).ok().flatten())
+        .as_deref()
+        .and_then(decode_thread_view_mode)
+        .unwrap_or_default()
+}
+
+fn store_thread_view_mode(mode: ThreadViewMode) {
+    if let Some(storage) = local_storage() {
+        let _ = storage.set_item(ROOMS_THREAD_VIEW_MODE_KEY, encode_thread_view_mode(mode));
+    }
+}
+
 // ── Members drawer + thread panel header helpers ───────────────────────────
 
 /// Whether the members rail currently renders as an overlay drawer rather
@@ -518,15 +561,23 @@ fn roster_display_name(roster: &[RoomParticipant], author_id: &str) -> String {
         .unwrap_or_else(|| author_id.to_string())
 }
 
-/// Thread panel subtitle: reply count plus who is being replied to, by
-/// display name. The count is truthful ("No replies yet" over a fake "0").
-fn thread_panel_subtitle(reply_count: usize, root_author_display: &str) -> String {
-    let replies = match reply_count {
+/// Truthful reply-count label ("No replies yet" over a fake "0"), shared by
+/// the inline thread header and the panel subtitle.
+fn reply_count_label(reply_count: usize) -> String {
+    match reply_count {
         0 => "No replies yet".to_string(),
         1 => "1 reply".to_string(),
         n => format!("{n} replies"),
-    };
-    format!("{replies} \u{b7} replying to {root_author_display}")
+    }
+}
+
+/// Thread panel subtitle: reply count plus who is being replied to, by
+/// display name.
+fn thread_panel_subtitle(reply_count: usize, root_author_display: &str) -> String {
+    format!(
+        "{} \u{b7} replying to {root_author_display}",
+        reply_count_label(reply_count)
+    )
 }
 
 /// Row timestamp: show only the canonical wire clock (HH:MM) for RFC3339
@@ -856,6 +907,13 @@ pub fn RoomsWorkspace(
     // (narrow viewports, or mid-width desktops while a thread is open).
     let show_members = RwSignal::new(false);
     let members_chip_ref: NodeRef<leptos::html::Button> = NodeRef::new();
+
+    // Thread presentation: inline under the root message by default; the
+    // side panel is an opt-in pop-out and the reader's choice persists.
+    let thread_view_mode = RwSignal::new(load_thread_view_mode());
+    Effect::new(move |_| {
+        store_thread_view_mode(thread_view_mode.get());
+    });
 
     // Persisted view state, captured BEFORE the persist effect below can
     // overwrite storage with this mount's initial empty state. Restores are
@@ -1483,10 +1541,259 @@ pub fn RoomsWorkspace(
         }
     });
 
+    // Shared thread-conversation pieces. Exactly one presentation renders
+    // at a time (inline under the root, or the opt-in side panel), so the
+    // composer state and its mention-listbox id never exist twice.
+    let thread_replies_view = move |root_seq: u64| -> AnyView {
+        view! {
+                                        <For
+                                            each=move || partition_thread_messages(&rooms.transcript.get(), root_seq).replies
+                                            key=|m: &RoomMessage| m.seq
+                                            children=move |reply: RoomMessage| {
+                                                let full_ts = reply.created_at.clone();
+                                                let is_system = room_messages::is_compact_system_row(&reply);
+                                                view! {
+                                                    <div
+                                                        class="rooms-workspace__msg rooms-workspace__msg--thread-reply"
+                                                        class:rooms-workspace__msg--system=is_system
+                                                    >
+                                                        <div class=if is_system {
+                                                            "rooms-workspace__msg-avatar".to_string()
+                                                        } else {
+                                                            format!(
+                                                                "rooms-workspace__msg-avatar {}",
+                                                                avatar_identity_class(&reply.author_id)
+                                                            )
+                                                        }>
+                                                            {if is_system {
+                                                                view! { <crate::icons::Spark /> }.into_any()
+                                                            } else {
+                                                                reply.author_id.chars().take(2).collect::<String>().to_uppercase().into_any()
+                                                            }}
+                                                        </div>
+                                                        <div class="rooms-workspace__msg-body">
+                                                            <div class="rooms-workspace__msg-author">
+                                                                <span class="rooms-workspace__msg-name">{thread_display_name(&reply.author_id)}</span>
+                                                                <time
+                                                                    class="rooms-workspace__msg-time"
+                                                                    datetime=full_ts.clone()
+                                                                    aria-label=full_ts.clone()
+                                                                    title=full_ts.clone()
+                                                                >
+                                                                    {canonical_wire_clock_time(&full_ts)}
+                                                                </time>
+                                                            </div>
+                                                            <div class="rooms-workspace__msg-text">
+                                                                {crate::room_markdown::body_view(reply.body.clone(), member_ids)}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                }
+                                            }
+                                        />
+        }
+        .into_any()
+    };
+    let thread_composer_view = move || -> AnyView {
+        view! {
+                                    <div class="rooms-workspace__composer rooms-workspace__composer--thread">
+                                        <form
+                                            class="rooms-workspace__composer-row"
+                                            on:submit=move |ev| {
+                                                ev.prevent_default();
+                                                do_send_thread_reply();
+                                            }
+                                        >
+                                            <input
+                                                class="rooms-workspace__composer-input"
+                                                type="text"
+                                                aria-label="Thread reply"
+                                                placeholder="Reply in thread…"
+                                                node_ref=thread_input_ref
+                                                role="combobox"
+                                                aria-autocomplete="list"
+                                                aria-controls="rooms-mention-listbox-thread"
+                                                aria-expanded=move || (!thread_mention_items.get().is_empty()).to_string()
+                                                aria-activedescendant=move || {
+                                                    if thread_mention_items.get().is_empty() {
+                                                        String::new()
+                                                    } else {
+                                                        format!("rooms-mention-thread-opt-{}", thread_mention_active.get())
+                                                    }
+                                                }
+                                                prop:value=move || thread_composer.get()
+                                                on:input=move |ev| {
+                                                    let value = event_target_value(&ev);
+                                                    thread_mention_ctx.set(live_mention_query_from_input(
+                                                        &value,
+                                                        ev.target()
+                                                            .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
+                                                            .and_then(|el| el.selection_start().ok().flatten()),
+                                                    ));
+                                                    thread_mention_active.set(0);
+                                                    thread_composer.set(value);
+                                                }
+                                                on:keydown=move |ev| {
+                                                    if ev.is_composing() {
+                                                        return;
+                                                    }
+                                                    if thread_mention_ctx.get_untracked().is_none() {
+                                                        return;
+                                                    }
+                                                    let key = ev.key();
+                                                    let active = thread_mention_active.get_untracked();
+                                                    if matches!(key.as_str(), "Enter" | "Tab") {
+                                                        let local_participants = rooms
+                                                            .open_room
+                                                            .get_untracked()
+                                                            .map(|room| room.participants)
+                                                            .unwrap_or_default();
+                                                        let roster = mention_roster(
+                                                            &local_participants,
+                                                            rooms.access.get_untracked().as_ref(),
+                                                        );
+                                                        let selection = ev
+                                                            .target()
+                                                            .and_then(|target| {
+                                                                target
+                                                                    .dyn_into::<web_sys::HtmlInputElement>()
+                                                                    .ok()
+                                                            })
+                                                            .and_then(|input| {
+                                                                input.selection_start().ok().flatten()
+                                                            });
+                                                        let displayed_id = thread_mention_items
+                                                            .get_untracked()
+                                                            .get(active)
+                                                            .map(|item| item.id.clone());
+                                                        if !mention_accept_is_valid(
+                                                            &thread_composer.get_untracked(),
+                                                            selection,
+                                                            &roster,
+                                                            active,
+                                                            displayed_id.as_deref(),
+                                                        ) {
+                                                            thread_mention_ctx.set(None);
+                                                            thread_mention_active.set(0);
+                                                            return;
+                                                        }
+                                                    }
+                                                    let len = thread_mention_items.get_untracked().len();
+                                                    match mention_popup_key(len, active, &key) {
+                                                        MentionKey::Move(next) => {
+                                                            ev.prevent_default();
+                                                            thread_mention_active.set(next);
+                                                        }
+                                                        MentionKey::Accept => {
+                                                            ev.prevent_default();
+                                                            let displayed_id = thread_mention_items
+                                                                .get_untracked()
+                                                                .get(active)
+                                                                .map(|item| item.id.clone());
+                                                            accept_thread_mention(active, displayed_id);
+                                                        }
+                                                        MentionKey::Close => {
+                                                            ev.prevent_default();
+                                                            thread_mention_ctx.set(None);
+                                                        }
+                                                        MentionKey::Pass => {}
+                                                    }
+                                                }
+                                                on:blur=move |_| thread_mention_ctx.set(None)
+                                                disabled=move || !access_allows_writes(rooms.access.get().as_ref())
+                                            />
+                                            {move || {
+                                                let items = thread_mention_items.get();
+                                                if items.is_empty() {
+                                                    return ().into_any();
+                                                }
+                                                let active = thread_mention_active.get();
+                                                let access = rooms.access.get();
+                                                view! {
+                                                    <div
+                                                        id="rooms-mention-listbox-thread"
+                                                        class="rooms-workspace__mention-pop"
+                                                        role="listbox"
+                                                        aria-label="Mention suggestions"
+                                                    >
+                                                        {items
+                                                            .into_iter()
+                                                            .enumerate()
+                                                            .map(|(i, item)| {
+                                                                let desc = agent_descriptor_line(access.as_ref(), &item.id);
+                                                                let initials = item
+                                                                    .display_name
+                                                                    .chars()
+                                                                    .take(2)
+                                                                    .collect::<String>()
+                                                                    .to_uppercase();
+                                                                let avatar_class = format!(
+                                                                    "rooms-workspace__member-avatar {}",
+                                                                    avatar_identity_class(&item.id)
+                                                                );
+                                                                let id_label = format!("@{}", item.id);
+                                                                let clicked_id = item.id.clone();
+                                                                view! {
+                                                                    <div
+                                                                        id=format!("rooms-mention-thread-opt-{i}")
+                                                                        class="rooms-workspace__mention-opt"
+                                                                        class:rooms-workspace__mention-opt--active=i == active
+                                                                        role="option"
+                                                                        aria-selected=(i == active).to_string()
+                                                                        on:mousedown=move |ev: web_sys::MouseEvent| {
+                                                                            // Keep combobox focus until the click activation runs.
+                                                                            ev.prevent_default();
+                                                                        }
+                                                                        on:click=move |_| {
+                                                                            accept_thread_mention(
+                                                                                i,
+                                                                                Some(clicked_id.clone()),
+                                                                            )
+                                                                        }
+                                                                    >
+                                                                        <span class=avatar_class>{initials}</span>
+                                                                        <span class="rooms-workspace__mention-name">
+                                                                            {item.display_name.clone()}
+                                                                        </span>
+                                                                        <span class="rooms-workspace__mention-id">{id_label}</span>
+                                                                        <span class="rooms-workspace__mention-kind">
+                                                                            {participant_kind_label(item.kind)}
+                                                                        </span>
+                                                                        {desc.map(|d| view! {
+                                                                            <span class="rooms-workspace__mention-desc">{d}</span>
+                                                                        })}
+                                                                    </div>
+                                                                }
+                                                            })
+                                                            .collect_view()}
+                                                    </div>
+                                                }
+                                                .into_any()
+                                            }}
+                                            <button
+                                                class="rooms-workspace__composer-send"
+                                                type="submit"
+                                                disabled=move || {
+                                                    thread_send_in_flight.get()
+                                                        || thread_composer.get().trim().is_empty()
+                                                        || !access_allows_writes(rooms.access.get().as_ref())
+                                                }
+                                            >
+                                                {move || if thread_send_in_flight.get() { "Sending…" } else { "Reply" }}
+                                            </button>
+                                        </form>
+                                    </div>
+        }
+        .into_any()
+    };
+
     view! {
         <div
             class="rooms-workspace"
-            class:rooms-workspace--thread-open=move || selected_thread_root_seq.get().is_some()
+            class:rooms-workspace--thread-open=move || {
+                selected_thread_root_seq.get().is_some()
+                    && thread_view_mode.get() == ThreadViewMode::Panel
+            }
             role="region"
             aria-label="Rooms workspace"
             on:keydown=move |ev| {
@@ -1500,7 +1807,8 @@ pub fn RoomsWorkspace(
                 let members_overlay = window_inner_width().is_some_and(|width| {
                     members_drawer_is_overlay(
                         width,
-                        selected_thread_root_seq.get_untracked().is_some(),
+                        selected_thread_root_seq.get_untracked().is_some()
+                            && thread_view_mode.get_untracked() == ThreadViewMode::Panel,
                     )
                 });
                 if members_escape_closes(
@@ -2096,6 +2404,50 @@ pub fn RoomsWorkspace(
                                                         }}
                                                     </div>
                                                 </div>
+                                                // Inline thread: the default
+                                                // presentation — the conversation
+                                                // surfaces directly under its
+                                                // root message.
+                                                {move || {
+                                                    let inline_open = thread_view_mode.get()
+                                                        == ThreadViewMode::Inline
+                                                        && is_thread_open(
+                                                            selected_thread_root_seq.get(),
+                                                            root_seq,
+                                                        );
+                                                    if !inline_open {
+                                                        return ().into_any();
+                                                    }
+                                                    view! {
+                                                        <div class="rooms-workspace__thread-inline">
+                                                            <div class="rooms-workspace__thread-inline-head">
+                                                                <span class="rooms-workspace__thread-inline-count">
+                                                                    {move || reply_count_label(
+                                                                        reply_count_for(&rooms.transcript.get(), root_seq),
+                                                                    )}
+                                                                </span>
+                                                                <button
+                                                                    class="rooms-workspace__thread-inline-expand"
+                                                                    type="button"
+                                                                    title="Open as side panel"
+                                                                    aria-label="Open thread as side panel"
+                                                                    on:click=move |_| {
+                                                                        thread_view_mode.set(ThreadViewMode::Panel)
+                                                                    }
+                                                                >
+                                                                    <svg viewBox="0 0 16 16" width="13" height="13"
+                                                                        fill="none" stroke="currentColor" stroke-width="1.5"
+                                                                        stroke-linecap="round" stroke-linejoin="round">
+                                                                        <rect x="2" y="2.5" width="12" height="11" rx="1.5"/>
+                                                                        <path d="M9.5 2.5v11"/>
+                                                                    </svg>
+                                                                </button>
+                                                            </div>
+                                                            {thread_replies_view(root_seq)}
+                                                            {thread_composer_view()}
+                                                        </div>
+                                                    }.into_any()
+                                                }}
                                             }
                                         }
                                     />
@@ -2734,6 +3086,11 @@ pub fn RoomsWorkspace(
             // into the members rail: roster and thread coexist, and the
             // reply composer is pinned outside the scroll region.
             {move || {
+                // Opt-in presentation: inline-under-the-message is the
+                // default; this panel renders only when popped out.
+                if thread_view_mode.get() != ThreadViewMode::Panel {
+                    return ().into_any();
+                }
                 let Some(root) =
                     thread_root_for(&rooms.transcript.get(), selected_thread_root_seq.get())
                 else {
@@ -2761,18 +3118,36 @@ pub fn RoomsWorkspace(
                                     {subtitle}
                                 </div>
                             </div>
-                            <button
-                                class="rooms-workspace__thread-panel-close"
-                                type="button"
-                                aria-label="Close thread"
-                                on:click=move |_| selected_thread_root_seq.set(None)
-                            >
-                                <svg viewBox="0 0 16 16" width="14" height="14"
-                                    fill="none" stroke="currentColor" stroke-width="1.6"
-                                    stroke-linecap="round">
-                                    <path d="M3 3l10 10M13 3L3 13"/>
-                                </svg>
-                            </button>
+                            <div class="rooms-workspace__thread-panel-actions">
+                                <button
+                                    class="rooms-workspace__thread-panel-dock"
+                                    type="button"
+                                    title="Show under message"
+                                    aria-label="Show thread under its message"
+                                    on:click=move |_| {
+                                        thread_view_mode.set(ThreadViewMode::Inline)
+                                    }
+                                >
+                                    <svg viewBox="0 0 16 16" width="13" height="13"
+                                        fill="none" stroke="currentColor" stroke-width="1.5"
+                                        stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M3 6l5 5 5-5"/>
+                                        <path d="M3 3h10"/>
+                                    </svg>
+                                </button>
+                                <button
+                                    class="rooms-workspace__thread-panel-close"
+                                    type="button"
+                                    aria-label="Close thread"
+                                    on:click=move |_| selected_thread_root_seq.set(None)
+                                >
+                                    <svg viewBox="0 0 16 16" width="14" height="14"
+                                        fill="none" stroke="currentColor" stroke-width="1.6"
+                                        stroke-linecap="round">
+                                        <path d="M3 3l10 10M13 3L3 13"/>
+                                    </svg>
+                                </button>
+                            </div>
                         </div>
                         <div
                             class="rooms-workspace__thread-panel-transcript"
@@ -2814,239 +3189,9 @@ pub fn RoomsWorkspace(
                                                 </div>
                                             </div>
                                         </div>
-                                        <For
-                                            each=move || partition_thread_messages(&rooms.transcript.get(), root_seq).replies
-                                            key=|m: &RoomMessage| m.seq
-                                            children=move |reply: RoomMessage| {
-                                                let full_ts = reply.created_at.clone();
-                                                let is_system = room_messages::is_compact_system_row(&reply);
-                                                view! {
-                                                    <div
-                                                        class="rooms-workspace__msg rooms-workspace__msg--thread-reply"
-                                                        class:rooms-workspace__msg--system=is_system
-                                                    >
-                                                        <div class=if is_system {
-                                                            "rooms-workspace__msg-avatar".to_string()
-                                                        } else {
-                                                            format!(
-                                                                "rooms-workspace__msg-avatar {}",
-                                                                avatar_identity_class(&reply.author_id)
-                                                            )
-                                                        }>
-                                                            {if is_system {
-                                                                view! { <crate::icons::Spark /> }.into_any()
-                                                            } else {
-                                                                reply.author_id.chars().take(2).collect::<String>().to_uppercase().into_any()
-                                                            }}
-                                                        </div>
-                                                        <div class="rooms-workspace__msg-body">
-                                                            <div class="rooms-workspace__msg-author">
-                                                                <span class="rooms-workspace__msg-name">{thread_display_name(&reply.author_id)}</span>
-                                                                <time
-                                                                    class="rooms-workspace__msg-time"
-                                                                    datetime=full_ts.clone()
-                                                                    aria-label=full_ts.clone()
-                                                                    title=full_ts.clone()
-                                                                >
-                                                                    {canonical_wire_clock_time(&full_ts)}
-                                                                </time>
-                                                            </div>
-                                                            <div class="rooms-workspace__msg-text">
-                                                                {crate::room_markdown::body_view(reply.body.clone(), member_ids)}
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                }
-                                            }
-                                        />
+                                        {thread_replies_view(root_seq)}
                         </div>
-                                    <div class="rooms-workspace__composer rooms-workspace__composer--thread">
-                                        <form
-                                            class="rooms-workspace__composer-row"
-                                            on:submit=move |ev| {
-                                                ev.prevent_default();
-                                                do_send_thread_reply();
-                                            }
-                                        >
-                                            <input
-                                                class="rooms-workspace__composer-input"
-                                                type="text"
-                                                aria-label="Thread reply"
-                                                placeholder="Reply in thread…"
-                                                node_ref=thread_input_ref
-                                                role="combobox"
-                                                aria-autocomplete="list"
-                                                aria-controls="rooms-mention-listbox-thread"
-                                                aria-expanded=move || (!thread_mention_items.get().is_empty()).to_string()
-                                                aria-activedescendant=move || {
-                                                    if thread_mention_items.get().is_empty() {
-                                                        String::new()
-                                                    } else {
-                                                        format!("rooms-mention-thread-opt-{}", thread_mention_active.get())
-                                                    }
-                                                }
-                                                prop:value=move || thread_composer.get()
-                                                on:input=move |ev| {
-                                                    let value = event_target_value(&ev);
-                                                    thread_mention_ctx.set(live_mention_query_from_input(
-                                                        &value,
-                                                        ev.target()
-                                                            .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
-                                                            .and_then(|el| el.selection_start().ok().flatten()),
-                                                    ));
-                                                    thread_mention_active.set(0);
-                                                    thread_composer.set(value);
-                                                }
-                                                on:keydown=move |ev| {
-                                                    if ev.is_composing() {
-                                                        return;
-                                                    }
-                                                    if thread_mention_ctx.get_untracked().is_none() {
-                                                        return;
-                                                    }
-                                                    let key = ev.key();
-                                                    let active = thread_mention_active.get_untracked();
-                                                    if matches!(key.as_str(), "Enter" | "Tab") {
-                                                        let local_participants = rooms
-                                                            .open_room
-                                                            .get_untracked()
-                                                            .map(|room| room.participants)
-                                                            .unwrap_or_default();
-                                                        let roster = mention_roster(
-                                                            &local_participants,
-                                                            rooms.access.get_untracked().as_ref(),
-                                                        );
-                                                        let selection = ev
-                                                            .target()
-                                                            .and_then(|target| {
-                                                                target
-                                                                    .dyn_into::<web_sys::HtmlInputElement>()
-                                                                    .ok()
-                                                            })
-                                                            .and_then(|input| {
-                                                                input.selection_start().ok().flatten()
-                                                            });
-                                                        let displayed_id = thread_mention_items
-                                                            .get_untracked()
-                                                            .get(active)
-                                                            .map(|item| item.id.clone());
-                                                        if !mention_accept_is_valid(
-                                                            &thread_composer.get_untracked(),
-                                                            selection,
-                                                            &roster,
-                                                            active,
-                                                            displayed_id.as_deref(),
-                                                        ) {
-                                                            thread_mention_ctx.set(None);
-                                                            thread_mention_active.set(0);
-                                                            return;
-                                                        }
-                                                    }
-                                                    let len = thread_mention_items.get_untracked().len();
-                                                    match mention_popup_key(len, active, &key) {
-                                                        MentionKey::Move(next) => {
-                                                            ev.prevent_default();
-                                                            thread_mention_active.set(next);
-                                                        }
-                                                        MentionKey::Accept => {
-                                                            ev.prevent_default();
-                                                            let displayed_id = thread_mention_items
-                                                                .get_untracked()
-                                                                .get(active)
-                                                                .map(|item| item.id.clone());
-                                                            accept_thread_mention(active, displayed_id);
-                                                        }
-                                                        MentionKey::Close => {
-                                                            ev.prevent_default();
-                                                            thread_mention_ctx.set(None);
-                                                        }
-                                                        MentionKey::Pass => {}
-                                                    }
-                                                }
-                                                on:blur=move |_| thread_mention_ctx.set(None)
-                                                disabled=move || !access_allows_writes(rooms.access.get().as_ref())
-                                            />
-                                            {move || {
-                                                let items = thread_mention_items.get();
-                                                if items.is_empty() {
-                                                    return ().into_any();
-                                                }
-                                                let active = thread_mention_active.get();
-                                                let access = rooms.access.get();
-                                                view! {
-                                                    <div
-                                                        id="rooms-mention-listbox-thread"
-                                                        class="rooms-workspace__mention-pop"
-                                                        role="listbox"
-                                                        aria-label="Mention suggestions"
-                                                    >
-                                                        {items
-                                                            .into_iter()
-                                                            .enumerate()
-                                                            .map(|(i, item)| {
-                                                                let desc = agent_descriptor_line(access.as_ref(), &item.id);
-                                                                let initials = item
-                                                                    .display_name
-                                                                    .chars()
-                                                                    .take(2)
-                                                                    .collect::<String>()
-                                                                    .to_uppercase();
-                                                                let avatar_class = format!(
-                                                                    "rooms-workspace__member-avatar {}",
-                                                                    avatar_identity_class(&item.id)
-                                                                );
-                                                                let id_label = format!("@{}", item.id);
-                                                                let clicked_id = item.id.clone();
-                                                                view! {
-                                                                    <div
-                                                                        id=format!("rooms-mention-thread-opt-{i}")
-                                                                        class="rooms-workspace__mention-opt"
-                                                                        class:rooms-workspace__mention-opt--active=i == active
-                                                                        role="option"
-                                                                        aria-selected=(i == active).to_string()
-                                                                        on:mousedown=move |ev: web_sys::MouseEvent| {
-                                                                            // Keep combobox focus until the click activation runs.
-                                                                            ev.prevent_default();
-                                                                        }
-                                                                        on:click=move |_| {
-                                                                            accept_thread_mention(
-                                                                                i,
-                                                                                Some(clicked_id.clone()),
-                                                                            )
-                                                                        }
-                                                                    >
-                                                                        <span class=avatar_class>{initials}</span>
-                                                                        <span class="rooms-workspace__mention-name">
-                                                                            {item.display_name.clone()}
-                                                                        </span>
-                                                                        <span class="rooms-workspace__mention-id">{id_label}</span>
-                                                                        <span class="rooms-workspace__mention-kind">
-                                                                            {participant_kind_label(item.kind)}
-                                                                        </span>
-                                                                        {desc.map(|d| view! {
-                                                                            <span class="rooms-workspace__mention-desc">{d}</span>
-                                                                        })}
-                                                                    </div>
-                                                                }
-                                                            })
-                                                            .collect_view()}
-                                                    </div>
-                                                }
-                                                .into_any()
-                                            }}
-                                            <button
-                                                class="rooms-workspace__composer-send"
-                                                type="submit"
-                                                disabled=move || {
-                                                    thread_send_in_flight.get()
-                                                        || thread_composer.get().trim().is_empty()
-                                                        || !access_allows_writes(rooms.access.get().as_ref())
-                                                }
-                                            >
-                                                {move || if thread_send_in_flight.get() { "Sending…" } else { "Reply" }}
-                                            </button>
-                                        </form>
-                                    </div>
+                        {thread_composer_view()}
                     </aside>
                 }.into_any()
             }}
@@ -4701,6 +4846,56 @@ mod tests {
         assert_eq!(decode_view_state("\n7"), None);
         assert_eq!(decode_view_state("room-a\nnot-a-number"), None);
         assert_eq!(decode_view_state("room-a\n-3"), None);
+    }
+
+    #[test]
+    fn thread_view_defaults_to_inline_under_the_message() {
+        assert_eq!(ThreadViewMode::default(), ThreadViewMode::Inline);
+    }
+
+    #[test]
+    fn thread_view_mode_round_trips_and_fails_closed() {
+        for mode in [ThreadViewMode::Inline, ThreadViewMode::Panel] {
+            assert_eq!(
+                decode_thread_view_mode(encode_thread_view_mode(mode)),
+                Some(mode)
+            );
+        }
+        assert_eq!(decode_thread_view_mode(""), None);
+        assert_eq!(decode_thread_view_mode("sidebar"), None);
+        assert_eq!(decode_thread_view_mode("Inline"), None);
+    }
+
+    /// The inline presentation must exist in both the stylesheet and the
+    /// markup — the default thread experience is under the message, not
+    /// the panel.
+    #[test]
+    fn inline_thread_is_styled_and_emitted() {
+        let css = include_str!("../../../styles/rooms-workspace.css");
+        let stripped = strip_css_comments(css);
+        let normalized = css_without_whitespace(&stripped);
+        assert!(
+            normalized.contains(".rooms-workspace__thread-inline{"),
+            "inline thread container needs a base rule"
+        );
+        // Needle built at runtime so this test's own literal can't satisfy
+        // the check if the emitter disappears from the markup.
+        let emitter = format!(
+            "class=\"{}\"",
+            ["rooms-workspace__thread", "-inline"].concat()
+        );
+        let markup = include_str!("rooms_workspace.rs");
+        assert!(
+            markup.contains(&emitter),
+            "the timeline must emit the inline thread container"
+        );
+    }
+
+    #[test]
+    fn reply_count_label_is_truthful() {
+        assert_eq!(reply_count_label(0), "No replies yet");
+        assert_eq!(reply_count_label(1), "1 reply");
+        assert_eq!(reply_count_label(4), "4 replies");
     }
 
     // ── Thread panel header helpers ─────────────────────────────────────

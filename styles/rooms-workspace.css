@@ -828,12 +828,105 @@
   padding: 8px 12px;
 }
 
+.rooms-workspace__thread-panel-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.rooms-workspace__thread-panel-dock {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-4);
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__thread-panel-dock:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
 /* Replies are denser than the main timeline: smaller identity marks keep
-   the 380px column about the text, not the chrome. */
-.rooms-workspace__thread-panel .rooms-workspace__msg-avatar {
+   the conversation about the text, not the chrome. */
+.rooms-workspace__thread-panel .rooms-workspace__msg-avatar,
+.rooms-workspace__thread-inline .rooms-workspace__msg-avatar {
   width: 24px;
   height: 24px;
   font-size: 9px;
+}
+
+/* ── Inline thread — default presentation ─────────────────────────── */
+
+/* The thread surfaces directly underneath its root message in the
+   timeline; the side panel above is the opt-in pop-out. The left accent
+   guide reads as "this belongs to the message above". */
+.rooms-workspace__thread-inline {
+  margin: 2px 8px 6px 44px;
+  padding: 4px 0 0;
+  border-left: 2px solid var(--accent-soft);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: var(--bg-raised);
+}
+
+.rooms-workspace__thread-inline-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 10px 4px;
+}
+
+.rooms-workspace__thread-inline-count {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__thread-inline-expand {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-4);
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__thread-inline-expand:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__thread-inline .rooms-workspace__composer {
+  padding: 6px 10px 8px;
+}
+
+/* The 44px root-avatar indent would crush the conversation on narrow
+   screens; hug the timeline edge instead. */
+@media (max-width: 650px) {
+  .rooms-workspace__thread-inline {
+    margin-left: 8px;
+  }
 }
 
 .rooms-workspace__composer--thread {
@@ -1495,6 +1588,8 @@
 .rooms-workspace__mobile-nav-toggle:focus-visible,
 .rooms-workspace__members-chip:focus-visible,
 .rooms-workspace__thread-panel-close:focus-visible,
+.rooms-workspace__thread-panel-dock:focus-visible,
+.rooms-workspace__thread-inline-expand:focus-visible,
 .rooms-workspace__addagent:focus-visible,
 .rooms-workspace__addagent-select:focus-visible {
   outline: none;
