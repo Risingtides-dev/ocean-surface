@@ -1251,6 +1251,30 @@ fn roster_display_name(roster: &[RoomParticipant], author_id: &str) -> String {
         .unwrap_or_else(|| author_id.to_string())
 }
 
+// ── Unread divider (designer-lane contract, styles/rooms-interaction.css) ──
+//
+// The room row's badge is daemon-derived (`room_attention_badge`, which reads
+// the additive `unread_count`/`mention_count` projection); this lane owns only
+// the transcript's first-unread divider and the row's bold-unread modifier.
+
+/// Sequence of the first root message the reader has not seen, i.e. where
+/// the "new messages" divider belongs.
+///
+/// `baseline_read_seq` is snapshotted when the room is opened and held for
+/// as long as it stays open, so the divider marks where the reader left off
+/// instead of sliding away as the live read cursor advances on scroll.
+///
+/// Returns `None` when there is no baseline — a room with no read floor has
+/// no "left off" point, and a divider pinned above the very first message
+/// would be noise rather than information.
+fn first_unread_root_seq(roots: &[RoomMessage], baseline_read_seq: Option<u64>) -> Option<u64> {
+    let baseline = baseline_read_seq?;
+    roots
+        .iter()
+        .find(|message| message.seq > baseline)
+        .map(|message| message.seq)
+}
+
 /// Truthful reply-count label ("No replies yet" over a fake "0"), shared by
 /// the inline thread header and the panel subtitle.
 fn reply_count_label(reply_count: usize) -> String {
@@ -1950,6 +1974,34 @@ pub fn RoomsWorkspace(
         store_thread_view_mode(thread_view_mode.get());
     });
 
+    // Where the reader left off, captured as `(room_key, read_seq)` the
+    // first time the open room's cursor projection loads and held until the
+    // room changes. The live cursor advances as the transcript is scrolled,
+    // so reading it directly would slide the divider away mid-read.
+    let unread_baseline = RwSignal::new(None::<(String, Option<u64>)>);
+    Effect::new(move |_| {
+        let Some(key) = rooms.open_key.get() else {
+            if unread_baseline.get_untracked().is_some() {
+                unread_baseline.set(None);
+            }
+            return;
+        };
+        let cursor = rooms.open_read_cursor.get();
+        unread_baseline.update(|current| {
+            let locked_for_room = current
+                .as_ref()
+                .is_some_and(|(locked_key, _)| locked_key == &key);
+            if locked_for_room {
+                return;
+            }
+            // Wait for the projection to load; `Some(projection)` with no
+            // read_seq is a loaded "never read" answer, not a pending one.
+            if let Some(projection) = cursor {
+                *current = Some((key, projection.read_seq));
+            }
+        });
+    });
+
     // Persisted view state, captured BEFORE the persist effect below can
     // overwrite storage with this mount's initial empty state. Restores are
     // validated against live daemon data before they apply: the room must
@@ -1982,6 +2034,21 @@ pub fn RoomsWorkspace(
 
     // Mention truth source: the open room's daemon-provided roster ids.
     // room_markdown highlights @id ONLY when it resolves here.
+    // Row the "new messages" divider sits above, or None when the reader has
+    // no left-off point in this room.
+    let first_unread_seq = Memo::new(move |_| {
+        let baseline = match unread_baseline.get() {
+            Some((key, baseline)) if rooms.open_key.get().as_deref() == Some(key.as_str()) => {
+                baseline
+            }
+            _ => return None,
+        };
+        first_unread_root_seq(
+            &partition_thread_messages(&rooms.transcript.get(), 0).roots,
+            baseline,
+        )
+    });
+
     let member_ids = Memo::new(move |_| {
         let local_participants = rooms
             .open_room
@@ -3296,13 +3363,16 @@ pub fn RoomsWorkspace(
                                                     .as_deref()
                                                     == Some(&*key_tab)
                                             };
-                                            let unread = move || {
+                                            // Memo, not a bare closure: both the row's
+                                            // bold-unread modifier and the attention badge
+                                            // read it, and a closure is not Copy.
+                                            let unread = Memo::new(move |_| {
                                                 rooms.read_summaries.with(|summaries| {
                                                     crate::rooms::room_has_durable_unread(
                                                         summaries.get(&key_unread),
                                                     )
                                                 })
-                                            };
+                                            });
                                             let attention_label = Memo::new(move |_| {
                                                 rooms.read_summaries.with(|summaries| {
                                                     crate::rooms::room_attention_aria_label(
@@ -3321,6 +3391,7 @@ pub fn RoomsWorkspace(
                                                 <button
                                                     class="rooms-workspace__room"
                                                     class:is-active=active
+                                                    class:rooms-workspace__room--unread=move || unread.get()
                                                     type="button"
                                                     role="option"
                                                     id=room_option_dom_id(&room.id)
@@ -3351,7 +3422,7 @@ pub fn RoomsWorkspace(
                                                     <span class="rooms-workspace__room-name">
                                                         {room.name.clone()}
                                                     </span>
-                                                    <Show when=move || unread()>
+                                                    <Show when=move || unread.get()>
                                                         <span
                                                             class="rooms-workspace__room-unread"
                                                             role="img"
@@ -3776,6 +3847,23 @@ pub fn RoomsWorkspace(
                                             // keyed row was cached.
                                             let ledger_row = m.clone();
                                             view! {
+                                                // "New messages" line at the reader's
+                                                // left-off point. Above the day/gap
+                                                // headers so it reads as the boundary
+                                                // for everything that follows.
+                                                {move || {
+                                                    (first_unread_seq.get() == Some(root_seq)).then(|| {
+                                                        view! {
+                                                            <div
+                                                                class="rooms-workspace__unread-divider"
+                                                                role="separator"
+                                                                aria-label="New messages"
+                                                            >
+                                                                "New"
+                                                            </div>
+                                                        }
+                                                    })
+                                                }}
                                                 {day_label.map(|d| view! {
                                                     <div class="rooms-workspace__day-separator" data-day="true">{d}</div>
                                                 })}
@@ -8564,6 +8652,76 @@ mod tests {
         assert!(
             markup.contains(&emitter),
             "confirmed rows must emit the ledger mark"
+        );
+    }
+
+    // ── Unread divider (badge is daemon-derived on main) ──────────────
+
+    #[test]
+    fn first_unread_is_the_first_root_past_the_baseline() {
+        let roots = vec![
+            test_msg(2, "a", None),
+            test_msg(5, "b", None),
+            test_msg(9, "c", None),
+        ];
+        assert_eq!(first_unread_root_seq(&roots, Some(2)), Some(5));
+        assert_eq!(first_unread_root_seq(&roots, Some(4)), Some(5));
+        assert_eq!(first_unread_root_seq(&roots, Some(5)), Some(9));
+        // Fully caught up: no divider.
+        assert_eq!(first_unread_root_seq(&roots, Some(9)), None);
+        assert_eq!(first_unread_root_seq(&roots, Some(99)), None);
+    }
+
+    #[test]
+    fn first_unread_needs_a_baseline_and_tolerates_an_empty_room() {
+        let roots = vec![test_msg(2, "a", None)];
+        // No read floor: no "left off" point, so no divider is pinned to the
+        // very first message.
+        assert_eq!(first_unread_root_seq(&roots, None), None);
+        assert_eq!(first_unread_root_seq(&[], Some(3)), None);
+        assert_eq!(first_unread_root_seq(&[], None), None);
+    }
+
+    /// The divider marks a boundary in the ROOT timeline; thread replies are
+    /// rendered inside their thread, so they must not move it.
+    #[test]
+    fn first_unread_ignores_thread_replies() {
+        let roots = partition_thread_messages(
+            &[
+                test_msg(1, "root", None),
+                test_msg(2, "reply", Some(1)),
+                test_msg(3, "next root", None),
+            ],
+            1,
+        )
+        .roots;
+        assert_eq!(first_unread_root_seq(&roots, Some(1)), Some(3));
+    }
+
+    /// Both unread affordances are styled by the designer lane and must stay
+    /// emitted by the Rust lane (the forward-CSS contract in
+    /// styles/rooms-interaction.css names them).
+    #[test]
+    fn unread_affordances_are_styled_and_emitted() {
+        let css = include_str!("../../../styles/rooms-interaction.css");
+        let divider = ["rooms-workspace__unread", "-divider"].concat();
+        let row_modifier = ["rooms-workspace__room", "--unread"].concat();
+        assert!(
+            css.contains(&format!(".{divider}")),
+            "divider must stay styled"
+        );
+        assert!(
+            css.contains(&format!(".{row_modifier}")),
+            "bold-unread row must stay styled"
+        );
+        let markup = include_str!("rooms_workspace.rs");
+        assert!(
+            markup.contains(&format!("class=\"{divider}\"")),
+            "the transcript must emit the unread divider"
+        );
+        assert!(
+            markup.contains(&format!("class:{row_modifier}=")),
+            "the room row must emit the bold-unread modifier"
         );
     }
 
