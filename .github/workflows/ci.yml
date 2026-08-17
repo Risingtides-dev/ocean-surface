@@ -71,6 +71,10 @@ jobs:
       #     only. Whoever adds the job: TASK-81 left the crate clippy-clean, so
       #     it should go green on the first run — if it does not, the runner
       #     setup is the problem, not the source.
+      #     (The `tauri-acceptance` job below gates the crate's Rooms
+      #     acceptance harness (OCEAN-390) without compiling it — resolve-only
+      #     `cargo tree` plus the runner's `--validate` mode — so this
+      #     compile/lint gap is still open.)
       # --------------------------------------------------------------------
 
       # ocean-surface-proxy: the native crate — full build/test/clippy gate.
@@ -191,3 +195,84 @@ jobs:
       # any GPU/render-dependent integration tests from the headless gate.
       - name: Test (ocean-gui, lib only)
         run: cargo test -p ocean-gui --lib
+
+  # ----------------------------------------------------------------------
+  # Tauri Rooms acceptance harness (OCEAN-390 / issue #110) — static gate.
+  #
+  # The live Stage0 harness is macOS-only (real WKWebView + System Events
+  # keyboard truth in a dedicated login; see test/tauri/README.md). This job
+  # keeps the repository-owned pieces from rotting on every PR without
+  # compiling ocean-tauri:
+  #   1. `scripts/test-tauri-rooms.sh --validate` — static/config checks only
+  #      (offscreen <=650px window contract, lockfile source hygiene, Python
+  #      spec + embedded helper AST). It never starts a daemon or a GUI.
+  #   2. dependency-graph isolation — the default ocean-tauri resolve must
+  #      NOT contain the embedded WebDriver plugin, and the debug-only
+  #      `rooms-acceptance` feature must pin exactly the reviewed version.
+  #      `cargo tree` resolves the feature graph without building, so none of
+  #      the webkit2gtk system deps from the scope note above are needed.
+  tauri-acceptance:
+    name: tauri-acceptance (harness validate + feature graph)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Resolve-only job: caches the registry index/archives, not target.
+          key: tauri-acceptance
+
+      # --validate preflights the exact tool set the native Stage0 run needs
+      # (`command -v trunk` included), so CI installs the pinned release
+      # binary rather than skipping that check. Checksum-pinned; a
+      # `cargo install trunk` compile would dwarf the whole job.
+      - name: Install trunk (pinned release binary)
+        run: |
+          curl -sSL -o trunk.tar.gz \
+            https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz
+          echo "f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b  trunk.tar.gz" | sha256sum -c -
+          tar -xzf trunk.tar.gz trunk
+          sudo install -m 0755 trunk /usr/local/bin/trunk
+          rm trunk trunk.tar.gz
+          trunk --version
+
+      # The success contract is a single exact stdout line — assert it
+      # verbatim so the documented pass/fail output stays load-bearing.
+      - name: Harness static validation (exact pass line)
+        run: |
+          set +e
+          output=$(./scripts/test-tauri-rooms.sh --validate 2>&1)
+          status=$?
+          set -e
+          echo "$output"
+          test "$status" -eq 0
+          test "$output" = "PASS: Tauri Rooms static validation"
+
+      # Assert the specific cargo error, not just a non-zero exit, so an
+      # unrelated failure (network, lockfile drift) cannot masquerade as
+      # "plugin absent".
+      - name: Default dependency graph excludes the WebDriver plugin
+        run: |
+          set +e
+          output=$(cargo tree --locked \
+            --manifest-path crates/ocean-tauri/Cargo.toml \
+            -i tauri-plugin-wdio-webdriver 2>&1)
+          status=$?
+          set -e
+          echo "$output"
+          test "$status" -ne 0
+          grep -F "package ID specification \`tauri-plugin-wdio-webdriver\` did not match any packages" <<<"$output"
+
+      - name: rooms-acceptance feature pins exactly the reviewed plugin
+        run: |
+          output=$(cargo tree --locked \
+            --manifest-path crates/ocean-tauri/Cargo.toml \
+            --features rooms-acceptance -i tauri-plugin-wdio-webdriver)
+          echo "$output"
+          grep -Fx "tauri-plugin-wdio-webdriver v1.3.0" <<<"$output"
