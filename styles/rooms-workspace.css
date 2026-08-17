@@ -668,9 +668,11 @@
   text-transform: uppercase;
 }
 
+/* Members-drawer dismiss. Hidden while the rail is inline; the narrow-layout
+   blocks (≤1080px, and thread-open ≤1440px) reveal it alongside the drawer. */
 .rooms-workspace__right-close {
   appearance: none;
-  display: inline-flex;
+  display: none;
   align-items: center;
   justify-content: center;
   width: 22px;
@@ -754,22 +756,31 @@
   letter-spacing: 0.06em;
 }
 
-/* ── Right rail — thread section ──────────────────────────────────── */
+/* ── Thread panel — dedicated conversation column ─────────────────── */
 
-.rooms-workspace__right-thread {
-  flex: 1 1 auto;
-  min-height: 0;
+/* A real conversation column, NOT the 220px members rail the thread view
+   used to be mode-swapped into. Sits in flow to the right of the members
+   rail; below 900px it overlays instead (see the responsive blocks). */
+.rooms-workspace__thread-panel {
+  flex: 0 0 380px;
+  min-width: 0;
   display: flex;
   flex-direction: column;
+  background: var(--bg-raised);
+  border-left: 1px solid var(--border-subtle);
 }
 
-.rooms-workspace__right-thread-head {
+.rooms-workspace__thread-panel-head {
   flex: 0 0 auto;
-  padding: 10px 12px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 12px 10px;
   border-bottom: 1px solid var(--border-subtle);
 }
 
-.rooms-workspace__right-thread-title {
+.rooms-workspace__thread-panel-title {
   margin: 0 0 2px;
   font-size: 13px;
   font-weight: 600;
@@ -777,17 +788,52 @@
   line-height: 1.35;
 }
 
-.rooms-workspace__right-thread-subtitle {
+.rooms-workspace__thread-panel-subtitle {
   font-size: 11px;
   color: var(--fg-3);
   line-height: 1.35;
 }
 
-.rooms-workspace__right-thread-transcript {
+.rooms-workspace__thread-panel-close {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-4);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__thread-panel-close:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+/* The composer sits OUTSIDE this scroll container, pinned to the panel
+   bottom, so long threads can never scroll the reply box away. */
+.rooms-workspace__thread-panel-transcript {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   padding: 8px 12px;
+}
+
+/* Replies are denser than the main timeline: smaller identity marks keep
+   the 380px column about the text, not the chrome. */
+.rooms-workspace__thread-panel .rooms-workspace__msg-avatar {
+  width: 24px;
+  height: 24px;
+  font-size: 9px;
 }
 
 .rooms-workspace__composer--thread {
@@ -888,13 +934,14 @@
     display: none;
   }
 
-  .rooms-workspace__right--thread {
-    display: flex;
+  /* The thread column no longer fits in flow: float it over the transcript
+     instead of hiding it (the old mode-swapped rail simply vanished here). */
+  .rooms-workspace__thread-panel {
     position: absolute;
     top: 0;
     right: 0;
     bottom: 0;
-    width: min(360px, 46vw);
+    width: min(400px, 56vw);
     z-index: 220;
     box-shadow: var(--shadow-md);
   }
@@ -920,7 +967,7 @@
     border-right: 1px solid var(--border-subtle);
     box-shadow: var(--shadow-md);
   }
-  .rooms-workspace__right--thread {
+  .rooms-workspace__thread-panel {
     position: fixed;
     inset: 0;
     width: 100vw;
@@ -1089,7 +1136,7 @@
 .rooms-workspace__left-list,
 .rooms-workspace__right-list,
 .rooms-workspace__transcript,
-.rooms-workspace__right-thread-transcript {
+.rooms-workspace__thread-panel-transcript {
   scrollbar-width: thin;
   scrollbar-color: var(--border-subtle) transparent;
 }
@@ -1097,14 +1144,14 @@
 .rooms-workspace__left-list::-webkit-scrollbar,
 .rooms-workspace__right-list::-webkit-scrollbar,
 .rooms-workspace__transcript::-webkit-scrollbar,
-.rooms-workspace__right-thread-transcript::-webkit-scrollbar {
+.rooms-workspace__thread-panel-transcript::-webkit-scrollbar {
   width: 8px;
 }
 
 .rooms-workspace__left-list::-webkit-scrollbar-thumb,
 .rooms-workspace__right-list::-webkit-scrollbar-thumb,
 .rooms-workspace__transcript::-webkit-scrollbar-thumb,
-.rooms-workspace__right-thread-transcript::-webkit-scrollbar-thumb {
+.rooms-workspace__thread-panel-transcript::-webkit-scrollbar-thumb {
   border-radius: var(--radius-pill);
   background: var(--border-subtle);
 }
@@ -1112,7 +1159,7 @@
 .rooms-workspace__left-list::-webkit-scrollbar-thumb:hover,
 .rooms-workspace__right-list::-webkit-scrollbar-thumb:hover,
 .rooms-workspace__transcript::-webkit-scrollbar-thumb:hover,
-.rooms-workspace__right-thread-transcript::-webkit-scrollbar-thumb:hover {
+.rooms-workspace__thread-panel-transcript::-webkit-scrollbar-thumb:hover {
   background: var(--border-strong);
 }
 
@@ -1312,6 +1359,113 @@
   }
 }
 
+/* ── Members reachability ─────────────────────────────────────────── */
+
+/* Everywhere the inline members rail is hidden (≤1080px, or ≤1440px while a
+   thread is open), a header chip reopens it as a right-hand drawer. Without
+   this, the roster — and the only add-agent affordance in the product — was
+   unreachable on narrow viewports. */
+
+.rooms-workspace__members-chip {
+  display: none;
+  align-items: center;
+  gap: 5px;
+  height: var(--ctl-h-sm);
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-family: var(--font);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__members-chip:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+  color: var(--fg);
+}
+
+.rooms-workspace__members-backdrop {
+  display: none;
+}
+
+/* Members yield the row to the thread column on mid-width desktops; the
+   chip keeps them one click away. */
+@media (max-width: 1440px) {
+  .rooms-workspace--thread-open
+    .rooms-workspace__right:not(.rooms-workspace__right--visible) {
+    display: none;
+  }
+
+  .rooms-workspace--thread-open .rooms-workspace__members-chip {
+    display: inline-flex;
+  }
+
+  .rooms-workspace--thread-open .rooms-workspace__right-close {
+    display: inline-flex;
+  }
+
+  .rooms-workspace--thread-open
+    .rooms-workspace__right.rooms-workspace__right--visible {
+    display: flex;
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(320px, 86vw);
+    z-index: 430;
+    border-left: 1px solid var(--border-subtle);
+    box-shadow: var(--shadow-md);
+  }
+
+  .rooms-workspace--thread-open
+    .rooms-workspace__members-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 425;
+    background: var(--scrim);
+  }
+}
+
+/* Below 1080px the inline rail is gone regardless of threads. */
+@media (max-width: 1080px) {
+  .rooms-workspace__members-chip {
+    display: inline-flex;
+  }
+
+  .rooms-workspace__right-close {
+    display: inline-flex;
+  }
+
+  .rooms-workspace__right.rooms-workspace__right--visible {
+    display: flex;
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(320px, 86vw);
+    z-index: 430;
+    border-left: 1px solid var(--border-subtle);
+    box-shadow: var(--shadow-md);
+  }
+
+  .rooms-workspace__members-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 425;
+    background: var(--scrim);
+  }
+}
+
 @media (max-width: 650px) {
   .rooms-workspace__left--visible {
     inset: auto;
@@ -1339,6 +1493,8 @@
 /* Keyboard and touch parity for every interactive workspace control. */
 .rooms-workspace__room:focus-visible,
 .rooms-workspace__mobile-nav-toggle:focus-visible,
+.rooms-workspace__members-chip:focus-visible,
+.rooms-workspace__thread-panel-close:focus-visible,
 .rooms-workspace__addagent:focus-visible,
 .rooms-workspace__addagent-select:focus-visible {
   outline: none;
@@ -1348,6 +1504,7 @@
 @media (pointer: coarse) {
   .rooms-workspace__left-close,
   .rooms-workspace__right-close,
+  .rooms-workspace__thread-panel-close,
   .rooms-workspace__center-back,
   .rooms-workspace__mobile-nav-toggle {
     position: relative;
@@ -1355,6 +1512,7 @@
 
   .rooms-workspace__left-close::after,
   .rooms-workspace__right-close::after,
+  .rooms-workspace__thread-panel-close::after,
   .rooms-workspace__center-back::after,
   .rooms-workspace__mobile-nav-toggle::after {
     content: '';
