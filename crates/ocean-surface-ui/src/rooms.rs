@@ -434,6 +434,29 @@ struct RetryOutboxErrorResponse {
     error: Option<String>,
 }
 
+/// Adopt the signed-in user as this surface's room identity.
+///
+/// Before this, identity was minted per BROWSER (`web-<random>`), so a room
+/// roster showed opaque client ids instead of people, and the same person on
+/// two devices appeared as two members. The proxy knows who signed in, so the
+/// login is the identity.
+///
+/// Called at boot with whatever `/api/config` reported. Overwriting on every
+/// boot is deliberate: if a different person signs in on this browser, the
+/// stored identity must follow them rather than inherit the previous tenant's.
+pub fn adopt_identity(id: &str, display_name: &str) {
+    if id.trim().is_empty() {
+        return;
+    }
+    if let Some(storage) = local_storage() {
+        let _ = storage.set_item(ROOM_IDENTITY_KEY, id);
+        let _ = storage.set_item(ROOM_DISPLAY_NAME_KEY, display_name);
+    }
+}
+
+/// Display name for the adopted identity, when one was published.
+const ROOM_DISPLAY_NAME_KEY: &str = "ocean.room_display_name";
+
 /// Identity of this surface as a room participant. Stable per browser via
 /// localStorage so join/leave/author all key on the same id.
 #[derive(Debug, Clone)]
@@ -455,10 +478,13 @@ impl RoomIdentity {
                 }
                 minted
             });
-        Self {
-            display_name: id.clone(),
-            id,
-        }
+        // Prefer the signed-in display name; fall back to the id so an
+        // unauthenticated or single-operator surface behaves as before.
+        let display_name = local_storage()
+            .and_then(|s| s.get_item(ROOM_DISPLAY_NAME_KEY).ok().flatten())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| id.clone());
+        Self { display_name, id }
     }
 }
 

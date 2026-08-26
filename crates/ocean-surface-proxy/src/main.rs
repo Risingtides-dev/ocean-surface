@@ -253,12 +253,15 @@ fn users_file_path() -> PathBuf {
 /// Falls back to the single `OCEAN_SURFACE_USER`/`OCEAN_SURFACE_PASS` pair
 /// when no users file exists, so an existing single-operator deployment keeps
 /// working byte-for-byte and this change is additive rather than a migration.
-fn load_users(default_daemon_url: &str, secret_path: &FsPath) -> anyhow::Result<Vec<ProxyUser>> {
-    let path = users_file_path();
-    let entries: Vec<UserFileEntry> = match std::fs::read_to_string(&path) {
+fn load_users(
+    default_daemon_url: &str,
+    secret_path: &FsPath,
+    path: &FsPath,
+) -> anyhow::Result<Vec<ProxyUser>> {
+    let entries: Vec<UserFileEntry> = match std::fs::read_to_string(path) {
         Ok(raw) => {
             // Refuse a world-readable roster: it holds every teammate's password.
-            if let Ok(meta) = std::fs::metadata(&path) {
+            if let Ok(meta) = std::fs::metadata(path) {
                 let mode = meta.mode() & 0o777;
                 if mode & 0o077 != 0 {
                     anyhow::bail!(
@@ -462,7 +465,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Multi-user roster. Absent file -> empty -> single-user behaviour is
     // unchanged, which is what keeps this additive for existing deployments.
-    let users = load_users(&daemon_url, &session_secret_path())?;
+    let users = load_users(&daemon_url, &session_secret_path(), &users_file_path())?;
     if users.is_empty() {
         tracing::info!("single-operator mode (no users file)");
     } else {
@@ -1151,13 +1154,18 @@ async fn health() -> Json<Value> {
 /// client talks to the daemon through THIS origin (the /v1/agent/* reverse
 /// proxy below) — works identically on localhost and through the tunnel, with
 /// no mixed-content or hardcoded host.
-async fn config(State(state): State<Arc<AppState>>) -> Json<Value> {
-    Json(config_payload(&state))
+async fn config(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Json<Value> {
+    Json(config_payload(&state, session_user(&state, &headers)))
 }
 
-fn config_payload(state: &AppState) -> Value {
+fn config_payload(state: &AppState, user: Option<&ProxyUser>) -> Value {
     json!({
         "daemon_url": "",
+        // Who is signed in, so the client stops inventing a per-browser
+        // identity. Empty in single-operator mode, which keeps the previous
+        // behaviour for a deployment that has no roster.
+        "user_id": user.map(|u| u.username.clone()).unwrap_or_default(),
+        "user_display_name": user.map(|u| u.username.clone()).unwrap_or_default(),
         "has_auth": state.has_auth(),
         "voice_profile": state.voice_profile,
         "maps_key": state.maps_key.clone().unwrap_or_default(),
@@ -2300,6 +2308,26 @@ mod tests {
     }
 
     #[test]
+    fn config_publishes_the_signed_in_identity_so_rooms_show_people() {
+        let state = multi_user_state();
+        let eric = state
+            .users
+            .iter()
+            .find(|u| u.username == "ecfromthedc")
+            .expect("eric");
+
+        let signed_in = config_payload(&state, Some(eric));
+        assert_eq!(signed_in["user_id"], "ecfromthedc");
+        assert_eq!(signed_in["user_display_name"], "ecfromthedc");
+
+        // Single-operator / signed-out publishes nothing, so the client keeps
+        // its previous per-browser behaviour instead of adopting a blank id.
+        let anon = config_payload(&state, None);
+        assert_eq!(anon["user_id"], "");
+        assert_eq!(anon["user_display_name"], "");
+    }
+
+    #[test]
     fn each_users_session_routes_to_their_own_daemon() {
         let state = multi_user_state();
         assert_eq!(
@@ -2373,9 +2401,7 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&users, std::fs::Permissions::from_mode(0o600)).unwrap();
         let secret = dir.path().join("secret");
-        std::env::set_var("OCEAN_SURFACE_USERS_FILE", &users);
-        let loaded = load_users("http://default:4780", &secret).expect("load");
-        std::env::remove_var("OCEAN_SURFACE_USERS_FILE");
+        let loaded = load_users("http://default:4780", &secret, &users).expect("load");
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].daemon_url, "http://default:4780");
         assert_eq!(loaded[1].daemon_url, "http://elsewhere:4780");
@@ -2391,9 +2417,7 @@ mod tests {
         std::fs::write(&users, r#"[{"username":"a","password":"p"}]"#).unwrap();
         std::fs::set_permissions(&users, std::fs::Permissions::from_mode(0o644)).unwrap();
         let secret = dir.path().join("secret");
-        std::env::set_var("OCEAN_SURFACE_USERS_FILE", &users);
-        let err = load_users("http://default:4780", &secret).unwrap_err();
-        std::env::remove_var("OCEAN_SURFACE_USERS_FILE");
+        let err = load_users("http://default:4780", &secret, &users).unwrap_err();
         assert!(
             err.to_string().contains("0600"),
             "a file holding every teammate's password must not be world-readable: {err}"
@@ -2411,9 +2435,7 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&users, std::fs::Permissions::from_mode(0o600)).unwrap();
         let secret = dir.path().join("secret");
-        std::env::set_var("OCEAN_SURFACE_USERS_FILE", &users);
-        let err = load_users("http://default:4780", &secret).unwrap_err();
-        std::env::remove_var("OCEAN_SURFACE_USERS_FILE");
+        let err = load_users("http://default:4780", &secret, &users).unwrap_err();
         assert!(err.to_string().contains("duplicate"), "{err}");
     }
 
@@ -2421,12 +2443,12 @@ mod tests {
     fn a_missing_users_file_means_single_operator_mode_not_an_error() {
         let dir = tempfile::tempdir().expect("tempdir");
         let secret = dir.path().join("secret");
-        std::env::set_var(
-            "OCEAN_SURFACE_USERS_FILE",
-            dir.path().join("does-not-exist.json"),
-        );
-        let loaded = load_users("http://default:4780", &secret).expect("absent file is fine");
-        std::env::remove_var("OCEAN_SURFACE_USERS_FILE");
+        let loaded = load_users(
+            "http://default:4780",
+            &secret,
+            &dir.path().join("does-not-exist.json"),
+        )
+        .expect("absent file is fine");
         assert!(loaded.is_empty());
     }
 
@@ -2735,7 +2757,7 @@ mod tests {
             observer_token_path: PathBuf::from("/not-used-in-config-tests"),
         };
 
-        let payload = config_payload(&state);
+        let payload = config_payload(&state, None);
 
         assert_eq!(payload["daemon_url"], "");
         assert_eq!(payload["has_auth"], true);
