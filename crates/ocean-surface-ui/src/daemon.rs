@@ -211,6 +211,11 @@ struct ProxyConfig {
     livekit_token_path: String,
     #[serde(default)]
     tldraw_sync_uri: String,
+    /// Who the proxy says is signed in. Empty in single-operator mode.
+    #[serde(default)]
+    user_id: String,
+    #[serde(default)]
+    user_display_name: String,
 }
 
 /// A component interaction event sent from the client to the daemon.
@@ -2686,6 +2691,17 @@ impl Daemon {
                         daemon
                             .tldraw_sync_uri
                             .set(cfg.tldraw_sync_uri.trim().to_string());
+                        // The login IS the room identity. Without this the
+                        // surface mints a per-browser `web-<random>` and a
+                        // roster shows opaque client ids instead of people.
+                        crate::rooms::adopt_identity(
+                            cfg.user_id.trim(),
+                            if cfg.user_display_name.trim().is_empty() {
+                                cfg.user_id.trim()
+                            } else {
+                                cfg.user_display_name.trim()
+                            },
+                        );
                     }
                     Err(_) => {
                         // Non-JSON / unexpected shape — keep the fallback url.
