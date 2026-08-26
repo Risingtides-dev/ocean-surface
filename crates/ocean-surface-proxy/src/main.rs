@@ -23,7 +23,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use axum::{
     body::Bytes,
-    extract::{Form, Path, Request, State},
+    extract::{Extension, Form, Path, Request, State},
     http::{header, HeaderMap, HeaderName, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
@@ -63,7 +63,12 @@ struct AppState {
     /// split is: streams untimed by necessity, request/response bounded.
     http_json: reqwest::Client,
     voice_profile: String,
+    /// Fallback upstream: used when auth is off, and as the default for a user
+    /// entry that names no daemon of its own.
     daemon_url: String,
+    /// Everyone who may sign in, each with their own upstream. Empty means
+    /// single-user mode driven by `basic_auth` + `daemon_url` above.
+    users: Vec<ProxyUser>,
     default_livekit_room_id: String,
     tldraw_sync_uri: Option<String>,
     /// Google Maps JS API key, handed to the client via /api/config so the map
@@ -178,6 +183,137 @@ fn load_or_create_session_secret(path: &FsPath) -> anyhow::Result<String> {
         }
         Err(error) => Err(error).with_context(|| format!("creating {}", path.display())),
     }
+}
+
+/// One person who may sign in, and the Ocean daemon their session drives.
+///
+/// Multi-user is the whole point: a proxy that holds one daemon url and one
+/// credential can only ever show everyone the SAME Ocean. Each user carries
+/// their own upstream so a login decides *whose* sessions and instance you
+/// see, while Rooms stay shared because they federate through Bedrock rather
+/// than through this proxy.
+#[derive(Clone)]
+struct ProxyUser {
+    username: String,
+    password: String,
+    daemon_url: String,
+    /// Derived from the shared server secret plus THIS user's credentials, so
+    /// one user's cookie can never authenticate as another and rotating one
+    /// person's password invalidates only their sessions.
+    session_token: String,
+}
+
+impl std::fmt::Debug for ProxyUser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyUser")
+            .field("username", &self.username)
+            .field("password", &"[redacted]")
+            .field("daemon_url", &self.daemon_url)
+            .field("session_token", &"[redacted]")
+            .finish()
+    }
+}
+
+/// The upstream chosen for one request, injected by the auth gate and read by
+/// every proxying handler. Making it a request extension rather than shared
+/// state is what keeps two concurrent users from racing on one field.
+#[derive(Clone, Debug)]
+struct ResolvedDaemon(String);
+
+impl ResolvedDaemon {
+    fn base(&self) -> &str {
+        self.0.trim_end_matches('/')
+    }
+}
+
+/// One entry in the users file.
+#[derive(Deserialize)]
+struct UserFileEntry {
+    username: String,
+    password: String,
+    /// Optional: falls back to OCEAN_DAEMON_URL, so a single-machine entry
+    /// needs only a username and password.
+    #[serde(default)]
+    daemon_url: Option<String>,
+}
+
+/// Where multi-user config lives. Same rule as the single-user credentials:
+/// a 0600 file, never the plist, because plists are world-readable.
+fn users_file_path() -> PathBuf {
+    std::env::var_os("OCEAN_SURFACE_USERS_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_default();
+            PathBuf::from(home).join(".config/ocean-surface/users.json")
+        })
+}
+
+/// Load the roster.
+///
+/// Falls back to the single `OCEAN_SURFACE_USER`/`OCEAN_SURFACE_PASS` pair
+/// when no users file exists, so an existing single-operator deployment keeps
+/// working byte-for-byte and this change is additive rather than a migration.
+fn load_users(default_daemon_url: &str, secret_path: &FsPath) -> anyhow::Result<Vec<ProxyUser>> {
+    let path = users_file_path();
+    let entries: Vec<UserFileEntry> = match std::fs::read_to_string(&path) {
+        Ok(raw) => {
+            // Refuse a world-readable roster: it holds every teammate's password.
+            if let Ok(meta) = std::fs::metadata(&path) {
+                let mode = meta.mode() & 0o777;
+                if mode & 0o077 != 0 {
+                    anyhow::bail!(
+                        "{} is mode {:o}; it holds credentials and must be 0600",
+                        path.display(),
+                        mode
+                    );
+                }
+            }
+            serde_json::from_str(&raw)
+                .map_err(|e| anyhow::anyhow!("{} is not valid JSON: {e}", path.display()))?
+        }
+        Err(_) => Vec::new(),
+    };
+
+    let mut users = Vec::new();
+    for entry in entries {
+        if entry.username.trim().is_empty() || entry.password.trim().is_empty() {
+            anyhow::bail!(
+                "{}: every user needs a username and password",
+                path.display()
+            );
+        }
+        let daemon_url = entry
+            .daemon_url
+            .unwrap_or_else(|| default_daemon_url.to_string());
+        let session_token =
+            derive_user_session_token(&entry.username, &entry.password, secret_path)?;
+        users.push(ProxyUser {
+            username: entry.username,
+            password: entry.password,
+            daemon_url,
+            session_token,
+        });
+    }
+
+    // Duplicate usernames would make login order-dependent and revocation
+    // ambiguous, so they are a hard configuration error.
+    let mut seen = std::collections::BTreeSet::new();
+    for u in &users {
+        if !seen.insert(u.username.clone()) {
+            anyhow::bail!("{}: duplicate username '{}'", path.display(), u.username);
+        }
+    }
+    Ok(users)
+}
+
+/// Per-user session token. Same construction as the single-user form, with the
+/// username bound in, so tokens are not interchangeable between accounts.
+fn derive_user_session_token(
+    user: &str,
+    pass: &str,
+    secret_path: &FsPath,
+) -> anyhow::Result<String> {
+    derive_session_token(Some(&(user.to_string(), pass.to_string())), secret_path)
 }
 
 fn derive_session_token(
@@ -324,11 +460,27 @@ async fn main() -> anyhow::Result<()> {
     // or password changes the derived token and invalidates prior sessions.
     let session_token = derive_session_token(basic_auth.as_ref(), &session_secret_path())?;
 
+    // Multi-user roster. Absent file -> empty -> single-user behaviour is
+    // unchanged, which is what keeps this additive for existing deployments.
+    let users = load_users(&daemon_url, &session_secret_path())?;
+    if users.is_empty() {
+        tracing::info!("single-operator mode (no users file)");
+    } else {
+        tracing::info!(
+            count = users.len(),
+            "multi-user mode: per-login daemon routing"
+        );
+        for u in &users {
+            tracing::info!(user = %u.username, daemon = %u.daemon_url, "surface user");
+        }
+    }
+
     let observer_token_path = std::env::var_os("OCEAN_OBSERVER_TOKEN_FILE")
         .map(PathBuf::from)
         .unwrap_or_else(|| ocean_config_dir().join("observatory-token"));
 
     let state = Arc::new(AppState {
+        users,
         // TASK-71: never follow upstream redirects. A redirect-following
         // reverse proxy is an SSRF primitive waiting on a daemon-side 3xx —
         // the daemon returns none today, but this boundary should not depend
@@ -570,10 +722,49 @@ fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 }
 
 fn has_valid_session(state: &AppState, headers: &HeaderMap) -> bool {
+    if session_user(state, headers).is_some() {
+        return true;
+    }
     let Some(provided) = cookie_value(headers, SESSION_COOKIE) else {
         return false;
     };
     constant_time_eq(provided.as_bytes(), state.session_token.as_bytes())
+}
+
+/// Which roster user this request's session cookie belongs to.
+///
+/// Every candidate is compared in constant time and the loop does NOT exit
+/// early on a match, so the work done does not vary with which user signed in.
+fn session_user<'a>(state: &'a AppState, headers: &HeaderMap) -> Option<&'a ProxyUser> {
+    let provided = cookie_value(headers, SESSION_COOKIE)?;
+    let mut found: Option<&ProxyUser> = None;
+    for user in &state.users {
+        if constant_time_eq(provided.as_bytes(), user.session_token.as_bytes()) {
+            found = Some(user);
+        }
+    }
+    found
+}
+
+/// The upstream this request should be proxied to. A signed-in roster user
+/// gets their own daemon; everything else falls back to the configured
+/// default, which is what single-operator mode has always used.
+/// The upstream the auth gate resolved for this request. Falls back to the
+/// configured default if the extension is somehow absent, which keeps a
+/// misordered layer from producing a broken URL rather than a wrong one.
+fn resolved_daemon(state: &AppState, req: &Request) -> ResolvedDaemon {
+    req.extensions()
+        .get::<ResolvedDaemon>()
+        .cloned()
+        .unwrap_or_else(|| ResolvedDaemon(state.daemon_url.clone()))
+}
+
+fn daemon_for(state: &AppState, headers: &HeaderMap) -> ResolvedDaemon {
+    ResolvedDaemon(
+        session_user(state, headers)
+            .map(|u| u.daemon_url.clone())
+            .unwrap_or_else(|| state.daemon_url.clone()),
+    )
 }
 
 fn has_valid_basic_credentials(state: &AppState, headers: &HeaderMap) -> bool {
@@ -596,16 +787,23 @@ fn has_valid_basic_credentials(state: &AppState, headers: &HeaderMap) -> bool {
 
 async fn session_auth_gate(
     State(state): State<Arc<AppState>>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Response {
-    if state.basic_auth.is_none()
+    let authed = state.basic_auth.is_none()
         || is_public_boot_asset(req.uri().path())
         || has_valid_session(&state, req.headers())
         // Keep scripted/smoke clients compatible during migration, but never
         // challenge a browser for Basic credentials.
-        || has_valid_basic_credentials(&state, req.headers())
-    {
+        || has_valid_basic_credentials(&state, req.headers());
+
+    if authed {
+        // Resolve the upstream ONCE, here, and carry it on the request. Every
+        // proxying handler reads this rather than a shared field, so two people
+        // using the site at the same moment cannot be routed into each other's
+        // Ocean.
+        let daemon = daemon_for(&state, req.headers());
+        req.extensions_mut().insert(daemon);
         return next.run(req).await;
     }
 
@@ -669,18 +867,38 @@ async fn login_submit(
     headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Response {
-    let Some((want_user, want_pass)) = state.basic_auth.as_ref() else {
+    if state.basic_auth.is_none() && state.users.is_empty() {
         return Redirect::to("/").into_response();
-    };
+    }
     // Username and password are the complete login gate. Do not reject valid
     // credentials based on Origin, Host, forwarding headers, device identity,
     // or tunnel topology; those transport details are not authentication.
-    let user_ok = constant_time_eq(form.username.as_bytes(), want_user.as_bytes());
-    let pass_ok = constant_time_eq(form.password.as_bytes(), want_pass.as_bytes());
-    if !(user_ok & pass_ok) {
+    //
+    // The roster is checked first and WITHOUT an early exit, so a wrong
+    // username costs the same as a wrong password.
+    let mut matched: Option<&ProxyUser> = None;
+    for user in &state.users {
+        let user_ok = constant_time_eq(form.username.as_bytes(), user.username.as_bytes());
+        let pass_ok = constant_time_eq(form.password.as_bytes(), user.password.as_bytes());
+        if user_ok & pass_ok {
+            matched = Some(user);
+        }
+    }
+
+    let issued_token = if let Some(user) = matched {
+        user.session_token.clone()
+    } else if let Some((want_user, want_pass)) = state.basic_auth.as_ref() {
+        let user_ok = constant_time_eq(form.username.as_bytes(), want_user.as_bytes());
+        let pass_ok = constant_time_eq(form.password.as_bytes(), want_pass.as_bytes());
+        if !(user_ok & pass_ok) {
+            tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+            return (StatusCode::UNAUTHORIZED, login_html(true)).into_response();
+        }
+        state.session_token.clone()
+    } else {
         tokio::time::sleep(std::time::Duration::from_millis(750)).await;
         return (StatusCode::UNAUTHORIZED, login_html(true)).into_response();
-    }
+    };
 
     let secure = if request_is_https(&headers, state.secure_cookie) {
         "; Secure"
@@ -689,7 +907,7 @@ async fn login_submit(
     };
     let cookie = format!(
         "{SESSION_COOKIE}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_MAX_AGE_SECONDS}{secure}",
-        state.session_token
+        issued_token
     );
     let mut response = Redirect::to("/").into_response();
     response.headers_mut().insert(
@@ -956,8 +1174,12 @@ fn config_payload(state: &AppState) -> Value {
 }
 
 /// Reverse-proxy POST /v1/agent/turns to the local daemon.
-async fn proxy_turns(State(state): State<Arc<AppState>>, body: Bytes) -> impl IntoResponse {
-    let url = format!("{}/v1/agent/turns", state.daemon_url.trim_end_matches('/'));
+async fn proxy_turns(
+    State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
+    body: Bytes,
+) -> impl IntoResponse {
+    let url = format!("{}/v1/agent/turns", daemon.base());
     match state
         .http_json
         .post(&url)
@@ -981,11 +1203,12 @@ async fn proxy_turns(State(state): State<Arc<AppState>>, body: Bytes) -> impl In
 }
 
 /// Reverse-proxy POST /v1/agent/sessions to the local daemon.
-async fn proxy_sessions_post(State(state): State<Arc<AppState>>, body: Bytes) -> impl IntoResponse {
-    let url = format!(
-        "{}/v1/agent/sessions",
-        state.daemon_url.trim_end_matches('/')
-    );
+async fn proxy_sessions_post(
+    State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
+    body: Bytes,
+) -> impl IntoResponse {
+    let url = format!("{}/v1/agent/sessions", daemon.base());
     match state
         .http_json
         .post(&url)
@@ -1010,15 +1233,13 @@ async fn proxy_sessions_post(State(state): State<Arc<AppState>>, body: Bytes) ->
 
 /// Reverse-proxy GET /v1/agent/sessions to the local daemon.
 async fn proxy_sessions(State(state): State<Arc<AppState>>, req: Request) -> impl IntoResponse {
+    let daemon = resolved_daemon(&state, &req);
     let q = req
         .uri()
         .query()
         .map(|q| format!("?{q}"))
         .unwrap_or_default();
-    let url = format!(
-        "{}/v1/agent/sessions{q}",
-        state.daemon_url.trim_end_matches('/')
-    );
+    let url = format!("{}/v1/agent/sessions{q}", daemon.base());
     match state.http_json.get(&url).send().await {
         Ok(resp) => {
             let status = resp.status();
@@ -1040,21 +1261,23 @@ async fn proxy_sessions(State(state): State<Arc<AppState>>, req: Request) -> imp
 /// parsing a value" → blank chat history on session switch.
 async fn proxy_session_detail(
     State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    proxy_get_json(&state, &format!("/v1/sessions/{id}")).await
+    proxy_get_json(&state, &daemon, &format!("/v1/sessions/{id}")).await
 }
 
 async fn proxy_agent_session_detail(
     State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    proxy_get_json(&state, &format!("/v1/agent/sessions/{id}")).await
+    proxy_get_json(&state, &daemon, &format!("/v1/agent/sessions/{id}")).await
 }
 
 /// JSON GET passthrough helper for small daemon endpoints.
-async fn proxy_get_json(state: &AppState, path: &str) -> Response {
-    let url = format!("{}{path}", state.daemon_url.trim_end_matches('/'));
+async fn proxy_get_json(state: &AppState, daemon: &ResolvedDaemon, path: &str) -> Response {
+    let url = format!("{}{path}", daemon.base());
     match state.http_json.get(&url).send().await {
         Ok(resp) => {
             let status = resp.status();
@@ -1071,8 +1294,13 @@ async fn proxy_get_json(state: &AppState, path: &str) -> Response {
 }
 
 /// JSON POST passthrough helper for small daemon endpoints.
-async fn proxy_post_json(state: &AppState, path: &str, body: Bytes) -> Response {
-    let url = format!("{}{path}", state.daemon_url.trim_end_matches('/'));
+async fn proxy_post_json(
+    state: &AppState,
+    daemon: &ResolvedDaemon,
+    path: &str,
+    body: Bytes,
+) -> Response {
+    let url = format!("{}{path}", daemon.base());
     match state
         .http_json
         .post(&url)
@@ -1096,19 +1324,26 @@ async fn proxy_post_json(state: &AppState, path: &str, body: Bytes) -> Response 
 }
 
 /// Reverse-proxy GET /v1/models (model picker catalogue).
-async fn proxy_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    proxy_get_json(&state, "/v1/models").await
+async fn proxy_models(
+    State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
+) -> impl IntoResponse {
+    proxy_get_json(&state, &daemon, "/v1/models").await
 }
 
 /// Reverse-proxy GET /v1/agents (named agent identity picker, TASK-9/TASK-11).
-async fn proxy_agents(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    proxy_get_json(&state, "/v1/agents").await
+async fn proxy_agents(
+    State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
+) -> impl IntoResponse {
+    proxy_get_json(&state, &daemon, "/v1/agents").await
 }
 
 /// Reverse-proxy GET /v1/fs/dirs?path=<path> (filesystem directory listing).
 /// Forwards the full query string so `?path=~/dev` reaches the daemon intact.
 async fn proxy_fs_dirs(State(state): State<Arc<AppState>>, req: Request) -> impl IntoResponse {
-    let mut url = format!("{}/v1/fs/dirs", state.daemon_url.trim_end_matches('/'));
+    let daemon = resolved_daemon(&state, &req);
+    let mut url = format!("{}/v1/fs/dirs", daemon.base());
     if let Some(qs) = req.uri().query() {
         url.push('?');
         url.push_str(qs);
@@ -1129,44 +1364,58 @@ async fn proxy_fs_dirs(State(state): State<Arc<AppState>>, req: Request) -> impl
 }
 
 /// Reverse-proxy GET /v1/model (current selection).
-async fn proxy_model_get(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    proxy_get_json(&state, "/v1/model").await
+async fn proxy_model_get(
+    State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
+) -> impl IntoResponse {
+    proxy_get_json(&state, &daemon, "/v1/model").await
 }
 
 /// Reverse-proxy POST /v1/model (hot-swap the model).
-async fn proxy_model_set(State(state): State<Arc<AppState>>, body: Bytes) -> impl IntoResponse {
-    proxy_post_json(&state, "/v1/model", body).await
+async fn proxy_model_set(
+    State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
+    body: Bytes,
+) -> impl IntoResponse {
+    proxy_post_json(&state, &daemon, "/v1/model", body).await
 }
 
 /// Reverse-proxy GET /v1/projects (project list for the picker).
-async fn proxy_projects_list(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    proxy_get_json(&state, "/v1/projects").await
+async fn proxy_projects_list(
+    State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
+) -> impl IntoResponse {
+    proxy_get_json(&state, &daemon, "/v1/projects").await
 }
 
 /// Reverse-proxy POST /v1/projects (create a project).
 async fn proxy_projects_create(
     State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
     body: Bytes,
 ) -> impl IntoResponse {
-    proxy_post_json(&state, "/v1/projects", body).await
+    proxy_post_json(&state, &daemon, "/v1/projects", body).await
 }
 
 /// Reverse-proxy GET /v1/projects/{id} (project + its sessions).
 async fn proxy_project_get(
     State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    proxy_get_json(&state, &format!("/v1/projects/{id}")).await
+    proxy_get_json(&state, &daemon, &format!("/v1/projects/{id}")).await
 }
 
 /// Reverse-proxy PATCH /v1/projects/{id} (update name/config).
 async fn proxy_project_patch(
     State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
     Path(id): Path<String>,
     body: Bytes,
 ) -> impl IntoResponse {
     proxy_method_json(
         &state,
+        &daemon,
         reqwest::Method::PATCH,
         &format!("/v1/projects/{id}"),
         body,
@@ -1177,10 +1426,12 @@ async fn proxy_project_patch(
 /// Reverse-proxy DELETE /v1/projects/{id}.
 async fn proxy_project_delete(
     State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     proxy_method_json(
         &state,
+        &daemon,
         reqwest::Method::DELETE,
         &format!("/v1/projects/{id}"),
         Bytes::new(),
@@ -1191,52 +1442,67 @@ async fn proxy_project_delete(
 /// Reverse-proxy POST /v1/component/event (component interaction → daemon).
 async fn proxy_component_event(
     State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
     body: Bytes,
 ) -> impl IntoResponse {
-    proxy_post_json(&state, "/v1/component/event", body).await
+    proxy_post_json(&state, &daemon, "/v1/component/event", body).await
 }
 
 /// Reverse-proxy POST /v1/calls/place (outbound call → daemon).
-async fn proxy_call_place(State(state): State<Arc<AppState>>, body: Bytes) -> impl IntoResponse {
-    proxy_post_json(&state, CALL_PLACE_DAEMON_PATH, body).await
+async fn proxy_call_place(
+    State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
+    body: Bytes,
+) -> impl IntoResponse {
+    proxy_post_json(&state, &daemon, CALL_PLACE_DAEMON_PATH, body).await
 }
 /// Reverse-proxy POST /v1/voice/realtime/client-secret (ephemeral OpenAI
 /// Realtime token mint → daemon; the key never reaches the browser).
 async fn proxy_realtime_client_secret(
     State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
     body: Bytes,
 ) -> impl IntoResponse {
-    proxy_post_json(&state, "/v1/voice/realtime/client-secret", body).await
+    proxy_post_json(&state, &daemon, "/v1/voice/realtime/client-secret", body).await
 }
 
 /// Reverse-proxy POST /v1/agent/sessions/{id}/messages (voice-agent handoff
 /// note appended to a chat session → daemon).
 async fn proxy_session_message_append(
     State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
     Path(id): Path<String>,
     body: Bytes,
 ) -> impl IntoResponse {
-    proxy_post_json(&state, &format!("/v1/agent/sessions/{id}/messages"), body).await
+    proxy_post_json(
+        &state,
+        &daemon,
+        &format!("/v1/agent/sessions/{id}/messages"),
+        body,
+    )
+    .await
 }
 
 /// Reverse-proxy POST /v1/rooms/{room_id}/livekit-token.
 async fn proxy_livekit_token(
     State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
     Path(room_id): Path<String>,
     body: Bytes,
 ) -> impl IntoResponse {
-    proxy_post_json(&state, &livekit_token_daemon_path(&room_id), body).await
+    proxy_post_json(&state, &daemon, &livekit_token_daemon_path(&room_id), body).await
 }
 
 /// JSON passthrough for an arbitrary method (PATCH/DELETE), mirroring
 /// proxy_post_json but with the verb supplied.
 async fn proxy_method_json(
     state: &AppState,
+    daemon: &ResolvedDaemon,
     method: reqwest::Method,
     path: &str,
     body: Bytes,
 ) -> Response {
-    let url = format!("{}{path}", state.daemon_url.trim_end_matches('/'));
+    let url = format!("{}{path}", daemon.base());
     match state
         .http_json
         .request(method, &url)
@@ -1262,9 +1528,16 @@ async fn proxy_method_json(
 /// Reverse-proxy POST /v1/requests/{id}/cancel (halt a running turn).
 async fn proxy_cancel(
     State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    proxy_post_json(&state, &format!("/v1/requests/{id}/cancel"), Bytes::new()).await
+    proxy_post_json(
+        &state,
+        &daemon,
+        &format!("/v1/requests/{id}/cancel"),
+        Bytes::new(),
+    )
+    .await
 }
 
 fn livekit_token_daemon_path(room_id: &str) -> String {
@@ -1450,6 +1723,7 @@ async fn proxy_longhouse(
     Path(rest): Path<String>,
     req: Request,
 ) -> impl IntoResponse {
+    let daemon = resolved_daemon(&state, &req);
     // TASK-71: `rest` is the DECODED wildcard capture, so `%2e%2e` is already
     // `..` by the time we see it. Refuse dot segments before they can collapse
     // into a daemon path this route was never meant to reach.
@@ -1462,10 +1736,7 @@ async fn proxy_longhouse(
         .query()
         .map(|q| format!("?{q}"))
         .unwrap_or_default();
-    let url = format!(
-        "{}/v1/longhouse/{rest}{q}",
-        state.daemon_url.trim_end_matches('/')
-    );
+    let url = format!("{}/v1/longhouse/{rest}{q}", daemon.base());
     // buffer the (small) body so we can forward it on POST
     // TASK-73: a body over the cap previously became an EMPTY forwarded
     // request via unwrap_or_default() — a truncation that presents upstream as
@@ -1512,6 +1783,7 @@ async fn proxy_rooms_persistent(
     State(state): State<Arc<AppState>>,
     req: Request,
 ) -> impl IntoResponse {
+    let daemon = resolved_daemon(&state, &req);
     let method = req.method().clone();
     let path = req.uri().path().to_string();
     // TASK-71: this handler forwards the RAW request path verbatim, so a `..`
@@ -1542,7 +1814,7 @@ async fn proxy_rooms_persistent(
             && !segments[3].is_empty()
     };
     if is_events_tail {
-        let url = format!("{}{path}{q}", state.daemon_url.trim_end_matches('/'));
+        let url = format!("{}{path}{q}", daemon.base());
         let mut upstream = state.http.get(&url);
         if let Some(last_id) = req.headers().get("last-event-id") {
             if let Ok(val) = last_id.to_str() {
@@ -1558,7 +1830,7 @@ async fn proxy_rooms_persistent(
     // The path is always under /v1/rooms/persistent (the only routes wired to
     // this handler); forward it unchanged, with the query string preserved so
     // the transcript tail's ?after_seq= reaches the daemon.
-    let url = format!("{}{path}{q}", state.daemon_url.trim_end_matches('/'));
+    let url = format!("{}{path}{q}", daemon.base());
     // buffer the (small) body so we can forward it on POST/DELETE
     // TASK-73: a body over the cap previously became an EMPTY forwarded
     // request via unwrap_or_default() — a truncation that presents upstream as
@@ -1663,12 +1935,13 @@ async fn proxy_control_events(
     State(state): State<Arc<AppState>>,
     req: Request,
 ) -> impl IntoResponse {
+    let daemon = resolved_daemon(&state, &req);
     let q = req
         .uri()
         .query()
         .map(|q| format!("?{q}"))
         .unwrap_or_default();
-    let url = format!("{}/v1/events{q}", state.daemon_url.trim_end_matches('/'));
+    let url = format!("{}/v1/events{q}", daemon.base());
     match state.http.get(&url).send().await {
         Ok(resp) => sse_stream_response(resp),
         Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
@@ -1678,8 +1951,11 @@ async fn proxy_control_events(
 /// Reverse-proxy GET /v1/permissions (permission snapshot). The web UI polls
 /// this to render pending-permission cards; without it the request fell through
 /// to ServeDir → 404 (empty body) → "permission snapshot rejected".
-async fn proxy_permissions_snapshot(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    proxy_get_json(&state, "/v1/permissions").await
+async fn proxy_permissions_snapshot(
+    State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
+) -> impl IntoResponse {
+    proxy_get_json(&state, &daemon, "/v1/permissions").await
 }
 
 /// Reverse-proxy POST /v1/permissions/{id}/decision (OCEAN-136). The web UI
@@ -1688,15 +1964,23 @@ async fn proxy_permissions_snapshot(State(state): State<Arc<AppState>>) -> impl 
 /// the daemon — without it Allow/Deny 404'd and the gated turn stayed stuck.
 async fn proxy_permission_decision(
     State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
     Path(id): Path<String>,
     body: Bytes,
 ) -> impl IntoResponse {
-    proxy_post_json(&state, &format!("/v1/permissions/{id}/decision"), body).await
+    proxy_post_json(
+        &state,
+        &daemon,
+        &format!("/v1/permissions/{id}/decision"),
+        body,
+    )
+    .await
 }
 
 /// Reverse-proxy the daemon's SSE event stream. We stream the upstream body
 /// straight through so deltas arrive in real time.
 async fn proxy_events(State(state): State<Arc<AppState>>, req: Request) -> impl IntoResponse {
+    let daemon = resolved_daemon(&state, &req);
     // Preserve ?session_id= query string — scopes SSE to one session per
     // OCEAN_ECOSYSTEM_CONTRACT.md. Do not strip. The full upstream query is
     // forwarded verbatim so session_id (and any other params like ?all=1)
@@ -1706,10 +1990,7 @@ async fn proxy_events(State(state): State<Arc<AppState>>, req: Request) -> impl 
         .query()
         .map(|q| format!("?{q}"))
         .unwrap_or_default();
-    let url = format!(
-        "{}/v1/agent/events{q}",
-        state.daemon_url.trim_end_matches('/')
-    );
+    let url = format!("{}/v1/agent/events{q}", daemon.base());
     match state.http.get(&url).send().await {
         Ok(resp) => sse_stream_response(resp),
         Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
@@ -1720,6 +2001,7 @@ async fn proxy_events(State(state): State<Arc<AppState>>, req: Request) -> impl 
 /// credential. Snapshot/replay are buffered JSON; events remains an unbuffered
 /// SSE byte stream with Last-Event-ID resume preserved end to end.
 async fn proxy_observatory(State(state): State<Arc<AppState>>, req: Request) -> Response {
+    let daemon = resolved_daemon(&state, &req);
     let token = match read_observer_token(&state.observer_token_path) {
         Ok(token) => token,
         Err(error) => {
@@ -1739,7 +2021,7 @@ async fn proxy_observatory(State(state): State<Arc<AppState>>, req: Request) -> 
         .query()
         .map(|query| format!("?{query}"))
         .unwrap_or_default();
-    let url = format!("{}{path}{query}", state.daemon_url.trim_end_matches('/'));
+    let url = format!("{}{path}{query}", daemon.base());
     // TASK-83: this one handler serves BOTH an SSE tail (`/events`) and
     // buffered routes (`/snapshot`, `/replay`), so the client must be chosen
     // by route shape rather than swapped wholesale. The streaming tail keeps
@@ -1792,8 +2074,12 @@ async fn proxy_observatory(State(state): State<Arc<AppState>>, req: Request) -> 
 /// POST /api/stt — forward raw audio bytes to the daemon's voice STT endpoint.
 /// The daemon holds the xAI key and handles multipart construction.
 /// Returns `{ok, text}` on success, `{ok: false, error}` on failure.
-async fn stt(State(state): State<Arc<AppState>>, body: Bytes) -> impl IntoResponse {
-    let url = format!("{}/v1/voice/stt", state.daemon_url.trim_end_matches('/'));
+async fn stt(
+    State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
+    body: Bytes,
+) -> impl IntoResponse {
+    let url = format!("{}/v1/voice/stt", daemon.base());
 
     // TASK-83: buffered (the response is read to completion via `.json()`),
     // so it belongs on the timed client. It was left on the untimed SSE
@@ -1859,6 +2145,7 @@ struct TtsRequest {
 /// Forwards `voice` from the configured profile so the daemon applies it.
 async fn tts(
     State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
     Json(req): Json<TtsRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let text = req.text.trim().to_string();
@@ -1866,7 +2153,7 @@ async fn tts(
         return Err((StatusCode::BAD_REQUEST, "text required".to_string()));
     }
 
-    let url = format!("{}/v1/voice/tts", state.daemon_url.trim_end_matches('/'));
+    let url = format!("{}/v1/voice/tts", daemon.base());
 
     // TASK-83: buffered (`.bytes()` below) — same miss as stt.
     let resp = state
@@ -1920,11 +2207,13 @@ async fn tts(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_app, config_payload, constant_time_eq, decode_segment, has_dot_segment,
-        is_hashed_asset, livekit_token_daemon_path, percent_encode_path_segment,
-        read_observer_token, session_auth_gate, sse_no_buffer_headers, wasm_headers, AppState,
-        CALL_PLACE_DAEMON_PATH, WASM_CACHE_CONTROL,
+        build_app, config_payload, constant_time_eq, daemon_for, decode_segment, has_dot_segment,
+        has_valid_session, is_hashed_asset, livekit_token_daemon_path, load_users,
+        percent_encode_path_segment, read_observer_token, session_auth_gate, session_user,
+        sse_no_buffer_headers, wasm_headers, AppState, ProxyUser, CALL_PLACE_DAEMON_PATH,
+        SESSION_COOKIE, WASM_CACHE_CONTROL,
     };
+    use axum::http::HeaderMap;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -1966,9 +2255,179 @@ mod tests {
             maps_map_id: "DEMO_MAP_ID".to_string(),
             basic_auth: Some(("ocean".to_string(), "surface".to_string())),
             session_token: "test-session".to_string(),
+            users: Vec::new(),
             secure_cookie: true,
             observer_token_path: PathBuf::from("/not-used-in-auth-tests"),
         })
+    }
+
+    // ── multi-user routing ────────────────────────────────────────
+    //
+    // The property that matters: a login decides WHOSE Ocean you see. If any of
+    // these regress, two teammates share one instance and the feature is a lie.
+
+    fn user(name: &str, pass: &str, daemon: &str, token: &str) -> ProxyUser {
+        ProxyUser {
+            username: name.to_string(),
+            password: pass.to_string(),
+            daemon_url: daemon.to_string(),
+            session_token: token.to_string(),
+        }
+    }
+
+    fn multi_user_state() -> Arc<AppState> {
+        let mut state = auth_test_state();
+        let inner = Arc::get_mut(&mut state).expect("sole owner");
+        inner.users = vec![
+            user("ocean", "pw-a", "http://127.0.0.1:4780", "tok-ocean"),
+            user(
+                "ecfromthedc",
+                "pw-b",
+                "http://100.119.217.76:4780",
+                "tok-eric",
+            ),
+        ];
+        state
+    }
+
+    fn cookie_headers(token: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::COOKIE,
+            format!("{SESSION_COOKIE}={token}").parse().unwrap(),
+        );
+        h
+    }
+
+    #[test]
+    fn each_users_session_routes_to_their_own_daemon() {
+        let state = multi_user_state();
+        assert_eq!(
+            daemon_for(&state, &cookie_headers("tok-ocean")).0,
+            "http://127.0.0.1:4780"
+        );
+        assert_eq!(
+            daemon_for(&state, &cookie_headers("tok-eric")).0,
+            "http://100.119.217.76:4780"
+        );
+    }
+
+    #[test]
+    fn one_users_cookie_never_resolves_to_another_users_ocean() {
+        let state = multi_user_state();
+        let eric = session_user(&state, &cookie_headers("tok-eric")).expect("eric");
+        assert_eq!(eric.username, "ecfromthedc");
+        assert_ne!(eric.daemon_url, "http://127.0.0.1:4780");
+    }
+
+    #[test]
+    fn an_unknown_cookie_is_not_a_session_and_falls_back_to_the_default() {
+        let state = multi_user_state();
+        assert!(session_user(&state, &cookie_headers("tok-forged")).is_none());
+        // Falling back to the configured default is safe: the auth gate refuses
+        // the request before any handler runs.
+        assert_eq!(
+            daemon_for(&state, &cookie_headers("tok-forged")).0,
+            "http://127.0.0.1:4780"
+        );
+    }
+
+    #[test]
+    fn a_request_with_no_cookie_has_no_session_user() {
+        let state = multi_user_state();
+        assert!(session_user(&state, &HeaderMap::new()).is_none());
+    }
+
+    #[test]
+    fn single_operator_mode_is_unchanged_when_no_roster_is_configured() {
+        let state = auth_test_state();
+        assert!(state.users.is_empty());
+        assert!(session_user(&state, &cookie_headers("test-session")).is_none());
+        // The legacy single-user token still authenticates...
+        assert!(has_valid_session(&state, &cookie_headers("test-session")));
+        // ...and still resolves to the one configured daemon.
+        assert_eq!(
+            daemon_for(&state, &cookie_headers("test-session")).0,
+            "http://127.0.0.1:4780"
+        );
+    }
+
+    #[test]
+    fn roster_sessions_authenticate_alongside_the_legacy_token() {
+        let state = multi_user_state();
+        assert!(has_valid_session(&state, &cookie_headers("tok-eric")));
+        assert!(has_valid_session(&state, &cookie_headers("tok-ocean")));
+        assert!(has_valid_session(&state, &cookie_headers("test-session")));
+        assert!(!has_valid_session(&state, &cookie_headers("nope")));
+    }
+
+    #[test]
+    fn a_user_entry_without_a_daemon_inherits_the_default() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let users = dir.path().join("users.json");
+        std::fs::write(
+            &users,
+            r#"[{"username":"a","password":"p"},
+                {"username":"b","password":"q","daemon_url":"http://elsewhere:4780"}]"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&users, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let secret = dir.path().join("secret");
+        std::env::set_var("OCEAN_SURFACE_USERS_FILE", &users);
+        let loaded = load_users("http://default:4780", &secret).expect("load");
+        std::env::remove_var("OCEAN_SURFACE_USERS_FILE");
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].daemon_url, "http://default:4780");
+        assert_eq!(loaded[1].daemon_url, "http://elsewhere:4780");
+        // Distinct credentials must yield distinct session tokens, or one login
+        // would authenticate as another.
+        assert_ne!(loaded[0].session_token, loaded[1].session_token);
+    }
+
+    #[test]
+    fn a_world_readable_users_file_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let users = dir.path().join("users.json");
+        std::fs::write(&users, r#"[{"username":"a","password":"p"}]"#).unwrap();
+        std::fs::set_permissions(&users, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let secret = dir.path().join("secret");
+        std::env::set_var("OCEAN_SURFACE_USERS_FILE", &users);
+        let err = load_users("http://default:4780", &secret).unwrap_err();
+        std::env::remove_var("OCEAN_SURFACE_USERS_FILE");
+        assert!(
+            err.to_string().contains("0600"),
+            "a file holding every teammate's password must not be world-readable: {err}"
+        );
+    }
+
+    #[test]
+    fn duplicate_usernames_are_a_configuration_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let users = dir.path().join("users.json");
+        std::fs::write(
+            &users,
+            r#"[{"username":"a","password":"p"},{"username":"a","password":"q"}]"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&users, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let secret = dir.path().join("secret");
+        std::env::set_var("OCEAN_SURFACE_USERS_FILE", &users);
+        let err = load_users("http://default:4780", &secret).unwrap_err();
+        std::env::remove_var("OCEAN_SURFACE_USERS_FILE");
+        assert!(err.to_string().contains("duplicate"), "{err}");
+    }
+
+    #[test]
+    fn a_missing_users_file_means_single_operator_mode_not_an_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let secret = dir.path().join("secret");
+        std::env::set_var(
+            "OCEAN_SURFACE_USERS_FILE",
+            dir.path().join("does-not-exist.json"),
+        );
+        let loaded = load_users("http://default:4780", &secret).expect("absent file is fine");
+        std::env::remove_var("OCEAN_SURFACE_USERS_FILE");
+        assert!(loaded.is_empty());
     }
 
     #[test]
@@ -2271,6 +2730,7 @@ mod tests {
             maps_map_id: "DEMO_MAP_ID".to_string(),
             basic_auth: None,
             session_token: "test-session".to_string(),
+            users: Vec::new(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used-in-config-tests"),
         };
@@ -2350,6 +2810,7 @@ mod tests {
             // report-only policy silently collects nothing in production.
             basic_auth: Some(("u".to_string(), "p".to_string())),
             session_token: "test-session".to_string(),
+            users: Vec::new(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
         });
@@ -2430,6 +2891,7 @@ mod tests {
             maps_map_id: "DEMO_MAP_ID".to_string(),
             basic_auth: None,
             session_token: "test-session".to_string(),
+            users: Vec::new(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
         });
@@ -2567,6 +3029,7 @@ mod tests {
             maps_map_id: "DEMO_MAP_ID".to_string(),
             basic_auth: None,
             session_token: "test-session".to_string(),
+            users: Vec::new(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
         });
@@ -2659,6 +3122,7 @@ mod tests {
             maps_map_id: "DEMO_MAP_ID".to_string(),
             basic_auth: None,
             session_token: "test-session".to_string(),
+            users: Vec::new(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
         });
@@ -2746,6 +3210,7 @@ mod tests {
             maps_map_id: "DEMO_MAP_ID".to_string(),
             basic_auth: None,
             session_token: "test-session".to_string(),
+            users: Vec::new(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
         });
