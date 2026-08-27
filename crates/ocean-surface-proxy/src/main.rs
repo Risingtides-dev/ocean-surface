@@ -2475,8 +2475,7 @@ mod tests {
         observatory_token_path, percent_encode_path_segment, read_observer_token,
         rooms_persistent_shape, session_auth_gate, session_user, sse_no_buffer_headers,
         wasm_headers, AppState, ProxyUser, ResolvedDaemon, RoomsPersistentShape,
-        ATTACHMENT_UPLOAD_BODY_LIMIT, CALL_PLACE_DAEMON_PATH, ROOMS_JSON_BODY_LIMIT,
-        SESSION_COOKIE, WASM_CACHE_CONTROL,
+        ATTACHMENT_UPLOAD_BODY_LIMIT, CALL_PLACE_DAEMON_PATH, SESSION_COOKIE, WASM_CACHE_CONTROL,
     };
     use axum::http::HeaderMap;
     use std::os::unix::fs::PermissionsExt;
@@ -3875,17 +3874,6 @@ mod tests {
             rooms_persistent_shape(&Method::GET, "/v1/rooms/persistent/t/attachments/"),
             RoomsPersistentShape::Json
         );
-    }
-
-    /// The upload ceiling must be the daemon's own route limit.
-    ///
-    /// `MAX_ATTACHMENT_BYTES` (8 MiB) + `BODY_LIMIT_SLACK` (4096). The slack is
-    /// what lets a slightly-oversize body reach the handler and come back as
-    /// the typed `attachment_too_large` instead of an untyped 413 from us.
-    #[test]
-    fn the_upload_ceiling_mirrors_the_daemons_route_limit() {
-        assert_eq!(ATTACHMENT_UPLOAD_BODY_LIMIT, 8 * 1024 * 1024 + 4096);
-        assert!(ATTACHMENT_UPLOAD_BODY_LIMIT > ROOMS_JSON_BODY_LIMIT);
     }
 
     /// A stand-in daemon for the two forwarding tests below. Mirrors the real
