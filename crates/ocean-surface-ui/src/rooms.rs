@@ -449,6 +449,14 @@ pub fn adopt_identity(id: &str, display_name: &str) {
         return;
     }
     if let Some(storage) = local_storage() {
+        // If a DIFFERENT person signed in on this browser, the previous
+        // tenant's id must not survive — otherwise the new person acts as the
+        // old one until something else overwrites it.
+        let previous = storage.get_item(ROOM_IDENTITY_KEY).ok().flatten();
+        if previous.as_deref().is_some_and(|p| p != id) {
+            let _ = storage.remove_item(ROOM_IDENTITY_KEY);
+            let _ = storage.remove_item(ROOM_DISPLAY_NAME_KEY);
+        }
         let _ = storage.set_item(ROOM_IDENTITY_KEY, id);
         let _ = storage.set_item(ROOM_DISPLAY_NAME_KEY, display_name);
     }
@@ -467,17 +475,15 @@ pub struct RoomIdentity {
 
 impl RoomIdentity {
     fn current() -> Self {
-        // Reuse a persisted id if present; otherwise mint one and store it.
+        // A persisted id ONLY. Minting here is what produced the `web-<random>`
+        // ghosts: bootstrap resolves a page-load later, so a fresh browser
+        // minted an identity, joined rooms under it, and left a dead member
+        // behind on every visit. An unresolved identity is empty, and the
+        // callers refuse to join or post until bootstrap fills it in.
         let id = local_storage()
             .and_then(|s| s.get_item(ROOM_IDENTITY_KEY).ok().flatten())
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| {
-                let minted = format!("web-{}", mint_suffix());
-                if let Some(s) = local_storage() {
-                    let _ = s.set_item(ROOM_IDENTITY_KEY, &minted);
-                }
-                minted
-            });
+            .unwrap_or_default();
         // Prefer the signed-in display name; fall back to the id so an
         // unauthenticated or single-operator surface behaves as before.
         let display_name = local_storage()
@@ -613,7 +619,9 @@ impl Rooms {
         // per-call clone.
         let id_static: &'static str = Box::leak(identity.id.into_boxed_str());
         let name_static: &'static str = Box::leak(identity.display_name.into_boxed_str());
-        Self {
+        let daemon_adopted_id = daemon.adopted_user_id;
+        let daemon_adopted_name = daemon.adopted_display_name;
+        let rooms = Self {
             url: daemon.url,
             list: RwSignal::new(Vec::new()),
             rooms_loaded: RwSignal::new(false),
@@ -636,7 +644,38 @@ impl Rooms {
             read_cursor_in_flight: RwSignal::new(None),
             last_sent_read_cursor: RwSignal::new(None),
             create_op: RwSignal::new((0, None)),
-        }
+        };
+
+        // Identity is RESOLVED, not snapshotted. `Rooms::new` runs synchronously
+        // in the App body while bootstrap's /api/config fetch is still in
+        // flight, so the value read above is whatever the last session left
+        // behind. This effect rewrites it the moment bootstrap answers, which is
+        // what stops the first session after a login from acting as the previous
+        // identity.
+        let handle = rooms;
+        Effect::new(move |_| {
+            let id = daemon_adopted_id.get();
+            if id.is_empty() {
+                return;
+            }
+            let name = daemon_adopted_name.get();
+            let display = if name.is_empty() { id.clone() } else { name };
+            handle
+                .identity_id
+                .set(Box::leak(id.into_boxed_str()) as &'static str);
+            handle
+                .identity_name
+                .set(Box::leak(display.into_boxed_str()) as &'static str);
+        });
+
+        rooms
+    }
+
+    /// Whether bootstrap has resolved who we are. Join and post refuse while
+    /// this is false: acting under an unresolved identity is exactly how ghost
+    /// members were created.
+    pub fn identity_resolved(&self) -> bool {
+        !self.identity_id.get_untracked().is_empty()
     }
 
     fn base(&self) -> String {
@@ -1014,6 +1053,14 @@ impl Rooms {
     /// Join the open room as the current identity
     /// (`POST .../participants`).
     pub fn join_open(&self) {
+        // Refuse to join under an unresolved identity. This is the gate that
+        // stops ghost members: before it, a page-load whose bootstrap had not
+        // answered joined as a minted `web-<random>` and left a dead member in
+        // the roster on every visit.
+        if !self.identity_resolved() {
+            self.status.set("signing you in…".to_string());
+            return;
+        }
         let Some(key) = self.open_key.get_untracked() else {
             return;
         };
@@ -1175,6 +1222,12 @@ impl Rooms {
     /// the body drive the daemon's trigger-policy auto-convene.
     pub fn post_message(&self, body: String, thread_parent_seq: Option<u64>) {
         if !access_allows_writes(self.access.get_untracked().as_ref()) {
+            return;
+        }
+        // A message authored under an unresolved identity is either refused by
+        // the daemon (author_not_in_roster) or lands attributed to nobody.
+        if !self.identity_resolved() {
+            self.status.set("signing you in…".to_string());
             return;
         }
         let body = body.trim().to_string();
