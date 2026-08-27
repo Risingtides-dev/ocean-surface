@@ -1985,6 +1985,16 @@ pub struct Daemon {
     /// Rendered independently of the SSE `status` string so it isn't clobbered
     /// by connect()'s "connecting…"/"connected" transitions.
     pub voice_ready: RwSignal<bool>,
+    /// Who `/api/config` says is signed in. Empty until bootstrap answers, and
+    /// empty in single-operator mode.
+    ///
+    /// This is a SIGNAL, not a boot snapshot, because bootstrap is a network
+    /// round-trip that resolves AFTER the rooms panel is constructed. Reading
+    /// it once at construction is how the first session after every login ended
+    /// up acting under the previous identity.
+    pub adopted_user_id: RwSignal<String>,
+    /// Display name for [`Self::adopted_user_id`].
+    pub adopted_display_name: RwSignal<String>,
     /// Google Maps JS API key from /api/config, used by the map component to
     /// load the Maps script. Empty until bootstrap (and when no key is set).
     pub maps_key: RwSignal<String>,
@@ -2471,6 +2481,8 @@ impl Daemon {
             turns: RwSignal::new(Vec::new()),
             streaming: RwSignal::new(false),
             session_id: RwSignal::new(None),
+            adopted_user_id: RwSignal::new(String::new()),
+            adopted_display_name: RwSignal::new(String::new()),
             status: RwSignal::new("disconnected".into()),
             status_detail: RwSignal::new(None),
             cwd: RwSignal::new(default_cwd()),
@@ -2555,6 +2567,8 @@ impl Daemon {
             streaming: RwSignal::new(false),
             session_id: RwSignal::new(None),
             status: RwSignal::new("dummy".into()),
+            adopted_user_id: RwSignal::new(String::new()),
+            adopted_display_name: RwSignal::new(String::new()),
             status_detail: RwSignal::new(None),
             cwd: RwSignal::new("/".into()),
             voice_ready: RwSignal::new(false),
@@ -2694,14 +2708,20 @@ impl Daemon {
                         // The login IS the room identity. Without this the
                         // surface mints a per-browser `web-<random>` and a
                         // roster shows opaque client ids instead of people.
-                        crate::rooms::adopt_identity(
-                            cfg.user_id.trim(),
-                            if cfg.user_display_name.trim().is_empty() {
-                                cfg.user_id.trim()
-                            } else {
-                                cfg.user_display_name.trim()
-                            },
-                        );
+                        let adopted_id = cfg.user_id.trim().to_string();
+                        let adopted_name = if cfg.user_display_name.trim().is_empty() {
+                            adopted_id.clone()
+                        } else {
+                            cfg.user_display_name.trim().to_string()
+                        };
+                        crate::rooms::adopt_identity(&adopted_id, &adopted_name);
+                        // Publish to the live signals too. localStorage alone is
+                        // not enough: the rooms panel already read it, a network
+                        // round-trip ago.
+                        if !adopted_id.is_empty() {
+                            daemon.adopted_user_id.set(adopted_id);
+                            daemon.adopted_display_name.set(adopted_name);
+                        }
                     }
                     Err(_) => {
                         // Non-JSON / unexpected shape — keep the fallback url.
