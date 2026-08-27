@@ -900,6 +900,13 @@ pub fn RoomsWorkspace(
     // ── Left-rail: create form signals ────────────────────────────────
     let new_room_name = RwSignal::new(String::new());
 
+    // ── Members rail: agent-builder form state ────────────────────────
+    // Constructed HERE, at component scope, not inside the members-rail
+    // closure: that closure re-runs on every `rooms.access` change (i.e. every
+    // roster update that arrives over SSE), so form state owned by it would be
+    // discarded mid-sentence and take a half-written system prompt with it.
+    let agent_builder = crate::agents::AgentBuilderState::new(&rooms);
+
     // Toggle for narrow-screen left-rail visibility.
     let show_left_rail = RwSignal::new(false);
 
@@ -2908,6 +2915,21 @@ pub fn RoomsWorkspace(
                                                                 }
                                                             />
                                                         </select>
+                                                        // The picker above only ADDS an agent that
+                                                        // already exists on disk. This authors one
+                                                        // in place — or edits one — then refreshes
+                                                        // that same picker so the operator's next
+                                                        // click puts it in the room. No curl, no
+                                                        // leaving the room to write a folder by hand.
+                                                        // `available_agents` is reused as the edit
+                                                        // target list rather than fetched twice.
+                                                        <crate::agents::AgentBuilder
+                                                            state=agent_builder
+                                                            agents=rooms.available_agents
+                                                            on_saved=Callback::new(move |_name: String| {
+                                                                rooms.fetch_agents();
+                                                            })
+                                                        />
                                                     </div>
                                                 }.into_any()
                                             } else {

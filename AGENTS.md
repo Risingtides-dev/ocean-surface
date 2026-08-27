@@ -241,10 +241,17 @@ Web surface session UI:
   so stale transcript, access, and tail state cannot leak across room identity.
 - The browser PWA proxy must forward `/v1/agents` as JSON and stream room SSE
   unbuffered while preserving `Last-Event-ID`; Tauri reaches the same daemon
-  endpoints directly.
-- Agent participants are selected from daemon-owned `/v1/agents` identities
-  and remain subject to daemon join validation. Free-text agent creation does
-  not belong in the surface.
+  endpoints directly. The proxy is an ALLOWLIST, not a passthrough: the agent
+  builder's write verbs (`POST /v1/agents`, `GET`/`PUT /v1/agents/{name}`) are
+  registered explicitly, and an unregistered verb answers with an empty body
+  that the surface can only report as a JSON decode error. Adding an
+  `/v1/agents/{name}` route requires the `has_dot_segment` guard —
+  percent-encoding does not neutralise `..`, because `.` is unreserved.
+- Agent participants are selected from daemon-owned `/v1/agents` identities and
+  remain subject to daemon join validation. The surface never mints a
+  participant from free text: a name typed into the agent builder becomes a
+  participant only after the DAEMON creates the folder and the identity comes
+  back in `/v1/agents`.
 - Local rosters and mention ids come from `Room.participants`; every non-Local
   roster and mention id comes only from the safe access member projection.
   Composer writes are enabled only for `Local` and `Live` access.
@@ -259,6 +266,46 @@ Web surface session UI:
 - The rooms browser is a flex column; `.rooms-panel__list` keeps
   `min-height: 0` with vertical overflow so long room lists scroll instead of
   pushing status/actions outside the viewport.
+
+## Agent Builder Contract
+
+- `agents.rs` owns the agent write layer; the form mounts inside the members
+  rail's existing `+ agent` disclosure (`rooms_workspace.rs`) and reuses
+  `Rooms::available_agents` as both the add picker and the edit-target list.
+  No parallel agent list.
+- The model picker is built from the daemon's `/v1/models` catalogue shared
+  through `Rooms::models` — never a hardcoded list, never a second fetch.
+  `model_options` must always include the current value, because `/v1/models`
+  resolves asynchronously and a missing option silently rewrites a pinned model
+  to "inherit default" on save.
+- Tools is free text until the daemon publishes a tool catalogue. There is no
+  `/v1/tools` route; a hardcoded dropdown would rot on the next tool added.
+- Prefill reads `agent.config.tools`, never the merged `AgentDef.tools` — the
+  latter includes `tools/` filename stems, and round-tripping it writes
+  filesystem-derived names into `agent.toml`.
+- A write body is the WHOLE `agent.toml`: the daemon rebuilds the file from the
+  spec it is handed, so `capabilities` and `yolo` are round-tripped verbatim
+  even though the form does not render them. `[[subprocess_capability]]` cannot
+  be expressed in the write API's spec, so an agent declaring one is refused
+  (`blocks_save`) rather than saved lossily.
+- An agent IS its folder: identity comes from the PUT path, the name field is
+  read-only while editing, and renaming is a move on disk, not a form edit.
+- Form state lives in `AgentBuilderState` at `RoomsWorkspace` scope. The
+  members-rail closure re-runs on every `rooms.access` change, so state created
+  inside it is destroyed by unrelated roster traffic.
+- Every pre-dispatch decision is a pure function with a native test. The daemon
+  stays the authority on all of them; the client copies exist to save a
+  round-trip, never to replace one.
+- Requires `ocean-os` `feat/agent-crud` on main. Against an older daemon the
+  write verbs answer 405 and `write_error_message` says so in words.
+
+**Files:** `crates/ocean-surface-ui/src/agents.rs`, `rooms_workspace.rs`
+(mount), `rooms.rs` (`models` handle, `pub(crate) encode`),
+`crates/ocean-surface-proxy/src/main.rs` (allowlist),
+`styles/rooms-workspace.css`.
+
+**Frozen gates:** the same six listed under File Preview Deep-Link, plus
+`cargo test -p ocean-surface-proxy`.
 
 ## Workspace Map
 

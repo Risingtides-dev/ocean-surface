@@ -2832,3 +2832,38 @@ stylesheet inventories. Verified 755 UI tests plus integration suites, strict
 WASM Clippy, formatting, diff/script hygiene, and a Trunk release bundle; an
 independent exact-commit review returned CLEAR.
 _________________________________________________________________________________
+time:      [23:42] [08-26-26]
+agent:     [claude] [opus 5 1m]
+worktree:  feat/agent-builder-ui
+type:      [feature-request]
+area:      [frontend]
+
+Built the agent builder into the rooms members rail, closing the gap where the
+daemon had full folder-as-agent CRUD but the surface only ever performed the
+read half — authoring an agent meant hand-writing agent.toml and instructions.md
+on disk, or curling JSON. Under the same `+ agent` disclosure that lists existing
+agents there is now a form (name, description, model, tools, instructions.md)
+that creates a new agent and edits an existing one, refreshing the picker above
+it on success so the agent is one click from being in the room. New module
+crates/ocean-surface-ui/src/agents.rs owns the write layer; the model picker is
+driven by the daemon's own /v1/models through a shared Rooms::models handle
+rather than a hardcoded list; tools stays free text because no /v1/tools
+catalogue exists to build a picker from. Two data-loss guards ship with edit: the
+write body round-trips capabilities and yolo verbatim (the daemon rebuilds
+agent.toml from what it is handed, so an omitted field is deleted from disk), and
+an agent declaring [[subprocess_capability]] is refused outright because the
+write API's AgentSpec cannot express it. Prefill reads config.tools, never the
+merged AgentDef.tools, so a no-op edit cannot promote tools/ filename stems into
+agent.toml. Also fixed the reason this would have been dead on web: the proxy is
+an allowlist, and /v1/agents was GET-only with no /v1/agents/{name} at all —
+added POST plus GET/PUT with the has_dot_segment guard (percent-encoding does not
+neutralise `..`; `.` is unreserved), pinned by production-router tests that
+discriminate 502-from-the-forwarder against 404/405-from-the-fallback. Landed as
+two commits: create, then edit with its guards. Verified cargo fmt --check, both
+cargo check targets, 878 native UI tests, 41 proxy tests, and the wasm test build.
+NOT verified against a live daemon: the write routes are on ocean-os
+feat/agent-crud (5a010452), not main, so this is blocked on that merge. One
+honest caveat — `cargo clippy -p ocean-surface-ui --target wasm32-unknown-unknown
+-- -D warnings` was ALREADY red on origin/main (dead `mint_suffix` in rooms.rs)
+before any of this work; my own code is clippy-clean and that error is untouched.
+_________________________________________________________________________________
