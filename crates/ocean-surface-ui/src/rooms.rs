@@ -16,8 +16,9 @@
 //! Live updates: the daemon's room-scoped SSE (TASK-10, `GET
 //! /v1/rooms/persistent/{key}/events`) streams every transcript row as a
 //! `room_message` frame with `id:=seq`. The surface hydrates once, then tails
-//! live with sequence resume (`?after_seq=` on each newly constructed browser
-//! connection) — no poll, no global-stream workaround (TASK-11).
+//! live with sequence resume (`?after_seq=` only when a hydrated sequence
+//! exists on each newly constructed browser connection) — no poll, no
+//! global-stream workaround (TASK-11).
 //!
 //! The whole module is self-contained — it carries its own request layer rather
 //! than threading rooms state through the `Daemon` handle — so it never touches
@@ -723,6 +724,13 @@ impl Rooms {
         self.generation.get_untracked()
     }
 
+    /// Reactive generation read for UI lifecycle Effects whose state belongs
+    /// to one exact open-room admission. Request code should continue to use
+    /// [`Rooms::generation_snapshot`] plus [`Rooms::room_is_current`].
+    pub(crate) fn generation_snapshot_reactive(&self) -> u64 {
+        self.generation.get()
+    }
+
     /// Synchronously clear the open-room signals and pin `tail_state` to
     /// `Replaying` so no prior room state leaks into the next open. Shared
     /// by `open_room` (pre-hydrate) and `close_room`.
@@ -1348,17 +1356,20 @@ impl Rooms {
             if !me.room_is_current(generation_id, &key) {
                 return;
             }
-            let after = last_transcript_seq(&me.transcript.get_untracked());
-            let get_url = format!(
-                "{base}/v1/rooms/persistent/{}/transcript?after_seq={after}",
-                encode(&key)
+            let endpoint = format!("{base}/v1/rooms/persistent/{}/transcript", encode(&key));
+            let get_url = url_with_after_seq(
+                &endpoint,
+                last_transcript_seq(&me.transcript.get_untracked()),
             );
             if let Ok(resp) = Request::get(&get_url).send().await {
                 if let Ok(r) = resp.json::<TranscriptResponse>().await {
                     if r.ok && !r.transcript.is_empty() && me.room_is_current(generation_id, &key) {
                         me.transcript.update(|transcript| {
                             for message in r.transcript {
-                                if transcript.last().map(|last| last.seq).unwrap_or(0) < message.seq
+                                if transcript
+                                    .last()
+                                    .map(|last| last.seq < message.seq)
+                                    .unwrap_or(true)
                                 {
                                     transcript.push(message);
                                 }
@@ -1395,7 +1406,7 @@ impl Rooms {
                     TailState::Replaying
                 });
 
-                let url = format!("{events_url}?after_seq={resume_seq}");
+                let url = url_with_after_seq(&events_url, resume_seq);
                 let mut es = match EventSource::new(&url) {
                     Ok(es) => es,
                     Err(_) => {
@@ -1531,8 +1542,12 @@ impl Rooms {
                             );
                         }
                         RoomTailFrame::Message(entry) => {
-                            if entry.seq > last_seq.get_untracked() {
-                                last_seq.set(entry.seq);
+                            if last_seq
+                                .get_untracked()
+                                .map(|last| entry.seq > last)
+                                .unwrap_or(true)
+                            {
+                                last_seq.set(Some(entry.seq));
                             }
                             let is_roster_change = matches!(
                                 entry.kind,
@@ -1983,8 +1998,15 @@ fn replace_access_projection(
     true
 }
 
-fn last_transcript_seq(transcript: &[RoomMessage]) -> u64 {
-    transcript.last().map(|message| message.seq).unwrap_or(0)
+fn last_transcript_seq(transcript: &[RoomMessage]) -> Option<u64> {
+    transcript.last().map(|message| message.seq)
+}
+
+fn url_with_after_seq(endpoint: &str, after_seq: Option<u64>) -> String {
+    match after_seq {
+        Some(sequence) => format!("{endpoint}?after_seq={sequence}"),
+        None => endpoint.to_string(),
+    }
 }
 
 fn list_request_is_current(expected_ticket: u64, current_ticket: u64) -> bool {
@@ -2586,8 +2608,13 @@ mod tests {
 
     #[test]
     fn transcript_cursor_is_seeded_from_last_hydrated_sequence() {
-        assert_eq!(last_transcript_seq(&[]), 0);
-        assert_eq!(last_transcript_seq(&[message(3), message(9)]), 9);
+        assert_eq!(last_transcript_seq(&[]), None);
+        assert_eq!(last_transcript_seq(&[message(3), message(9)]), Some(9));
+        assert_eq!(url_with_after_seq("/events", None), "/events");
+        assert_eq!(
+            url_with_after_seq("/events", Some(0)),
+            "/events?after_seq=0"
+        );
     }
 
     #[test]

@@ -2882,3 +2882,21 @@ allocation on each change. Removed the obsolete random-id generator and added
 identity normalization/fallback tests. Verified 869 UI tests plus integration
 suites, strict WASM Clippy, WASM and proxy checks, formatting, and diff hygiene.
 _________________________________________________________________________________
+time:      [00:42] [08-27-26]
+agent:     [codex desktop] [gpt-5]
+worktree:  [fix/rooms-identity-ordering]
+type:      [bug report]
+area:      [frontend]
+
+Rebased the fail-closed identity correction onto current Surface main and
+closed two additional Rooms lifecycle defects in the same client bundle.
+Channel and thread drafts, mentions, and pending-send confirmation now reset on
+the exact room generation, so switching or closing cannot carry content into a
+different room or strand both composers behind `Sending…`. Empty hydrated
+transcripts now omit `after_seq`; the first zero-based room row is no longer
+silently skipped by refresh or SSE startup.
+
+Verified 882 native UI tests plus integration suites, strict WASM Clippy, WASM
+check and test compilation, all 46 proxy tests, proxy check, formatting, and
+diff hygiene. Production deployment remains pending review and merge.
+_________________________________________________________________________________

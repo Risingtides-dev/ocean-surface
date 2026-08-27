@@ -272,6 +272,12 @@ Web surface session UI:
 - The rooms browser is a flex column; `.rooms-panel__list` keeps
   `min-height: 0` with vertical overflow so long room lists scroll instead of
   pushing status/actions outside the viewport.
+- Channel/thread drafts, mention state, and pending-send confirmation are
+  scoped to the exact open-room generation. A room switch or close clears them
+  synchronously so content and a stale `Sending…` gate cannot cross rooms.
+- An empty hydrated transcript has no resume cursor. Surface omits
+  `after_seq` until it owns a real room sequence, preserving the daemon's
+  zero-based first row.
 
 ## Agent Builder Contract
 

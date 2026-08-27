@@ -430,6 +430,24 @@ fn sync_thread_selection(
     thread_root_for(transcript, Some(root_seq)).map(|_| root_seq)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RoomComposerEpoch {
+    generation: u64,
+    room_key: Option<String>,
+}
+
+fn room_composer_epoch_changed(
+    previous: Option<&RoomComposerEpoch>,
+    generation: u64,
+    room_key: Option<&str>,
+) -> bool {
+    previous
+        != Some(&RoomComposerEpoch {
+            generation,
+            room_key: room_key.map(str::to_string),
+        })
+}
+
 // ── View-state persistence (open room + open thread) ───────────────────────
 
 /// localStorage key for the last open room/thread. Bump the suffix on any
@@ -1410,6 +1428,44 @@ pub fn RoomsWorkspace(
     let last_sent_wire = RwSignal::new(String::new());
     let last_sent_seq = RwSignal::new(0u64);
     let send_in_flight = RwSignal::new(false);
+    let composer_epoch = RwSignal::new(None::<RoomComposerEpoch>);
+
+    // Drafts and pending-send confirmation belong to one exact room
+    // generation. A completion from the previous room is intentionally
+    // generation-rejected by `Rooms`; synchronously clear its UI ownership too
+    // so neither content nor a stuck "Sending…" gate follows the operator.
+    Effect::new(move |_| {
+        let room_key = rooms.open_key.get();
+        let generation = rooms.generation_snapshot_reactive();
+        if !room_composer_epoch_changed(
+            composer_epoch.get_untracked().as_ref(),
+            generation,
+            room_key.as_deref(),
+        ) {
+            return;
+        }
+        composer_epoch.set(Some(RoomComposerEpoch {
+            generation,
+            room_key,
+        }));
+
+        composer.set(String::new());
+        mention_ctx.set(None);
+        mention_active.set(0);
+        last_sent_draft.set(String::new());
+        last_sent_wire.set(String::new());
+        last_sent_seq.set(0);
+        send_in_flight.set(false);
+
+        selected_thread_root_seq.set(None);
+        thread_composer.set(String::new());
+        thread_mention_ctx.set(None);
+        thread_mention_active.set(0);
+        thread_last_sent_draft.set(String::new());
+        thread_last_sent_wire.set(String::new());
+        thread_last_sent_seq.set(0);
+        thread_send_in_flight.set(false);
+    });
     let do_send = move || {
         let draft = composer.get_untracked();
         if !message_send_admitted(
@@ -4393,6 +4449,22 @@ mod tests {
             sync_thread_selection(Some(9), Some("room-1"), &transcript),
             None
         );
+    }
+
+    #[test]
+    fn composer_epoch_changes_on_room_or_generation_and_not_on_rerender() {
+        let first = RoomComposerEpoch {
+            generation: 4,
+            room_key: Some("room-a".into()),
+        };
+        assert!(!room_composer_epoch_changed(
+            Some(&first),
+            4,
+            Some("room-a")
+        ));
+        assert!(room_composer_epoch_changed(Some(&first), 5, Some("room-a")));
+        assert!(room_composer_epoch_changed(Some(&first), 4, Some("room-b")));
+        assert!(room_composer_epoch_changed(Some(&first), 4, None));
     }
 
     // ── Behavioral: composer draft preservation (production helper) ──
