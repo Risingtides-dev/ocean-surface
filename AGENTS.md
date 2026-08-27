@@ -228,6 +228,12 @@ Web surface session UI:
 
 ## Rooms Contract
 
+- Browser-hosted Rooms treat `/api/config` as the current-user authority and
+  keep join/post unavailable until that identity resolves; never act under a
+  previous tenant's browser storage. Explicit single-operator and direct
+  extension/Tauri hosts use the stable `surface-operator` identity, and Room
+  identity signals own `String` values rather than leaked process-lifetime
+  string allocations.
 - Every successful `GET /v1/rooms/persistent/{key}` carries a required
   `RoomAccessProjection`, including explicit `Local` for G1 rooms. Surface
   `None` means loading or no open room; it is never a local-room discriminator.
@@ -266,6 +272,12 @@ Web surface session UI:
 - The rooms browser is a flex column; `.rooms-panel__list` keeps
   `min-height: 0` with vertical overflow so long room lists scroll instead of
   pushing status/actions outside the viewport.
+- Channel/thread drafts, mention state, and pending-send confirmation are
+  scoped to the exact open-room generation. A room switch or close clears them
+  synchronously so content and a stale `Sending…` gate cannot cross rooms.
+- An empty hydrated transcript has no resume cursor. Surface omits
+  `after_seq` until it owns a real room sequence, preserving the daemon's
+  zero-based first row.
 
 ## Agent Builder Contract
 

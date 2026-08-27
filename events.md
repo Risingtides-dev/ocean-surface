@@ -2867,3 +2867,36 @@ honest caveat — `cargo clippy -p ocean-surface-ui --target wasm32-unknown-unkn
 -- -D warnings` was ALREADY red on origin/main (dead `mint_suffix` in rooms.rs)
 before any of this work; my own code is clippy-clean and that error is untouched.
 _________________________________________________________________________________
+time:      [00:07] [08-27-26]
+agent:     [codex desktop] [gpt-5]
+worktree:  [fix/rooms-identity-ordering]
+type:      [bug report]
+area:      [frontend]
+
+Closed the cross-login Rooms identity race on top of the initial ordering fix.
+Browser Rooms now remain unresolved until the same-origin proxy publishes the
+current login, so a previous tenant's local storage can never authorize an
+early join or post. Single-operator, extension, and Tauri hosts use one stable
+local identity; reactive identity signals own their strings without leaking an
+allocation on each change. Removed the obsolete random-id generator and added
+identity normalization/fallback tests. Verified 869 UI tests plus integration
+suites, strict WASM Clippy, WASM and proxy checks, formatting, and diff hygiene.
+_________________________________________________________________________________
+time:      [00:42] [08-27-26]
+agent:     [codex desktop] [gpt-5]
+worktree:  [fix/rooms-identity-ordering]
+type:      [bug report]
+area:      [frontend]
+
+Rebased the fail-closed identity correction onto current Surface main and
+closed two additional Rooms lifecycle defects in the same client bundle.
+Channel and thread drafts, mentions, and pending-send confirmation now reset on
+the exact room generation, so switching or closing cannot carry content into a
+different room or strand both composers behind `Sending…`. Empty hydrated
+transcripts now omit `after_seq`; the first zero-based room row is no longer
+silently skipped by refresh or SSE startup.
+
+Verified 882 native UI tests plus integration suites, strict WASM Clippy, WASM
+check and test compilation, all 46 proxy tests, proxy check, formatting, and
+diff hygiene. Production deployment remains pending review and merge.
+_________________________________________________________________________________

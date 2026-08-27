@@ -2652,6 +2652,9 @@ impl Daemon {
             let is_extension = running_as_extension();
             if is_extension {
                 daemon.url.set(DEFAULT_DAEMON_URL.to_string());
+                let identity = crate::rooms::RoomIdentity::direct_host();
+                daemon.adopted_user_id.set(identity.id);
+                daemon.adopted_display_name.set(identity.display_name);
                 // No proxy fronts the side panel: voice goes daemon-direct to
                 // `/v1/voice/*`, so readiness is host-neutral (offered) and any
                 // missing-credential state surfaces per request. There is no
@@ -2708,20 +2711,17 @@ impl Daemon {
                         // The login IS the room identity. Without this the
                         // surface mints a per-browser `web-<random>` and a
                         // roster shows opaque client ids instead of people.
-                        let adopted_id = cfg.user_id.trim().to_string();
-                        let adopted_name = if cfg.user_display_name.trim().is_empty() {
-                            adopted_id.clone()
-                        } else {
-                            cfg.user_display_name.trim().to_string()
-                        };
-                        crate::rooms::adopt_identity(&adopted_id, &adopted_name);
-                        // Publish to the live signals too. localStorage alone is
-                        // not enough: the rooms panel already read it, a network
-                        // round-trip ago.
-                        if !adopted_id.is_empty() {
-                            daemon.adopted_user_id.set(adopted_id);
-                            daemon.adopted_display_name.set(adopted_name);
-                        }
+                        let identity = crate::rooms::RoomIdentity::from_proxy_config(
+                            &cfg.user_id,
+                            &cfg.user_display_name,
+                        );
+                        let adopted_id = identity.id;
+                        let adopted_name = identity.display_name;
+                        // Publish only after the authenticated config response.
+                        // Until then browser Rooms remain unresolved and cannot
+                        // act under identity state from a previous login.
+                        daemon.adopted_user_id.set(adopted_id);
+                        daemon.adopted_display_name.set(adopted_name);
                     }
                     Err(_) => {
                         // Non-JSON / unexpected shape — keep the fallback url.
