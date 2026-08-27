@@ -2124,18 +2124,6 @@ fn local_storage() -> Option<web_sys::Storage> {
     web_sys::window().and_then(|w| w.local_storage().ok().flatten())
 }
 
-/// A short, reasonably-unique suffix for a minted identity. We don't have a UUID
-/// crate in this WASM bundle, so derive one from the wall clock (`js_sys::Date`,
-/// no web-sys feature needed) XOR'd with a random.
-fn mint_suffix() -> String {
-    let now = js_sys::Date::now();
-    let rand = js_sys::Math::random();
-    format!(
-        "{:x}",
-        (now as u64).wrapping_mul(1_000_000) ^ (rand * 1e9) as u64
-    )
-}
-
 /// Derive a url/key-safe slug from a room name (lowercase alnum + `-`).
 fn slugify(name: &str) -> String {
     let mut out = String::new();
