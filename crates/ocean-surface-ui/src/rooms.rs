@@ -569,6 +569,11 @@ pub struct Rooms {
     pub identity_id: RwSignal<&'static str>,
     /// This browser's display name.
     pub identity_name: RwSignal<&'static str>,
+    /// Whether `identity_id` came from the DAEMON rather than from a
+    /// localStorage warm-start. False until `/api/config` answers. See
+    /// [`Rooms::identity_resolved`] for why the distinction is the whole
+    /// difference between a gate and a formality.
+    pub identity_authoritative: RwSignal<bool>,
     /// Tail state for the live connection indicator. Starts as Replaying during
     /// initial catch-up, switches to Live once connected, and to Reconnecting on
     /// drop/retry. The view reads this to render the status bar indicator.
@@ -635,6 +640,7 @@ impl Rooms {
             generation: RwSignal::new(0),
             identity_id: RwSignal::new(id_static),
             identity_name: RwSignal::new(name_static),
+            identity_authoritative: RwSignal::new(false),
             tail_state: RwSignal::new(TailState::Replaying),
             available_agents: RwSignal::new(Vec::new()),
             agents_loaded: RwSignal::new(false),
@@ -666,6 +672,10 @@ impl Rooms {
             handle
                 .identity_name
                 .set(Box::leak(display.into_boxed_str()) as &'static str);
+            // Only now may this surface act. Set last, after both strings are
+            // in place, so nothing can observe an authoritative flag over a
+            // half-written identity.
+            handle.identity_authoritative.set(true);
         });
 
         rooms
@@ -674,8 +684,21 @@ impl Rooms {
     /// Whether bootstrap has resolved who we are. Join and post refuse while
     /// this is false: acting under an unresolved identity is exactly how ghost
     /// members were created.
+    ///
+    /// The test is "the daemon answered", NOT "we have a non-empty id". Those
+    /// look equivalent and are not: `RoomIdentity::current()` warm-starts from
+    /// localStorage, so a browser that had ever loaded rooms before began life
+    /// with a non-empty id and passed the old check instantly — including a
+    /// `web-<random>` ghost left by the minting bug, or the id of whoever used
+    /// this browser last. Clicking join in the window before `/api/config`
+    /// answered then rejoined as exactly the identity this gate exists to
+    /// refuse. The stored value is a display warm-start and nothing more; only
+    /// the daemon says who you are.
     pub fn identity_resolved(&self) -> bool {
-        !self.identity_id.get_untracked().is_empty()
+        identity_may_act(
+            self.identity_authoritative.get_untracked(),
+            self.identity_id.get_untracked(),
+        )
     }
 
     fn base(&self) -> String {
@@ -2176,9 +2199,34 @@ pub(crate) fn livekit_token_path_for_room(key: &str) -> String {
     format!("/v1/rooms/{}/livekit-token", encode(key))
 }
 
+/// Whether this surface may act as a room participant yet.
+///
+/// Both halves are load-bearing. `authoritative` is the daemon having
+/// answered; a non-empty `id` alone is not, because the id warm-starts from
+/// localStorage and so is non-empty for any browser that has loaded rooms
+/// before — including one holding a `web-<random>` ghost or the previous
+/// tenant's id.
+fn identity_may_act(authoritative: bool, id: &str) -> bool {
+    authoritative && !id.is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acting_requires_the_daemon_to_have_answered_not_just_a_stored_id() {
+        // The gap this closes: a stored id made the gate pass instantly, so a
+        // click landing before /api/config answered rejoined as whatever the
+        // last session left behind — the exact ghost the gate exists to refuse.
+        assert!(!identity_may_act(false, "web-18c72b1e64dc22de"));
+        assert!(!identity_may_act(false, "smaths"));
+        // Nothing to act as, however the flag stands.
+        assert!(!identity_may_act(false, ""));
+        assert!(!identity_may_act(true, ""));
+        // Resolved, and someone to be.
+        assert!(identity_may_act(true, "smaths"));
+    }
 
     #[test]
     fn no_agents_hint_waits_for_agents_fetch() {
