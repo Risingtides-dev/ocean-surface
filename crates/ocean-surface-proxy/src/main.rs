@@ -201,6 +201,11 @@ struct ProxyUser {
     /// one user's cookie can never authenticate as another and rotating one
     /// person's password invalidates only their sessions.
     session_token: String,
+    /// The observer token file for this user's daemon, when they have one.
+    /// `None` on the default daemon (the process-wide path already names the
+    /// right credential) and on a remote daemon that has not been configured
+    /// for observatory access.
+    observer_token_path: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for ProxyUser {
@@ -209,6 +214,7 @@ impl std::fmt::Debug for ProxyUser {
             .field("username", &self.username)
             .field("password", &"[redacted]")
             .field("daemon_url", &self.daemon_url)
+            .field("observer_token_path", &self.observer_token_path)
             .field("session_token", &"[redacted]")
             .finish()
     }
@@ -235,6 +241,12 @@ struct UserFileEntry {
     /// needs only a username and password.
     #[serde(default)]
     daemon_url: Option<String>,
+    /// Optional: the observer token file for THIS user's daemon. Only needed
+    /// when `daemon_url` points somewhere other than the default — a token is
+    /// minted by one daemon and means nothing to another, so there is no
+    /// sensible fallback. See `observatory_upstream`.
+    #[serde(default)]
+    observer_token_path: Option<String>,
 }
 
 /// Where multi-user config lives. Same rule as the single-user credentials:
@@ -295,6 +307,7 @@ fn load_users(
             password: entry.password,
             daemon_url,
             session_token,
+            observer_token_path: entry.observer_token_path.map(PathBuf::from),
         });
     }
 
@@ -768,6 +781,42 @@ fn daemon_for(state: &AppState, headers: &HeaderMap) -> ResolvedDaemon {
             .map(|u| u.daemon_url.clone())
             .unwrap_or_else(|| state.daemon_url.clone()),
     )
+}
+
+/// Which observer token file belongs to the daemon this request resolved to.
+///
+/// Every other proxying handler forwards the browser's own session, so routing
+/// it to the caller's daemon is the whole job. The observatory routes are the
+/// exception: they mint no per-user auth, they present a daemon-issued
+/// *observer token* read off local disk. Multi-user routing sent the request
+/// to the right daemon and kept reading the process-wide path — so a signed-in
+/// teammate's observatory request carried THIS machine's observer token to
+/// THEIR daemon.
+///
+/// That is a credential disclosure, not a routing bug. A token is minted by
+/// one daemon and is meaningless to any other, so a mismatch cannot be
+/// papered over with a fallback: the only safe answers are the token that
+/// belongs to that daemon, or none.
+///
+/// `None` here means the caller's daemon has no configured credential, and the
+/// route fails closed. No observatory beats the wrong operator's observatory.
+fn observatory_token_path(
+    state: &AppState,
+    headers: &HeaderMap,
+    daemon: &ResolvedDaemon,
+) -> Option<PathBuf> {
+    // The default upstream's credential is the one the process-wide path
+    // names, and single-operator mode never leaves this branch.
+    if daemon.base() == state.daemon_url.trim_end_matches('/') {
+        return Some(state.observer_token_path.clone());
+    }
+    let user = session_user(state, headers)?;
+    // Belt and braces: only answer with a roster credential when that roster
+    // entry is in fact the daemon we resolved to.
+    if user.daemon_url.trim_end_matches('/') != daemon.base() {
+        return None;
+    }
+    user.observer_token_path.clone()
 }
 
 fn has_valid_basic_credentials(state: &AppState, headers: &HeaderMap) -> bool {
@@ -2010,10 +2059,21 @@ async fn proxy_events(State(state): State<Arc<AppState>>, req: Request) -> impl 
 /// SSE byte stream with Last-Event-ID resume preserved end to end.
 async fn proxy_observatory(State(state): State<Arc<AppState>>, req: Request) -> Response {
     let daemon = resolved_daemon(&state, &req);
-    let token = match read_observer_token(&state.observer_token_path) {
+    let Some(token_path) = observatory_token_path(&state, req.headers(), &daemon) else {
+        tracing::warn!(
+            daemon = %daemon.base(),
+            "observatory has no credential for this daemon; refusing to send another daemon's token"
+        );
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "observatory credential unavailable",
+        )
+            .into_response();
+    };
+    let token = match read_observer_token(&token_path) {
         Ok(token) => token,
         Err(error) => {
-            tracing::warn!(%error, path = %state.observer_token_path.display(), "observatory credential unavailable");
+            tracing::warn!(%error, path = %token_path.display(), "observatory credential unavailable");
             // TASK-73: the error stringifies io::Error, which carries the FULL
             // filesystem path of the credential file. Log it, never ship it.
             return (
@@ -2217,9 +2277,9 @@ mod tests {
     use super::{
         build_app, config_payload, constant_time_eq, daemon_for, decode_segment, has_dot_segment,
         has_valid_session, is_hashed_asset, livekit_token_daemon_path, load_users,
-        percent_encode_path_segment, read_observer_token, session_auth_gate, session_user,
-        sse_no_buffer_headers, wasm_headers, AppState, ProxyUser, CALL_PLACE_DAEMON_PATH,
-        SESSION_COOKIE, WASM_CACHE_CONTROL,
+        observatory_token_path, percent_encode_path_segment, read_observer_token,
+        session_auth_gate, session_user, sse_no_buffer_headers, wasm_headers, AppState, ProxyUser,
+        ResolvedDaemon, CALL_PLACE_DAEMON_PATH, SESSION_COOKIE, WASM_CACHE_CONTROL,
     };
     use axum::http::HeaderMap;
     use std::os::unix::fs::PermissionsExt;
@@ -2280,7 +2340,90 @@ mod tests {
             password: pass.to_string(),
             daemon_url: daemon.to_string(),
             session_token: token.to_string(),
+            observer_token_path: None,
         }
+    }
+
+    fn session_headers(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("{SESSION_COOKIE}={token}").parse().unwrap(),
+        );
+        headers
+    }
+
+    // ── observatory credentials ───────────────────────────────────
+    //
+    // The observatory routes are the one place that presents a credential of
+    // its own rather than forwarding the browser's session, so multi-user
+    // routing has to reach the TOKEN as well as the URL. A token minted by one
+    // daemon means nothing to another and discloses this machine to it.
+
+    #[test]
+    fn the_default_daemon_uses_the_process_wide_observer_token() {
+        let state = multi_user_state();
+        let path = observatory_token_path(
+            &state,
+            &session_headers("tok-ocean"),
+            &ResolvedDaemon("http://127.0.0.1:4780".into()),
+        );
+        assert_eq!(path, Some(state.observer_token_path.clone()));
+    }
+
+    #[test]
+    fn single_operator_mode_is_untouched_by_the_credential_split() {
+        // No session cookie at all: the historical path must still resolve.
+        let state = auth_test_state();
+        let path = observatory_token_path(
+            &state,
+            &HeaderMap::new(),
+            &ResolvedDaemon("http://127.0.0.1:4780".into()),
+        );
+        assert_eq!(path, Some(state.observer_token_path.clone()));
+    }
+
+    #[test]
+    fn another_users_daemon_never_receives_this_machines_observer_token() {
+        // The bug this pins: routing sent the request to Eric's daemon while
+        // the credential stayed the local one, handing his machine a token for
+        // this one. With no token configured for him the only right answer is
+        // none — the route fails closed rather than substituting.
+        let state = multi_user_state();
+        let path = observatory_token_path(
+            &state,
+            &session_headers("tok-eric"),
+            &ResolvedDaemon("http://100.119.217.76:4780".into()),
+        );
+        assert_eq!(path, None, "must not fall back to the local credential");
+    }
+
+    #[test]
+    fn a_configured_roster_credential_is_used_for_that_users_daemon() {
+        let mut state = multi_user_state();
+        let inner = Arc::get_mut(&mut state).expect("sole owner");
+        inner.users[1].observer_token_path = Some(PathBuf::from("/eric/observer.token"));
+        let path = observatory_token_path(
+            &state,
+            &session_headers("tok-eric"),
+            &ResolvedDaemon("http://100.119.217.76:4780".into()),
+        );
+        assert_eq!(path, Some(PathBuf::from("/eric/observer.token")));
+    }
+
+    #[test]
+    fn a_credential_is_never_answered_for_a_daemon_the_session_does_not_own() {
+        // Defence in depth: even if a resolved upstream and the session ever
+        // disagreed, one user's token must not travel to the other's daemon.
+        let mut state = multi_user_state();
+        let inner = Arc::get_mut(&mut state).expect("sole owner");
+        inner.users[1].observer_token_path = Some(PathBuf::from("/eric/observer.token"));
+        let path = observatory_token_path(
+            &state,
+            &session_headers("tok-eric"),
+            &ResolvedDaemon("http://10.0.0.9:4780".into()),
+        );
+        assert_eq!(path, None);
     }
 
     fn multi_user_state() -> Arc<AppState> {
