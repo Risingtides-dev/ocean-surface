@@ -2173,7 +2173,10 @@ fn slugify(name: &str) -> String {
 /// Percent-encode a path segment (room keys can contain `-`/`_`/alnum already,
 /// but a defensive encode keeps an unexpected char from breaking the URL).
 /// Pure Rust so tests run on native targets.
-fn encode(s: &str) -> String {
+///
+/// `pub(crate)` so `agents.rs` addresses `/v1/agents/{name}` through the same
+/// encoder rather than growing a second, subtly different one.
+pub(crate) fn encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {

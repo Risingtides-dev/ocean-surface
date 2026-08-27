@@ -592,6 +592,15 @@ fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
         // reads as a decode bug rather than a missing route. Same dead-feature
         // shape the rooms routes below were written about.
         .route("/v1/agents", get(proxy_agents).post(proxy_agent_create))
+        // GET is the agent builder's prefill (an edit must start from the
+        // agent's real agent.toml, not from form defaults); PUT is the edit
+        // itself. DELETE is deliberately NOT here — removing an agent folder
+        // is not something this surface offers, and an allowlist should carry
+        // only the verbs a surface actually uses.
+        .route(
+            "/v1/agents/{name}",
+            get(proxy_agent_get).put(proxy_agent_update),
+        )
         .route("/v1/fs/dirs", get(proxy_fs_dirs))
         .route(
             "/v1/projects",
@@ -1416,6 +1425,47 @@ async fn proxy_agent_create(
     body: Bytes,
 ) -> impl IntoResponse {
     proxy_post_json(&state, &daemon, "/v1/agents", body).await
+}
+
+/// Build the daemon path addressing one agent, or `None` if the name would
+/// reach a route this proxy never exposed.
+///
+/// The dot-segment guard is NOT redundant with the encoder: [`percent_encode_path_segment`]
+/// treats `.` as unreserved (it is, per RFC 3986), so `..` survives encoding
+/// unchanged and `reqwest`'s `Url::parse` would then collapse it — the exact
+/// TASK-71/82 shape that once shipped a live bypass. axum's `Path` extractor
+/// has already decoded once by the time we see `name`, so `%2e%2e` arrives as
+/// `..`; [`has_dot_segment`] decodes once more, catching `%252e%252e` too.
+fn agent_daemon_path(name: &str) -> Option<String> {
+    if has_dot_segment(name) {
+        return None;
+    }
+    Some(format!("/v1/agents/{}", percent_encode_path_segment(name)))
+}
+
+/// Reverse-proxy GET /v1/agents/{name} (one agent's definition, for prefill).
+async fn proxy_agent_get(
+    State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
+    Path(name): Path<String>,
+) -> Response {
+    let Some(path) = agent_daemon_path(&name) else {
+        return (StatusCode::BAD_REQUEST, "invalid path").into_response();
+    };
+    proxy_get_json(&state, &daemon, &path).await
+}
+
+/// Reverse-proxy PUT /v1/agents/{name} (agent builder → edit an agent).
+async fn proxy_agent_update(
+    State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
+    Path(name): Path<String>,
+    body: Bytes,
+) -> Response {
+    let Some(path) = agent_daemon_path(&name) else {
+        return (StatusCode::BAD_REQUEST, "invalid path").into_response();
+    };
+    proxy_method_json(&state, &daemon, reqwest::Method::PUT, &path, body).await
 }
 
 /// Reverse-proxy GET /v1/fs/dirs?path=<path> (filesystem directory listing).
@@ -2297,8 +2347,8 @@ async fn tts(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_app, config_payload, constant_time_eq, daemon_for, decode_segment, has_dot_segment,
-        has_valid_session, is_hashed_asset, livekit_token_daemon_path, load_users,
+        agent_daemon_path, build_app, config_payload, constant_time_eq, daemon_for, decode_segment,
+        has_dot_segment, has_valid_session, is_hashed_asset, livekit_token_daemon_path, load_users,
         observatory_token_path, percent_encode_path_segment, read_observer_token,
         session_auth_gate, session_user, sse_no_buffer_headers, wasm_headers, AppState, ProxyUser,
         ResolvedDaemon, CALL_PLACE_DAEMON_PATH, SESSION_COOKIE, WASM_CACHE_CONTROL,
@@ -3337,6 +3387,18 @@ mod tests {
             "/v1/longhouse/../../v1/agent/sessions",
             "/v1/longhouse/%2e%2e/%2e%2e/v1/agent/sessions",
             "/v1/longhouse/%2E%2E/v1/agent/sessions",
+            // agents/{name} — the agent builder's prefill route. Only
+            // single-segment shapes can match `{name}`, and percent-encoding
+            // does NOT neutralise them: `.` is unreserved, so `..` survives
+            // the encoder intact and would collapse upstream. `%2e%2e` is
+            // decoded to `..` by axum's Path extractor before the handler
+            // runs; `%252e%252e` decodes to `%2e%2e`, which the guard's own
+            // single-pass decode then resolves.
+            "/v1/agents/..",
+            "/v1/agents/%2e%2e",
+            "/v1/agents/%2E%2E",
+            "/v1/agents/%252e%252e",
+            "/v1/agents/.",
         ] {
             let resp = app
                 .clone()
@@ -3514,5 +3576,101 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    /// `/v1/agents/{name}` did not exist on the allowlist AT ALL, so the
+    /// builder's edit mode — prefill (GET) and save (PUT) — had nowhere to go
+    /// on web. Same production-router discrimination as the create test:
+    /// 502 means the forwarder was reached, 404 means ServeDir swallowed it.
+    #[tokio::test]
+    async fn agent_def_and_update_route_through_production_router() {
+        let dist = tempfile::tempdir().expect("tempdir");
+        let state = Arc::new(AppState {
+            http: reqwest::Client::new(),
+            http_json: reqwest::Client::new(),
+            voice_profile: "leo".to_string(),
+            // Closed port: instant connection refusal, never a real daemon.
+            daemon_url: "http://127.0.0.1:9".to_string(),
+            default_livekit_room_id: "project:surface-test".to_string(),
+            tldraw_sync_uri: None,
+            maps_key: None,
+            maps_map_id: "DEMO_MAP_ID".to_string(),
+            basic_auth: None,
+            session_token: "test-session".to_string(),
+            users: Vec::new(),
+            secure_cookie: false,
+            observer_token_path: PathBuf::from("/not-used"),
+        });
+        let app = build_app(state, dist.path());
+
+        for (method, body) in [
+            ("GET", Body::empty()),
+            ("PUT", Body::from(r#"{"instructions":"be useful"}"#)),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri("/v1/agents/researcher")
+                        .header("content-type", "application/json")
+                        .body(body)
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_GATEWAY,
+                "{method} /v1/agents/{{name}} must reach the forwarder",
+            );
+        }
+
+        // DELETE is intentionally absent from the allowlist: removing an agent
+        // folder is not an action this surface offers. Pinned so adding the
+        // verb has to be a decision, not a copy-paste.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/v1/agents/researcher")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    /// The encoder alone does not make an agent name safe: `.` is unreserved,
+    /// so `percent_encode_path_segment("..")` is `..`, unchanged. This pins
+    /// that the path builder refuses rather than encodes, because an encoded
+    /// `..` still collapses in `Url::parse` upstream.
+    #[test]
+    fn agent_daemon_path_refuses_traversal_that_encoding_cannot_neutralise() {
+        assert_eq!(
+            percent_encode_path_segment(".."),
+            "..",
+            "the encoder passes dots through, which is why the guard exists",
+        );
+        assert_eq!(agent_daemon_path(".."), None);
+        assert_eq!(agent_daemon_path("."), None);
+        assert_eq!(agent_daemon_path("%2e%2e"), None);
+        assert_eq!(agent_daemon_path("%2E%2E"), None);
+
+        // Legitimate names still route, including the whole daemon charset.
+        assert_eq!(
+            agent_daemon_path("code-review_2"),
+            Some("/v1/agents/code-review_2".to_string()),
+        );
+        // A dot INSIDE a name is not a dot segment (same rule the rooms
+        // forwarder applies to `room.v2`), and it survives encoding intact.
+        assert_eq!(agent_daemon_path("a.b"), Some("/v1/agents/a.b".to_string()),);
+        // Anything outside the unreserved set is escaped before it can be
+        // read as path structure.
+        assert_eq!(
+            agent_daemon_path("a b"),
+            Some("/v1/agents/a%20b".to_string()),
+        );
     }
 }

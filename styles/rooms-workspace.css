@@ -1322,6 +1322,18 @@
   overflow-wrap: anywhere;
 }
 
+/* A block, unlike an error, is not something the operator can retype their way
+   out of — it explains why Save is gone. Warn, not error: nothing failed. */
+.rooms-workspace__agentbuilder-note {
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
 .rooms-workspace__agentbuilder-save {
   appearance: none;
   padding: 6px 12px;

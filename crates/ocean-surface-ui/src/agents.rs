@@ -5,7 +5,9 @@
 //! `instructions.md` system prompt. The daemon exposes it over
 //!
 //!   GET  /v1/agents          → the roster the room's `+ agent` picker reads
+//!   GET  /v1/agents/{name}   → one agent's full definition, for prefill
 //!   POST /v1/agents          → create one
+//!   PUT  /v1/agents/{name}   → edit one
 //!
 //! …but until now the surface only ever performed the GET, so the only way to
 //! AUTHOR an agent was to hand-write the folder or curl the JSON. This module
@@ -49,7 +51,24 @@ const INVALID_NAME: &str = "use 1-64 chars of a-z, 0-9, '-' or '_' (no leading '
 /// JSON decode error from an empty 404 body and has no idea what to fix.
 const NO_WRITE_API: &str = "this daemon has no agent write API — update ocean-os";
 
-// ---- Wire types (mirror the daemon's AgentWriteBody) ----
+/// Refuses to save an agent whose `agent.toml` declares `[[subprocess_capability]]`.
+///
+/// `agentdir::write` rebuilds `agent.toml` from `AgentSpec` alone, and
+/// `AgentSpec` has no `subprocess_capability` field — so saving such an agent
+/// from here would silently, permanently delete its tier-1 subprocess
+/// capabilities. Round-tripping is not an option either: the surface cannot
+/// send a field the write API does not accept. Refusing is the only honest
+/// answer until ocean-os widens the spec.
+const SUBPROCESS_CAPABILITY_BLOCK: &str =
+    "this agent declares [[subprocess_capability]], which the write API cannot \
+     round-trip — edit it on disk so the daemon does not drop it";
+
+/// Shown when the definition fetch failed. Save stays disabled: a PUT built
+/// from a form that never prefilled would overwrite the real description,
+/// model and tools with whatever the create form happened to hold.
+const DEF_LOAD_FAILED: &str = "could not load this agent — reopen the picker to retry";
+
+// ---- Wire types (mirror the daemon's AgentWriteBody / AgentDef) ----
 
 /// Create body. FLAT on the wire: the daemon's `AgentWriteBody` carries `name`
 /// beside a `#[serde(flatten)]` `AgentSpec`, so every field sits at the top
@@ -82,6 +101,59 @@ struct AgentWriteResponse {
     ok: bool,
     #[serde(default)]
     error: Option<String>,
+}
+
+/// `GET /v1/agents/{name}` → `{ ok, agent?, error? }`.
+#[derive(Debug, Clone, Deserialize)]
+struct AgentDefResponse {
+    #[serde(default)]
+    ok: bool,
+    #[serde(default)]
+    agent: Option<AgentDefWire>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// The parts of `AgentDef` the form prefills from.
+///
+/// Note what is NOT here: `AgentDef::tools`. That field is `config.tools`
+/// MERGED with the filename stems under the agent's `tools/` directory
+/// (`agentdir::effective_tools`), so it describes what the agent can reach,
+/// not what its `agent.toml` declares. Prefilling from it would promote
+/// filesystem-derived names into `agent.toml` on the next save — a no-op edit
+/// that quietly changes the agent's meaning. Prefill reads `config` only.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct AgentDefWire {
+    #[serde(default)]
+    config: AgentConfigWire,
+    #[serde(default)]
+    instructions: String,
+}
+
+/// `agent.toml` as the daemon serializes it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AgentConfigWire {
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    /// The DECLARED tool allowlist — see [`AgentDefWire`] on why this is the
+    /// prefill source rather than the merged `AgentDef::tools`.
+    #[serde(default)]
+    pub tools: Vec<String>,
+    /// Carried through a save verbatim. The form does not render these, but
+    /// omitting them from the write body would delete them from `agent.toml`,
+    /// because the daemon rebuilds the file from the spec it is handed.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// Kept as opaque JSON: the surface only needs to know whether any exist
+    /// (see [`blocks_save`]), and modelling the daemon's `SubprocessCapability`
+    /// here would be a second definition to keep in sync for no gain.
+    #[serde(default, rename = "subprocess_capability")]
+    pub subprocess_capabilities: Vec<serde_json::Value>,
+    /// Carried through a save verbatim, same reason as `capabilities`.
+    #[serde(default)]
+    pub yolo: Option<bool>,
 }
 
 // ---- Pure helpers (unit-tested; no signals, no network) ----
@@ -186,26 +258,59 @@ pub fn create_blocked_reason(name: &str, instructions: &str) -> Option<&'static 
     None
 }
 
-/// Build the create body from raw form text.
+/// The tools field's prefill text, read from the DECLARED allowlist.
+///
+/// Deliberately `config.tools`, never `AgentDef::tools`: the latter is the
+/// declared list merged with the stems of the files in the agent's `tools/`
+/// directory, so round-tripping it would write filesystem-derived names into
+/// `agent.toml` and change what the agent means through an edit that looks
+/// like a no-op.
+pub fn tools_prefill(config: &AgentConfigWire) -> String {
+    config.tools.join(", ")
+}
+
+/// Why this agent cannot be saved from the surface at all, if it cannot.
+///
+/// See [`SUBPROCESS_CAPABILITY_BLOCK`]: the write API's spec cannot express
+/// `[[subprocess_capability]]`, and the daemon rebuilds `agent.toml` from that
+/// spec, so any save would drop the declaration. The form renders this and
+/// disables Save rather than performing a lossy write and calling it success.
+pub fn blocks_save(config: &AgentConfigWire) -> Option<&'static str> {
+    (!config.subprocess_capabilities.is_empty()).then_some(SUBPROCESS_CAPABILITY_BLOCK)
+}
+
+/// Build a write body from raw form text.
+///
+/// `name` is `Some` only on create — `PUT /v1/agents/{name}` takes identity
+/// from the path, which is why the name field is read-only while editing: an
+/// agent IS its folder, so renaming is a move, not a field edit.
 ///
 /// Empty description/model collapse to `None` rather than `Some("")`: the
 /// daemon writes `agent.toml` from this spec, and an empty string would be
 /// persisted as a real (meaningless) value instead of the absent key that
 /// means "inherit".
-pub fn create_body(
-    name: &str,
+///
+/// `capabilities` and `yolo` are passed straight through from the loaded
+/// definition. The form does not render them, but the daemon rebuilds
+/// `agent.toml` from what it is handed, so anything omitted here is DELETED
+/// from disk — an edit to the description must not cost the operator their
+/// capability list.
+pub fn write_body(
+    name: Option<&str>,
     description: &str,
     model: &str,
     tools_raw: &str,
     instructions: &str,
+    capabilities: Vec<String>,
+    yolo: Option<bool>,
 ) -> AgentWriteBody {
     AgentWriteBody {
-        name: Some(name.trim().to_string()),
+        name: name.map(|n| n.trim().to_string()),
         description: non_empty(description),
         model: non_empty(model),
         tools: parse_tools(tools_raw),
-        capabilities: Vec::new(),
-        yolo: None,
+        capabilities,
+        yolo,
         instructions: instructions.to_string(),
     }
 }
@@ -238,6 +343,8 @@ pub struct AgentBuilderState {
     pub models: RwSignal<Vec<ModelInfo>>,
     /// Whether the form is disclosed.
     pub open: RwSignal<bool>,
+    /// `Some(name)` = editing that agent (PUT), `None` = creating one (POST).
+    pub editing: RwSignal<Option<String>>,
     pub name: RwSignal<String>,
     pub description: RwSignal<String>,
     /// Empty = inherit the daemon default.
@@ -246,8 +353,23 @@ pub struct AgentBuilderState {
     pub tools: RwSignal<String>,
     /// The `instructions.md` system prompt. The one required slot.
     pub instructions: RwSignal<String>,
+    /// `capabilities` from the loaded definition, carried verbatim into the
+    /// next save so editing a description never deletes them (see
+    /// [`write_body`]). Empty while creating.
+    pub capabilities: RwSignal<Vec<String>>,
+    /// `yolo` from the loaded definition, carried verbatim for the same reason.
+    pub yolo: RwSignal<Option<bool>>,
     /// A write is in flight — drives the button label and blocks re-submit.
     pub pending: RwSignal<bool>,
+    /// A definition fetch is in flight; the form is not yet trustworthy.
+    pub loading_def: RwSignal<bool>,
+    /// Why saving is refused outright, if it is — a state the operator cannot
+    /// fix by editing the form, unlike [`error`](Self::error).
+    pub blocked: RwSignal<Option<&'static str>>,
+    /// Monotonic ticket for definition fetches, so switching edit targets
+    /// twice in quick succession cannot let the first response overwrite the
+    /// second one's prefill.
+    def_ticket: RwSignal<u64>,
     /// Inline form error. The form stays open with its input intact so the
     /// operator can fix and retry, following `Daemon::create_project`.
     pub error: RwSignal<Option<String>>,
@@ -261,12 +383,18 @@ impl AgentBuilderState {
             url: rooms.url,
             models: rooms.models,
             open: RwSignal::new(false),
+            editing: RwSignal::new(None),
             name: RwSignal::new(String::new()),
             description: RwSignal::new(String::new()),
             model: RwSignal::new(String::new()),
             tools: RwSignal::new(String::new()),
             instructions: RwSignal::new(String::new()),
+            capabilities: RwSignal::new(Vec::new()),
+            yolo: RwSignal::new(None),
             pending: RwSignal::new(false),
+            loading_def: RwSignal::new(false),
+            blocked: RwSignal::new(None),
+            def_ticket: RwSignal::new(0),
             error: RwSignal::new(None),
         }
     }
@@ -275,39 +403,131 @@ impl AgentBuilderState {
         self.url.get_untracked().trim_end_matches('/').to_string()
     }
 
-    /// Clear the form back to a blank create. Called only after a confirmed
-    /// success — a failed write must keep the operator's typing.
-    fn reset_fields(&self) {
+    /// Clear the form back to a blank create. Called after a confirmed create,
+    /// and when the operator explicitly switches back to "New agent" — a
+    /// FAILED write must keep the operator's typing, so it never calls this.
+    ///
+    /// Bumps `def_ticket` so a definition fetch still in flight cannot land on
+    /// the blank form it was superseded by.
+    pub fn start_create(&self) {
+        self.def_ticket.update(|n| *n += 1);
+        self.editing.set(None);
         self.name.set(String::new());
         self.description.set(String::new());
         self.model.set(String::new());
         self.tools.set(String::new());
         self.instructions.set(String::new());
+        self.capabilities.set(Vec::new());
+        self.yolo.set(None);
+        self.loading_def.set(false);
+        self.blocked.set(None);
         self.error.set(None);
     }
 
-    /// `POST /v1/agents` — create the agent, then hand its name to `on_saved`
-    /// so the caller can refresh the picker one line above.
+    /// `GET /v1/agents/{name}` — switch to edit mode and prefill from disk.
     ///
-    /// Create never overwrites: the daemon answers 409 if the name is taken,
+    /// Prefill fidelity is the whole point: an edit that starts from anything
+    /// other than the agent's real `agent.toml` writes the difference back as
+    /// if the operator had asked for it.
+    pub fn load_def(&self, name: String) {
+        let ticket = {
+            let next = self.def_ticket.get_untracked() + 1;
+            self.def_ticket.set(next);
+            next
+        };
+        self.editing.set(Some(name.clone()));
+        self.name.set(name.clone());
+        self.loading_def.set(true);
+        self.blocked.set(None);
+        self.error.set(None);
+
+        let base = self.base();
+        let me = *self;
+        spawn_local(async move {
+            let get_url = format!("{base}/v1/agents/{}", crate::rooms::encode(&name));
+            let outcome = match Request::get(&get_url).send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let raw = resp.text().await.unwrap_or_default();
+                    match serde_json::from_str::<AgentDefResponse>(&raw) {
+                        Ok(decoded) if decoded.ok => match decoded.agent {
+                            Some(agent) => Ok(agent),
+                            // `ok: true` with no agent is a daemon bug, not an
+                            // empty agent; prefilling from the default would
+                            // blank the real one on save.
+                            None => Err("the daemon returned no definition".to_string()),
+                        },
+                        Ok(decoded) => Err(write_error_message(status, decoded.error.as_deref())),
+                        Err(_) => Err(write_error_message(status, None)),
+                    }
+                }
+                Err(err) => Err(format!("could not reach the daemon: {err}")),
+            };
+
+            // A newer pick (or a switch back to create) supersedes this one.
+            if me.def_ticket.get_untracked() != ticket {
+                return;
+            }
+            me.loading_def.set(false);
+            match outcome {
+                Ok(agent) => {
+                    me.description
+                        .set(agent.config.description.clone().unwrap_or_default());
+                    me.model.set(agent.config.model.clone().unwrap_or_default());
+                    me.tools.set(tools_prefill(&agent.config));
+                    me.instructions.set(agent.instructions);
+                    me.capabilities.set(agent.config.capabilities.clone());
+                    me.yolo.set(agent.config.yolo);
+                    me.blocked.set(blocks_save(&agent.config));
+                }
+                Err(message) => {
+                    log::error!("agent def load failed: {message}");
+                    me.error.set(Some(message));
+                    // Save stays disabled: a PUT from a form that never
+                    // prefilled would overwrite real config with form defaults.
+                    me.blocked.set(Some(DEF_LOAD_FAILED));
+                }
+            }
+        });
+    }
+
+    /// Write the form: `POST /v1/agents` when creating, `PUT /v1/agents/{name}`
+    /// when editing. On success the agent's name goes to `on_saved`, so the
+    /// caller can refresh the picker one line above.
+    ///
+    /// Create never overwrites — the daemon answers 409 if the name is taken,
     /// which lands inline rather than silently clobbering an agent the
-    /// operator forgot about.
-    pub fn create(&self, on_saved: Callback<String>) {
-        if self.pending.get_untracked() {
+    /// operator forgot about. Edit sends `capabilities` and `yolo` back
+    /// verbatim, because the daemon rebuilds `agent.toml` from this body and
+    /// anything missing is deleted from disk.
+    pub fn save(&self, on_saved: Callback<String>) {
+        if self.pending.get_untracked() || self.loading_def.get_untracked() {
             return;
         }
-        let name = self.name.get_untracked().trim().to_string();
+        if let Some(reason) = self.blocked.get_untracked() {
+            self.error.set(Some(reason.to_string()));
+            return;
+        }
+        let editing = self.editing.get_untracked();
         let instructions = self.instructions.get_untracked();
+        // In edit mode identity comes from the loaded agent, never the (read-
+        // only) name field, so a stale field value can never retarget the PUT.
+        let name = match &editing {
+            Some(existing) => existing.clone(),
+            None => self.name.get_untracked().trim().to_string(),
+        };
         if let Some(reason) = create_blocked_reason(&name, &instructions) {
             self.error.set(Some(reason.to_string()));
             return;
         }
-        let body = create_body(
-            &name,
+        let body = write_body(
+            editing.is_none().then_some(name.as_str()),
             &self.description.get_untracked(),
             &self.model.get_untracked(),
             &self.tools.get_untracked(),
             &instructions,
+            self.capabilities.get_untracked(),
+            self.yolo.get_untracked(),
         );
         self.error.set(None);
         self.pending.set(true);
@@ -315,14 +535,20 @@ impl AgentBuilderState {
         let base = self.base();
         let me = *self;
         spawn_local(async move {
-            let post_url = format!("{base}/v1/agents");
-            let request = match Request::post(&post_url)
+            let builder = match &editing {
+                Some(existing) => Request::put(&format!(
+                    "{base}/v1/agents/{}",
+                    crate::rooms::encode(existing)
+                )),
+                None => Request::post(&format!("{base}/v1/agents")),
+            };
+            let request = match builder
                 .header("content-type", "application/json")
                 .json(&body)
             {
                 Ok(request) => request,
                 Err(err) => {
-                    log::error!("agent create encode error: {err}");
+                    log::error!("agent write encode error: {err}");
                     me.error
                         .set(Some(format!("could not encode request: {err}")));
                     me.pending.set(false);
@@ -340,19 +566,26 @@ impl AgentBuilderState {
                     let decoded = serde_json::from_str::<AgentWriteResponse>(&raw).ok();
                     if decoded.as_ref().is_some_and(|r| r.ok) {
                         me.pending.set(false);
-                        me.reset_fields();
-                        me.open.set(false);
+                        if editing.is_none() {
+                            // A create leaves a blank form ready for the next
+                            // one; an edit keeps its prefill, so the operator
+                            // can see what they just saved.
+                            me.start_create();
+                            me.open.set(false);
+                        } else {
+                            me.error.set(None);
+                        }
                         on_saved.run(name);
                     } else {
                         let daemon_error = decoded.and_then(|r| r.error);
                         let message = write_error_message(status, daemon_error.as_deref());
-                        log::error!("agent create rejected ({status}): {message}");
+                        log::error!("agent write rejected ({status}): {message}");
                         me.error.set(Some(message));
                         me.pending.set(false);
                     }
                 }
                 Err(err) => {
-                    log::error!("agent create post error: {err}");
+                    log::error!("agent write request error: {err}");
                     me.error
                         .set(Some(format!("could not reach the daemon: {err}")));
                     me.pending.set(false);
@@ -364,20 +597,33 @@ impl AgentBuilderState {
 
 // ---- Component ----
 
-/// The create-an-agent form, mounted under the roster's `+ agent` picker.
+/// The author-an-agent form, mounted under the roster's `+ agent` picker.
 ///
-/// Deliberately does NOT auto-join the new agent to the open room: `on_saved`
-/// refreshes the picker directly above, so the operator's next action is the
-/// one they already know. Putting the agent in the room stays the picker's job.
+/// Creates a new agent or edits an existing one; `agents` is the same list the
+/// picker above renders, reused as the edit target chooser rather than fetched
+/// again.
+///
+/// Deliberately does NOT auto-join a newly created agent to the open room:
+/// `on_saved` refreshes the picker directly above, so the operator's next
+/// action is the one they already know. Putting an agent in the room stays the
+/// picker's job.
 #[component]
-pub fn AgentBuilder(state: AgentBuilderState, on_saved: Callback<String>) -> impl IntoView {
-    let submit = move || state.create(on_saved);
+pub fn AgentBuilder(
+    state: AgentBuilderState,
+    agents: RwSignal<Vec<String>>,
+    on_saved: Callback<String>,
+) -> impl IntoView {
+    let submit = move || state.save(on_saved);
+    // Busy in either direction: a form mid-prefill is not yet the agent's real
+    // config, so it must not be typed into or saved.
+    let busy = move || state.pending.get() || state.loading_def.get();
+    let editing = move || state.editing.get().is_some();
 
     view! {
         <button
             class="rooms-workspace__agentbuilder-toggle"
             type="button"
-            title="Author a new agent on the daemon"
+            title="Create or edit an agent on the daemon"
             aria-controls="rooms-workspace-agent-builder"
             aria-expanded=move || state.open.get().to_string()
             on:click=move |_| state.open.update(|open: &mut bool| *open = !*open)
@@ -387,6 +633,37 @@ pub fn AgentBuilder(state: AgentBuilderState, on_saved: Callback<String>) -> imp
 
         <Show when=move || state.open.get()>
             <div id="rooms-workspace-agent-builder" class="rooms-workspace__agentbuilder">
+                // Mode chooser. Uncontrolled like every other select here, so
+                // the active mode is marked per-option from `editing`.
+                <select
+                    class="rooms-workspace__agentbuilder-select"
+                    aria-label="Create a new agent or edit an existing one"
+                    on:change=move |ev| {
+                        let value = event_target_value(&ev);
+                        if value.is_empty() {
+                            state.start_create();
+                        } else {
+                            state.load_def(value);
+                        }
+                    }
+                    disabled=move || state.pending.get()
+                >
+                    <option value="" selected=move || !editing()>"New agent"</option>
+                    <For
+                        each=move || agents.get()
+                        key=|id: &String| id.clone()
+                        children=move |id: String| {
+                            let selected = state.editing.get_untracked().as_deref() == Some(id.as_str());
+                            let value = id.clone();
+                            view! {
+                                <option value=value selected=selected>{format!("Edit {id}")}</option>
+                            }
+                        }
+                    />
+                </select>
+                // An agent IS its folder, so identity comes from the path on a
+                // PUT and this field is read-only while editing: renaming is a
+                // move on disk, not a form edit.
                 <input
                     class="rooms-workspace__agentbuilder-input"
                     type="text"
@@ -394,7 +671,7 @@ pub fn AgentBuilder(state: AgentBuilderState, on_saved: Callback<String>) -> imp
                     placeholder="name — a-z, 0-9, - or _"
                     prop:value=move || state.name.get()
                     on:input=move |ev| state.name.set(event_target_value(&ev))
-                    disabled=move || state.pending.get()
+                    disabled=move || busy() || editing()
                 />
                 <input
                     class="rooms-workspace__agentbuilder-input"
@@ -403,7 +680,7 @@ pub fn AgentBuilder(state: AgentBuilderState, on_saved: Callback<String>) -> imp
                     placeholder="one-line description (optional)"
                     prop:value=move || state.description.get()
                     on:input=move |ev| state.description.set(event_target_value(&ev))
-                    disabled=move || state.pending.get()
+                    disabled=busy
                 />
                 // Uncontrolled `<select>`, like the agent picker above it:
                 // Leptos does not re-assert `value` on re-render, so the
@@ -412,7 +689,7 @@ pub fn AgentBuilder(state: AgentBuilderState, on_saved: Callback<String>) -> imp
                     class="rooms-workspace__agentbuilder-select"
                     aria-label="Agent model"
                     on:change=move |ev| state.model.set(event_target_value(&ev))
-                    disabled=move || state.pending.get()
+                    disabled=busy
                 >
                     <For
                         each=move || model_options(&state.models.get(), &state.model.get())
@@ -432,7 +709,7 @@ pub fn AgentBuilder(state: AgentBuilderState, on_saved: Callback<String>) -> imp
                     placeholder="tools, comma separated (optional)"
                     prop:value=move || state.tools.get()
                     on:input=move |ev| state.tools.set(event_target_value(&ev))
-                    disabled=move || state.pending.get()
+                    disabled=busy
                 />
                 <textarea
                     class="rooms-workspace__agentbuilder-prompt"
@@ -441,8 +718,17 @@ pub fn AgentBuilder(state: AgentBuilderState, on_saved: Callback<String>) -> imp
                     placeholder="instructions.md — the system prompt this agent runs with"
                     prop:value=move || state.instructions.get()
                     on:input=move |ev| state.instructions.set(event_target_value(&ev))
-                    disabled=move || state.pending.get()
+                    disabled=busy
                 ></textarea>
+
+                // A block is not something the operator can type their way out
+                // of, so it reads as a note rather than an error and simply
+                // takes Save away.
+                <Show when=move || state.blocked.get().is_some()>
+                    <div class="rooms-workspace__agentbuilder-note">
+                        {move || state.blocked.get().unwrap_or_default()}
+                    </div>
+                </Show>
 
                 <Show when=move || state.error.get().is_some()>
                     <div class="rooms-workspace__agentbuilder-error" role="alert">
@@ -453,11 +739,21 @@ pub fn AgentBuilder(state: AgentBuilderState, on_saved: Callback<String>) -> imp
                 <button
                     class="rooms-workspace__agentbuilder-save"
                     type="button"
-                    aria-busy=move || state.pending.get().to_string()
-                    disabled=move || state.pending.get()
+                    aria-busy=move || busy().to_string()
+                    disabled=move || busy() || state.blocked.get().is_some()
                     on:click=move |_| submit()
                 >
-                    {move || if state.pending.get() { "Saving…" } else { "Create agent" }}
+                    {move || {
+                        if state.loading_def.get() {
+                            "Loading…"
+                        } else if state.pending.get() {
+                            "Saving…"
+                        } else if editing() {
+                            "Save changes"
+                        } else {
+                            "Create agent"
+                        }
+                    }}
                 </button>
             </div>
         </Show>
@@ -567,8 +863,27 @@ mod tests {
         );
     }
 
+    /// A create body carries identity and nothing to round-trip.
+    fn create_body(
+        name: &str,
+        description: &str,
+        model: &str,
+        tools_raw: &str,
+        instructions: &str,
+    ) -> AgentWriteBody {
+        write_body(
+            Some(name),
+            description,
+            model,
+            tools_raw,
+            instructions,
+            Vec::new(),
+            None,
+        )
+    }
+
     #[test]
-    fn create_body_sends_absent_keys_rather_than_empty_strings() {
+    fn a_create_body_sends_absent_keys_rather_than_empty_strings() {
         let body = create_body("  researcher  ", "  ", "", "bash, edit", "be useful");
         assert_eq!(body.name.as_deref(), Some("researcher"));
         // Empty description/model must be absent so agent.toml inherits
@@ -591,10 +906,106 @@ mod tests {
     }
 
     #[test]
-    fn create_body_keeps_a_chosen_description_and_model() {
+    fn a_create_body_keeps_a_chosen_description_and_model() {
         let body = create_body("researcher", "reads the web", "claude-opus-5", "", "hi");
         assert_eq!(body.description.as_deref(), Some("reads the web"));
         assert_eq!(body.model.as_deref(), Some("claude-opus-5"));
         assert!(body.tools.is_empty());
+    }
+
+    /// R4. `AgentDef.tools` is `config.tools` merged with the filename stems
+    /// under the agent's `tools/` directory. Prefilling the form from THAT and
+    /// saving would write `scrape` (a file on disk) into `agent.toml` as a
+    /// declared tool — an edit to the description silently changing what the
+    /// agent is allowed to reach. The prefill must read `config` only.
+    #[test]
+    fn tools_prefill_reads_the_declared_allowlist_not_the_merged_one() {
+        let wire = r#"{
+            "name": "researcher",
+            "root": "/agents/researcher",
+            "config": { "tools": ["bash", "web_fetch"] },
+            "instructions": "be useful",
+            "tools": ["bash", "web_fetch", "scrape"]
+        }"#;
+        let def: AgentDefWire = serde_json::from_str(wire).expect("def decodes");
+        assert_eq!(tools_prefill(&def.config), "bash, web_fetch");
+        assert!(
+            !tools_prefill(&def.config).contains("scrape"),
+            "a tools/ filename stem must never be promoted into agent.toml",
+        );
+    }
+
+    /// The definition decodes even though the surface models only a slice of
+    /// `AgentDef` — unknown keys (skills, subagents, root) must not break
+    /// prefill when the daemon grows a field.
+    #[test]
+    fn a_definition_with_unmodelled_fields_still_prefills() {
+        let wire = r#"{
+            "name": "researcher",
+            "root": "/agents/researcher",
+            "config": { "description": "reads the web", "model": "claude-opus-5",
+                        "capabilities": ["mcp:linear"], "yolo": true },
+            "instructions": "be useful",
+            "skills": [{ "name": "search", "path": "skills/search.md" }],
+            "subagents": ["scout"]
+        }"#;
+        let def: AgentDefWire = serde_json::from_str(wire).expect("def decodes");
+        assert_eq!(def.config.description.as_deref(), Some("reads the web"));
+        assert_eq!(def.config.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(def.config.capabilities, vec!["mcp:linear"]);
+        assert_eq!(def.config.yolo, Some(true));
+        assert_eq!(def.instructions, "be useful");
+        // No `[[subprocess_capability]]` here, so nothing blocks the save.
+        assert_eq!(blocks_save(&def.config), None);
+    }
+
+    /// R3. `agentdir::write` rebuilds agent.toml from `AgentSpec`, which has no
+    /// `subprocess_capability` field — so saving such an agent from the surface
+    /// would delete its tier-1 capabilities, silently and permanently. Refuse
+    /// instead of performing a lossy write and reporting success.
+    #[test]
+    fn an_agent_with_subprocess_capabilities_cannot_be_saved_from_the_surface() {
+        let wire = r#"{
+            "config": {
+                "tools": ["bash"],
+                "subprocess_capability": [{ "name": "scrape", "command": "./tools/scrape" }]
+            },
+            "instructions": "be useful"
+        }"#;
+        let def: AgentDefWire = serde_json::from_str(wire).expect("def decodes");
+        assert_eq!(blocks_save(&def.config), Some(SUBPROCESS_CAPABILITY_BLOCK));
+
+        assert_eq!(blocks_save(&AgentConfigWire::default()), None);
+    }
+
+    /// The write body is the WHOLE agent.toml as far as the daemon is
+    /// concerned. Anything the form does not render still has to be sent back,
+    /// or editing a description deletes it from disk.
+    #[test]
+    fn an_edit_carries_unrendered_config_through_and_drops_the_name() {
+        let body = write_body(
+            None,
+            "reads the web",
+            "claude-opus-5",
+            "bash",
+            "be useful",
+            vec!["mcp:linear".to_string()],
+            Some(true),
+        );
+        // Identity comes from the PUT path, never the body.
+        assert_eq!(body.name, None);
+        assert_eq!(body.capabilities, vec!["mcp:linear"]);
+        assert_eq!(body.yolo, Some(true));
+
+        let json = serde_json::to_value(&body).expect("body serializes");
+        assert!(json.get("name").is_none());
+        assert_eq!(
+            json.get("capabilities")
+                .and_then(|v| v.as_array())
+                .map(Vec::len),
+            Some(1),
+            "omitting capabilities would delete them from agent.toml",
+        );
+        assert_eq!(json.get("yolo").and_then(|v| v.as_bool()), Some(true));
     }
 }
