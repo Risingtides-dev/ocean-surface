@@ -323,6 +323,10 @@ impl RoomAttachmentsState {
     ///
     /// The ticket bump is the load-bearing half: without it the previous
     /// room's list could still land and be rendered under this room's name.
+    /// `uploading` is retired here as well: an upload belongs to the room it
+    /// started in, so a flag carried across a room change disables the new
+    /// room's control over a file nobody ever sent it — permanently, if the
+    /// old request never resolves.
     fn reset(&self) {
         self.ticket
             .update(|ticket| *ticket = ticket.wrapping_add(1));
@@ -330,6 +334,7 @@ impl RoomAttachmentsState {
         self.loaded.set(false);
         self.loading.set(false);
         self.error.set(None);
+        self.uploading.set(false);
     }
 
     /// Load one room's file list.
@@ -378,7 +383,13 @@ impl RoomAttachmentsState {
     ///
     /// The refusal check runs before `array_buffer()`, so an oversize file is
     /// never even read into the heap, let alone sent.
-    fn upload(&self, key: String, uploader: String, file: web_sys::File) {
+    ///
+    /// `rooms` is taken so the completion can re-validate the `(generation,
+    /// key)` pair it started with. The list ticket cannot stand in for that
+    /// here: the success arm calls `fetch`, which mints a FRESH ticket, so a
+    /// room change mid-upload would republish the old room's files — with
+    /// hrefs built from the new room's key — under the new room's name.
+    fn upload(&self, rooms: Rooms, key: String, uploader: String, file: web_sys::File) {
         let raw_name = file.name();
         let byte_len = file.size().max(0.0) as u64;
         if let Some(refusal) = upload_refusal(&raw_name, byte_len) {
@@ -391,37 +402,42 @@ impl RoomAttachmentsState {
         let content_type = declared_content_type(&file.type_());
         let base = self.base();
         let me = *self;
+        let generation = rooms.generation_snapshot();
         self.uploading.set(true);
         self.error.set(None);
         spawn_local(async move {
-            let bytes = match JsFuture::from(file.array_buffer()).await {
-                Ok(buffer) => js_sys::Uint8Array::new(&buffer).to_vec(),
-                Err(_) => {
-                    me.uploading.set(false);
-                    me.error
-                        .set(Some(format!("Could not read \u{201c}{filename}\u{201d}.")));
-                    return;
+            let outcome = match JsFuture::from(file.array_buffer()).await {
+                Err(_) => Err(format!("Could not read \u{201c}{filename}\u{201d}.")),
+                Ok(buffer) => {
+                    let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
+                    let url = upload_url(&base, &key, &filename, &content_type, &uploader);
+                    match Request::post(&url).body(bytes) {
+                        Ok(request) => match request.send().await {
+                            Ok(resp) => {
+                                let status = resp.status();
+                                match resp.json::<UploadResultBody>().await {
+                                    Ok(body) if body.ok => Ok(()),
+                                    Ok(body) => Err(upload_failure_message(
+                                        status,
+                                        body.code.as_deref(),
+                                        body.error.as_deref(),
+                                    )),
+                                    Err(err) => Err(format!("Upload decode error: {err}")),
+                                }
+                            }
+                            Err(err) => Err(format!("Upload request failed: {err}")),
+                        },
+                        Err(err) => Err(format!("Upload encode error: {err}")),
+                    }
                 }
             };
-            let url = upload_url(&base, &key, &filename, &content_type, &uploader);
-            let outcome = match Request::post(&url).body(bytes) {
-                Ok(request) => match request.send().await {
-                    Ok(resp) => {
-                        let status = resp.status();
-                        match resp.json::<UploadResultBody>().await {
-                            Ok(body) if body.ok => Ok(()),
-                            Ok(body) => Err(upload_failure_message(
-                                status,
-                                body.code.as_deref(),
-                                body.error.as_deref(),
-                            )),
-                            Err(err) => Err(format!("Upload decode error: {err}")),
-                        }
-                    }
-                    Err(err) => Err(format!("Upload request failed: {err}")),
-                },
-                Err(err) => Err(format!("Upload encode error: {err}")),
-            };
+            // Every write below belongs to the room this upload started in.
+            // If that room is gone, `reset` has already cleared this state for
+            // whoever is on screen now, and the bytes still landed in the room
+            // they were meant for — reopening it shows the file.
+            if !rooms.room_is_current(generation, &key) {
+                return;
+            }
             me.uploading.set(false);
             match outcome {
                 // The daemon appends a transcript marker for the upload, but
@@ -519,7 +535,7 @@ pub fn RoomAttachments(
                         ));
                         return;
                     }
-                    state.upload(key, rooms.identity_id.get_untracked(), file);
+                    state.upload(rooms, key, rooms.identity_id.get_untracked(), file);
                 }
             />
 
@@ -590,6 +606,7 @@ pub fn RoomAttachments(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rooms::room_request_is_current;
 
     #[test]
     fn upload_url_carries_every_field_in_the_query_string() {
@@ -700,6 +717,90 @@ mod tests {
     fn stale_list_responses_cannot_publish() {
         assert!(list_request_is_current(7, 7));
         assert!(!list_request_is_current(6, 7));
+    }
+
+    /// The ticket above cannot cover an upload: its success arm calls `fetch`,
+    /// which mints a fresh ticket and would therefore be admitted. So the
+    /// completion re-validates the `(generation, key)` pair it started with
+    /// through `Rooms::room_is_current`, which delegates to
+    /// `crate::rooms::room_request_is_current` — exercised directly here, with
+    /// no live `Rooms` or browser runtime needed.
+    #[test]
+    fn an_upload_landing_after_a_room_change_cannot_publish() {
+        // Upload starts in room A at gen N.
+        let started_generation = 3;
+        let started_key = "room-a";
+
+        // It lands while A is still the open room: publish, so the operator
+        // sees the file they just sent.
+        assert!(room_request_is_current(
+            started_generation,
+            started_generation,
+            started_key,
+            Some(started_key),
+        ));
+
+        // The operator switched to room B first. Publishing here would paint
+        // A's filenames under B's name, with hrefs built from B's key.
+        assert!(!room_request_is_current(
+            started_generation,
+            started_generation + 1,
+            started_key,
+            Some("room-b"),
+        ));
+
+        // Closed to no room at all: still nothing to publish into.
+        assert!(!room_request_is_current(
+            started_generation,
+            started_generation + 1,
+            started_key,
+            None,
+        ));
+
+        // A close/reopen of the SAME key is a different admission — `reset`
+        // has already cleared this state, so the in-flight upload must not
+        // write into it even though the key still matches.
+        assert!(!room_request_is_current(
+            started_generation,
+            started_generation + 1,
+            started_key,
+            Some(started_key),
+        ));
+    }
+
+    #[test]
+    fn reset_retires_the_in_flight_upload_not_just_the_list() {
+        let state = RoomAttachmentsState {
+            url: RwSignal::new("http://d".to_string()),
+            items: RwSignal::new(vec![RoomAttachment {
+                id: "0123456789abcdef0123456789abcdef".to_string(),
+                filename: "spec.md".to_string(),
+                content_type: "text/markdown".to_string(),
+                byte_len: 12,
+                sha256: String::new(),
+                uploaded_by: "smaths".to_string(),
+                uploaded_at: String::new(),
+                on_behalf_of: None,
+            }]),
+            loaded: RwSignal::new(true),
+            loading: RwSignal::new(true),
+            error: RwSignal::new(Some("boom".to_string())),
+            uploading: RwSignal::new(true),
+            ticket: RwSignal::new(4),
+        };
+
+        state.reset();
+
+        assert!(state.items.get_untracked().is_empty());
+        assert!(!state.loaded.get_untracked());
+        assert!(!state.loading.get_untracked());
+        assert!(state.error.get_untracked().is_none());
+        // The room the upload was for is gone; leaving this true renders the
+        // NEXT room's control disabled and reading "uploading…" for a file it
+        // never saw, forever if that request never resolves.
+        assert!(!state.uploading.get_untracked());
+        // And the ticket still moves, so a list in flight cannot land either.
+        assert_eq!(state.ticket.get_untracked(), 5);
     }
 
     #[test]
