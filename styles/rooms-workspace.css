@@ -998,6 +998,123 @@
   cursor: not-allowed;
 }
 
+/* ── Room context files (below roster, above the policy summary) ─── */
+
+.rooms-workspace__files {
+  flex: 0 0 auto;
+  max-height: 40%;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 0 6px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__files-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 12px 6px;
+}
+
+.rooms-workspace__files-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-3);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__files-add {
+  appearance: none;
+  padding: 2px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__files-add:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__files-add:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* The button forwards the user gesture; this is the real control. */
+.rooms-workspace__files-input {
+  display: none;
+}
+
+.rooms-workspace__files-note,
+.rooms-workspace__files-error {
+  padding: 4px 12px 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__files-error {
+  color: var(--err);
+}
+
+.rooms-workspace__files-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.rooms-workspace__file {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 2px 8px;
+  padding: 5px 12px;
+  color: var(--fg-2);
+  font-size: 12px;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.rooms-workspace__file:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__file-glyph {
+  grid-row: span 2;
+  font-size: 13px;
+  line-height: 1;
+  text-align: center;
+}
+
+/* A filename is the one thing here that must never be silently reflowed into
+   the rail's width — truncate it and let the title attribute carry the rest. */
+.rooms-workspace__file-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rooms-workspace__file-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-4);
+  font-size: 10px;
+}
+
 /* ── Room policy summary (access info, below roster) ──────────────── */
 
 .rooms-workspace__policy {
@@ -1732,6 +1849,8 @@
 .rooms-workspace__thread-panel-dock:focus-visible,
 .rooms-workspace__thread-inline-expand:focus-visible,
 .rooms-workspace__addagent:focus-visible,
+.rooms-workspace__files-add:focus-visible,
+.rooms-workspace__file:focus-visible,
 .rooms-workspace__addagent-select:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);

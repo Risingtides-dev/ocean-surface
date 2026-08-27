@@ -46,6 +46,21 @@ const SESSION_MAX_AGE_SECONDS: u64 = 60 * 60 * 24 * 30;
 
 const CALL_PLACE_DAEMON_PATH: &str = "/v1/calls/place";
 
+/// Body ceiling for a room-attachment upload forward.
+///
+/// Mirrors the daemon's `MAX_ATTACHMENT_BYTES` (8 MiB) + `BODY_LIMIT_SLACK`
+/// (4096) exactly. The slack is not decoration: a body a little over the cap
+/// must still REACH the daemon so it comes back as the typed
+/// `attachment_too_large` JSON. Capping at the cap itself would turn every
+/// oversize upload into our own untyped 413, which reads to the operator as a
+/// proxy bug rather than the rule it actually is. The generic
+/// [`ROOMS_JSON_BODY_LIMIT`] stays where it is; a room message has no business
+/// being megabytes.
+const ATTACHMENT_UPLOAD_BODY_LIMIT: usize = 8 * 1024 * 1024 + 4096;
+
+/// Body ceiling for every other persistent-rooms forward (TASK-73).
+const ROOMS_JSON_BODY_LIMIT: usize = 1 << 20;
+
 /// Shared state.
 struct AppState {
     /// General-purpose client used for the reverse-proxy routes — including the
@@ -1900,6 +1915,95 @@ async fn proxy_longhouse(
     }
 }
 
+/// Which persistent-rooms request this is, because three of the shapes under
+/// one wildcard route cannot be forwarded the same way.
+///
+/// Classified from reconstructed path SEGMENTS, never a `contains`/`ends_with`
+/// probe: `{key}` is caller-supplied, so a room literally keyed `attachments`
+/// or one whose key embeds `/events` would otherwise pick the wrong lane. This
+/// is the idiom TASK-11 established for the SSE tail after the axum route
+/// conflict; the two attachment lanes join it rather than inventing a second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoomsPersistentShape {
+    /// `GET {key}/events` — stream, never buffer.
+    EventsTail,
+    /// `POST {key}/attachments` — a RAW-BYTES body up to the daemon's 8 MiB
+    /// cap, not JSON.
+    AttachmentUpload,
+    /// `GET {key}/attachments/{id}` — opaque bytes whose upstream
+    /// content-type / disposition / nosniff headers ARE the security contract.
+    AttachmentDownload,
+    /// Everything else in the subtree: a JSON request, a JSON reply.
+    Json,
+}
+
+fn rooms_persistent_shape(method: &axum::http::Method, path: &str) -> RoomsPersistentShape {
+    let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    let keyed = segments.len() >= 5
+        && segments[0] == "v1"
+        && segments[1] == "rooms"
+        && segments[2] == "persistent"
+        && !segments[3].is_empty();
+    if !keyed {
+        return RoomsPersistentShape::Json;
+    }
+    let is_get = method == axum::http::Method::GET;
+    if is_get && segments.len() == 5 && segments[4] == "events" {
+        RoomsPersistentShape::EventsTail
+    } else if method == axum::http::Method::POST
+        && segments.len() == 5
+        && segments[4] == "attachments"
+    {
+        RoomsPersistentShape::AttachmentUpload
+    } else if is_get
+        && segments.len() == 6
+        && segments[4] == "attachments"
+        && !segments[5].is_empty()
+    {
+        RoomsPersistentShape::AttachmentDownload
+    } else {
+        RoomsPersistentShape::Json
+    }
+}
+
+/// Forward an attachment download with its headers intact.
+///
+/// The daemon answers `application/octet-stream` + `X-Content-Type-Options:
+/// nosniff` + `Content-Disposition: attachment` precisely so an
+/// uploader-declared `text/html` can never execute on this origin. Re-stamping
+/// every buffered reply `application/json` — right for the rest of the subtree
+/// — destroyed all three, which made the PROXY the stored-XSS surface the
+/// daemon had carefully closed. Only those three headers are copied; the rest
+/// of the response is ours.
+async fn attachment_download_response(status: StatusCode, resp: reqwest::Response) -> Response {
+    let mut headers = HeaderMap::new();
+    for name in [
+        header::CONTENT_TYPE,
+        header::CONTENT_DISPOSITION,
+        header::X_CONTENT_TYPE_OPTIONS,
+    ] {
+        if let Some(value) = resp.headers().get(&name) {
+            headers.insert(name, value.clone());
+        }
+    }
+    // A refusal (unknown attachment, malformed id) is a JSON body carrying its
+    // own content type, and the copy above already moved it across. The
+    // fallback is for an upstream that declared nothing at all: guess opaque,
+    // never guess renderable.
+    if !headers.contains_key(header::CONTENT_TYPE) {
+        headers.insert(
+            header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/octet-stream"),
+        );
+        headers.insert(
+            header::X_CONTENT_TYPE_OPTIONS,
+            axum::http::HeaderValue::from_static("nosniff"),
+        );
+    }
+    let bytes = resp.bytes().await.unwrap_or_default();
+    (status, headers, bytes).into_response()
+}
+
 /// Reverse-proxy the daemon's persistent-rooms API (`/v1/rooms/persistent`
 /// and everything under it). Mirrors `proxy_longhouse` — forwards the method,
 /// full path, query string, and body — but also handles DELETE (leave a room:
@@ -1908,6 +2012,10 @@ async fn proxy_longhouse(
 /// get (GET), join (POST), leave (DELETE), post-message (POST), transcript
 /// (GET, `?after_seq=`), and the live event tail (GET, exact `{key}/events`
 /// shape — streamed via sse_stream_response with Last-Event-ID resume).
+///
+/// [`RoomsPersistentShape`] splits out the three lanes that are not
+/// JSON-in / JSON-out: the SSE tail, the raw-bytes attachment upload, and the
+/// attachment download whose upstream headers must survive verbatim.
 async fn proxy_rooms_persistent(
     State(state): State<Arc<AppState>>,
     req: Request,
@@ -1933,16 +2041,8 @@ async fn proxy_rooms_persistent(
     // `/events`) must stream through sse_stream_response rather than buffering
     // (axum rejects a separate {key}/events route alongside {*rest}).
     // We reconstruct this from path segments to avoid a loose ends_with.
-    let is_events_tail = method == axum::http::Method::GET && {
-        let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
-        segments.len() == 5
-            && segments[0] == "v1"
-            && segments[1] == "rooms"
-            && segments[2] == "persistent"
-            && segments[4] == "events"
-            && !segments[3].is_empty()
-    };
-    if is_events_tail {
+    let shape = rooms_persistent_shape(&method, &path);
+    if shape == RoomsPersistentShape::EventsTail {
         let url = format!("{}{path}{q}", daemon.base());
         let mut upstream = state.http.get(&url);
         if let Some(last_id) = req.headers().get("last-event-id") {
@@ -1960,11 +2060,26 @@ async fn proxy_rooms_persistent(
     // this handler); forward it unchanged, with the query string preserved so
     // the transcript tail's ?after_seq= reaches the daemon.
     let url = format!("{}{path}{q}", daemon.base());
+    // An attachment upload declares its own type; every other forward in this
+    // subtree is JSON. Read it BEFORE the body consumes the request.
+    let declared_type = req
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     // buffer the (small) body so we can forward it on POST/DELETE
     // TASK-73: a body over the cap previously became an EMPTY forwarded
     // request via unwrap_or_default() — a truncation that presents upstream as
     // a legitimate call. Refuse it instead.
-    let body = match axum::body::to_bytes(req.into_body(), 1 << 20).await {
+    //
+    // The 1 MiB ceiling is right for JSON and WRONG for an attachment: it made
+    // the daemon's 8 MiB cap unreachable from a browser, so every upload over
+    // 1 MiB died here with an untyped 413 that no client could explain.
+    let body_limit = match shape {
+        RoomsPersistentShape::AttachmentUpload => ATTACHMENT_UPLOAD_BODY_LIMIT,
+        _ => ROOMS_JSON_BODY_LIMIT,
+    };
+    let body = match axum::body::to_bytes(req.into_body(), body_limit).await {
         Ok(bytes) => bytes,
         Err(_) => {
             return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
@@ -1973,22 +2088,30 @@ async fn proxy_rooms_persistent(
     let builder = if method == axum::http::Method::GET {
         state.http_json.get(&url)
     } else {
+        // Raw attachment bytes are not JSON, and saying they are is a lie any
+        // middlebox between here and the daemon is entitled to act on. The
+        // daemon reads the body as bytes and ignores this header either way.
+        let forwarded_type = match shape {
+            RoomsPersistentShape::AttachmentUpload => declared_type
+                .as_deref()
+                .unwrap_or("application/octet-stream"),
+            _ => "application/json",
+        };
         state
             .http_json
             .request(method, &url)
-            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_TYPE, forwarded_type)
             .body(body.to_vec())
     };
     match builder.send().await {
         Ok(resp) => {
-            let status = resp.status();
+            let status =
+                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            if shape == RoomsPersistentShape::AttachmentDownload {
+                return attachment_download_response(status, resp).await;
+            }
             let bytes = resp.bytes().await.unwrap_or_default();
-            (
-                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
-                [(header::CONTENT_TYPE, "application/json")],
-                bytes,
-            )
-                .into_response()
+            (status, [(header::CONTENT_TYPE, "application/json")], bytes).into_response()
         }
         Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
     }
@@ -2350,8 +2473,10 @@ mod tests {
         agent_daemon_path, build_app, config_payload, constant_time_eq, daemon_for, decode_segment,
         has_dot_segment, has_valid_session, is_hashed_asset, livekit_token_daemon_path, load_users,
         observatory_token_path, percent_encode_path_segment, read_observer_token,
-        session_auth_gate, session_user, sse_no_buffer_headers, wasm_headers, AppState, ProxyUser,
-        ResolvedDaemon, CALL_PLACE_DAEMON_PATH, SESSION_COOKIE, WASM_CACHE_CONTROL,
+        rooms_persistent_shape, session_auth_gate, session_user, sse_no_buffer_headers,
+        wasm_headers, AppState, ProxyUser, ResolvedDaemon, RoomsPersistentShape,
+        ATTACHMENT_UPLOAD_BODY_LIMIT, CALL_PLACE_DAEMON_PATH, ROOMS_JSON_BODY_LIMIT,
+        SESSION_COOKIE, WASM_CACHE_CONTROL,
     };
     use axum::http::HeaderMap;
     use std::os::unix::fs::PermissionsExt;
@@ -2359,13 +2484,15 @@ mod tests {
     use std::sync::Arc;
 
     use axum::{
-        body::Body,
-        http::{header, Request, StatusCode},
+        body::{Body, Bytes},
+        extract::DefaultBodyLimit,
+        http::{header, HeaderValue, Request, StatusCode},
         middleware,
         routing::{get, post},
-        Router,
+        Json, Router,
     };
     use base64::Engine;
+    use serde_json::{json, Value};
     use tower::ServiceExt; // for `oneshot`
 
     /// Build a router that returns a tiny body for any path, wrapped in the
@@ -3672,5 +3799,305 @@ mod tests {
             agent_daemon_path("a b"),
             Some("/v1/agents/a%20b".to_string()),
         );
+    }
+
+    // ── Room attachments through the wildcard forwarder ──────────────
+
+    /// The lane a persistent-rooms request takes must come from reconstructed
+    /// SEGMENTS, never a substring probe.
+    ///
+    /// `{key}` is caller-supplied, so a `contains("/attachments")` or an
+    /// `ends_with` would let a room named after a route steal that route's
+    /// forwarding rules — an 8 MiB body limit or a header-preserving download
+    /// applied to something that is neither.
+    #[test]
+    fn attachment_lanes_are_classified_by_segment_shape() {
+        use axum::http::Method;
+
+        assert_eq!(
+            rooms_persistent_shape(&Method::GET, "/v1/rooms/persistent/team/events"),
+            RoomsPersistentShape::EventsTail
+        );
+        assert_eq!(
+            rooms_persistent_shape(&Method::POST, "/v1/rooms/persistent/team/attachments"),
+            RoomsPersistentShape::AttachmentUpload
+        );
+        assert_eq!(
+            rooms_persistent_shape(&Method::GET, "/v1/rooms/persistent/team/attachments/abc123"),
+            RoomsPersistentShape::AttachmentDownload
+        );
+
+        // The LIST shares the upload's path and is ordinary JSON both ways.
+        assert_eq!(
+            rooms_persistent_shape(&Method::GET, "/v1/rooms/persistent/team/attachments"),
+            RoomsPersistentShape::Json
+        );
+        // A delete answers JSON; only the GET of the bytes needs the header
+        // passthrough.
+        assert_eq!(
+            rooms_persistent_shape(
+                &Method::DELETE,
+                "/v1/rooms/persistent/team/attachments/abc123"
+            ),
+            RoomsPersistentShape::Json
+        );
+        // Everything else in the subtree stays on the JSON lane.
+        assert_eq!(
+            rooms_persistent_shape(&Method::POST, "/v1/rooms/persistent/team/messages"),
+            RoomsPersistentShape::Json
+        );
+        assert_eq!(
+            rooms_persistent_shape(&Method::GET, "/v1/rooms/persistent/team"),
+            RoomsPersistentShape::Json
+        );
+        assert_eq!(
+            rooms_persistent_shape(&Method::GET, "/v1/rooms/persistent"),
+            RoomsPersistentShape::Json
+        );
+
+        // A room KEYED after a route must not inherit that route's lane —
+        // the exact class of mistake a loose ends_with would make.
+        assert_eq!(
+            rooms_persistent_shape(&Method::POST, "/v1/rooms/persistent/attachments"),
+            RoomsPersistentShape::Json
+        );
+        assert_eq!(
+            rooms_persistent_shape(&Method::GET, "/v1/rooms/persistent/events"),
+            RoomsPersistentShape::Json
+        );
+        // Deeper than the route: not ours to special-case.
+        assert_eq!(
+            rooms_persistent_shape(&Method::GET, "/v1/rooms/persistent/t/attachments/a/b"),
+            RoomsPersistentShape::Json
+        );
+        // An empty id is not an id.
+        assert_eq!(
+            rooms_persistent_shape(&Method::GET, "/v1/rooms/persistent/t/attachments/"),
+            RoomsPersistentShape::Json
+        );
+    }
+
+    /// The upload ceiling must be the daemon's own route limit.
+    ///
+    /// `MAX_ATTACHMENT_BYTES` (8 MiB) + `BODY_LIMIT_SLACK` (4096). The slack is
+    /// what lets a slightly-oversize body reach the handler and come back as
+    /// the typed `attachment_too_large` instead of an untyped 413 from us.
+    #[test]
+    fn the_upload_ceiling_mirrors_the_daemons_route_limit() {
+        assert_eq!(ATTACHMENT_UPLOAD_BODY_LIMIT, 8 * 1024 * 1024 + 4096);
+        assert!(ATTACHMENT_UPLOAD_BODY_LIMIT > ROOMS_JSON_BODY_LIMIT);
+    }
+
+    /// A stand-in daemon for the two forwarding tests below. Mirrors the real
+    /// attachment routes' shapes: the upload's `DefaultBodyLimit`, and the
+    /// download's octet-stream + nosniff + disposition triple.
+    async fn spawn_attachment_daemon() -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new()
+            .route(
+                "/v1/rooms/persistent/{key}/attachments",
+                post(|headers: HeaderMap, body: Bytes| async move {
+                    let declared = headers
+                        .get(header::CONTENT_TYPE)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    (
+                        StatusCode::CREATED,
+                        Json(json!({ "ok": true, "bytes": body.len(), "declared": declared })),
+                    )
+                })
+                .layer(DefaultBodyLimit::max(ATTACHMENT_UPLOAD_BODY_LIMIT))
+                .get(|| async { Json(json!({ "ok": true, "attachments": [] })) }),
+            )
+            .route(
+                "/v1/rooms/persistent/{key}/attachments/{id}",
+                get(|| async {
+                    let mut headers = HeaderMap::new();
+                    headers.insert(
+                        header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/octet-stream"),
+                    );
+                    headers.insert(
+                        header::X_CONTENT_TYPE_OPTIONS,
+                        HeaderValue::from_static("nosniff"),
+                    );
+                    headers.insert(
+                        header::CONTENT_DISPOSITION,
+                        HeaderValue::from_static("attachment; filename=\"notes.md\""),
+                    );
+                    (StatusCode::OK, headers, Bytes::from_static(b"# notes"))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind upstream");
+        let addr = listener.local_addr().expect("upstream addr");
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    fn attachment_proxy_state(daemon_url: String) -> Arc<AppState> {
+        Arc::new(AppState {
+            http: reqwest::Client::new(),
+            http_json: reqwest::Client::new(),
+            voice_profile: "leo".to_string(),
+            daemon_url,
+            default_livekit_room_id: "project:surface-test".to_string(),
+            tldraw_sync_uri: None,
+            maps_key: None,
+            maps_map_id: "DEMO_MAP_ID".to_string(),
+            basic_auth: None,
+            session_token: "test-session".to_string(),
+            users: Vec::new(),
+            secure_cookie: false,
+            observer_token_path: PathBuf::from("/not-used"),
+        })
+    }
+
+    /// An attachment upload must reach the daemon whole.
+    ///
+    /// The forwarder buffered every persistent-rooms body at 1 MiB, so the
+    /// daemon's 8 MiB cap was unreachable from a browser: a 2 MiB spec died at
+    /// this proxy with an untyped 413 and no client could explain why. The
+    /// ceiling is raised on THIS SHAPE ONLY — the message route below still
+    /// gets the JSON ceiling — and the declared content type is forwarded
+    /// rather than overwritten with `application/json`, which the body is not.
+    ///
+    /// Drives `build_app` against a real upstream: a limit that stayed on the
+    /// wrong constant, or a shape check that missed this route, fails here.
+    #[tokio::test]
+    async fn an_attachment_upload_over_a_megabyte_reaches_the_daemon() {
+        let (daemon_url, upstream) = spawn_attachment_daemon().await;
+        let dist = tempfile::tempdir().expect("tempdir");
+        let app = build_app(attachment_proxy_state(daemon_url), dist.path());
+
+        let payload = vec![b'x'; 2 * 1024 * 1024];
+        let sent = payload.len();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(
+                        "/v1/rooms/persistent/team/attachments\
+                         ?filename=spec.md&content_type=text/markdown&uploader_id=smaths",
+                    )
+                    .header(header::CONTENT_TYPE, "text/markdown")
+                    .body(Body::from(payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("read body");
+        let seen: Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(
+            seen["bytes"].as_u64(),
+            Some(sent as u64),
+            "the daemon must receive every byte, not a truncated body",
+        );
+        assert_eq!(
+            seen["declared"].as_str(),
+            Some("text/markdown"),
+            "raw attachment bytes must not be forwarded as application/json",
+        );
+        upstream.abort();
+    }
+
+    /// The raised ceiling is for attachments alone.
+    ///
+    /// A room message has no business being megabytes, and widening the limit
+    /// for every persistent-rooms POST would hand an unauthenticated-shaped
+    /// forward eight times the buffer it needs.
+    #[tokio::test]
+    async fn the_raised_ceiling_does_not_leak_to_other_rooms_routes() {
+        let (daemon_url, upstream) = spawn_attachment_daemon().await;
+        let dist = tempfile::tempdir().expect("tempdir");
+        let app = build_app(attachment_proxy_state(daemon_url), dist.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rooms/persistent/team/messages")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(vec![b'x'; 2 * 1024 * 1024]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        upstream.abort();
+    }
+
+    /// A download's headers ARE the security contract, and the proxy used to
+    /// destroy all three.
+    ///
+    /// The daemon answers every download `application/octet-stream` +
+    /// `nosniff` + `Content-Disposition: attachment` precisely so an
+    /// uploader-declared `text/html` can never execute on this origin. The
+    /// forwarder re-stamped every buffered reply `application/json` — correct
+    /// for the rest of the subtree — which stripped the disposition and the
+    /// nosniff and mislabelled the bytes. That made the PROXY the stored-XSS
+    /// surface the daemon had closed.
+    #[tokio::test]
+    async fn a_download_keeps_the_daemons_octet_stream_contract() {
+        let (daemon_url, upstream) = spawn_attachment_daemon().await;
+        let dist = tempfile::tempdir().expect("tempdir");
+        let app = build_app(attachment_proxy_state(daemon_url), dist.path());
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/rooms/persistent/team/attachments/0123456789abcdef0123456789abcdef")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/octet-stream",
+        );
+        assert_eq!(
+            resp.headers().get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+            "nosniff",
+        );
+        assert_eq!(
+            resp.headers().get(header::CONTENT_DISPOSITION).unwrap(),
+            "attachment; filename=\"notes.md\"",
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("read body");
+        assert_eq!(&body[..], b"# notes", "the bytes must arrive unaltered");
+
+        // And the JSON lane is untouched: the LIST on the same path prefix
+        // still comes back labelled application/json.
+        let listed = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/rooms/persistent/team/attachments")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        assert_eq!(
+            listed.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json",
+        );
+        upstream.abort();
     }
 }
