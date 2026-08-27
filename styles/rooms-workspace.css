@@ -1224,6 +1224,133 @@
   font-size: 12px;
 }
 
+/* ── Agent builder (author a new agent in place) ──────────────────── */
+/* Sits directly under the picker above, inside the same disclosure: the
+   picker offers agents that already exist, this authors one that does not.
+   Deliberately quieter than the picker (dashed toggle, no accent) so the
+   common action — add an existing agent — stays the visually primary one. */
+
+.rooms-workspace__agentbuilder-toggle {
+  appearance: none;
+  display: block;
+  width: 100%;
+  padding: 5px 8px;
+  margin-top: 6px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-4);
+  font-family: var(--font);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__agentbuilder-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--fg-2);
+}
+
+.rooms-workspace__agentbuilder {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  margin-top: 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+.rooms-workspace__agentbuilder-input,
+.rooms-workspace__agentbuilder-select,
+.rooms-workspace__agentbuilder-prompt {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 12px;
+  outline: none;
+  transition: border-color var(--dur-fast) var(--ease);
+}
+
+/* The system prompt is the one field that wants room to think in, so it
+   grows with the rail rather than sitting at input height. */
+.rooms-workspace__agentbuilder-prompt {
+  min-height: 96px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.rooms-workspace__agentbuilder-input::placeholder,
+.rooms-workspace__agentbuilder-prompt::placeholder {
+  color: var(--fg-4);
+}
+
+.rooms-workspace__agentbuilder-input:hover:not(:disabled),
+.rooms-workspace__agentbuilder-select:hover:not(:disabled),
+.rooms-workspace__agentbuilder-prompt:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.rooms-workspace__agentbuilder-input:focus:not(:disabled),
+.rooms-workspace__agentbuilder-select:focus:not(:disabled),
+.rooms-workspace__agentbuilder-prompt:focus:not(:disabled) {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.rooms-workspace__agentbuilder-input:disabled,
+.rooms-workspace__agentbuilder-select:disabled,
+.rooms-workspace__agentbuilder-prompt:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* A refusal keeps the form open with its input intact, so the message has to
+   live with the fields rather than replacing them. */
+.rooms-workspace__agentbuilder-error {
+  color: var(--err);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.rooms-workspace__agentbuilder-save {
+  appearance: none;
+  padding: 6px 12px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--fg-on-accent);
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  transition: filter var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__agentbuilder-save:hover:not(:disabled) {
+  filter: brightness(1.12);
+}
+
+.rooms-workspace__agentbuilder-save:active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+.rooms-workspace__agentbuilder-save:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 /* ── Scrollbar ────────────────────────────────────────────────────── */
 
 .rooms-workspace__left-list,
@@ -1273,6 +1400,8 @@
 .rooms-workspace__right-close:focus-visible,
 .rooms-workspace__center-back:focus-visible,
 .rooms-workspace__join-btn:focus-visible,
+.rooms-workspace__agentbuilder-toggle:focus-visible,
+.rooms-workspace__agentbuilder-save:focus-visible,
 .rooms-workspace__composer-send:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
@@ -1615,9 +1744,13 @@
     inset: -8px;
   }
 
+  /* 16px is the iOS threshold below which focusing an input zooms the page. */
   .rooms-workspace__left-input,
   .rooms-workspace__composer-input,
-  .rooms-workspace__addagent-select {
+  .rooms-workspace__addagent-select,
+  .rooms-workspace__agentbuilder-input,
+  .rooms-workspace__agentbuilder-select,
+  .rooms-workspace__agentbuilder-prompt {
     font-size: 16px;
   }
 }

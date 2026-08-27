@@ -9,6 +9,7 @@
 
 use leptos::prelude::*;
 
+mod agents;
 mod app;
 mod call;
 mod canvas;

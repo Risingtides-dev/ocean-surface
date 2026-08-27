@@ -541,6 +541,12 @@ pub struct Rooms {
     /// origin learned at bootstrap (phone-via-tunnel resolves it asynchronously,
     /// so we must read it live at request time, not snapshot it at construction).
     pub url: RwSignal<String>,
+    /// The daemon's model catalogue signal, shared with `Daemon::models` (`GET
+    /// /v1/models`, populated once at bootstrap). Rooms itself never reads it;
+    /// it is carried so the members rail can hand it to the agent builder,
+    /// whose model picker must offer the daemon's own list rather than a
+    /// hardcoded one. Sharing the handle means zero extra requests.
+    pub models: RwSignal<Vec<crate::daemon::ModelInfo>>,
     /// All persistent rooms (from `GET /v1/rooms/persistent`).
     pub list: RwSignal<Vec<Room>>,
     /// Whether the first `fetch_rooms` has resolved (success or failure). Starts
@@ -628,6 +634,7 @@ impl Rooms {
         let daemon_adopted_name = daemon.adopted_display_name;
         let rooms = Self {
             url: daemon.url,
+            models: daemon.models,
             list: RwSignal::new(Vec::new()),
             rooms_loaded: RwSignal::new(false),
             rooms_loading: RwSignal::new(false),

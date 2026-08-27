@@ -584,7 +584,14 @@ fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
         .route("/v1/model", get(proxy_model_get).post(proxy_model_set))
         // Agent identity picker (TASK-9/TASK-11): surfaces call GET /v1/agents
         // same-origin; the proxy forwards to the daemon and returns the JSON list.
-        .route("/v1/agents", get(proxy_agents))
+        // POST is the agent builder (rooms members rail): folder-as-agent used
+        // to be authorable only by hand on disk. This allowlist is not a
+        // passthrough — with only `get(..)` registered, a POST to this same
+        // path is answered 405 with an EMPTY body, so the surface's
+        // `resp.json()` dies with "EOF while parsing a value" and the failure
+        // reads as a decode bug rather than a missing route. Same dead-feature
+        // shape the rooms routes below were written about.
+        .route("/v1/agents", get(proxy_agents).post(proxy_agent_create))
         .route("/v1/fs/dirs", get(proxy_fs_dirs))
         .route(
             "/v1/projects",
@@ -1394,6 +1401,21 @@ async fn proxy_agents(
     Extension(daemon): Extension<ResolvedDaemon>,
 ) -> impl IntoResponse {
     proxy_get_json(&state, &daemon, "/v1/agents").await
+}
+
+/// Reverse-proxy POST /v1/agents (agent builder → create an agent folder).
+///
+/// This puts a filesystem-write API on the web origin: the daemon writes under
+/// `$OCEAN_AGENTS_DIR` and applies no caller auth of its own, so this proxy's
+/// session gate is the only fence. Same posture as the already-proxied
+/// `POST /v1/projects`, and it holds only while the daemon stays bound to
+/// 127.0.0.1.
+async fn proxy_agent_create(
+    State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
+    body: Bytes,
+) -> impl IntoResponse {
+    proxy_post_json(&state, &daemon, "/v1/agents", body).await
 }
 
 /// Reverse-proxy GET /v1/fs/dirs?path=<path> (filesystem directory listing).
@@ -3409,5 +3431,88 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// The agent builder's create must actually be on the allowlist.
+    ///
+    /// `/v1/agents` was registered GET-only, so a POST fell through to
+    /// ServeDir and came back as an empty 404 — which reaches the browser as
+    /// a JSON decode error, not a routing error, and is therefore invisible
+    /// as a proxy bug. Driven against the PRODUCTION router so deleting the
+    /// `.post(...)` flips this test rather than passing vacuously: a routed
+    /// request reaches the forwarder and dies at the closed daemon port with
+    /// 502, while a fallthrough is 404.
+    #[tokio::test]
+    async fn agent_create_routes_through_production_router() {
+        let dist = tempfile::tempdir().expect("tempdir");
+        let state = Arc::new(AppState {
+            http: reqwest::Client::new(),
+            http_json: reqwest::Client::new(),
+            voice_profile: "leo".to_string(),
+            // Closed port: instant connection refusal, never a real daemon.
+            daemon_url: "http://127.0.0.1:9".to_string(),
+            default_livekit_room_id: "project:surface-test".to_string(),
+            tldraw_sync_uri: None,
+            maps_key: None,
+            maps_map_id: "DEMO_MAP_ID".to_string(),
+            basic_auth: None,
+            session_token: "test-session".to_string(),
+            users: Vec::new(),
+            secure_cookie: false,
+            observer_token_path: PathBuf::from("/not-used"),
+        });
+        let app = build_app(state, dist.path());
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/agents")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"name":"researcher","instructions":"be useful"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_GATEWAY,
+            "POST /v1/agents must reach the forwarder, not ServeDir",
+        );
+
+        // Control: the pre-existing GET still routes, so the assertion above
+        // is about the new verb rather than the path existing at all.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/agents")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+
+        // Control: a POST the allowlist does not carry is refused without ever
+        // reaching the forwarder. 405 (not 404) is exactly what POST
+        // /v1/agents itself returned before this route existed — a registered
+        // path whose method router has no POST — and it too has an empty body,
+        // which is why the surface saw a decode error rather than a 405.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/agents-nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 }
