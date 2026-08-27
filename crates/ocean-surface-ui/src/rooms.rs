@@ -44,10 +44,10 @@ enum TailState {
     Reconnecting,
 }
 
-/// localStorage key for this surface's stable room participant id, so a given
-/// browser keeps the same identity across reloads (join/leave/author are keyed
-/// on it).
-const ROOM_IDENTITY_KEY: &str = "ocean.room_identity";
+/// Stable identity used by explicit single-operator and direct-host surfaces.
+/// Browser deployments with a signed-in user never use this value: they stay
+/// unresolved until `/api/config` publishes the current login.
+const SINGLE_OPERATOR_ROOM_ID: &str = "surface-operator";
 
 // ---- Wire types (mirror ocean-core Room / RoomMessage / RoomParticipant) ----
 
@@ -434,39 +434,9 @@ struct RetryOutboxErrorResponse {
     error: Option<String>,
 }
 
-/// Adopt the signed-in user as this surface's room identity.
-///
-/// Before this, identity was minted per BROWSER (`web-<random>`), so a room
-/// roster showed opaque client ids instead of people, and the same person on
-/// two devices appeared as two members. The proxy knows who signed in, so the
-/// login is the identity.
-///
-/// Called at boot with whatever `/api/config` reported. Overwriting on every
-/// boot is deliberate: if a different person signs in on this browser, the
-/// stored identity must follow them rather than inherit the previous tenant's.
-pub fn adopt_identity(id: &str, display_name: &str) {
-    if id.trim().is_empty() {
-        return;
-    }
-    if let Some(storage) = local_storage() {
-        // If a DIFFERENT person signed in on this browser, the previous
-        // tenant's id must not survive — otherwise the new person acts as the
-        // old one until something else overwrites it.
-        let previous = storage.get_item(ROOM_IDENTITY_KEY).ok().flatten();
-        if previous.as_deref().is_some_and(|p| p != id) {
-            let _ = storage.remove_item(ROOM_IDENTITY_KEY);
-            let _ = storage.remove_item(ROOM_DISPLAY_NAME_KEY);
-        }
-        let _ = storage.set_item(ROOM_IDENTITY_KEY, id);
-        let _ = storage.set_item(ROOM_DISPLAY_NAME_KEY, display_name);
-    }
-}
-
-/// Display name for the adopted identity, when one was published.
-const ROOM_DISPLAY_NAME_KEY: &str = "ocean.room_display_name";
-
-/// Identity of this surface as a room participant. Stable per browser via
-/// localStorage so join/leave/author all key on the same id.
+/// Identity of this surface as a room participant. Browser hosts receive it
+/// from the current authenticated proxy session; direct hosts use the stable
+/// single-operator identity.
 #[derive(Debug, Clone)]
 pub struct RoomIdentity {
     pub id: String,
@@ -474,23 +444,34 @@ pub struct RoomIdentity {
 }
 
 impl RoomIdentity {
-    fn current() -> Self {
-        // A persisted id ONLY. Minting here is what produced the `web-<random>`
-        // ghosts: bootstrap resolves a page-load later, so a fresh browser
-        // minted an identity, joined rooms under it, and left a dead member
-        // behind on every visit. An unresolved identity is empty, and the
-        // callers refuse to join or post until bootstrap fills it in.
-        let id = local_storage()
-            .and_then(|s| s.get_item(ROOM_IDENTITY_KEY).ok().flatten())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_default();
-        // Prefer the signed-in display name; fall back to the id so an
-        // unauthenticated or single-operator surface behaves as before.
-        let display_name = local_storage()
-            .and_then(|s| s.get_item(ROOM_DISPLAY_NAME_KEY).ok().flatten())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| id.clone());
-        Self { display_name, id }
+    fn unresolved() -> Self {
+        Self {
+            id: String::new(),
+            display_name: String::new(),
+        }
+    }
+
+    pub(crate) fn from_proxy_config(id: &str, display_name: &str) -> Self {
+        let id = id.trim();
+        if id.is_empty() {
+            return Self {
+                id: SINGLE_OPERATOR_ROOM_ID.to_string(),
+                display_name: "Operator".to_string(),
+            };
+        }
+        let display_name = display_name.trim();
+        Self {
+            id: id.to_string(),
+            display_name: if display_name.is_empty() {
+                id.to_string()
+            } else {
+                display_name.to_string()
+            },
+        }
+    }
+
+    pub(crate) fn direct_host() -> Self {
+        Self::from_proxy_config("", "")
     }
 }
 
@@ -571,12 +552,14 @@ pub struct Rooms {
     /// Monotonic generation: bumped when the open room changes so a stale
     /// poll/SSE loop retires instead of writing into the wrong room.
     generation: RwSignal<u64>,
-    /// This browser's stable participant id, used for join/leave/post.
-    pub identity_id: RwSignal<&'static str>,
+    /// Current participant id, used for join/leave/post. Browser-hosted Rooms
+    /// keep this empty until the signed-in identity resolves from `/api/config`.
+    pub identity_id: RwSignal<String>,
     /// This browser's display name.
-    pub identity_name: RwSignal<&'static str>,
+    pub identity_name: RwSignal<String>,
     /// Whether `identity_id` came from the DAEMON rather than from a
-    /// localStorage warm-start. False until `/api/config` answers. See
+    /// current authenticated config response. False until `/api/config`
+    /// answers on browser hosts. See
     /// [`Rooms::identity_resolved`] for why the distinction is the whole
     /// difference between a gate and a formality.
     pub identity_authoritative: RwSignal<bool>,
@@ -624,12 +607,17 @@ impl Rooms {
     /// always targets the origin resolved by bootstrap. Room collaboration is
     /// daemon-native text; LiveKit state is intentionally outside this type.
     pub fn new(daemon: &crate::daemon::Daemon) -> Self {
-        let identity = RoomIdentity::current();
-        // Leak the small, app-lifetime identity strings to obtain `&'static str`
-        // signals, so the panel can pass them into request closures without a
-        // per-call clone.
-        let id_static: &'static str = Box::leak(identity.id.into_boxed_str());
-        let name_static: &'static str = Box::leak(identity.display_name.into_boxed_str());
+        // A browser login is authoritative, so never act under the identity a
+        // previous tenant left in localStorage while `/api/config` is in flight.
+        // Direct extension/Tauri hosts have no proxy login and use their stable
+        // local-operator identity immediately.
+        let direct_host =
+            crate::daemon::running_as_extension() || crate::daemon::running_as_tauri();
+        let identity = if direct_host {
+            RoomIdentity::direct_host()
+        } else {
+            RoomIdentity::unresolved()
+        };
         let daemon_adopted_id = daemon.adopted_user_id;
         let daemon_adopted_name = daemon.adopted_display_name;
         let rooms = Self {
@@ -645,9 +633,9 @@ impl Rooms {
             transcript: RwSignal::new(Vec::new()),
             status: RwSignal::new(String::new()),
             generation: RwSignal::new(0),
-            identity_id: RwSignal::new(id_static),
-            identity_name: RwSignal::new(name_static),
-            identity_authoritative: RwSignal::new(false),
+            identity_id: RwSignal::new(identity.id),
+            identity_name: RwSignal::new(identity.display_name),
+            identity_authoritative: RwSignal::new(direct_host),
             tail_state: RwSignal::new(TailState::Replaying),
             available_agents: RwSignal::new(Vec::new()),
             agents_loaded: RwSignal::new(false),
@@ -673,12 +661,8 @@ impl Rooms {
             }
             let name = daemon_adopted_name.get();
             let display = if name.is_empty() { id.clone() } else { name };
-            handle
-                .identity_id
-                .set(Box::leak(id.into_boxed_str()) as &'static str);
-            handle
-                .identity_name
-                .set(Box::leak(display.into_boxed_str()) as &'static str);
+            handle.identity_id.set(id);
+            handle.identity_name.set(display);
             // Only now may this surface act. Set last, after both strings are
             // in place, so nothing can observe an authoritative flag over a
             // half-written identity.
@@ -692,19 +676,13 @@ impl Rooms {
     /// this is false: acting under an unresolved identity is exactly how ghost
     /// members were created.
     ///
-    /// The test is "the daemon answered", NOT "we have a non-empty id". Those
-    /// look equivalent and are not: `RoomIdentity::current()` warm-starts from
-    /// localStorage, so a browser that had ever loaded rooms before began life
-    /// with a non-empty id and passed the old check instantly — including a
-    /// `web-<random>` ghost left by the minting bug, or the id of whoever used
-    /// this browser last. Clicking join in the window before `/api/config`
-    /// answered then rejoined as exactly the identity this gate exists to
-    /// refuse. The stored value is a display warm-start and nothing more; only
-    /// the daemon says who you are.
+    /// The test is "the daemon answered", NOT merely "we have a non-empty id".
+    /// Direct hosts are authoritative at construction; browser hosts stay
+    /// unresolved until the current authenticated `/api/config` response.
     pub fn identity_resolved(&self) -> bool {
         identity_may_act(
             self.identity_authoritative.get_untracked(),
-            self.identity_id.get_untracked(),
+            &self.identity_id.get_untracked(),
         )
     }
 
@@ -765,7 +743,7 @@ impl Rooms {
         joined_open_for(
             self.access.get().as_ref(),
             self.open_room.get().as_ref(),
-            self.identity_id.get(),
+            &self.identity_id.get(),
         )
     }
 
@@ -1101,8 +1079,8 @@ impl Rooms {
         let name = self.identity_name.get_untracked();
         spawn_local(async move {
             let body = JoinBody {
-                id,
-                display_name: name,
+                id: &id,
+                display_name: &name,
                 kind: RoomParticipantKind::Human,
             };
             let post_url = format!("{base}/v1/rooms/persistent/{}/participants", encode(&key));
@@ -1218,7 +1196,7 @@ impl Rooms {
             let del_url = format!(
                 "{base}/v1/rooms/persistent/{}/participants/{}",
                 encode(&key),
-                encode(id)
+                encode(&id)
             );
             let result = match Request::delete(&del_url).send().await {
                 Ok(resp) => match resp.json::<RoomMutateResponse>().await {
@@ -1273,7 +1251,7 @@ impl Rooms {
         let id = self.identity_id.get_untracked();
         spawn_local(async move {
             let payload = PostMessageBody {
-                author_id: id,
+                author_id: &id,
                 author_kind: RoomParticipantKind::Human,
                 body: &body,
                 thread_parent_seq,
@@ -2150,10 +2128,6 @@ fn agent_ids_for(access: Option<&RoomAccessProjection>, room: Option<&Room>) -> 
     .unwrap_or_default()
 }
 
-fn local_storage() -> Option<web_sys::Storage> {
-    web_sys::window().and_then(|w| w.local_storage().ok().flatten())
-}
-
 /// Derive a url/key-safe slug from a room name (lowercase alnum + `-`).
 fn slugify(name: &str) -> String {
     let mut out = String::new();
@@ -2226,9 +2200,8 @@ mod tests {
 
     #[test]
     fn acting_requires_the_daemon_to_have_answered_not_just_a_stored_id() {
-        // The gap this closes: a stored id made the gate pass instantly, so a
-        // click landing before /api/config answered rejoined as whatever the
-        // last session left behind — the exact ghost the gate exists to refuse.
+        // An id without current authenticated authority must never make the
+        // gate pass, even if a future warm-start source grows one again.
         assert!(!identity_may_act(false, "web-18c72b1e64dc22de"));
         assert!(!identity_may_act(false, "smaths"));
         // Nothing to act as, however the flag stands.
@@ -2236,6 +2209,25 @@ mod tests {
         assert!(!identity_may_act(true, ""));
         // Resolved, and someone to be.
         assert!(identity_may_act(true, "smaths"));
+    }
+
+    #[test]
+    fn proxy_identity_uses_login_and_normalizes_display_name() {
+        assert_eq!(
+            RoomIdentity::from_proxy_config("  ocean  ", "  Ocean Operator  ").id,
+            "ocean"
+        );
+        assert_eq!(
+            RoomIdentity::from_proxy_config("ocean", "").display_name,
+            "ocean"
+        );
+    }
+
+    #[test]
+    fn successful_single_operator_config_uses_stable_identity() {
+        let identity = RoomIdentity::from_proxy_config("", "");
+        assert_eq!(identity.id, SINGLE_OPERATOR_ROOM_ID);
+        assert_eq!(identity.display_name, "Operator");
     }
 
     #[test]

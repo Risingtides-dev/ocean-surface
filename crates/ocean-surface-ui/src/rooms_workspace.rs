@@ -1494,7 +1494,7 @@ pub fn RoomsWorkspace(
             access
                 .outbox
                 .iter()
-                .any(|item| outbox_matches_failed_message(item, me, &wire, None))
+                .any(|item| outbox_matches_failed_message(item, &me, &wire, None))
         });
         let request_failed = rooms.status.get().starts_with("message ");
         if failed_outbox || request_failed {
@@ -1537,7 +1537,7 @@ pub fn RoomsWorkspace(
             access
                 .outbox
                 .iter()
-                .any(|item| outbox_matches_failed_message(item, me, &wire, Some(root_seq)))
+                .any(|item| outbox_matches_failed_message(item, &me, &wire, Some(root_seq)))
         });
         let request_failed = rooms.status.get().starts_with("message ");
         if failed_outbox || request_failed {
