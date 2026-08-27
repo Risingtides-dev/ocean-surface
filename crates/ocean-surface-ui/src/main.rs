@@ -11,6 +11,7 @@ use leptos::prelude::*;
 
 mod agents;
 mod app;
+mod attachments;
 mod call;
 mod canvas;
 mod components;

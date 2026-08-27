@@ -2900,3 +2900,50 @@ Verified 882 native UI tests plus integration suites, strict WASM Clippy, WASM
 check and test compilation, all 46 proxy tests, proxy check, formatting, and
 diff hygiene. Production deployment remains pending review and merge.
 _________________________________________________________________________________
+time:      [22:55] [08-27-26]
+agent:     [claude] [opus 5]
+worktree:  loop/attachments-ui
+type:      [feature-request]
+area:      [frontend]
+
+Room context files are reachable from a browser. The four daemon attachment
+routes had landed and been verified live, and nothing in the UI called them, so
+the feature read to the user as nothing at all. New attachments.rs owns the
+panel: list, upload with a real error rather than a hang at the 8 MiB cap, and
+open. The proxy half is where the substance is — the room lane forwarded
+everything under one 1 MiB JSON body limit and stamped every buffered reply
+`application/json`, so an upload could not physically reach the daemon and a
+download arrived mislabelled with its Content-Disposition dropped. The lane is
+now classified by segment shape, not by substring: a room literally keyed
+`attachments`, a path one segment deeper, and an empty id all stay JSON, and
+that is four negative tests rather than a comment.
+
+ATTACHMENT_UPLOAD_BODY_LIMIT mirrors the daemon's own MAX_ATTACHMENT_BYTES +
+BODY_LIMIT_SLACK exactly, verified against ocean-os origin/main rather than
+guessed. The slack is load-bearing: capping at the cap would turn every
+oversize upload into our own untyped 413, which reads as a proxy bug instead of
+the rule it is. The download lane early-returns before the JSON buffering and
+forwards the upstream content type verbatim, injecting nosniff only where
+upstream declared no type at all.
+
+Review found one real defect in the state machine, in exactly the area the
+module's comments claimed to have solved: the upload-completion path had no
+current-room guard, so a room switch mid-upload painted the previous room's file
+list under the new room's name with dead links and left the new room's control
+stuck on "uploading…". The module had invented a narrower ticket covering only
+the list path. It now uses the repo's own idiom — generation_snapshot() at start,
+room_is_current() re-validated immediately before ANY write in the completion
+arm — the same guard rooms.rs uses at its eight async-completion sites. reset()
+also clears `uploading`, which the doc comment already claimed it did.
+
+Two tests were dead weight and one is now gone. The ceiling test asserted a
+constant equals its own literal and stayed green with the body-limit fix fully
+reverted; clippy --all-targets rejected the same line as an assertion on a
+constant, so it was deleted. The constant's own doc already carries the why, at
+more length and better. Real coverage for the ceiling and the header contract
+lives in the build_app tests, which do fail on revert.
+
+Verified: 926 native UI tests, 50 proxy tests, cargo fmt --check, strict clippy
+on both crates under --all-targets, RUSTFLAGS="-D warnings" wasm check, and the
+frozen wasm --no-run test link. Deploy remains a human decision.
+_________________________________________________________________________________

@@ -925,6 +925,11 @@ pub fn RoomsWorkspace(
     // discarded mid-sentence and take a half-written system prompt with it.
     let agent_builder = crate::agents::AgentBuilderState::new(&rooms);
 
+    // Room context files. Same reasoning as the agent builder above: an
+    // in-flight upload flag rebuilt by a roster SSE update would re-enable the
+    // control during its own upload.
+    let attachments = crate::attachments::RoomAttachmentsState::new(&rooms);
+
     // Toggle for narrow-screen left-rail visibility.
     let show_left_rail = RwSignal::new(false);
 
@@ -3132,6 +3137,17 @@ pub fn RoomsWorkspace(
                             }
                     }}
                 </div>
+
+                // Room context files. A sibling of the roster, not a child of
+                // the closure above: that closure re-runs on every access
+                // change, and this section owns an upload's in-flight state.
+                <crate::attachments::RoomAttachments
+                    rooms=rooms
+                    state=attachments
+                    writes_allowed=Signal::derive(move || {
+                        access_allows_writes(rooms.access.get().as_ref())
+                    })
+                />
 
                 // Trigger-policy summary at bottom of right rail
                 {move || {
