@@ -396,6 +396,42 @@ enum Focus {
     New,
 }
 
+/// Everything an amend puts on the wire, decided before anything is spawned so
+/// the decision is readable from a test. `None` on a field means "leave it
+/// alone"; `expected_version` is the whole compare-and-swap.
+#[derive(Debug, PartialEq, Eq)]
+struct AmendPlan {
+    expected_version: u64,
+    title: Option<String>,
+    body: Option<String>,
+    state: Option<String>,
+}
+
+/// Does a live compare-and-swap refusal need a plain sentence of its own here?
+///
+/// The open editor renders the full refusal with its re-read control, so it
+/// needs no second copy. Everywhere else — the list, the create form, and the
+/// rail with no panel open at all — would otherwise show NOTHING about a write
+/// the store refused: `begin_write` cleared `error` and never re-set it, so an
+/// author who stepped back from the editor mid-write reads a refusal as a save.
+fn conflict_needs_its_own_line(focus: Option<&Focus>) -> bool {
+    !matches!(focus, Some(Focus::Open(_)))
+}
+
+/// Escape owned by the artifacts panel.
+///
+/// It is the topmost overlay in the rooms surface — `z-index: 445`, above the
+/// members drawer's 430 and its backdrop's 425 — so it consumes the key before
+/// anything under it, and `rooms_workspace`'s ladder asks this first. Without
+/// that branch the key would close the drawer UNDER an open modal, or fall
+/// through to the app rail and tear down the whole rooms surface with an
+/// unsaved draft inside it. A predicate for the same reason
+/// `members_escape_closes` is one: a ladder rung no test can reach is a rung
+/// the next edit deletes in silence.
+pub fn artifacts_escape_closes(panel_open: bool, default_prevented: bool) -> bool {
+    panel_open && !default_prevented
+}
+
 /// Reactive handle for one room's artifacts.
 ///
 /// Constructed at `RoomsWorkspace` component scope, never inside a rail closure:
@@ -425,6 +461,11 @@ pub struct RoomArtifactsState {
     pub saving: RwSignal<bool>,
     /// Whether the panel is open, and what it is showing.
     panel: RwSignal<Option<Focus>>,
+    /// The rail control that opens the panel, so closing it can hand focus
+    /// back — the workspace's Escape ladder does the same for the members
+    /// chip, and a key that leaves focus on a removed node strands a reader
+    /// who is not using a mouse.
+    open_ref: NodeRef<leptos::html::Button>,
     /// The version the open editor was loaded against. This, NOT the version on
     /// the latest list row, is what an amend presents — see the module note on
     /// `expected_version`.
@@ -452,6 +493,7 @@ impl RoomArtifactsState {
             error: RwSignal::new(None),
             saving: RwSignal::new(false),
             panel: RwSignal::new(None),
+            open_ref: NodeRef::new(),
             base_version: RwSignal::new(0),
             conflict: RwSignal::new(None),
             draft_title: RwSignal::new(String::new()),
@@ -459,6 +501,24 @@ impl RoomArtifactsState {
             draft_kind: RwSignal::new(ARTIFACT_KINDS[0].to_string()),
             draft_state: RwSignal::new(ARTIFACT_STATES[0].to_string()),
             ticket: RwSignal::new(0),
+        }
+    }
+
+    /// Whether the panel is on screen. Public because the Escape ladder that
+    /// owns the key lives in `rooms_workspace`, not here.
+    pub fn panel_is_open(&self) -> bool {
+        self.panel.get_untracked().is_some()
+    }
+
+    /// Close the panel and hand focus back to the control that opened it. The
+    /// conflict goes with it: a stale-version banner belongs to the editor that
+    /// earned it, and one restored over a later visit describes a write nobody
+    /// on screen issued.
+    pub fn close_panel(&self) {
+        self.panel.set(None);
+        self.conflict.set(None);
+        if let Some(open) = self.open_ref.get_untracked() {
+            let _ = open.focus();
         }
     }
 
@@ -662,12 +722,14 @@ impl RoomArtifactsState {
         });
     }
 
-    /// Amend one artifact under compare-and-swap.
+    /// Decide what an amend of `artifact_id` would put on the wire, or refuse it
+    /// in the words its author reads.
     ///
-    /// `expected_version` comes from `base_version` — the version the editor was
-    /// loaded against — so a list refresh that landed mid-edit cannot turn a
-    /// stale write into a silent overwrite.
-    fn amend(&self, rooms: Rooms, key: String, artifact_id: String, author_id: String) {
+    /// Separated from `amend` for the same reason `publish_write` takes its room
+    /// check as an argument: `amend` ends in `spawn_local`, a wasm-only import
+    /// no native test can drive, and the version this presents is the one thing
+    /// in the module a wrong answer would lose somebody's work over.
+    fn amend_plan(&self, artifact_id: &str) -> Result<AmendPlan, String> {
         // The row the delta is computed against. `upsert` keeps the list ahead
         // of the editor on every write, so this is present whenever an editor is
         // open — but a silent return here would be an unexplained dead control,
@@ -678,31 +740,40 @@ impl RoomArtifactsState {
             .into_iter()
             .find(|item| item.id == artifact_id)
         else {
-            self.error
-                .set(Some("That artifact is no longer in this room.".to_string()));
-            return;
+            return Err("That artifact is no longer in this room.".to_string());
         };
         let title = self.draft_title.get_untracked();
         let body = self.draft_body.get_untracked();
         let state = self.draft_state.get_untracked();
         if title.trim().is_empty() {
-            self.error
-                .set(Some("An artifact needs a title.".to_string()));
-            return;
+            return Err("An artifact needs a title.".to_string());
         }
-        // The delta is computed against the version the editor HOLDS, which is
-        // the same row the daemon will compare against if the CAS admits this
-        // write. A no-op amend is a 400 there and unreadable prose here.
+        // A no-op amend is a 400 at the store, deliberately, and unreadable
+        // prose here. Caught against the row that stands.
         let Some((title, body, state)) = amend_delta(&current, &title, &body, &state) else {
-            self.error.set(Some("Nothing changed.".to_string()));
-            return;
+            return Err("Nothing changed.".to_string());
         };
-        let (title, body, state) = (
-            title.map(str::to_string),
-            body.map(str::to_string),
-            state.map(str::to_string),
-        );
-        let expected_version = self.base_version.get_untracked();
+        Ok(AmendPlan {
+            // `base_version`, NOT `current.version`. The editor's version is the
+            // one its author actually read; the list's may have moved under them
+            // since, and presenting THAT is a write the compare-and-swap admits
+            // and nobody ever saw.
+            expected_version: self.base_version.get_untracked(),
+            title: title.map(str::to_string),
+            body: body.map(str::to_string),
+            state: state.map(str::to_string),
+        })
+    }
+
+    /// Amend one artifact under compare-and-swap.
+    fn amend(&self, rooms: Rooms, key: String, artifact_id: String, author_id: String) {
+        let plan = match self.amend_plan(&artifact_id) {
+            Ok(plan) => plan,
+            Err(refusal) => {
+                self.error.set(Some(refusal));
+                return;
+            }
+        };
         let base = self.base();
         let me = *self;
         let generation = rooms.generation_snapshot();
@@ -710,10 +781,10 @@ impl RoomArtifactsState {
         spawn_local(async move {
             let url = amend_url(&base, &key, &artifact_id);
             let payload = AmendRequest {
-                expected_version,
-                title: title.as_deref(),
-                body: body.as_deref(),
-                state: state.as_deref(),
+                expected_version: plan.expected_version,
+                title: plan.title.as_deref(),
+                body: plan.body.as_deref(),
+                state: plan.state.as_deref(),
                 author_id: &author_id,
             };
             let outcome = post_artifact(&url, &payload).await;
@@ -871,6 +942,7 @@ pub fn RoomArtifacts(
                 <button
                     class="rooms-workspace__artifacts-open"
                     type="button"
+                    node_ref=state.open_ref
                     title="Open this room's tasks, decisions and notes"
                     disabled=move || {
                         rooms.open_key.get().is_none_or(|key| key.is_empty())
@@ -892,6 +964,25 @@ pub fn RoomArtifacts(
                 state.error.get().map(|error| view! {
                     <div class="rooms-workspace__artifacts-error" role="alert">{error}</div>
                 })
+            }}
+
+            // The compare-and-swap refusal follows its author out of the editor.
+            // A 409 that lands after they stepped back to the list renders
+            // nowhere otherwise: `begin_write` cleared `error` and never re-set
+            // it, and the recovery block below is inside the editor they left.
+            // A write the store REFUSED reading as a write that saved is the one
+            // outcome this whole panel exists to prevent.
+            {move || {
+                let focus = state.panel.get();
+                state
+                    .conflict
+                    .get()
+                    .filter(|_| conflict_needs_its_own_line(focus.as_ref()))
+                    .map(|(expected, actual)| view! {
+                        <div class="rooms-workspace__artifacts-error" role="alert">
+                            {conflict_message(expected, actual)}
+                        </div>
+                    })
             }}
 
             {move || {
@@ -952,14 +1043,20 @@ pub fn RoomArtifacts(
                 let Some(focus) = state.panel.get() else {
                     return ().into_any();
                 };
+                // The panel is a fixed modal over its own rail, so the rail's
+                // copy of the sentence is behind the scrim while this is open.
+                let stranded = conflict_needs_its_own_line(Some(&focus));
                 view! {
                     <div class="rooms-workspace__artifacts-scrim" on:click=move |_| {
-                        state.panel.set(None);
-                        state.conflict.set(None);
+                        state.close_panel();
                     }></div>
+                    // `aria-modal` because the scrim is only paint: without it a
+                    // screen reader still walks the rail and the transcript
+                    // behind a dialog a sighted reader cannot reach.
                     <div
                         class="rooms-workspace__artifacts-panel"
                         role="dialog"
+                        aria-modal="true"
                         aria-label="Room artifacts"
                     >
                         <div class="rooms-workspace__artifacts-panel-head">
@@ -974,10 +1071,7 @@ pub fn RoomArtifacts(
                                 class="rooms-workspace__artifacts-close"
                                 type="button"
                                 aria-label="Close artifacts"
-                                on:click=move |_| {
-                                    state.panel.set(None);
-                                    state.conflict.set(None);
-                                }
+                                on:click=move |_| state.close_panel()
                             >
                                 "\u{d7}"
                             </button>
@@ -989,6 +1083,19 @@ pub fn RoomArtifacts(
                                     {error}
                                 </div>
                             })
+                        }}
+
+                        {move || {
+                            state.conflict.get().filter(|_| stranded).map(
+                                |(expected, actual)| view! {
+                                    <div
+                                        class="rooms-workspace__artifacts-error"
+                                        role="alert"
+                                    >
+                                        {conflict_message(expected, actual)}
+                                    </div>
+                                },
+                            )
                         }}
 
                         <div class="rooms-workspace__artifacts-panel-body">
@@ -1303,6 +1410,7 @@ mod tests {
             error: RwSignal::new(None),
             saving: RwSignal::new(false),
             panel: RwSignal::new(None),
+            open_ref: NodeRef::new(),
             base_version: RwSignal::new(0),
             conflict: RwSignal::new(None),
             draft_title: RwSignal::new(String::new()),
@@ -1553,24 +1661,134 @@ mod tests {
     fn an_amend_presents_the_version_the_editor_opened_against() {
         // The bug this refuses: a background list refresh lands mid-edit
         // carrying v5, the editor still shows v2's prose, and an amend that
-        // presented v5 would be admitted by the CAS and silently overwrite the
-        // change the author never saw. `base_version` is captured when the
-        // editor loads and does not move when the list does.
+        // presented v5 would be ADMITTED by the compare-and-swap and silently
+        // overwrite the change its author never saw. The plan is read rather
+        // than the wire because `amend` ends in `spawn_local`, which no native
+        // test can drive — the payload decision is extracted for exactly that.
         let state = fresh_state();
         let opened = decoded("ship-the-proxy", "task", "open", 2);
         state.items.set(vec![opened.clone()]);
         state.load_editor(&opened);
         assert_eq!(state.base_version.get_untracked(), 2);
 
-        // Someone else amends; the list refresh publishes their v5 row.
+        // Someone else amends; the list refresh publishes their v5 row under
+        // the open editor. The author then moves the lifecycle and saves.
         state
             .items
             .set(vec![decoded("ship-the-proxy", "task", "open", 5)]);
+        state.draft_state.set("done".to_string());
+
+        let plan = state
+            .amend_plan("ship-the-proxy")
+            .expect("a lifecycle move is a real change");
         assert_eq!(
-            state.base_version.get_untracked(),
-            2,
-            "the editor still holds the version it read"
+            plan.expected_version, 2,
+            "the version the editor read goes out, not the one the list moved to"
         );
+        assert_eq!(plan.state.as_deref(), Some("done"));
+        assert_eq!(plan.title, None, "an unchanged field is left alone");
+        assert_eq!(plan.body, None);
+    }
+
+    #[test]
+    fn an_amend_the_store_would_refuse_is_refused_here_with_a_reason() {
+        // Each of these is a 400 or a dead control at the wire. Refused before
+        // the write so the author reads a cause instead of a status code.
+        let state = fresh_state();
+        let opened = decoded("ship-the-proxy", "task", "open", 2);
+        state.items.set(vec![opened.clone()]);
+        state.load_editor(&opened);
+
+        assert_eq!(
+            state.amend_plan("gone-from-the-room"),
+            Err("That artifact is no longer in this room.".to_string())
+        );
+
+        state.draft_title.set("   ".to_string());
+        assert_eq!(
+            state.amend_plan("ship-the-proxy"),
+            Err("An artifact needs a title.".to_string())
+        );
+
+        state.draft_title.set(opened.title.clone());
+        assert_eq!(
+            state.amend_plan("ship-the-proxy"),
+            Err("Nothing changed.".to_string())
+        );
+    }
+
+    #[test]
+    fn a_refused_write_is_shown_wherever_its_author_is_standing() {
+        // The swallow this refuses: submit an amend, step back to the list, and
+        // the 409 lands into a state nothing renders — `begin_write` cleared
+        // `error` and never re-set it, and the recovery block lives inside the
+        // editor that was left. An un-erroring UI over a write the store
+        // REFUSED is a refusal that reads as a save.
+        let state = fresh_state();
+        let opened = decoded("ship-the-proxy", "task", "open", 2);
+        state.items.set(vec![opened.clone()]);
+        state.load_editor(&opened);
+        state.begin_write();
+        // Back to the list, mid-write.
+        state.panel.set(Some(Focus::List));
+
+        assert!(!state.publish_write(
+            WriteOutcome::Conflict {
+                expected: 2,
+                actual: 5
+            },
+            true
+        ));
+        assert_eq!(
+            state.error.get_untracked(),
+            None,
+            "a conflict is not an error"
+        );
+        assert_eq!(state.conflict.get_untracked(), Some((2, 5)));
+        assert!(
+            conflict_needs_its_own_line(state.panel.get_untracked().as_ref()),
+            "the list has no conflict banner of its own, so it must carry the sentence"
+        );
+
+        // Closed entirely — the rail is then the only thing on screen, and it
+        // says it too.
+        state.panel.set(None);
+        assert!(conflict_needs_its_own_line(None));
+        // The create form is no better a place to hide it.
+        assert!(conflict_needs_its_own_line(Some(&Focus::New)));
+        // Only the open editor is exempt: it renders the full refusal WITH the
+        // re-read that recovers from it, and two copies would read as two.
+        assert!(!conflict_needs_its_own_line(Some(&Focus::Open(
+            "ship-the-proxy".to_string()
+        ))));
+    }
+
+    #[test]
+    fn the_panel_consumes_escape_before_anything_underneath_it() {
+        // The panel is `position: fixed` at z-index 445, above the members
+        // drawer (430) and its backdrop (425). Left out of the workspace's
+        // ladder, Escape would close the drawer UNDER an open modal or fall
+        // through to the app rail and tear down the rooms surface with an
+        // unsaved draft inside it.
+        assert!(artifacts_escape_closes(true, false));
+        // Nothing to close.
+        assert!(!artifacts_escape_closes(false, false));
+        // Something nearer the key already answered it.
+        assert!(!artifacts_escape_closes(true, true));
+    }
+
+    #[test]
+    fn closing_the_panel_retires_the_conflict_it_was_showing() {
+        // A banner restored over a later visit describes a write nobody on
+        // screen issued.
+        let state = fresh_state();
+        state.panel.set(Some(Focus::List));
+        state.conflict.set(Some((2, 5)));
+        assert!(state.panel_is_open());
+
+        state.close_panel();
+        assert!(!state.panel_is_open());
+        assert_eq!(state.conflict.get_untracked(), None);
     }
 
     #[test]

@@ -1881,10 +1881,23 @@ pub fn RoomsWorkspace(
                 if ev.key() != "Escape" {
                     return;
                 }
-                // Topmost overlay first: an open members drawer sits above
-                // the left drawer and the app hierarchy, so it consumes the
-                // first Escape. Only when it actually renders as an overlay —
-                // an inline rail never owns the key.
+                // Topmost overlay first, and that is the artifacts panel: a
+                // fixed modal at z-index 445, above the members drawer's 430
+                // and its backdrop's 425. Without this rung Escape closes a
+                // drawer UNDERNEATH an open modal, or falls through to the app
+                // rail and tears the whole rooms surface down with an unsaved
+                // artifact draft inside it.
+                if crate::room_artifacts::artifacts_escape_closes(
+                    artifacts.panel_is_open(),
+                    ev.default_prevented(),
+                ) {
+                    ev.prevent_default();
+                    artifacts.close_panel();
+                    return;
+                }
+                // Then the members drawer, which sits above the left drawer and
+                // the app hierarchy. Only when it actually renders as an
+                // overlay — an inline rail never owns the key.
                 let members_overlay = window_inner_width().is_some_and(|width| {
                     members_drawer_is_overlay(
                         width,
