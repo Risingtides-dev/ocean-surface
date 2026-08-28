@@ -284,6 +284,15 @@ fn summary_read_is_current(ticket: u64, current: u64) -> bool {
     ticket == current
 }
 
+/// Escape owned by the summary panel. Same contract as
+/// `artifacts_escape_closes`: the panel is a fixed modal on the rooms
+/// surface's overlay tier, so it consumes the key before the drawers under
+/// it. A predicate for the same reason that one is — a ladder rung no test
+/// can reach is a rung the next edit deletes in silence.
+pub fn summary_escape_closes(panel_open: bool, default_prevented: bool) -> bool {
+    panel_open && !default_prevented
+}
+
 // ---- State ------------------------------------------------------------------
 
 /// Reactive handle for one room's summary.
@@ -316,6 +325,10 @@ pub struct RoomSummaryState {
     pub note: RwSignal<Option<String>>,
     /// A summarize run is in flight — blocks re-submit and drives the label.
     pub summarizing: RwSignal<bool>,
+    /// Whether the reading-measure panel is open.
+    panel: RwSignal<bool>,
+    /// The rail control that opens the panel, so closing hands focus back.
+    open_ref: NodeRef<leptos::html::Button>,
     /// Monotonic ticket; only the latest overlapping read may publish.
     ticket: RwSignal<u64>,
 }
@@ -330,7 +343,23 @@ impl RoomSummaryState {
             error: RwSignal::new(None),
             note: RwSignal::new(None),
             summarizing: RwSignal::new(false),
+            panel: RwSignal::new(false),
+            open_ref: NodeRef::new(),
             ticket: RwSignal::new(0),
+        }
+    }
+
+    /// Whether the panel is on screen. Public because the Escape ladder that
+    /// owns the key lives in `rooms_workspace`, not here.
+    pub fn panel_is_open(&self) -> bool {
+        self.panel.get_untracked()
+    }
+
+    /// Close the panel and hand focus back to the control that opened it.
+    pub fn close_panel(&self) {
+        self.panel.set(false);
+        if let Some(open) = self.open_ref.get_untracked() {
+            let _ = open.focus();
         }
     }
 
@@ -346,7 +375,9 @@ impl RoomSummaryState {
     /// worse than showing none. `summarizing` is retired here as well: a run
     /// belongs to the room that started it, so a flag carried across a room
     /// change disables the new room's control over work it never asked for,
-    /// permanently if that request never resolves.
+    /// permanently if that request never resolves. The panel goes with them:
+    /// one left open across a room change would present the next room's
+    /// summary inside a dialog the operator opened for this one.
     fn reset(&self) {
         self.ticket
             .update(|ticket| *ticket = ticket.wrapping_add(1));
@@ -356,6 +387,7 @@ impl RoomSummaryState {
         self.error.set(None);
         self.note.set(None);
         self.summarizing.set(false);
+        self.panel.set(false);
     }
 
     /// Read back the room's standing summary.
@@ -509,7 +541,13 @@ impl RoomSummaryState {
 
 // ---- Component --------------------------------------------------------------
 
-/// The open room's summary: what it says now, and one control to re-run it.
+/// The open room's summary: a compact rail row, and a panel where the prose is
+/// actually read and the run control lives.
+///
+/// The rail deliberately holds one line — whether a summary exists and how
+/// current it is. The right rail is 220px wide and prose is unreadable there;
+/// everything at a reading measure happens in the panel, exactly as
+/// `room_artifacts` and `room_repo` do it.
 ///
 /// `writes_allowed` is supplied by the workspace rather than recomputed here so
 /// this control and the composer can never disagree about the same room's
@@ -547,76 +585,47 @@ pub fn RoomSummary(
             <div class="rooms-workspace__summary-head">
                 <span class="rooms-workspace__summary-title">"Summary"</span>
                 <button
-                    class="rooms-workspace__summary-run"
+                    class="rooms-workspace__summary-open"
                     type="button"
-                    title="Summarize this room's transcript into the room's summary"
-                    disabled=move || !can_summarize()
+                    node_ref=state.open_ref
+                    title="Open this room's summary"
+                    disabled=move || {
+                        rooms.open_key.get().is_none_or(|key| key.is_empty())
+                    }
                     on:click=move |_| {
-                        let Some(key) = rooms
-                            .open_key
-                            .get_untracked()
-                            .filter(|key| !key.is_empty())
-                        else {
-                            return;
-                        };
-                        if !rooms.identity_resolved() {
-                            state.error.set(Some(
-                                "Still signing in \u{2014} try again in a moment.".to_string(),
-                            ));
-                            return;
-                        }
-                        state.summarize(rooms, key, rooms.identity_id.get_untracked());
+                        state.error.set(None);
+                        state.panel.set(true);
                     }
                 >
-                    {move || {
-                        if state.summarizing.get() { "summarizing\u{2026}" } else { "summarize" }
-                    }}
+                    "open"
                 </button>
             </div>
 
+            // Rendered in the rail AND the panel, like the artifacts error: a
+            // failure while the panel is closed must not read as a room with
+            // nothing to say.
             {move || {
                 state.error.get().map(|error| view! {
                     <div class="rooms-workspace__summary-error" role="alert">{error}</div>
                 })
             }}
 
-            {move || {
-                state.note.get().map(|note| view! {
-                    <div class="rooms-workspace__summary-note">{note}</div>
-                })
-            }}
-
+            // The collapsed row's one line: whether a summary exists and how
+            // current it is. The prose itself lives in the panel.
             {move || {
                 if state.loading.get() {
                     return view! {
                         <div class="rooms-workspace__summary-note">"Loading summary\u{2026}"</div>
                     }.into_any();
                 }
-                // The standing summary stays readable through a re-run. Blanking
-                // it for the duration would remove the only thing on screen worth
-                // reading, and a run that comes back `unchanged` would have taken
-                // away nothing but the reader's place in the text.
                 if let Some(artifact) = state.artifact.get() {
-                    let dropped = artifact.state == "dropped";
                     let detail = format!(
                         "{} \u{2014} updated {} by {}",
                         artifact.id, artifact.updated_at, artifact.updated_by,
                     );
                     return view! {
-                        <div class="rooms-workspace__summary-scroll">
-                            <div
-                                class="rooms-workspace__summary-body"
-                                class:rooms-workspace__summary-body--dropped=dropped
-                            >
-                                // Structural rendering only: `body_view` emits
-                                // Leptos text nodes inside a fixed element set
-                                // with no innerHTML path, so model-written prose
-                                // cannot become markup on this origin.
-                                {crate::room_markdown::body_view(artifact.body.clone(), members)}
-                            </div>
-                            <div class="rooms-workspace__summary-meta" title=detail>
-                                {summary_meta(&artifact)}
-                            </div>
+                        <div class="rooms-workspace__summary-line" title=detail>
+                            {summary_meta(&artifact)}
                         </div>
                     }.into_any();
                 }
@@ -633,6 +642,145 @@ pub fn RoomSummary(
                 }
                 view! {
                     <div class="rooms-workspace__summary-note">"No summary yet."</div>
+                }.into_any()
+            }}
+
+            {move || {
+                if !state.panel.get() {
+                    return ().into_any();
+                }
+                view! {
+                    <div
+                        class="rooms-workspace__summary-scrim"
+                        on:click=move |_| state.close_panel()
+                    ></div>
+                    // `aria-modal` because the scrim is only paint: without it
+                    // a screen reader still walks the rail and the transcript
+                    // behind a dialog a sighted reader cannot reach.
+                    <div
+                        class="rooms-workspace__summary-panel"
+                        role="dialog"
+                        aria-modal="true"
+                        aria-label="Room summary"
+                    >
+                        <div class="rooms-workspace__summary-panel-head">
+                            <span class="rooms-workspace__summary-panel-title">"Summary"</span>
+                            <button
+                                class="rooms-workspace__summary-run"
+                                type="button"
+                                title="Summarize this room's transcript into the room's summary"
+                                disabled=move || !can_summarize()
+                                on:click=move |_| {
+                                    let Some(key) = rooms
+                                        .open_key
+                                        .get_untracked()
+                                        .filter(|key| !key.is_empty())
+                                    else {
+                                        return;
+                                    };
+                                    if !rooms.identity_resolved() {
+                                        state.error.set(Some(
+                                            "Still signing in \u{2014} try again in a moment."
+                                                .to_string(),
+                                        ));
+                                        return;
+                                    }
+                                    state.summarize(
+                                        rooms,
+                                        key,
+                                        rooms.identity_id.get_untracked(),
+                                    );
+                                }
+                            >
+                                {move || {
+                                    if state.summarizing.get() {
+                                        "summarizing\u{2026}"
+                                    } else {
+                                        "summarize"
+                                    }
+                                }}
+                            </button>
+                            <button
+                                class="rooms-workspace__summary-close"
+                                type="button"
+                                aria-label="Close summary"
+                                on:click=move |_| state.close_panel()
+                            >
+                                "\u{d7}"
+                            </button>
+                        </div>
+                        <div class="rooms-workspace__summary-panel-body">
+                            {move || {
+                                state.error.get().map(|error| view! {
+                                    <div class="rooms-workspace__summary-error" role="alert">
+                                        {error}
+                                    </div>
+                                })
+                            }}
+                            {move || {
+                                state.note.get().map(|note| view! {
+                                    <div class="rooms-workspace__summary-note">{note}</div>
+                                })
+                            }}
+                            {move || {
+                                if state.loading.get() {
+                                    return view! {
+                                        <div class="rooms-workspace__summary-note">
+                                            "Loading summary\u{2026}"
+                                        </div>
+                                    }.into_any();
+                                }
+                                // The standing summary stays readable through a
+                                // re-run. Blanking it for the duration would
+                                // remove the only thing on screen worth reading,
+                                // and a run that comes back `unchanged` would
+                                // have taken away nothing but the reader's place
+                                // in the text.
+                                if let Some(artifact) = state.artifact.get() {
+                                    let dropped = artifact.state == "dropped";
+                                    let detail = format!(
+                                        "{} \u{2014} updated {} by {}",
+                                        artifact.id, artifact.updated_at, artifact.updated_by,
+                                    );
+                                    return view! {
+                                        <div
+                                            class="rooms-workspace__summary-body"
+                                            class:rooms-workspace__summary-body--dropped=dropped
+                                        >
+                                            // Structural rendering only:
+                                            // `body_view` emits Leptos text nodes
+                                            // inside a fixed element set with no
+                                            // innerHTML path, so model-written
+                                            // prose cannot become markup on this
+                                            // origin.
+                                            {crate::room_markdown::body_view(
+                                                artifact.body.clone(),
+                                                members,
+                                            )}
+                                        </div>
+                                        <div class="rooms-workspace__summary-meta" title=detail>
+                                            {summary_meta(&artifact)}
+                                        </div>
+                                    }.into_any();
+                                }
+                                if state.summarizing.get() {
+                                    return view! {
+                                        <div class="rooms-workspace__summary-note">
+                                            "Reading the transcript\u{2026}"
+                                        </div>
+                                    }.into_any();
+                                }
+                                if !state.loaded.get() {
+                                    return ().into_any();
+                                }
+                                view! {
+                                    <div class="rooms-workspace__summary-note">
+                                        "No summary yet."
+                                    </div>
+                                }.into_any()
+                            }}
+                        </div>
+                    </div>
                 }.into_any()
             }}
         </div>
@@ -653,6 +801,8 @@ mod tests {
             error: RwSignal::new(None),
             note: RwSignal::new(None),
             summarizing: RwSignal::new(false),
+            panel: RwSignal::new(false),
+            open_ref: NodeRef::new(),
             ticket: RwSignal::new(0),
         }
     }
@@ -937,6 +1087,8 @@ mod tests {
             error: RwSignal::new(Some("boom".to_string())),
             note: RwSignal::new(Some("unchanged".to_string())),
             summarizing: RwSignal::new(true),
+            panel: RwSignal::new(true),
+            open_ref: NodeRef::new(),
             ticket: RwSignal::new(4),
         };
 
@@ -951,8 +1103,19 @@ mod tests {
         // room's control disabled and reading "summarizing…" for a turn it never
         // asked for, forever if that request never resolves.
         assert!(!state.summarizing.get_untracked());
+        // The panel closes with the room it was opened for: left standing it
+        // would present the next room's summary inside this room's dialog.
+        assert!(!state.panel_is_open());
         // And the ticket still moves, so a read in flight cannot land either.
         assert_eq!(state.ticket.get_untracked(), 5);
+    }
+
+    #[test]
+    fn escape_closes_only_an_open_unclaimed_panel() {
+        assert!(summary_escape_closes(true, false));
+        assert!(!summary_escape_closes(false, false));
+        // A key someone under us already consumed is not ours to act on.
+        assert!(!summary_escape_closes(true, true));
     }
 
     #[test]
