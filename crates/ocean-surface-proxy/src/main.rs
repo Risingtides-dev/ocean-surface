@@ -1992,6 +1992,25 @@ fn rooms_persistent_shape(method: &axum::http::Method, path: &str) -> RoomsPersi
     }
 }
 
+/// The forward budget one buffered rooms-persistent request gets.
+///
+/// Keyed off [`RoomsPersistentShape`] in one function because the long
+/// command lane used to hang off a lone match arm at the builder site: a
+/// reviewer reverted that arm and every proxy test stayed green, leaving a
+/// long clone one refactor away from dying here as a 502 again. The buffered
+/// non-command shapes answer [`JSON_FORWARD_TIMEOUT`] — the same value the
+/// `http_json` client applies by default, so the answer holds even for the
+/// GET forwards that never attach an explicit per-request timeout. An
+/// [`EventsTail`](RoomsPersistentShape::EventsTail) never gets here: the tail
+/// streams on the untimed `state.http` client — any budget would sever every
+/// live tail — and returns before this function is consulted.
+fn forward_timeout(shape: RoomsPersistentShape) -> std::time::Duration {
+    match shape {
+        RoomsPersistentShape::WorkspaceCommand => WORKSPACE_COMMAND_FORWARD_TIMEOUT,
+        _ => JSON_FORWARD_TIMEOUT,
+    }
+}
+
 /// Forward an attachment download with its headers intact.
 ///
 /// The daemon answers `application/octet-stream` + `X-Content-Type-Options:
@@ -2128,15 +2147,14 @@ async fn proxy_rooms_persistent(
             .request(method, &url)
             .header(header::CONTENT_TYPE, forwarded_type)
             .body(body.to_vec());
-        // A per-request timeout overrides the client's 120s default. Only the
-        // command lane gets it: workspace READS answer out of Bedrock's state
-        // in one round trip and stay on the JSON budget.
-        match shape {
-            RoomsPersistentShape::WorkspaceCommand => {
-                builder.timeout(WORKSPACE_COMMAND_FORWARD_TIMEOUT)
-            }
-            _ => builder,
-        }
+        // A per-request timeout overrides the client's 120s default. The
+        // budget is keyed off the shape in forward_timeout — where a test
+        // pins it — rather than in a match arm here that a refactor once
+        // proved deletable without a single test noticing. For every
+        // non-command shape the explicit value equals the default it
+        // replaces: workspace READS answer out of Bedrock's state in one
+        // round trip and stay on the JSON budget.
+        builder.timeout(forward_timeout(shape))
     };
     match builder.send().await {
         Ok(resp) => {
@@ -2506,11 +2524,13 @@ async fn tts(
 mod tests {
     use super::{
         agent_daemon_path, build_app, config_payload, constant_time_eq, daemon_for, decode_segment,
-        has_dot_segment, has_valid_session, is_hashed_asset, livekit_token_daemon_path, load_users,
-        observatory_token_path, percent_encode_path_segment, read_observer_token,
-        rooms_persistent_shape, session_auth_gate, session_user, sse_no_buffer_headers,
-        wasm_headers, AppState, ProxyUser, ResolvedDaemon, RoomsPersistentShape,
-        ATTACHMENT_UPLOAD_BODY_LIMIT, CALL_PLACE_DAEMON_PATH, SESSION_COOKIE, WASM_CACHE_CONTROL,
+        forward_timeout, has_dot_segment, has_valid_session, is_hashed_asset,
+        livekit_token_daemon_path, load_users, observatory_token_path, percent_encode_path_segment,
+        read_observer_token, rooms_persistent_shape, session_auth_gate, session_user,
+        sse_no_buffer_headers, wasm_headers, AppState, ProxyUser, ResolvedDaemon,
+        RoomsPersistentShape, ATTACHMENT_UPLOAD_BODY_LIMIT, CALL_PLACE_DAEMON_PATH,
+        JSON_FORWARD_TIMEOUT, SESSION_COOKIE, WASM_CACHE_CONTROL,
+        WORKSPACE_COMMAND_FORWARD_TIMEOUT,
     };
     use axum::http::HeaderMap;
     use std::os::unix::fs::PermissionsExt;
@@ -3972,6 +3992,44 @@ mod tests {
             ),
             RoomsPersistentShape::WorkspaceCommand
         );
+    }
+
+    /// The budget the classification buys. The test above pins which requests
+    /// classify as WorkspaceCommand; without this one, nothing pinned that
+    /// the classification RECEIVES the long lane — reverting the timeout arm
+    /// at the builder site once left every proxy test green.
+    #[test]
+    fn workspace_command_forward_timeout_clears_the_daemon_budget() {
+        assert_eq!(
+            forward_timeout(RoomsPersistentShape::WorkspaceCommand),
+            WORKSPACE_COMMAND_FORWARD_TIMEOUT
+        );
+        // Strictly above the daemon's 960s workspace budget
+        // (WORKSPACE_COMMAND_TIMEOUT in ocean-os's room_workspace_proxy.rs):
+        // this hop must outlast that one so the client always reads the
+        // daemon's typed answer, never this hop's 502.
+        assert!(
+            forward_timeout(RoomsPersistentShape::WorkspaceCommand)
+                > std::time::Duration::from_secs(960)
+        );
+    }
+
+    /// Every buffered non-command shape rides the JSON budget — the same
+    /// value the http_json client applies as its default, so the answer stays
+    /// truthful for the GET forwards that never attach an explicit
+    /// per-request timeout. EventsTail is deliberately absent: the tail
+    /// streams on the untimed client before forward_timeout is consulted
+    /// (untimed_client_is_used_only_by_streaming_handlers pins that), so no
+    /// budget at all — least of all a 120s one — is the truth for it.
+    #[test]
+    fn buffered_non_command_shapes_ride_the_json_budget() {
+        for shape in [
+            RoomsPersistentShape::AttachmentUpload,
+            RoomsPersistentShape::AttachmentDownload,
+            RoomsPersistentShape::Json,
+        ] {
+            assert_eq!(forward_timeout(shape), JSON_FORWARD_TIMEOUT);
+        }
     }
 
     /// A stand-in daemon for the two forwarding tests below. Mirrors the real
