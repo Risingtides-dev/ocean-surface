@@ -7,6 +7,8 @@
 //!   GET  /v1/rooms/persistent/{key}/workspace/repo         → the binding
 //!   POST /v1/rooms/persistent/{key}/workspace/repo/clone   → clone it
 //!   POST /v1/rooms/persistent/{key}/workspace/repo/build   → run a script
+//!   GET  /v1/rooms/persistent/{key}/workspace/repo/ci      → recorded CI state
+//!   POST /v1/rooms/persistent/{key}/workspace/repo/ci      → pull CI via gh
 //!
 //! Choosing WHAT the room builds — bind and unbind — is deliberately absent
 //! from that allowlist: those are owner-only upstream, and the daemon always
@@ -50,6 +52,15 @@
 //!    triggers the same silent re-read immediately — the wake accelerates
 //!    the poller, it never replaces it.
 //!
+//! CI rides the same lane with one more property: a pull's reply is ALWAYS
+//! HTTP 200 once gh ran — a nonzero exit (unauthenticated gh, a non-GitHub
+//! remote, a rate limit) is outcome `failed` with gh's stderr guidance as
+//! THE answer, rendered as a legible failed state, never a transport fault.
+//! The recorded read is served from Bedrock's dedupe table with no container
+//! run, so CI state is readable on open even while the container is absent,
+//! and another member's pull reaches this panel as a "workspace CI" marker
+//! on the same transcript tail the clone markers ride.
+//!
 //! A production deployment whose daemon or Bedrock predates these routes
 //! answers 404 with no code; that renders as "not available yet", plainly,
 //! not as a failure. Everything that turns a reply into what the operator
@@ -72,6 +83,11 @@ const CLONE_POLL_MS: u32 = 4_000;
 /// "workspace repo clone failed…"). The other seven marker variants say
 /// nothing about the binding, so they don't wake this section.
 const REPO_CLONE_MARKER_PREFIX: &str = "workspace repo clone";
+
+/// The opening of the CI marker ("workspace CI on 'main': 2 new results…").
+/// Another member's pull lands new rows in Bedrock's table; this marker is
+/// how the recorded view here hears it moved.
+const REPO_CI_MARKER_PREFIX: &str = "workspace CI";
 
 /// The script the build field starts at. Bedrock has no default — `script` is
 /// required on the wire — and "build" is the npm convention this control is
@@ -114,6 +130,49 @@ pub struct BuildReport {
     pub duration_ms: Option<u64>,
 }
 
+/// The `ci` object of a pull reply. Always under HTTP 200 once gh ran —
+/// outcome `failed` or `timed_out` is gh's own report, not a fault.
+/// `message` carries Bedrock's projection refusal (`ci_output_rejected`
+/// family) when gh exited 0 but the answer could not be vouched for.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct CiReport {
+    #[serde(default)]
+    pub outcome: String,
+    #[serde(default)]
+    pub exit_code: Option<i64>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    #[serde(default)]
+    pub checks_total: Option<u64>,
+    #[serde(default)]
+    pub checks_new: Option<u64>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// One CI check. The identity pair is Bedrock's only promise; every
+/// descriptive field is lenient because the two reply shapes differ — a
+/// pull's rows carry `new`, the recorded read's rows carry `first_seen_at`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct CiCheck {
+    #[serde(default)]
+    pub check_run_id: String,
+    #[serde(default)]
+    pub head_sha: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub conclusion: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub first_seen_at: Option<String>,
+    #[serde(default)]
+    pub new: bool,
+}
+
 /// Bedrock's thrown refusals carry their `code` here, nested under `details`
 /// (its top-level error writer serializes `HttpError.details` whole), while
 /// its plain 404s and every daemon-side gate put `code` at the top level.
@@ -134,6 +193,16 @@ struct RepoBody {
     repo: Option<RepoProjection>,
     #[serde(default)]
     build: Option<BuildReport>,
+    #[serde(default)]
+    ci: Option<CiReport>,
+    /// A pull reply's full current list, and the recorded read's whole
+    /// answer — presence here is what a `GET repo/ci` success means.
+    #[serde(default)]
+    checks: Option<Vec<CiCheck>>,
+    /// Top-level on a pull reply: gh's guidance when the outcome is a
+    /// failure. Distinct from the `details.stderr` of a thrown 502.
+    #[serde(default)]
+    stderr: Option<String>,
     #[serde(default)]
     code: Option<String>,
     #[serde(default)]
@@ -178,6 +247,17 @@ fn build_url(base: &str, key: &str, actor: &str) -> String {
     )
 }
 
+/// One URL for both CI verbs: GET reads the recorded state, POST pulls. The
+/// daemon forwards only `limit` upstream on the read and this side never
+/// passes one — Bedrock's default is plenty for a panel.
+fn ci_url(base: &str, key: &str, actor: &str) -> String {
+    format!(
+        "{base}/v1/rooms/persistent/{}/workspace/repo/ci?actor_id={}",
+        encode(key),
+        encode(actor),
+    )
+}
+
 /// What the room's binding IS right now, as far as this surface can honestly
 /// say. `None` in the state signal means "not answered yet" — only a reply
 /// mints one of these.
@@ -196,13 +276,15 @@ enum RepoView {
     Unavailable,
 }
 
-/// The two commands a member can run. One at a time — Bedrock holds a
-/// mutual-exclusion lock over the checkout and answers 409 to the loser, so
-/// offering parallel submits would only manufacture refusals.
+/// The commands a member can run. One at a time — Bedrock holds a
+/// mutual-exclusion lock over the checkout for clone and build, and while a
+/// CI pull takes no claim upstream, one submit at a time keeps this panel's
+/// answer legible: `note` and `error` hold one command's outcome, not a race.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RepoCommand {
     Clone,
     Build,
+    Ci,
 }
 
 /// What a command reply means for the panel.
@@ -214,6 +296,11 @@ enum CommandOutcome {
     /// The build ran. Success OR script failure — both are this arm; the
     /// report says which.
     Built(BuildReport),
+    /// The CI pull ran and gh answered cleanly: the report, and the full
+    /// current list (with `new` flags) that replaces the recorded view
+    /// wholesale. A gh that ran and FAILED is a `Failure` carrying its
+    /// stderr guidance — that guidance is the answer, not a fault.
+    Checked(CiReport, Vec<CiCheck>),
     /// A typed state: the workspace is busy or not ready, in Bedrock's own
     /// terms. Rendered as a sentence, never as a failure.
     State(String),
@@ -300,11 +387,57 @@ fn classify_status(status: u16, body: Option<RepoBody>) -> Result<RepoView, Stri
     }
 }
 
+/// What the recorded-CI read answered. Kept apart from `RepoView` because
+/// the table outlives the container: the binding can be mid-churn while the
+/// recorded checks still read fine, and a daemon can serve the repo lane
+/// while predating this one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChecksView {
+    /// The recorded rows, as Bedrock's table serves them.
+    Recorded(Vec<CiCheck>),
+    /// This deployment does not serve the read. Quiet — the panel around it
+    /// still works, and the pull control answers honestly at the click.
+    Unavailable,
+    /// The read failed and nothing recorded stands to show instead.
+    Unread(String),
+}
+
+/// Map a `GET repo/ci` reply onto the recorded view. Same 404 posture as
+/// `classify_status`: a deployment that predates the lane is an answer, not
+/// a fault.
+fn classify_checks(status: u16, body: Option<RepoBody>) -> Result<ChecksView, String> {
+    let Some(body) = body else {
+        if status == 404 {
+            return Ok(ChecksView::Unavailable);
+        }
+        return Err(format!(
+            "The recorded CI reply could not be read ({status})."
+        ));
+    };
+    if let Some(checks) = body.checks {
+        return Ok(ChecksView::Recorded(checks));
+    }
+    match body.refusal_code() {
+        Some("workspace_route_not_allowed") => Ok(ChecksView::Unavailable),
+        Some(code) => Err(failure_sentence(code)
+            .or_else(|| state_sentence(code))
+            .or_else(|| body.error.clone())
+            .unwrap_or_else(|| format!("Reading recorded CI failed ({status})."))),
+        None if status == 404 => Ok(ChecksView::Unavailable),
+        None => Err(body
+            .error
+            .filter(|error| !error.is_empty())
+            .map(|error| format!("Reading recorded CI failed: {error}"))
+            .unwrap_or_else(|| format!("Reading recorded CI failed ({status})."))),
+    }
+}
+
 /// Map a command reply onto what the panel should show.
 fn classify_command(command: RepoCommand, status: u16, body: Option<RepoBody>) -> CommandOutcome {
     let noun = match command {
         RepoCommand::Clone => "clone",
         RepoCommand::Build => "build",
+        RepoCommand::Ci => "CI check",
     };
     let Some(body) = body else {
         return CommandOutcome::Failure(format!("The {noun} reply could not be read ({status})."));
@@ -318,6 +451,16 @@ fn classify_command(command: RepoCommand, status: u16, body: Option<RepoBody>) -
         RepoCommand::Build => {
             if let Some(build) = body.build {
                 return CommandOutcome::Built(build);
+            }
+        }
+        RepoCommand::Ci => {
+            if let Some(ci) = body.ci {
+                if ci.outcome == "checked" {
+                    return CommandOutcome::Checked(ci, body.checks.unwrap_or_default());
+                }
+                // gh ran and reported — 200 with a failed outcome, and its
+                // stderr guidance is the whole answer.
+                return CommandOutcome::Failure(ci_failure_sentence(&ci, body.stderr.as_deref()));
             }
         }
     }
@@ -374,6 +517,97 @@ fn build_sentence(report: &BuildReport) -> String {
         (_, Some(code)) => format!("Build `{}` exited {code}{took}.", report.script),
         _ => format!("Build `{}` {}{took}.", report.script, report.outcome),
     }
+}
+
+/// The sentence a clean CI pull earns. The counts are the news; the
+/// recorded list below the note carries the conclusions.
+fn ci_sentence(report: &CiReport) -> String {
+    let took = report
+        .duration_ms
+        .map(|ms| format!(" in {}s", ms.div_ceil(1000)))
+        .unwrap_or_default();
+    match (report.checks_new, report.checks_total) {
+        (Some(0), Some(total)) => {
+            format!("CI checked{took} \u{2014} no new results ({total} recorded).")
+        }
+        (Some(new), Some(total)) => {
+            let noun = if new == 1 { "result" } else { "results" };
+            format!("CI checked{took}: {new} new {noun} ({total} total).")
+        }
+        _ => format!("CI checked{took}."),
+    }
+}
+
+/// A failed or timed-out pull, with gh's stderr as the detail — an
+/// unauthenticated gh or a non-GitHub remote explains itself there, and
+/// that guidance is what the operator acts on. Bedrock's projection
+/// refusals carry their reason in `message` instead.
+fn ci_failure_sentence(report: &CiReport, stderr: Option<&str>) -> String {
+    let verb = if report.outcome == "timed_out" {
+        "timed out"
+    } else {
+        "failed"
+    };
+    let guidance = stderr
+        .map(str::trim)
+        .filter(|guidance| !guidance.is_empty())
+        .or_else(|| {
+            report
+                .message
+                .as_deref()
+                .map(str::trim)
+                .filter(|message| !message.is_empty())
+        });
+    match guidance {
+        Some(guidance) => format!("The CI check {verb}: {}", clip(guidance, 400)),
+        None => format!("The CI check {verb}."),
+    }
+}
+
+/// The word a check row is judged on: the conclusion when the run has one,
+/// the status otherwise, "unknown" when gh said neither.
+fn check_verdict(check: &CiCheck) -> &str {
+    check
+        .conclusion
+        .as_deref()
+        .map(str::trim)
+        .filter(|word| !word.is_empty())
+        .or_else(|| {
+            check
+                .status
+                .as_deref()
+                .map(str::trim)
+                .filter(|word| !word.is_empty())
+        })
+        .unwrap_or("unknown")
+}
+
+/// The color a verdict earns: the one word that means done-and-well, the
+/// family that means it is not, and neutral for everything else ("skipped",
+/// "neutral", a bare status).
+fn conclusion_tone(verdict: &str) -> &'static str {
+    match verdict {
+        "success" => "good",
+        "failure" | "timed_out" | "startup_failure" | "action_required" | "cancelled" => "bad",
+        _ => "",
+    }
+}
+
+/// One recorded check as a line the eye can scan: name, verdict, and the
+/// commit it judged.
+fn check_line(check: &CiCheck) -> String {
+    let name = check
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("(unnamed)");
+    let mut line = format!("{name}: {}", check_verdict(check));
+    if !check.head_sha.is_empty() {
+        line.push_str(" @ ");
+        line.push_str(&short_sha(&check.head_sha));
+    }
+    line
 }
 
 /// A readable name for the remote: the last two path segments, `.git`
@@ -447,6 +681,20 @@ fn read_is_current(ticket: u64, current: u64) -> bool {
 /// event that changes the binding this section renders.
 fn is_repo_clone_marker(row: &RoomMessage) -> bool {
     is_workspace_marker(row) && row.body.starts_with(REPO_CLONE_MARKER_PREFIX)
+}
+
+/// Whether a row is a CI marker — another member's pull changed the
+/// recorded view this section reads back.
+fn is_repo_ci_marker(row: &RoomMessage) -> bool {
+    is_workspace_marker(row) && row.body.starts_with(REPO_CI_MARKER_PREFIX)
+}
+
+/// The union the wake Effect watches. One watermark covers both kinds
+/// because a wake simply re-reads this section's two lanes: refreshing both
+/// on either marker costs one extra silent GET, where a second watermark
+/// would cost a second Effect that can drift from this one.
+fn is_repo_wake_marker(row: &RoomMessage) -> bool {
+    is_repo_clone_marker(row) || is_repo_ci_marker(row)
 }
 
 /// Where a standing error came from. A silent read that succeeds may clear
@@ -529,8 +777,15 @@ pub struct RoomRepoState {
     /// The script the build control will name. Room-scoped; reset() returns
     /// it to the convention.
     build_script: RwSignal<String>,
+    /// The recorded CI view: read on open from Bedrock's table (no
+    /// container run), replaced wholesale by a pull's reply.
+    checks: RwSignal<Option<ChecksView>>,
     /// Monotonic ticket; only the latest overlapping read may publish.
     ticket: RwSignal<u64>,
+    /// The recorded-CI read's own admission — separate from `ticket` so a
+    /// binding read and a checks read can overlap without retiring each
+    /// other.
+    checks_ticket: RwSignal<u64>,
     /// Poller generation; bumping it retires any running poll loop.
     poll_epoch: RwSignal<u64>,
 }
@@ -548,7 +803,9 @@ impl RoomRepoState {
             panel: RwSignal::new(false),
             open_ref: NodeRef::new(),
             build_script: RwSignal::new(DEFAULT_BUILD_SCRIPT.to_string()),
+            checks: RwSignal::new(None),
             ticket: RwSignal::new(0),
+            checks_ticket: RwSignal::new(0),
             poll_epoch: RwSignal::new(0),
         }
     }
@@ -577,9 +834,12 @@ impl RoomRepoState {
     fn reset(&self) {
         self.ticket
             .update(|ticket| *ticket = ticket.wrapping_add(1));
+        self.checks_ticket
+            .update(|ticket| *ticket = ticket.wrapping_add(1));
         self.poll_epoch
             .update(|epoch| *epoch = epoch.wrapping_add(1));
         self.view.set(None);
+        self.checks.set(None);
         self.loading.set(false);
         self.error.set(None);
         self.marker_seen.set(None);
@@ -635,6 +895,44 @@ impl RoomRepoState {
         }
     }
 
+    /// Read the recorded CI state, silently — Bedrock answers from its own
+    /// table, so this burns no container run and rides along with every
+    /// binding read.
+    fn fetch_checks(&self, key: String, actor: String) {
+        let base = self.base();
+        let me = *self;
+        let ticket = self.checks_ticket.get_untracked().wrapping_add(1);
+        self.checks_ticket.set(ticket);
+        spawn_local(async move {
+            let result = read_checks(&base, &key, &actor).await;
+            me.publish_checks(
+                result,
+                read_is_current(ticket, me.checks_ticket.get_untracked()),
+            );
+        });
+    }
+
+    /// Publish a recorded-CI read. `publish_status`'s rule, applied twice:
+    /// a failed read never blanks a standing list, and this background lane
+    /// never touches `error` — a blip here must not stomp a command answer
+    /// the operator is reading.
+    fn publish_checks(&self, result: Result<ChecksView, String>, is_current: bool) {
+        if !is_current {
+            return;
+        }
+        match result {
+            Ok(view) => self.checks.set(Some(view)),
+            Err(sentence) => {
+                let keep = self
+                    .checks
+                    .with_untracked(|slot| matches!(slot, Some(ChecksView::Recorded(_))));
+                if !keep {
+                    self.checks.set(Some(ChecksView::Unread(sentence)));
+                }
+            }
+        }
+    }
+
     /// Run the clone. The POST is NOT the source of truth for completion —
     /// see the module note — so this also starts the status poller, which
     /// keeps the panel honest even if the long-held response is lost.
@@ -680,6 +978,24 @@ impl RoomRepoState {
         });
     }
 
+    /// Pull CI through the workspace's gh. No poller and no readback: the
+    /// reply is always the answer — a checked one carries the full current
+    /// list, a failed one carries gh's guidance — and another member's pull
+    /// reaches this panel by marker.
+    fn check_ci(&self, rooms: Rooms, key: String, actor: String) {
+        let base = self.base();
+        let me = *self;
+        let generation = rooms.generation_snapshot();
+        self.working.set(Some(RepoCommand::Ci));
+        self.error.set(None);
+        self.note.set(None);
+        spawn_local(async move {
+            let url = ci_url(&base, &key, &actor);
+            let outcome = post_command(RepoCommand::Ci, &url, &serde_json::json!({})).await;
+            me.publish_command(outcome, rooms.room_is_current(generation, &key));
+        });
+    }
+
     /// Publish a completed command — but only into the room that started it.
     /// `room_is_current` is the caller's `(generation, key)` re-validation,
     /// taken as an argument so every arm is reachable from a native test.
@@ -697,6 +1013,10 @@ impl RoomRepoState {
                 self.view.set(Some(RepoView::Bound(*repo)));
             }
             CommandOutcome::Built(report) => self.note.set(Some(build_sentence(&report))),
+            CommandOutcome::Checked(report, checks) => {
+                self.note.set(Some(ci_sentence(&report)));
+                self.checks.set(Some(ChecksView::Recorded(checks)));
+            }
             CommandOutcome::State(sentence) => self.note.set(Some(sentence)),
             CommandOutcome::Failure(error) => {
                 self.error.set(Some((RepoErrorSource::Command, error)))
@@ -772,9 +1092,23 @@ async fn read_status(base: &str, key: &str, actor: &str) -> Result<RepoView, Str
     }
 }
 
+/// One recorded-CI read: transport, decode, classify. Same undecodable-404
+/// posture as `read_status`, for the same reason.
+async fn read_checks(base: &str, key: &str, actor: &str) -> Result<ChecksView, String> {
+    let url = ci_url(base, key, actor);
+    match Request::get(&url).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.json::<RepoBody>().await.ok();
+            classify_checks(status, body)
+        }
+        Err(err) => Err(format!("The recorded CI request failed: {err}")),
+    }
+}
+
 /// One command POST. The body is exactly what the daemon's strict lane
-/// expects: `{}` for clone, `{script}` for build — `actor_member_id` is the
-/// daemon's to assert, never this side's.
+/// expects: `{}` for clone and CI, `{script}` for build — `actor_member_id`
+/// is the daemon's to assert, never this side's.
 async fn post_command(
     command: RepoCommand,
     url: &str,
@@ -838,28 +1172,32 @@ pub fn RoomRepo(rooms: Rooms, state: RoomRepoState, writes_allowed: Signal<bool>
     });
 
     // Follow the target. Clearing FIRST is what stops the previous room's
-    // binding from being read, however briefly, under this room's name.
+    // binding from being read, however briefly, under this room's name. The
+    // recorded CI read rides along: Bedrock answers it from its own table,
+    // so being readable on open costs no container run.
     Effect::new(move |_| match read_target.get() {
         Some((key, actor)) => {
             state.reset();
+            state.fetch_checks(key.clone(), actor.clone());
             state.fetch(rooms, key, actor);
         }
         None => state.reset(),
     });
 
     // The wake path: a clone finishing anywhere — another member, another
-    // session — lands on the transcript as a System marker, so watching the
-    // SSE-fed transcript closes the gap between "the room heard" and "this
-    // panel shows it". The watermark starts over with reset() AND carries
-    // the room generation, so hydration reads as the initial load, never as
-    // news, whichever Effect runs first on a room switch.
+    // session — lands on the transcript as a System marker, and a CI pull
+    // that found news does too, so watching the SSE-fed transcript closes
+    // the gap between "the room heard" and "this panel shows it". The
+    // watermark starts over with reset() AND carries the room generation,
+    // so hydration reads as the initial load, never as news, whichever
+    // Effect runs first on a room switch.
     Effect::new(move |_| {
         let (watermark, wake) = rooms.transcript.with(|transcript| {
             marker_wake(
                 state.marker_seen.get_untracked(),
                 rooms.generation_snapshot(),
                 transcript,
-                is_repo_clone_marker,
+                is_repo_wake_marker,
             )
         });
         state.marker_seen.set(watermark);
@@ -869,7 +1207,8 @@ pub fn RoomRepo(rooms: Rooms, state: RoomRepoState, writes_allowed: Signal<bool>
         let Some((key, actor)) = read_target.get_untracked() else {
             return;
         };
-        state.refresh_on_marker(rooms, key, actor);
+        state.refresh_on_marker(rooms, key.clone(), actor.clone());
+        state.fetch_checks(key, actor);
     });
 
     let can_run = move || {
@@ -1124,7 +1463,99 @@ fn panel_bound(
                     }}
                 </button>
             </div>
+            // Cloned-only like the build row: the pull runs gh in the
+            // checkout, and Bedrock answers 409 until one exists.
+            <div class="rooms-workspace__repo-actions">
+                <button
+                    class="rooms-workspace__repo-run"
+                    type="button"
+                    title="Pull CI results for the bound branch through the workspace's gh"
+                    disabled=move || !can_run()
+                    on:click=move |_| {
+                        let Some((key, actor_id)) = actor() else { return };
+                        state.check_ci(rooms, key, actor_id);
+                    }
+                >
+                    {move || {
+                        if state.working.get() == Some(RepoCommand::Ci) {
+                            "checking\u{2026}"
+                        } else {
+                            "check CI"
+                        }
+                    }}
+                </button>
+            </div>
         })}
+
+        // The recorded CI state — Bedrock's table, no container run.
+        // Rendered for any standing binding, cloned or not: the rows
+        // outlive the checkout, and a member rejoining after a container
+        // churn still deserves the room's CI history on open.
+        {move || {
+            let Some(checks_view) = state.checks.get() else {
+                return ().into_any();
+            };
+            match checks_view {
+                ChecksView::Unavailable => ().into_any(),
+                ChecksView::Unread(sentence) => view! {
+                    <div class="rooms-workspace__repo-ci">
+                        <div class="rooms-workspace__repo-ci-title">"recorded CI"</div>
+                        <div class="rooms-workspace__repo-note">{sentence}</div>
+                    </div>
+                }
+                .into_any(),
+                ChecksView::Recorded(checks) if checks.is_empty() => view! {
+                    <div class="rooms-workspace__repo-ci">
+                        <div class="rooms-workspace__repo-ci-title">"recorded CI"</div>
+                        <div class="rooms-workspace__repo-note">
+                            "No CI results recorded for this room yet."
+                        </div>
+                    </div>
+                }
+                .into_any(),
+                ChecksView::Recorded(checks) => {
+                    let rows = checks.into_iter().map(check_row).collect_view();
+                    view! {
+                        <div class="rooms-workspace__repo-ci">
+                            <div class="rooms-workspace__repo-ci-title">"recorded CI"</div>
+                            <ul class="rooms-workspace__repo-ci-list">{rows}</ul>
+                        </div>
+                    }
+                    .into_any()
+                }
+            }
+        }}
+    }
+}
+
+/// One recorded check row: the line, linked when gh gave a URL, the pull
+/// reply's `new` flag, and when this room first saw the result.
+fn check_row(check: CiCheck) -> impl IntoView {
+    let tone = conclusion_tone(check_verdict(&check));
+    let line_class = if tone.is_empty() {
+        "rooms-workspace__repo-check-line".to_string()
+    } else {
+        format!("rooms-workspace__repo-check-line rooms-workspace__repo-check-line--{tone}")
+    };
+    let line = check_line(&check);
+    let url = check.url.clone().filter(|url| !url.is_empty());
+    let seen = check.first_seen_at.clone().filter(|at| !at.is_empty());
+    view! {
+        <li class="rooms-workspace__repo-check">
+            {check.new.then(|| view! {
+                <span class="rooms-workspace__repo-check-new">"new"</span>
+            })}
+            {match url {
+                Some(url) => view! {
+                    <a class=line_class href=url target="_blank" rel="noreferrer">{line}</a>
+                }
+                .into_any(),
+                None => view! { <span class=line_class>{line}</span> }.into_any(),
+            }}
+            {seen.map(|at| view! {
+                <span class="rooms-workspace__repo-check-seen">{at}</span>
+            })}
+        </li>
     }
 }
 
@@ -1145,7 +1576,9 @@ mod tests {
             panel: RwSignal::new(false),
             open_ref: NodeRef::new(),
             build_script: RwSignal::new(DEFAULT_BUILD_SCRIPT.to_string()),
+            checks: RwSignal::new(None),
             ticket: RwSignal::new(0),
+            checks_ticket: RwSignal::new(0),
             poll_epoch: RwSignal::new(0),
         }
     }
@@ -1325,6 +1758,205 @@ mod tests {
         );
     }
 
+    // ---- the CI pull --------------------------------------------------------
+
+    /// The checked reply, field for field as Bedrock composes it: the
+    /// report's counts, and the full current list with `new` flagging what
+    /// this room had not recorded.
+    #[test]
+    fn a_checked_ci_carries_the_results() {
+        let checked = body(
+            r#"{"ci": {"outcome": "checked", "branch": "main", "repo_dir": "site",
+                       "exit_code": 0, "duration_ms": 5200, "checks_total": 5, "checks_new": 2},
+                "checks": [
+                  {"check_run_id": "17296035001",
+                   "head_sha": "0123456789012345678901234567890123456789",
+                   "name": "lint", "title": "CI", "status": "completed",
+                   "conclusion": "failure", "event": "push",
+                   "url": "https://github.com/acme/site/actions/runs/17296035001",
+                   "created_at": "2026-08-27T10:00:00Z", "updated_at": "2026-08-27T10:05:00Z",
+                   "new": true},
+                  {"check_run_id": "17296035000",
+                   "head_sha": "0123456789012345678901234567890123456789",
+                   "name": "build", "status": "completed", "conclusion": "success",
+                   "new": false}
+                ],
+                "exec": {"id": "exec-9"}, "stderr": ""}"#,
+        );
+        let outcome = classify_command(RepoCommand::Ci, 200, Some(checked));
+        let CommandOutcome::Checked(report, checks) = outcome else {
+            panic!("expected Checked, got {outcome:?}");
+        };
+        assert_eq!(checks.len(), 2);
+        assert!(checks[0].new);
+        assert!(!checks[1].new);
+        let sentence = ci_sentence(&report);
+        assert!(
+            sentence.contains("2 new results (5 total)"),
+            "got: {sentence}"
+        );
+        assert!(sentence.contains("6s"), "got: {sentence}");
+    }
+
+    /// gh ran and exited nonzero — unauthenticated, a non-GitHub remote, a
+    /// rate limit. The reply is 200, the stderr guidance is THE answer, and
+    /// it must survive into the sentence like the clone failure's does.
+    #[test]
+    fn a_failed_ci_shows_the_gh_guidance() {
+        let failed = body(
+            r#"{"ci": {"outcome": "failed", "branch": "main", "repo_dir": "site",
+                       "exit_code": 4, "duration_ms": 800},
+                "exec": {"id": "exec-10"},
+                "stderr": "To get started with GitHub CLI, please run:  gh auth login"}"#,
+        );
+        let outcome = classify_command(RepoCommand::Ci, 200, Some(failed));
+        let CommandOutcome::Failure(sentence) = outcome else {
+            panic!("expected Failure, got {outcome:?}");
+        };
+        assert!(sentence.contains("gh auth login"), "got: {sentence}");
+        assert!(sentence.contains("failed"), "got: {sentence}");
+    }
+
+    #[test]
+    fn a_timed_out_ci_says_so() {
+        let stalled = body(
+            r#"{"ci": {"outcome": "timed_out", "branch": "main", "repo_dir": "site",
+                       "exit_code": null, "duration_ms": 600000},
+                "exec": {"id": "exec-11"}, "stderr": ""}"#,
+        );
+        let outcome = classify_command(RepoCommand::Ci, 200, Some(stalled));
+        assert_eq!(
+            outcome,
+            CommandOutcome::Failure("The CI check timed out.".to_string())
+        );
+    }
+
+    /// gh exited 0 but Bedrock refused to vouch for the output — the coded
+    /// refusal's `message` is the human half, and stderr (empty here) must
+    /// not shadow it.
+    #[test]
+    fn a_rejected_ci_projection_carries_its_message() {
+        let rejected = body(
+            r#"{"ci": {"outcome": "failed", "error": "ci_output_rejected",
+                       "message": "gh did not return JSON.", "branch": "main",
+                       "repo_dir": "site", "exit_code": 0, "duration_ms": 900},
+                "exec": {"id": "exec-12"}, "stderr": ""}"#,
+        );
+        let outcome = classify_command(RepoCommand::Ci, 200, Some(rejected));
+        let CommandOutcome::Failure(sentence) = outcome else {
+            panic!("expected Failure, got {outcome:?}");
+        };
+        assert!(sentence.contains("did not return JSON"), "got: {sentence}");
+    }
+
+    /// Bedrock's two typed refusals for a pull, both thrown (code under
+    /// `details`): a clone in flight, and a repo not yet cloned.
+    #[test]
+    fn a_ci_pull_against_an_unready_checkout_is_a_state() {
+        let cloning = body(
+            r#"{"ok": false, "error": "A clone is running for this room; wait for it to finish.",
+                "details": {"code": "repo_cloning"}}"#,
+        );
+        let outcome = classify_command(RepoCommand::Ci, 409, Some(cloning));
+        let CommandOutcome::State(sentence) = outcome else {
+            panic!("expected State, got {outcome:?}");
+        };
+        assert!(sentence.contains("already running"), "got: {sentence}");
+
+        let uncloned = body(
+            r#"{"ok": false, "error": "This room's repo has not been cloned into the workspace.",
+                "details": {"code": "repo_not_cloned", "clone_status": "pending"}}"#,
+        );
+        let outcome = classify_command(RepoCommand::Ci, 409, Some(uncloned));
+        let CommandOutcome::State(sentence) = outcome else {
+            panic!("expected State, got {outcome:?}");
+        };
+        assert!(sentence.contains("clone it first"), "got: {sentence}");
+    }
+
+    /// A daemon predating the CI lane refuses the POST with its own coded
+    /// 404 — a failure in words at the click, not a state and not a crash.
+    #[test]
+    fn a_route_less_daemon_refuses_the_ci_pull_in_words() {
+        let refused = body(
+            r#"{"ok": false, "code": "workspace_route_not_allowed",
+                "error": "this workspace route is not allowed"}"#,
+        );
+        let outcome = classify_command(RepoCommand::Ci, 404, Some(refused));
+        assert_eq!(
+            outcome,
+            CommandOutcome::Failure(
+                "This Ocean deployment doesn't expose that workspace route.".to_string()
+            )
+        );
+    }
+
+    // ---- the recorded CI read -----------------------------------------------
+
+    /// The GET's answer: rows from Bedrock's table, `first_seen_at` and all,
+    /// with no `new` flag — that is the pull reply's word, not the table's.
+    #[test]
+    fn recorded_checks_read_back() {
+        let recorded = body(
+            r#"{"checks": [
+                  {"check_run_id": "17296035001",
+                   "head_sha": "0123456789012345678901234567890123456789",
+                   "name": "lint", "status": "completed", "conclusion": "failure",
+                   "url": "https://github.com/acme/site/actions/runs/17296035001",
+                   "first_seen_at": "2026-08-27T10:06:00.000Z"}
+                ]}"#,
+        );
+        let view = classify_checks(200, Some(recorded)).unwrap();
+        let ChecksView::Recorded(checks) = view else {
+            panic!("expected Recorded, got {view:?}");
+        };
+        assert_eq!(checks.len(), 1);
+        assert_eq!(
+            checks[0].first_seen_at.as_deref(),
+            Some("2026-08-27T10:06:00.000Z")
+        );
+        assert!(!checks[0].new);
+    }
+
+    /// An empty history is an answer — the panel says "none recorded yet",
+    /// never nothing.
+    #[test]
+    fn an_empty_recorded_history_is_an_answer() {
+        let empty = body(r#"{"checks": []}"#);
+        assert_eq!(
+            classify_checks(200, Some(empty)),
+            Ok(ChecksView::Recorded(Vec::new()))
+        );
+    }
+
+    /// A deployment predating the lane — the daemon's coded 404 or an
+    /// undecodable one — reads as quiet unavailability: the repo panel
+    /// around it still works, and the POST says so in words if clicked.
+    #[test]
+    fn a_route_less_deployment_reads_ci_as_unavailable() {
+        assert_eq!(classify_checks(404, None), Ok(ChecksView::Unavailable));
+        let coded = body(
+            r#"{"ok": false, "code": "workspace_route_not_allowed",
+                "error": "this workspace route is not allowed"}"#,
+        );
+        assert_eq!(
+            classify_checks(404, Some(coded)),
+            Ok(ChecksView::Unavailable)
+        );
+    }
+
+    #[test]
+    fn an_unreachable_bedrock_fails_the_ci_read_in_words() {
+        let relay = body(
+            r#"{"ok": false, "code": "workspace_unavailable",
+                "error": "the room workspace could not be reached"}"#,
+        );
+        let err = classify_checks(503, Some(relay)).unwrap_err();
+        assert!(err.contains("can't be reached"), "got: {err}");
+        let opaque = classify_checks(500, None).unwrap_err();
+        assert!(opaque.contains("500"), "got: {opaque}");
+    }
+
     // ---- publish admission --------------------------------------------------
 
     #[test]
@@ -1424,6 +2056,81 @@ mod tests {
         assert_eq!(
             state.note.get_untracked().as_deref(),
             Some("Cloned at 0123456789.")
+        );
+    }
+
+    fn recorded_check(name: &str, conclusion: &str) -> CiCheck {
+        CiCheck {
+            check_run_id: "1".into(),
+            head_sha: "0123456789012345678901234567890123456789".into(),
+            name: Some(name.into()),
+            status: Some("completed".into()),
+            conclusion: Some(conclusion.into()),
+            url: None,
+            first_seen_at: None,
+            new: false,
+        }
+    }
+
+    /// A checked pull replaces the recorded view wholesale — the reply IS
+    /// the table's current answer — and the note says the news.
+    #[test]
+    fn a_checked_pull_replaces_the_recorded_view_and_says_the_news() {
+        let state = fresh_state();
+        state.working.set(Some(RepoCommand::Ci));
+        let report = CiReport {
+            outcome: "checked".into(),
+            exit_code: Some(0),
+            duration_ms: Some(2100),
+            checks_total: Some(3),
+            checks_new: Some(1),
+            message: None,
+        };
+        let pulled = vec![recorded_check("lint", "success")];
+        state.publish_command(CommandOutcome::Checked(report, pulled.clone()), true);
+        assert_eq!(state.working.get_untracked(), None);
+        assert_eq!(
+            state.checks.get_untracked(),
+            Some(ChecksView::Recorded(pulled))
+        );
+        let note = state.note.get_untracked().unwrap();
+        assert!(note.contains("1 new result (3 total)"), "got: {note}");
+    }
+
+    #[test]
+    fn a_stale_checks_read_publishes_nothing() {
+        let state = fresh_state();
+        state.publish_checks(Ok(ChecksView::Recorded(Vec::new())), false);
+        assert_eq!(state.checks.get_untracked(), None);
+    }
+
+    /// `publish_status`'s rule, held on this lane too: a blipped background
+    /// read neither blanks a standing recorded list nor touches the shared
+    /// error signal a command answer may be occupying.
+    #[test]
+    fn a_failed_checks_read_never_blanks_a_standing_list() {
+        let state = fresh_state();
+        state.publish_checks(Err("net blip".to_string()), true);
+        assert_eq!(
+            state.checks.get_untracked(),
+            Some(ChecksView::Unread("net blip".to_string()))
+        );
+
+        let standing = vec![recorded_check("lint", "success")];
+        state.publish_checks(Ok(ChecksView::Recorded(standing.clone())), true);
+        state.error.set(Some((
+            RepoErrorSource::Command,
+            "The clone failed.".to_string(),
+        )));
+        state.publish_checks(Err("net blip".to_string()), true);
+        assert_eq!(
+            state.checks.get_untracked(),
+            Some(ChecksView::Recorded(standing))
+        );
+        assert_eq!(
+            state.error.get_untracked(),
+            Some((RepoErrorSource::Command, "The clone failed.".to_string())),
+            "a checks read must never stomp a standing command answer"
         );
     }
 
@@ -1534,6 +2241,32 @@ mod tests {
         );
     }
 
+    /// A check row degrades honestly: the verdict falls from conclusion to
+    /// status to "unknown", and the tone colors only words with a meaning.
+    #[test]
+    fn a_check_reads_as_name_verdict_and_sha() {
+        let check = recorded_check("lint", "failure");
+        assert_eq!(check_line(&check), "lint: failure @ 0123456789");
+        assert_eq!(conclusion_tone(check_verdict(&check)), "bad");
+
+        let unfinished = CiCheck {
+            conclusion: None,
+            ..recorded_check("build", "")
+        };
+        assert_eq!(check_verdict(&unfinished), "completed");
+        assert_eq!(conclusion_tone(check_verdict(&unfinished)), "");
+
+        let bare = CiCheck {
+            name: None,
+            status: None,
+            conclusion: None,
+            head_sha: String::new(),
+            ..recorded_check("", "")
+        };
+        assert_eq!(check_line(&bare), "(unnamed): unknown");
+        assert_eq!(conclusion_tone("success"), "good");
+    }
+
     // ---- gates --------------------------------------------------------------
 
     #[test]
@@ -1642,5 +2375,40 @@ mod tests {
         transcript.push(system_row(3, "workspace build 'build' succeeded (3.2s)"));
         let (_, wake) = marker_wake(watermark, 3, &transcript, is_repo_clone_marker);
         assert!(!wake);
+    }
+
+    /// The wake union: a CI marker refreshes the recorded view another
+    /// member's pull just changed, clone markers keep waking the binding
+    /// read, and the other marker variants still wake nothing here.
+    #[test]
+    fn a_ci_marker_wakes_the_recorded_view() {
+        let ci = system_row(
+            2,
+            "workspace CI on 'main': 2 new results (5 total) \u{2014} lint: failure, build: success",
+        );
+        assert!(is_repo_ci_marker(&ci));
+        assert!(!is_repo_ci_marker(&system_row(
+            3,
+            "workspace repo cloned: 'main' @ 0123456789ab"
+        )));
+        assert!(is_repo_wake_marker(&ci));
+        assert!(is_repo_wake_marker(&system_row(
+            3,
+            "workspace repo cloned: 'main' @ 0123456789ab"
+        )));
+        assert!(!is_repo_wake_marker(&system_row(
+            4,
+            "workspace build 'build' succeeded (3.2s)"
+        )));
+
+        // Through the shared wake mechanics: recorded history stays silent,
+        // a live CI marker wakes.
+        let history = vec![system_row(1, "workspace hydrated (12 files)")];
+        let (watermark, wake) = marker_wake(None, 7, &history, is_repo_wake_marker);
+        assert!(!wake);
+        let mut transcript = history;
+        transcript.push(ci);
+        let (_, wake) = marker_wake(watermark, 7, &transcript, is_repo_wake_marker);
+        assert!(wake);
     }
 }
