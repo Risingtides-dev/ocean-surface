@@ -129,6 +129,10 @@ pub struct RoomMessage {
     /// Root message sequence for a one-level thread reply. `None` for roots.
     #[serde(default)]
     pub thread_parent_seq: Option<u64>,
+    /// Attachment described by an upload/removal marker row. `None` on every
+    /// other row, and always absent from daemons predating the field.
+    #[serde(default)]
+    pub attachment_id: Option<String>,
 }
 
 // ---- Federated wire types (exact mirror of ocean-core 786c6ba4) -------------
@@ -2311,6 +2315,7 @@ mod tests {
             created_at: "2026-07-16T22:00:00Z".into(),
             federated: None,
             thread_parent_seq: None,
+            attachment_id: None,
         }
     }
 

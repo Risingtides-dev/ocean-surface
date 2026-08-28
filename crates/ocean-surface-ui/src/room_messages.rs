@@ -148,6 +148,7 @@ mod tests {
             created_at: ts.to_string(),
             thread_parent_seq: None,
             federated: None,
+            attachment_id: None,
         }
     }
 

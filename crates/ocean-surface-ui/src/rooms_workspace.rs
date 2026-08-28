@@ -1645,6 +1645,7 @@ pub fn RoomsWorkspace(
                                             children=move |reply: RoomMessage| {
                                                 let full_ts = reply.created_at.clone();
                                                 let is_system = room_messages::is_compact_system_row(&reply);
+                                                let media = crate::transcript_media::marker_media_view(rooms, &reply);
                                                 view! {
                                                     <div
                                                         class="rooms-workspace__msg rooms-workspace__msg--thread-reply"
@@ -1679,6 +1680,7 @@ pub fn RoomsWorkspace(
                                                             <div class="rooms-workspace__msg-text">
                                                                 {crate::room_markdown::body_view(reply.body.clone(), member_ids)}
                                                             </div>
+                                                            {media}
                                                         </div>
                                                     </div>
                                                 }
@@ -2431,6 +2433,7 @@ pub fn RoomsWorkspace(
                                         key=|(_, m): &(Option<RoomMessage>, RoomMessage)| m.seq
                                         children=move |(prev, m): (Option<RoomMessage>, RoomMessage)| {
                                             let is_system = room_messages::is_compact_system_row(&m);
+                                            let media = crate::transcript_media::marker_media_view(rooms, &m);
                                             let full_ts = m.created_at.clone();
                                             let root_seq = m.seq;
                                             let day_label = room_messages::day_separator_label(prev.as_ref(), &m)
@@ -2491,6 +2494,7 @@ pub fn RoomsWorkspace(
                                                         <div class="rooms-workspace__msg-text">
                                                             {crate::room_markdown::body_view(m.body.clone(), member_ids)}
                                                         </div>
+                                                        {media}
                                                         {move || {
                                                             if should_show_thread_button(&m) {
                                                                 let reply_count = move || reply_count_for(&rooms.transcript.get(), root_seq);
@@ -4467,6 +4471,7 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".into(),
             federated: None,
             thread_parent_seq,
+            attachment_id: None,
         }
     }
 

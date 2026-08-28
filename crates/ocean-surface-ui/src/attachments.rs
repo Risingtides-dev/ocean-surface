@@ -124,11 +124,13 @@ fn upload_url(base: &str, key: &str, filename: &str, content_type: &str, uploade
     )
 }
 
-/// The bytes. Linked, never fetched-and-rendered: the daemon serves this
-/// `application/octet-stream` with `nosniff` and an attachment disposition
-/// specifically so it lands in the operator's downloads instead of executing
-/// on this origin.
-fn download_url(base: &str, key: &str, id: &str) -> String {
+/// The bytes. Linked, never fetched-and-rendered: the daemon sniffs them
+/// and serves a real image type for exactly PNG/JPEG/GIF/WebP — which is
+/// what lets the transcript mount an `<img>` here — while everything
+/// outside that allowlist falls back to `application/octet-stream` with an
+/// attachment disposition, landing in the operator's downloads instead of
+/// executing on this origin. `nosniff` is unconditional either way.
+pub(crate) fn download_url(base: &str, key: &str, id: &str) -> String {
     format!(
         "{base}/v1/rooms/persistent/{}/attachments/{}",
         encode(key),
