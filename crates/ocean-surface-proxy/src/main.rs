@@ -1997,10 +1997,13 @@ fn rooms_persistent_shape(method: &axum::http::Method, path: &str) -> RoomsPersi
 /// Keyed off [`RoomsPersistentShape`] in one function because the long
 /// command lane used to hang off a lone match arm at the builder site: a
 /// reviewer reverted that arm and every proxy test stayed green, leaving a
-/// long clone one refactor away from dying here as a 502 again. Every
-/// non-command shape answers [`JSON_FORWARD_TIMEOUT`] — the same value the
+/// long clone one refactor away from dying here as a 502 again. The buffered
+/// non-command shapes answer [`JSON_FORWARD_TIMEOUT`] — the same value the
 /// `http_json` client applies by default, so the answer holds even for the
-/// forwards that never attach an explicit per-request timeout.
+/// GET forwards that never attach an explicit per-request timeout. An
+/// [`EventsTail`](RoomsPersistentShape::EventsTail) never gets here: the tail
+/// streams on the untimed `state.http` client — any budget would sever every
+/// live tail — and returns before this function is consulted.
 fn forward_timeout(shape: RoomsPersistentShape) -> std::time::Duration {
     match shape {
         RoomsPersistentShape::WorkspaceCommand => WORKSPACE_COMMAND_FORWARD_TIMEOUT,
@@ -4011,13 +4014,16 @@ mod tests {
         );
     }
 
-    /// Every non-command shape rides the JSON budget — the same value the
-    /// http_json client applies as its default, so the answer stays truthful
-    /// for the forwards that never attach an explicit per-request timeout.
+    /// Every buffered non-command shape rides the JSON budget — the same
+    /// value the http_json client applies as its default, so the answer stays
+    /// truthful for the GET forwards that never attach an explicit
+    /// per-request timeout. EventsTail is deliberately absent: the tail
+    /// streams on the untimed client before forward_timeout is consulted
+    /// (untimed_client_is_used_only_by_streaming_handlers pins that), so no
+    /// budget at all — least of all a 120s one — is the truth for it.
     #[test]
-    fn non_command_shapes_ride_the_json_budget() {
+    fn buffered_non_command_shapes_ride_the_json_budget() {
         for shape in [
-            RoomsPersistentShape::EventsTail,
             RoomsPersistentShape::AttachmentUpload,
             RoomsPersistentShape::AttachmentDownload,
             RoomsPersistentShape::Json,
