@@ -473,6 +473,36 @@
   font-style: italic;
 }
 
+/* ── Center rail — inline attachment media ────────────────────────── */
+
+/* An image marker's inline preview. Bounded hard: an unconstrained upload
+   would let one screenshot own the viewport, and the timeline's readable
+   measure comes from its padding, so the cap is the img's own, not a column's. */
+.rooms-workspace__media {
+  margin-top: 6px;
+}
+
+.rooms-workspace__media-img {
+  display: block;
+  max-width: min(560px, 100%);
+  max-height: min(340px, 45vh);
+  width: auto;
+  height: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+
+/* The load-failed fallback wears the files-panel row's classes so the two
+   affordances stay one affordance; this modifier only shrink-wraps it and
+   gives it an edge, since here it sits on the transcript, not in a list. */
+.rooms-workspace__media-fallback {
+  width: fit-content;
+  max-width: 100%;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+}
+
 /* ── Center rail — thread affordances ─────────────────────────────── */
 
 .rooms-workspace__thread-toggle {

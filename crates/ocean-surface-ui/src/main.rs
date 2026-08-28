@@ -42,6 +42,7 @@ mod search;
 mod sessions;
 mod slash_menu;
 mod transcript;
+mod transcript_media;
 mod tts;
 mod voice;
 mod widget;
