@@ -272,6 +272,25 @@ fn list_request_is_current(ticket: u64, current: u64) -> bool {
     ticket == current
 }
 
+/// The collapsed row's one fact: that files exist, and how many. The names,
+/// sizes and links live in the panel.
+fn file_count_line(count: usize) -> String {
+    if count == 1 {
+        "1 file".to_string()
+    } else {
+        format!("{count} files")
+    }
+}
+
+/// Escape owned by the files panel. Same contract as
+/// `artifacts_escape_closes`: the panel is a fixed modal on the rooms
+/// surface's overlay tier, so it consumes the key before the drawers under
+/// it. A predicate for the same reason that one is — a ladder rung no test
+/// can reach is a rung the next edit deletes in silence.
+pub fn files_escape_closes(panel_open: bool, default_prevented: bool) -> bool {
+    panel_open && !default_prevented
+}
+
 // ---- State ------------------------------------------------------------------
 
 /// Reactive handle for one room's context files.
@@ -298,6 +317,10 @@ pub struct RoomAttachmentsState {
     pub error: RwSignal<Option<String>>,
     /// An upload is in flight — blocks re-submit and drives the button label.
     pub uploading: RwSignal<bool>,
+    /// Whether the reading-measure panel is open.
+    panel: RwSignal<bool>,
+    /// The rail control that opens the panel, so closing hands focus back.
+    open_ref: NodeRef<leptos::html::Button>,
     /// Monotonic ticket; only the latest overlapping list request may publish.
     ticket: RwSignal<u64>,
 }
@@ -311,7 +334,23 @@ impl RoomAttachmentsState {
             loading: RwSignal::new(false),
             error: RwSignal::new(None),
             uploading: RwSignal::new(false),
+            panel: RwSignal::new(false),
+            open_ref: NodeRef::new(),
             ticket: RwSignal::new(0),
+        }
+    }
+
+    /// Whether the panel is on screen. Public because the Escape ladder that
+    /// owns the key lives in `rooms_workspace`, not here.
+    pub fn panel_is_open(&self) -> bool {
+        self.panel.get_untracked()
+    }
+
+    /// Close the panel and hand focus back to the control that opened it.
+    pub fn close_panel(&self) {
+        self.panel.set(false);
+        if let Some(open) = self.open_ref.get_untracked() {
+            let _ = open.focus();
         }
     }
 
@@ -326,7 +365,9 @@ impl RoomAttachmentsState {
     /// `uploading` is retired here as well: an upload belongs to the room it
     /// started in, so a flag carried across a room change disables the new
     /// room's control over a file nobody ever sent it — permanently, if the
-    /// old request never resolves.
+    /// old request never resolves. The panel goes with them: one left open
+    /// across a room change would present the next room's files inside a
+    /// dialog the operator opened for this one.
     fn reset(&self) {
         self.ticket
             .update(|ticket| *ticket = ticket.wrapping_add(1));
@@ -335,6 +376,7 @@ impl RoomAttachmentsState {
         self.loading.set(false);
         self.error.set(None);
         self.uploading.set(false);
+        self.panel.set(false);
     }
 
     /// Load one room's file list.
@@ -452,8 +494,13 @@ impl RoomAttachmentsState {
 
 // ---- Component --------------------------------------------------------------
 
-/// The open room's context files: a real loading state, the list, and one file
-/// input behind a button.
+/// The open room's context files: a compact rail row, and a panel where the
+/// list is actually read and the upload control lives.
+///
+/// The rail deliberately holds one line — that files exist, and how many. The
+/// right rail is 220px wide and a filename is unreadable there; the list at a
+/// reading measure happens in the panel, exactly as `room_artifacts` and
+/// `room_repo` do it.
 ///
 /// `writes_allowed` is supplied by the workspace rather than recomputed here so
 /// this control and the composer can never disagree about the same room's
@@ -491,22 +538,26 @@ pub fn RoomAttachments(
             <div class="rooms-workspace__files-head">
                 <span class="rooms-workspace__files-title">"Files"</span>
                 <button
-                    class="rooms-workspace__files-add"
+                    class="rooms-workspace__files-open"
                     type="button"
-                    title="Attach a context file to this room"
-                    disabled=move || !can_upload()
+                    node_ref=state.open_ref
+                    title="Open this room's context files"
+                    disabled=move || {
+                        rooms.open_key.get().is_none_or(|key| key.is_empty())
+                    }
                     on:click=move |_| {
-                        if let Some(input) = file_input.get_untracked() {
-                            input.click();
-                        }
+                        state.error.set(None);
+                        state.panel.set(true);
                     }
                 >
-                    {move || if state.uploading.get() { "uploading\u{2026}" } else { "+ file" }}
+                    "open"
                 </button>
             </div>
 
-            // The button above only forwards the user gesture; this is the real
-            // control. One file per upload: the route takes one raw body.
+            // The add button in the panel head only forwards the user gesture;
+            // this is the real control, and it stays mounted here so the
+            // gesture still has somewhere to land while the panel unmounts.
+            // One file per upload: the route takes one raw body.
             <input
                 class="rooms-workspace__files-input"
                 type="file"
@@ -539,15 +590,19 @@ pub fn RoomAttachments(
                 }
             />
 
+            // Rendered in the rail AND the panel, like the artifacts error: a
+            // failure while the panel is closed must not read as a room with
+            // no files.
             {move || {
                 state.error.get().map(|error| view! {
                     <div class="rooms-workspace__files-error" role="alert">{error}</div>
                 })
             }}
 
+            // The collapsed row's one line: that files exist, and how many.
+            // Order matters: in-flight and never-answered both outrank the
+            // empty state, which may only speak for a room that replied.
             {move || {
-                // Order matters: in-flight and never-answered both outrank the
-                // empty state, which may only speak for a room that replied.
                 if state.loading.get() {
                     return view! {
                         <div class="rooms-workspace__files-note">"Loading files\u{2026}"</div>
@@ -556,46 +611,148 @@ pub fn RoomAttachments(
                 if !state.loaded.get() {
                     return ().into_any();
                 }
-                let items = state.items.get();
-                if items.is_empty() {
+                let count = state.items.with(|items| items.len());
+                if count == 0 {
                     return view! {
                         <div class="rooms-workspace__files-note">"No files yet."</div>
                     }.into_any();
                 }
-                let base = state.url.get().trim_end_matches('/').to_string();
-                let key = rooms.open_key.get().unwrap_or_default();
-                let rows = items
-                    .into_iter()
-                    .map(|item| {
-                        // The href is the daemon's octet-stream route. `download`
-                        // is belt to its braces: same-origin the browser honors
-                        // it, cross-origin (Tauri, extension) the daemon's own
-                        // Content-Disposition still lands the file.
-                        let href = download_url(&base, &key, &item.id);
-                        let meta =
-                            format!("{} \u{b7} {}", human_bytes(item.byte_len), item.uploaded_by);
-                        view! {
-                            <a
-                                class="rooms-workspace__file"
-                                role="listitem"
-                                href=href
-                                download=item.filename.clone()
-                                title=format!("{} ({})", item.filename, item.content_type)
-                            >
-                                <span class="rooms-workspace__file-glyph" aria-hidden="true">
-                                    {kind_glyph(&item.content_type)}
-                                </span>
-                                <span class="rooms-workspace__file-name">
-                                    {item.filename.clone()}
-                                </span>
-                                <span class="rooms-workspace__file-meta">{meta}</span>
-                            </a>
-                        }
-                    })
-                    .collect::<Vec<_>>();
                 view! {
-                    <div class="rooms-workspace__files-list" role="list" aria-label="Room files">
-                        {rows}
+                    <div class="rooms-workspace__files-line">{file_count_line(count)}</div>
+                }.into_any()
+            }}
+
+            {move || {
+                if !state.panel.get() {
+                    return ().into_any();
+                }
+                view! {
+                    <div
+                        class="rooms-workspace__files-scrim"
+                        on:click=move |_| state.close_panel()
+                    ></div>
+                    // `aria-modal` because the scrim is only paint: without it
+                    // a screen reader still walks the rail and the transcript
+                    // behind a dialog a sighted reader cannot reach.
+                    <div
+                        class="rooms-workspace__files-panel"
+                        role="dialog"
+                        aria-modal="true"
+                        aria-label="Room files"
+                    >
+                        <div class="rooms-workspace__files-panel-head">
+                            <span class="rooms-workspace__files-panel-title">"Files"</span>
+                            <button
+                                class="rooms-workspace__files-add"
+                                type="button"
+                                title="Attach a context file to this room"
+                                disabled=move || !can_upload()
+                                on:click=move |_| {
+                                    if let Some(input) = file_input.get_untracked() {
+                                        input.click();
+                                    }
+                                }
+                            >
+                                {move || {
+                                    if state.uploading.get() {
+                                        "uploading\u{2026}"
+                                    } else {
+                                        "+ file"
+                                    }
+                                }}
+                            </button>
+                            <button
+                                class="rooms-workspace__files-close"
+                                type="button"
+                                aria-label="Close files"
+                                on:click=move |_| state.close_panel()
+                            >
+                                "\u{d7}"
+                            </button>
+                        </div>
+                        <div class="rooms-workspace__files-panel-body">
+                            {move || {
+                                state.error.get().map(|error| view! {
+                                    <div class="rooms-workspace__files-error" role="alert">
+                                        {error}
+                                    </div>
+                                })
+                            }}
+                            {move || {
+                                if state.loading.get() {
+                                    return view! {
+                                        <div class="rooms-workspace__files-note">
+                                            "Loading files\u{2026}"
+                                        </div>
+                                    }.into_any();
+                                }
+                                if !state.loaded.get() {
+                                    return ().into_any();
+                                }
+                                let items = state.items.get();
+                                if items.is_empty() {
+                                    return view! {
+                                        <div class="rooms-workspace__files-note">
+                                            "No files yet."
+                                        </div>
+                                    }.into_any();
+                                }
+                                let base = state.url.get().trim_end_matches('/').to_string();
+                                let key = rooms.open_key.get().unwrap_or_default();
+                                let rows = items
+                                    .into_iter()
+                                    .map(|item| {
+                                        // The href is the daemon's octet-stream
+                                        // route. `download` is belt to its
+                                        // braces: same-origin the browser honors
+                                        // it, cross-origin (Tauri, extension)
+                                        // the daemon's own Content-Disposition
+                                        // still lands the file.
+                                        let href = download_url(&base, &key, &item.id);
+                                        let meta = format!(
+                                            "{} \u{b7} {}",
+                                            human_bytes(item.byte_len),
+                                            item.uploaded_by,
+                                        );
+                                        view! {
+                                            <a
+                                                class="rooms-workspace__file"
+                                                role="listitem"
+                                                href=href
+                                                download=item.filename.clone()
+                                                title=format!(
+                                                    "{} ({})",
+                                                    item.filename,
+                                                    item.content_type,
+                                                )
+                                            >
+                                                <span
+                                                    class="rooms-workspace__file-glyph"
+                                                    aria-hidden="true"
+                                                >
+                                                    {kind_glyph(&item.content_type)}
+                                                </span>
+                                                <span class="rooms-workspace__file-name">
+                                                    {item.filename.clone()}
+                                                </span>
+                                                <span class="rooms-workspace__file-meta">
+                                                    {meta}
+                                                </span>
+                                            </a>
+                                        }
+                                    })
+                                    .collect::<Vec<_>>();
+                                view! {
+                                    <div
+                                        class="rooms-workspace__files-list"
+                                        role="list"
+                                        aria-label="Room files"
+                                    >
+                                        {rows}
+                                    </div>
+                                }.into_any()
+                            }}
+                        </div>
                     </div>
                 }.into_any()
             }}
@@ -786,6 +943,8 @@ mod tests {
             loading: RwSignal::new(true),
             error: RwSignal::new(Some("boom".to_string())),
             uploading: RwSignal::new(true),
+            panel: RwSignal::new(true),
+            open_ref: NodeRef::new(),
             ticket: RwSignal::new(4),
         };
 
@@ -799,8 +958,26 @@ mod tests {
         // NEXT room's control disabled and reading "uploading…" for a file it
         // never saw, forever if that request never resolves.
         assert!(!state.uploading.get_untracked());
+        // The panel closes with the room it was opened for: left standing it
+        // would present the next room's files inside this room's dialog.
+        assert!(!state.panel_is_open());
         // And the ticket still moves, so a list in flight cannot land either.
         assert_eq!(state.ticket.get_untracked(), 5);
+    }
+
+    #[test]
+    fn escape_closes_only_an_open_unclaimed_panel() {
+        assert!(files_escape_closes(true, false));
+        assert!(!files_escape_closes(false, false));
+        // A key someone under us already consumed is not ours to act on.
+        assert!(!files_escape_closes(true, true));
+    }
+
+    #[test]
+    fn the_collapsed_row_counts_its_files() {
+        assert_eq!(file_count_line(1), "1 file");
+        assert_eq!(file_count_line(2), "2 files");
+        assert_eq!(file_count_line(12), "12 files");
     }
 
     #[test]

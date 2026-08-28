@@ -1900,6 +1900,26 @@ pub fn RoomsWorkspace(
                     repo.close_panel();
                     return;
                 }
+                // The summary and files panels sit on the same overlay tier
+                // with their rail triggers behind the other panels' scrims,
+                // so the same at-most-one-open argument holds and the order
+                // of these rungs never decides anything.
+                if crate::room_summary::summary_escape_closes(
+                    summary.panel_is_open(),
+                    ev.default_prevented(),
+                ) {
+                    ev.prevent_default();
+                    summary.close_panel();
+                    return;
+                }
+                if crate::attachments::files_escape_closes(
+                    attachments.panel_is_open(),
+                    ev.default_prevented(),
+                ) {
+                    ev.prevent_default();
+                    attachments.close_panel();
+                    return;
+                }
                 // Topmost overlay first, and that is the artifacts panel: a
                 // fixed modal at z-index 445, above the members drawer's 430
                 // and its backdrop's 425. Without this rung Escape closes a

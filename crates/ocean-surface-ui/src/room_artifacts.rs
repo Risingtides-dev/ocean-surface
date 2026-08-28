@@ -2016,12 +2016,12 @@ mod tests {
     /// Source assertion against the real stylesheet, in the style of
     /// `slash_menu.rs`'s.
     ///
-    /// The right rail is `flex: 0 0 220px`, and the summary (38%) and the files
-    /// (40%) already leave the roster about a fifth of it. A fourth PROPORTIONAL
-    /// section there is not a feature, it is a fifth thing nobody can read — so
-    /// this section is capped in pixels and does its reading in a panel. That is
-    /// a layout decision an innocent-looking edit can undo, in a rail shared
-    /// with two features this slice does not own.
+    /// The right rail is `flex: 0 0 220px`, and a PROPORTIONAL section there
+    /// is not a feature, it is another thing nobody can read — so every
+    /// section takes a fixed sliver and does its reading in a panel on the
+    /// overlay tier, leaving the roster's `flex: 1` the rest of the column.
+    /// That is a layout decision an innocent-looking edit can undo, in a rail
+    /// four features share.
     #[test]
     fn the_rail_section_takes_a_fixed_sliver_and_never_a_share_of_the_column() {
         let css_path = concat!(
@@ -2052,17 +2052,25 @@ mod tests {
             "a capped list that cannot scroll hides rows: {list}"
         );
 
-        // Neither neighbour is shrunk to make room. Those sections belong to
-        // other slices, and changing them here is both scope creep and a
-        // next-wave collision.
-        assert!(
-            rule_body(&css, ".rooms-workspace__summary {").contains("max-height: 38%"),
-            "the summary's share is not this slice's to change"
-        );
-        assert!(
-            rule_body(&css, ".rooms-workspace__files {").contains("max-height: 40%"),
-            "the files' share is not this slice's to change"
-        );
+        // The neighbours hold the same line. The summary and the files once
+        // claimed 38% and 40% of the column between them — the roster kept
+        // about a fifth of its own rail — and a percentage reappearing on any
+        // section is that regression starting over.
+        for selector in [
+            ".rooms-workspace__summary {",
+            ".rooms-workspace__files {",
+            ".rooms-workspace__repo {",
+        ] {
+            let body = rule_body(&css, selector);
+            assert!(
+                !body.contains('%'),
+                "`{selector}` must not claim a share of the right rail: {body}"
+            );
+            assert!(
+                body.contains("flex: 0 0 auto"),
+                "`{selector}` must not grow into the roster's space: {body}"
+            );
+        }
     }
 
     /// The declarations of one rule, found by its exact opening line.
