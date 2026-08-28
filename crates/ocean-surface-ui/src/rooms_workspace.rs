@@ -937,6 +937,12 @@ pub fn RoomsWorkspace(
     // asked for.
     let summary = crate::room_summary::RoomSummaryState::new(&rooms);
 
+    // The room's artifacts. Same reasoning again: this state owns an open
+    // editor and the version it was loaded against, and a rail closure re-run
+    // by a roster SSE update would rebuild both mid-edit — which is how a
+    // compare-and-swap loses the version it is supposed to be presenting.
+    let artifacts = crate::room_artifacts::RoomArtifactsState::new(&rooms);
+
     // Toggle for narrow-screen left-rail visibility.
     let show_left_rail = RwSignal::new(false);
 
@@ -3152,6 +3158,21 @@ pub fn RoomsWorkspace(
                 <crate::room_summary::RoomSummary
                     rooms=rooms
                     state=summary
+                    writes_allowed=Signal::derive(move || {
+                        access_allows_writes(rooms.access.get().as_ref())
+                    })
+                    members=member_ids
+                />
+
+                // What the room produced: tasks, decisions, captured
+                // knowledge. A sibling for the same reason as its neighbours —
+                // it owns a write's in-flight state and an open editor. The
+                // rail holds only the compact list; reading and writing happen
+                // in the panel it opens, because 220px is not a measure prose
+                // can be edited at.
+                <crate::room_artifacts::RoomArtifacts
+                    rooms=rooms
+                    state=artifacts
                     writes_allowed=Signal::derive(move || {
                         access_allows_writes(rooms.access.get().as_ref())
                     })

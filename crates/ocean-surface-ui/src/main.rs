@@ -30,6 +30,7 @@ mod model;
 mod observatory;
 mod palette;
 mod place_call;
+mod room_artifacts;
 mod room_markdown;
 mod room_messages;
 mod room_summary;
