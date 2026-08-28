@@ -3,12 +3,13 @@
 //!
 //! A federated room can have a Bedrock container workspace; every command run
 //! in it — a member's exec, a clone, a build — lands in a durable ledger that
-//! outlives the container itself. The daemon exposes the two reads a room
+//! outlives the container itself. The daemon exposes the reads a room
 //! MEMBER gets (`room_workspace_proxy.rs`'s allowlist, `?actor_id=` asserted
 //! on every call):
 //!
 //!   GET /v1/rooms/persistent/{key}/workspace          → status + exec index
 //!   GET /v1/rooms/persistent/{key}/workspace/execs    → rows with tails
+//!   GET /v1/rooms/persistent/{key}/workspace/list     → one directory's entries
 //!
 //! Provision and destroy are deliberately NOT on that allowlist — they are
 //! owner acts over the Bedrock API — so a room without a workspace is stated
@@ -34,6 +35,9 @@
 //! 4. **The status route's exec index carries no tails.** The panel reads the
 //!    execs route instead, and the status body's `recent_execs` is left on
 //!    the floor rather than rendered as twenty rows that all look withheld.
+//! 5. **File rows are inert.** The allowlist has no file-read route, so the
+//!    listing IS the feature: names, kinds, sizes, and directories as the
+//!    only navigation. An open link would promise a read the daemon refuses.
 //!
 //! Workspace activity also reaches this surface live: the daemon ingests
 //! Bedrock's allowlisted `room.workspace.*` ledger rows as System transcript
@@ -85,6 +89,10 @@ const EXEC_LIST_LIMIT: u32 = 30;
 /// a build claims the checkout by holding an exec row whose command opens
 /// with this line, which is also what makes builds recognizable here.
 const BUILD_COMMAND_MARKER: &str = "# ocean-room-build";
+
+/// Where the file browse starts and snaps back to on open: bedrock's
+/// `WORKSPACE_ROOT` (src/compute/driver.mjs).
+const WORKSPACE_ROOT_PATH: &str = "/workspace";
 
 // ---- Wire types -------------------------------------------------------------
 
@@ -142,6 +150,23 @@ pub struct ExecRow {
     pub stderr_clipped: Option<bool>,
 }
 
+/// One row of the list route: the driver contract (`listFiles` in bedrock's
+/// src/compute/driver.mjs) — one directory deep, name-sorted, sizes on
+/// files only.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct FileEntry {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default, rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub size: Option<u64>,
+    #[serde(default)]
+    pub mtime: Option<String>,
+}
+
 /// Bedrock's thrown refusals nest their `code` under `details`; its plain
 /// 404s and every daemon-side gate put `code` at the top level. Same dual
 /// home as `room_repo`'s, read the same way.
@@ -151,14 +176,19 @@ struct ErrorDetails {
     code: Option<String>,
 }
 
-/// The lenient envelope both reads fit into. Presence of `workspace` or
-/// `execs` is what success means — there is no `ok` field on this lane.
+/// The lenient envelope all three reads fit into. Presence of `workspace`,
+/// `execs` or `entries` is what success means — there is no `ok` field on
+/// this lane.
 #[derive(Debug, Default, Deserialize)]
 struct WorkspaceBody {
     #[serde(default)]
     workspace: Option<WorkspaceProjection>,
     #[serde(default)]
     execs: Option<Vec<ExecRow>>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    entries: Option<Vec<FileEntry>>,
     #[serde(default)]
     code: Option<String>,
     #[serde(default)]
@@ -190,6 +220,15 @@ fn execs_url(base: &str, key: &str, actor: &str) -> String {
         "{base}/v1/rooms/persistent/{}/workspace/execs?actor_id={}&limit={EXEC_LIST_LIMIT}",
         encode(key),
         encode(actor),
+    )
+}
+
+fn files_url(base: &str, key: &str, actor: &str, path: &str) -> String {
+    format!(
+        "{base}/v1/rooms/persistent/{}/workspace/list?actor_id={}&path={}",
+        encode(key),
+        encode(actor),
+        encode(path),
     )
 }
 
@@ -298,6 +337,107 @@ fn classify_execs(status: u16, body: Option<WorkspaceBody>) -> Result<ExecsView,
             .filter(|error| !error.is_empty())
             .map(|error| format!("Command history failed: {error}"))
             .unwrap_or_else(|| format!("Command history failed ({status})."))),
+    }
+}
+
+/// What the listing read answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FilesView {
+    /// One directory of the tree, as bedrock normalized and sorted it.
+    Listing {
+        path: String,
+        entries: Vec<FileEntry>,
+    },
+    /// No live container to list (`workspace_absent` or its provisioning /
+    /// failed kin): a state, not an error — the status block above the
+    /// listing already says why, so this renders nothing of its own.
+    NoContainer,
+    /// The deployment does not serve the list route.
+    Unavailable,
+}
+
+/// Map a list-route reply. Unlike the ledger-backed execs route, listing
+/// needs the live container, so bedrock refuses here (`workspace_absent`
+/// and kin) where the other reads answer.
+fn classify_files(status: u16, body: Option<WorkspaceBody>) -> Result<FilesView, String> {
+    let Some(body) = body else {
+        if status == 404 {
+            return Ok(FilesView::Unavailable);
+        }
+        return Err(format!(
+            "The file listing reply could not be read ({status})."
+        ));
+    };
+    if let Some(entries) = body.entries {
+        return Ok(FilesView::Listing {
+            path: body
+                .path
+                .filter(|path| !path.is_empty())
+                .unwrap_or_else(|| WORKSPACE_ROOT_PATH.to_string()),
+            entries,
+        });
+    }
+    match body.refusal_code() {
+        Some("workspace_absent" | "workspace_provisioning" | "workspace_failed") => {
+            Ok(FilesView::NoContainer)
+        }
+        // The status read answers NotFederated and hides the section; this
+        // arm only keeps the classification total.
+        Some("room_not_federated") => Ok(FilesView::NoContainer),
+        Some("workspace_route_not_allowed") => Ok(FilesView::Unavailable),
+        Some(code) => Err(failure_sentence(code)
+            .or_else(|| body.error.clone())
+            .unwrap_or_else(|| format!("File listing failed ({status})."))),
+        None if status == 404 => Ok(FilesView::Unavailable),
+        None => Err(body
+            .error
+            .filter(|error| !error.is_empty())
+            .map(|error| format!("File listing failed: {error}"))
+            .unwrap_or_else(|| format!("File listing failed ({status})."))),
+    }
+}
+
+/// The directory above `path`, or `None` at the workspace root. A path that
+/// does not sit under the root points back to the root rather than out of
+/// the tree — bedrock normalizes what it echoes, but the browse must not
+/// bet on it.
+fn parent_path(path: &str) -> Option<String> {
+    let rest = path.strip_prefix(WORKSPACE_ROOT_PATH)?;
+    if rest.is_empty() {
+        return None;
+    }
+    let cut = path.rfind('/')?;
+    if cut < WORKSPACE_ROOT_PATH.len() {
+        return Some(WORKSPACE_ROOT_PATH.to_string());
+    }
+    Some(path[..cut].to_string())
+}
+
+/// A file's size for its row: bytes plainly, then one decimal per unit.
+/// `None` — a directory, or a stat the driver could not take — renders
+/// nothing rather than a zero it never measured.
+fn entry_size_label(size: Option<u64>) -> Option<String> {
+    let size = size?;
+    if size < 1024 {
+        return Some(format!("{size} B"));
+    }
+    let kb = size as f64 / 1024.0;
+    if kb < 1024.0 {
+        return Some(format!("{kb:.1} KB"));
+    }
+    let mb = kb / 1024.0;
+    if mb < 1024.0 {
+        return Some(format!("{mb:.1} MB"));
+    }
+    Some(format!("{:.1} GB", mb / 1024.0))
+}
+
+/// The row's title attribute carries what the row itself does not: the full
+/// path, and the mtime when the driver took one.
+fn entry_title(entry: &FileEntry) -> String {
+    match entry.mtime.as_deref().filter(|mtime| !mtime.is_empty()) {
+        Some(mtime) => format!("{} \u{b7} {}", entry.path, mtime),
+        None => entry.path.clone(),
     }
 }
 
@@ -495,12 +635,13 @@ fn fallback_reads_status(tick: u64) -> bool {
     tick % STATUS_FALLBACK_EVERY_TICKS == 0
 }
 
-/// The two read lanes this panel runs. A standing error remembers which lane
-/// set it, so one lane's recovery can never wipe the other's live failure.
+/// The read lanes this panel runs. A standing error remembers which lane
+/// set it, so one lane's recovery can never wipe another's live failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReadLane {
     Status,
     Execs,
+    Files,
 }
 
 /// Whether a lane's successful read clears the standing error: only the one
@@ -543,6 +684,12 @@ pub struct RoomWorkspacePanelState {
     /// What the history read answered. `None` = not asked or not answered
     /// yet — the panel fetches on open, so the rail never pays for it.
     execs: RwSignal<Option<ExecsView>>,
+    /// What the listing read answered, for `files_path`. Same open-only
+    /// lifecycle as the history.
+    files: RwSignal<Option<FilesView>>,
+    /// The directory being browsed. What the silent refresh re-reads, so a
+    /// flush updates the listing the operator is actually looking at.
+    files_path: RwSignal<String>,
     /// A foreground status read is in flight (the poller refreshes silently).
     loading: RwSignal<bool>,
     /// The most recent failure, tagged with the lane that set it so the
@@ -559,6 +706,7 @@ pub struct RoomWorkspacePanelState {
     /// publish.
     ticket: RwSignal<u64>,
     execs_ticket: RwSignal<u64>,
+    files_ticket: RwSignal<u64>,
     /// Poller generation; bumping it retires any running poll loop.
     poll_epoch: RwSignal<u64>,
 }
@@ -569,6 +717,8 @@ impl RoomWorkspacePanelState {
             url: rooms.url,
             view: RwSignal::new(None),
             execs: RwSignal::new(None),
+            files: RwSignal::new(None),
+            files_path: RwSignal::new(WORKSPACE_ROOT_PATH.to_string()),
             loading: RwSignal::new(false),
             error: RwSignal::new(None),
             marker_seen: RwSignal::new(None),
@@ -576,6 +726,7 @@ impl RoomWorkspacePanelState {
             open_ref: NodeRef::new(),
             ticket: RwSignal::new(0),
             execs_ticket: RwSignal::new(0),
+            files_ticket: RwSignal::new(0),
             poll_epoch: RwSignal::new(0),
         }
     }
@@ -608,10 +759,14 @@ impl RoomWorkspacePanelState {
             .update(|ticket| *ticket = ticket.wrapping_add(1));
         self.execs_ticket
             .update(|ticket| *ticket = ticket.wrapping_add(1));
+        self.files_ticket
+            .update(|ticket| *ticket = ticket.wrapping_add(1));
         self.poll_epoch
             .update(|epoch| *epoch = epoch.wrapping_add(1));
         self.view.set(None);
         self.execs.set(None);
+        self.files.set(None);
+        self.files_path.set(WORKSPACE_ROOT_PATH.to_string());
         self.loading.set(false);
         self.error.set(None);
         self.marker_seen.set(None);
@@ -678,6 +833,43 @@ impl RoomWorkspacePanelState {
         }
     }
 
+    /// Read one directory of the tree, foreground — the open and every
+    /// navigation land here.
+    fn fetch_files(&self, key: String, actor: String, path: String) {
+        let base = self.base();
+        let me = *self;
+        let ticket = self.files_ticket.get_untracked().wrapping_add(1);
+        self.files_ticket.set(ticket);
+        spawn_local(async move {
+            let result = read_files(&base, &key, &actor, &path).await;
+            me.publish_files(
+                result,
+                read_is_current(ticket, me.files_ticket.get_untracked()),
+            );
+        });
+    }
+
+    /// Publish a completed listing read — but only the latest one.
+    fn publish_files(&self, result: Result<FilesView, String>, is_current: bool) {
+        if !is_current {
+            return;
+        }
+        match result {
+            Ok(view) => {
+                self.files.set(Some(view));
+                self.clear_lane_error(ReadLane::Files);
+            }
+            Err(error) => self.error.set(Some((ReadLane::Files, error))),
+        }
+    }
+
+    /// Browse into another directory: remember the path — the silent
+    /// refresh re-reads what is on screen — then read it.
+    fn navigate_files(&self, key: String, actor: String, path: String) {
+        self.files_path.set(path.clone());
+        self.fetch_files(key, actor, path);
+    }
+
     /// A lane that answered clears the error IT set, and only that one — a
     /// healthy status read must not wipe a live execs failure, or the other
     /// way round.
@@ -690,14 +882,17 @@ impl RoomWorkspacePanelState {
         }
     }
 
-    /// Open the panel: read both lanes fresh — a reopened panel shows the
-    /// room as it is, not as it was when last opened — and start the poll
-    /// loop that keeps it that way.
+    /// Open the panel: read every lane fresh — a reopened panel shows the
+    /// room as it is, not as it was when last opened, and the file browse
+    /// starts over at the root — and start the poll loop that keeps it
+    /// that way.
     fn open_panel(&self, rooms: Rooms, key: String, actor: String) {
         self.error.set(None);
         self.panel.set(true);
+        self.files_path.set(WORKSPACE_ROOT_PATH.to_string());
         self.fetch_status(key.clone(), actor.clone());
         self.fetch_execs(key.clone(), actor.clone());
+        self.fetch_files(key.clone(), actor.clone(), WORKSPACE_ROOT_PATH.to_string());
         self.poll_while_open(rooms, key, actor);
     }
 
@@ -707,7 +902,9 @@ impl RoomWorkspacePanelState {
     /// epoch and `(generation, key)` checks are what keep a loop from
     /// surviving its room or doubling up with a successor. Execs every tick
     /// (plain execs have no marker, this loop is their only truth); status
-    /// every Nth (every change to it does).
+    /// and the file listing every Nth — every status change mints a marker,
+    /// and so does every write that reshapes the tree except a plain exec's,
+    /// which this slow tick backstops.
     fn poll_while_open(&self, rooms: Rooms, key: String, actor: String) {
         let epoch = self.poll_epoch.get_untracked().wrapping_add(1);
         self.poll_epoch.set(epoch);
@@ -725,21 +922,22 @@ impl RoomWorkspacePanelState {
                     return;
                 }
                 tick = tick.wrapping_add(1);
-                refresh_lanes(me, &base, &key, &actor, fallback_reads_status(tick), true).await;
+                let slow = fallback_reads_status(tick);
+                refresh_lanes(me, &base, &key, &actor, slow, true, slow).await;
             }
         });
     }
 
     /// A workspace marker just landed on the transcript: refresh now instead
     /// of waiting out the fallback tick. Status always — the rail glance is
-    /// on screen with the panel closed — and the history only where it
-    /// renders; an opening panel fetches both fresh anyway.
+    /// on screen with the panel closed — and the history and listing only
+    /// where they render; an opening panel fetches everything fresh anyway.
     fn refresh_on_marker(&self, key: String, actor: String) {
         let base = self.base();
         let me = *self;
-        let execs = self.panel.get_untracked();
+        let open = self.panel.get_untracked();
         spawn_local(async move {
-            refresh_lanes(me, &base, &key, &actor, true, execs).await;
+            refresh_lanes(me, &base, &key, &actor, true, open, open).await;
         });
     }
 }
@@ -754,6 +952,7 @@ async fn refresh_lanes(
     actor: &str,
     status: bool,
     execs: bool,
+    files: bool,
 ) {
     if status {
         let ticket = me.ticket.get_untracked().wrapping_add(1);
@@ -768,6 +967,18 @@ async fn refresh_lanes(
         me.publish_execs(
             result,
             read_is_current(ticket, me.execs_ticket.get_untracked()),
+        );
+    }
+    if files {
+        // The path the operator is browsing NOW — a navigation that lands
+        // mid-refresh retires this read at the ticket gate.
+        let path = me.files_path.get_untracked();
+        let ticket = me.files_ticket.get_untracked().wrapping_add(1);
+        me.files_ticket.set(ticket);
+        let result = read_files(base, key, actor, &path).await;
+        me.publish_files(
+            result,
+            read_is_current(ticket, me.files_ticket.get_untracked()),
         );
     }
 }
@@ -799,10 +1010,23 @@ async fn read_execs(base: &str, key: &str, actor: &str) -> Result<ExecsView, Str
     }
 }
 
+async fn read_files(base: &str, key: &str, actor: &str, path: &str) -> Result<FilesView, String> {
+    let url = files_url(base, key, actor, path);
+    match Request::get(&url).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.json::<WorkspaceBody>().await.ok();
+            classify_files(status, body)
+        }
+        Err(err) => Err(format!("File listing request failed: {err}")),
+    }
+}
+
 // ---- Component --------------------------------------------------------------
 
 /// The open room's workspace: a compact rail row with a glance line, and a
-/// panel where the provision facts and the command history are read.
+/// panel where the provision facts, the file tree and the command history
+/// are read.
 ///
 /// Renders NOTHING for a Local room — no workspace exists there and a
 /// refusal would only read as breakage. Everything here is a read, so no
@@ -1002,6 +1226,7 @@ pub fn RoomWorkspacePanel(rooms: Rooms, state: RoomWorkspacePanelState) -> impl 
                                         }.into_any(),
                                         _ => ().into_any(),
                                     }}
+                                    {move || files_section(state, actor)}
                                     {move || {
                                         let rows = match state.execs.get() {
                                             Some(ExecsView::Rows(rows)) => rows,
@@ -1126,6 +1351,109 @@ fn exec_row_view(row: &ExecRow) -> impl IntoView {
     }
 }
 
+/// The workspace tree, one directory at a time — what the list route feeds.
+/// A room with no live container renders nothing here: the status block
+/// above already says so in its own words.
+fn files_section(
+    state: RoomWorkspacePanelState,
+    actor: impl Fn() -> Option<(String, String)> + Copy + 'static,
+) -> AnyView {
+    let (path, entries) = match state.files.get() {
+        Some(FilesView::Listing { path, entries }) => (path, entries),
+        Some(FilesView::NoContainer) => return ().into_any(),
+        Some(FilesView::Unavailable) => {
+            return view! {
+                <div class="rooms-workspace__compute-note">
+                    "File listing isn't available on this deployment yet."
+                </div>
+            }
+            .into_any();
+        }
+        // Not answered yet — the panel always asks on open.
+        None => {
+            return view! {
+                <div class="rooms-workspace__compute-note">"Reading files\u{2026}"</div>
+            }
+            .into_any();
+        }
+    };
+    let up = parent_path(&path);
+    view! {
+        <div class="rooms-workspace__compute-files-title">"Files"</div>
+        <div class="rooms-workspace__compute-files-path">
+            {up.map(|parent| view! {
+                <button
+                    class="rooms-workspace__compute-files-up"
+                    type="button"
+                    title="Up one directory"
+                    aria-label="Up one directory"
+                    on:click=move |_| {
+                        let Some((key, actor_id)) = actor() else { return };
+                        state.navigate_files(key, actor_id, parent.clone());
+                    }
+                >
+                    "\u{2191}"
+                </button>
+            })}
+            <span class="rooms-workspace__compute-files-dir">{path}</span>
+        </div>
+        {if entries.is_empty() {
+            view! {
+                <div class="rooms-workspace__compute-note">"This directory is empty."</div>
+            }
+            .into_any()
+        } else {
+            entries
+                .into_iter()
+                .map(|entry| file_row_view(state, actor, entry))
+                .collect::<Vec<_>>()
+                .into_any()
+        }}
+    }
+    .into_any()
+}
+
+/// One entry. A directory row IS the navigation — a button into it; a file
+/// row is deliberately inert: the member lane has no file-read route, so
+/// the name and size are the whole answer and an open link would be a lie.
+fn file_row_view(
+    state: RoomWorkspacePanelState,
+    actor: impl Fn() -> Option<(String, String)> + Copy + 'static,
+    entry: FileEntry,
+) -> AnyView {
+    let title = entry_title(&entry);
+    if entry.kind == "directory" {
+        let target = entry.path.clone();
+        view! {
+            <button
+                class="rooms-workspace__compute-file rooms-workspace__compute-file--dir"
+                type="button"
+                title=title
+                on:click=move |_| {
+                    let Some((key, actor_id)) = actor() else { return };
+                    state.navigate_files(key, actor_id, target.clone());
+                }
+            >
+                <span class="rooms-workspace__compute-file-kind">"dir"</span>
+                <span class="rooms-workspace__compute-file-name">{entry.name}</span>
+            </button>
+        }
+        .into_any()
+    } else {
+        let size = entry_size_label(entry.size);
+        view! {
+            <div class="rooms-workspace__compute-file" title=title>
+                <span class="rooms-workspace__compute-file-kind">"file"</span>
+                <span class="rooms-workspace__compute-file-name">{entry.name}</span>
+                {size.map(|size| view! {
+                    <span class="rooms-workspace__compute-file-size">{size}</span>
+                })}
+            </div>
+        }
+        .into_any()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1135,6 +1463,8 @@ mod tests {
             url: RwSignal::new("http://d".to_string()),
             view: RwSignal::new(None),
             execs: RwSignal::new(None),
+            files: RwSignal::new(None),
+            files_path: RwSignal::new(WORKSPACE_ROOT_PATH.to_string()),
             loading: RwSignal::new(false),
             error: RwSignal::new(None),
             marker_seen: RwSignal::new(None),
@@ -1142,6 +1472,7 @@ mod tests {
             open_ref: NodeRef::new(),
             ticket: RwSignal::new(0),
             execs_ticket: RwSignal::new(0),
+            files_ticket: RwSignal::new(0),
             poll_epoch: RwSignal::new(0),
         }
     }
@@ -1334,6 +1665,145 @@ mod tests {
         );
     }
 
+    // ---- the files wire -----------------------------------------------------
+
+    /// Bedrock's list body: the normalized path echoed back, one directory
+    /// of driver-sorted entries, sizes on files only.
+    #[test]
+    fn a_listing_carries_its_path_and_rows() {
+        let listed = body(
+            r#"{"path": "/workspace", "entries": [
+                {"name": ".git", "path": "/workspace/.git", "type": "directory",
+                 "size": null, "mtime": "2026-08-27T10:00:00.000Z"},
+                {"name": "package.json", "path": "/workspace/package.json",
+                 "type": "file", "size": 417, "mtime": "2026-08-27T10:01:00.000Z"}]}"#,
+        );
+        let FilesView::Listing { path, entries } = classify_files(200, Some(listed)).unwrap()
+        else {
+            panic!("expected a listing");
+        };
+        assert_eq!(path, "/workspace");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].kind, "directory");
+        assert_eq!(entries[0].size, None);
+        assert_eq!(entries[1].kind, "file");
+        assert_eq!(entries[1].size, Some(417));
+    }
+
+    /// Listing needs the live container, so bedrock refuses where the
+    /// ledger-backed reads answer: absent and its provisioning/failed kin
+    /// are states the status block already explains, never errors; gates
+    /// and route-less deployments read as they do on every other lane.
+    #[test]
+    fn files_states_classify_totally() {
+        for code in [
+            "workspace_absent",
+            "workspace_provisioning",
+            "workspace_failed",
+        ] {
+            let refused = body(&format!(r#"{{"error": "no", "code": "{code}"}}"#));
+            assert_eq!(
+                classify_files(409, Some(refused)),
+                Ok(FilesView::NoContainer),
+                "{code} must be a state"
+            );
+        }
+        assert_eq!(classify_files(404, None), Ok(FilesView::Unavailable));
+        let coded = body(r#"{"ok": false, "code": "workspace_route_not_allowed"}"#);
+        assert_eq!(classify_files(404, Some(coded)), Ok(FilesView::Unavailable));
+        let gated = body(r#"{"ok": false, "code": "not_a_room_member"}"#);
+        assert_eq!(
+            classify_files(403, Some(gated)),
+            Err("You're not on this room's roster.".to_string())
+        );
+    }
+
+    /// The browse climbs one directory at a time and stops at the root; a
+    /// path from outside the tree has no parent to offer.
+    #[test]
+    fn navigation_climbs_to_the_root_and_stops() {
+        assert_eq!(parent_path("/workspace"), None);
+        assert_eq!(parent_path("/workspace/src").as_deref(), Some("/workspace"));
+        assert_eq!(
+            parent_path("/workspace/src/components").as_deref(),
+            Some("/workspace/src")
+        );
+        assert_eq!(parent_path(""), None);
+        assert_eq!(parent_path("/elsewhere"), None);
+    }
+
+    /// Sizes read as a human line; a directory's `null` renders nothing
+    /// rather than a zero the driver never measured.
+    #[test]
+    fn sizes_label_bytes_kb_mb() {
+        assert_eq!(entry_size_label(None), None);
+        assert_eq!(entry_size_label(Some(0)).as_deref(), Some("0 B"));
+        assert_eq!(entry_size_label(Some(1023)).as_deref(), Some("1023 B"));
+        assert_eq!(entry_size_label(Some(1536)).as_deref(), Some("1.5 KB"));
+        assert_eq!(
+            entry_size_label(Some(5 * 1024 * 1024)).as_deref(),
+            Some("5.0 MB")
+        );
+        assert_eq!(
+            entry_size_label(Some(3 * 1024 * 1024 * 1024)).as_deref(),
+            Some("3.0 GB")
+        );
+    }
+
+    /// The row's title carries what the row itself does not: the full path,
+    /// and the mtime when the driver took one.
+    #[test]
+    fn the_row_title_carries_path_and_mtime() {
+        let entry = FileEntry {
+            name: "package.json".to_string(),
+            path: "/workspace/package.json".to_string(),
+            kind: "file".to_string(),
+            size: Some(417),
+            mtime: Some("2026-08-27T10:01:00.000Z".to_string()),
+        };
+        assert_eq!(
+            entry_title(&entry),
+            "/workspace/package.json \u{b7} 2026-08-27T10:01:00.000Z"
+        );
+        let bare = FileEntry {
+            mtime: None,
+            ..entry
+        };
+        assert_eq!(entry_title(&bare), "/workspace/package.json");
+    }
+
+    #[test]
+    fn the_files_url_asserts_the_actor_and_encodes_the_path() {
+        assert_eq!(
+            files_url("http://d", "k", "a", "/workspace/my dir"),
+            "http://d/v1/rooms/persistent/k/workspace/list?actor_id=a&path=%2Fworkspace%2Fmy%20dir"
+        );
+    }
+
+    /// The files lane keeps the same isolation contract as the other two:
+    /// a failed refresh keeps the standing listing, its failure stands
+    /// through the other lanes' successes, and its own success clears it.
+    #[test]
+    fn the_files_lane_errors_stay_isolated() {
+        let state = fresh_state();
+        let listing = FilesView::Listing {
+            path: "/workspace".to_string(),
+            entries: Vec::new(),
+        };
+        state.files.set(Some(listing.clone()));
+        state.publish_files(Err("files down".to_string()), true);
+        assert_eq!(state.files.get_untracked(), Some(listing.clone()));
+        state.publish_status(Ok(WorkspaceView::Absent), true);
+        state.publish_execs(Ok(ExecsView::Rows(Vec::new())), true);
+        assert_eq!(
+            state.error.get_untracked(),
+            Some((ReadLane::Files, "files down".to_string())),
+            "the other lanes' successes must not wipe a live files failure"
+        );
+        state.publish_files(Ok(listing), true);
+        assert_eq!(state.error.get_untracked(), None);
+    }
+
     // ---- builds -------------------------------------------------------------
 
     /// A build row is an exec row opening with Bedrock's marker; the marker
@@ -1466,6 +1936,9 @@ mod tests {
 
         state.publish_execs(Ok(ExecsView::Rows(Vec::new())), false);
         assert_eq!(state.execs.get_untracked(), None);
+
+        state.publish_files(Ok(FilesView::NoContainer), false);
+        assert_eq!(state.files.get_untracked(), None);
     }
 
     /// A failed poll refresh must not blank what the operator is reading —
