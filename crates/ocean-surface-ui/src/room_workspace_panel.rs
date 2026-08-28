@@ -35,12 +35,18 @@
 //!    execs route instead, and the status body's `recent_execs` is left on
 //!    the floor rather than rendered as twenty rows that all look withheld.
 //!
-//! The daemon's federation ingest accepts only `message` events, so
-//! `room.workspace.*` events never reach this surface — an open panel POLLS
+//! Workspace activity also reaches this surface live: the daemon ingests
+//! Bedrock's allowlisted `room.workspace.*` ledger rows as System transcript
+//! markers ("workspace provisioned", "workspace build 'x' failed", …), and
+//! the room-scoped SSE tail delivers them with the rest of the transcript.
+//! Those markers are this panel's wake signal — a new one triggers the same
+//! silent reads the poller runs, immediately. The open panel still POLLS
 //! (the `room_repo` clone-poller idiom: ticket admission, epoch retirement,
-//! `(generation, key)` re-validation) so a reload, a re-entered room, or a
-//! second member's panel all read current state rather than a view frozen by
-//! whoever opened one first.
+//! `(generation, key)` re-validation), but as a SLOW fallback: the tail
+//! spends real time in Reconnecting, a deployment can predate the marker
+//! lane, and a plain member exec deliberately emits no marker at all — the
+//! daemon's allowlist keeps exec chatter off the transcript — so another
+//! member's command history only advances on the fallback.
 //!
 //! A deployment whose daemon or Bedrock predates these routes answers 404
 //! with no code; that renders as "not available yet", plainly. Everything
@@ -52,11 +58,24 @@ use leptos::prelude::*;
 use serde::{Deserialize, Deserializer};
 use wasm_bindgen_futures::spawn_local;
 
-use crate::rooms::{encode, RoomAccessProjection, RoomAccessState, Rooms};
+use crate::rooms::{
+    encode, RoomAccessProjection, RoomAccessState, RoomMessage, RoomMessageKind, Rooms,
+};
 
-/// How often an open panel re-reads status and history. The same cadence as
-/// the repo section's clone poller: honest without leaning on the daemon.
-const PANEL_POLL_MS: u32 = 4_000;
+/// The open panel's fallback tick. The marker wake is the primary refresh
+/// now, so this only has to be honest where the push path is absent — and
+/// it is what keeps another member's plain execs advancing at all, which is
+/// why it stays minutes-not-hours slow.
+const PANEL_POLL_MS: u32 = 10_000;
+
+/// Every status change emits a transcript marker, so the status lane needs
+/// the fallback even less than the execs lane does: it rides every Nth tick
+/// (~30s) instead of every one.
+const STATUS_FALLBACK_EVERY_TICKS: u64 = 3;
+
+/// Every marker the daemon composes opens with this word — nine variants,
+/// one prefix (`compose_workspace_marker` in ocean-os's room_federation.rs).
+const WORKSPACE_MARKER_PREFIX: &str = "workspace ";
 
 /// Rows asked of the execs route. Bedrock bounds the parameter to 1..=200
 /// and defaults to 50; 30 keeps the panel a read, not an archive.
@@ -424,6 +443,75 @@ fn read_is_current(ticket: u64, current: u64) -> bool {
     ticket == current
 }
 
+/// Whether a transcript row is one of the daemon's workspace markers. The
+/// daemon writes them as System rows authored by the lane itself, and every
+/// body it composes opens with the same word — member-controlled text can
+/// only ever appear inside a marker, never mint one.
+pub(crate) fn is_workspace_marker(row: &RoomMessage) -> bool {
+    row.kind == RoomMessageKind::System
+        && row.author_id == "system"
+        && row.body.starts_with(WORKSPACE_MARKER_PREFIX)
+}
+
+/// What a transcript observation means for the marker wake: the watermark to
+/// store — `(room generation, highest seq seen)` — and whether the rows past
+/// the old watermark include a marker worth refreshing for.
+///
+/// The first sight of a room admission only records the watermark: hydration
+/// replays the room's whole history, and waking on it would fire a refresh
+/// right after the open-room fetch already read everything. An EMPTY
+/// transcript stays uninitialized for the same reason — a just-opened room
+/// is cleared before it hydrates, and initializing against the cleared state
+/// would make the hydration that follows read as news.
+///
+/// Shared with `room_repo`, which watches the same transcript for its own
+/// subset of markers — `is_marker` is the caller's notion of "worth waking
+/// for".
+pub(crate) fn marker_wake(
+    prior: Option<(u64, u64)>,
+    generation: u64,
+    transcript: &[RoomMessage],
+    is_marker: impl Fn(&RoomMessage) -> bool,
+) -> (Option<(u64, u64)>, bool) {
+    let Some(latest) = transcript.last().map(|row| row.seq) else {
+        return (None, false);
+    };
+    match prior {
+        Some((seen_generation, seen)) if seen_generation == generation => {
+            // New rows sit at the tail; the transcript is ascending by seq.
+            let wake = transcript
+                .iter()
+                .rev()
+                .take_while(|row| row.seq > seen)
+                .any(is_marker);
+            (Some((generation, latest.max(seen))), wake)
+        }
+        _ => (Some((generation, latest)), false),
+    }
+}
+
+/// Whether this fallback tick reads the status lane too, or only execs.
+fn fallback_reads_status(tick: u64) -> bool {
+    tick % STATUS_FALLBACK_EVERY_TICKS == 0
+}
+
+/// The two read lanes this panel runs. A standing error remembers which lane
+/// set it, so one lane's recovery can never wipe the other's live failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadLane {
+    Status,
+    Execs,
+}
+
+/// Whether a lane's successful read clears the standing error: only the one
+/// its own lane set. This is the absorbed fix — a blipped silent poll used
+/// to leave its error standing forever over a self-healed view, and the
+/// naive "success clears" would let a status success wipe a live execs
+/// failure.
+fn lane_success_clears(standing: Option<ReadLane>, lane: ReadLane) -> bool {
+    standing == Some(lane)
+}
+
 /// Whether the section exists for this room at all. Only a federated room
 /// has a Bedrock workspace; a Local room renders nothing rather than a
 /// refusal, and `None` (no room open / still loading) also renders nothing.
@@ -457,8 +545,12 @@ pub struct RoomWorkspacePanelState {
     execs: RwSignal<Option<ExecsView>>,
     /// A foreground status read is in flight (the poller refreshes silently).
     loading: RwSignal<bool>,
-    /// The most recent failure, either read.
-    error: RwSignal<Option<String>>,
+    /// The most recent failure, tagged with the lane that set it so the
+    /// other lane's success cannot clear it.
+    error: RwSignal<Option<(ReadLane, String)>>,
+    /// The marker wake's watermark: `(room generation, highest transcript
+    /// seq seen)`. `None` until the open room's transcript is first sighted.
+    marker_seen: RwSignal<Option<(u64, u64)>>,
     /// Whether the reading-measure panel is open.
     panel: RwSignal<bool>,
     /// The rail control that opens the panel, so closing hands focus back.
@@ -479,6 +571,7 @@ impl RoomWorkspacePanelState {
             execs: RwSignal::new(None),
             loading: RwSignal::new(false),
             error: RwSignal::new(None),
+            marker_seen: RwSignal::new(None),
             panel: RwSignal::new(false),
             open_ref: NodeRef::new(),
             ticket: RwSignal::new(0),
@@ -521,6 +614,7 @@ impl RoomWorkspacePanelState {
         self.execs.set(None);
         self.loading.set(false);
         self.error.set(None);
+        self.marker_seen.set(None);
         self.panel.set(false);
     }
 
@@ -545,10 +639,13 @@ impl RoomWorkspacePanelState {
         }
         self.loading.set(false);
         match result {
-            Ok(view) => self.view.set(Some(view)),
+            Ok(view) => {
+                self.view.set(Some(view));
+                self.clear_lane_error(ReadLane::Status);
+            }
             // A failed refresh never blanks a standing view: what the
             // operator was reading is still the best answer this surface has.
-            Err(error) => self.error.set(Some(error)),
+            Err(error) => self.error.set(Some((ReadLane::Status, error))),
         }
     }
 
@@ -573,8 +670,23 @@ impl RoomWorkspacePanelState {
             return;
         }
         match result {
-            Ok(view) => self.execs.set(Some(view)),
-            Err(error) => self.error.set(Some(error)),
+            Ok(view) => {
+                self.execs.set(Some(view));
+                self.clear_lane_error(ReadLane::Execs);
+            }
+            Err(error) => self.error.set(Some((ReadLane::Execs, error))),
+        }
+    }
+
+    /// A lane that answered clears the error IT set, and only that one — a
+    /// healthy status read must not wipe a live execs failure, or the other
+    /// way round.
+    fn clear_lane_error(&self, lane: ReadLane) {
+        let clears = self
+            .error
+            .with_untracked(|slot| lane_success_clears(slot.as_ref().map(|(lane, _)| *lane), lane));
+        if clears {
+            self.error.set(None);
         }
     }
 
@@ -589,11 +701,13 @@ impl RoomWorkspacePanelState {
         self.poll_while_open(rooms, key, actor);
     }
 
-    /// Refresh both lanes while the panel is open. Reads silently — no
+    /// The fallback poll while the panel is open. Reads silently — no
     /// loading flicker — and publishes through the same ticket admission as
     /// every other read, so an overlapping foreground fetch still wins. The
     /// epoch and `(generation, key)` checks are what keep a loop from
-    /// surviving its room or doubling up with a successor.
+    /// surviving its room or doubling up with a successor. Execs every tick
+    /// (plain execs have no marker, this loop is their only truth); status
+    /// every Nth (every change to it does).
     fn poll_while_open(&self, rooms: Rooms, key: String, actor: String) {
         let epoch = self.poll_epoch.get_untracked().wrapping_add(1);
         self.poll_epoch.set(epoch);
@@ -601,6 +715,7 @@ impl RoomWorkspacePanelState {
         let me = *self;
         let generation = rooms.generation_snapshot();
         spawn_local(async move {
+            let mut tick: u64 = 0;
             loop {
                 gloo_timers::future::TimeoutFuture::new(PANEL_POLL_MS).await;
                 if me.poll_epoch.get_untracked() != epoch
@@ -609,20 +724,51 @@ impl RoomWorkspacePanelState {
                 {
                     return;
                 }
-                let ticket = me.ticket.get_untracked().wrapping_add(1);
-                me.ticket.set(ticket);
-                let result = read_workspace(&base, &key, &actor).await;
-                me.publish_status(result, read_is_current(ticket, me.ticket.get_untracked()));
-
-                let ticket = me.execs_ticket.get_untracked().wrapping_add(1);
-                me.execs_ticket.set(ticket);
-                let result = read_execs(&base, &key, &actor).await;
-                me.publish_execs(
-                    result,
-                    read_is_current(ticket, me.execs_ticket.get_untracked()),
-                );
+                tick = tick.wrapping_add(1);
+                refresh_lanes(me, &base, &key, &actor, fallback_reads_status(tick), true).await;
             }
         });
+    }
+
+    /// A workspace marker just landed on the transcript: refresh now instead
+    /// of waiting out the fallback tick. Status always — the rail glance is
+    /// on screen with the panel closed — and the history only where it
+    /// renders; an opening panel fetches both fresh anyway.
+    fn refresh_on_marker(&self, key: String, actor: String) {
+        let base = self.base();
+        let me = *self;
+        let execs = self.panel.get_untracked();
+        spawn_local(async move {
+            refresh_lanes(me, &base, &key, &actor, true, execs).await;
+        });
+    }
+}
+
+/// The silent refresh the fallback poller and the marker wake share: read
+/// the named lanes, publish through ticket admission. One shape for both
+/// callers, so they cannot drift apart about what "refresh" means.
+async fn refresh_lanes(
+    me: RoomWorkspacePanelState,
+    base: &str,
+    key: &str,
+    actor: &str,
+    status: bool,
+    execs: bool,
+) {
+    if status {
+        let ticket = me.ticket.get_untracked().wrapping_add(1);
+        me.ticket.set(ticket);
+        let result = read_workspace(base, key, actor).await;
+        me.publish_status(result, read_is_current(ticket, me.ticket.get_untracked()));
+    }
+    if execs {
+        let ticket = me.execs_ticket.get_untracked().wrapping_add(1);
+        me.execs_ticket.set(ticket);
+        let result = read_execs(base, key, actor).await;
+        me.publish_execs(
+            result,
+            read_is_current(ticket, me.execs_ticket.get_untracked()),
+        );
     }
 }
 
@@ -693,17 +839,46 @@ pub fn RoomWorkspacePanel(rooms: Rooms, state: RoomWorkspacePanelState) -> impl 
         None => state.reset(),
     });
 
+    // The wake path: watch the transcript the SSE tail feeds for new
+    // workspace markers and refresh on each one, so the panel reflects a
+    // provision, clone or build the moment the room hears about it instead
+    // of a fallback tick later. The watermark starts over with the panel's
+    // reset() lifecycle AND carries the room generation, so whichever of the
+    // two Effects runs first on a room switch, hydration reads as the
+    // initial load, never as news.
+    Effect::new(move |_| {
+        let (watermark, wake) = rooms.transcript.with(|transcript| {
+            marker_wake(
+                state.marker_seen.get_untracked(),
+                rooms.generation_snapshot(),
+                transcript,
+                is_workspace_marker,
+            )
+        });
+        state.marker_seen.set(watermark);
+        if !wake {
+            return;
+        }
+        let Some((key, actor)) = read_target.get_untracked() else {
+            return;
+        };
+        state.refresh_on_marker(key, actor);
+    });
+
     // The one place the open action resolves the room key and the actor
-    // together; the identity refusal is the composer's, in its words.
+    // together; the identity refusal is the composer's, in its words. Tagged
+    // as the status lane's: it stands in for the reads the open would have
+    // run, and any read that succeeds proves it moot.
     let actor = move || -> Option<(String, String)> {
         let key = rooms
             .open_key
             .get_untracked()
             .filter(|key| !key.is_empty())?;
         if !rooms.identity_resolved() {
-            state.error.set(Some(
+            state.error.set(Some((
+                ReadLane::Status,
                 "Still signing in \u{2014} try again in a moment.".to_string(),
-            ));
+            )));
             return None;
         }
         Some((key, rooms.identity_id.get_untracked()))
@@ -745,7 +920,7 @@ pub fn RoomWorkspacePanel(rooms: Rooms, state: RoomWorkspacePanelState) -> impl 
                     // error: a failure while the panel is closed must not
                     // read as a room without a workspace.
                     {move || {
-                        state.error.get().map(|error| view! {
+                        state.error.get().map(|(_, error)| view! {
                             <div class="rooms-workspace__compute-error" role="alert">{error}</div>
                         })
                     }}
@@ -803,7 +978,7 @@ pub fn RoomWorkspacePanel(rooms: Rooms, state: RoomWorkspacePanelState) -> impl 
                                 </div>
                                 <div class="rooms-workspace__compute-panel-body">
                                     {move || {
-                                        state.error.get().map(|error| view! {
+                                        state.error.get().map(|(_, error)| view! {
                                             <div
                                                 class="rooms-workspace__compute-error"
                                                 role="alert"
@@ -962,6 +1137,7 @@ mod tests {
             execs: RwSignal::new(None),
             loading: RwSignal::new(false),
             error: RwSignal::new(None),
+            marker_seen: RwSignal::new(None),
             panel: RwSignal::new(false),
             open_ref: NodeRef::new(),
             ticket: RwSignal::new(0),
@@ -1306,7 +1482,42 @@ mod tests {
             state.execs.get_untracked(),
             Some(ExecsView::Rows(Vec::new()))
         );
-        assert_eq!(state.error.get_untracked().as_deref(), Some("boom"));
+        assert_eq!(
+            state.error.get_untracked(),
+            Some((ReadLane::Execs, "boom".to_string()))
+        );
+    }
+
+    /// The absorbed fix, both halves: a lane that recovers clears the error
+    /// it set — one blipped silent poll no longer leaves a standing alert
+    /// over a healthy view — and only that one, so a status success can
+    /// never wipe a live execs failure.
+    #[test]
+    fn a_lane_success_clears_only_the_error_its_own_lane_set() {
+        let state = fresh_state();
+        state.publish_status(Err("status blip".to_string()), true);
+        state.publish_status(Ok(WorkspaceView::Absent), true);
+        assert_eq!(state.error.get_untracked(), None);
+
+        state.publish_execs(Err("execs down".to_string()), true);
+        state.publish_status(Ok(WorkspaceView::Absent), true);
+        assert_eq!(
+            state.error.get_untracked(),
+            Some((ReadLane::Execs, "execs down".to_string())),
+            "a status success must not wipe a live execs failure"
+        );
+        state.publish_execs(Ok(ExecsView::Rows(Vec::new())), true);
+        assert_eq!(state.error.get_untracked(), None);
+
+        assert!(lane_success_clears(
+            Some(ReadLane::Status),
+            ReadLane::Status
+        ));
+        assert!(!lane_success_clears(
+            Some(ReadLane::Execs),
+            ReadLane::Status
+        ));
+        assert!(!lane_success_clears(None, ReadLane::Execs));
     }
 
     // ---- gates --------------------------------------------------------------
@@ -1343,5 +1554,136 @@ mod tests {
             execs_url("http://d", "k", "a"),
             "http://d/v1/rooms/persistent/k/workspace/execs?actor_id=a&limit=30"
         );
+    }
+
+    // ---- the marker wake ----------------------------------------------------
+
+    fn row(seq: u64, kind: RoomMessageKind, author_id: &str, body: &str) -> RoomMessage {
+        RoomMessage {
+            seq,
+            author_id: author_id.into(),
+            author_kind: crate::rooms::RoomParticipantKind::System,
+            kind,
+            body: body.into(),
+            created_at: String::new(),
+            federated: None,
+            thread_parent_seq: None,
+            attachment_id: None,
+        }
+    }
+
+    /// Only the daemon's own markers count: System kind, the lane's author,
+    /// the composed prefix. A member TYPING "workspace provisioned" is a
+    /// Message row and must not trigger reads.
+    #[test]
+    fn only_a_system_workspace_row_is_a_marker() {
+        assert!(is_workspace_marker(&row(
+            1,
+            RoomMessageKind::System,
+            "system",
+            "workspace provisioned (cloudflare, 12 files hydrated)"
+        )));
+        assert!(is_workspace_marker(&row(
+            2,
+            RoomMessageKind::System,
+            "system",
+            "workspace build 'build' failed (exit 1, 32.4s)"
+        )));
+        assert!(!is_workspace_marker(&row(
+            3,
+            RoomMessageKind::Message,
+            "user",
+            "workspace provisioned"
+        )));
+        assert!(!is_workspace_marker(&row(
+            4,
+            RoomMessageKind::System,
+            "system",
+            "attachment notes.md uploaded"
+        )));
+        assert!(!is_workspace_marker(&row(
+            5,
+            RoomMessageKind::System,
+            "user",
+            "workspace provisioned"
+        )));
+    }
+
+    /// The wake fires on a NEW marker and nothing else: not on the initial
+    /// hydration (the whole history is "new" then), not on a plain message,
+    /// not twice for the same marker, and not across a room switch.
+    #[test]
+    fn a_new_marker_wakes_and_the_initial_load_does_not() {
+        let history = vec![
+            row(1, RoomMessageKind::Message, "user", "hello"),
+            row(
+                2,
+                RoomMessageKind::System,
+                "system",
+                "workspace provisioned",
+            ),
+        ];
+        // First sight of the room: record only, however marker-laden.
+        let (watermark, wake) = marker_wake(None, 7, &history, is_workspace_marker);
+        assert_eq!(watermark, Some((7, 2)));
+        assert!(!wake);
+
+        // A plain message arrives: watermark advances, no wake.
+        let mut transcript = history.clone();
+        transcript.push(row(3, RoomMessageKind::Message, "user", "any news?"));
+        let (watermark, wake) = marker_wake(watermark, 7, &transcript, is_workspace_marker);
+        assert_eq!(watermark, Some((7, 3)));
+        assert!(!wake);
+
+        // A marker arrives: wake, once.
+        transcript.push(row(
+            4,
+            RoomMessageKind::System,
+            "system",
+            "workspace repo cloned: 'main' @ 0123456789ab",
+        ));
+        let (watermark, wake) = marker_wake(watermark, 7, &transcript, is_workspace_marker);
+        assert_eq!(watermark, Some((7, 4)));
+        assert!(wake);
+        let (watermark, wake) = marker_wake(watermark, 7, &transcript, is_workspace_marker);
+        assert_eq!(watermark, Some((7, 4)));
+        assert!(!wake, "an unchanged transcript must not wake again");
+
+        // A room switch bumps the generation: the next room's history is an
+        // initial load again, whatever its seqs say.
+        let next_room = vec![row(
+            9,
+            RoomMessageKind::System,
+            "system",
+            "workspace build 'build' succeeded (3.2s)",
+        )];
+        let (watermark, wake) = marker_wake(watermark, 8, &next_room, is_workspace_marker);
+        assert_eq!(watermark, Some((8, 9)));
+        assert!(!wake);
+    }
+
+    /// A cleared transcript — a room being opened, hydration pending — stays
+    /// uninitialized. Initializing against it would make the hydration that
+    /// follows read as news and fire a refresh right after the open fetch.
+    #[test]
+    fn an_empty_transcript_never_initializes_the_watermark() {
+        assert_eq!(
+            marker_wake(None, 7, &[], is_workspace_marker),
+            (None, false)
+        );
+        assert_eq!(
+            marker_wake(Some((7, 4)), 7, &[], is_workspace_marker),
+            (None, false)
+        );
+    }
+
+    /// Execs ride every fallback tick (no marker exists for them); status
+    /// only every Nth, because every status change mints one.
+    #[test]
+    fn the_status_fallback_rides_every_third_tick() {
+        let status_ticks: Vec<u64> = (1..=7)
+            .filter(|tick| fallback_reads_status(*tick))
+            .collect();
+        assert_eq!(status_ticks, vec![3, 6]);
     }
 }

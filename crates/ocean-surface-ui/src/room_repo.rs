@@ -45,6 +45,10 @@
 //!    private property: a plain read that answers `cloning` — a reload
 //!    mid-clone, a second member watching — starts the same poller, so every
 //!    session converges on the completion, not just the one that clicked.
+//!    The daemon also relays clone outcomes onto the room transcript as
+//!    System markers ("workspace repo cloned…"), so a marker on the SSE tail
+//!    triggers the same silent re-read immediately — the wake accelerates
+//!    the poller, it never replaces it.
 //!
 //! A production deployment whose daemon or Bedrock predates these routes
 //! answers 404 with no code; that renders as "not available yet", plainly,
@@ -56,12 +60,18 @@ use leptos::prelude::*;
 use serde::Deserialize;
 use wasm_bindgen_futures::spawn_local;
 
-use crate::rooms::{encode, RoomAccessProjection, RoomAccessState, Rooms};
+use crate::room_workspace_panel::{is_workspace_marker, marker_wake};
+use crate::rooms::{encode, RoomAccessProjection, RoomAccessState, RoomMessage, Rooms};
 
 /// How often the poller re-reads the binding while a clone is running. The
 /// clone itself takes tens of seconds to minutes; 4s keeps the panel honest
 /// without leaning on the daemon.
 const CLONE_POLL_MS: u32 = 4_000;
+
+/// The opening both clone-outcome markers share ("workspace repo cloned…",
+/// "workspace repo clone failed…"). The other seven marker variants say
+/// nothing about the binding, so they don't wake this section.
+const REPO_CLONE_MARKER_PREFIX: &str = "workspace repo clone";
 
 /// The script the build field starts at. Bedrock has no default — `script` is
 /// required on the wire — and "build" is the npm convention this control is
@@ -433,6 +443,31 @@ fn read_is_current(ticket: u64, current: u64) -> bool {
     ticket == current
 }
 
+/// Whether a transcript row is a clone-outcome marker — the one workspace
+/// event that changes the binding this section renders.
+fn is_repo_clone_marker(row: &RoomMessage) -> bool {
+    is_workspace_marker(row) && row.body.starts_with(REPO_CLONE_MARKER_PREFIX)
+}
+
+/// Where a standing error came from. A silent read that succeeds may clear
+/// only a READ failure: a command refusal ("the clone failed: …") or a
+/// pre-wire refusal (empty script, unresolved identity) is an answer the
+/// operator has not acted on yet, and a background poll going well says
+/// nothing about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepoErrorSource {
+    Read,
+    Command,
+}
+
+/// Whether a successful status read clears the standing error — the
+/// absorbed fix: one blipped silent poll no longer leaves an alert standing
+/// over a healthy self-healing view, and a command failure stands until the
+/// operator acts.
+fn read_success_clears(standing: Option<RepoErrorSource>) -> bool {
+    standing == Some(RepoErrorSource::Read)
+}
+
 /// Refuse a build this side already knows Bedrock will reject: `script` is
 /// required on the wire, and an empty one would come back as prose about a
 /// field this control should have insisted on.
@@ -475,8 +510,12 @@ pub struct RoomRepoState {
     view: RwSignal<Option<RepoView>>,
     /// A foreground read is in flight (the poller refreshes silently).
     loading: RwSignal<bool>,
-    /// The most recent failure, read or command.
-    error: RwSignal<Option<String>>,
+    /// The most recent failure, read or command, tagged with which — a
+    /// read that recovers clears only a read's failure.
+    error: RwSignal<Option<(RepoErrorSource, String)>>,
+    /// The marker wake's watermark: `(room generation, highest transcript
+    /// seq seen)`. `None` until the open room's transcript is first sighted.
+    marker_seen: RwSignal<Option<(u64, u64)>>,
     /// The typed state or outcome worth a sentence: "a build is running",
     /// "build `test` exited 1". Kept apart from `error` because these are
     /// answers, not faults, and they render in a calmer voice.
@@ -503,6 +542,7 @@ impl RoomRepoState {
             view: RwSignal::new(None),
             loading: RwSignal::new(false),
             error: RwSignal::new(None),
+            marker_seen: RwSignal::new(None),
             note: RwSignal::new(None),
             working: RwSignal::new(None),
             panel: RwSignal::new(false),
@@ -542,6 +582,7 @@ impl RoomRepoState {
         self.view.set(None);
         self.loading.set(false);
         self.error.set(None);
+        self.marker_seen.set(None);
         self.note.set(None);
         self.working.set(None);
         self.panel.set(false);
@@ -579,10 +620,18 @@ impl RoomRepoState {
         }
         self.loading.set(false);
         match result {
-            Ok(view) => self.view.set(Some(view)),
+            Ok(view) => {
+                self.view.set(Some(view));
+                let clears = self.error.with_untracked(|slot| {
+                    read_success_clears(slot.as_ref().map(|(source, _)| *source))
+                });
+                if clears {
+                    self.error.set(None);
+                }
+            }
             // A failed read never blanks a standing view: the binding the
             // operator was reading is still the best answer this surface has.
-            Err(error) => self.error.set(Some(error)),
+            Err(error) => self.error.set(Some((RepoErrorSource::Read, error))),
         }
     }
 
@@ -614,7 +663,7 @@ impl RoomRepoState {
     fn build_repo(&self, rooms: Rooms, key: String, actor: String) {
         let script = self.build_script.get_untracked().trim().to_string();
         if let Some(refusal) = script_refusal(&script) {
-            self.error.set(Some(refusal));
+            self.error.set(Some((RepoErrorSource::Command, refusal)));
             return;
         }
         let base = self.base();
@@ -649,7 +698,9 @@ impl RoomRepoState {
             }
             CommandOutcome::Built(report) => self.note.set(Some(build_sentence(&report))),
             CommandOutcome::State(sentence) => self.note.set(Some(sentence)),
-            CommandOutcome::Failure(error) => self.error.set(Some(error)),
+            CommandOutcome::Failure(error) => {
+                self.error.set(Some((RepoErrorSource::Command, error)))
+            }
         }
     }
 
@@ -680,6 +731,27 @@ impl RoomRepoState {
                 ) {
                     return;
                 }
+            }
+        });
+    }
+
+    /// A clone-outcome marker just landed on the transcript: re-read the
+    /// binding now instead of a poll tick later. Silent, and through the
+    /// same ticket admission — a stale publish is harmless. The invariant
+    /// that a read answering `cloning` demands a poller holds here too, so
+    /// the wake can only ever accelerate the poller, never strand a running
+    /// clone without one.
+    fn refresh_on_marker(&self, rooms: Rooms, key: String, actor: String) {
+        let base = self.base();
+        let me = *self;
+        spawn_local(async move {
+            let ticket = me.ticket.get_untracked().wrapping_add(1);
+            me.ticket.set(ticket);
+            let result = read_status(&base, &key, &actor).await;
+            let published = read_is_current(ticket, me.ticket.get_untracked());
+            me.publish_status(result, published);
+            if published && clone_is_running(me.view.get_untracked().as_ref()) {
+                me.poll_while_cloning(rooms, key, actor);
             }
         });
     }
@@ -775,6 +847,31 @@ pub fn RoomRepo(rooms: Rooms, state: RoomRepoState, writes_allowed: Signal<bool>
         None => state.reset(),
     });
 
+    // The wake path: a clone finishing anywhere — another member, another
+    // session — lands on the transcript as a System marker, so watching the
+    // SSE-fed transcript closes the gap between "the room heard" and "this
+    // panel shows it". The watermark starts over with reset() AND carries
+    // the room generation, so hydration reads as the initial load, never as
+    // news, whichever Effect runs first on a room switch.
+    Effect::new(move |_| {
+        let (watermark, wake) = rooms.transcript.with(|transcript| {
+            marker_wake(
+                state.marker_seen.get_untracked(),
+                rooms.generation_snapshot(),
+                transcript,
+                is_repo_clone_marker,
+            )
+        });
+        state.marker_seen.set(watermark);
+        if !wake {
+            return;
+        }
+        let Some((key, actor)) = read_target.get_untracked() else {
+            return;
+        };
+        state.refresh_on_marker(rooms, key, actor);
+    });
+
     let can_run = move || {
         writes_allowed.get()
             && state.working.get().is_none()
@@ -789,9 +886,10 @@ pub fn RoomRepo(rooms: Rooms, state: RoomRepoState, writes_allowed: Signal<bool>
             .get_untracked()
             .filter(|key| !key.is_empty())?;
         if !rooms.identity_resolved() {
-            state.error.set(Some(
+            state.error.set(Some((
+                RepoErrorSource::Command,
                 "Still signing in \u{2014} try again in a moment.".to_string(),
-            ));
+            )));
             return None;
         }
         Some((key, rooms.identity_id.get_untracked()))
@@ -842,7 +940,7 @@ pub fn RoomRepo(rooms: Rooms, state: RoomRepoState, writes_allowed: Signal<bool>
                     // error: a failure while the panel is closed must not
                     // read as a room without a repo.
                     {move || {
-                        state.error.get().map(|error| view! {
+                        state.error.get().map(|(_, error)| view! {
                             <div class="rooms-workspace__repo-error" role="alert">{error}</div>
                         })
                     }}
@@ -898,7 +996,7 @@ pub fn RoomRepo(rooms: Rooms, state: RoomRepoState, writes_allowed: Signal<bool>
                                 </div>
                                 <div class="rooms-workspace__repo-panel-body">
                                     {move || {
-                                        state.error.get().map(|error| view! {
+                                        state.error.get().map(|(_, error)| view! {
                                             <div class="rooms-workspace__repo-error" role="alert">
                                                 {error}
                                             </div>
@@ -1041,6 +1139,7 @@ mod tests {
             view: RwSignal::new(None),
             loading: RwSignal::new(false),
             error: RwSignal::new(None),
+            marker_seen: RwSignal::new(None),
             note: RwSignal::new(None),
             working: RwSignal::new(None),
             panel: RwSignal::new(false),
@@ -1245,7 +1344,38 @@ mod tests {
         state.view.set(Some(RepoView::Unbound));
         state.publish_status(Err("boom".to_string()), true);
         assert_eq!(state.view.get_untracked(), Some(RepoView::Unbound));
-        assert_eq!(state.error.get_untracked().as_deref(), Some("boom"));
+        assert_eq!(
+            state.error.get_untracked(),
+            Some((RepoErrorSource::Read, "boom".to_string()))
+        );
+    }
+
+    /// The absorbed fix: a read that recovers clears the error a read set —
+    /// one blipped silent poll no longer leaves an alert standing over a
+    /// healthy view — and NEVER a command's, which the operator has not
+    /// acted on yet.
+    #[test]
+    fn a_read_success_clears_only_a_read_error() {
+        let state = fresh_state();
+        state.publish_status(Err("net blip".to_string()), true);
+        state.publish_status(Ok(RepoView::Unbound), true);
+        assert_eq!(state.error.get_untracked(), None);
+
+        state.working.set(Some(RepoCommand::Clone));
+        state.publish_command(
+            CommandOutcome::Failure("The clone failed.".to_string()),
+            true,
+        );
+        state.publish_status(Ok(RepoView::Unbound), true);
+        assert_eq!(
+            state.error.get_untracked(),
+            Some((RepoErrorSource::Command, "The clone failed.".to_string())),
+            "a background read success must not clear a command failure"
+        );
+
+        assert!(read_success_clears(Some(RepoErrorSource::Read)));
+        assert!(!read_success_clears(Some(RepoErrorSource::Command)));
+        assert!(!read_success_clears(None));
     }
 
     #[test]
@@ -1271,7 +1401,10 @@ mod tests {
         assert_eq!(state.error.get_untracked(), None);
 
         state.publish_command(CommandOutcome::Failure("broke".to_string()), true);
-        assert_eq!(state.error.get_untracked().as_deref(), Some("broke"));
+        assert_eq!(
+            state.error.get_untracked(),
+            Some((RepoErrorSource::Command, "broke".to_string()))
+        );
     }
 
     #[test]
@@ -1454,5 +1587,60 @@ mod tests {
         assert_eq!(clip("abcdef", 3), "abc\u{2026}");
         // A multi-byte boundary must not split.
         assert_eq!(clip("é é é", 3), "é é\u{2026}");
+    }
+
+    // ---- the marker wake ----------------------------------------------------
+
+    fn system_row(seq: u64, body: &str) -> RoomMessage {
+        RoomMessage {
+            seq,
+            author_id: "system".into(),
+            author_kind: crate::rooms::RoomParticipantKind::System,
+            kind: crate::rooms::RoomMessageKind::System,
+            body: body.into(),
+            created_at: String::new(),
+            federated: None,
+            thread_parent_seq: None,
+            attachment_id: None,
+        }
+    }
+
+    /// Only a clone outcome wakes the binding read: both outcomes match,
+    /// the other seven marker variants — which say nothing about the
+    /// binding — do not, and neither does the initial load.
+    #[test]
+    fn only_a_clone_outcome_marker_wakes_the_binding_read() {
+        assert!(is_repo_clone_marker(&system_row(
+            1,
+            "workspace repo cloned: 'main' @ 0123456789ab"
+        )));
+        assert!(is_repo_clone_marker(&system_row(
+            2,
+            "workspace repo clone failed: 'main' (exit 128)"
+        )));
+        assert!(!is_repo_clone_marker(&system_row(
+            3,
+            "workspace build 'build' succeeded (3.2s)"
+        )));
+        assert!(!is_repo_clone_marker(&system_row(4, "workspace flushed")));
+
+        // Initial sight of a marker-laden history records, never wakes.
+        let history = vec![system_row(1, "workspace repo cloned: 'main'")];
+        let (watermark, wake) = marker_wake(None, 3, &history, is_repo_clone_marker);
+        assert_eq!(watermark, Some((3, 1)));
+        assert!(!wake);
+
+        // A live clone outcome wakes; a build marker after it does not.
+        let mut transcript = history;
+        transcript.push(system_row(
+            2,
+            "workspace repo clone failed: 'main' (exit 1)",
+        ));
+        let (watermark, wake) = marker_wake(watermark, 3, &transcript, is_repo_clone_marker);
+        assert_eq!(watermark, Some((3, 2)));
+        assert!(wake);
+        transcript.push(system_row(3, "workspace build 'build' succeeded (3.2s)"));
+        let (_, wake) = marker_wake(watermark, 3, &transcript, is_repo_clone_marker);
+        assert!(!wake);
     }
 }
