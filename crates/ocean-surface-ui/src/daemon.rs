@@ -2239,7 +2239,10 @@ pub struct Daemon {
     pub preview_file_intent: RwSignal<Option<(String, u64)>>,
 }
 
-/// A selectable model, mirroring the daemon's KnownModel.
+/// A selectable model, mirroring the daemon's KnownModel plus the readiness
+/// the daemon reports for it (`GET /v1/models` serializes ReadyModel flat:
+/// id/provider/label top-level, `ready` and optional `credential_source`
+/// alongside).
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct ModelInfo {
     pub id: String,
@@ -2247,6 +2250,69 @@ pub struct ModelInfo {
     pub provider: String,
     #[serde(default)]
     pub label: String,
+    /// Whether the daemon could route a turn to this model right now
+    /// (credential visible to that process — configuration truth, not a
+    /// liveness probe). Deliberately `Option`, not a defaulted bool: a daemon
+    /// predating readiness omits the field, and defaulting to `false` would
+    /// render its whole catalogue as unusable.
+    #[serde(default)]
+    pub ready: Option<bool>,
+    /// Where the daemon resolved the credential, kept as loose JSON on
+    /// purpose: `fetch_models` throws away the WHOLE catalogue on any decode
+    /// error, so a typed enum here would let one new daemon-side variant
+    /// blank the picker. Formatted by [`credential_source_hint`].
+    #[serde(default)]
+    pub credential_source: Option<Value>,
+}
+
+impl ModelInfo {
+    /// Why this model cannot run, when the daemon has said so. `None` for a
+    /// ready model — and for a daemon that never reported readiness, so an
+    /// older daemon's catalogue renders exactly as it did before the field
+    /// existed.
+    pub fn unready_reason(&self) -> Option<String> {
+        if self.ready != Some(false) {
+            return None;
+        }
+        // Today's daemon attaches credential_source only to entries whose
+        // credential actually resolved, so an unready entry usually names
+        // nothing — fall back to the provider, which is what the operator
+        // needs to go configure.
+        Some(
+            match self
+                .credential_source
+                .as_ref()
+                .and_then(credential_source_hint)
+            {
+                Some(hint) => format!("no credential: {hint}"),
+                None if self.provider.is_empty() => "no credential".to_string(),
+                None => format!("no credential for {}", self.provider),
+            },
+        )
+    }
+}
+
+/// Human-readable name for a `credential_source` wire value. The daemon's
+/// enum is externally tagged snake_case — `{"env":{"name":"…"}}`,
+/// `{"ocean_auth_file":{"path":"…"}}`, `{"codex_cli_auth_file":{"path":"…"}}`,
+/// or the bare string `"not_required"` — and grows variants over time, so an
+/// unrecognized shape degrades to its tag instead of failing anything.
+fn credential_source_hint(source: &Value) -> Option<String> {
+    match source {
+        Value::String(tag) => Some(tag.replace('_', " ")),
+        Value::Object(map) => {
+            let (tag, body) = map.iter().next()?;
+            match body
+                .get("name")
+                .or_else(|| body.get("path"))
+                .and_then(Value::as_str)
+            {
+                Some(detail) => Some(detail.to_string()),
+                None => Some(tag.replace('_', " ")),
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Token usage for a turn (or summed for a session), mirrored from the daemon's
@@ -8043,6 +8109,73 @@ mod tests {
             tool_name: Some("read_file".into()),
             is_error: Some(is_error),
         }
+    }
+
+    #[test]
+    fn model_info_decodes_the_daemons_flat_readiness_payload() {
+        // The daemon serializes ReadyModel FLAT (id/provider/label top-level
+        // plus ready + optional credential_source) and its own wire test pins
+        // that shape; this is the client half of the same contract, including
+        // the bare-string "not_required" variant.
+        let models: Vec<ModelInfo> = serde_json::from_value(serde_json::json!([
+            {"id": "claude-opus-5", "provider": "anthropic", "label": "Opus 5",
+             "ready": true, "credential_source": {"env": {"name": "ANTHROPIC_API_KEY"}}},
+            {"id": "fake-local", "provider": "fake", "label": "Fake",
+             "ready": true, "credential_source": "not_required"},
+            {"id": "grok-4", "provider": "xai", "label": "Grok 4", "ready": false},
+        ]))
+        .expect("flat readiness payload decodes");
+
+        assert_eq!(models[0].ready, Some(true));
+        assert_eq!(models[0].unready_reason(), None);
+        assert_eq!(
+            models[1].credential_source,
+            Some(Value::String("not_required".into()))
+        );
+        assert_eq!(models[1].unready_reason(), None);
+        // Unready entries carry no credential_source on today's wire, so the
+        // reason names the provider the operator has to configure.
+        assert_eq!(models[2].ready, Some(false));
+        assert_eq!(
+            models[2].unready_reason().as_deref(),
+            Some("no credential for xai")
+        );
+    }
+
+    #[test]
+    fn model_info_from_an_older_daemon_renders_exactly_as_before() {
+        // A daemon predating readiness omits both fields. That must decode to
+        // ready: None — NOT false — or every model shows as unusable.
+        let models: Vec<ModelInfo> = serde_json::from_value(serde_json::json!([
+            {"id": "claude-opus-5", "provider": "anthropic", "label": "Opus 5"}
+        ]))
+        .expect("pre-readiness payload decodes");
+        assert_eq!(models[0].ready, None);
+        assert_eq!(models[0].credential_source, None);
+        assert_eq!(models[0].unready_reason(), None);
+    }
+
+    #[test]
+    fn unknown_credential_source_variants_cannot_blank_the_picker() {
+        // fetch_models keeps the OLD list on any decode error, so a daemon
+        // that grows a credential_source variant must still decode here —
+        // and the hint degrades to the variant's tag.
+        let models: Vec<ModelInfo> = serde_json::from_value(serde_json::json!([
+            {"id": "m", "provider": "p", "label": "M", "ready": false,
+             "credential_source": {"os_keychain": {"service": "ocean"}}},
+            {"id": "n", "provider": "q", "label": "N", "ready": false,
+             "credential_source": {"env": {"name": "ANTHROPIC_API_KEY"}}},
+        ]))
+        .expect("unknown credential_source variant still decodes");
+        assert_eq!(
+            models[0].unready_reason().as_deref(),
+            Some("no credential: os keychain")
+        );
+        // A recognized source on an unready entry names the concrete thing.
+        assert_eq!(
+            models[1].unready_reason().as_deref(),
+            Some("no credential: ANTHROPIC_API_KEY")
+        );
     }
 
     #[test]
