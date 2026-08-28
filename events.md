@@ -3002,3 +3002,35 @@ exist only on ocean-os main at 88c34cf0 and later, and a surface pointed at an
 older daemon now gets a real fault rather than a false "No summary yet." Surface
 deploy stays a human decision. No migration. PR #125.
 _________________________________________________________________________________
+
+time:      [03:33] [08-28-26]
+agent:     [claude] [fable 5]
+worktree:  loop/exec-and-build-history-in-the-room-ui, loop/proxy-forward-timeout-unpinned
+type:      [merge]
+area:      [frontend]
+
+Wave 6 landed two surface slices. PR #132: the room's workspace is no longer
+curl-only — a right-rail Workspace section opens a panel showing provision
+facts, the last build's outcome (derived from the exec list via Bedrock's
+"# ocean-room-build" marker), and recent execs with verdict, exit code, and
+per-stream tails. ABSENT tails render as a withheld sentence and NULL tails
+(still running) render nothing, kept distinct by a double-option serde shim
+that a test pins against reversion. The panel polls both lane routes at 4s
+using the room_repo ticket/epoch idiom because the daemon's federation ingest
+only accepts event_type=="message", so room.workspace.* events never reach the
+surface — the push path is filed as its own ocean-os slice
+(workspace-events-do-not-reach-the-room). No provision/destroy affordance:
+those routes are not on the daemon lane, so absence is stated, not offered.
+Until a human deploys both Bedrock (railway up) and a current daemon, the
+panel's "isn't available on this deployment yet" state is the expected
+production behavior. PR #133: the proxy's 990s workspace-command forward
+timeout — previously applied by one untested match arm — is now routed through
+fn forward_timeout(shape) and unit-tested: WorkspaceCommand gets 990s (above
+the daemon's 960s budget), buffered non-command shapes ride the 120s JSON
+budget, and EventsTail is deliberately absent because the SSE tail streams on
+the untimed client where any budget would sever every live tail. On the
+record: the builder-site wiring is guarded by clippy dead_code, not a test.
+Verified at land, both PRs: 998 UI + 53 proxy + integration suites 0 failed,
+clippy --all-targets -D warnings clean, fmt clean, RUSTFLAGS="-D warnings"
+wasm check clean.
+_________________________________________________________________________________
