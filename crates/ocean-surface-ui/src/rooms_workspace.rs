@@ -930,6 +930,13 @@ pub fn RoomsWorkspace(
     // control during its own upload.
     let attachments = crate::attachments::RoomAttachmentsState::new(&rooms);
 
+    // The room's summary. Same reasoning again, and it costs more here: the
+    // in-flight flag guards a request that holds one of the daemon's turn
+    // permits for up to 45s, so a flag rebuilt by a roster SSE update would
+    // re-enable the control mid-run and buy a second provider turn nobody
+    // asked for.
+    let summary = crate::room_summary::RoomSummaryState::new(&rooms);
+
     // Toggle for narrow-screen left-rail visibility.
     let show_left_rail = RwSignal::new(false);
 
@@ -3137,6 +3144,19 @@ pub fn RoomsWorkspace(
                             }
                     }}
                 </div>
+
+                // What the room says about itself, above the shelf of files it
+                // was handed. A sibling of the roster for the same reason as
+                // the files below — that closure re-runs on every access
+                // change, and this section owns a run's in-flight state.
+                <crate::room_summary::RoomSummary
+                    rooms=rooms
+                    state=summary
+                    writes_allowed=Signal::derive(move || {
+                        access_allows_writes(rooms.access.get().as_ref())
+                    })
+                    members=member_ids
+                />
 
                 // Room context files. A sibling of the roster, not a child of
                 // the closure above: that closure re-runs on every access

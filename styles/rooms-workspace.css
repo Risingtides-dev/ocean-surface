@@ -998,6 +998,105 @@
   cursor: not-allowed;
 }
 
+/* ── Room summary (below roster, above the context files) ────────── */
+
+.rooms-workspace__summary {
+  flex: 0 0 auto;
+  max-height: 38%;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 0 6px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__summary-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 12px 6px;
+}
+
+.rooms-workspace__summary-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-3);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__summary-run {
+  appearance: none;
+  padding: 2px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__summary-run:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__summary-run:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* A note is a truthful non-result (`unchanged`, `no_messages`); only an error
+   earns the error colour. Colouring the two alike would send an operator
+   looking for a broken room every time the model repeated itself. */
+.rooms-workspace__summary-note,
+.rooms-workspace__summary-error {
+  padding: 4px 12px 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__summary-error {
+  color: var(--err);
+}
+
+.rooms-workspace__summary-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 12px 4px;
+}
+
+/* Model prose carries its own line structure — paragraph breaks and bullet
+   lines are the shape of the summary, not incidental whitespace. `pre-wrap`
+   for the same reason `__msg-text` has it: room_markdown is a span tokenizer
+   and emits no block elements of its own. */
+.rooms-workspace__summary-body {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--fg-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* A dropped artifact is a tombstone the daemon deliberately preserves. It stays
+   readable and stops looking like the room's current word. */
+.rooms-workspace__summary-body--dropped {
+  opacity: 0.55;
+}
+
+.rooms-workspace__summary-meta {
+  margin-top: 6px;
+  font-size: 10px;
+  color: var(--fg-4);
+  overflow-wrap: anywhere;
+}
+
 /* ── Room context files (below roster, above the policy summary) ─── */
 
 .rooms-workspace__files {
@@ -1850,6 +1949,7 @@
 .rooms-workspace__thread-inline-expand:focus-visible,
 .rooms-workspace__addagent:focus-visible,
 .rooms-workspace__files-add:focus-visible,
+.rooms-workspace__summary-run:focus-visible,
 .rooms-workspace__file:focus-visible,
 .rooms-workspace__addagent-select:focus-visible {
   outline: none;
