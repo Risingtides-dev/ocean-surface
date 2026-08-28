@@ -950,6 +950,11 @@ pub fn RoomsWorkspace(
     // command.
     let repo = crate::room_repo::RoomRepoState::new(&rooms);
 
+    // The room's workspace status and command history. Same reasoning: the
+    // open panel owns a poll loop, and a rail closure re-run by a roster SSE
+    // update would orphan the loop and respawn it mid-tick.
+    let workspace_panel = crate::room_workspace_panel::RoomWorkspacePanelState::new(&rooms);
+
     // Toggle for narrow-screen left-rail visibility.
     let show_left_rail = RwSignal::new(false);
 
@@ -1898,6 +1903,16 @@ pub fn RoomsWorkspace(
                 ) {
                     ev.prevent_default();
                     repo.close_panel();
+                    return;
+                }
+                // The workspace panel sits on the same overlay tier, behind
+                // the same at-most-one-open argument.
+                if crate::room_workspace_panel::workspace_panel_escape_closes(
+                    workspace_panel.panel_is_open(),
+                    ev.default_prevented(),
+                ) {
+                    ev.prevent_default();
+                    workspace_panel.close_panel();
                     return;
                 }
                 // The summary and files panels sit on the same overlay tier
@@ -3252,6 +3267,15 @@ pub fn RoomsWorkspace(
                     writes_allowed=Signal::derive(move || {
                         access_allows_writes(rooms.access.get().as_ref())
                     })
+                />
+
+                // The workspace itself and its command history — the read
+                // half of the lane the repo section drives. A sibling for the
+                // same reason as its neighbours, and pure reads: what a
+                // member may see, the daemon already decided per row.
+                <crate::room_workspace_panel::RoomWorkspacePanel
+                    rooms=rooms
+                    state=workspace_panel
                 />
 
                 // Trigger-policy summary at bottom of right rail

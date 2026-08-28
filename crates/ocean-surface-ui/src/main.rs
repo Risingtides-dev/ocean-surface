@@ -35,6 +35,7 @@ mod room_markdown;
 mod room_messages;
 mod room_repo;
 mod room_summary;
+mod room_workspace_panel;
 mod rooms;
 mod rooms_workspace;
 mod search;
