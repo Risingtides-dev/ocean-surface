@@ -3306,3 +3306,101 @@
   line-height: 1.45;
   color: var(--fg-4);
 }
+
+/* The workspace tree, one directory at a time. Directory rows are buttons —
+   the navigation; file rows are inert: the member lane has no file-read
+   route, so a name and a size is the whole answer. */
+.rooms-workspace__compute-files-title {
+  margin-top: 14px;
+  padding-bottom: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg-4);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__compute-files-path {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-bottom: 4px;
+}
+
+.rooms-workspace__compute-files-up {
+  appearance: none;
+  padding: 0 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__compute-files-up:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__compute-files-dir {
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-3);
+  overflow-wrap: anywhere;
+}
+
+.rooms-workspace__compute-file {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 4px 0;
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+  background: transparent;
+  text-align: left;
+}
+
+.rooms-workspace__compute-file--dir {
+  appearance: none;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__compute-file--dir:hover {
+  background: var(--bg-hover);
+}
+
+.rooms-workspace__compute-file-kind {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__compute-file-name {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rooms-workspace__compute-file-size {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--fg-3);
+}
