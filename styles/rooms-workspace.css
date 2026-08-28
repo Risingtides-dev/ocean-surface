@@ -3307,9 +3307,9 @@
   color: var(--fg-4);
 }
 
-/* The workspace tree, one directory at a time. Directory rows are buttons —
-   the navigation; file rows are inert: the member lane has no file-read
-   route, so a name and a size is the whole answer. */
+/* The workspace tree, one directory at a time. Every row is a button now:
+   directory rows navigate, file rows open their bounded content over the
+   listing. */
 .rooms-workspace__compute-files-title {
   margin-top: 14px;
   padding-bottom: 4px;
@@ -3367,13 +3367,15 @@
   text-align: left;
 }
 
-.rooms-workspace__compute-file--dir {
+.rooms-workspace__compute-file--dir,
+.rooms-workspace__compute-file--openable {
   appearance: none;
   cursor: pointer;
   transition: background var(--dur-fast) var(--ease);
 }
 
-.rooms-workspace__compute-file--dir:hover {
+.rooms-workspace__compute-file--dir:hover,
+.rooms-workspace__compute-file--openable:hover {
   background: var(--bg-hover);
 }
 
@@ -3403,4 +3405,30 @@
   flex: 0 0 auto;
   font-size: 11px;
   color: var(--fg-3);
+}
+
+/* The open file's size line, under the path row. */
+.rooms-workspace__compute-file-meta {
+  padding-bottom: 4px;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+/* The open file's content. Its own scroll, taller than a command tail —
+   this IS the panel's subject while it is open — but still bounded so the
+   command history below stays reachable. */
+.rooms-workspace__compute-file-text {
+  margin: 0;
+  padding: 6px 8px;
+  max-height: min(48vh, 420px);
+  overflow-y: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--fg-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
