@@ -2947,3 +2947,58 @@ Verified: 926 native UI tests, 50 proxy tests, cargo fmt --check, strict clippy
 on both crates under --all-targets, RUSTFLAGS="-D warnings" wasm check, and the
 frozen wasm --no-run test link. Deploy remains a human decision.
 _________________________________________________________________________________
+
+time:      [20:53] [08-27-26]
+agent:     [claude] [opus 5]
+worktree:  loop/room-summary-ui
+type:      [feature-request]
+area:      [frontend]
+
+A room can be summarized from a browser, and the summary reads back where
+people look. The daemon has been able to summarize since the summarize route
+landed — bounded transcript tail, one model turn, folded into the well-known
+room-summary artifact — and no browser could run it or read what it wrote, so
+the feature did not exist to anyone using Ocean. A control in the right rail
+now runs one turn, and the artifact renders in the room including on open,
+through the GET, so a room summarized last week reads back without spending
+another turn. Three things the wire contract forced and they are the design:
+summarized:false is not a failure (unchanged still carries the artifact that
+stands, and no_messages and empty_summary are equally truthful 200s, so notes
+and errors are separate signals with separate colours); the artifact is a
+singleton, so this side mints no ids and watches version move, which is what
+makes a repeat run an amend; and 403/429/502/504 each say something an
+operator can act on, at_capacity in particular reading as busy rather than
+broken. Follows attachments-ui throughout — workspace-scoped state mounted as
+a sibling of the roster closure, a monotonic read ticket, a (generation, key)
+re-validation on the run, and reset clearing the in-flight flag.
+
+Review found the module's load-bearing guards were decoration: three of the
+four its own doc comments call load-bearing could be deleted with all 908
+tests and clippy silent. One real behavioural hole rode along — summarize()
+minted no ticket, and since can_summarize deliberately does not wait on
+loading, the room-open GET was still out holding the PRE-run artifact and,
+landing last, published stale prose and an older v{n} over the summary the
+operator had just paid a turn for. begin_run now bumps the ticket and clears
+loading with it. The trade is stated in its doc rather than left to be found:
+a run that then FAILS leaves no standing summary until the next run or reopen,
+because the run is the authority for the room it started in. The two
+admissions moved into publish_read and publish_run as arguments rather than
+recomputed conditions, so each refusal is reachable with no Rooms and no
+browser; the old a_run_landing_after_a_room_change_cannot_publish asserted
+rooms.rs's own pre-existing predicate and is gone. The 404 arm now answers
+only to unknown_artifact, the daemon's only coded 404 there — an unknown room
+comes back with no code at all, and reading that as "no summary yet" told an
+operator a room that is GONE merely had nothing to say.
+
+Verified at land: ocean-surface-ui 913 lib tests plus 30 across the six
+integration binaries, proxy 50, clippy --all-targets -D warnings clean on both
+crates, cargo fmt --check clean, and RUSTFLAGS="-D warnings" cargo check
+--target wasm32-unknown-unknown exit 0 — the release lane the test profile does
+not stand in for. Five mutations, each applied alone and reverted, each failing
+a named test; the guard deletions were written with _-prefixed params so they
+do not trip the incidental unused-variable warning that was the only thing
+catching the naive version. INERT UNTIL THE DAEMON SHIPS: the summarize routes
+exist only on ocean-os main at 88c34cf0 and later, and a surface pointed at an
+older daemon now gets a real fault rather than a false "No summary yet." Surface
+deploy stays a human decision. No migration. PR #125.
+_________________________________________________________________________________
