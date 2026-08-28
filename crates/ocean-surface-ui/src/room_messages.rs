@@ -3,11 +3,8 @@
 //! transcript entries, decide grouped rendering, conversation-gap headers,
 //! compact system rows, and day separators.
 //!
-//! Deliberately NOT wired into markup yet: the timeline region of
-//! `rooms_workspace.rs` is being restructured by the thread slice
-//! (root-only timeline + reply rail), so the density model lands here as a
-//! reviewed, test-locked contract that the timeline adopts. Class names it
-//! maps to are defined in the stylesheets:
+//! The timeline in `rooms_workspace.rs` consumes these helpers directly.
+//! Class names they map to are defined in the stylesheets:
 //! `.rooms-workspace__msg--grouped`, `.rooms-workspace__day-separator`.
 
 use crate::rooms::{RoomMessage, RoomMessageKind};
