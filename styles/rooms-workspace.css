@@ -2575,3 +2575,236 @@
 .rooms-workspace__member {
   flex-wrap: wrap;
 }
+
+/* ── Room repo (rail row + workspace panel) ────────────────────────── */
+
+/* A fixed sliver like the artifacts above it, and for the same reason: the
+   rail is 220px with two proportional neighbours already on it. The rail
+   holds one compact line — remote and clone state — and everything with a
+   verb happens in the panel it opens. */
+.rooms-workspace__repo {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 0 6px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__repo-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 12px 6px;
+}
+
+.rooms-workspace__repo-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-3);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__repo-open {
+  appearance: none;
+  padding: 2px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__repo-open:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__repo-open:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.rooms-workspace__repo-note {
+  padding: 4px 12px 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__repo-error {
+  padding: 4px 12px 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--err);
+  overflow-wrap: anywhere;
+}
+
+/* The one rail line: remote tail, clone state, head sha. Mono because two of
+   those three are identifiers the eye compares character by character. */
+.rooms-workspace__repo-line {
+  padding: 0 12px 4px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── The panel: where the binding is read and clone/build run ─────── */
+
+.rooms-workspace__repo-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 440;
+  background: var(--scrim);
+}
+
+.rooms-workspace__repo-panel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 445;
+  display: flex;
+  flex-direction: column;
+  /* Narrower than the artifacts panel: a binding is facts and two controls,
+     not prose. Still wide enough that a remote URL reads on one line. */
+  width: min(560px, 92vw);
+  max-height: min(70vh, 620px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-lg);
+}
+
+.rooms-workspace__repo-panel-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__repo-panel-title {
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.rooms-workspace__repo-close {
+  appearance: none;
+  flex: 0 0 auto;
+  width: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.rooms-workspace__repo-close:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__repo-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 16px 16px;
+}
+
+.rooms-workspace__repo-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 12px;
+  align-items: baseline;
+}
+
+.rooms-workspace__repo-fact-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg-4);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__repo-fact-value {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+
+.rooms-workspace__repo-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.rooms-workspace__repo-run {
+  appearance: none;
+  height: var(--ctl-h-sm);
+  padding: 0 12px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--accent);
+  font-family: var(--font);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__repo-run:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+.rooms-workspace__repo-run:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* The script field sits beside its button; mono because it names a package
+   script, and flexes so the pair fills the measure. */
+.rooms-workspace__repo-input {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.rooms-workspace__repo-input:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 1px;
+}
+
+/* The honest boundary: bind/unbind are owner acts this surface does not
+   offer, and saying so beats a control that pretends. */
+.rooms-workspace__repo-footnote {
+  margin-top: 14px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-4);
+}

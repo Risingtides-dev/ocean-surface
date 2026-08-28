@@ -1753,6 +1753,19 @@ fn daemon_unreachable_body(err: &reqwest::Error) -> &'static str {
 /// that SSE legitimately requires.
 const JSON_FORWARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
+/// Timeout for a room workspace COMMAND forward (`POST .../workspace/...`).
+///
+/// The daemon's workspace lane waits up to 960s for Bedrock to finish a
+/// clone or build (`WORKSPACE_COMMAND_TIMEOUT` in ocean-os's
+/// `room_workspace_proxy.rs` — Bedrock's own exec ceiling is 900s and its
+/// default build budget alone is 600s). At the 120s JSON default this proxy
+/// was the SHORTEST budget on the path: a long clone died here with a 502
+/// while continuing upstream — Bedrock records the exec regardless — and the
+/// browser read a running command as a failed one. Sitting 30s above the
+/// daemon's budget means every timeout that reaches the client is the
+/// daemon's own typed answer, never this hop's guess.
+const WORKSPACE_COMMAND_FORWARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(990);
+
 /// Length-independent byte comparison (TASK-73).
 ///
 /// Returns false for a length mismatch, but reads BOTH inputs fully before
@@ -1933,6 +1946,10 @@ enum RoomsPersistentShape {
     /// `GET {key}/attachments/{id}` — opaque bytes whose upstream
     /// content-type / disposition / nosniff headers ARE the security contract.
     AttachmentDownload,
+    /// `POST {key}/workspace/...` — JSON both ways, but the reply can take
+    /// as long as a clone or build runs; forwarded with the long command
+    /// timeout instead of the JSON default.
+    WorkspaceCommand,
     /// Everything else in the subtree: a JSON request, a JSON reply.
     Json,
 }
@@ -1961,6 +1978,15 @@ fn rooms_persistent_shape(method: &axum::http::Method, path: &str) -> RoomsPersi
         && !segments[5].is_empty()
     {
         RoomsPersistentShape::AttachmentDownload
+    } else if method == axum::http::Method::POST
+        && segments.len() >= 6
+        && segments[4] == "workspace"
+    {
+        // The daemon's workspace POSTs (exec, repo/clone, repo/build) relay
+        // commands that run in a room's container before answering. Length
+        // >= 6 because the daemon has no POST on the bare status route, and
+        // a room merely KEYED `workspace` puts the word in segment 3, not 4.
+        RoomsPersistentShape::WorkspaceCommand
     } else {
         RoomsPersistentShape::Json
     }
@@ -2097,11 +2123,20 @@ async fn proxy_rooms_persistent(
                 .unwrap_or("application/octet-stream"),
             _ => "application/json",
         };
-        state
+        let builder = state
             .http_json
             .request(method, &url)
             .header(header::CONTENT_TYPE, forwarded_type)
-            .body(body.to_vec())
+            .body(body.to_vec());
+        // A per-request timeout overrides the client's 120s default. Only the
+        // command lane gets it: workspace READS answer out of Bedrock's state
+        // in one round trip and stay on the JSON budget.
+        match shape {
+            RoomsPersistentShape::WorkspaceCommand => {
+                builder.timeout(WORKSPACE_COMMAND_FORWARD_TIMEOUT)
+            }
+            _ => builder,
+        }
     };
     match builder.send().await {
         Ok(resp) => {
@@ -3873,6 +3908,69 @@ mod tests {
         assert_eq!(
             rooms_persistent_shape(&Method::GET, "/v1/rooms/persistent/t/attachments/"),
             RoomsPersistentShape::Json
+        );
+    }
+
+    /// The workspace COMMAND lane: the daemon budgets 960s for a clone or
+    /// build, so these three POSTs must not ride the 120s JSON default — at
+    /// that bound a running clone read back as a 502 while Bedrock recorded
+    /// the exec anyway. Reads on the same subtree answer out of Bedrock's
+    /// state in one round trip and stay JSON.
+    #[test]
+    fn workspace_commands_get_the_long_lane_and_reads_do_not() {
+        use axum::http::Method;
+
+        assert_eq!(
+            rooms_persistent_shape(&Method::POST, "/v1/rooms/persistent/team/workspace/exec"),
+            RoomsPersistentShape::WorkspaceCommand
+        );
+        assert_eq!(
+            rooms_persistent_shape(
+                &Method::POST,
+                "/v1/rooms/persistent/team/workspace/repo/clone"
+            ),
+            RoomsPersistentShape::WorkspaceCommand
+        );
+        assert_eq!(
+            rooms_persistent_shape(
+                &Method::POST,
+                "/v1/rooms/persistent/team/workspace/repo/build"
+            ),
+            RoomsPersistentShape::WorkspaceCommand
+        );
+
+        // Every read on the subtree stays on the JSON lane.
+        assert_eq!(
+            rooms_persistent_shape(&Method::GET, "/v1/rooms/persistent/team/workspace"),
+            RoomsPersistentShape::Json
+        );
+        assert_eq!(
+            rooms_persistent_shape(&Method::GET, "/v1/rooms/persistent/team/workspace/repo"),
+            RoomsPersistentShape::Json
+        );
+        assert_eq!(
+            rooms_persistent_shape(&Method::GET, "/v1/rooms/persistent/team/workspace/execs"),
+            RoomsPersistentShape::Json
+        );
+
+        // The daemon has no POST on the bare status route; nothing to slow.
+        assert_eq!(
+            rooms_persistent_shape(&Method::POST, "/v1/rooms/persistent/team/workspace"),
+            RoomsPersistentShape::Json
+        );
+        // A room merely KEYED `workspace` does not inherit the lane — the
+        // exact class of mistake a loose `contains` would make.
+        assert_eq!(
+            rooms_persistent_shape(&Method::POST, "/v1/rooms/persistent/workspace/messages"),
+            RoomsPersistentShape::Json
+        );
+        // And the room keyed `workspace` CAN still reach its own workspace.
+        assert_eq!(
+            rooms_persistent_shape(
+                &Method::POST,
+                "/v1/rooms/persistent/workspace/workspace/exec"
+            ),
+            RoomsPersistentShape::WorkspaceCommand
         );
     }
 
