@@ -173,18 +173,23 @@ fn classify_summarize(status: u16, body: SummarizeBody) -> SummarizeOutcome {
 
 /// What reading the artifact back told us.
 ///
-/// `Ok(None)` is the case that matters: the daemon's 404 means this room has
-/// never been summarized, which is an ANSWER and not a failure — it is the only
-/// thing that earns the empty state the right to speak. A `Result` rather than
-/// a named three-variant enum because every arm but one would be a `String`
-/// next to a 248-byte artifact.
+/// `Ok(None)` is the case that matters: the daemon's `unknown_artifact` 404
+/// means this room has never been summarized, which is an ANSWER and not a
+/// failure — it is the only thing that earns the empty state the right to
+/// speak. A `Result` rather than a named three-variant enum because every arm
+/// but one would be a `String` next to a 248-byte artifact.
 type SummaryRead = Result<Option<RoomArtifact>, String>;
 
 fn classify_read(status: u16, body: ArtifactBody) -> SummaryRead {
     if body.ok {
         return Ok(body.artifact);
     }
-    if status == 404 {
+    // The code, not the status. `unknown_artifact` is the daemon's ONLY coded
+    // 404 on this route; its other one is the unknown room, which
+    // `room_store_error_response` sends with no `code` at all. Reading that as
+    // an empty summary would tell an operator a room that is GONE merely has
+    // nothing to say yet.
+    if status == 404 && body.code.as_deref() == Some("unknown_artifact") {
         return Ok(None);
     }
     Err(summary_failure_message(
@@ -269,6 +274,14 @@ fn summary_meta(artifact: &RoomArtifact) -> String {
         meta.push_str(mark);
     }
     meta
+}
+
+/// Latest-wins admission for an overlapping read. The same predicate
+/// `attachments.rs` extracts for its list ticket, and here for the same reason:
+/// an older completion publishing over a newer one is what put a premature
+/// empty state on screen in three previous features (TASK-104/106/107).
+fn summary_read_is_current(ticket: u64, current: u64) -> bool {
+    ticket == current
 }
 
 // ---- State ------------------------------------------------------------------
@@ -371,24 +384,32 @@ impl RoomSummaryState {
                 }
                 Err(err) => Err(format!("Summary request failed: {err}")),
             };
-            // Latest-wins: an older read publishing over a newer one is what put
-            // a premature empty state on screen in three previous features.
-            if ticket != me.ticket.get_untracked() {
-                return;
-            }
-            me.loading.set(false);
-            match read {
-                // Only an ANSWER may declare the summary known — including the
-                // 404 that answers "never summarized". A failed read that
-                // flipped this would replace an honest error with the false
-                // claim that the room has no summary.
-                Ok(artifact) => {
-                    me.artifact.set(artifact);
-                    me.loaded.set(true);
-                }
-                Err(error) => me.error.set(Some(error)),
-            }
+            let current = summary_read_is_current(ticket, me.ticket.get_untracked());
+            me.publish_read(read, current);
         });
+    }
+
+    /// Publish a completed read — but only the latest one.
+    ///
+    /// `is_current` is the caller's ticket check, taken as an argument for the
+    /// same reason `publish_run` takes its verdict: a guard no test can reach is
+    /// a guard the next edit deletes in silence.
+    fn publish_read(&self, read: SummaryRead, is_current: bool) {
+        if !is_current {
+            return;
+        }
+        self.loading.set(false);
+        match read {
+            // Only an ANSWER may declare the summary known — including the 404
+            // that answers "never summarized". A failed read that flipped this
+            // would replace an honest error with the false claim that the room
+            // has no summary.
+            Ok(artifact) => {
+                self.artifact.set(artifact);
+                self.loaded.set(true);
+            }
+            Err(error) => self.error.set(Some(error)),
+        }
     }
 
     /// Run one summarize turn and publish what came back.
@@ -402,9 +423,7 @@ impl RoomSummaryState {
         let base = self.base();
         let me = *self;
         let generation = rooms.generation_snapshot();
-        self.summarizing.set(true);
-        self.error.set(None);
-        self.note.set(None);
+        self.begin_run();
         spawn_local(async move {
             let url = summarize_url(&base, &key);
             let payload = SummarizeRequest {
@@ -430,30 +449,61 @@ impl RoomSummaryState {
                 },
                 Err(err) => SummarizeOutcome::Failure(format!("Summarize encode error: {err}")),
             };
-            // Every write below belongs to the room this run started in. If that
-            // room is gone, `reset` has already cleared this state for whoever is
-            // on screen now, and the artifact still landed in the room it was
-            // meant for — reopening it reads the summary back.
-            if !rooms.room_is_current(generation, &key) {
-                return;
-            }
-            me.summarizing.set(false);
-            match outcome {
-                SummarizeOutcome::Wrote(artifact) => {
-                    me.artifact.set(Some(artifact));
-                    me.loaded.set(true);
-                }
-                SummarizeOutcome::Unchanged(artifact) => {
-                    me.note.set(Some(summary_note(Some("unchanged"))));
-                    me.artifact.set(Some(artifact));
-                    me.loaded.set(true);
-                }
-                // A note never clears the artifact: `no_messages` is about the
-                // transcript, not about the summary that already stands.
-                SummarizeOutcome::Note(note) => me.note.set(Some(note)),
-                SummarizeOutcome::Failure(error) => me.error.set(Some(error)),
-            }
+            me.publish_run(outcome, rooms.room_is_current(generation, &key));
         });
+    }
+
+    /// Take the state into a run.
+    ///
+    /// Retiring the read is the half that is easy to miss. `can_summarize`
+    /// deliberately does not wait on `loading`, so the control is live from
+    /// first paint while the room-open GET is still out — and that GET is
+    /// holding the artifact as it stood BEFORE this run. Landing last it would
+    /// publish the pre-run prose and its older `v{n}` over the summary the
+    /// operator just paid a model turn for, which is the one number this module
+    /// asks the reader to trust. `loading` goes with it: a read that can no
+    /// longer publish must not keep a spinner over the summary that can. The
+    /// cost is that a run which then FAILS leaves the panel with no standing
+    /// summary until the next run or reopen — the run is the authority for the
+    /// room it started in, and a read carrying pre-run state is not a fallback
+    /// worth reinstating.
+    fn begin_run(&self) {
+        self.ticket
+            .update(|ticket| *ticket = ticket.wrapping_add(1));
+        self.loading.set(false);
+        self.summarizing.set(true);
+        self.error.set(None);
+        self.note.set(None);
+    }
+
+    /// Publish a completed run — but only into the room that started it.
+    ///
+    /// `room_is_current` is the caller's `(generation, key)` re-validation,
+    /// taken as an argument rather than recomputed here so the refusal itself is
+    /// reachable from a test with no live `Rooms` and no browser runtime. When
+    /// it is false there is nothing to write: `reset` has already cleared this
+    /// state for whoever is on screen now, and the artifact still landed in the
+    /// room it was meant for — reopening that room reads the summary back.
+    fn publish_run(&self, outcome: SummarizeOutcome, room_is_current: bool) {
+        if !room_is_current {
+            return;
+        }
+        self.summarizing.set(false);
+        match outcome {
+            SummarizeOutcome::Wrote(artifact) => {
+                self.artifact.set(Some(artifact));
+                self.loaded.set(true);
+            }
+            SummarizeOutcome::Unchanged(artifact) => {
+                self.note.set(Some(summary_note(Some("unchanged"))));
+                self.artifact.set(Some(artifact));
+                self.loaded.set(true);
+            }
+            // A note never clears the artifact: `no_messages` is about the
+            // transcript, not about the summary that already stands.
+            SummarizeOutcome::Note(note) => self.note.set(Some(note)),
+            SummarizeOutcome::Failure(error) => self.error.set(Some(error)),
+        }
     }
 }
 
@@ -592,7 +642,38 @@ pub fn RoomSummary(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rooms::room_request_is_current;
+
+    /// A state as `new` leaves it, for the tests that drive one directly.
+    fn fresh_state() -> RoomSummaryState {
+        RoomSummaryState {
+            url: RwSignal::new("http://d".to_string()),
+            artifact: RwSignal::new(None),
+            loaded: RwSignal::new(false),
+            loading: RwSignal::new(false),
+            error: RwSignal::new(None),
+            note: RwSignal::new(None),
+            summarizing: RwSignal::new(false),
+            ticket: RwSignal::new(0),
+        }
+    }
+
+    /// The room's summary at a given version — the only field these tests read
+    /// back, because it is what tells a repeat run's amend from a stale read.
+    fn artifact_at(version: u64) -> RoomArtifact {
+        RoomArtifact {
+            id: ROOM_SUMMARY_ARTIFACT_ID.to_string(),
+            kind: "note".to_string(),
+            title: "Room summary".to_string(),
+            body: "They agreed to ship on Friday.".to_string(),
+            state: "open".to_string(),
+            created_by: "smaths".to_string(),
+            created_at: String::new(),
+            updated_by: "smaths".to_string(),
+            updated_at: String::new(),
+            on_behalf_of: None,
+            version,
+        }
+    }
 
     fn summarize_body(json: &str) -> SummarizeBody {
         serde_json::from_str(json).expect("decode")
@@ -766,6 +847,15 @@ mod tests {
         assert!(
             classify_read(500, artifact_body(r#"{"ok":false,"error":"store fault"}"#)).is_err()
         );
+        // A 404 the daemon did NOT code is its unknown-room refusal —
+        // `room_store_error_response` sends that one with no `code` at all.
+        // Answering it with the empty state would tell an operator that a room
+        // which is GONE merely has nothing to say yet.
+        assert!(classify_read(
+            404,
+            artifact_body(r#"{"ok":false,"error":"no room with key 'r'"}"#)
+        )
+        .is_err());
     }
 
     #[test]
@@ -865,52 +955,149 @@ mod tests {
         assert_eq!(state.ticket.get_untracked(), 5);
     }
 
+    #[test]
+    fn stale_reads_cannot_publish() {
+        assert!(summary_read_is_current(7, 7));
+        assert!(!summary_read_is_current(6, 7));
+    }
+
+    #[test]
+    fn a_read_landing_after_a_newer_answer_writes_nothing() {
+        // The state a run has just published into, with the room-open GET it
+        // raced still outstanding and holding the PRE-run artifact.
+        let state = fresh_state();
+        state.artifact.set(Some(artifact_at(4)));
+        state.loaded.set(true);
+
+        state.publish_read(Ok(Some(artifact_at(3))), false);
+
+        // v3 on screen would be the visible half of the lie: the operator paid
+        // for v4 and the meta line would swear the room is still at v3.
+        assert_eq!(
+            state
+                .artifact
+                .get_untracked()
+                .map(|artifact| artifact.version),
+            Some(4)
+        );
+        // A stale failure is no more admissible than stale prose.
+        state.publish_read(Err("Summarize failed (500).".to_string()), false);
+        assert!(state.error.get_untracked().is_none());
+    }
+
+    #[test]
+    fn only_an_answer_declares_the_summary_known() {
+        // The 404 that means "never summarized" IS an answer, and it is the
+        // only thing that earns the empty state the right to speak.
+        let answered = fresh_state();
+        answered.publish_read(Ok(None), true);
+        assert!(answered.loaded.get_untracked());
+        assert!(!answered.loading.get_untracked());
+
+        // A failed read must not: flipping `loaded` here would replace an
+        // honest error with the false claim that the room has no summary.
+        let failed = fresh_state();
+        failed.publish_read(Err("Summarize failed (500).".to_string()), true);
+        assert!(!failed.loaded.get_untracked());
+        assert_eq!(
+            failed.error.get_untracked().as_deref(),
+            Some("Summarize failed (500)."),
+        );
+    }
+
+    #[test]
+    fn starting_a_run_retires_the_room_open_read_it_races() {
+        // The ordinary shape on a slow origin, because the control is live from
+        // first paint: the room-open GET is still out — holding the artifact as
+        // it stood BEFORE this run — when the operator presses summarize.
+        let state = fresh_state();
+        state.loading.set(true);
+        state.error.set(Some("the last room's failure".to_string()));
+        state.note.set(Some("the last room's note".to_string()));
+        let read_in_flight = state.ticket.get_untracked();
+
+        state.begin_run();
+
+        // Landing last, that read would put the pre-run prose and its older
+        // `v{n}` back over the summary this run is about to write.
+        assert!(!summary_read_is_current(
+            read_in_flight,
+            state.ticket.get_untracked()
+        ));
+        // And it takes its spinner with it: a read that can no longer publish
+        // must not keep "Loading summary…" over the summary that can.
+        assert!(!state.loading.get_untracked());
+        assert!(state.summarizing.get_untracked());
+        assert!(state.error.get_untracked().is_none());
+        assert!(state.note.get_untracked().is_none());
+    }
+
     /// The read ticket cannot cover a summarize run: a room change bumps it for
     /// the NEW room's read, which would then admit the OLD room's answer. So the
-    /// completion re-validates the `(generation, key)` pair it started with
-    /// through `Rooms::room_is_current`, which delegates to
-    /// `crate::rooms::room_request_is_current` — exercised directly here, with
-    /// no live `Rooms` or browser runtime needed.
+    /// completion re-validates the `(generation, key)` pair it started with and
+    /// hands the verdict to `publish_run`, which is where the refusal lives and
+    /// where a test can reach it without a live `Rooms` or a browser runtime.
     #[test]
-    fn a_run_landing_after_a_room_change_cannot_publish() {
-        let started_generation = 3;
-        let started_key = "room-a";
+    fn a_run_landing_after_a_room_change_writes_nothing() {
+        let state = fresh_state();
+        state.summarizing.set(true);
 
-        // It lands while A is still open: publish, so the operator reads the
-        // summary they just paid a model turn for.
-        assert!(room_request_is_current(
-            started_generation,
-            started_generation,
-            started_key,
-            Some(started_key),
-        ));
+        state.publish_run(SummarizeOutcome::Wrote(artifact_at(4)), false);
 
-        // The operator switched to room B first. Publishing here would put A's
-        // conversation on screen as B's summary — prose about the wrong room,
-        // which is the worst thing this control could render.
-        assert!(!room_request_is_current(
-            started_generation,
-            started_generation + 1,
-            started_key,
-            Some("room-b"),
-        ));
+        // Publishing here would put the old room's conversation on screen as
+        // this room's summary — prose about the wrong room, which is the worst
+        // thing this control could render.
+        assert!(state.artifact.get_untracked().is_none());
+        assert!(!state.loaded.get_untracked());
+        // Not even the flag: `reset` retired this run when the room changed,
+        // and a late write to `summarizing` would disable the control that is
+        // on screen now over a turn it never asked for.
+        assert!(state.summarizing.get_untracked());
+    }
 
-        // Closed to no room at all: nothing to publish into.
-        assert!(!room_request_is_current(
-            started_generation,
-            started_generation + 1,
-            started_key,
-            None,
-        ));
+    #[test]
+    fn a_run_landing_in_its_own_room_publishes_and_no_later_reply_blanks_it() {
+        let state = fresh_state();
+        state.summarizing.set(true);
 
-        // A close/reopen of the SAME key is a different admission — `reset` has
-        // already cleared this state, so the in-flight run must not write into
-        // it even though the key still matches.
-        assert!(!room_request_is_current(
-            started_generation,
-            started_generation + 1,
-            started_key,
-            Some(started_key),
-        ));
+        state.publish_run(SummarizeOutcome::Wrote(artifact_at(4)), true);
+        assert_eq!(
+            state
+                .artifact
+                .get_untracked()
+                .map(|artifact| artifact.version),
+            Some(4)
+        );
+        assert!(state.loaded.get_untracked());
+        assert!(!state.summarizing.get_untracked());
+
+        // A note is about the transcript, not about the summary that stands.
+        state.publish_run(
+            SummarizeOutcome::Note(summary_note(Some("no_messages"))),
+            true,
+        );
+        assert_eq!(
+            state
+                .artifact
+                .get_untracked()
+                .map(|artifact| artifact.version),
+            Some(4)
+        );
+        assert_eq!(
+            state.note.get_untracked().as_deref(),
+            Some("Nothing to summarize yet."),
+        );
+
+        // And neither does a refusal: the room's last word stays readable while
+        // the operator reads why the re-run did not land.
+        state.publish_run(SummarizeOutcome::Failure("boom".to_string()), true);
+        assert_eq!(
+            state
+                .artifact
+                .get_untracked()
+                .map(|artifact| artifact.version),
+            Some(4)
+        );
+        assert_eq!(state.error.get_untracked().as_deref(), Some("boom"));
     }
 }
