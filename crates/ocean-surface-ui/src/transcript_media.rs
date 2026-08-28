@@ -26,6 +26,13 @@
 //! future-proofing: if the daemon rewords a marker or the upload parse is
 //! ever loosened, the failure mode stays a lost preview, never an image
 //! under a removal line. An unrecognized marker body mounts nothing at all.
+//!
+//! The same field also retires images ALREADY on screen: every mounted row
+//! watches the live transcript for a removal marker carrying its id and
+//! swaps to the named-file fallback the moment one arrives over SSE. Ids
+//! are minted per attachment, so the retirement is permanent for that id —
+//! a re-upload is a fresh id — and an open viewer converges to exactly the
+//! state a fresh load reaches only after the download 404s.
 
 use leptos::prelude::*;
 
@@ -78,6 +85,21 @@ pub(crate) fn marker_image(msg: &RoomMessage) -> Option<(String, String)> {
     upload_marker_filename(&msg.body).map(|name| (id.to_string(), name.to_string()))
 }
 
+/// Whether the transcript records a removal for this attachment id.
+///
+/// Ids are minted per attachment, so a single removal retires the id for
+/// good — a re-upload of the same file arrives under a fresh id and never
+/// matches. Message-kind rows are excluded for the same reason
+/// `marker_image` excludes them: a person typing removal-shaped text into
+/// the chat must not be able to blank someone else's image.
+pub(crate) fn removal_recorded(transcript: &[RoomMessage], attachment_id: &str) -> bool {
+    transcript.iter().any(|m| {
+        !matches!(m.kind, RoomMessageKind::Message)
+            && m.attachment_id.as_deref() == Some(attachment_id)
+            && is_removal_marker(&m.body)
+    })
+}
+
 // ---- View -------------------------------------------------------------------
 
 /// The media block for one transcript row, or `None` when the row mounts
@@ -88,6 +110,15 @@ pub(crate) fn marker_image(msg: &RoomMessage) -> Option<(String, String)> {
 /// `attachments.rs` reads it at request time for the same reason.
 pub(crate) fn marker_media_view(rooms: Rooms, msg: &RoomMessage) -> Option<AnyView> {
     let (id, filename) = marker_image(msg)?;
+    // Read INSIDE the render closure so it stays reactive: the removal
+    // marker rides the same transcript signal the SSE stream feeds, which
+    // is what retires an image on an already-open viewer's screen instead
+    // of waiting for a reload. The O(rows) scan per transcript change per
+    // mounted image is fine at room scale.
+    let removed = {
+        let id = id.clone();
+        move || rooms.transcript.with(|t| removal_recorded(t, &id))
+    };
     let href = move || {
         let base = rooms.url.get().trim_end_matches('/').to_string();
         let key = rooms.open_key.get().unwrap_or_default();
@@ -100,10 +131,11 @@ pub(crate) fn marker_media_view(rooms: Rooms, msg: &RoomMessage) -> Option<AnyVi
         view! {
             <div class="rooms-workspace__media">
                 {move || {
-                    if failed.get() {
-                        // The bytes said no (non-image, deleted, unsniffable):
-                        // degrade to the same named-file affordance the files
-                        // panel renders, which still downloads whatever the
+                    if failed.get() || removed() {
+                        // The bytes said no (non-image, deleted, unsniffable)
+                        // or a removal marker landed for this id: degrade to
+                        // the same named-file affordance the files panel
+                        // renders, which still downloads whatever the
                         // attachment actually is — or 404s honestly.
                         let name = filename.clone();
                         view! {
@@ -247,6 +279,66 @@ mod tests {
             marker_image(&msg),
             Some((ID.to_string(), "we' (ird.png".to_string()))
         );
+    }
+
+    #[test]
+    fn a_recorded_removal_retires_exactly_its_attachment_id() {
+        let transcript = vec![
+            marker(
+                RoomMessageKind::System,
+                "john attached 'spec.png' (52413 bytes)",
+                Some(ID),
+            ),
+            marker(
+                RoomMessageKind::System,
+                "ada removed attachment 'spec.png'",
+                Some(ID),
+            ),
+        ];
+        assert!(removal_recorded(&transcript, ID));
+        // Ids are minted per attachment: a removal for one says nothing
+        // about any other, so a re-upload (fresh id) stays rendered.
+        assert!(!removal_recorded(
+            &transcript,
+            "fedcba9876543210fedcba9876543210"
+        ));
+    }
+
+    #[test]
+    fn removal_shaped_chat_text_retires_nothing() {
+        // A person typing the marker's words rides the Message lane; only
+        // the system lane can retire someone's rendered image.
+        let transcript = vec![marker(
+            RoomMessageKind::Message,
+            "john removed attachment 'spec.png'",
+            Some(ID),
+        )];
+        assert!(!removal_recorded(&transcript, ID));
+    }
+
+    #[test]
+    fn a_transcript_without_a_removal_retires_nothing() {
+        let transcript = vec![
+            marker(
+                RoomMessageKind::System,
+                "john attached 'spec.png' (52413 bytes)",
+                Some(ID),
+            ),
+            marker(RoomMessageKind::Message, "looks good", None),
+        ];
+        assert!(!removal_recorded(&transcript, ID));
+    }
+
+    #[test]
+    fn an_older_daemons_removal_without_the_field_retires_nothing() {
+        // Absence of attachment_id IS the older-daemon wire; with no id
+        // there is nothing safe to match on, so the image stays.
+        let transcript = vec![marker(
+            RoomMessageKind::System,
+            "john removed attachment 'spec.png'",
+            None,
+        )];
+        assert!(!removal_recorded(&transcript, ID));
     }
 
     #[test]
