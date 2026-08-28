@@ -235,6 +235,13 @@ pub fn model_options(catalogue: &[ModelInfo], current: &str) -> Vec<(String, Str
         } else {
             model.label.clone()
         };
+        // Annotated, never hidden or disabled: an agent may legitimately pin
+        // a model whose credential the operator configures later — readiness
+        // is the daemon's configuration truth, not a menu filter.
+        let label = match model.unready_reason() {
+            Some(reason) => format!("{label} — {reason}"),
+            None => label,
+        };
         out.push((model.id.clone(), label));
     }
     let current = current.trim();
@@ -769,6 +776,10 @@ mod tests {
             id: id.to_string(),
             provider: "test".to_string(),
             label: label.to_string(),
+            // An older daemon reports no readiness at all; that is the
+            // baseline every existing expectation below is written against.
+            ready: None,
+            credential_source: None,
         }
     }
 
@@ -846,6 +857,29 @@ mod tests {
             1,
             "the current model must not be duplicated"
         );
+    }
+
+    #[test]
+    fn model_options_annotate_unready_models_but_never_hide_them() {
+        let mut unready = model("claude-opus-5", "Opus 5");
+        unready.provider = "anthropic".to_string();
+        unready.ready = Some(false);
+        let mut ready = model("grok-4", "Grok 4");
+        ready.ready = Some(true);
+        let catalogue = vec![unready, ready];
+
+        let options = model_options(&catalogue, "");
+        // Unready → still offered (pinning ahead of a credential is a valid
+        // configuration act), with the daemon's why in the label.
+        assert_eq!(
+            options[1],
+            (
+                "claude-opus-5".into(),
+                "Opus 5 — no credential for anthropic".into()
+            )
+        );
+        // Ready → label untouched.
+        assert_eq!(options[2], ("grok-4".into(), "Grok 4".into()));
     }
 
     #[test]
