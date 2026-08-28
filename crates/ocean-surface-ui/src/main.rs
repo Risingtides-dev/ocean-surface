@@ -33,6 +33,7 @@ mod place_call;
 mod room_artifacts;
 mod room_markdown;
 mod room_messages;
+mod room_repo;
 mod room_summary;
 mod rooms;
 mod rooms_workspace;

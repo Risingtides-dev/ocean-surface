@@ -943,6 +943,13 @@ pub fn RoomsWorkspace(
     // compare-and-swap loses the version it is supposed to be presenting.
     let artifacts = crate::room_artifacts::RoomArtifactsState::new(&rooms);
 
+    // The room's repo binding. Same reasoning once more, and the stake is a
+    // container: the in-flight flag guards a clone/build that holds Bedrock's
+    // per-room checkout lock, so a flag rebuilt by a roster SSE update would
+    // re-enable the control mid-run and manufacture a 409 against our own
+    // command.
+    let repo = crate::room_repo::RoomRepoState::new(&rooms);
+
     // Toggle for narrow-screen left-rail visibility.
     let show_left_rail = RwSignal::new(false);
 
@@ -1879,6 +1886,18 @@ pub fn RoomsWorkspace(
             aria-label="Rooms workspace"
             on:keydown=move |ev| {
                 if ev.key() != "Escape" {
+                    return;
+                }
+                // The repo panel shares the artifacts panel's overlay tier
+                // (z-index 445) and their rail triggers sit behind each
+                // other's scrims, so at most one is open; ask it first for
+                // the same reason the artifacts rung exists at all.
+                if crate::room_repo::repo_escape_closes(
+                    repo.panel_is_open(),
+                    ev.default_prevented(),
+                ) {
+                    ev.prevent_default();
+                    repo.close_panel();
                     return;
                 }
                 // Topmost overlay first, and that is the artifacts panel: a
@@ -3198,6 +3217,18 @@ pub fn RoomsWorkspace(
                 <crate::attachments::RoomAttachments
                     rooms=rooms
                     state=attachments
+                    writes_allowed=Signal::derive(move || {
+                        access_allows_writes(rooms.access.get().as_ref())
+                    })
+                />
+
+                // The room's bound repo — see, clone and build it from the
+                // room. A sibling for the same reason as its neighbours, and
+                // it renders NOTHING for a Local room: no Bedrock workspace
+                // exists there, and a refusal would read as breakage.
+                <crate::room_repo::RoomRepo
+                    rooms=rooms
+                    state=repo
                     writes_allowed=Signal::derive(move || {
                         access_allows_writes(rooms.access.get().as_ref())
                     })
