@@ -3334,12 +3334,19 @@ impl Daemon {
     }
 
     pub fn send_prompt(&self, prompt: String) {
+        self.send_prompt_with_display(prompt.clone(), prompt);
+    }
+
+    /// Send `prompt` to the model while echoing a concise `display_prompt` in the
+    /// transcript. The composer uses this for explicitly attached text context:
+    /// the wire prompt contains bounded file contents, while the local transcript
+    /// shows the operator's instruction plus attachment names instead of dumping
+    /// entire source files into the chat rail.
+    pub fn send_prompt_with_display(&self, prompt: String, display_prompt: String) {
         if prompt.trim().is_empty() {
             return;
         }
-        // Echo the user prompt immediately, then dispatch under the surface's
-        // ambient client identity (web vs. extension).
-        self.turns.update(|t| t.push(Turn::user(prompt.clone())));
+        self.turns.update(|t| t.push(Turn::user(display_prompt)));
         self.streaming.set(true);
         self.dispatch_prompt(prompt, false, surface_client_type());
     }

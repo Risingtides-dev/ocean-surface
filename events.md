@@ -2729,3 +2729,100 @@ dedicated Ocean tunnel LaunchAgent; repointed DNS to the existing Ocean tunnel;
 then verified the authenticated public title is Ocean, /health is healthy, and
 Pasture/Stitchpad markers are absent. Removed the temporary laptop recovery jobs
 and moved their exact files to Trash. No source build or source-code change.
+
+_________________________________________________________________________________
+time:      [17:19] [07-24-26]
+agent:     [codex] [gpt-5]
+worktree:  [main]
+type:      [feature-request]
+area:      [frontend]
+
+Replaced the active VoiceOrb's generic microphone glyph with the existing Ocean
+wave-mark SVG. The badge now drifts while live, crests while capturing, and
+settles while transcription resolves; reduced-motion disables those animations.
+Updated the extension build to carry the referenced SVG at its sidepanel path.
+Verified fmt, wasm cargo check, strict wasm clippy, shell syntax, and diff
+hygiene. AGENTS.md unchanged: no durable contract changed.
+
+_________________________________________________________________________________
+time:      [01:23] [07-25-26]
+agent:     [ocean] [gpt-5.2]
+worktree:  [main]
+type:      [feature-request]
+area:      [architecture]
+
+Recorded the Offshore Ocean Browser direction and opened OCEAN-388. An always-on
+remote machine such as tide-net should host dedicated authenticated Chromium
+profiles and run ocean-browser beside loopback-only CDP; the local Ocean daemon
+routes the existing browser_* tool schemas over authenticated Offshore/Room RPC
+and receives structured results, BrowserActivity, optional screencast frames,
+and bounded realtime DevTools network/WebSocket signals. This moves Chrome's
+RAM/CPU/GPU and visible-window footprint off the operator's development machine
+while retaining a local-execution fallback. Runtime routing, permissions, CDP,
+profiles, and artifact transfer remain ocean-os authority; ocean-surface owns
+only worker selection/status, health/activity projection, and optional remote
+live view through the canonical Leptos/Tauri surface. CDP must never be exposed
+over LAN/tailnet, credentials and raw auth-bearing traffic must never be relayed,
+and typed/allow-listed queries plus normal permission/audit gates are required.
+time:      [00:31] [08-28-26]
+agent:     [claude] [fable 5]
+type:      [merge]
+area:      [frontend]
+
+Ocean-loop wave 4 land phase: merged two slices to main. #128 (repo-binding-ui)
+adds the browser half of the daemon's workspace lane — a room shows its bound
+repo, any member can clone and build, typed refusals render as calm states, and
+the refine pass made a plain read that answers clone_status=="cloning" start
+the status poller so a reload mid-clone or a second member no longer sees a
+stale view. Bind/unbind deliberately stay out (owner authority would leak to
+every roster member through the credential's bearer). #129 (model-picker
+readiness) decodes ready/credential_source in ModelInfo and annotates unready
+models in both pickers with the why, additive so an older daemon renders as
+before. Full gate re-run after each rebase: UI+proxy tests, clippy -D warnings,
+fmt, and the wasm -D warnings release-lane check, all green. Feature in #128 is
+inert until the ocean-os daemon deploy and a Bedrock railway up. Branches and
+worktrees cleaned up.
+_________________________________________________________________________________
+time:      [07:18] [08-28-26]
+agent:     [claude] [fable 5]
+type:      [merge]
+area:      [frontend]
+
+Ocean-loop wave land phase: merged two slices to main. #136 (workspace file
+listing) renders GET workspace/list in the room workspace panel — a third read
+lane on the status/execs idioms (monotonic tickets, isolated lane errors), no
+new poller, directory rows navigate down with an up affordance stopping at the
+root, and file rows stay inert because the daemon allowlist has no file-read
+leaf yet (that bridge is backlogged as workspace-file-read-lane). Bedrock's
+workspace_absent/provisioning/failed are matched by code, not HTTP status, and
+render as a quiet no-container state. #137 (removal-marker retirement) makes a
+removal marker retire an already-rendered inline image live for every open
+viewer, entirely inside transcript_media.rs: a pure removal_recorded probe read
+reactively inside the <For>-cached row closure, failing safe on chat-shaped
+text, foreign ids, and older daemons without the field. Full gate re-run after
+each rebase: 7 UI suites, clippy -D warnings, fmt, wasm -D warnings check, all
+green. Both builders skipped this ledger in-worktree to avoid a parallel-write
+conflict; recorded here at land per the wave model. Branches and worktrees
+cleaned up. Surface deploy stays a human decision.
+_________________________________________________________________________________
+
+time:      [15:59] [08-28-26]
+agent:     [claude] [fable 5]
+type:      [merge]
+area:      [frontend]
+
+Ocean-loop wave land phase: merged #138 (workspace-file-open-in-panel) to main.
+A file row in the workspace panel opens its bounded content: utf8 text renders
+as a Leptos-escaped text node (no inner_html), base64 is dropped at
+classification and never reaches the DOM, over-cap 413 workspace_file_too_large
+renders as a state not an error, Bedrock refusals relay verbatim as typed
+states. File lane holds its own read ticket and error under the panel's
+lane-isolation design. The refine pass closed review's one behavioral defect:
+close_file() now clears the File lane's standing error via clear_lane_error, so
+a failed open followed by back no longer leaves a permanent error banner over a
+healthy listing — mutation-verified both ways. At land (rebase no-op onto
+origin/main 4d2ba65): 1031 UI lib + integration suites and 53 proxy tests 0
+failed, clippy -D warnings clean, fmt clean, RUSTFLAGS="-D warnings" wasm check
+exit 0. Deploy stays a human decision; inert until a production daemon ships
+the workspace file relay (ocean-os#387).
+_________________________________________________________________________________

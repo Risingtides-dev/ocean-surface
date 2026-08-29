@@ -438,7 +438,14 @@ pub fn VoiceOrb(
 
     let glyph = move || match voice_mode.get() {
         mode::VoiceMode::Off => view! { <crate::icons::MicOff /> }.into_any(),
-        _ => view! { <crate::icons::Mic /> }.into_any(),
+        _ => view! {
+            <img
+                class="voice-orb__mark"
+                src="brand/ocean-mark.svg"
+                alt=""
+            />
+        }
+        .into_any(),
     };
     let mode_classes = move |m: mode::VoiceMode| {
         if voice_mode.get() == m {

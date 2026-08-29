@@ -33,6 +33,13 @@ for f in dist/*.png dist/*.webmanifest; do
   [ -e "$f" ] && cp "$f" "$DIST/" || true
 done
 
+# The voice orb uses Ocean's existing wave-mark SVG. sidepanel.html lives one
+# level above dist/, so keep this asset at the extension root too.
+if [ -f dist/brand/ocean-mark.svg ]; then
+  mkdir -p "$EXT/brand"
+  cp dist/brand/ocean-mark.svg "$EXT/brand/ocean-mark.svg"
+fi
+
 echo "Extension built at $EXT/"
 echo "Load it unpacked at chrome://extensions, or copy to the daemon's"
 echo "extension dir so it auto-loads with Ocean's Chrome:"
