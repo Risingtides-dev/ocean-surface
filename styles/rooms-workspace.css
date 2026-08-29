@@ -460,6 +460,43 @@
   line-height: 1.35;
 }
 
+/* A row Bedrock confirmed onto the shared ledger wears a small check beside
+   its timestamp. Positive-only: a row without ledger metadata renders no
+   mark at all, because in a Local room (and for pre-federation history)
+   absence is correct, not a failure — in-flight state belongs to the outbox
+   block. Grouped rows keep the per-row mark and mirror the timestamp's
+   dim-until-hover treatment from the density contract above. */
+.rooms-workspace__msg-ledger {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  color: var(--fg-4);
+  opacity: 0.75;
+}
+
+.rooms-workspace__msg--grouped .rooms-workspace__msg-ledger {
+  opacity: 0.68;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__msg--grouped:hover .rooms-workspace__msg-ledger,
+.rooms-workspace__msg--grouped:focus-within .rooms-workspace__msg-ledger {
+  opacity: 1;
+}
+
+@media (hover: none), (pointer: coarse) {
+  .rooms-workspace__msg--grouped .rooms-workspace__msg-ledger {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rooms-workspace__msg--grouped .rooms-workspace__msg-ledger {
+    transition: none;
+  }
+}
+
 .rooms-workspace__msg-text {
   color: var(--fg-2);
   font-size: 13px;

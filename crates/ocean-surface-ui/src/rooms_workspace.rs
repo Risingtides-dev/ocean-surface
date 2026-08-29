@@ -97,6 +97,62 @@ fn access_allows_writes(access: Option<&RoomAccessProjection>) -> bool {
     )
 }
 
+/// Whether this room federates through Bedrock at all. Private copy of the
+/// same decision in `room_repo`/`room_workspace_panel`, kept file-scoped like
+/// its siblings.
+fn room_is_federated(access: Option<&RoomAccessProjection>) -> bool {
+    access.is_some_and(|projection| projection.state != RoomAccessState::Local)
+}
+
+/// How one transcript row relates to the shared ledger.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LedgerMark {
+    /// Bedrock confirmed the row onto the shared ledger; the row wears the
+    /// positive mark.
+    Confirmed,
+    /// Federated room, but the row carries no confirmation — local-era/G1
+    /// history. Silence, never a pending/failed treatment: in-flight state
+    /// belongs to the outbox block, not the transcript.
+    Unmarked,
+    /// Local room (or no access projection yet): there is no ledger to
+    /// reach, so `federated: None` is simply correct and nothing renders.
+    NotApplicable,
+}
+
+fn ledger_mark(access: Option<&RoomAccessProjection>, message: &RoomMessage) -> LedgerMark {
+    if !room_is_federated(access) {
+        LedgerMark::NotApplicable
+    } else if message.federated.is_some() {
+        LedgerMark::Confirmed
+    } else {
+        LedgerMark::Unmarked
+    }
+}
+
+/// The per-row ledger glyph, rendered beside the timestamp so grouped rows —
+/// whose header collapses to the dimmed time — keep it. Only `Confirmed`
+/// renders anything; both silent states are deliberate (see [`LedgerMark`]).
+fn ledger_mark_view(access: Option<&RoomAccessProjection>, message: &RoomMessage) -> AnyView {
+    if ledger_mark(access, message) != LedgerMark::Confirmed {
+        return ().into_any();
+    }
+    view! {
+        <span
+            class="rooms-workspace__msg-ledger"
+            role="img"
+            title="On the shared ledger"
+            aria-label="On the shared ledger"
+        >
+            <svg viewBox="0 0 16 16" width="10" height="10"
+                fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 8.5l3.5 3.5L13 5"/>
+            </svg>
+        </span>
+    }
+    .into_any()
+}
+
 /// Render a compact clock label from the canonical RFC3339 wire timestamp.
 /// Extracts the shared `HH:MM` prefix for `Z`, fractional-second, and offset
 /// variants without converting timezones or localizing; invalid/non-canonical
@@ -1646,6 +1702,7 @@ pub fn RoomsWorkspace(
                                                 let full_ts = reply.created_at.clone();
                                                 let is_system = room_messages::is_compact_system_row(&reply);
                                                 let media = crate::transcript_media::marker_media_view(rooms, &reply);
+                                                let ledger_row = reply.clone();
                                                 view! {
                                                     <div
                                                         class="rooms-workspace__msg rooms-workspace__msg--thread-reply"
@@ -1676,6 +1733,10 @@ pub fn RoomsWorkspace(
                                                                 >
                                                                     {canonical_wire_clock_time(&full_ts)}
                                                                 </time>
+                                                                {move || ledger_mark_view(
+                                                                    rooms.access.get().as_ref(),
+                                                                    &ledger_row,
+                                                                )}
                                                             </div>
                                                             <div class="rooms-workspace__msg-text">
                                                                 {crate::room_markdown::body_view(reply.body.clone(), member_ids)}
@@ -2451,6 +2512,11 @@ pub fn RoomsWorkspace(
                                                 .as_ref()
                                                 .map(|p| room_messages::is_grouped(p, &m))
                                                 .unwrap_or(false);
+                                            // Cloned for the ledger mark, which
+                                            // re-reads reactively: the access
+                                            // projection can arrive after the
+                                            // keyed row was cached.
+                                            let ledger_row = m.clone();
                                             view! {
                                                 {day_label.map(|d| view! {
                                                     <div class="rooms-workspace__day-separator" data-day="true">{d}</div>
@@ -2490,6 +2556,10 @@ pub fn RoomsWorkspace(
                                                             >
                                                                 {canonical_wire_clock_time(&full_ts)}
                                                             </time>
+                                                            {move || ledger_mark_view(
+                                                                rooms.access.get().as_ref(),
+                                                                &ledger_row,
+                                                            )}
                                                         </div>
                                                         <div class="rooms-workspace__msg-text">
                                                             {crate::room_markdown::body_view(m.body.clone(), member_ids)}
@@ -3410,6 +3480,9 @@ pub fn RoomsWorkspace(
                                                     >
                                                         {canonical_wire_clock_time(&full_ts)}
                                                     </time>
+                                                    // The enclosing closure re-runs on access
+                                                    // changes, so this needs no closure of its own.
+                                                    {ledger_mark_view(rooms.access.get().as_ref(), &root)}
                                                 </div>
                                                 <div class="rooms-workspace__msg-text">
                                                     {crate::room_markdown::body_view(root.body.clone(), member_ids)}
@@ -3433,8 +3506,8 @@ mod tests {
     use super::*;
     use crate::rooms::{
         room_request_is_current, CreateOutcome, CreateResolution, FederatedActorType,
-        FederatedRoomMemberProjection, FederatedRoomRole, MemberPresence, RoomAccessProjection,
-        RoomAccessState, RoomMessage, RoomMessageKind, RoomParticipantKind,
+        FederatedMessageMeta, FederatedRoomMemberProjection, FederatedRoomRole, MemberPresence,
+        RoomAccessProjection, RoomAccessState, RoomMessage, RoomMessageKind, RoomParticipantKind,
     };
 
     #[test]
@@ -3992,6 +4065,75 @@ mod tests {
     #[test]
     fn access_blocks_writes_none() {
         assert!(!access_allows_writes(None));
+    }
+
+    // ── ledger_mark ───────────────────────────────────────────────────
+
+    fn test_meta() -> FederatedMessageMeta {
+        FederatedMessageMeta {
+            ledger_event_id: "evt-1".into(),
+            global_sequence: 7,
+            source_id: "surface-web".into(),
+            source_sequence: 3,
+            client_event_id: "client-1".into(),
+            origin_principal_id: "principal-1".into(),
+            origin_member_id: "user".into(),
+        }
+    }
+
+    #[test]
+    fn ledger_mark_confirms_only_rows_with_meta_in_federated_rooms() {
+        let mut confirmed = test_msg(1, "hello", None);
+        confirmed.federated = Some(test_meta());
+        let live = test_access(RoomAccessState::Live);
+
+        assert_eq!(ledger_mark(Some(&live), &confirmed), LedgerMark::Confirmed);
+        assert_eq!(
+            ledger_mark(Some(&live), &test_msg(2, "local-era", None)),
+            LedgerMark::Unmarked
+        );
+    }
+
+    /// Confirmation is a fact about the row, not about connection health:
+    /// a degraded federated room keeps its confirmed marks.
+    #[test]
+    fn ledger_mark_survives_degraded_federated_states() {
+        let mut confirmed = test_msg(1, "hello", None);
+        confirmed.federated = Some(test_meta());
+        for state in [
+            RoomAccessState::Connecting,
+            RoomAccessState::Recovering,
+            RoomAccessState::Revoked,
+        ] {
+            assert_eq!(
+                ledger_mark(Some(&test_access(state)), &confirmed),
+                LedgerMark::Confirmed
+            );
+        }
+    }
+
+    /// A Local room (or a room whose access projection has not loaded)
+    /// has no ledger to reach — nothing may render, even for a row that
+    /// somehow carries metadata.
+    #[test]
+    fn ledger_mark_is_silent_where_no_ledger_exists() {
+        let mut confirmed = test_msg(1, "hello", None);
+        confirmed.federated = Some(test_meta());
+        let local = test_access(RoomAccessState::Local);
+
+        assert_eq!(
+            ledger_mark(Some(&local), &confirmed),
+            LedgerMark::NotApplicable
+        );
+        assert_eq!(ledger_mark(None, &confirmed), LedgerMark::NotApplicable);
+        assert_eq!(
+            ledger_mark(Some(&local), &test_msg(2, "plain", None)),
+            LedgerMark::NotApplicable
+        );
+        assert_eq!(
+            ledger_mark(None, &test_msg(3, "plain", None)),
+            LedgerMark::NotApplicable
+        );
     }
 
     #[test]
@@ -5132,6 +5274,32 @@ mod tests {
         assert!(
             markup.contains(&emitter),
             "the timeline must emit the inline thread container"
+        );
+    }
+
+    /// The ledger mark must exist in both the stylesheet and the markup,
+    /// and only as the positive class — no pending/failed variant may ever
+    /// appear, because an unmarked row is not a failure state.
+    #[test]
+    fn ledger_mark_is_styled_and_emitted() {
+        let css = include_str!("../../../styles/rooms-workspace.css");
+        let stripped = strip_css_comments(css);
+        let normalized = css_without_whitespace(&stripped);
+        assert!(
+            normalized.contains(".rooms-workspace__msg-ledger{"),
+            "ledger mark needs a base rule"
+        );
+        assert!(
+            !normalized.contains("msg-ledger--"),
+            "the ledger mark is positive-only; no state variants"
+        );
+        // Needle built at runtime so this test's own literal can't satisfy
+        // the check if the emitter disappears from the markup.
+        let emitter = format!("class=\"{}\"", ["rooms-workspace__msg", "-ledger"].concat());
+        let markup = include_str!("rooms_workspace.rs");
+        assert!(
+            markup.contains(&emitter),
+            "confirmed rows must emit the ledger mark"
         );
     }
 
