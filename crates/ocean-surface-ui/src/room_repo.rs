@@ -1528,8 +1528,21 @@ fn panel_bound(
     }
 }
 
-/// One recorded check row: the line, linked when gh gave a URL, the pull
-/// reply's `new` flag, and when this room first saw the result.
+/// The href a recorded check may carry: gh's `url`, but only when it is a
+/// well-formed http(s) URL. The field is gh stdout read inside the room
+/// container — the same container the bound repo's build script runs in — so
+/// it is the container's word, not GitHub's, and rendering it unvetted would
+/// hand that container a clickable `javascript:` anchor in the surface
+/// origin. Same allowlist as room markdown links; anything else stays text.
+fn check_href(check: &CiCheck) -> Option<String> {
+    check
+        .url
+        .clone()
+        .filter(|url| crate::room_markdown::scheme_allowed(url))
+}
+
+/// One recorded check row: the line, linked when gh gave an http(s) URL, the
+/// pull reply's `new` flag, and when this room first saw the result.
 fn check_row(check: CiCheck) -> impl IntoView {
     let tone = conclusion_tone(check_verdict(&check));
     let line_class = if tone.is_empty() {
@@ -1538,7 +1551,7 @@ fn check_row(check: CiCheck) -> impl IntoView {
         format!("rooms-workspace__repo-check-line rooms-workspace__repo-check-line--{tone}")
     };
     let line = check_line(&check);
-    let url = check.url.clone().filter(|url| !url.is_empty());
+    let url = check_href(&check);
     let seen = check.first_seen_at.clone().filter(|at| !at.is_empty());
     view! {
         <li class="rooms-workspace__repo-check">
@@ -1547,7 +1560,7 @@ fn check_row(check: CiCheck) -> impl IntoView {
             })}
             {match url {
                 Some(url) => view! {
-                    <a class=line_class href=url target="_blank" rel="noreferrer">{line}</a>
+                    <a class=line_class href=url target="_blank" rel="noopener noreferrer">{line}</a>
                 }
                 .into_any(),
                 None => view! { <span class=line_class>{line}</span> }.into_any(),
@@ -2265,6 +2278,32 @@ mod tests {
         };
         assert_eq!(check_line(&bare), "(unnamed): unknown");
         assert_eq!(conclusion_tone("success"), "good");
+    }
+
+    /// The check URL is container-influenced gh output, not GitHub's word:
+    /// only a well-formed http(s) URL survives to become an anchor, the same
+    /// posture the markdown renderers hold against `javascript:` hrefs.
+    #[test]
+    fn a_check_href_is_gated_to_http_schemes() {
+        let with_url = |url: &str| CiCheck {
+            url: Some(url.into()),
+            ..recorded_check("lint", "success")
+        };
+
+        let run = "https://github.com/acme/site/actions/runs/1/job/2";
+        assert_eq!(check_href(&with_url(run)).as_deref(), Some(run));
+
+        for hostile in [
+            "javascript:alert(1)",
+            "JavaScript:alert(1)",
+            "java\tscript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "vbscript:x",
+            "",
+        ] {
+            assert_eq!(check_href(&with_url(hostile)), None, "{hostile:?} linked");
+        }
+        assert_eq!(check_href(&recorded_check("lint", "success")), None);
     }
 
     // ---- gates --------------------------------------------------------------
