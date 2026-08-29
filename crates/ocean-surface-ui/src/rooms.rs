@@ -611,8 +611,9 @@ pub struct Rooms {
     /// interleave and resolve out of order.
     pub policy_update_in_flight: RwSignal<bool>,
     /// Error from the last trigger-policy PATCH, shown inline by the toggles
-    /// section: a checkbox that snaps back with no explanation reads as a
-    /// broken control, not a failed request.
+    /// section. A refused flip does not snap the box back — `open_room` is
+    /// untouched, so nothing re-renders — which is why the error must be
+    /// visible: the box alone would overstate what was stored.
     pub policy_update_error: RwSignal<Option<String>>,
 }
 

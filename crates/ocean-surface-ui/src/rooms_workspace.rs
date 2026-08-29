@@ -83,9 +83,11 @@ fn create_trigger_policy(
 
 /// One editable trigger row in the right rail. `checked` is a plain bool on
 /// purpose: the enclosing section re-renders from `open_room` after every
-/// admitted PATCH, so the box always shows durable state, never an optimistic
-/// guess. The flip reads the room's policy fresh at event time — not from the
-/// render that drew the box — so two quick flips compose instead of the second
+/// admitted PATCH, so an admitted flip settles to durable state. A refused
+/// PATCH leaves `open_room` untouched — no re-render — so the box keeps the
+/// user's flip next to the inline error until the next successful write. The
+/// flip reads the room's policy fresh at event time — not from the render that
+/// drew the box — so two quick flips compose instead of the second
 /// resurrecting the first's pre-state.
 fn trigger_toggle_row(
     rooms: Rooms,
