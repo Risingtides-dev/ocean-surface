@@ -8,6 +8,7 @@
 //!   GET    /v1/rooms/persistent                       → list rooms
 //!   POST   /v1/rooms/persistent                       → create a room
 //!   GET    /v1/rooms/persistent/{key}                 → room + transcript
+//!   PATCH  /v1/rooms/persistent/{key}                 → update trigger policy
 //!   POST   /v1/rooms/persistent/{key}/participants    → join
 //!   DELETE /v1/rooms/persistent/{key}/participants/{id}→ leave
 //!   POST   /v1/rooms/persistent/{key}/messages        → post a message
@@ -278,6 +279,10 @@ pub struct RoomTriggerPolicy {
     /// Wake an agent when a rendered component emits an interaction event.
     #[serde(default)]
     pub on_component_event: bool,
+    /// Wake the room's agents when a workspace build fails. Off by default,
+    /// so every policy stored before this field existed keeps its behavior.
+    #[serde(default)]
+    pub on_build_failure: bool,
     /// Optional cron expression for scheduled wake-ups. `None`/empty = no schedule.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_schedule: Option<String>,
@@ -399,6 +404,14 @@ struct CreateRoomBody<'a> {
     /// (no triggers) applies; otherwise the daemon stores it verbatim.
     #[serde(skip_serializing_if = "Option::is_none")]
     trigger_policy: Option<RoomTriggerPolicy>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RoomPolicyPatchBody<'a> {
+    /// Always the COMPLETE policy. The daemon's PATCH replaces the stored
+    /// policy wholesale (absent = unchanged, null = clear), so a partial
+    /// object here would silently zero every flag it omitted.
+    trigger_policy: &'a RoomTriggerPolicy,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -593,6 +606,14 @@ pub struct Rooms {
     /// Surfaces snapshot the op_id before dispatching and gate only on the
     /// outcome carrying a matching id — concurrent submits never cross-resolve.
     pub create_op: RwSignal<(u64, Option<CreateOutcome>)>,
+    /// Whether a trigger-policy PATCH on the open room is in flight. The
+    /// workspace disables its toggles on this, so two flips can never
+    /// interleave and resolve out of order.
+    pub policy_update_in_flight: RwSignal<bool>,
+    /// Error from the last trigger-policy PATCH, shown inline by the toggles
+    /// section: a checkbox that snaps back with no explanation reads as a
+    /// broken control, not a failed request.
+    pub policy_update_error: RwSignal<Option<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -650,6 +671,8 @@ impl Rooms {
             read_cursor_in_flight: RwSignal::new(None),
             last_sent_read_cursor: RwSignal::new(None),
             create_op: RwSignal::new((0, None)),
+            policy_update_in_flight: RwSignal::new(false),
+            policy_update_error: RwSignal::new(None),
         };
 
         // Identity is RESOLVED, not snapshotted. `Rooms::new` runs synchronously
@@ -746,6 +769,9 @@ impl Rooms {
         self.read_cursor_in_flight.set(None);
         self.last_sent_read_cursor.set(None);
         self.tail_state.set(TailState::Replaying);
+        // In-flight stays as-is — the completion clears it itself — but a
+        // previous room's PATCH failure must not read as this room's.
+        self.policy_update_error.set(None);
     }
 
     /// Whether the current identity is joined according to the room's explicit
@@ -1068,6 +1094,69 @@ impl Rooms {
         self.generation.update(|g| *g = g.wrapping_add(1));
         self.open_key.set(None);
         self.reset_room_state();
+    }
+
+    /// Replace the open room's trigger policy (`PATCH /v1/rooms/persistent/{key}`).
+    /// Callers flip one flag on a copy of the room's CURRENT policy and pass
+    /// the whole thing — the daemon replaces rather than merges, so a delta
+    /// would clear every flag it omitted. Success re-renders from the record
+    /// the daemon returned, so a shown checkmark is always durable state.
+    /// Generation-gated like the read-cursor PATCH: a response that lands
+    /// after the operator switched rooms writes nothing.
+    pub fn update_open_room_policy(&self, policy: RoomTriggerPolicy) {
+        if self.policy_update_in_flight.get_untracked() {
+            return;
+        }
+        let Some(key) = self.open_key.get_untracked() else {
+            return;
+        };
+        let base = self.base();
+        let me = *self;
+        let generation_id = self.generation.get_untracked();
+        self.policy_update_in_flight.set(true);
+        self.policy_update_error.set(None);
+        spawn_local(async move {
+            let patch_url = format!("{base}/v1/rooms/persistent/{}", encode(&key));
+            let body = RoomPolicyPatchBody {
+                trigger_policy: &policy,
+            };
+            let result = match Request::patch(&patch_url)
+                .header("content-type", "application/json")
+                .json(&body)
+            {
+                Ok(req) => match req.send().await {
+                    Ok(resp) => match resp.json::<RoomMutateResponse>().await {
+                        Ok(r) if r.ok => Ok(r.room),
+                        Ok(r) => Err(r.error.unwrap_or_else(|| "unknown error".into())),
+                        Err(err) => Err(format!("decode: {err}")),
+                    },
+                    Err(err) => Err(format!("patch: {err}")),
+                },
+                Err(err) => Err(format!("encode: {err}")),
+            };
+            me.policy_update_in_flight.set(false);
+            if !me.room_is_current(generation_id, &key) {
+                // The operator moved on. On success the daemon already holds
+                // the change and the next open re-reads it; on failure the
+                // error belongs to a room that is no longer on screen.
+                return;
+            }
+            match result {
+                Ok(room) => {
+                    if let Some(room) = room {
+                        // Merge into the list too, so the flags survive a
+                        // list-driven re-render without a refetch.
+                        me.list.update(|rooms| {
+                            if let Some(entry) = rooms.iter_mut().find(|r| r.id == room.id) {
+                                *entry = room.clone();
+                            }
+                        });
+                        me.open_room.set(Some(room));
+                    }
+                }
+                Err(error) => me.policy_update_error.set(Some(error)),
+            }
+        });
     }
 
     /// Join the open room as the current identity
@@ -2389,6 +2478,54 @@ mod tests {
         assert_eq!(slugify("!!!hi!!!"), "hi");
         assert_eq!(slugify("---"), "");
         assert_eq!(slugify(""), "");
+    }
+
+    /// Every policy stored before `on_build_failure` existed decodes with the
+    /// flag off — same compat guarantee the daemon's own struct makes.
+    #[test]
+    fn trigger_policy_without_on_build_failure_decodes_with_flag_off() {
+        let policy: RoomTriggerPolicy = serde_json::from_value(serde_json::json!({
+            "on_mention": true,
+            "on_thread_reply": true
+        }))
+        .expect("legacy policy should decode");
+        assert!(policy.on_mention);
+        assert!(policy.on_thread_reply);
+        assert!(!policy.on_build_failure);
+        assert!(!policy.on_component_event);
+        assert_eq!(policy.on_schedule, None);
+    }
+
+    /// The PATCH body carries the COMPLETE policy under `trigger_policy` —
+    /// including flags the UI exposes no control for — because the daemon
+    /// replaces the stored policy wholesale. An omitted `on_component_event`
+    /// here would clear a flag something else set. `on_schedule: None` is the
+    /// one deliberate omission (skip_serializing_if), matching the daemon's
+    /// own "absent = unset" encoding for the optional cron field.
+    #[test]
+    fn policy_patch_body_sends_the_complete_policy() {
+        let policy = RoomTriggerPolicy {
+            on_mention: true,
+            on_thread_reply: false,
+            on_component_event: true,
+            on_build_failure: true,
+            on_schedule: None,
+        };
+        let body = serde_json::to_value(RoomPolicyPatchBody {
+            trigger_policy: &policy,
+        })
+        .expect("body should encode");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "trigger_policy": {
+                    "on_mention": true,
+                    "on_thread_reply": false,
+                    "on_component_event": true,
+                    "on_build_failure": true
+                }
+            })
+        );
     }
 
     #[test]

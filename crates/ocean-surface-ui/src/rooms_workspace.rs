@@ -16,7 +16,8 @@ use crate::room_messages;
 use crate::rooms::{
     CreateResolution, FederatedActorType, FederatedRoomMemberProjection, FederatedRoomRole,
     MemberPresence, OutboxItemState, Room, RoomAccessProjection, RoomAccessState, RoomMessage,
-    RoomMessageKind, RoomParticipant, RoomParticipantKind, RoomReadCursorProjection, Rooms,
+    RoomMessageKind, RoomParticipant, RoomParticipantKind, RoomReadCursorProjection,
+    RoomTriggerPolicy, Rooms,
 };
 
 // ── Production helpers (testable directly, called from Effects) ─
@@ -29,6 +30,90 @@ use crate::rooms::{
 /// typing that happened while the send was in flight is never discarded.
 fn should_clear_composer(current: &str, original_draft: &str) -> bool {
     !original_draft.is_empty() && current == original_draft
+}
+
+/// The trigger-policy flags this workspace exposes. `on_component_event` and
+/// `on_schedule` deliberately have no control: their runtime semantics are
+/// still being ruled on daemon-side, so the UI neither sets nor clears them —
+/// it only carries them through untouched (see [`policy_with_toggle`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TriggerToggle {
+    Mention,
+    ThreadReply,
+    BuildFailure,
+}
+
+/// The full policy to PATCH when one exposed flag flips: a copy of the room's
+/// current policy with only that flag changed. The daemon replaces the stored
+/// policy wholesale, so carrying the unexposed fields here is what keeps a
+/// policy set elsewhere (a schedule, component events) intact across a flip.
+fn policy_with_toggle(
+    current: Option<&RoomTriggerPolicy>,
+    toggle: TriggerToggle,
+    enabled: bool,
+) -> RoomTriggerPolicy {
+    let mut policy = current.cloned().unwrap_or_default();
+    match toggle {
+        TriggerToggle::Mention => policy.on_mention = enabled,
+        TriggerToggle::ThreadReply => policy.on_thread_reply = enabled,
+        TriggerToggle::BuildFailure => policy.on_build_failure = enabled,
+    }
+    policy
+}
+
+/// Create-time policy from the three exposed toggles. All-off returns `None`
+/// so the create body omits the field entirely and the daemon's default (no
+/// automatic triggers) applies — exactly what creating a room did before this
+/// form had toggles.
+fn create_trigger_policy(
+    on_mention: bool,
+    on_thread_reply: bool,
+    on_build_failure: bool,
+) -> Option<RoomTriggerPolicy> {
+    if !on_mention && !on_thread_reply && !on_build_failure {
+        return None;
+    }
+    Some(RoomTriggerPolicy {
+        on_mention,
+        on_thread_reply,
+        on_build_failure,
+        ..RoomTriggerPolicy::default()
+    })
+}
+
+/// One editable trigger row in the right rail. `checked` is a plain bool on
+/// purpose: the enclosing section re-renders from `open_room` after every
+/// admitted PATCH, so the box always shows durable state, never an optimistic
+/// guess. The flip reads the room's policy fresh at event time — not from the
+/// render that drew the box — so two quick flips compose instead of the second
+/// resurrecting the first's pre-state.
+fn trigger_toggle_row(
+    rooms: Rooms,
+    toggle: TriggerToggle,
+    label: &'static str,
+    checked: bool,
+) -> impl IntoView {
+    view! {
+        <label class="rooms-workspace__trigger">
+            <input
+                type="checkbox"
+                prop:checked=checked
+                disabled=move || rooms.policy_update_in_flight.get()
+                on:change=move |ev| {
+                    let current = rooms
+                        .open_room
+                        .get_untracked()
+                        .and_then(|room| room.trigger_policy);
+                    rooms.update_open_room_policy(policy_with_toggle(
+                        current.as_ref(),
+                        toggle,
+                        event_target_checked(&ev),
+                    ));
+                }
+            />
+            <span class="rooms-workspace__trigger-label">{label}</span>
+        </label>
+    }
 }
 
 fn normalized_message_body(draft: &str) -> String {
@@ -1455,6 +1540,11 @@ pub fn RoomsWorkspace(
     //    prevents stale completions from overwriting later ops).
     let pending_create = RwSignal::new(false);
     let create_op_id: RwSignal<u64> = RwSignal::new(0);
+    // Auto-wake toggles for the room being created. Default off: an absent
+    // policy (all three off) posts no `trigger_policy` at all.
+    let create_on_mention = RwSignal::new(false);
+    let create_on_thread_reply = RwSignal::new(false);
+    let create_on_build_failure = RwSignal::new(false);
     let create_room = move || {
         // Prevent concurrent dispatch: if a create is already in flight,
         // ignore the keypress. The Effect clears pending_create when the
@@ -1466,7 +1556,14 @@ pub fn RoomsWorkspace(
         if name.trim().is_empty() {
             return;
         }
-        let op_id = rooms.create_room(name.clone(), None);
+        let op_id = rooms.create_room(
+            name.clone(),
+            create_trigger_policy(
+                create_on_mention.get_untracked(),
+                create_on_thread_reply.get_untracked(),
+                create_on_build_failure.get_untracked(),
+            ),
+        );
         if op_id == 0 {
             // Synchronous rejection — empty name or slug. Don't set
             // pending; the name field already shows the error via status.
@@ -1498,6 +1595,11 @@ pub fn RoomsWorkspace(
         match Rooms::resolve_create_op(current_op, my_op, outcome.as_ref()) {
             CreateResolution::Success => {
                 new_room_name.set(String::new());
+                // The toggles were part of the same draft: the next room
+                // starts from the no-triggers default, like the name field.
+                create_on_mention.set(false);
+                create_on_thread_reply.set(false);
+                create_on_build_failure.set(false);
                 pending_create.set(false);
             }
             CreateResolution::KeepDraft => {
@@ -2305,7 +2407,47 @@ pub fn RoomsWorkspace(
                         }
                         disabled=move || pending_create.get()
                     />
-                    />
+                    // Auto-wake flags for the room being created. Only the
+                    // three ruled-on flags get a control; see TriggerToggle.
+                    <div
+                        class="rooms-workspace__create-triggers"
+                        role="group"
+                        aria-label="Auto-wake triggers for the new room"
+                    >
+                        <label class="rooms-workspace__trigger">
+                            <input
+                                type="checkbox"
+                                prop:checked=move || create_on_mention.get()
+                                on:change=move |ev| {
+                                    create_on_mention.set(event_target_checked(&ev))
+                                }
+                                disabled=move || pending_create.get()
+                            />
+                            <span class="rooms-workspace__trigger-label">"@mention"</span>
+                        </label>
+                        <label class="rooms-workspace__trigger">
+                            <input
+                                type="checkbox"
+                                prop:checked=move || create_on_thread_reply.get()
+                                on:change=move |ev| {
+                                    create_on_thread_reply.set(event_target_checked(&ev))
+                                }
+                                disabled=move || pending_create.get()
+                            />
+                            <span class="rooms-workspace__trigger-label">"thread reply"</span>
+                        </label>
+                        <label class="rooms-workspace__trigger">
+                            <input
+                                type="checkbox"
+                                prop:checked=move || create_on_build_failure.get()
+                                on:change=move |ev| {
+                                    create_on_build_failure.set(event_target_checked(&ev))
+                                }
+                                disabled=move || pending_create.get()
+                            />
+                            <span class="rooms-workspace__trigger-label">"build failure"</span>
+                        </label>
+                    </div>
                 </div>
             </div>
 
@@ -3292,6 +3434,65 @@ pub fn RoomsWorkspace(
                     }}
                 </div>
 
+                // How this room wakes its agents: the three ruled-on
+                // trigger-policy flags, editable in place. Local rooms only —
+                // a federated room's policy is evaluated by its owning daemon,
+                // and PATCHing the local mirror would only forge a copy that
+                // changes nothing. A sibling of the roster for the same reason
+                // as its neighbours: it owns a PATCH's in-flight state.
+                {move || {
+                    let local = matches!(
+                        rooms.access.get().map(|a| a.state),
+                        Some(RoomAccessState::Local)
+                    );
+                    let Some(room) = rooms.open_room.get() else {
+                        return ().into_any();
+                    };
+                    if !local {
+                        return ().into_any();
+                    }
+                    let policy = room.trigger_policy;
+                    let flag = |pick: fn(&RoomTriggerPolicy) -> bool| {
+                        policy.as_ref().map(pick).unwrap_or(false)
+                    };
+                    view! {
+                        <div
+                            class="rooms-workspace__triggers"
+                            role="group"
+                            aria-label="Agent wake triggers"
+                        >
+                            <div class="rooms-workspace__triggers-head">
+                                <span class="rooms-workspace__triggers-title">"Triggers"</span>
+                            </div>
+                            {trigger_toggle_row(
+                                rooms,
+                                TriggerToggle::Mention,
+                                "@mention",
+                                flag(|p| p.on_mention),
+                            )}
+                            {trigger_toggle_row(
+                                rooms,
+                                TriggerToggle::ThreadReply,
+                                "thread reply",
+                                flag(|p| p.on_thread_reply),
+                            )}
+                            {trigger_toggle_row(
+                                rooms,
+                                TriggerToggle::BuildFailure,
+                                "build failure",
+                                flag(|p| p.on_build_failure),
+                            )}
+                            {move || {
+                                rooms.policy_update_error.get().map(|error| view! {
+                                    <div class="rooms-workspace__triggers-error" role="alert">
+                                        {format!("trigger update failed: {error}")}
+                                    </div>
+                                })
+                            }}
+                        </div>
+                    }.into_any()
+                }}
+
                 // What the room says about itself, above the shelf of files it
                 // was handed. A sibling of the roster for the same reason as
                 // the files below — that closure re-runs on every access
@@ -3509,6 +3710,72 @@ mod tests {
         FederatedMessageMeta, FederatedRoomMemberProjection, FederatedRoomRole, MemberPresence,
         RoomAccessProjection, RoomAccessState, RoomMessage, RoomMessageKind, RoomParticipantKind,
     };
+
+    /// Flipping one exposed flag must carry every OTHER field through
+    /// untouched — the daemon replaces the stored policy wholesale, so this
+    /// is the only thing standing between "toggle build failure" and "silently
+    /// wipe the schedule someone set through the API".
+    #[test]
+    fn policy_with_toggle_preserves_unexposed_fields() {
+        let current = RoomTriggerPolicy {
+            on_mention: true,
+            on_thread_reply: false,
+            on_component_event: true,
+            on_build_failure: false,
+            on_schedule: Some("0 9 * * 1".into()),
+        };
+        let flipped = policy_with_toggle(Some(&current), TriggerToggle::BuildFailure, true);
+        assert_eq!(
+            flipped,
+            RoomTriggerPolicy {
+                on_build_failure: true,
+                ..current.clone()
+            }
+        );
+        // Flipping off restores exactly the original, still untouched.
+        let back = policy_with_toggle(Some(&flipped), TriggerToggle::BuildFailure, false);
+        assert_eq!(back, current);
+    }
+
+    /// A room with no stored policy starts from all-off, so the first flip
+    /// enables exactly one flag.
+    #[test]
+    fn policy_with_toggle_from_no_policy_starts_from_default() {
+        let policy = policy_with_toggle(None, TriggerToggle::Mention, true);
+        assert_eq!(
+            policy,
+            RoomTriggerPolicy {
+                on_mention: true,
+                ..RoomTriggerPolicy::default()
+            }
+        );
+    }
+
+    /// All-off must post NO policy (the daemon default applies, as before the
+    /// form had toggles), and any set flag must produce a policy that never
+    /// touches the unexposed fields.
+    #[test]
+    fn create_trigger_policy_only_carries_exposed_flags() {
+        assert_eq!(create_trigger_policy(false, false, false), None);
+        let policy = create_trigger_policy(true, false, true).expect("policy");
+        assert!(policy.on_mention);
+        assert!(!policy.on_thread_reply);
+        assert!(policy.on_build_failure);
+        assert!(!policy.on_component_event);
+        assert_eq!(policy.on_schedule, None);
+    }
+
+    /// The toggle classes render from Rust; their rules must exist in the
+    /// root stylesheet or the controls ship unstyled.
+    #[test]
+    fn trigger_toggles_are_styled_in_the_root_stylesheet() {
+        let css = include_str!("../../../styles/rooms-workspace.css");
+        let normalized = css_without_whitespace(&strip_css_comments(css));
+        assert!(normalized.contains(".rooms-workspace__create-triggers{"));
+        assert!(normalized.contains(".rooms-workspace__triggers{"));
+        assert!(normalized.contains(".rooms-workspace__trigger{"));
+        assert!(normalized.contains(".rooms-workspace__triggers-error{"));
+    }
 
     #[test]
     fn read_advance_request_skips_hydration_but_advances_after_bottom_append() {
