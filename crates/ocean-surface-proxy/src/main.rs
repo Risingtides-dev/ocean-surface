@@ -640,7 +640,11 @@ fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
         // fix: {key}/events and {*rest} cannot coexist at the same prefix).
         // Declared BEFORE the livekit-token route so the `persistent` segment is
         // matched as a literal, never swallowed by the `{room_id}` capture —
-        // though the two are distinct subtrees either way.
+        // though the two are distinct subtrees either way. PATCH carries the
+        // room-scoped replace-semantics writes (read cursor, trigger policy);
+        // the wildcard was wired get/post/delete only, so those flips died at
+        // the proxy as an empty-bodied 405 the browser could only report as a
+        // decode error while the daemon route sat healthy and unreachable.
         .route(
             "/v1/rooms/persistent",
             get(proxy_rooms_persistent).post(proxy_rooms_persistent),
@@ -649,6 +653,7 @@ fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
             "/v1/rooms/persistent/{*rest}",
             get(proxy_rooms_persistent)
                 .post(proxy_rooms_persistent)
+                .patch(proxy_rooms_persistent)
                 .delete(proxy_rooms_persistent),
         )
         .route(
@@ -2112,7 +2117,7 @@ async fn proxy_rooms_persistent(
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
-    // buffer the (small) body so we can forward it on POST/DELETE
+    // buffer the (small) body so we can forward it on POST/PATCH/DELETE
     // TASK-73: a body over the cap previously became an EMPTY forwarded
     // request via unwrap_or_default() — a truncation that presents upstream as
     // a legitimate call. Refuse it instead.
@@ -3816,6 +3821,72 @@ mod tests {
                     .method("DELETE")
                     .uri("/v1/agents/researcher")
                     .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    /// The room-scoped PATCHes — read cursor and trigger policy — ride the
+    /// `{*rest}` wildcard, which was wired get/post/delete only: a browser
+    /// PATCH died at the proxy as an empty-bodied 405 the UI could only
+    /// report as a decode error, while the daemon route sat healthy and
+    /// unreachable. Same production-router discrimination as the agent
+    /// tests: 502 means the forwarder was reached, 405 means the method
+    /// router refused the verb.
+    #[tokio::test]
+    async fn rooms_persistent_patch_routes_through_production_router() {
+        let dist = tempfile::tempdir().expect("tempdir");
+        let state = Arc::new(AppState {
+            http: reqwest::Client::new(),
+            http_json: reqwest::Client::new(),
+            voice_profile: "leo".to_string(),
+            // Closed port: instant connection refusal, never a real daemon.
+            daemon_url: "http://127.0.0.1:9".to_string(),
+            default_livekit_room_id: "project:surface-test".to_string(),
+            tldraw_sync_uri: None,
+            maps_key: None,
+            maps_map_id: "DEMO_MAP_ID".to_string(),
+            basic_auth: None,
+            session_token: "test-session".to_string(),
+            users: Vec::new(),
+            secure_cookie: false,
+            observer_token_path: PathBuf::from("/not-used"),
+        });
+        let app = build_app(state, dist.path());
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/v1/rooms/persistent/room-key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"trigger_policy":{"on_build_failure":true}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_GATEWAY,
+            "PATCH /v1/rooms/persistent/{{key}} must reach the forwarder",
+        );
+
+        // Control: the literal `/v1/rooms/persistent` route carries no PATCH
+        // — there is nothing to replace on the collection — and answers 405,
+        // which is exactly what the wildcard did before the verb was added.
+        // Pins the discrimination the assertion above rests on.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/v1/rooms/persistent")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
                     .unwrap(),
             )
             .await
