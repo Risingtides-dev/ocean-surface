@@ -3379,6 +3379,58 @@ a.rooms-workspace__repo-check-line:hover {
   overflow-wrap: anywhere;
 }
 
+/* ── The owner lifecycle: provision and destroy ─────────────────────────
+   Rendered for every member — the daemon's owner gate refuses non-owners
+   in type, so no control is hidden here — and destroy arms a confirm
+   first: the container is flushed back to Bedrock, then discarded. */
+.rooms-workspace__compute-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.rooms-workspace__compute-run {
+  appearance: none;
+  height: var(--ctl-h-sm);
+  padding: 0 12px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--accent);
+  font-family: var(--font);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__compute-run:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+.rooms-workspace__compute-run:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Destroy wears the risk it carries. */
+.rooms-workspace__compute-run--danger {
+  border-color: var(--err);
+  color: var(--err);
+}
+
+.rooms-workspace__compute-run--danger:hover:not(:disabled) {
+  background: var(--err-soft);
+}
+
+.rooms-workspace__compute-destroy-warn {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--err);
+}
+
 /* The last build's outcome, above the list it is derived from. */
 .rooms-workspace__compute-build {
   margin-top: 12px;

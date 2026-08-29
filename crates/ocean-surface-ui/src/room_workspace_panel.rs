@@ -1,5 +1,6 @@
-//! The room's workspace and its command history — the read half of the lane
-//! `room_repo.rs` drives.
+//! The room's workspace: its status, files and command history — the read
+//! half of the lane `room_repo.rs` drives — and the owner lifecycle verbs
+//! that create and destroy the workspace itself.
 //!
 //! A federated room can have a Bedrock container workspace; every command run
 //! in it — a member's exec, a clone, a build — lands in a durable ledger that
@@ -12,9 +13,21 @@
 //!   GET /v1/rooms/persistent/{key}/workspace/list     → one directory's entries
 //!   GET /v1/rooms/persistent/{key}/workspace/file     → one file's bounded content
 //!
-//! Provision and destroy are deliberately NOT on that allowlist — they are
-//! owner acts over the Bedrock API — so a room without a workspace is stated
-//! as a fact here, never offered as a button.
+//! The lifecycle pair rides the same lane since the daemon's allowlist
+//! opened the owner leaves (the 2026-08-29 operator ruling):
+//!
+//!   POST /v1/rooms/persistent/{key}/workspace/provision → create + hydrate
+//!   POST /v1/rooms/persistent/{key}/workspace/destroy   → flush, then discard
+//!
+//! Both are owner verbs: the daemon forwards them only for the actor that
+//! resolves to the room credential's own principal and refuses everyone else
+//! in type (`workspace_not_owner_principal`), so this panel renders the
+//! controls for every member and lets that refusal be the answer — no
+//! authorization invented on this side. Destroy always saves first: the
+//! container is flushed back to Bedrock before the driver discards it, and
+//! the `?flush=0` escape hatch is deliberately never sent from here.
+//! A daemon predating the leaves 404s them; the buttons answer "not
+//! available yet" in the reads' own voice.
 //!
 //! What the wire promises, and this panel honors:
 //!
@@ -186,6 +199,18 @@ struct ErrorDetails {
     code: Option<String>,
 }
 
+/// The destroy reply's account of the final save. `changed` counts the
+/// files written back to Bedrock; `error` is the flush failing while the
+/// destroy still went through — the one outcome that must never read as
+/// "saved".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+struct FlushReport {
+    #[serde(default)]
+    changed: Option<u64>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
 /// The lenient envelope all four reads fit into. Presence of `workspace`,
 /// `execs`, `entries` or `content` is what success means — the file
 /// projection does carry an `ok` field, but leaning on presence keeps the
@@ -209,6 +234,14 @@ struct WorkspaceBody {
     encoding: Option<String>,
     #[serde(default)]
     content: Option<String>,
+    /// `true` on the destroy reply — the record is closed, whatever the
+    /// flush report beside it says.
+    #[serde(default)]
+    destroyed: Option<bool>,
+    /// The destroy reply's flush report: `null` when no ready container
+    /// stood to save.
+    #[serde(default)]
+    flush: Option<FlushReport>,
     #[serde(default)]
     code: Option<String>,
     #[serde(default)]
@@ -263,6 +296,27 @@ fn file_url(base: &str, key: &str, actor: &str, path: &str) -> String {
     )
 }
 
+/// The owner lifecycle rides daemon-side POST leaves — the daemon maps
+/// destroy to Bedrock's DELETE itself, exactly as `room_repo`'s unbind
+/// rides. No `flush=` ever: the default flush is what makes destroy save
+/// the work back to Bedrock, and offering the skip would make this button
+/// able to discard a room's work.
+fn provision_url(base: &str, key: &str, actor: &str) -> String {
+    format!(
+        "{base}/v1/rooms/persistent/{}/workspace/provision?actor_id={}",
+        encode(key),
+        encode(actor),
+    )
+}
+
+fn destroy_url(base: &str, key: &str, actor: &str) -> String {
+    format!(
+        "{base}/v1/rooms/persistent/{}/workspace/destroy?actor_id={}",
+        encode(key),
+        encode(actor),
+    )
+}
+
 /// What the room's workspace IS right now. `None` in the state signal means
 /// "not answered yet" — only a reply mints one of these.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -297,6 +351,12 @@ fn failure_sentence(code: &str) -> Option<String> {
         "not_a_room_member" => "You're not on this room's roster.",
         "room_not_found" => "This room is unknown to the daemon.",
         "room_access_revoked" => "This room's federation access was revoked.",
+        // The owner verbs resolve the actor against the identity map, so
+        // these are reachable here where the reads never earn them.
+        "forged_workspace_actor" => {
+            "An agent's workspace command is run by the daemon, not from here."
+        }
+        "workspace_actor_unmapped" => "Your identity doesn't map to this room's compute service.",
         "workspace_unavailable" => "The room's compute service can't be reached right now.",
         "workspace_upstream_protocol" => {
             "The room's compute service answered something this surface can't read."
@@ -497,6 +557,185 @@ fn classify_file(status: u16, body: Option<WorkspaceBody>) -> Result<FileOpenVie
             .filter(|error| !error.is_empty())
             .map(|error| format!("File read failed: {error}"))
             .unwrap_or_else(|| format!("File read failed ({status})."))),
+    }
+}
+
+/// The owner lifecycle verbs this panel can fire. Two, deliberately: the
+/// daemon's leaf pair is the whole vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceCommand {
+    Provision,
+    Destroy,
+}
+
+impl WorkspaceCommand {
+    fn noun(self) -> &'static str {
+        match self {
+            WorkspaceCommand::Provision => "provision",
+            WorkspaceCommand::Destroy => "destroy",
+        }
+    }
+}
+
+/// What a lifecycle reply means for the panel. `Landed` carries its own
+/// sentence but never a view: the mutation reply's claims stay out of
+/// `WorkspaceView` — the caller re-reads status as truth, so the panel
+/// only ever renders what any reload would.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LifecycleOutcome {
+    /// The verb landed; the sentence says what the reply proved.
+    Landed(String),
+    /// A typed state in the calm voice: already provisioning, nothing to
+    /// destroy, not the owner. Answers, not faults.
+    State(String),
+    /// A refusal or fault, in words an operator can act on.
+    Failure(String),
+    /// The daemon in front of us does not serve the lifecycle leaves yet.
+    Unavailable,
+}
+
+/// The sentence a typed lifecycle state earns. `workspace_absent` can only
+/// come back from destroy — provision claims an absent record instead of
+/// refusing it — so its sentence states the destroy fact.
+fn lifecycle_state_sentence(code: &str) -> Option<String> {
+    let sentence = match code {
+        "workspace_provisioning" => "A workspace for this room is already being provisioned.",
+        "workspace_absent" => "This room has no workspace to destroy.",
+        // The daemon's owner gate answering a non-principal actor: how the
+        // room is shaped, not a fault — the calm `room_repo` uses for it.
+        "workspace_not_owner_principal" => {
+            "Only the room owner can provision or destroy the workspace."
+        }
+        "room_not_federated" => "This room has no Bedrock workspace.",
+        _ => return None,
+    };
+    Some(sentence.to_string())
+}
+
+/// The landed-destroy sentence, from the reply's flush report. Truth over
+/// comfort: a destroy whose final flush failed discarded whatever changed
+/// since the last save, and saying less would lie about lost work.
+fn destroy_sentence(flush: Option<&FlushReport>) -> String {
+    let Some(report) = flush else {
+        // No ready container stood, so there was nothing live to save.
+        return "Workspace destroyed.".to_string();
+    };
+    if report.error.is_some() {
+        return "Workspace destroyed, but the final flush failed \u{2014} changes since the \
+                last flush were discarded with the container."
+            .to_string();
+    }
+    match report.changed {
+        Some(0) => {
+            "Workspace destroyed \u{2014} nothing had changed since the last flush.".to_string()
+        }
+        Some(1) => {
+            "Workspace destroyed \u{2014} 1 changed file flushed back to Bedrock first.".to_string()
+        }
+        Some(changed) => format!(
+            "Workspace destroyed \u{2014} {changed} changed files flushed back to Bedrock first."
+        ),
+        None => "Workspace destroyed \u{2014} flushed back to Bedrock first.".to_string(),
+    }
+}
+
+/// The stated-as-fact sentence for a daemon that predates the lifecycle
+/// leaves — the same voice as every other lane's "not available yet", and
+/// production behavior until a daemon carrying them is deployed.
+fn lifecycle_unavailable_sentence(command: WorkspaceCommand) -> String {
+    match command {
+        WorkspaceCommand::Provision => {
+            "Provisioning isn't available on this deployment yet.".to_string()
+        }
+        WorkspaceCommand::Destroy => {
+            "Destroying isn't available on this deployment yet.".to_string()
+        }
+    }
+}
+
+/// Map a lifecycle reply. Success is the verb's own proof — provision's
+/// projection (the fresh 201 or the idempotent 200), destroy's
+/// `destroyed: true` — and everything else classifies like the read lanes:
+/// typed states in the calm voice, refusals in words, an empty or coded
+/// 404 as the deployment's honest "not yet".
+fn classify_lifecycle(
+    command: WorkspaceCommand,
+    status: u16,
+    body: Option<WorkspaceBody>,
+) -> LifecycleOutcome {
+    let noun = command.noun();
+    let Some(body) = body else {
+        if status == 404 {
+            return LifecycleOutcome::Unavailable;
+        }
+        return LifecycleOutcome::Failure(format!(
+            "The {noun} reply could not be read ({status})."
+        ));
+    };
+    match command {
+        WorkspaceCommand::Provision => {
+            if body.workspace.is_some() {
+                return LifecycleOutcome::Landed("Workspace provisioned.".to_string());
+            }
+        }
+        WorkspaceCommand::Destroy => {
+            if body.destroyed == Some(true) {
+                return LifecycleOutcome::Landed(destroy_sentence(body.flush.as_ref()));
+            }
+        }
+    }
+    match body.refusal_code() {
+        Some("workspace_route_not_allowed") => LifecycleOutcome::Unavailable,
+        Some(code) => {
+            if let Some(sentence) = lifecycle_state_sentence(code) {
+                return LifecycleOutcome::State(sentence);
+            }
+            LifecycleOutcome::Failure(
+                failure_sentence(code)
+                    .or_else(|| body.error.clone())
+                    .unwrap_or_else(|| format!("The {noun} failed ({status}).")),
+            )
+        }
+        None if status == 404 => LifecycleOutcome::Unavailable,
+        None => LifecycleOutcome::Failure(
+            body.error
+                .filter(|error| !error.is_empty())
+                .map(|error| format!("The {noun} was refused: {error}"))
+                .unwrap_or_else(|| format!("The {noun} failed ({status}).")),
+        ),
+    }
+}
+
+/// Which lifecycle verbs the panel offers against what stands. Not
+/// authorization — the daemon's owner gate answers that in type — just the
+/// verbs that can possibly land: provision claims an absent, destroyed or
+/// failed record; destroy needs one still standing. A failed workspace
+/// earns both — retry the provision, or clear the record for good.
+fn lifecycle_verbs(view: Option<&WorkspaceView>) -> (bool, bool) {
+    match view {
+        Some(WorkspaceView::Absent) => (true, false),
+        Some(WorkspaceView::Present(workspace)) => match workspace.status.as_str() {
+            "destroyed" => (true, false),
+            "failed" => (true, true),
+            _ => (false, true),
+        },
+        _ => (false, false),
+    }
+}
+
+/// Whether a fresh status answer changes what the operator is looking at.
+/// This is what disarms a primed destroy confirm — the polish debt the
+/// repo panel's unbind recorded: armed against one workspace state, the
+/// confirm must not stand over another. Timestamps churn on every silent
+/// refresh (an exec bumps `last_active_at`), so only the view's shape and
+/// status count as a flip.
+fn view_flip(old: Option<&WorkspaceView>, new: &WorkspaceView) -> bool {
+    match (old, new) {
+        (Some(WorkspaceView::Present(old)), WorkspaceView::Present(new)) => {
+            old.status != new.status
+        }
+        (Some(old), new) => std::mem::discriminant(old) != std::mem::discriminant(new),
+        (None, _) => true,
     }
 }
 
@@ -739,14 +978,18 @@ fn fallback_reads_status(tick: u64) -> bool {
     tick % STATUS_FALLBACK_EVERY_TICKS == 0
 }
 
-/// The read lanes this panel runs. A standing error remembers which lane
-/// set it, so one lane's recovery can never wipe another's live failure.
+/// The lanes this panel runs — four reads, and the lifecycle commands. A
+/// standing error remembers which lane set it, so one lane's recovery can
+/// never wipe another's live failure — and no read publishes as
+/// `Lifecycle`, so a failed provision or destroy stands until the next
+/// command starts or the room changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReadLane {
+enum PanelLane {
     Status,
     Execs,
     Files,
     File,
+    Lifecycle,
 }
 
 /// Whether a lane's successful read clears the standing error: only the one
@@ -754,7 +997,7 @@ enum ReadLane {
 /// to leave its error standing forever over a self-healed view, and the
 /// naive "success clears" would let a status success wipe a live execs
 /// failure.
-fn lane_success_clears(standing: Option<ReadLane>, lane: ReadLane) -> bool {
+fn lane_success_clears(standing: Option<PanelLane>, lane: PanelLane) -> bool {
     standing == Some(lane)
 }
 
@@ -806,7 +1049,18 @@ pub struct RoomWorkspacePanelState {
     loading: RwSignal<bool>,
     /// The most recent failure, tagged with the lane that set it so the
     /// other lane's success cannot clear it.
-    error: RwSignal<Option<(ReadLane, String)>>,
+    error: RwSignal<Option<(PanelLane, String)>>,
+    /// The typed state or landed outcome worth a sentence — "already being
+    /// provisioned", "workspace destroyed". Answers, not faults, in a
+    /// calmer voice than `error`.
+    note: RwSignal<Option<String>>,
+    /// The lifecycle command in flight, if any — blocks re-submit and
+    /// drives the button labels while the daemon's command budget runs.
+    working: RwSignal<Option<WorkspaceCommand>>,
+    /// Whether the destroy control is one click from firing. Destroy
+    /// discards the container (after its flush), so the first click only
+    /// arms this — and a close, reset or view flip disarms it.
+    confirm_destroy: RwSignal<bool>,
     /// The marker wake's watermark: `(room generation, highest transcript
     /// seq seen)`. `None` until the open room's transcript is first sighted.
     marker_seen: RwSignal<Option<(u64, u64)>>,
@@ -836,6 +1090,9 @@ impl RoomWorkspacePanelState {
             file: RwSignal::new(None),
             loading: RwSignal::new(false),
             error: RwSignal::new(None),
+            note: RwSignal::new(None),
+            working: RwSignal::new(None),
+            confirm_destroy: RwSignal::new(false),
             marker_seen: RwSignal::new(None),
             panel: RwSignal::new(false),
             open_ref: NodeRef::new(),
@@ -853,9 +1110,11 @@ impl RoomWorkspacePanelState {
         self.panel.get_untracked()
     }
 
-    /// Close the panel, retire its poll loop, and hand focus back.
+    /// Close the panel, retire its poll loop, and hand focus back. A
+    /// reopened panel must not resume a primed destroy confirm.
     pub fn close_panel(&self) {
         self.panel.set(false);
+        self.confirm_destroy.set(false);
         self.poll_epoch
             .update(|epoch| *epoch = epoch.wrapping_add(1));
         if let Some(open) = self.open_ref.get_untracked() {
@@ -889,6 +1148,9 @@ impl RoomWorkspacePanelState {
         self.file.set(None);
         self.loading.set(false);
         self.error.set(None);
+        self.note.set(None);
+        self.working.set(None);
+        self.confirm_destroy.set(false);
         self.marker_seen.set(None);
         self.panel.set(false);
     }
@@ -915,12 +1177,21 @@ impl RoomWorkspacePanelState {
         self.loading.set(false);
         match result {
             Ok(view) => {
+                // A view that flipped under a primed destroy confirm takes
+                // the confirm with it — armed against one state, it must
+                // not fire at another.
+                if self
+                    .view
+                    .with_untracked(|old| view_flip(old.as_ref(), &view))
+                {
+                    self.confirm_destroy.set(false);
+                }
                 self.view.set(Some(view));
-                self.clear_lane_error(ReadLane::Status);
+                self.clear_lane_error(PanelLane::Status);
             }
             // A failed refresh never blanks a standing view: what the
             // operator was reading is still the best answer this surface has.
-            Err(error) => self.error.set(Some((ReadLane::Status, error))),
+            Err(error) => self.error.set(Some((PanelLane::Status, error))),
         }
     }
 
@@ -947,9 +1218,9 @@ impl RoomWorkspacePanelState {
         match result {
             Ok(view) => {
                 self.execs.set(Some(view));
-                self.clear_lane_error(ReadLane::Execs);
+                self.clear_lane_error(PanelLane::Execs);
             }
-            Err(error) => self.error.set(Some((ReadLane::Execs, error))),
+            Err(error) => self.error.set(Some((PanelLane::Execs, error))),
         }
     }
 
@@ -977,9 +1248,9 @@ impl RoomWorkspacePanelState {
         match result {
             Ok(view) => {
                 self.files.set(Some(view));
-                self.clear_lane_error(ReadLane::Files);
+                self.clear_lane_error(PanelLane::Files);
             }
-            Err(error) => self.error.set(Some((ReadLane::Files, error))),
+            Err(error) => self.error.set(Some((PanelLane::Files, error))),
         }
     }
 
@@ -1013,9 +1284,9 @@ impl RoomWorkspacePanelState {
         match result {
             Ok(view) => {
                 self.file.set(Some(view));
-                self.clear_lane_error(ReadLane::File);
+                self.clear_lane_error(PanelLane::File);
             }
-            Err(error) => self.error.set(Some((ReadLane::File, error))),
+            Err(error) => self.error.set(Some((PanelLane::File, error))),
         }
     }
 
@@ -1036,13 +1307,13 @@ impl RoomWorkspacePanelState {
             .update(|ticket| *ticket = ticket.wrapping_add(1));
         self.open_file.set(None);
         self.file.set(None);
-        self.clear_lane_error(ReadLane::File);
+        self.clear_lane_error(PanelLane::File);
     }
 
     /// A lane that answered clears the error IT set, and only that one — a
     /// healthy status read must not wipe a live execs failure, or the other
     /// way round.
-    fn clear_lane_error(&self, lane: ReadLane) {
+    fn clear_lane_error(&self, lane: PanelLane) {
         let clears = self
             .error
             .with_untracked(|slot| lane_success_clears(slot.as_ref().map(|(lane, _)| *lane), lane));
@@ -1057,6 +1328,7 @@ impl RoomWorkspacePanelState {
     /// that way.
     fn open_panel(&self, rooms: Rooms, key: String, actor: String) {
         self.error.set(None);
+        self.note.set(None);
         self.panel.set(true);
         self.files_path.set(WORKSPACE_ROOT_PATH.to_string());
         // A file left open when the panel last closed does not survive the
@@ -1111,6 +1383,60 @@ impl RoomWorkspacePanelState {
         spawn_local(async move {
             refresh_lanes(me, &base, &key, &actor, true, open, open).await;
         });
+    }
+
+    /// Fire a lifecycle verb. The reply never moves the view — after a
+    /// landed command the lanes are re-read as truth, so the panel renders
+    /// exactly what any reload would (and the daemon's transcript marker
+    /// wakes every other member's panel the same way).
+    fn run_lifecycle(&self, rooms: Rooms, command: WorkspaceCommand, key: String, actor: String) {
+        let base = self.base();
+        let me = *self;
+        let generation = rooms.generation_snapshot();
+        self.working.set(Some(command));
+        self.confirm_destroy.set(false);
+        self.error.set(None);
+        self.note.set(None);
+        spawn_local(async move {
+            let url = match command {
+                WorkspaceCommand::Provision => provision_url(&base, &key, &actor),
+                WorkspaceCommand::Destroy => destroy_url(&base, &key, &actor),
+            };
+            let outcome = post_lifecycle(command, &url).await;
+            let current = rooms.room_is_current(generation, &key);
+            let landed = matches!(outcome, LifecycleOutcome::Landed(_));
+            me.publish_lifecycle(command, outcome, current);
+            if current && landed {
+                let open = me.panel.get_untracked();
+                refresh_lanes(me, &base, &key, &actor, true, open, open).await;
+            }
+        });
+    }
+
+    /// Publish a completed lifecycle command — but only into the room that
+    /// started it. Landed and typed states share the note's calm voice;
+    /// only a real refusal or fault takes the alert.
+    fn publish_lifecycle(
+        &self,
+        command: WorkspaceCommand,
+        outcome: LifecycleOutcome,
+        room_is_current: bool,
+    ) {
+        if !room_is_current {
+            return;
+        }
+        self.working.set(None);
+        match outcome {
+            LifecycleOutcome::Landed(sentence) | LifecycleOutcome::State(sentence) => {
+                self.note.set(Some(sentence));
+            }
+            LifecycleOutcome::Unavailable => {
+                self.note.set(Some(lifecycle_unavailable_sentence(command)));
+            }
+            LifecycleOutcome::Failure(error) => {
+                self.error.set(Some((PanelLane::Lifecycle, error)));
+            }
+        }
     }
 }
 
@@ -1206,6 +1532,34 @@ async fn read_file(base: &str, key: &str, actor: &str, path: &str) -> Result<Fil
     }
 }
 
+/// One lifecycle POST. `{}` because the daemon's lane demands a JSON object
+/// on every POST leaf even where the upstream DELETE reads none — the same
+/// contract as `room_repo`'s unbind — and provision's strict deny-extra
+/// body admits `spec` alone, which this panel never shapes: the daemon's
+/// default spec is the product's.
+async fn post_lifecycle(command: WorkspaceCommand, url: &str) -> LifecycleOutcome {
+    match Request::post(url)
+        .header("content-type", "application/json")
+        .json(&serde_json::json!({}))
+    {
+        Ok(request) => match request.send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.json::<WorkspaceBody>().await.ok();
+                classify_lifecycle(command, status, body)
+            }
+            // The container work may well continue upstream — Bedrock owns
+            // the record either way — so the sentence says so instead of
+            // implying the command died with the connection.
+            Err(err) => LifecycleOutcome::Failure(format!(
+                "The request was cut ({err}) \u{2014} the {} may still be running upstream.",
+                command.noun()
+            )),
+        },
+        Err(err) => LifecycleOutcome::Failure(format!("Workspace request encode error: {err}")),
+    }
+}
+
 // ---- Component --------------------------------------------------------------
 
 /// The open room's workspace: a compact rail row with a glance line, and a
@@ -1213,9 +1567,10 @@ async fn read_file(base: &str, key: &str, actor: &str, path: &str) -> Result<Fil
 /// are read.
 ///
 /// Renders NOTHING for a Local room — no workspace exists there and a
-/// refusal would only read as breakage. Everything here is a read, so no
-/// `writes_allowed` gate: what a member may see, the daemon already decided
-/// per row.
+/// refusal would only read as breakage. No `writes_allowed` gate even now
+/// that the lifecycle verbs live here: they are owner acts the daemon gates
+/// in type, strictly narrower than any gate this side could compose, and
+/// what a member may read the daemon already decided per row.
 #[component]
 pub fn RoomWorkspacePanel(rooms: Rooms, state: RoomWorkspacePanelState) -> impl IntoView {
     // The (key, actor) this section should be reading, or `None` when it
@@ -1284,7 +1639,7 @@ pub fn RoomWorkspacePanel(rooms: Rooms, state: RoomWorkspacePanelState) -> impl 
             .filter(|key| !key.is_empty())?;
         if !rooms.identity_resolved() {
             state.error.set(Some((
-                ReadLane::Status,
+                PanelLane::Status,
                 "Still signing in \u{2014} try again in a moment.".to_string(),
             )));
             return None;
@@ -1400,16 +1755,13 @@ pub fn RoomWorkspacePanel(rooms: Rooms, state: RoomWorkspacePanelState) -> impl 
                                             panel_facts(&workspace).into_any()
                                         }
                                         Some(WorkspaceView::Absent) => view! {
-                                            // Absence stated, not offered:
-                                            // provisioning is not on the
-                                            // member lane.
                                             <div class="rooms-workspace__compute-note">
-                                                "This room has no workspace yet \u{2014} \
-                                                 provisioning is an owner act, by API for now."
+                                                "This room has no workspace yet."
                                             </div>
                                         }.into_any(),
                                         _ => ().into_any(),
                                     }}
+                                    {move || lifecycle_section(state, rooms, actor)}
                                     {move || files_section(state, actor)}
                                     {move || {
                                         let rows = match state.execs.get() {
@@ -1533,6 +1885,108 @@ fn exec_row_view(row: &ExecRow) -> impl IntoView {
             }}
         </div>
     }
+}
+
+/// The owner lifecycle controls, under the facts (or the absence they act
+/// on). Rendered for every member — the daemon's typed refusal is the
+/// authorization answer — and destroy sits behind a two-click confirm
+/// whose copy says what actually happens: the container is flushed back
+/// to Bedrock, then discarded. Both verbs run real container work under
+/// the daemon's command budget, so the in-flight command disables the row.
+fn lifecycle_section(
+    state: RoomWorkspacePanelState,
+    rooms: Rooms,
+    actor: impl Fn() -> Option<(String, String)> + Copy + 'static,
+) -> AnyView {
+    let (provision, destroy) = lifecycle_verbs(state.view.get().as_ref());
+    let note = state.note.get();
+    if !provision && !destroy && note.is_none() {
+        return ().into_any();
+    }
+    let working = state.working.get();
+    let busy = working.is_some();
+    view! {
+        {note.map(|note| view! {
+            <div class="rooms-workspace__compute-note">{note}</div>
+        })}
+        {(provision || destroy).then(|| view! {
+            <div class="rooms-workspace__compute-actions">
+                {provision.then(|| view! {
+                    <button
+                        class="rooms-workspace__compute-run"
+                        type="button"
+                        title="Provision a container workspace for this room"
+                        disabled=busy
+                        on:click=move |_| {
+                            let Some((key, actor_id)) = actor() else { return };
+                            state.run_lifecycle(
+                                rooms,
+                                WorkspaceCommand::Provision,
+                                key,
+                                actor_id,
+                            );
+                        }
+                    >
+                        {if working == Some(WorkspaceCommand::Provision) {
+                            "provisioning\u{2026}"
+                        } else {
+                            "provision"
+                        }}
+                    </button>
+                })}
+                {destroy.then(|| {
+                    if state.confirm_destroy.get() {
+                        view! {
+                            <span class="rooms-workspace__compute-destroy-warn">
+                                "The container is flushed back to Bedrock, then discarded."
+                            </span>
+                            <button
+                                class="rooms-workspace__compute-run rooms-workspace__compute-run--danger"
+                                type="button"
+                                disabled=busy
+                                on:click=move |_| {
+                                    let Some((key, actor_id)) = actor() else { return };
+                                    state.run_lifecycle(
+                                        rooms,
+                                        WorkspaceCommand::Destroy,
+                                        key,
+                                        actor_id,
+                                    );
+                                }
+                            >
+                                "destroy"
+                            </button>
+                            <button
+                                class="rooms-workspace__compute-run"
+                                type="button"
+                                on:click=move |_| state.confirm_destroy.set(false)
+                            >
+                                "keep"
+                            </button>
+                        }.into_any()
+                    } else {
+                        view! {
+                            <button
+                                class="rooms-workspace__compute-run rooms-workspace__compute-run--danger"
+                                type="button"
+                                title="Destroy this room's workspace \u{2014} it is flushed \
+                                       back to Bedrock first"
+                                disabled=busy
+                                on:click=move |_| state.confirm_destroy.set(true)
+                            >
+                                {if working == Some(WorkspaceCommand::Destroy) {
+                                    "destroying\u{2026}"
+                                } else {
+                                    "destroy\u{2026}"
+                                }}
+                            </button>
+                        }.into_any()
+                    }
+                })}
+            </div>
+        })}
+    }
+    .into_any()
 }
 
 /// The workspace tree, one directory at a time — what the list route feeds.
@@ -1740,6 +2194,9 @@ mod tests {
             file: RwSignal::new(None),
             loading: RwSignal::new(false),
             error: RwSignal::new(None),
+            note: RwSignal::new(None),
+            working: RwSignal::new(None),
+            confirm_destroy: RwSignal::new(false),
             marker_seen: RwSignal::new(None),
             panel: RwSignal::new(false),
             open_ref: NodeRef::new(),
@@ -2071,7 +2528,7 @@ mod tests {
         state.publish_execs(Ok(ExecsView::Rows(Vec::new())), true);
         assert_eq!(
             state.error.get_untracked(),
-            Some((ReadLane::Files, "files down".to_string())),
+            Some((PanelLane::Files, "files down".to_string())),
             "the other lanes' successes must not wipe a live files failure"
         );
         state.publish_files(Ok(listing), true);
@@ -2197,7 +2654,7 @@ mod tests {
         );
         assert_eq!(
             state.error.get_untracked(),
-            Some((ReadLane::File, "file down".to_string())),
+            Some((PanelLane::File, "file down".to_string())),
             "a listing success must not wipe a live file failure"
         );
         state.publish_file(Ok(open), true);
@@ -2224,7 +2681,7 @@ mod tests {
         assert_eq!(state.file.get_untracked(), Some(FileOpenView::TooLarge));
         state
             .error
-            .set(Some((ReadLane::File, "file down".to_string())));
+            .set(Some((PanelLane::File, "file down".to_string())));
         state.close_file();
         assert_eq!(state.open_file.get_untracked(), None);
         assert_eq!(state.file.get_untracked(), None);
@@ -2441,7 +2898,7 @@ mod tests {
         );
         assert_eq!(
             state.error.get_untracked(),
-            Some((ReadLane::Execs, "boom".to_string()))
+            Some((PanelLane::Execs, "boom".to_string()))
         );
     }
 
@@ -2460,21 +2917,21 @@ mod tests {
         state.publish_status(Ok(WorkspaceView::Absent), true);
         assert_eq!(
             state.error.get_untracked(),
-            Some((ReadLane::Execs, "execs down".to_string())),
+            Some((PanelLane::Execs, "execs down".to_string())),
             "a status success must not wipe a live execs failure"
         );
         state.publish_execs(Ok(ExecsView::Rows(Vec::new())), true);
         assert_eq!(state.error.get_untracked(), None);
 
         assert!(lane_success_clears(
-            Some(ReadLane::Status),
-            ReadLane::Status
+            Some(PanelLane::Status),
+            PanelLane::Status
         ));
         assert!(!lane_success_clears(
-            Some(ReadLane::Execs),
-            ReadLane::Status
+            Some(PanelLane::Execs),
+            PanelLane::Status
         ));
-        assert!(!lane_success_clears(None, ReadLane::Execs));
+        assert!(!lane_success_clears(None, PanelLane::Execs));
     }
 
     // ---- gates --------------------------------------------------------------
@@ -2642,5 +3099,302 @@ mod tests {
             .filter(|tick| fallback_reads_status(*tick))
             .collect();
         assert_eq!(status_ticks, vec![3, 6]);
+    }
+
+    // ---- the lifecycle wire -------------------------------------------------
+
+    #[test]
+    fn the_lifecycle_urls_assert_the_actor_and_never_send_flush() {
+        assert_eq!(
+            provision_url("http://d", "team room", "user@host"),
+            "http://d/v1/rooms/persistent/team%20room/workspace/provision?actor_id=user%40host"
+        );
+        let destroy = destroy_url("http://d", "k", "a");
+        assert_eq!(
+            destroy,
+            "http://d/v1/rooms/persistent/k/workspace/destroy?actor_id=a"
+        );
+        assert!(
+            !destroy.contains("flush"),
+            "v1 must never offer the flush skip \u{2014} the default flush is what saves the work"
+        );
+    }
+
+    /// The fresh 201 and the idempotent 200 both carry the projection, and
+    /// both land — the daemon and Bedrock hold the idempotency, not this
+    /// side.
+    #[test]
+    fn a_provision_reply_with_a_projection_lands() {
+        for status in [201u16, 200] {
+            assert_eq!(
+                classify_lifecycle(
+                    WorkspaceCommand::Provision,
+                    status,
+                    Some(body(status_json()))
+                ),
+                LifecycleOutcome::Landed("Workspace provisioned.".to_string())
+            );
+        }
+    }
+
+    /// Destroy's landed sentence follows the flush report, and a failed
+    /// final flush must never read as saved.
+    #[test]
+    fn a_destroy_reply_sentences_its_flush_honestly() {
+        let landed =
+            |json: &str| classify_lifecycle(WorkspaceCommand::Destroy, 200, Some(body(json)));
+        assert_eq!(
+            landed(r#"{"destroyed": true, "flush": null}"#),
+            LifecycleOutcome::Landed("Workspace destroyed.".to_string())
+        );
+        assert_eq!(
+            landed(r#"{"destroyed": true, "flush": {"scanned": 40, "changed": 0}}"#),
+            LifecycleOutcome::Landed(
+                "Workspace destroyed \u{2014} nothing had changed since the last flush."
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            landed(r#"{"destroyed": true, "flush": {"scanned": 40, "changed": 1}}"#),
+            LifecycleOutcome::Landed(
+                "Workspace destroyed \u{2014} 1 changed file flushed back to Bedrock first."
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            landed(r#"{"destroyed": true, "flush": {"scanned": 40, "changed": 12}}"#),
+            LifecycleOutcome::Landed(
+                "Workspace destroyed \u{2014} 12 changed files flushed back to Bedrock first."
+                    .to_string()
+            )
+        );
+        let failed = landed(
+            r#"{"destroyed": true,
+                "flush": {"error": "runtime unreachable", "changed": 0, "scanned": 0}}"#,
+        );
+        let LifecycleOutcome::Landed(sentence) = failed else {
+            panic!("a destroy that closed the record landed, whatever the flush said");
+        };
+        assert!(sentence.contains("flush failed"), "got: {sentence}");
+        assert!(
+            !sentence.contains("flushed back"),
+            "must not read as saved: {sentence}"
+        );
+    }
+
+    /// The typed lifecycle answers, most of all the owner gate: how the
+    /// room is shaped for everyone who is not the owner, and never
+    /// breakage. The identity-map refusals stay failures in words, and a
+    /// daemon predating the leaves — its typed 404 or the bare one — reads
+    /// as the deployment's honest "not yet".
+    #[test]
+    fn lifecycle_states_classify_totally() {
+        let refused = body(
+            r#"{"ok": false, "code": "workspace_not_owner_principal",
+                "error": "an owner verb forwards only for the principal"}"#,
+        );
+        assert_eq!(
+            classify_lifecycle(WorkspaceCommand::Provision, 403, Some(refused)),
+            LifecycleOutcome::State(
+                "Only the room owner can provision or destroy the workspace.".to_string()
+            )
+        );
+        let racing = body(
+            r#"{"error": "A workspace for this room is already being provisioned.",
+                "code": "workspace_provisioning"}"#,
+        );
+        assert_eq!(
+            classify_lifecycle(WorkspaceCommand::Provision, 409, Some(racing)),
+            LifecycleOutcome::State(
+                "A workspace for this room is already being provisioned.".to_string()
+            )
+        );
+        let gone = body(
+            r#"{"error": "This room has no workspace to destroy.", "code": "workspace_absent"}"#,
+        );
+        assert_eq!(
+            classify_lifecycle(WorkspaceCommand::Destroy, 409, Some(gone)),
+            LifecycleOutcome::State("This room has no workspace to destroy.".to_string())
+        );
+        let unmapped = body(r#"{"ok": false, "code": "workspace_actor_unmapped"}"#);
+        assert_eq!(
+            classify_lifecycle(WorkspaceCommand::Provision, 403, Some(unmapped)),
+            LifecycleOutcome::Failure(
+                "Your identity doesn't map to this room's compute service.".to_string()
+            )
+        );
+        assert_eq!(
+            classify_lifecycle(WorkspaceCommand::Provision, 404, None),
+            LifecycleOutcome::Unavailable
+        );
+        let coded = body(r#"{"ok": false, "code": "workspace_route_not_allowed"}"#);
+        assert_eq!(
+            classify_lifecycle(WorkspaceCommand::Destroy, 404, Some(coded)),
+            LifecycleOutcome::Unavailable
+        );
+    }
+
+    /// The absorbed invariant, pinned: a mutation reply never moves the
+    /// view. A landed command publishes its sentence and nothing else — the
+    /// re-read that follows is what moves the panel.
+    #[test]
+    fn a_lifecycle_reply_never_moves_the_view() {
+        let state = fresh_state();
+        let standing = WorkspaceView::Present(Box::new(WorkspaceProjection {
+            status: "ready".to_string(),
+            ..WorkspaceProjection::default()
+        }));
+        state.view.set(Some(standing.clone()));
+        state.working.set(Some(WorkspaceCommand::Destroy));
+        state.publish_lifecycle(
+            WorkspaceCommand::Destroy,
+            LifecycleOutcome::Landed("Workspace destroyed.".to_string()),
+            true,
+        );
+        assert_eq!(
+            state.view.get_untracked(),
+            Some(standing),
+            "the reply's claim must wait for the readback"
+        );
+        assert_eq!(
+            state.note.get_untracked().as_deref(),
+            Some("Workspace destroyed.")
+        );
+        assert_eq!(state.working.get_untracked(), None);
+    }
+
+    /// A lifecycle publish honors the same admissions as every read: a
+    /// stale room publishes nothing, a failure takes the alert voice and
+    /// stands through read successes, and the unavailable answer is a
+    /// stated fact in the calm one.
+    #[test]
+    fn a_lifecycle_publish_admits_and_isolates() {
+        let state = fresh_state();
+        state.working.set(Some(WorkspaceCommand::Provision));
+        state.publish_lifecycle(
+            WorkspaceCommand::Provision,
+            LifecycleOutcome::Landed("Workspace provisioned.".to_string()),
+            false,
+        );
+        assert_eq!(state.note.get_untracked(), None);
+        assert_eq!(
+            state.working.get_untracked(),
+            Some(WorkspaceCommand::Provision),
+            "a stale publish must not clear another room's in-flight state"
+        );
+
+        state.publish_lifecycle(
+            WorkspaceCommand::Provision,
+            LifecycleOutcome::Failure("refused".to_string()),
+            true,
+        );
+        assert_eq!(
+            state.error.get_untracked(),
+            Some((PanelLane::Lifecycle, "refused".to_string()))
+        );
+        state.publish_status(Ok(WorkspaceView::Absent), true);
+        state.publish_execs(Ok(ExecsView::Rows(Vec::new())), true);
+        assert_eq!(
+            state.error.get_untracked(),
+            Some((PanelLane::Lifecycle, "refused".to_string())),
+            "a read lane's success must not wipe a lifecycle failure"
+        );
+
+        state.publish_lifecycle(
+            WorkspaceCommand::Destroy,
+            LifecycleOutcome::Unavailable,
+            true,
+        );
+        assert_eq!(
+            state.note.get_untracked().as_deref(),
+            Some("Destroying isn't available on this deployment yet.")
+        );
+    }
+
+    /// The confirm's whole disarm surface, pinned — the polish debt the
+    /// repo panel's unbind recorded: close, reset, and the view flipping
+    /// under it. Armed against one workspace state, it must never fire at
+    /// another — while the timestamp churn of an ordinary silent refresh
+    /// must not defuse the operator mid-decision.
+    #[test]
+    fn the_destroy_confirm_disarms_on_close_reset_and_view_flips() {
+        let ready = || {
+            WorkspaceView::Present(Box::new(WorkspaceProjection {
+                status: "ready".to_string(),
+                ..WorkspaceProjection::default()
+            }))
+        };
+        let state = fresh_state();
+        state.view.set(Some(ready()));
+        state.confirm_destroy.set(true);
+        state.close_panel();
+        assert!(!state.confirm_destroy.get_untracked(), "close must disarm");
+
+        state.confirm_destroy.set(true);
+        state.reset();
+        assert!(!state.confirm_destroy.get_untracked(), "reset must disarm");
+
+        state.view.set(Some(ready()));
+        state.confirm_destroy.set(true);
+        let aged = WorkspaceProjection {
+            status: "ready".to_string(),
+            last_active_at: Some("2026-08-29T10:00:00.000Z".to_string()),
+            ..WorkspaceProjection::default()
+        };
+        state.publish_status(Ok(WorkspaceView::Present(Box::new(aged))), true);
+        assert!(
+            state.confirm_destroy.get_untracked(),
+            "a timestamp churn is not a flip"
+        );
+
+        // The workspace another member destroyed flips the status — the
+        // armed confirm goes with it.
+        let destroyed = WorkspaceProjection {
+            status: "destroyed".to_string(),
+            ..WorkspaceProjection::default()
+        };
+        state.publish_status(Ok(WorkspaceView::Present(Box::new(destroyed))), true);
+        assert!(
+            !state.confirm_destroy.get_untracked(),
+            "a status flip must disarm"
+        );
+
+        state.view.set(Some(ready()));
+        state.confirm_destroy.set(true);
+        state.publish_status(Ok(WorkspaceView::Absent), true);
+        assert!(
+            !state.confirm_destroy.get_untracked(),
+            "a shape flip must disarm"
+        );
+    }
+
+    /// Which verbs stand against which view: provision claims absence and
+    /// closed records, destroy needs a standing one, failed earns both.
+    /// Never authorization — the daemon's owner gate answers that.
+    #[test]
+    fn the_lifecycle_verbs_follow_the_view() {
+        let present = |status: &str| {
+            WorkspaceView::Present(Box::new(WorkspaceProjection {
+                status: status.to_string(),
+                ..WorkspaceProjection::default()
+            }))
+        };
+        assert_eq!(lifecycle_verbs(Some(&WorkspaceView::Absent)), (true, false));
+        assert_eq!(lifecycle_verbs(Some(&present("ready"))), (false, true));
+        assert_eq!(
+            lifecycle_verbs(Some(&present("provisioning"))),
+            (false, true)
+        );
+        assert_eq!(lifecycle_verbs(Some(&present("failed"))), (true, true));
+        assert_eq!(lifecycle_verbs(Some(&present("destroyed"))), (true, false));
+        assert_eq!(
+            lifecycle_verbs(Some(&WorkspaceView::Unavailable)),
+            (false, false)
+        );
+        assert_eq!(
+            lifecycle_verbs(Some(&WorkspaceView::NotFederated)),
+            (false, false)
+        );
+        assert_eq!(lifecycle_verbs(None), (false, false));
     }
 }
