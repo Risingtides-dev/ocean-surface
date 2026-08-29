@@ -29,6 +29,17 @@
 //! A daemon predating the leaves 404s them; the buttons answer "not
 //! available yet" in the reads' own voice.
 //!
+//! The owner's secrets SET rides the same lane, and it is SET-ONLY by
+//! ruling — the daemon's manifest pins "a secrets row is the owner-gated
+//! set, and nothing else", no name list, no read-back anywhere upstream:
+//!
+//!   POST /v1/rooms/persistent/{key}/workspace/secrets/set → upstream PUT
+//!
+//! so the control below is a submit and its copy says so. The reply is
+//! names only (`{set, removed, total}`), and the value's whole life on
+//! this side is the input signal and the in-flight request body — cleared
+//! on submit, never rendered back, never logged.
+//!
 //! What the wire promises, and this panel honors:
 //!
 //! 1. **Typed refusals are states.** Bedrock's `workspace_absent` 404 is
@@ -238,6 +249,14 @@ struct WorkspaceBody {
     /// flush report beside it says.
     #[serde(default)]
     destroyed: Option<bool>,
+    /// The secrets-set reply, names only: no route upstream returns a
+    /// value, so nothing here can either.
+    #[serde(default)]
+    set: Option<Vec<String>>,
+    #[serde(default)]
+    removed: Option<Vec<String>>,
+    #[serde(default)]
+    total: Option<u64>,
     /// The destroy reply's flush report: `null` when no ready container
     /// stood to save.
     #[serde(default)]
@@ -312,6 +331,16 @@ fn provision_url(base: &str, key: &str, actor: &str) -> String {
 fn destroy_url(base: &str, key: &str, actor: &str) -> String {
     format!(
         "{base}/v1/rooms/persistent/{}/workspace/destroy?actor_id={}",
+        encode(key),
+        encode(actor),
+    )
+}
+
+/// The owner's secrets set — the daemon's POST leaf translating Bedrock's
+/// PUT, same as destroy's DELETE ride.
+fn secrets_set_url(base: &str, key: &str, actor: &str) -> String {
+    format!(
+        "{base}/v1/rooms/persistent/{}/workspace/secrets/set?actor_id={}",
         encode(key),
         encode(actor),
     )
@@ -706,6 +735,95 @@ fn classify_lifecycle(
     }
 }
 
+/// The sentence a typed secrets answer earns — every refusal a state, not
+/// an error. `secrets_unconfigured` is the live production answer until a
+/// human sets `OCEAN_ROOM_SECRET_KEY` on the Bedrock host and redeploys it.
+fn secrets_state_sentence(code: &str) -> Option<String> {
+    let sentence = match code {
+        "secrets_unconfigured" => "This Bedrock host isn't configured for room secrets.",
+        "workspace_absent" => "Secrets need a workspace \u{2014} provision one first.",
+        "workspace_provisioning" => {
+            "The workspace is still provisioning \u{2014} try again once it's ready."
+        }
+        "workspace_failed" => {
+            "The workspace failed to provision \u{2014} provision it again first."
+        }
+        "workspace_not_owner_principal" => "Only the room owner can set secrets.",
+        "room_not_federated" => "This room has no Bedrock workspace.",
+        // The daemon's own cap on lane bodies, stated as the bound it is.
+        "workspace_request_too_large" => {
+            "That secret is larger than the 32 KiB a workspace request can carry."
+        }
+        _ => return None,
+    };
+    Some(sentence.to_string())
+}
+
+/// The landed sentence, from the reply's names — the only thing the wire
+/// carries about what was stored, and all this panel will ever say about it.
+fn secrets_sentence(set: &[String], removed: &[String], total: Option<u64>) -> String {
+    let action = match (set.is_empty(), removed.is_empty()) {
+        (false, false) => format!("Set {}, removed {}", set.join(", "), removed.join(", ")),
+        (false, true) => format!("Set {}", set.join(", ")),
+        (true, false) => format!("Removed {}", removed.join(", ")),
+        (true, true) => "Nothing changed".to_string(),
+    };
+    match total {
+        Some(1) => format!("{action} \u{2014} 1 secret stored."),
+        Some(total) => format!("{action} \u{2014} {total} secrets stored."),
+        None => format!("{action}."),
+    }
+}
+
+/// Map a secrets-set reply. Success is the names reply — `set` and
+/// `removed` both present — and everything else classifies like the
+/// lifecycle verbs it sits beside: typed states in the calm voice,
+/// refusals in words, a 404 as the deployment's honest "not yet".
+fn classify_secrets(status: u16, body: Option<WorkspaceBody>) -> LifecycleOutcome {
+    let Some(body) = body else {
+        if status == 404 {
+            return LifecycleOutcome::Unavailable;
+        }
+        return LifecycleOutcome::Failure(format!(
+            "The secrets reply could not be read ({status})."
+        ));
+    };
+    if let (Some(set), Some(removed)) = (&body.set, &body.removed) {
+        return LifecycleOutcome::Landed(secrets_sentence(set, removed, body.total));
+    }
+    match body.refusal_code() {
+        Some("workspace_route_not_allowed") => LifecycleOutcome::Unavailable,
+        Some(code) => {
+            if let Some(sentence) = secrets_state_sentence(code) {
+                return LifecycleOutcome::State(sentence);
+            }
+            LifecycleOutcome::Failure(
+                failure_sentence(code)
+                    .or_else(|| body.error.clone())
+                    .unwrap_or_else(|| format!("The secrets set failed ({status}).")),
+            )
+        }
+        None if status == 404 => LifecycleOutcome::Unavailable,
+        None => LifecycleOutcome::Failure(
+            body.error
+                .filter(|error| !error.is_empty())
+                .map(|error| format!("The secrets set was refused: {error}"))
+                .unwrap_or_else(|| format!("The secrets set failed ({status}).")),
+        ),
+    }
+}
+
+/// Whether the secrets form renders: any room that answered with the lane —
+/// a workspace in any status, or an honest absence (submitting then earns
+/// the "provision first" state). Never authorization — the daemon's owner
+/// gate answers that in type, for every member the same.
+fn secrets_form_stands(view: Option<&WorkspaceView>) -> bool {
+    matches!(
+        view,
+        Some(WorkspaceView::Present(_) | WorkspaceView::Absent)
+    )
+}
+
 /// Which lifecycle verbs the panel offers against what stands. Not
 /// authorization — the daemon's owner gate answers that in type — just the
 /// verbs that can possibly land: provision claims an absent, destroyed or
@@ -990,6 +1108,7 @@ enum PanelLane {
     Files,
     File,
     Lifecycle,
+    Secrets,
 }
 
 /// Whether a lane's successful read clears the standing error: only the one
@@ -1061,6 +1180,20 @@ pub struct RoomWorkspacePanelState {
     /// discards the container (after its flush), so the first click only
     /// arms this — and a close, reset or view flip disarms it.
     confirm_destroy: RwSignal<bool>,
+    /// The secret NAME being composed. Not sensitive — it is what the reply
+    /// echoes back — and it survives a failed submit for a retry.
+    secret_name: RwSignal<String>,
+    /// The secret VALUE being composed: the one signal in this panel that
+    /// must never be rendered anywhere but its own password input. Taken
+    /// out (cleared) the moment a submit fires, and cleared again on close
+    /// and reset so no pasted value outlives the form it was pasted into.
+    secret_value: RwSignal<String>,
+    /// The secrets lane's calm sentence — the landed names, or the typed
+    /// state that answered instead. Its own slot, not `note`: a provision's
+    /// sentence and a secret's must not overwrite each other.
+    secrets_note: RwSignal<Option<String>>,
+    /// A secrets set is in flight — blocks re-submit while Bedrock writes.
+    secrets_busy: RwSignal<bool>,
     /// The marker wake's watermark: `(room generation, highest transcript
     /// seq seen)`. `None` until the open room's transcript is first sighted.
     marker_seen: RwSignal<Option<(u64, u64)>>,
@@ -1093,6 +1226,10 @@ impl RoomWorkspacePanelState {
             note: RwSignal::new(None),
             working: RwSignal::new(None),
             confirm_destroy: RwSignal::new(false),
+            secret_name: RwSignal::new(String::new()),
+            secret_value: RwSignal::new(String::new()),
+            secrets_note: RwSignal::new(None),
+            secrets_busy: RwSignal::new(false),
             marker_seen: RwSignal::new(None),
             panel: RwSignal::new(false),
             open_ref: NodeRef::new(),
@@ -1111,10 +1248,12 @@ impl RoomWorkspacePanelState {
     }
 
     /// Close the panel, retire its poll loop, and hand focus back. A
-    /// reopened panel must not resume a primed destroy confirm.
+    /// reopened panel must not resume a primed destroy confirm — and must
+    /// not still hold a pasted secret value either.
     pub fn close_panel(&self) {
         self.panel.set(false);
         self.confirm_destroy.set(false);
+        self.secret_value.set(String::new());
         self.poll_epoch
             .update(|epoch| *epoch = epoch.wrapping_add(1));
         if let Some(open) = self.open_ref.get_untracked() {
@@ -1151,6 +1290,10 @@ impl RoomWorkspacePanelState {
         self.note.set(None);
         self.working.set(None);
         self.confirm_destroy.set(false);
+        self.secret_name.set(String::new());
+        self.secret_value.set(String::new());
+        self.secrets_note.set(None);
+        self.secrets_busy.set(false);
         self.marker_seen.set(None);
         self.panel.set(false);
     }
@@ -1329,6 +1472,7 @@ impl RoomWorkspacePanelState {
     fn open_panel(&self, rooms: Rooms, key: String, actor: String) {
         self.error.set(None);
         self.note.set(None);
+        self.secrets_note.set(None);
         self.panel.set(true);
         self.files_path.set(WORKSPACE_ROOT_PATH.to_string());
         // A file left open when the panel last closed does not survive the
@@ -1435,6 +1579,72 @@ impl RoomWorkspacePanelState {
             }
             LifecycleOutcome::Failure(error) => {
                 self.error.set(Some((PanelLane::Lifecycle, error)));
+            }
+        }
+    }
+
+    /// Take the composed secret out of the form: the trimmed name, and the
+    /// value — which leaves its signal HERE, before any request exists, so
+    /// after a submit the value's only life is the in-flight body. Both
+    /// trimmed: a pasted token's trailing newline would otherwise be stored
+    /// into every future exec's environment, failing auth invisibly.
+    /// `None` (nothing composed) takes nothing, so a stray click cannot
+    /// wipe a half-pasted form.
+    fn take_secret_submission(&self) -> Option<(String, String)> {
+        let name = self.secret_name.get_untracked().trim().to_string();
+        let value = self.secret_value.get_untracked().trim().to_string();
+        if name.is_empty() || value.is_empty() {
+            return None;
+        }
+        self.secret_value.set(String::new());
+        Some((name, value))
+    }
+
+    /// Fire the owner's secrets set. Same shape as `run_lifecycle`: the
+    /// reply never moves any view — a landed set changes nothing this
+    /// panel reads back, deliberately — and only the room that started the
+    /// command may hear its answer.
+    fn run_secrets_set(&self, rooms: Rooms, key: String, actor: String) {
+        let Some((name, value)) = self.take_secret_submission() else {
+            return;
+        };
+        let base = self.base();
+        let me = *self;
+        let generation = rooms.generation_snapshot();
+        self.secrets_busy.set(true);
+        self.secrets_note.set(None);
+        self.error.set(None);
+        spawn_local(async move {
+            let url = secrets_set_url(&base, &key, &actor);
+            let outcome = post_secrets_set(&url, &name, &value).await;
+            me.publish_secrets(outcome, rooms.room_is_current(generation, &key));
+        });
+    }
+
+    /// Publish a completed secrets set — but only into the room that
+    /// started it. Landed clears the name too (the form is spent); a typed
+    /// state keeps it, because "provision first" is an answer the owner
+    /// acts on and then retries.
+    fn publish_secrets(&self, outcome: LifecycleOutcome, room_is_current: bool) {
+        if !room_is_current {
+            return;
+        }
+        self.secrets_busy.set(false);
+        match outcome {
+            LifecycleOutcome::Landed(sentence) => {
+                self.secret_name.set(String::new());
+                self.secrets_note.set(Some(sentence));
+            }
+            LifecycleOutcome::State(sentence) => {
+                self.secrets_note.set(Some(sentence));
+            }
+            LifecycleOutcome::Unavailable => {
+                self.secrets_note.set(Some(
+                    "Setting secrets isn't available on this deployment yet.".to_string(),
+                ));
+            }
+            LifecycleOutcome::Failure(error) => {
+                self.error.set(Some((PanelLane::Secrets, error)));
             }
         }
     }
@@ -1554,6 +1764,38 @@ async fn post_lifecycle(command: WorkspaceCommand, url: &str) -> LifecycleOutcom
             Err(err) => LifecycleOutcome::Failure(format!(
                 "The request was cut ({err}) \u{2014} the {} may still be running upstream.",
                 command.noun()
+            )),
+        },
+        Err(err) => LifecycleOutcome::Failure(format!("Workspace request encode error: {err}")),
+    }
+}
+
+/// The secrets POST — the one lane call with a real body: exactly
+/// `{"secrets": {NAME: value}}`, which Bedrock validates strict deny-extra
+/// (null would remove, and this form deliberately never composes one). The
+/// map is built by hand because the value is a variable, and this function
+/// is the last place it exists.
+async fn post_secrets_set(url: &str, name: &str, value: &str) -> LifecycleOutcome {
+    let mut secrets = serde_json::Map::new();
+    secrets.insert(
+        name.to_string(),
+        serde_json::Value::String(value.to_string()),
+    );
+    match Request::post(url)
+        .header("content-type", "application/json")
+        .json(&serde_json::json!({ "secrets": secrets }))
+    {
+        Ok(request) => match request.send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.json::<WorkspaceBody>().await.ok();
+                classify_secrets(status, body)
+            }
+            // Unlike the lifecycle verbs there is no readback to learn the
+            // truth from, so the sentence says what to do about it.
+            Err(err) => LifecycleOutcome::Failure(format!(
+                "The request was cut ({err}) \u{2014} the secret may or may not be stored; \
+                 set it again to be sure."
             )),
         },
         Err(err) => LifecycleOutcome::Failure(format!("Workspace request encode error: {err}")),
@@ -1762,6 +2004,7 @@ pub fn RoomWorkspacePanel(rooms: Rooms, state: RoomWorkspacePanelState) -> impl 
                                         _ => ().into_any(),
                                     }}
                                     {move || lifecycle_section(state, rooms, actor)}
+                                    {move || secrets_section(state, rooms, actor)}
                                     {move || files_section(state, actor)}
                                     {move || {
                                         let rows = match state.execs.get() {
@@ -1989,6 +2232,73 @@ fn lifecycle_section(
     .into_any()
 }
 
+/// The owner's secrets set, under the lifecycle verbs. Set-only like the
+/// lane it rides: no name list, no read-back — the two inputs and the
+/// submit are the whole vocabulary, and the copy says so up front.
+/// Rendered for every member; the daemon's typed 403 is the authorization
+/// answer, same as the verbs above.
+fn secrets_section(
+    state: RoomWorkspacePanelState,
+    rooms: Rooms,
+    actor: impl Fn() -> Option<(String, String)> + Copy + 'static,
+) -> AnyView {
+    if !secrets_form_stands(state.view.get().as_ref()) {
+        return ().into_any();
+    }
+    let busy = state.secrets_busy.get();
+    view! {
+        <div class="rooms-workspace__compute-secrets-title">"Secrets"</div>
+        <div class="rooms-workspace__compute-secrets-copy">
+            "Set-only: a value is injected into workspace commands and never shown again."
+        </div>
+        {state.secrets_note.get().map(|note| view! {
+            <div class="rooms-workspace__compute-note">{note}</div>
+        })}
+        <div class="rooms-workspace__compute-secrets-form">
+            <input
+                class="rooms-workspace__compute-secret-name"
+                type="text"
+                placeholder="GH_TOKEN"
+                aria-label="Secret name"
+                autocomplete="off"
+                spellcheck="false"
+                disabled=busy
+                prop:value=move || state.secret_name.get()
+                on:input=move |ev| state.secret_name.set(event_target_value(&ev))
+            />
+            // A password input: what is pasted never sits readable on
+            // screen, and the signal behind it is cleared on submit.
+            <input
+                class="rooms-workspace__compute-secret-value"
+                type="password"
+                placeholder="value"
+                aria-label="Secret value"
+                autocomplete="off"
+                disabled=busy
+                prop:value=move || state.secret_value.get()
+                on:input=move |ev| state.secret_value.set(event_target_value(&ev))
+            />
+            <button
+                class="rooms-workspace__compute-run"
+                type="button"
+                title="Store this secret for the room's workspace commands"
+                disabled=move || {
+                    state.secrets_busy.get()
+                        || state.secret_name.with(|name| name.trim().is_empty())
+                        || state.secret_value.with(|value| value.trim().is_empty())
+                }
+                on:click=move |_| {
+                    let Some((key, actor_id)) = actor() else { return };
+                    state.run_secrets_set(rooms, key, actor_id);
+                }
+            >
+                {if busy { "setting\u{2026}" } else { "set secret" }}
+            </button>
+        </div>
+    }
+    .into_any()
+}
+
 /// The workspace tree, one directory at a time — what the list route feeds.
 /// A room with no live container renders nothing here: the status block
 /// above already says so in its own words. An open file replaces the
@@ -2197,6 +2507,10 @@ mod tests {
             note: RwSignal::new(None),
             working: RwSignal::new(None),
             confirm_destroy: RwSignal::new(false),
+            secret_name: RwSignal::new(String::new()),
+            secret_value: RwSignal::new(String::new()),
+            secrets_note: RwSignal::new(None),
+            secrets_busy: RwSignal::new(false),
             marker_seen: RwSignal::new(None),
             panel: RwSignal::new(false),
             open_ref: NodeRef::new(),
@@ -3396,5 +3710,245 @@ mod tests {
             (false, false)
         );
         assert_eq!(lifecycle_verbs(None), (false, false));
+    }
+
+    // ---- the secrets wire ---------------------------------------------------
+    //
+    // Names only, throughout: no fixture here carries a secret value,
+    // because no reply on this wire does either.
+
+    #[test]
+    fn the_secrets_url_asserts_the_actor() {
+        assert_eq!(
+            secrets_set_url("http://d", "team room", "user@host"),
+            "http://d/v1/rooms/persistent/team%20room/workspace/secrets/set\
+             ?actor_id=user%40host"
+        );
+    }
+
+    /// The landed reply is `{set, removed, total}` — names the owner just
+    /// asserted, and the sentence renders them and nothing else.
+    #[test]
+    fn a_secrets_reply_lands_names_only() {
+        assert_eq!(
+            classify_secrets(
+                200,
+                Some(body(r#"{"set": ["GH_TOKEN"], "removed": [], "total": 1}"#))
+            ),
+            LifecycleOutcome::Landed("Set GH_TOKEN \u{2014} 1 secret stored.".to_string())
+        );
+        assert_eq!(
+            classify_secrets(
+                200,
+                Some(body(
+                    r#"{"set": ["NPM_TOKEN"], "removed": ["OLD_TOKEN"], "total": 2}"#
+                ))
+            ),
+            LifecycleOutcome::Landed(
+                "Set NPM_TOKEN, removed OLD_TOKEN \u{2014} 2 secrets stored.".to_string()
+            )
+        );
+        // A null that removed nothing lands too — the record is the truth,
+        // and "nothing changed" is what it says.
+        assert_eq!(
+            classify_secrets(200, Some(body(r#"{"set": [], "removed": [], "total": 3}"#))),
+            LifecycleOutcome::Landed("Nothing changed \u{2014} 3 secrets stored.".to_string())
+        );
+    }
+
+    /// Every refusal reads as a state, not an error: the unconfigured host
+    /// (production's live answer until a human sets OCEAN_ROOM_SECRET_KEY),
+    /// the missing workspace, the owner gate, the daemon's 32 KiB body cap.
+    /// The identity-map refusal stays a failure in words, an unknown 400
+    /// relays Bedrock's own sentence, and a route-less deployment is said
+    /// plainly.
+    #[test]
+    fn secrets_states_classify_totally() {
+        let unconfigured = body(
+            r#"{"error": "Room secrets require OCEAN_ROOM_SECRET_KEY on the Bedrock host.",
+                "details": {"code": "secrets_unconfigured"}}"#,
+        );
+        assert_eq!(
+            classify_secrets(501, Some(unconfigured)),
+            LifecycleOutcome::State(
+                "This Bedrock host isn't configured for room secrets.".to_string()
+            )
+        );
+        let absent = body(
+            r#"{"error": "This room has no workspace. Provision one first.",
+                "details": {"code": "workspace_absent"}}"#,
+        );
+        assert_eq!(
+            classify_secrets(409, Some(absent)),
+            LifecycleOutcome::State(
+                "Secrets need a workspace \u{2014} provision one first.".to_string()
+            )
+        );
+        let gated = body(r#"{"ok": false, "code": "workspace_not_owner_principal"}"#);
+        assert_eq!(
+            classify_secrets(403, Some(gated)),
+            LifecycleOutcome::State("Only the room owner can set secrets.".to_string())
+        );
+        let capped = body(r#"{"ok": false, "code": "workspace_request_too_large"}"#);
+        assert_eq!(
+            classify_secrets(413, Some(capped)),
+            LifecycleOutcome::State(
+                "That secret is larger than the 32 KiB a workspace request can carry.".to_string()
+            )
+        );
+        let unmapped = body(r#"{"ok": false, "code": "workspace_actor_unmapped"}"#);
+        assert_eq!(
+            classify_secrets(403, Some(unmapped)),
+            LifecycleOutcome::Failure(
+                "Your identity doesn't map to this room's compute service.".to_string()
+            )
+        );
+        // Bedrock's 400s (a bad name, a non-string value) carry no code this
+        // panel knows; its own precise sentence is the answer to relay.
+        let invalid = body(r#"{"error": "secrets.gh_token must match ^[A-Z][A-Z0-9_]{0,63}$."}"#);
+        assert_eq!(
+            classify_secrets(400, Some(invalid)),
+            LifecycleOutcome::Failure(
+                "The secrets set was refused: secrets.gh_token must match \
+                 ^[A-Z][A-Z0-9_]{0,63}$."
+                    .to_string()
+            )
+        );
+        assert_eq!(classify_secrets(404, None), LifecycleOutcome::Unavailable);
+        let coded = body(r#"{"ok": false, "code": "workspace_route_not_allowed"}"#);
+        assert_eq!(
+            classify_secrets(404, Some(coded)),
+            LifecycleOutcome::Unavailable
+        );
+    }
+
+    /// The form stands wherever the panel does — a workspace in any status,
+    /// or an honest absence (submitting then earns "provision first") — and
+    /// never over a deployment that answered "not yet".
+    #[test]
+    fn the_secrets_form_stands_with_an_answer() {
+        assert!(secrets_form_stands(Some(&WorkspaceView::Present(
+            Box::default()
+        ))));
+        assert!(secrets_form_stands(Some(&WorkspaceView::Absent)));
+        assert!(!secrets_form_stands(Some(&WorkspaceView::Unavailable)));
+        assert!(!secrets_form_stands(Some(&WorkspaceView::NotFederated)));
+        assert!(!secrets_form_stands(None));
+    }
+
+    /// The write-only discipline's mechanics: a submission takes the value
+    /// out of its signal (trimmed, like the name — a pasted token's
+    /// trailing newline must not be stored), an empty half takes nothing,
+    /// and what remains behind is only ever the name.
+    #[test]
+    fn a_submission_takes_the_value_and_leaves_the_name() {
+        let state = fresh_state();
+        assert_eq!(state.take_secret_submission(), None);
+        state.secret_name.set(" GH_TOKEN ".to_string());
+        assert_eq!(
+            state.take_secret_submission(),
+            None,
+            "a name without a value must take nothing"
+        );
+        state.secret_value.set(" v \n".to_string());
+        assert_eq!(
+            state.take_secret_submission(),
+            Some(("GH_TOKEN".to_string(), "v".to_string()))
+        );
+        assert_eq!(
+            state.secret_value.get_untracked(),
+            "",
+            "the value must not survive the submission"
+        );
+        assert_eq!(
+            state.secret_name.get_untracked(),
+            " GH_TOKEN ",
+            "the name survives for a retry"
+        );
+    }
+
+    /// The secrets publish honors the panel's admissions: a stale room
+    /// publishes nothing, a landed set spends the form and sentences its
+    /// names, a typed state keeps the name for the retry it invites, and a
+    /// failure takes the alert voice in its own lane — standing through
+    /// other lanes' successes like every other failure here.
+    #[test]
+    fn a_secrets_publish_admits_and_isolates() {
+        let state = fresh_state();
+        state.secrets_busy.set(true);
+        state.secret_name.set("GH_TOKEN".to_string());
+        state.publish_secrets(
+            LifecycleOutcome::Landed("Set GH_TOKEN \u{2014} 1 secret stored.".to_string()),
+            false,
+        );
+        assert!(
+            state.secrets_busy.get_untracked(),
+            "a stale publish must not clear another room's in-flight state"
+        );
+        assert_eq!(state.secrets_note.get_untracked(), None);
+
+        state.publish_secrets(
+            LifecycleOutcome::Landed("Set GH_TOKEN \u{2014} 1 secret stored.".to_string()),
+            true,
+        );
+        assert!(!state.secrets_busy.get_untracked());
+        assert_eq!(
+            state.secrets_note.get_untracked().as_deref(),
+            Some("Set GH_TOKEN \u{2014} 1 secret stored.")
+        );
+        assert_eq!(
+            state.secret_name.get_untracked(),
+            "",
+            "a landed set spends the form"
+        );
+
+        state.secret_name.set("GH_TOKEN".to_string());
+        state.publish_secrets(
+            LifecycleOutcome::State(
+                "Secrets need a workspace \u{2014} provision one first.".to_string(),
+            ),
+            true,
+        );
+        assert_eq!(
+            state.secret_name.get_untracked(),
+            "GH_TOKEN",
+            "a typed state keeps the name for the retry it invites"
+        );
+
+        state.publish_secrets(LifecycleOutcome::Failure("refused".to_string()), true);
+        assert_eq!(
+            state.error.get_untracked(),
+            Some((PanelLane::Secrets, "refused".to_string()))
+        );
+        state.publish_status(Ok(WorkspaceView::Absent), true);
+        assert_eq!(
+            state.error.get_untracked(),
+            Some((PanelLane::Secrets, "refused".to_string())),
+            "a read lane's success must not wipe a secrets failure"
+        );
+
+        state.publish_secrets(LifecycleOutcome::Unavailable, true);
+        assert_eq!(
+            state.secrets_note.get_untracked().as_deref(),
+            Some("Setting secrets isn't available on this deployment yet.")
+        );
+    }
+
+    /// The close and reset paths both clear the value signal: a pasted
+    /// secret must not outlive the form it was pasted into.
+    #[test]
+    fn no_pasted_value_survives_close_or_reset() {
+        let state = fresh_state();
+        state.secret_value.set("v".to_string());
+        state.close_panel();
+        assert_eq!(state.secret_value.get_untracked(), "");
+
+        state.secret_value.set("v".to_string());
+        state.secrets_note.set(Some("stale".to_string()));
+        state.reset();
+        assert_eq!(state.secret_value.get_untracked(), "");
+        assert_eq!(state.secret_name.get_untracked(), "");
+        assert_eq!(state.secrets_note.get_untracked(), None);
+        assert!(!state.secrets_busy.get_untracked());
     }
 }

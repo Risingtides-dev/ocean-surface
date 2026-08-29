@@ -3511,6 +3511,81 @@ a.rooms-workspace__repo-check-line:hover {
   color: var(--err);
 }
 
+/* ── The owner's secrets set ────────────────────────────────────────
+   Set-only, like the lane it rides: no list, no read-back — two inputs
+   and a submit are the whole vocabulary, and the value is a password
+   field so a pasted token never sits readable on screen. */
+.rooms-workspace__compute-secrets-title {
+  margin-top: 14px;
+  padding-bottom: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg-4);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__compute-secrets-copy {
+  padding-bottom: 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__compute-secrets-form {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.rooms-workspace__compute-secret-name,
+.rooms-workspace__compute-secret-value {
+  box-sizing: border-box;
+  height: var(--ctl-h-sm);
+  min-width: 0;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+  outline: none;
+  transition: border-color var(--dur-fast) var(--ease);
+}
+
+/* Names run short (GH_TOKEN) and values run long; the flex basis says so. */
+.rooms-workspace__compute-secret-name {
+  flex: 0 1 150px;
+}
+
+.rooms-workspace__compute-secret-value {
+  flex: 1 1 180px;
+}
+
+.rooms-workspace__compute-secret-name::placeholder,
+.rooms-workspace__compute-secret-value::placeholder {
+  color: var(--fg-4);
+}
+
+.rooms-workspace__compute-secret-name:hover:not(:disabled),
+.rooms-workspace__compute-secret-value:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.rooms-workspace__compute-secret-name:focus:not(:disabled),
+.rooms-workspace__compute-secret-value:focus:not(:disabled) {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.rooms-workspace__compute-secret-name:disabled,
+.rooms-workspace__compute-secret-value:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 /* The last build's outcome, above the list it is derived from. */
 .rooms-workspace__compute-build {
   margin-top: 12px;
