@@ -40,6 +40,19 @@
 //! this side is the input signal and the in-flight request body — cleared
 //! on submit, never rendered back, never logged.
 //!
+//! Members RUN commands on the same lane — the daemon's allowlist exec
+//! row is a member act (write-gated, attributed, never owner-gated):
+//!
+//!   POST /v1/rooms/persistent/{key}/workspace/exec → run, record, flush
+//!
+//! The body this side sends is `{"command"}` alone, deliberately: `cwd`
+//! defaults to the workspace root, the flush default is what saves the
+//! work back to Bedrock, and attribution is the daemon's — it resolves
+//! the actor at its own gate and strips any client-supplied
+//! `actor_member_id` as forgeable. A landed run mints no transcript
+//! marker, so the form re-reads the lanes itself instead of waiting on a
+//! wake that will never come.
+//!
 //! What the wire promises, and this panel honors:
 //!
 //! 1. **Typed refusals are states.** Bedrock's `workspace_absent` 404 is
@@ -232,6 +245,11 @@ struct WorkspaceBody {
     workspace: Option<WorkspaceProjection>,
     #[serde(default)]
     execs: Option<Vec<ExecRow>>,
+    /// The exec reply's own row — Bedrock's `exec` projection, relayed by
+    /// the daemon. The tails beside it on the wire are not read here: the
+    /// refreshed history below is where the output shows.
+    #[serde(default)]
+    exec: Option<ExecRow>,
     #[serde(default)]
     path: Option<String>,
     #[serde(default)]
@@ -341,6 +359,17 @@ fn destroy_url(base: &str, key: &str, actor: &str) -> String {
 fn secrets_set_url(base: &str, key: &str, actor: &str) -> String {
     format!(
         "{base}/v1/rooms/persistent/{}/workspace/secrets/set?actor_id={}",
+        encode(key),
+        encode(actor),
+    )
+}
+
+/// The member's exec — the daemon's one attributed POST leaf. Identity
+/// rides `?actor_id=` like every call on this lane; the body never carries
+/// it (see `post_exec`).
+fn exec_url(base: &str, key: &str, actor: &str) -> String {
+    format!(
+        "{base}/v1/rooms/persistent/{}/workspace/exec?actor_id={}",
         encode(key),
         encode(actor),
     )
@@ -824,6 +853,90 @@ fn secrets_form_stands(view: Option<&WorkspaceView>) -> bool {
     )
 }
 
+/// The sentence a typed exec answer earns — the workspace that isn't
+/// ready to run anything, and the daemon's own body cap. States, not
+/// faults: the command survives in the form for the retry each one
+/// invites.
+fn exec_state_sentence(code: &str) -> Option<String> {
+    let sentence = match code {
+        "workspace_absent" => "Running a command needs a workspace \u{2014} provision one first.",
+        "workspace_provisioning" => {
+            "The workspace is still provisioning \u{2014} try again once it's ready."
+        }
+        "workspace_failed" => {
+            "The workspace failed to provision \u{2014} provision it again first."
+        }
+        "room_not_federated" => "This room has no Bedrock workspace.",
+        "workspace_request_too_large" => {
+            "That command is larger than the 32 KiB a workspace request can carry."
+        }
+        _ => return None,
+    };
+    Some(sentence.to_string())
+}
+
+/// The landed sentence, from the reply's own row. The exit is stated as
+/// the fact it is — a member's failing command still landed — and the
+/// refreshed history below is where its output reads.
+fn exec_sentence(row: &ExecRow) -> String {
+    match (row.status.as_str(), row.exit_code) {
+        ("exited", Some(code)) => format!("Command ran \u{2014} exited {code}."),
+        ("timeout", _) => {
+            "The command timed out \u{2014} the history keeps what it wrote.".to_string()
+        }
+        _ => "Command ran.".to_string(),
+    }
+}
+
+/// Map an exec reply. Success is the reply's own row, whatever its exit —
+/// and everything else classifies like the verbs it sits beside: typed
+/// states in the calm voice, refusals in words, a 404 as the deployment's
+/// honest "not yet".
+fn classify_exec(status: u16, body: Option<WorkspaceBody>) -> LifecycleOutcome {
+    let Some(body) = body else {
+        if status == 404 {
+            return LifecycleOutcome::Unavailable;
+        }
+        return LifecycleOutcome::Failure(format!(
+            "The command reply could not be read ({status})."
+        ));
+    };
+    if let Some(row) = &body.exec {
+        return LifecycleOutcome::Landed(exec_sentence(row));
+    }
+    match body.refusal_code() {
+        Some("workspace_route_not_allowed") => LifecycleOutcome::Unavailable,
+        Some(code) => {
+            if let Some(sentence) = exec_state_sentence(code) {
+                return LifecycleOutcome::State(sentence);
+            }
+            LifecycleOutcome::Failure(
+                failure_sentence(code)
+                    .or_else(|| body.error.clone())
+                    .unwrap_or_else(|| format!("The command failed ({status}).")),
+            )
+        }
+        None if status == 404 => LifecycleOutcome::Unavailable,
+        None => LifecycleOutcome::Failure(
+            body.error
+                .filter(|error| !error.is_empty())
+                .map(|error| format!("The command was refused: {error}"))
+                .unwrap_or_else(|| format!("The command failed ({status}).")),
+        ),
+    }
+}
+
+/// Whether the run-command form renders: the same answers the secrets form
+/// stands on — a workspace in any status, or an honest absence (submitting
+/// then earns "provision first"). A member act throughout — the daemon's
+/// exec row carries no owner gate, so none is invented here.
+fn exec_form_stands(view: Option<&WorkspaceView>) -> bool {
+    matches!(
+        view,
+        Some(WorkspaceView::Present(_) | WorkspaceView::Absent)
+    )
+}
+
 /// Which lifecycle verbs the panel offers against what stands. Not
 /// authorization — the daemon's owner gate answers that in type — just the
 /// verbs that can possibly land: provision claims an absent, destroyed or
@@ -1109,6 +1222,7 @@ enum PanelLane {
     File,
     Lifecycle,
     Secrets,
+    Exec,
 }
 
 /// Whether a lane's successful read clears the standing error: only the one
@@ -1194,6 +1308,17 @@ pub struct RoomWorkspacePanelState {
     secrets_note: RwSignal<Option<String>>,
     /// A secrets set is in flight — blocks re-submit while Bedrock writes.
     secrets_busy: RwSignal<bool>,
+    /// The command being composed. Not sensitive — it becomes a readable
+    /// history row the moment it lands — and it survives every outcome but
+    /// a landed run, so a refusal is a retry, not a retype.
+    exec_command: RwSignal<String>,
+    /// The run lane's calm sentence — the landed exit, or the typed state
+    /// that answered instead. Its own slot, for the same reason the
+    /// secrets note has one.
+    exec_note: RwSignal<Option<String>>,
+    /// An exec is in flight — blocks re-submit for the whole command
+    /// budget, which runs to 960s upstream.
+    exec_busy: RwSignal<bool>,
     /// The marker wake's watermark: `(room generation, highest transcript
     /// seq seen)`. `None` until the open room's transcript is first sighted.
     marker_seen: RwSignal<Option<(u64, u64)>>,
@@ -1230,6 +1355,9 @@ impl RoomWorkspacePanelState {
             secret_value: RwSignal::new(String::new()),
             secrets_note: RwSignal::new(None),
             secrets_busy: RwSignal::new(false),
+            exec_command: RwSignal::new(String::new()),
+            exec_note: RwSignal::new(None),
+            exec_busy: RwSignal::new(false),
             marker_seen: RwSignal::new(None),
             panel: RwSignal::new(false),
             open_ref: NodeRef::new(),
@@ -1294,6 +1422,9 @@ impl RoomWorkspacePanelState {
         self.secret_value.set(String::new());
         self.secrets_note.set(None);
         self.secrets_busy.set(false);
+        self.exec_command.set(String::new());
+        self.exec_note.set(None);
+        self.exec_busy.set(false);
         self.marker_seen.set(None);
         self.panel.set(false);
     }
@@ -1648,6 +1779,74 @@ impl RoomWorkspacePanelState {
             }
         }
     }
+
+    /// Take the composed command: trimmed, an empty compose takes nothing.
+    /// Unlike the secret value it stays in its signal — only a landed run
+    /// spends the form, so every refusal keeps the command for its retry.
+    fn take_exec_submission(&self) -> Option<String> {
+        let command = self.exec_command.get_untracked().trim().to_string();
+        if command.is_empty() {
+            return None;
+        }
+        Some(command)
+    }
+
+    /// Fire a member's command. Same shape as `run_lifecycle`, including
+    /// the active re-read after a landed run — necessarily: a plain exec
+    /// mints no transcript marker (the daemon keeps exec chatter off
+    /// transcripts), so no wake will fire and this refresh is how the new
+    /// row appears in the history below.
+    fn run_exec(&self, rooms: Rooms, key: String, actor: String) {
+        let Some(command) = self.take_exec_submission() else {
+            return;
+        };
+        let base = self.base();
+        let me = *self;
+        let generation = rooms.generation_snapshot();
+        self.exec_busy.set(true);
+        self.exec_note.set(None);
+        self.error.set(None);
+        spawn_local(async move {
+            let url = exec_url(&base, &key, &actor);
+            let outcome = post_exec(&url, &command).await;
+            // The command budget runs to 960s — long past any panel switch
+            // — so only the room that started it may hear the answer.
+            let current = rooms.room_is_current(generation, &key);
+            let landed = matches!(outcome, LifecycleOutcome::Landed(_));
+            me.publish_exec(outcome, current);
+            if current && landed {
+                let open = me.panel.get_untracked();
+                refresh_lanes(me, &base, &key, &actor, true, open, open).await;
+            }
+        });
+    }
+
+    /// Publish a completed command — but only into the room that started
+    /// it. Landed spends the form; a typed state keeps the command for the
+    /// retry it invites, exactly like the secrets publish beside it.
+    fn publish_exec(&self, outcome: LifecycleOutcome, room_is_current: bool) {
+        if !room_is_current {
+            return;
+        }
+        self.exec_busy.set(false);
+        match outcome {
+            LifecycleOutcome::Landed(sentence) => {
+                self.exec_command.set(String::new());
+                self.exec_note.set(Some(sentence));
+            }
+            LifecycleOutcome::State(sentence) => {
+                self.exec_note.set(Some(sentence));
+            }
+            LifecycleOutcome::Unavailable => {
+                self.exec_note.set(Some(
+                    "Running commands isn't available on this deployment yet.".to_string(),
+                ));
+            }
+            LifecycleOutcome::Failure(error) => {
+                self.error.set(Some((PanelLane::Exec, error)));
+            }
+        }
+    }
 }
 
 /// The silent refresh the fallback poller and the marker wake share: read
@@ -1796,6 +1995,32 @@ async fn post_secrets_set(url: &str, name: &str, value: &str) -> LifecycleOutcom
             Err(err) => LifecycleOutcome::Failure(format!(
                 "The request was cut ({err}) \u{2014} the secret may or may not be stored; \
                  set it again to be sure."
+            )),
+        },
+        Err(err) => LifecycleOutcome::Failure(format!("Workspace request encode error: {err}")),
+    }
+}
+
+/// The exec POST — `{"command"}` alone, deliberately: `cwd` defaults to
+/// the workspace root upstream, the flush default is what saves the work
+/// back to Bedrock, and the daemon inserts the gate-resolved actor itself
+/// (a client-sent `actor_member_id` would be stripped as forgeable).
+async fn post_exec(url: &str, command: &str) -> LifecycleOutcome {
+    match Request::post(url)
+        .header("content-type", "application/json")
+        .json(&serde_json::json!({ "command": command }))
+    {
+        Ok(request) => match request.send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.json::<WorkspaceBody>().await.ok();
+                classify_exec(status, body)
+            }
+            // The container run may well continue upstream; the history is
+            // where its truth lands either way, so the sentence points there.
+            Err(err) => LifecycleOutcome::Failure(format!(
+                "The request was cut ({err}) \u{2014} the command may still be \
+                 running; the history below will say."
             )),
         },
         Err(err) => LifecycleOutcome::Failure(format!("Workspace request encode error: {err}")),
@@ -2006,6 +2231,7 @@ pub fn RoomWorkspacePanel(rooms: Rooms, state: RoomWorkspacePanelState) -> impl 
                                     {move || lifecycle_section(state, rooms, actor)}
                                     {move || secrets_section(state, rooms, actor)}
                                     {move || files_section(state, actor)}
+                                    {move || exec_section(state, rooms, actor)}
                                     {move || {
                                         let rows = match state.execs.get() {
                                             Some(ExecsView::Rows(rows)) => rows,
@@ -2299,6 +2525,61 @@ fn secrets_section(
     .into_any()
 }
 
+/// The member's run-command form, above the history its result lands in.
+/// One input and a submit: the minimal body is the correct one, and the
+/// row the run mints below carries everything else. Rendered for every
+/// member — exec is a member act on the daemon's allowlist, so no owner
+/// gate wraps it the way none wraps the daemon's.
+fn exec_section(
+    state: RoomWorkspacePanelState,
+    rooms: Rooms,
+    actor: impl Fn() -> Option<(String, String)> + Copy + 'static,
+) -> AnyView {
+    if !exec_form_stands(state.view.get().as_ref()) {
+        return ().into_any();
+    }
+    let busy = state.exec_busy.get();
+    view! {
+        <div class="rooms-workspace__compute-cmd-title">"Run a command"</div>
+        <div class="rooms-workspace__compute-cmd-copy">
+            "Runs in the room's container under your name; the result lands in the \
+             history below."
+        </div>
+        {state.exec_note.get().map(|note| view! {
+            <div class="rooms-workspace__compute-note">{note}</div>
+        })}
+        <div class="rooms-workspace__compute-cmd-form">
+            <input
+                class="rooms-workspace__compute-cmd-input"
+                type="text"
+                placeholder="npm test"
+                aria-label="Command to run"
+                autocomplete="off"
+                spellcheck="false"
+                disabled=busy
+                prop:value=move || state.exec_command.get()
+                on:input=move |ev| state.exec_command.set(event_target_value(&ev))
+            />
+            <button
+                class="rooms-workspace__compute-run"
+                type="button"
+                title="Run this command in the room's workspace"
+                disabled=move || {
+                    state.exec_busy.get()
+                        || state.exec_command.with(|command| command.trim().is_empty())
+                }
+                on:click=move |_| {
+                    let Some((key, actor_id)) = actor() else { return };
+                    state.run_exec(rooms, key, actor_id);
+                }
+            >
+                {if busy { "running\u{2026}" } else { "run" }}
+            </button>
+        </div>
+    }
+    .into_any()
+}
+
 /// The workspace tree, one directory at a time — what the list route feeds.
 /// A room with no live container renders nothing here: the status block
 /// above already says so in its own words. An open file replaces the
@@ -2511,6 +2792,9 @@ mod tests {
             secret_value: RwSignal::new(String::new()),
             secrets_note: RwSignal::new(None),
             secrets_busy: RwSignal::new(false),
+            exec_command: RwSignal::new(String::new()),
+            exec_note: RwSignal::new(None),
+            exec_busy: RwSignal::new(false),
             marker_seen: RwSignal::new(None),
             panel: RwSignal::new(false),
             open_ref: NodeRef::new(),
@@ -3932,6 +4216,214 @@ mod tests {
             state.secrets_note.get_untracked().as_deref(),
             Some("Setting secrets isn't available on this deployment yet.")
         );
+    }
+
+    // ---- the exec wire ------------------------------------------------------
+
+    #[test]
+    fn the_exec_url_asserts_the_actor() {
+        assert_eq!(
+            exec_url("http://d", "team room", "user@host"),
+            "http://d/v1/rooms/persistent/team%20room/workspace/exec?actor_id=user%40host"
+        );
+    }
+
+    /// The landed reply is Bedrock's own row, whatever its exit — a
+    /// member's failing command still landed — and a timeout says where
+    /// the output went.
+    #[test]
+    fn an_exec_reply_lands_whatever_its_exit() {
+        let clean = body(
+            r#"{"exec": {"id": "e1", "command": "npm test",
+                "status": "exited", "exit_code": 0}}"#,
+        );
+        assert_eq!(
+            classify_exec(200, Some(clean)),
+            LifecycleOutcome::Landed("Command ran \u{2014} exited 0.".to_string())
+        );
+        let failing = body(
+            r#"{"exec": {"id": "e2", "command": "npm test",
+                "status": "exited", "exit_code": 2}}"#,
+        );
+        assert_eq!(
+            classify_exec(200, Some(failing)),
+            LifecycleOutcome::Landed("Command ran \u{2014} exited 2.".to_string())
+        );
+        let hung = body(r#"{"exec": {"id": "e3", "command": "sleep 1200", "status": "timeout"}}"#);
+        assert_eq!(
+            classify_exec(200, Some(hung)),
+            LifecycleOutcome::Landed(
+                "The command timed out \u{2014} the history keeps what it wrote.".to_string()
+            )
+        );
+    }
+
+    /// Typed answers read as states in the calm voice — the workspace that
+    /// isn't ready and the daemon's body cap both invite a retry with the
+    /// command intact. The identity-map refusal stays a failure in words,
+    /// an unknown 400 relays Bedrock's own sentence, and a route-less
+    /// deployment is said plainly.
+    #[test]
+    fn exec_states_classify_totally() {
+        let absent = body(
+            r#"{"error": "This room has no workspace. Provision one first.",
+                "details": {"code": "workspace_absent"}}"#,
+        );
+        assert_eq!(
+            classify_exec(409, Some(absent)),
+            LifecycleOutcome::State(
+                "Running a command needs a workspace \u{2014} provision one first.".to_string()
+            )
+        );
+        let provisioning = body(
+            r#"{"error": "The room workspace is still provisioning.",
+                "details": {"code": "workspace_provisioning"}}"#,
+        );
+        assert_eq!(
+            classify_exec(409, Some(provisioning)),
+            LifecycleOutcome::State(
+                "The workspace is still provisioning \u{2014} try again once it's ready."
+                    .to_string()
+            )
+        );
+        let capped = body(r#"{"ok": false, "code": "workspace_request_too_large"}"#);
+        assert_eq!(
+            classify_exec(413, Some(capped)),
+            LifecycleOutcome::State(
+                "That command is larger than the 32 KiB a workspace request can carry.".to_string()
+            )
+        );
+        let unmapped = body(r#"{"ok": false, "code": "workspace_actor_unmapped"}"#);
+        assert_eq!(
+            classify_exec(403, Some(unmapped)),
+            LifecycleOutcome::Failure(
+                "Your identity doesn't map to this room's compute service.".to_string()
+            )
+        );
+        let invalid = body(r#"{"error": "command must be a non-empty string."}"#);
+        assert_eq!(
+            classify_exec(400, Some(invalid)),
+            LifecycleOutcome::Failure(
+                "The command was refused: command must be a non-empty string.".to_string()
+            )
+        );
+        assert_eq!(classify_exec(404, None), LifecycleOutcome::Unavailable);
+        let coded = body(r#"{"ok": false, "code": "workspace_route_not_allowed"}"#);
+        assert_eq!(
+            classify_exec(404, Some(coded)),
+            LifecycleOutcome::Unavailable
+        );
+    }
+
+    /// The form stands wherever the secrets form does — on an answer,
+    /// never over a deployment's "not yet".
+    #[test]
+    fn the_exec_form_stands_with_an_answer() {
+        assert!(exec_form_stands(Some(&WorkspaceView::Present(
+            Box::default()
+        ))));
+        assert!(exec_form_stands(Some(&WorkspaceView::Absent)));
+        assert!(!exec_form_stands(Some(&WorkspaceView::Unavailable)));
+        assert!(!exec_form_stands(Some(&WorkspaceView::NotFederated)));
+        assert!(!exec_form_stands(None));
+    }
+
+    /// A submission trims, an empty compose takes nothing — and unlike the
+    /// secret value, the command stays in its signal: only a landed run
+    /// spends the form.
+    #[test]
+    fn an_exec_submission_trims_and_keeps_the_command() {
+        let state = fresh_state();
+        assert_eq!(state.take_exec_submission(), None);
+        state.exec_command.set("  \n".to_string());
+        assert_eq!(state.take_exec_submission(), None);
+        state.exec_command.set(" npm test \n".to_string());
+        assert_eq!(state.take_exec_submission(), Some("npm test".to_string()));
+        assert_eq!(
+            state.exec_command.get_untracked(),
+            " npm test \n",
+            "the command survives for the retry a refusal invites"
+        );
+    }
+
+    /// The exec publish honors the panel's admissions: a stale room
+    /// publishes nothing — a 960s command outlives panel switches — a
+    /// landed run spends the form, a typed state keeps the command, and a
+    /// failure takes the alert voice in its own lane, standing through
+    /// other lanes' successes.
+    #[test]
+    fn an_exec_publish_admits_and_isolates() {
+        let state = fresh_state();
+        state.exec_busy.set(true);
+        state.exec_command.set("npm test".to_string());
+        state.publish_exec(
+            LifecycleOutcome::Landed("Command ran \u{2014} exited 0.".to_string()),
+            false,
+        );
+        assert!(
+            state.exec_busy.get_untracked(),
+            "a stale publish must not clear another room's in-flight state"
+        );
+        assert_eq!(state.exec_note.get_untracked(), None);
+
+        state.publish_exec(
+            LifecycleOutcome::Landed("Command ran \u{2014} exited 0.".to_string()),
+            true,
+        );
+        assert!(!state.exec_busy.get_untracked());
+        assert_eq!(
+            state.exec_note.get_untracked().as_deref(),
+            Some("Command ran \u{2014} exited 0.")
+        );
+        assert_eq!(
+            state.exec_command.get_untracked(),
+            "",
+            "a landed run spends the form"
+        );
+
+        state.exec_command.set("npm test".to_string());
+        state.publish_exec(
+            LifecycleOutcome::State(
+                "Running a command needs a workspace \u{2014} provision one first.".to_string(),
+            ),
+            true,
+        );
+        assert_eq!(
+            state.exec_command.get_untracked(),
+            "npm test",
+            "a typed state keeps the command for the retry it invites"
+        );
+
+        state.publish_exec(LifecycleOutcome::Failure("refused".to_string()), true);
+        assert_eq!(
+            state.error.get_untracked(),
+            Some((PanelLane::Exec, "refused".to_string()))
+        );
+        state.publish_status(Ok(WorkspaceView::Absent), true);
+        assert_eq!(
+            state.error.get_untracked(),
+            Some((PanelLane::Exec, "refused".to_string())),
+            "a read lane's success must not wipe an exec failure"
+        );
+
+        state.publish_exec(LifecycleOutcome::Unavailable, true);
+        assert_eq!(
+            state.exec_note.get_untracked().as_deref(),
+            Some("Running commands isn't available on this deployment yet.")
+        );
+    }
+
+    /// A room switch clears the run form with everything else.
+    #[test]
+    fn reset_clears_the_run_form() {
+        let state = fresh_state();
+        state.exec_command.set("npm test".to_string());
+        state.exec_note.set(Some("stale".to_string()));
+        state.exec_busy.set(true);
+        state.reset();
+        assert_eq!(state.exec_command.get_untracked(), "");
+        assert_eq!(state.exec_note.get_untracked(), None);
+        assert!(!state.exec_busy.get_untracked());
     }
 
     /// The close and reset paths both clear the value signal: a pasted

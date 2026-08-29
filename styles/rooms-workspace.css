@@ -3586,6 +3586,68 @@ a.rooms-workspace__repo-check-line:hover {
   cursor: not-allowed;
 }
 
+/* ── The member's run-command form ──────────────────────────────────
+   One input and a submit, above the history its row lands in. Command
+   only on the wire: cwd, flush, and attribution are the defaults the
+   daemon and Bedrock already hold. */
+.rooms-workspace__compute-cmd-title {
+  margin-top: 14px;
+  padding-bottom: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg-4);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__compute-cmd-copy {
+  padding-bottom: 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__compute-cmd-form {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.rooms-workspace__compute-cmd-input {
+  box-sizing: border-box;
+  height: var(--ctl-h-sm);
+  min-width: 0;
+  flex: 1 1 220px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+  outline: none;
+  transition: border-color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__compute-cmd-input::placeholder {
+  color: var(--fg-4);
+}
+
+.rooms-workspace__compute-cmd-input:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.rooms-workspace__compute-cmd-input:focus:not(:disabled) {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.rooms-workspace__compute-cmd-input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 /* The last build's outcome, above the list it is derived from. */
 .rooms-workspace__compute-build {
   margin-top: 12px;
