@@ -266,8 +266,14 @@ pub enum RoomAccessState {
 }
 
 /// How a room's agents are auto-woken. Mirrors `ocean_core::RoomTriggerPolicy`.
-/// All flags default off; the daemon reads this on `room_create` and evaluates
-/// it on every non-agent-authored message (OCEAN-65 / OCEAN-111).
+/// All flags default off. Three triggers are live — the daemon evaluates
+/// `on_mention`, `on_thread_reply` and `on_build_failure` on every
+/// non-agent-authored message (OCEAN-65 / OCEAN-111). `on_component_event`
+/// and `on_schedule` are unwired: nothing ever fires them, and the daemon's
+/// write routes answer a typed 400 (`trigger_unwired`) for a policy carrying
+/// `on_component_event: true` or a set `on_schedule`. Refusal is by VALUE,
+/// not presence, so serializing the defaults is accepted; both fields stay
+/// `Deserialize` because stored dead values remain readable.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RoomTriggerPolicy {
     /// Wake an agent when it is @-mentioned in the transcript (the common case).
@@ -276,14 +282,16 @@ pub struct RoomTriggerPolicy {
     /// Wake an agent when someone replies in a thread it participates in.
     #[serde(default)]
     pub on_thread_reply: bool,
-    /// Wake an agent when a rendered component emits an interaction event.
+    /// Unwired: never fires, and the daemon refuses any write where this is
+    /// `true` (`trigger_unwired`). Kept so stored `true` values still decode.
     #[serde(default)]
     pub on_component_event: bool,
     /// Wake the room's agents when a workspace build fails. Off by default,
     /// so every policy stored before this field existed keeps its behavior.
     #[serde(default)]
     pub on_build_failure: bool,
-    /// Optional cron expression for scheduled wake-ups. `None`/empty = no schedule.
+    /// Unwired: no schedule ever fires, and the daemon refuses any write
+    /// where this is set (`trigger_unwired`). Stored crons stay readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_schedule: Option<String>,
 }
@@ -2497,18 +2505,19 @@ mod tests {
         assert_eq!(policy.on_schedule, None);
     }
 
-    /// The PATCH body carries the COMPLETE policy under `trigger_policy` —
-    /// including flags the UI exposes no control for — because the daemon
-    /// replaces the stored policy wholesale. An omitted `on_component_event`
-    /// here would clear a flag something else set. `on_schedule: None` is the
-    /// one deliberate omission (skip_serializing_if), matching the daemon's
-    /// own "absent = unset" encoding for the optional cron field.
+    /// The PATCH body carries the COMPLETE policy under `trigger_policy`
+    /// because the daemon replaces the stored policy wholesale. The daemon
+    /// refuses dead trigger values by VALUE, not presence (`trigger_unwired`),
+    /// so the always-serialized `on_component_event: false` is accepted and
+    /// `on_schedule: None` stays omitted (skip_serializing_if), matching the
+    /// daemon's "absent = unset" encoding — a normalized policy's body always
+    /// passes the write gate.
     #[test]
     fn policy_patch_body_sends_the_complete_policy() {
         let policy = RoomTriggerPolicy {
             on_mention: true,
             on_thread_reply: false,
-            on_component_event: true,
+            on_component_event: false,
             on_build_failure: true,
             on_schedule: None,
         };
@@ -2522,7 +2531,7 @@ mod tests {
                 "trigger_policy": {
                     "on_mention": true,
                     "on_thread_reply": false,
-                    "on_component_event": true,
+                    "on_component_event": false,
                     "on_build_failure": true
                 }
             })
