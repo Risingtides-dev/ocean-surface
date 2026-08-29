@@ -3034,3 +3034,30 @@ Verified at land, both PRs: 998 UI + 53 proxy + integration suites 0 failed,
 clippy --all-targets -D warnings clean, fmt clean, RUSTFLAGS="-D warnings"
 wasm check clean.
 _________________________________________________________________________________
+time:      [13:46] [08-29-26]
+agent:     [claude] [fable 5]
+worktree:  loop/repo-bind-unbind-ui
+type:      [merge]
+area:      [frontend]
+
+Landed wave 17's two ocean-surface slices. PR #141: owner bind/unbind
+controls in the repo panel, entirely in room_repo.rs + the root stylesheet.
+Bind form (remote/branch/dir) builds its payload with a pure bind_payload()
+sending exactly the keys validateRepoBinding admits and omitting empty
+branch/dir so upstream defaults stay upstream's; unbind sits behind a
+one-click-arms-confirm flow since bedrock#40 made it delete the checkout,
+and posts {} because the daemon lane demands a JSON object. Neither verb
+trusts its mutation reply into the view — publish_command notes the outcome
+and the caller re-fetches GET repo (pinned by test). checkout_removed is
+surfaced honestly (removed / no_container / rm_failed), the owner refusal
+reads as a calm state, Bedrock's prose-only 403 relays in its own words, and
+no client-side authorization was invented — the daemon gate is the
+authority. 13 new tests. Inert until a daemon at >= ocean-os#390 is
+deployed; old daemons degrade gracefully. PR #142: exec history stops
+headlining a CI pull as "# ocean-room-ci" — command_headline sheds either
+bookkeeping marker via find_map, a CI row headlines its gh line, and a new
+test pins that last_build_sentence keys on the build marker alone so a CI
+pull can never masquerade as a build. Gates re-run at land after rebase:
+full suite green (1063 UI tests at #142), clippy -D warnings, fmt, and the
+RUSTFLAGS="-D warnings" wasm32 release-lane check all clean, both PRs.
+_________________________________________________________________________________
