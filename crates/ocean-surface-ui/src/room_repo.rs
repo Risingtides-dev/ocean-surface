@@ -10,11 +10,13 @@
 //!   GET  /v1/rooms/persistent/{key}/workspace/repo/ci      → recorded CI state
 //!   POST /v1/rooms/persistent/{key}/workspace/repo/ci      → pull CI via gh
 //!
-//! Choosing WHAT the room builds — bind and unbind — is deliberately absent
-//! from that allowlist: those are owner-only upstream, and the daemon always
-//! presents the room credential's bearer, so exposing them here would hand
-//! every roster participant the owner's authority. This panel says so instead
-//! of pretending.
+//! Choosing WHAT the room builds — bind and unbind — was deliberately absent
+//! until the daemon grew an identity map (ocean-os#390): its POST leaves
+//! `repo/bind` and `repo/unbind` become Bedrock's PUT and DELETE, forwarded
+//! only when the asserted actor resolves to the credential's own principal,
+//! and whether that principal owns the room stays Bedrock's call. This panel
+//! cannot run that map, so the controls render for every member and the
+//! typed refusal answers — never a client-side guess at authority.
 //!
 //! Five properties of the wire contract shape everything below:
 //!
@@ -26,6 +28,12 @@
 //!    only `actor_member_id` — which the daemon strips and re-installs itself
 //!    (`shape_body`) — so this side posts EXACTLY `{}`. A build additionally
 //!    REQUIRES `script` (an npm-script name; Bedrock composes the command).
+//!    A bind sends exactly the keys `validateRepoBinding` admits — `remote`,
+//!    and `branch`/`dir` only when the operator gave one, so the upstream
+//!    defaults stay upstream's. An unbind posts `{}` too: the daemon's lane
+//!    demands a JSON object even though Bedrock's DELETE reads none. And an
+//!    unbind DELETES THE CHECKOUT with the binding, so its control confirms
+//!    once, and the reply's `checkout_removed` is surfaced honestly.
 //! 3. **Typed refusals are states, not errors.** `workspace_absent`,
 //!    `repo_unbound`, `repo_cloning`, `build_running` and `repo_not_cloned`
 //!    are Bedrock answering the question honestly, relayed verbatim by the
@@ -203,6 +211,15 @@ struct RepoBody {
     /// failure. Distinct from the `details.stderr` of a thrown 502.
     #[serde(default)]
     stderr: Option<String>,
+    /// The unbind reply (`handleRepoUnbind`): presence of `unbound` is what
+    /// its success means, and `checkout_removed` says whether the checkout
+    /// actually left the container — false comes with a reason.
+    #[serde(default)]
+    unbound: Option<bool>,
+    #[serde(default)]
+    checkout_removed: Option<bool>,
+    #[serde(default)]
+    checkout_removed_reason: Option<String>,
     #[serde(default)]
     code: Option<String>,
     #[serde(default)]
@@ -258,6 +275,25 @@ fn ci_url(base: &str, key: &str, actor: &str) -> String {
     )
 }
 
+/// The owner verbs ride daemon-side POST leaves — the daemon maps them to
+/// Bedrock's PUT and DELETE itself, because the CORS preflight only admits
+/// the methods the lane advertises.
+fn bind_url(base: &str, key: &str, actor: &str) -> String {
+    format!(
+        "{base}/v1/rooms/persistent/{}/workspace/repo/bind?actor_id={}",
+        encode(key),
+        encode(actor),
+    )
+}
+
+fn unbind_url(base: &str, key: &str, actor: &str) -> String {
+    format!(
+        "{base}/v1/rooms/persistent/{}/workspace/repo/unbind?actor_id={}",
+        encode(key),
+        encode(actor),
+    )
+}
+
 /// What the room's binding IS right now, as far as this surface can honestly
 /// say. `None` in the state signal means "not answered yet" — only a reply
 /// mints one of these.
@@ -285,6 +321,8 @@ enum RepoCommand {
     Clone,
     Build,
     Ci,
+    Bind,
+    Unbind,
 }
 
 /// What a command reply means for the panel.
@@ -301,6 +339,16 @@ enum CommandOutcome {
     /// wholesale. A gh that ran and FAILED is a `Failure` carrying its
     /// stderr guidance — that guidance is the answer, not a fault.
     Checked(CiReport, Vec<CiCheck>),
+    /// The bind landed; the reply carries the fresh projection. The view is
+    /// NOT set from it — the caller re-reads through `GET repo`, so what the
+    /// panel renders is always what a read would answer.
+    Bound(Box<RepoProjection>),
+    /// The unbind landed, and the reply says truthfully whether the checkout
+    /// left the container with it.
+    Unbound {
+        checkout_removed: bool,
+        reason: Option<String>,
+    },
     /// A typed state: the workspace is busy or not ready, in Bedrock's own
     /// terms. Rendered as a sentence, never as a failure.
     State(String),
@@ -316,9 +364,10 @@ fn state_sentence(code: &str) -> Option<String> {
             "This room has no workspace container yet \u{2014} provisioning is an owner act, \
              by API for now."
         }
-        "repo_unbound" => {
-            "No repo is bound to this room yet \u{2014} binding is an owner act, by API for now."
-        }
+        "repo_unbound" => "No repo is bound to this room yet.",
+        // The daemon's owner gate answering a non-principal actor. For the
+        // people it refuses this is how the room is shaped, not a fault.
+        "workspace_not_owner_principal" => "Only the room owner can change the repo binding.",
         "repo_cloning" => "A clone is already running for this room.",
         "build_running" => {
             "A build is already running in this room \u{2014} wait for it to finish."
@@ -341,6 +390,7 @@ fn failure_sentence(code: &str) -> Option<String> {
             "An agent's workspace command is run by the daemon, not from here."
         }
         "room_access_revoked" => "This room's federation access was revoked.",
+        "workspace_actor_unmapped" => "Your identity doesn't map to this room's compute service.",
         "workspace_unavailable" => "The room's compute service can't be reached right now.",
         "workspace_upstream_protocol" => {
             "The room's compute service answered something this surface can't read."
@@ -438,6 +488,8 @@ fn classify_command(command: RepoCommand, status: u16, body: Option<RepoBody>) -
         RepoCommand::Clone => "clone",
         RepoCommand::Build => "build",
         RepoCommand::Ci => "CI check",
+        RepoCommand::Bind => "bind",
+        RepoCommand::Unbind => "unbind",
     };
     let Some(body) = body else {
         return CommandOutcome::Failure(format!("The {noun} reply could not be read ({status})."));
@@ -461,6 +513,19 @@ fn classify_command(command: RepoCommand, status: u16, body: Option<RepoBody>) -
                 // gh ran and reported — 200 with a failed outcome, and its
                 // stderr guidance is the whole answer.
                 return CommandOutcome::Failure(ci_failure_sentence(&ci, body.stderr.as_deref()));
+            }
+        }
+        RepoCommand::Bind => {
+            if let Some(repo) = body.repo {
+                return CommandOutcome::Bound(Box::new(repo));
+            }
+        }
+        RepoCommand::Unbind => {
+            if body.unbound == Some(true) {
+                return CommandOutcome::Unbound {
+                    checkout_removed: body.checkout_removed == Some(true),
+                    reason: body.checkout_removed_reason,
+                };
             }
         }
     }
@@ -516,6 +581,38 @@ fn build_sentence(report: &BuildReport) -> String {
         ("succeeded", _) => format!("Build `{}` succeeded{took}.", report.script),
         (_, Some(code)) => format!("Build `{}` exited {code}{took}.", report.script),
         _ => format!("Build `{}` {}{took}.", report.script, report.outcome),
+    }
+}
+
+/// The sentence a landed bind earns. The clone hint is the next act: a fresh
+/// binding is `pending` until someone clones it in.
+fn bound_sentence(repo: &RepoProjection) -> String {
+    let label = remote_label(&repo.remote);
+    if label.is_empty() {
+        "Repo bound \u{2014} clone it to bring it into the workspace.".to_string()
+    } else {
+        format!("Bound {label} \u{2014} clone it to bring it into the workspace.")
+    }
+}
+
+/// The sentence a landed unbind earns — honest about the checkout, because
+/// Bedrock deletes it with the binding and reports whether that worked. A
+/// checkout it could not remove stops being excluded from the flush, so the
+/// leftover matters enough to say.
+fn unbind_sentence(checkout_removed: bool, reason: Option<&str>) -> String {
+    if checkout_removed {
+        return "Repo unbound \u{2014} the workspace checkout was removed.".to_string();
+    }
+    match reason {
+        Some("no_container") => {
+            "Repo unbound. No container was live, so there was no checkout to remove.".to_string()
+        }
+        Some("rm_failed") => {
+            "Repo unbound, but the checkout could not be removed \u{2014} its files will flush \
+             as ordinary room files."
+                .to_string()
+        }
+        _ => "Repo unbound.".to_string(),
     }
 }
 
@@ -726,6 +823,42 @@ fn script_refusal(script: &str) -> Option<String> {
     None
 }
 
+/// `script_refusal`'s rule for the one field a bind requires. Everything
+/// else — scheme, host allowlist, branch grammar — is `validateRepoBinding`'s
+/// judgment, relayed in its own words.
+fn bind_refusal(remote: &str) -> Option<String> {
+    if remote.trim().is_empty() {
+        return Some("A binding names a remote URL.".to_string());
+    }
+    None
+}
+
+/// Exactly the keys `validateRepoBinding` admits, and only when given —
+/// the payload is strict deny-extra upstream, and an omitted `branch` or
+/// `dir` is how the upstream defaults stay upstream's.
+fn bind_payload(remote: &str, branch: &str, dir: &str) -> serde_json::Value {
+    let mut payload = serde_json::Map::new();
+    payload.insert(
+        "remote".to_string(),
+        serde_json::Value::String(remote.trim().to_string()),
+    );
+    let branch = branch.trim();
+    if !branch.is_empty() {
+        payload.insert(
+            "branch".to_string(),
+            serde_json::Value::String(branch.to_string()),
+        );
+    }
+    let dir = dir.trim();
+    if !dir.is_empty() {
+        payload.insert(
+            "dir".to_string(),
+            serde_json::Value::String(dir.to_string()),
+        );
+    }
+    serde_json::Value::Object(payload)
+}
+
 /// Whether the repo section exists for this room at all. Only a federated
 /// room has a Bedrock workspace; a Local room renders nothing rather than a
 /// refusal, and `None` (no room open / still loading) also renders nothing.
@@ -777,6 +910,14 @@ pub struct RoomRepoState {
     /// The script the build control will name. Room-scoped; reset() returns
     /// it to the convention.
     build_script: RwSignal<String>,
+    /// The bind form's three fields. Room-scoped like the script; empty
+    /// `branch`/`dir` mean "let upstream default", so empty is the reset.
+    bind_remote: RwSignal<String>,
+    bind_branch: RwSignal<String>,
+    bind_dir: RwSignal<String>,
+    /// Whether the unbind control is one click from firing. Unbind deletes
+    /// the checkout, so the first click only arms this.
+    confirm_unbind: RwSignal<bool>,
     /// The recorded CI view: read on open from Bedrock's table (no
     /// container run), replaced wholesale by a pull's reply.
     checks: RwSignal<Option<ChecksView>>,
@@ -803,6 +944,10 @@ impl RoomRepoState {
             panel: RwSignal::new(false),
             open_ref: NodeRef::new(),
             build_script: RwSignal::new(DEFAULT_BUILD_SCRIPT.to_string()),
+            bind_remote: RwSignal::new(String::new()),
+            bind_branch: RwSignal::new(String::new()),
+            bind_dir: RwSignal::new(String::new()),
+            confirm_unbind: RwSignal::new(false),
             checks: RwSignal::new(None),
             ticket: RwSignal::new(0),
             checks_ticket: RwSignal::new(0),
@@ -817,8 +962,10 @@ impl RoomRepoState {
     }
 
     /// Close the panel and hand focus back to the control that opened it.
+    /// A reopened panel must not resume a primed unbind confirm.
     pub fn close_panel(&self) {
         self.panel.set(false);
+        self.confirm_unbind.set(false);
         if let Some(open) = self.open_ref.get_untracked() {
             let _ = open.focus();
         }
@@ -847,6 +994,10 @@ impl RoomRepoState {
         self.working.set(None);
         self.panel.set(false);
         self.build_script.set(DEFAULT_BUILD_SCRIPT.to_string());
+        self.bind_remote.set(String::new());
+        self.bind_branch.set(String::new());
+        self.bind_dir.set(String::new());
+        self.confirm_unbind.set(false);
     }
 
     /// Read the binding, foreground: the rail shows the read happening. A
@@ -996,6 +1147,60 @@ impl RoomRepoState {
         });
     }
 
+    /// Bind a remote. The reply carries the fresh projection, but the view
+    /// is re-read through `GET repo` instead — the mutation's word never
+    /// becomes the panel's, so bind renders exactly what any reload would.
+    fn bind_repo(&self, rooms: Rooms, key: String, actor: String) {
+        let remote = self.bind_remote.get_untracked();
+        if let Some(refusal) = bind_refusal(&remote) {
+            self.error.set(Some((RepoErrorSource::Command, refusal)));
+            return;
+        }
+        let payload = bind_payload(
+            &remote,
+            &self.bind_branch.get_untracked(),
+            &self.bind_dir.get_untracked(),
+        );
+        let base = self.base();
+        let me = *self;
+        let generation = rooms.generation_snapshot();
+        self.working.set(Some(RepoCommand::Bind));
+        self.error.set(None);
+        self.note.set(None);
+        spawn_local(async move {
+            let url = bind_url(&base, &key, &actor);
+            let outcome = post_command(RepoCommand::Bind, &url, &payload).await;
+            let current = rooms.room_is_current(generation, &key);
+            let landed = matches!(outcome, CommandOutcome::Bound(_));
+            me.publish_command(outcome, current);
+            if current && landed {
+                me.fetch(rooms, key, actor);
+            }
+        });
+    }
+
+    /// Unbind the repo. `{}` because the lane demands a JSON object even
+    /// though the upstream DELETE reads none; the readback re-proves the
+    /// unbound state the same way bind re-proves the binding.
+    fn unbind_repo(&self, rooms: Rooms, key: String, actor: String) {
+        let base = self.base();
+        let me = *self;
+        let generation = rooms.generation_snapshot();
+        self.working.set(Some(RepoCommand::Unbind));
+        self.error.set(None);
+        self.note.set(None);
+        spawn_local(async move {
+            let url = unbind_url(&base, &key, &actor);
+            let outcome = post_command(RepoCommand::Unbind, &url, &serde_json::json!({})).await;
+            let current = rooms.room_is_current(generation, &key);
+            let landed = matches!(outcome, CommandOutcome::Unbound { .. });
+            me.publish_command(outcome, current);
+            if current && landed {
+                me.fetch(rooms, key, actor);
+            }
+        });
+    }
+
     /// Publish a completed command — but only into the room that started it.
     /// `room_is_current` is the caller's `(generation, key)` re-validation,
     /// taken as an argument so every arm is reachable from a native test.
@@ -1013,6 +1218,16 @@ impl RoomRepoState {
                 self.view.set(Some(RepoView::Bound(*repo)));
             }
             CommandOutcome::Built(report) => self.note.set(Some(build_sentence(&report))),
+            // The view deliberately stays as it was: the caller's readback
+            // is what moves it, so the panel never renders a state only a
+            // mutation reply has claimed.
+            CommandOutcome::Bound(repo) => self.note.set(Some(bound_sentence(&repo))),
+            CommandOutcome::Unbound {
+                checkout_removed,
+                reason,
+            } => self
+                .note
+                .set(Some(unbind_sentence(checkout_removed, reason.as_deref()))),
             CommandOutcome::Checked(report, checks) => {
                 self.note.set(Some(ci_sentence(&report)));
                 self.checks.set(Some(ChecksView::Recorded(checks)));
@@ -1351,18 +1566,19 @@ pub fn RoomRepo(rooms: Rooms, state: RoomRepoState, writes_allowed: Signal<bool>
                                             panel_bound(state, actor, rooms, can_run, repo)
                                                 .into_any()
                                         }
-                                        Some(RepoView::Unbound) => view! {
-                                            <div class="rooms-workspace__repo-note">
-                                                "No repo is bound to this room yet."
-                                            </div>
-                                        }.into_any(),
+                                        Some(RepoView::Unbound) => {
+                                            panel_unbound(state, actor, rooms, can_run)
+                                                .into_any()
+                                        }
                                         _ => ().into_any(),
                                     }}
-                                    // The honest boundary, stated where the
-                                    // missing controls would otherwise be.
+                                    // Owner-gated on the wire, not here:
+                                    // this surface cannot run the identity
+                                    // map, so the controls render for every
+                                    // member and the typed refusal answers.
                                     <div class="rooms-workspace__repo-footnote">
-                                        "Binding or unbinding the repo is an owner act, \
-                                         done over the Bedrock API for now."
+                                        "Binding and unbinding are owner acts \u{2014} \
+                                         the daemon refuses them for anyone else."
                                     </div>
                                 </div>
                             </div>
@@ -1371,6 +1587,73 @@ pub fn RoomRepo(rooms: Rooms, state: RoomRepoState, writes_allowed: Signal<bool>
                 </div>
             }.into_any()
         }}
+    }
+}
+
+/// The panel when no repo is bound: the answer, and the owner's bind form.
+/// Rendered for every member — the daemon's owner gate is the authority,
+/// and its typed refusal reads as a calm sentence here, not a failure.
+fn panel_unbound(
+    state: RoomRepoState,
+    actor: impl Fn() -> Option<(String, String)> + Copy + Send + Sync + 'static,
+    rooms: Rooms,
+    can_run: impl Fn() -> bool + Copy + Send + Sync + 'static,
+) -> impl IntoView {
+    view! {
+        <div class="rooms-workspace__repo-note">
+            "No repo is bound to this room yet."
+        </div>
+        <div class="rooms-workspace__repo-bind">
+            <input
+                class="rooms-workspace__repo-input"
+                type="text"
+                aria-label="Remote URL to bind"
+                placeholder="https://github.com/org/repo.git"
+                prop:value=move || state.bind_remote.get()
+                on:input=move |ev| state.bind_remote.set(event_target_value(&ev))
+            />
+            // Empty means upstream's defaults — `main`, and Bedrock's
+            // checkout dir — so the placeholders name them instead of
+            // this side pre-filling values it would then have to send.
+            <div class="rooms-workspace__repo-bind-pair">
+                <input
+                    class="rooms-workspace__repo-input"
+                    type="text"
+                    aria-label="Branch (defaults to main)"
+                    placeholder="main"
+                    prop:value=move || state.bind_branch.get()
+                    on:input=move |ev| state.bind_branch.set(event_target_value(&ev))
+                />
+                <input
+                    class="rooms-workspace__repo-input"
+                    type="text"
+                    aria-label="Checkout directory (defaults to repo)"
+                    placeholder="repo"
+                    prop:value=move || state.bind_dir.get()
+                    on:input=move |ev| state.bind_dir.set(event_target_value(&ev))
+                />
+            </div>
+            <div class="rooms-workspace__repo-actions">
+                <button
+                    class="rooms-workspace__repo-run"
+                    type="button"
+                    title="Bind this remote as the room's repo"
+                    disabled=move || !can_run()
+                    on:click=move |_| {
+                        let Some((key, actor_id)) = actor() else { return };
+                        state.bind_repo(rooms, key, actor_id);
+                    }
+                >
+                    {move || {
+                        if state.working.get() == Some(RepoCommand::Bind) {
+                            "binding\u{2026}"
+                        } else {
+                            "bind"
+                        }
+                    }}
+                </button>
+            </div>
+        </div>
     }
 }
 
@@ -1525,6 +1808,57 @@ fn panel_bound(
                 }
             }
         }}
+
+        // Unbinding deletes the checkout with the binding, so the first
+        // click only arms the confirm — a second, separate click fires.
+        <div class="rooms-workspace__repo-unbind">
+            {move || {
+                if state.confirm_unbind.get() {
+                    view! {
+                        <span class="rooms-workspace__repo-unbind-warn">
+                            "Unbinding deletes the workspace checkout."
+                        </span>
+                        <button
+                            class="rooms-workspace__repo-run rooms-workspace__repo-run--danger"
+                            type="button"
+                            disabled=move || !can_run()
+                            on:click=move |_| {
+                                let Some((key, actor_id)) = actor() else { return };
+                                state.confirm_unbind.set(false);
+                                state.unbind_repo(rooms, key, actor_id);
+                            }
+                        >
+                            "unbind"
+                        </button>
+                        <button
+                            class="rooms-workspace__repo-run"
+                            type="button"
+                            on:click=move |_| state.confirm_unbind.set(false)
+                        >
+                            "keep"
+                        </button>
+                    }.into_any()
+                } else {
+                    view! {
+                        <button
+                            class="rooms-workspace__repo-run rooms-workspace__repo-run--danger"
+                            type="button"
+                            title="Unbind this room's repo \u{2014} deletes the workspace checkout"
+                            disabled=move || !can_run()
+                            on:click=move |_| state.confirm_unbind.set(true)
+                        >
+                            {move || {
+                                if state.working.get() == Some(RepoCommand::Unbind) {
+                                    "unbinding\u{2026}"
+                                } else {
+                                    "unbind\u{2026}"
+                                }
+                            }}
+                        </button>
+                    }.into_any()
+                }
+            }}
+        </div>
     }
 }
 
@@ -1589,6 +1923,10 @@ mod tests {
             panel: RwSignal::new(false),
             open_ref: NodeRef::new(),
             build_script: RwSignal::new(DEFAULT_BUILD_SCRIPT.to_string()),
+            bind_remote: RwSignal::new(String::new()),
+            bind_branch: RwSignal::new(String::new()),
+            bind_dir: RwSignal::new(String::new()),
+            confirm_unbind: RwSignal::new(false),
             checks: RwSignal::new(None),
             ticket: RwSignal::new(0),
             checks_ticket: RwSignal::new(0),
@@ -1902,6 +2240,197 @@ mod tests {
                 "This Ocean deployment doesn't expose that workspace route.".to_string()
             )
         );
+    }
+
+    // ---- the owner verbs ----------------------------------------------------
+
+    /// The bind payload is strict deny-extra upstream: exactly the admitted
+    /// keys, trimmed, and an empty `branch`/`dir` is OMITTED so the upstream
+    /// defaults (`main`, Bedrock's checkout dir) stay upstream's.
+    #[test]
+    fn a_bind_payload_carries_exactly_what_was_given() {
+        let full = bind_payload(" https://github.com/acme/site.git ", "trunk", "site");
+        assert_eq!(
+            full,
+            serde_json::json!({
+                "remote": "https://github.com/acme/site.git",
+                "branch": "trunk",
+                "dir": "site"
+            })
+        );
+        let sparse = bind_payload("https://github.com/acme/site.git", "  ", "");
+        assert_eq!(
+            sparse,
+            serde_json::json!({"remote": "https://github.com/acme/site.git"})
+        );
+    }
+
+    #[test]
+    fn an_empty_remote_is_refused_before_the_wire() {
+        assert!(bind_refusal("  ").is_some());
+        assert!(bind_refusal("").is_some());
+        assert!(bind_refusal("https://github.com/acme/site.git").is_none());
+    }
+
+    /// A landed bind answers with the projection (200 on re-bind, 201 on
+    /// first bind — both are the same answer here), and the sentence points
+    /// at the next act.
+    #[test]
+    fn a_landed_bind_is_bound_and_points_at_the_clone() {
+        let outcome = classify_command(RepoCommand::Bind, 201, Some(body(bound_json())));
+        let CommandOutcome::Bound(repo) = outcome else {
+            panic!("expected Bound, got {outcome:?}");
+        };
+        let sentence = bound_sentence(&repo);
+        assert!(sentence.contains("acme/site"), "got: {sentence}");
+        assert!(sentence.contains("clone"), "got: {sentence}");
+    }
+
+    /// The daemon's owner gate answering a non-principal actor is how the
+    /// room is shaped for that caller — a state in a calm voice, never a
+    /// failure alert.
+    #[test]
+    fn a_non_principal_bind_is_a_state_not_a_failure() {
+        let gated = body(
+            r#"{"ok": false, "code": "workspace_not_owner_principal",
+                "error": "an owner verb forwards only for the principal this room's credential speaks for"}"#,
+        );
+        let outcome = classify_command(RepoCommand::Bind, 403, Some(gated));
+        let CommandOutcome::State(sentence) = outcome else {
+            panic!("expected State, got {outcome:?}");
+        };
+        assert!(sentence.contains("room owner"), "got: {sentence}");
+    }
+
+    /// Bedrock's own owner check throws WITHOUT a code — prose only — and
+    /// that prose must reach the operator through the fallthrough.
+    #[test]
+    fn bedrocks_owner_refusal_reads_in_its_own_words() {
+        let refused =
+            body(r#"{"error": "Only the room owner may change the shape of the room workspace."}"#);
+        let outcome = classify_command(RepoCommand::Unbind, 403, Some(refused));
+        let CommandOutcome::Failure(sentence) = outcome else {
+            panic!("expected Failure, got {outcome:?}");
+        };
+        assert!(sentence.contains("room owner"), "got: {sentence}");
+    }
+
+    /// `validateRepoBinding`'s judgments arrive as thrown 400s whose message
+    /// is the guidance — an ssh remote, a flag-shaped branch. Relayed, not
+    /// rewritten.
+    #[test]
+    fn a_rejected_binding_reads_in_bedrocks_words() {
+        let rejected = body(
+            r#"{"ok": false,
+                "error": "remote must use https://. ssh, git, http, and file remotes are refused.",
+                "details": {"code": "repo_remote_rejected"}}"#,
+        );
+        let outcome = classify_command(RepoCommand::Bind, 400, Some(rejected));
+        let CommandOutcome::Failure(sentence) = outcome else {
+            panic!("expected Failure, got {outcome:?}");
+        };
+        assert!(sentence.contains("https://"), "got: {sentence}");
+    }
+
+    /// The unbind reply's `checkout_removed` is the honest half of the
+    /// answer: gone, nothing to remove, or left behind where the next flush
+    /// will treat it as room files.
+    #[test]
+    fn an_unbind_reports_the_checkout_honestly() {
+        let gone = body(r#"{"unbound": true, "checkout_removed": true}"#);
+        let outcome = classify_command(RepoCommand::Unbind, 200, Some(gone));
+        assert_eq!(
+            outcome,
+            CommandOutcome::Unbound {
+                checkout_removed: true,
+                reason: None
+            }
+        );
+        assert!(unbind_sentence(true, None).contains("checkout was removed"));
+
+        let dark = body(
+            r#"{"unbound": true, "checkout_removed": false,
+                "checkout_removed_reason": "no_container"}"#,
+        );
+        let CommandOutcome::Unbound {
+            checkout_removed,
+            reason,
+        } = classify_command(RepoCommand::Unbind, 200, Some(dark))
+        else {
+            panic!("expected Unbound");
+        };
+        assert!(!checkout_removed);
+        let sentence = unbind_sentence(checkout_removed, reason.as_deref());
+        assert!(sentence.contains("No container"), "got: {sentence}");
+
+        let stuck = unbind_sentence(false, Some("rm_failed"));
+        assert!(stuck.contains("could not be removed"), "got: {stuck}");
+        assert!(stuck.contains("room files"), "got: {stuck}");
+    }
+
+    /// Losing an unbind race is Bedrock's thrown `repo_unbound` — already an
+    /// answer ("nothing is bound"), so it renders as the state it is.
+    #[test]
+    fn an_unbind_race_is_a_state() {
+        let raced = body(
+            r#"{"ok": false, "error": "This room has no repo bound to it.",
+                "details": {"code": "repo_unbound"}}"#,
+        );
+        let outcome = classify_command(RepoCommand::Unbind, 409, Some(raced));
+        let CommandOutcome::State(sentence) = outcome else {
+            panic!("expected State, got {outcome:?}");
+        };
+        assert!(sentence.contains("No repo is bound"), "got: {sentence}");
+    }
+
+    #[test]
+    fn an_unmapped_actor_is_a_failure_in_words() {
+        let unmapped = body(
+            r#"{"ok": false, "code": "workspace_actor_unmapped",
+                "error": "the asserted actor resolves to no Bedrock member id on this daemon"}"#,
+        );
+        let outcome = classify_command(RepoCommand::Bind, 403, Some(unmapped));
+        assert_eq!(
+            outcome,
+            CommandOutcome::Failure(
+                "Your identity doesn't map to this room's compute service.".to_string()
+            )
+        );
+    }
+
+    /// Neither owner verb trusts its mutation reply into the view: the note
+    /// carries the outcome and the caller's readback moves the panel, so
+    /// what renders is always what a fresh read would answer.
+    #[test]
+    fn owner_verbs_note_but_never_move_the_view() {
+        let state = fresh_state();
+        state.working.set(Some(RepoCommand::Bind));
+        let repo = RepoProjection {
+            remote: "https://github.com/acme/site.git".into(),
+            branch: "main".into(),
+            clone_status: "pending".into(),
+            head_sha: None,
+            last_cloned_at: None,
+            clone_error: None,
+        };
+        state.publish_command(CommandOutcome::Bound(Box::new(repo)), true);
+        assert_eq!(state.working.get_untracked(), None);
+        assert_eq!(state.view.get_untracked(), None);
+        let note = state.note.get_untracked().unwrap();
+        assert!(note.contains("acme/site"), "got: {note}");
+
+        state.working.set(Some(RepoCommand::Unbind));
+        state.publish_command(
+            CommandOutcome::Unbound {
+                checkout_removed: true,
+                reason: None,
+            },
+            true,
+        );
+        assert_eq!(state.working.get_untracked(), None);
+        assert_eq!(state.view.get_untracked(), None);
+        let note = state.note.get_untracked().unwrap();
+        assert!(note.contains("unbound"), "got: {note}");
     }
 
     // ---- the recorded CI read -----------------------------------------------
@@ -2344,6 +2873,8 @@ mod tests {
         );
         assert!(clone_url("http://d", "k", "a").ends_with("/workspace/repo/clone?actor_id=a"));
         assert!(build_url("http://d", "k", "a").ends_with("/workspace/repo/build?actor_id=a"));
+        assert!(bind_url("http://d", "k", "a").ends_with("/workspace/repo/bind?actor_id=a"));
+        assert!(unbind_url("http://d", "k", "a").ends_with("/workspace/repo/unbind?actor_id=a"));
     }
 
     #[test]

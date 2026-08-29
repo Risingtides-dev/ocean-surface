@@ -3071,8 +3071,56 @@
   outline-offset: 1px;
 }
 
-/* The honest boundary: bind/unbind are owner acts this surface does not
-   offer, and saying so beats a control that pretends. */
+/* ── Bind and unbind: the owner verbs ───────────────────────────────── */
+
+/* The bind form: the remote gets the full measure — URLs need it —
+   branch and dir share the next line. Owner-gated on the wire, not
+   here, so the form renders for every member. */
+.rooms-workspace__repo-bind {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.rooms-workspace__repo-bind-pair {
+  display: flex;
+  gap: 8px;
+}
+
+/* The column's own gap spaces the action row; the standalone margin
+   would double it. */
+.rooms-workspace__repo-bind .rooms-workspace__repo-actions {
+  margin-top: 0;
+}
+
+/* Unbind deletes the workspace checkout, so the control wears the risk
+   and the first click only arms a confirm. */
+.rooms-workspace__repo-unbind {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.rooms-workspace__repo-run--danger {
+  border-color: var(--err);
+  color: var(--err);
+}
+
+.rooms-workspace__repo-run--danger:hover:not(:disabled) {
+  background: var(--err-soft);
+}
+
+.rooms-workspace__repo-unbind-warn {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--err);
+}
+
+/* The honest boundary, now the gate's rather than a missing control's:
+   the verbs are here, and the daemon refuses non-owners in type. */
 .rooms-workspace__repo-footnote {
   margin-top: 14px;
   font-size: 11px;
