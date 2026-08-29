@@ -16,8 +16,42 @@ use crate::room_messages;
 use crate::rooms::{
     CreateResolution, FederatedActorType, FederatedRoomMemberProjection, FederatedRoomRole,
     MemberPresence, OutboxItemState, Room, RoomAccessProjection, RoomAccessState, RoomMessage,
-    RoomMessageKind, RoomParticipant, RoomParticipantKind, RoomReadCursorProjection, Rooms,
+    RoomMessageKind, RoomParticipant, RoomParticipantKind, RoomReadCursorProjection,
+    RoomTriggerPolicy, Rooms,
 };
+
+// ── Auto-reply policy (room creation) ──────────────────────────────────────
+//
+// A room's trigger policy is what makes its agents wake up on their own. The
+// daemon accepts it on `POST /v1/rooms/persistent` and evaluates it on every
+// non-agent message, but nothing in this surface ever set one, so auto-reply
+// was unreachable from the product.
+//
+// Only the two flags the daemon actually fires are exposed here.
+// `RoomTriggerPolicy` also carries `on_component_event` and `on_schedule`,
+// and `evaluate_trigger_policy` honors both — but their `RoomTriggerEvent`
+// variants are constructed nowhere in ocean-os outside ocean-core's own unit
+// tests (there is no cron scheduler), so offering them would be a control
+// that silently does nothing. They stay at their defaults until the daemon
+// emits those events.
+
+/// Build the create-time policy from the two live toggles.
+///
+/// Returns `None` when neither is set so an untouched create sends exactly
+/// the wire shape it always did — a room with no policy and one whose flags
+/// are all false behave identically, and `None` keeps the stored record (and
+/// the workspace's policy summary) honest about the reader never having asked
+/// for auto-reply.
+fn trigger_policy_from_toggles(
+    on_mention: bool,
+    on_thread_reply: bool,
+) -> Option<RoomTriggerPolicy> {
+    (on_mention || on_thread_reply).then(|| RoomTriggerPolicy {
+        on_mention,
+        on_thread_reply,
+        ..RoomTriggerPolicy::default()
+    })
+}
 
 // ── Production helpers (testable directly, called from Effects) ─
 
@@ -973,6 +1007,11 @@ pub fn RoomsWorkspace(
 ) -> impl IntoView {
     // ── Left-rail: create form signals ────────────────────────────────
     let new_room_name = RwSignal::new(String::new());
+    // Auto-reply opt-ins for the room being created. Default off: creating a
+    // room without touching them sends the same `None` policy as before, so
+    // no existing flow changes behavior.
+    let new_room_on_mention = RwSignal::new(false);
+    let new_room_on_thread_reply = RwSignal::new(false);
 
     // ── Members rail: agent-builder form state ────────────────────────
     // Constructed HERE, at component scope, not inside the members-rail
@@ -1466,7 +1505,13 @@ pub fn RoomsWorkspace(
         if name.trim().is_empty() {
             return;
         }
-        let op_id = rooms.create_room(name.clone(), None);
+        let op_id = rooms.create_room(
+            name.clone(),
+            trigger_policy_from_toggles(
+                new_room_on_mention.get_untracked(),
+                new_room_on_thread_reply.get_untracked(),
+            ),
+        );
         if op_id == 0 {
             // Synchronous rejection — empty name or slug. Don't set
             // pending; the name field already shows the error via status.
@@ -1498,6 +1543,10 @@ pub fn RoomsWorkspace(
         match Rooms::resolve_create_op(current_op, my_op, outcome.as_ref()) {
             CreateResolution::Success => {
                 new_room_name.set(String::new());
+                // Opt-ins are per-room, not sticky: the next room starts from
+                // the same default as the first.
+                new_room_on_mention.set(false);
+                new_room_on_thread_reply.set(false);
                 pending_create.set(false);
             }
             CreateResolution::KeepDraft => {
@@ -2305,7 +2354,37 @@ pub fn RoomsWorkspace(
                         }
                         disabled=move || pending_create.get()
                     />
-                    />
+                    // Auto-reply opt-ins for the room about to be created.
+                    // Only the triggers the daemon actually fires are offered.
+                    <fieldset class="rooms-workspace__create-policy">
+                        <legend class="rooms-workspace__create-policy-legend">
+                            "Agents reply automatically"
+                        </legend>
+                        <label class="rooms-workspace__create-policy-row">
+                            <input
+                                type="checkbox"
+                                class="rooms-workspace__create-policy-box"
+                                prop:checked=move || new_room_on_mention.get()
+                                on:change=move |ev| {
+                                    new_room_on_mention.set(event_target_checked(&ev))
+                                }
+                                disabled=move || pending_create.get()
+                            />
+                            <span>"when @mentioned"</span>
+                        </label>
+                        <label class="rooms-workspace__create-policy-row">
+                            <input
+                                type="checkbox"
+                                class="rooms-workspace__create-policy-box"
+                                prop:checked=move || new_room_on_thread_reply.get()
+                                on:change=move |ev| {
+                                    new_room_on_thread_reply.set(event_target_checked(&ev))
+                                }
+                                disabled=move || pending_create.get()
+                            />
+                            <span>"on thread replies"</span>
+                        </label>
+                    </fieldset>
                 </div>
             </div>
 
@@ -4832,6 +4911,65 @@ mod tests {
         assert!(!message_send_admitted(true, false, true, "hello"));
         assert!(!message_send_admitted(false, true, true, "hello"));
         assert!(message_send_admitted(false, false, true, " hello "));
+    }
+
+    // ── Create-time auto-reply policy ───────────────────────────────────
+
+    /// An untouched create must send exactly the wire shape it always did.
+    #[test]
+    fn no_toggles_sends_no_policy() {
+        assert_eq!(trigger_policy_from_toggles(false, false), None);
+    }
+
+    #[test]
+    fn toggles_map_to_their_own_flags_only() {
+        let mention = trigger_policy_from_toggles(true, false).expect("policy");
+        assert!(mention.on_mention);
+        assert!(!mention.on_thread_reply);
+
+        let thread = trigger_policy_from_toggles(false, true).expect("policy");
+        assert!(!thread.on_mention);
+        assert!(thread.on_thread_reply);
+
+        let both = trigger_policy_from_toggles(true, true).expect("policy");
+        assert!(both.on_mention);
+        assert!(both.on_thread_reply);
+    }
+
+    /// The daemon honors `on_component_event` and `on_schedule` in its
+    /// evaluator, but constructs neither event outside ocean-core's unit
+    /// tests. This surface must never set them — a control that silently
+    /// does nothing is worse than no control.
+    #[test]
+    fn dormant_trigger_flags_are_never_set() {
+        for (mention, thread) in [(true, false), (false, true), (true, true)] {
+            let policy = trigger_policy_from_toggles(mention, thread).expect("policy");
+            assert!(
+                !policy.on_component_event,
+                "on_component_event has no daemon emitter and must stay unset"
+            );
+            assert_eq!(
+                policy.on_schedule, None,
+                "on_schedule has no daemon scheduler and must stay unset"
+            );
+        }
+    }
+
+    /// The create-time opt-ins must reach the markup — the whole point is
+    /// that auto-reply stops being unreachable from the product.
+    #[test]
+    fn create_policy_toggles_are_styled_and_emitted() {
+        let css = include_str!("../../../styles/rooms-workspace.css");
+        let row = ["rooms-workspace__create-policy", "-row"].concat();
+        assert!(
+            css.contains(&format!(".{row}")),
+            "policy rows must stay styled"
+        );
+        let markup = include_str!("rooms_workspace.rs");
+        assert!(
+            markup.contains(&format!("class=\"{row}\"")),
+            "the create form must emit the auto-reply opt-ins"
+        );
     }
 
     // ── Behavioral: resolve_create_op (production helper from rooms.rs) ──
