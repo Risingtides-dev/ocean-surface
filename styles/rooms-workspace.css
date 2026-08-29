@@ -3043,6 +3043,85 @@
   color: var(--fg-4);
 }
 
+/* ── Recorded CI: the checks Bedrock's table already knows ─────────── */
+
+/* Read on open with no container run, replaced wholesale by a pull's
+   reply. Mono rows for the rail line's reason: name, verdict and sha are
+   compared character by character. */
+.rooms-workspace__repo-ci {
+  margin-top: 14px;
+}
+
+.rooms-workspace__repo-ci-title {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg-4);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__repo-ci-list {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rooms-workspace__repo-check {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.rooms-workspace__repo-check-line {
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-2);
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+a.rooms-workspace__repo-check-line:hover {
+  color: var(--fg);
+  text-decoration: underline;
+}
+
+.rooms-workspace__repo-check-line--good {
+  color: var(--ok);
+}
+
+.rooms-workspace__repo-check-line--bad {
+  color: var(--err);
+}
+
+/* The pull reply's own flag: a result this room had not recorded. */
+.rooms-workspace__repo-check-new {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* When this room first saw the result — the recorded read's field. */
+.rooms-workspace__repo-check-seen {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--fg-4);
+  white-space: nowrap;
+}
+
 /* ═══ WORKSPACE — status glance and command history ══════════════════
    The read half of the repo section's lane: what the room's container is,
    and what has run in it. Rail contract as its neighbours: a fixed sliver,
