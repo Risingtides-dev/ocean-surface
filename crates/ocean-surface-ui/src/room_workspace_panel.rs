@@ -95,6 +95,11 @@ const EXEC_LIST_LIMIT: u32 = 30;
 /// with this line, which is also what makes builds recognizable here.
 const BUILD_COMMAND_MARKER: &str = "# ocean-room-build";
 
+/// Bedrock's CI marker (`CI_COMMAND_MARKER` in src/room-ci.mjs): a CI pull
+/// records its gh invocation under this line. Unlike the build marker it
+/// guards no claim, so here it is only bookkeeping for the headline to shed.
+const CI_COMMAND_MARKER: &str = "# ocean-room-ci";
+
 /// Where the file browse starts and snaps back to on open: bedrock's
 /// `WORKSPACE_ROOT` (src/compute/driver.mjs).
 const WORKSPACE_ROOT_PATH: &str = "/workspace";
@@ -544,13 +549,14 @@ fn is_build(command: &str) -> bool {
     command.starts_with(BUILD_COMMAND_MARKER)
 }
 
-/// The one line a row leads with. Build rows shed the marker line — the
-/// member wrote `npm run build`, not the bookkeeping above it — and a
-/// multi-line command shows its first line with an ellipsis; the full text
-/// rides the row's title attribute.
+/// The one line a row leads with. Build and CI rows shed their marker line
+/// — the member wrote `npm run build` or asked gh, not the bookkeeping
+/// above it — and a multi-line command shows its first line with an
+/// ellipsis; the full text rides the row's title attribute.
 fn command_headline(command: &str) -> String {
-    let shown = command
-        .strip_prefix(BUILD_COMMAND_MARKER)
+    let shown = [BUILD_COMMAND_MARKER, CI_COMMAND_MARKER]
+        .into_iter()
+        .find_map(|marker| command.strip_prefix(marker))
         .map(str::trim_start)
         .filter(|rest| !rest.is_empty())
         .unwrap_or(command)
@@ -2259,6 +2265,48 @@ mod tests {
         // A marker with nothing after it still names itself rather than
         // vanishing into an unnameable row.
         assert_eq!(command_headline("# ocean-room-build"), "# ocean-room-build");
+    }
+
+    /// A CI pull's row headlines the gh line the pull actually ran, not the
+    /// bookkeeping marker above it — the same shed the build marker gets.
+    #[test]
+    fn a_ci_row_headlines_its_gh_line() {
+        let command = "# ocean-room-ci\ngh run list --branch 'main' --status completed";
+        assert_eq!(
+            command_headline(command),
+            "gh run list --branch 'main' --status completed"
+        );
+        assert!(!is_build(command), "a CI pull is not a build");
+        // Same self-naming rule as the build marker.
+        assert_eq!(command_headline("# ocean-room-ci"), "# ocean-room-ci");
+    }
+
+    /// The last-build sentence keys on the build marker alone. Today the two
+    /// markers' prefixes diverge ("# ocean-room-b…" vs "# ocean-room-ci"),
+    /// so a CI pull cannot masquerade as a build; this test exists so no
+    /// refactor of the marker handling ever lets one.
+    #[test]
+    fn a_ci_pull_never_captures_the_last_build_sentence() {
+        let exec = |command: &str| ExecRow {
+            command: command.to_string(),
+            status: "exited".to_string(),
+            exit_code: Some(0),
+            ..ExecRow::default()
+        };
+        let rows = vec![
+            exec("# ocean-room-ci\ngh run list --branch 'main' --status completed"),
+            exec("# ocean-room-build\nnpm run build"),
+        ];
+        assert_eq!(
+            last_build_sentence(&rows).as_deref(),
+            Some("Last build succeeded \u{2014} npm run build."),
+            "a newer CI pull must not shadow the real last build"
+        );
+        assert_eq!(
+            last_build_sentence(&rows[..1]).as_deref(),
+            None,
+            "a list holding only CI pulls claims no build at all"
+        );
     }
 
     /// "The last build's outcome" is derived from the list, most-recent
