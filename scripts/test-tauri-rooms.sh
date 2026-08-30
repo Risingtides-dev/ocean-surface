@@ -179,6 +179,7 @@ validate_static() {
   command -v cargo >/dev/null || fail "cargo is required for Stage0"
   command -v git >/dev/null || fail "git is required for source staging"
   command -v tar >/dev/null || fail "tar is required for source staging"
+  command -v cmp >/dev/null || fail "cmp is required for private config staging"
   jq -e '.app.windows[0].visible == true and .app.windows[0].width <= 650 and .app.windows[0].x < 0' \
     "$TAURI_DIR/tauri.rooms-acceptance.conf.json" >/dev/null
   ! grep -q 'source = "git+' "$ROOT/Cargo.lock" "$TAURI_DIR/Cargo.lock" \
@@ -365,6 +366,13 @@ grep -aR -F "$DAEMON_URL" "$TMP_ROOT/build-dist" >/dev/null \
 # Compile in a private crate copy so generate_context! reads a private config
 # and private frontendDist; the tracked acceptance-dist is never renamed/written.
 cp "$TAURI_DIR"/{Cargo.toml,Cargo.lock,build.rs,Info.plist,tauri.rooms-acceptance.conf.json} "$TMP_ROOT/tauri-crate/"
+# tauri-build runs before the acceptance binary's explicit generate_context!
+# and only reads the conventional filename. Keep both phases on the same
+# acceptance-only config inside the private crate copy.
+cp "$TAURI_DIR/tauri.rooms-acceptance.conf.json" "$TMP_ROOT/tauri-crate/tauri.conf.json"
+cmp -s "$TMP_ROOT/tauri-crate/tauri.conf.json" \
+  "$TMP_ROOT/tauri-crate/tauri.rooms-acceptance.conf.json" \
+  || fail "private Tauri build configs diverged"
 cp -R "$TAURI_DIR"/{src,capabilities,gen,icons} "$TMP_ROOT/tauri-crate/"
 [[ ! -e "$TMP_ROOT/tauri-crate/.cargo/config" \
    && ! -L "$TMP_ROOT/tauri-crate/.cargo/config" \
