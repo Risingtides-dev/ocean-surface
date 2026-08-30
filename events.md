@@ -3299,3 +3299,47 @@ asserts each read appears before it. Gate: 1138+4+8+4+7+5+2 tests green (26 in
 room_invite, 2 new), clippy -D warnings on wasm32, the wasm32 -D warnings
 release-lane check, fmt --check, and the proxy clippy job all clean.
 _________________________________________________________________________________
+
+time:      [15:04] [08-30-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-room-invite-redeem
+type:      [feature-request]
+area:      [frontend]
+
+The browser could mint an invite and never consume one. POST
+/v1/rooms/persistent/invites/redeem has been live in the daemon and nothing on
+this surface called it, so joining a room you were invited to meant curl. New
+room_redeem module and a rail control: paste a code, and on success you land in
+the room. Three things in that route make it a different animal from mint, and
+each cost a decision. Its 200 is a RoomAccessProjection with NO room key --
+recover_pending derives the key from the invite scope, creates the room with it,
+and drops it on the way out -- so a successful redemption cannot say which room
+it joined. Rather than invent one from an opaque code, the module snapshots the
+room-list keys before the request and diffs them after through a pure
+newly_joined_key, opening the room only when EXACTLY one appeared and falling
+back to "it's in your list" otherwise; a concurrent create or an already-held
+room both refuse to guess. The diff needs an await point that fire-and-forget
+fetch_rooms cannot give, so it runs its own key-only probe and still hands the
+canonical refresh to fetch_rooms. Second: room_not_found is unreachable on this
+route (no path through redeem_invite/recover_pending returns
+IntentError::NotFound), so a 404 is always the router and never the room, and
+the backlog's refusal list was wrong to include it. Third, and the trap: the
+refusals split on whether the CODE IS SPENT, not on severity. remove_pending
+runs on 403 alone; every other refusal retains the pending redemption and
+get_or_insert_pending_redemption keys it on the code, so re-sending the SAME
+code resumes rather than starting a second -- which makes the 409 an invitation
+to retry, not a dead end, and makes 503/500 and a cut connection safe to retry
+too. Retry and Refused are separate outcome arms for that reason, a join clears
+the field and every refusal keeps it, and the 503 sentence carries both of its
+causes since unlike mint's it is a transient as often as a deployment fact.
+Review caught the one test that was decoration: the mount guard searched
+rooms_workspace.rs for "room_redeem::RoomRedeem", which is a strict prefix of
+the RoomRedeemState binding at component scope, so it passed with the element
+deleted. Its needle is now the element form, and a second guard reads the
+component body from source for its class literals and both answer slots --
+without it, emptying the view to a bare div left all 24 tests green, because
+the stylesheet tests only ever read the stylesheet. Both are mutation-checked.
+Gate: 1163+4+8+4+7+5+2 tests green (25 new in room_redeem), clippy -D warnings
+on wasm32, the wasm32 -D warnings release-lane check, cargo check on the proxy,
+the wasm32 test build, and fmt --check all clean.
+_________________________________________________________________________________
