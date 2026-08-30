@@ -864,16 +864,23 @@ fn participant_removable(participant_id: &str, identity_id: &str) -> bool {
 /// this is the pruning rule that keeps a primed confirm from outliving its
 /// target: a different room, or a roster the target has left, disarms it.
 /// Without the room check, a same-id agent in the next room opened would
-/// inherit a confirm armed against a different room's row.
+/// inherit a confirm armed against a different room's row. Both rosters are
+/// consulted because only one renders at a time: a federated room's rows are
+/// the access projection's members, never `open_room.participants`, and a
+/// confirm armed against one of them must survive the SSE access updates
+/// that rebuild the rail.
 fn keep_armed_remove(
     armed: Option<&str>,
     room_changed: bool,
     participants: &[RoomParticipant],
+    members: &[FederatedRoomMemberProjection],
 ) -> bool {
     let Some(armed) = armed else {
         return false;
     };
-    !room_changed && participants.iter().any(|p| p.id == armed)
+    !room_changed
+        && (participants.iter().any(|p| p.id == armed)
+            || members.iter().any(|m| m.member_id == armed))
 }
 
 /// Convert a UTF-16 code-unit offset (what `selectionStart` reports) into a
@@ -1157,9 +1164,16 @@ pub fn RoomsWorkspace(
             .get()
             .map(|room| room.participants)
             .unwrap_or_default();
+        let members = rooms
+            .access
+            .get()
+            .map(|access| access.members)
+            .unwrap_or_default();
         let room_changed = prev_key.is_some_and(|prev| prev != key);
         let armed = member_remove_armed.get_untracked();
-        if armed.is_some() && !keep_armed_remove(armed.as_deref(), room_changed, &participants) {
+        if armed.is_some()
+            && !keep_armed_remove(armed.as_deref(), room_changed, &participants, &members)
+        {
             member_remove_armed.set(None);
         }
         key
@@ -3521,6 +3535,8 @@ pub fn RoomsWorkspace(
                                                     let desc_title = member.public_agent_descriptor.as_ref()
                                                         .and_then(|d| d.description.clone())
                                                         .unwrap_or_default();
+                                                    let member_id = member.member_id.clone();
+                                                    let member_display = member.display_name.clone();
                                                     view! {
                                                         <div class="rooms-workspace__member"
                                                             role="listitem"
@@ -3537,28 +3553,95 @@ pub fn RoomsWorkspace(
                                                             {desc_line.map(|desc| view! {
                                                                 <span class="rooms-workspace__member-desc">{desc}</span>
                                                             })}
-                                                            <span class="rooms-workspace__member-kind">
-                                                                {actor_label}
-                                                            </span>
-                                                            <span class="rooms-workspace__member-role">
-                                                                {role_label}
-                                                            </span>
-                                                            {if presence.is_some() {
-                                                                view! {
-                                                                    <span
-                                                                        class="rooms-workspace__member-presence"
-                                                                        class:rooms-workspace__member-presence--live=move || {
-                                                                            presence == Some(MemberPresence::Live)
-                                                                        }
-                                                                        class:rooms-workspace__member-presence--unavailable=move || {
-                                                                            presence == Some(MemberPresence::Unavailable)
-                                                                        }
-                                                                        role="img"
-                                                                        aria-label=presence_label
-                                                                    ></span>
-                                                                }.into_any()
-                                                            } else {
-                                                                ().into_any()
+                                                            // Row tail: the badges plus a remove
+                                                            // control, or — armed — the two-step
+                                                            // confirm in their place, for the same
+                                                            // rail-width and durability reasons as
+                                                            // the Local branch. EVERY row offers
+                                                            // the control: the projection carries
+                                                            // no "this is you" flag, so instead of
+                                                            // guessing which row is the caller we
+                                                            // let bedrock's owner-or-self policy
+                                                            // answer each attempt; a refusal lands
+                                                            // in the status line with the roster
+                                                            // intact.
+                                                            {move || {
+                                                                let armed = member_remove_armed.get().as_deref()
+                                                                    == Some(member_id.as_str());
+                                                                if armed {
+                                                                    let confirm_id = member_id.clone();
+                                                                    let confirm_display = member_display.clone();
+                                                                    let confirm_label =
+                                                                        format!("Confirm removing {member_display} from room");
+                                                                    view! {
+                                                                        <button
+                                                                            class="rooms-workspace__member-remove-btn rooms-workspace__member-remove-btn--danger"
+                                                                            type="button"
+                                                                            aria-label=confirm_label
+                                                                            on:click=move |_| {
+                                                                                member_remove_armed.set(None);
+                                                                                rooms.remove_member(
+                                                                                    confirm_id.clone(),
+                                                                                    confirm_display.clone(),
+                                                                                );
+                                                                            }
+                                                                        >
+                                                                            "remove"
+                                                                        </button>
+                                                                        <button
+                                                                            class="rooms-workspace__member-remove-btn"
+                                                                            type="button"
+                                                                            on:click=move |_| member_remove_armed.set(None)
+                                                                        >
+                                                                            "keep"
+                                                                        </button>
+                                                                    }.into_any()
+                                                                } else {
+                                                                    let arm_id = member_id.clone();
+                                                                    let arm_label =
+                                                                        format!("Remove {member_display} from room");
+                                                                    view! {
+                                                                        <span class="rooms-workspace__member-kind">
+                                                                            {actor_label}
+                                                                        </span>
+                                                                        <span class="rooms-workspace__member-role">
+                                                                            {role_label}
+                                                                        </span>
+                                                                        {if presence.is_some() {
+                                                                            view! {
+                                                                                <span
+                                                                                    class="rooms-workspace__member-presence"
+                                                                                    class:rooms-workspace__member-presence--live=move || {
+                                                                                        presence == Some(MemberPresence::Live)
+                                                                                    }
+                                                                                    class:rooms-workspace__member-presence--unavailable=move || {
+                                                                                        presence == Some(MemberPresence::Unavailable)
+                                                                                    }
+                                                                                    role="img"
+                                                                                    aria-label=presence_label
+                                                                                ></span>
+                                                                            }.into_any()
+                                                                        } else {
+                                                                            ().into_any()
+                                                                        }}
+                                                                        <button
+                                                                            class="rooms-workspace__member-remove"
+                                                                            type="button"
+                                                                            title="Remove from room"
+                                                                            aria-label=arm_label
+                                                                            on:click=move |_| {
+                                                                                member_remove_armed
+                                                                                    .set(Some(arm_id.clone()))
+                                                                            }
+                                                                        >
+                                                                            <svg viewBox="0 0 16 16" width="10" height="10"
+                                                                                fill="none" stroke="currentColor" stroke-width="1.6"
+                                                                                stroke-linecap="round">
+                                                                                <path d="M3 3l10 10M13 3L3 13"/>
+                                                                            </svg>
+                                                                        </button>
+                                                                    }.into_any()
+                                                                }
                                                             }}
                                                         </div>
                                                     }
@@ -4508,13 +4591,13 @@ mod tests {
             part("web-1", "John", RoomParticipantKind::Human),
             part("scout", "Scout", RoomParticipantKind::Agent),
         ];
-        assert!(keep_armed_remove(Some("scout"), false, &roster));
+        assert!(keep_armed_remove(Some("scout"), false, &roster, &[]));
     }
 
     #[test]
     fn armed_remove_disarms_when_its_target_leaves_the_roster() {
         let roster = [part("web-1", "John", RoomParticipantKind::Human)];
-        assert!(!keep_armed_remove(Some("scout"), false, &roster));
+        assert!(!keep_armed_remove(Some("scout"), false, &roster, &[]));
     }
 
     #[test]
@@ -4522,13 +4605,49 @@ mod tests {
         // The next room can list the very same agent id; a confirm armed
         // against the previous room's row must not carry over to it.
         let roster = [part("scout", "Scout", RoomParticipantKind::Agent)];
-        assert!(!keep_armed_remove(Some("scout"), true, &roster));
+        assert!(!keep_armed_remove(Some("scout"), true, &roster, &[]));
     }
 
     #[test]
     fn unarmed_state_has_nothing_to_keep() {
         let roster = [part("scout", "Scout", RoomParticipantKind::Agent)];
-        assert!(!keep_armed_remove(None, false, &roster));
+        assert!(!keep_armed_remove(None, false, &roster, &[]));
+    }
+
+    #[test]
+    fn federated_armed_remove_survives_the_access_updates_that_rebuild_the_rail() {
+        // A federated member never appears in open_room.participants — the
+        // access projection is the roster that keeps its confirm alive, so
+        // an SSE access update that retains the target must not disarm it.
+        let members = [fed_member("member-agent")];
+        assert!(keep_armed_remove(
+            Some("member-agent"),
+            false,
+            &[],
+            &members
+        ));
+    }
+
+    #[test]
+    fn federated_armed_remove_disarms_when_its_target_leaves_the_projection() {
+        let members = [fed_member("member-other")];
+        assert!(!keep_armed_remove(
+            Some("member-agent"),
+            false,
+            &[],
+            &members
+        ));
+    }
+
+    #[test]
+    fn federated_armed_remove_disarms_across_a_room_switch() {
+        let members = [fed_member("member-agent")];
+        assert!(!keep_armed_remove(
+            Some("member-agent"),
+            true,
+            &[],
+            &members
+        ));
     }
 
     // ── room_is_federated ─────────────────────────────────────────────
@@ -4786,6 +4905,20 @@ mod tests {
             id: id.into(),
             kind,
             display_name: name.into(),
+        }
+    }
+
+    fn fed_member(id: &str) -> FederatedRoomMemberProjection {
+        FederatedRoomMemberProjection {
+            member_id: id.into(),
+            owner_member_id: None,
+            actor_type: FederatedActorType::Agent,
+            role_in_room: FederatedRoomRole::Member,
+            display_name: id.into(),
+            public_agent_descriptor: None,
+            joined_at: "2026-07-16T22:00:00Z".into(),
+            derived_presence: None,
+            local_binding_available: Some(true),
         }
     }
 

@@ -1377,6 +1377,58 @@ impl Rooms {
         });
     }
 
+    /// Remove a member from the open federated room
+    /// (`DELETE .../members/{member_id}`). Unlike the participants DELETE,
+    /// a 200 carries the refreshed [`RoomAccessProjection`] itself — the
+    /// daemon re-reads bedrock's roster before answering, so the member is
+    /// already gone from it — and failures carry `{"ok":false,"error":code}`
+    /// (see [`decode_remove_member_response`]). Authorization is bedrock's
+    /// owner-or-self policy answered per attempt: the projection has no
+    /// "this is you" flag, so every row offers the control and a refusal is
+    /// a status line, never a revocation.
+    pub fn remove_member(&self, member_id: String, display_name: String) {
+        if member_id.is_empty() {
+            return;
+        }
+        let Some(key) = self.open_key.get_untracked() else {
+            return;
+        };
+        let base = self.base();
+        let me = *self;
+        let generation_id = self.generation.get_untracked();
+        spawn_local(async move {
+            let del_url = format!(
+                "{base}/v1/rooms/persistent/{}/members/{}",
+                encode(&key),
+                encode(&member_id)
+            );
+            let result = match Request::delete(&del_url).send().await {
+                Ok(resp) => {
+                    let http_ok = resp.ok();
+                    let http_status = resp.status();
+                    match resp.text().await {
+                        Ok(body) => decode_remove_member_response(http_ok, http_status, &body),
+                        Err(err) => Err(format!("remove decode error: {err}")),
+                    }
+                }
+                Err(err) => Err(format!("remove error: {err}")),
+            };
+            if result.is_ok() {
+                me.fetch_rooms();
+            }
+            if !me.room_is_current(generation_id, &key) {
+                return;
+            }
+            match result {
+                Ok(access) => {
+                    apply_access_projection(&me.access, access);
+                    me.status.set(format!("removed '{display_name}'"));
+                }
+                Err(error) => me.status.set(error),
+            }
+        });
+    }
+
     /// Post a message to the open room (`POST .../messages`). `@id` mentions in
     /// the body drive the daemon's trigger-policy auto-convene.
     pub fn post_message(&self, body: String, thread_parent_seq: Option<u64>) {
@@ -2141,6 +2193,41 @@ fn replace_access_projection(
     true
 }
 
+/// Decode the members DELETE response. This route does NOT answer the
+/// [`RoomMutateResponse`] envelope the participants DELETE uses: a 200 body
+/// is the refreshed [`RoomAccessProjection`] directly, an error body is
+/// `{"ok":false,"error":code}` — so the split has to be on HTTP status, not
+/// on an `ok` field.
+fn decode_remove_member_response(
+    http_ok: bool,
+    http_status: u16,
+    body: &str,
+) -> Result<RoomAccessProjection, String> {
+    if http_ok {
+        serde_json::from_str::<RoomAccessProjection>(body)
+            .map_err(|err| format!("remove decode error: {err}"))
+    } else {
+        let code = serde_json::from_str::<RoomErrorResponse>(body)
+            .ok()
+            .and_then(|r| r.error);
+        Err(remove_member_failure_status(http_status, code.as_deref()))
+    }
+}
+
+/// Status line for a refused member remove. `federation_forbidden` here is
+/// bedrock's owner-or-self policy answering "not yours to remove" — the
+/// credential and binding are untouched and a retry is admitted, so the copy
+/// must read as a refusal of this one attempt, never as revoked access.
+fn remove_member_failure_status(http_status: u16, code: Option<&str>) -> String {
+    match code {
+        Some("federation_forbidden") => {
+            "remove refused: only the room owner or the member's registrant can remove them".into()
+        }
+        Some(code) => format!("remove failed: {code}"),
+        None => format!("remove failed: HTTP {http_status}"),
+    }
+}
+
 fn last_transcript_seq(transcript: &[RoomMessage]) -> Option<u64> {
     transcript.last().map(|message| message.seq)
 }
@@ -2702,6 +2789,53 @@ mod tests {
                 "mention_member_ids": ["member-agent"],
                 "state": "failed"
             })
+        );
+    }
+
+    // ── members DELETE response decode ────────────────────────────────
+
+    #[test]
+    fn remove_member_success_body_is_the_projection_not_a_mutate_envelope() {
+        // The daemon refreshed the roster before answering, so the 200 body
+        // already shows the member gone — applying it IS the UI update.
+        let body = serde_json::json!({
+            "state": "live",
+            "last_confirmed_global_sequence": 9
+        })
+        .to_string();
+        let access = decode_remove_member_response(true, 200, &body)
+            .expect("200 body decodes as RoomAccessProjection");
+        assert_eq!(access.state, RoomAccessState::Live);
+        assert!(access.members.is_empty());
+    }
+
+    #[test]
+    fn remove_member_policy_403_reads_as_refusal_never_revocation() {
+        let error = decode_remove_member_response(
+            false,
+            403,
+            r#"{"ok":false,"error":"federation_forbidden"}"#,
+        )
+        .unwrap_err();
+        assert!(error.starts_with("remove refused"), "{error}");
+        assert!(!error.to_lowercase().contains("revok"), "{error}");
+    }
+
+    #[test]
+    fn remove_member_other_failures_carry_their_code_or_http_status() {
+        assert_eq!(
+            decode_remove_member_response(
+                false,
+                503,
+                r#"{"ok":false,"error":"federation_unavailable"}"#
+            )
+            .unwrap_err(),
+            "remove failed: federation_unavailable"
+        );
+        // An undecodable error body still names the HTTP status.
+        assert_eq!(
+            decode_remove_member_response(false, 502, "upstream burp").unwrap_err(),
+            "remove failed: HTTP 502"
         );
     }
 
