@@ -176,6 +176,12 @@ pub struct WorkspaceProjection {
     pub last_active_at: Option<String>,
     #[serde(default)]
     pub last_flushed_at: Option<String>,
+    /// Why the provision failed. Owner-only on the wire — Bedrock names
+    /// infrastructure in it — and never null: the key is simply absent for
+    /// everyone else, and on a Bedrock that predates it. Unknown, not "no
+    /// reason".
+    #[serde(default)]
+    pub last_error: Option<String>,
     /// The room's stored secret names — not a projection field on the
     /// wire (the status body carries `secrets` BESIDE `workspace`, hence
     /// the skip), folded in by `classify_status` so the Present view is
@@ -2605,7 +2611,29 @@ fn panel_facts(workspace: &WorkspaceProjection) -> impl IntoView {
             {fact("active", workspace.last_active_at.clone())}
             {fact("flushed", workspace.last_flushed_at.clone())}
         </div>
+        // Owner-only on the wire, so its presence is already permissioned;
+        // when it is here, it is the reason the status fact says `failed`.
+        {failed_reason(workspace).map(|reason| view! {
+            <div class="rooms-workspace__compute-failed-reason" role="alert">
+                {reason}
+            </div>
+        })}
     }
+}
+
+/// The provisioning failure worth showing, pinned to `failed` so a reason
+/// can never stand over a state it does not explain (Bedrock clears it on
+/// provision and on ready, but the panel does not bet on that). `None` when
+/// absent — not-the-owner, or an older Bedrock: the same absent-vs-empty
+/// honesty as the secrets list.
+fn failed_reason(workspace: &WorkspaceProjection) -> Option<String> {
+    if workspace.status != "failed" {
+        return None;
+    }
+    workspace
+        .last_error
+        .clone()
+        .filter(|reason| !reason.is_empty())
 }
 
 /// The whole-history take-back, under the section title. Rendered for
@@ -3321,6 +3349,66 @@ mod tests {
             workspace.last_active_at.as_deref(),
             Some("2026-08-27T10:00:00.000Z")
         );
+        // Non-owner projection: last_error simply absent, never an error.
+        assert_eq!(workspace.last_error, None);
+    }
+
+    /// The owner's failed answer carries the reason inside the projection —
+    /// the field this panel used to drop, leaving the bare word "failed".
+    #[test]
+    fn a_failed_workspace_keeps_the_owner_reason() {
+        let failed = body(
+            r#"{"workspace": {
+                "room_id": "room-1",
+                "status": "failed",
+                "driver": "cloudflare",
+                "last_error": "container image rejected by the driver"
+            }}"#,
+        );
+        let view = classify_status(200, Some(failed)).unwrap();
+        let WorkspaceView::Present(workspace) = view else {
+            panic!("expected Present, got {view:?}");
+        };
+        assert_eq!(
+            failed_reason(&workspace).as_deref(),
+            Some("container image rejected by the driver")
+        );
+    }
+
+    /// The reason renders only under the status it explains, and an absent
+    /// one (non-owner, older Bedrock) renders nothing — absent is unknown,
+    /// never "no reason".
+    #[test]
+    fn the_reason_shows_only_on_a_failed_workspace() {
+        let explained = WorkspaceProjection {
+            status: "failed".to_string(),
+            last_error: Some("no capacity".to_string()),
+            ..WorkspaceProjection::default()
+        };
+        assert_eq!(failed_reason(&explained).as_deref(), Some("no capacity"));
+
+        let unexplained = WorkspaceProjection {
+            status: "failed".to_string(),
+            ..WorkspaceProjection::default()
+        };
+        assert_eq!(failed_reason(&unexplained), None);
+
+        // Bedrock clears the reason before any other status can stand;
+        // pinned here so the panel never bets on that.
+        let ready = WorkspaceProjection {
+            status: "ready".to_string(),
+            last_error: Some("stale".to_string()),
+            ..WorkspaceProjection::default()
+        };
+        assert_eq!(failed_reason(&ready), None);
+
+        // An empty reason is a blank alert, worse than none.
+        let blank = WorkspaceProjection {
+            status: "failed".to_string(),
+            last_error: Some(String::new()),
+            ..WorkspaceProjection::default()
+        };
+        assert_eq!(failed_reason(&blank), None);
     }
 
     /// Bedrock's 404 carries a top-level code and is a STATE — the room has

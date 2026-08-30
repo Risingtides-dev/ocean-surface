@@ -3509,6 +3509,17 @@ a.rooms-workspace__repo-check-line:hover {
   overflow-wrap: anywhere;
 }
 
+/* The failure's reason, under the fact that says `failed`. Owner-only on
+   the wire, so its presence is already permissioned — and distinct from
+   `__compute-error` above, which is the panel's own fetch failure. */
+.rooms-workspace__compute-failed-reason {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--err);
+  overflow-wrap: anywhere;
+}
+
 /* ── The owner lifecycle: provision and destroy ─────────────────────────
    Rendered for every member — the daemon's owner gate refuses non-owners
    in type, so no control is hidden here — and destroy arms a confirm
