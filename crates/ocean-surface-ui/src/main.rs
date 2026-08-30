@@ -34,6 +34,7 @@ mod room_artifacts;
 mod room_invite;
 mod room_markdown;
 mod room_messages;
+mod room_redeem;
 mod room_repo;
 mod room_summary;
 mod room_workspace_panel;

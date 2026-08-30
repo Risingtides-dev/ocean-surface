@@ -1179,6 +1179,13 @@ pub fn RoomsWorkspace(
     // and publish the room twice over one intent.
     let invite = crate::room_invite::RoomInviteState::new(&rooms);
 
+    // The other half of that door: redeeming a code someone else minted. Not
+    // scoped to a room at all — you redeem to GET one — so it lives at this
+    // scope for the plainer reason that the left rail's create block is
+    // rebuilt on room-list traffic, and a redemption spans two Bedrock legs
+    // that must not be re-fired halfway through.
+    let redeem = crate::room_redeem::RoomRedeemState::new(&rooms);
+
     // The room's workspace status and command history. Same reasoning: the
     // open panel owns a poll loop, and a rail closure re-run by a roster SSE
     // update would orphan the loop and respawn it mid-tick.
@@ -2582,6 +2589,15 @@ pub fn RoomsWorkspace(
                         </label>
                     </div>
                 </div>
+
+                // The other way into a room: a code someone else minted. A
+                // SIBLING of the create block, not a child — creating and
+                // joining are two verbs — and in the left rail rather than
+                // anywhere in the room surface, because a person holding a
+                // code has no room open and may have no rooms at all, which
+                // is precisely the state this rail is the only thing visible
+                // in.
+                <crate::room_redeem::RoomRedeem rooms=rooms state=redeem />
             </div>
 
             // ═══ CENTER RAIL — header + transcript + composer ═══════════
