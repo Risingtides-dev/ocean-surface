@@ -239,9 +239,35 @@ def main():
         wait_for(lambda: client.attribute(toggle, "aria-expanded") == "true",
                  "room drawer did not open")
         drawer = client.element("#rooms-workspace-room-list")
-        wait_for(lambda: client.displayed(drawer) and
-                 "rooms-workspace__left--visible" in client.attribute(drawer, "class"),
-                 "room drawer did not become visible")
+        drawer_state = {}
+
+        def drawer_is_visible():
+            state = client.execute("""
+                const drawer = document.querySelector('#rooms-workspace-room-list');
+                if (!drawer) return {found: false};
+                const style = getComputedStyle(drawer);
+                const rect = drawer.getBoundingClientRect();
+                return {
+                  found: true,
+                  className: drawer.className,
+                  display: style.display,
+                  visibility: style.visibility,
+                  width: rect.width,
+                  height: rect.height
+                };
+            """)
+            state["webdriverDisplayed"] = client.displayed(drawer)
+            drawer_state.clear()
+            drawer_state.update(state)
+            return (state["webdriverDisplayed"] and
+                    "rooms-workspace__left--visible" in state["className"] and
+                    state["display"] != "none" and state["visibility"] != "hidden" and
+                    state["width"] > 0 and state["height"] > 0)
+
+        try:
+            wait_for(drawer_is_visible, "room drawer did not become visible")
+        except AssertionError as error:
+            raise AssertionError("{}; drawer_state={!r}".format(error, drawer_state)) from error
 
         room_options = [candidate for candidate in client.elements('[role="option"]')
                         if (client.attribute(candidate, "id") or "").startswith("rooms-opt-")]
