@@ -3740,6 +3740,46 @@ a.rooms-workspace__repo-check-line:hover {
   color: var(--fg-4);
 }
 
+/* The owner's take-back. The whole-history control reuses the lifecycle
+   action row; the per-row trigger stays quiet on the row — the history is
+   for reading — and only wears the risk color on intent. Not hover-only:
+   the control is always visible, hover just raises it. */
+.rooms-workspace__compute-actions--purge {
+  margin-top: 6px;
+}
+
+.rooms-workspace__compute-exec-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.rooms-workspace__compute-exec-purge {
+  appearance: none;
+  padding: 1px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-4);
+  font-family: var(--font);
+  font-size: 11px;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__compute-exec-purge:hover:not(:disabled) {
+  color: var(--err);
+  border-color: var(--err);
+}
+
+.rooms-workspace__compute-exec-purge:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 /* The workspace tree, one directory at a time. Every row is a button now:
    directory rows navigate, file rows open their bounded content over the
    listing. */
