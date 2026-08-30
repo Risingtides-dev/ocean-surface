@@ -3,20 +3,24 @@
 //! One call, and it is the only way this browser joins a room it was not
 //! already in:
 //!
-//!   POST /v1/rooms/persistent/invites/redeem  {code}  → 200 RoomAccessProjection
+//!   POST /v1/rooms/persistent/invites/redeem  {code}  → 200 RoomAccessProjection + room_key
 //!
 //! It is the mirror of [`crate::room_invite`], and four properties of its wire
 //! contract make it a different animal from minting:
 //!
-//! 1. **The 200 carries NO room key.** The body is a serialized
-//!    `RoomAccessProjection` — `{state, last_confirmed_global_sequence?,
-//!    members?, outbox?}` — and nothing else. The daemon knows the key (it
-//!    derives it from the invite's scope and calls `store.create(key, …)`) and
-//!    drops it on the way out. So a successful redemption cannot say which
-//!    room it joined, and this module must not invent one: a code is opaque
-//!    and no key can be read out of it. What it does instead is snapshot the
-//!    room list before the request and diff it after — [`newly_joined_key`],
-//!    pure and provable — and open the room only when exactly one appeared.
+//! 1. **The 200 names the room, on a daemon new enough to say so.** ocean-os
+//!    #407 put `room_key` beside the flattened `RoomAccessProjection` and made
+//!    it REQUIRED daemon-side, so a successful redemption finally answers
+//!    which room it joined and this module opens exactly that one. It is
+//!    decoded OPTIONAL here, and the asymmetry is the point: this bundle and
+//!    the daemon it talks to roll forward independently, so requiring the key
+//!    would turn a redemption that ALREADY SUCCEEDED — room created,
+//!    credential installed, no un-redeem — into an unreadable reply on every
+//!    daemon predating #407. Absent the key, the pre-#407 fallback still
+//!    stands: snapshot the room list before the request and diff it after —
+//!    [`newly_joined_key`], pure and provable — and open the room only when
+//!    exactly one appeared. The key comes off the wire or off the list;
+//!    either way a code is opaque and none can be read out of it.
 //! 2. **The refusal set is not mint's.** `room_not_found` is UNREACHABLE: no
 //!    path through `redeem_invite`/`recover_pending` returns
 //!    `IntentError::NotFound`, so a 404 from this route is always the ROUTER,
@@ -58,18 +62,22 @@ use crate::rooms::{Room, RoomAccessState, Rooms};
 /// `state` is `RoomAccessProjection`'s single required field, so its presence
 /// on a 2xx settles success without decoding the projection a second time —
 /// `crate::rooms` already owns that decoder and this module needs only the
-/// landing state. `error` is the machine code `intent_error_response` writes
-/// into `{ok:false, error:"<code>"}`. Neither may be read without first
-/// knowing which of the two replies arrived.
+/// landing state. `room_key` is #407's addition, `Option` for the reason
+/// property 1 gives. `error` is the machine code `intent_error_response`
+/// writes into `{ok:false, error:"<code>"}`. Neither `state` nor `error` may
+/// be read without first knowing which of the two replies arrived.
 #[derive(Debug, Default, Deserialize)]
 struct RedeemBody {
     #[serde(default)]
     state: Option<RoomAccessState>,
     #[serde(default)]
+    room_key: Option<String>,
+    #[serde(default)]
     error: Option<String>,
 }
 
-/// The room list, read for its keys alone. Its own envelope rather than
+/// The room list, read for its keys alone, and read only on the pre-#407
+/// fallback path property 1 describes. Its own envelope rather than
 /// `crate::rooms`'s, which is private and decodes read-state summaries this
 /// probe has no use for; `Room` itself is shared, so the two cannot drift on
 /// the field that matters.
@@ -92,8 +100,10 @@ fn redeem_url(base: &str) -> String {
 /// What a redeem reply means for the rail.
 #[derive(Debug, PartialEq, Eq)]
 enum RedeemOutcome {
-    /// The room is on this daemon now. Carries the access state it landed in.
-    Joined(RoomAccessState),
+    /// The room is on this daemon now. Carries the access state it landed in
+    /// and the key the reply named — `None` from a daemon predating #407,
+    /// which sends [`RoomRedeemState::redeem`] to the room-list diff instead.
+    Joined(RoomAccessState, Option<String>),
     /// The deployment answering honestly about itself: this daemon predates
     /// the redeem route. A sentence, never a failure.
     State(String),
@@ -105,13 +115,15 @@ enum RedeemOutcome {
     Refused(String),
 }
 
-/// The one room that appeared while the redemption ran.
+/// The one room that appeared while the redemption ran — the fallback for a
+/// reply carrying no `room_key`, and untouched by any daemon that sends one.
 ///
 /// `None` when the answer is not unambiguous — nothing new (redeeming into a
 /// room already held takes the daemon's `(Some(_), _) => {}` arm and creates
 /// no row), or more than one (something else created a room concurrently).
 /// Neither is provably the room redeemed, and opening the wrong one is worse
-/// than saying "it's in your list".
+/// than saying "it's in your list". That second case is what `room_key` was
+/// added to answer, and why this is now a fallback rather than the mechanism.
 fn newly_joined_key(before: &[String], after: &[Room]) -> Option<String> {
     let mut fresh = after
         .iter()
@@ -185,6 +197,23 @@ fn refused_sentence(code: &str) -> Option<String> {
     Some(sentence.to_string())
 }
 
+/// The sentence any 5xx earns when no known code named it — property 3 read
+/// off the STATUS rather than off a code.
+///
+/// `recover_pending` runs `remove_pending` on a 403 it produced itself and on
+/// nothing else, so nothing at or above 500 spends the invite: a proxy 502
+/// whose HTML body never decodes, a daemon 500 carrying no code, and a
+/// refusal code this bundle predates all leave the pending redemption open
+/// for the same code to resume. Reading any of them as spent sends the
+/// operator hunting for a replacement invite they do not need.
+fn server_fault_sentence(status: u16, code: Option<&str>) -> String {
+    let what = match code {
+        Some(code) => format!("The redemption failed on the daemon ({code}, {status})"),
+        None => format!("The redemption got no readable answer ({status})"),
+    };
+    format!("{what}. Nothing was consumed \u{2014} run the same code again to resume it.")
+}
+
 /// The sentence a deployment without the route earns.
 fn route_absent_sentence() -> String {
     "Joining by invite code isn't available on this deployment yet.".to_string()
@@ -192,21 +221,39 @@ fn route_absent_sentence() -> String {
 
 /// Map a redeem reply onto what the rail should show. `body` is `None` when
 /// the reply did not decode, which a route-less deployment produces (an empty
-/// 404), so that case is an ANSWER here rather than a transport fault.
+/// 404) and so does a proxy in front of the daemon (a 502/504 whose body is
+/// HTML), so that case is an ANSWER here rather than a transport fault.
 ///
 /// Success is settled on the status and a present `state` before any refusal
 /// code is consulted, for the same reason mint settles on a present `code`:
 /// the two replies share one envelope and only one of them holds each field.
+///
+/// Anything at or above 500 that no known code named is a
+/// [`RedeemOutcome::Retry`] — see [`server_fault_sentence`]. Only a 403 spends
+/// the invite, so answering a gateway fault with `Refused` would tell the
+/// operator their code is dead while the daemon still holds it open.
 fn classify_redeem(status: u16, body: Option<RedeemBody>) -> RedeemOutcome {
     let Some(body) = body else {
         if status == 404 {
             return RedeemOutcome::State(route_absent_sentence());
         }
+        // A proxy 502/504 answers HTML, which never decodes into `RedeemBody`.
+        // The daemon never produced a refusal to run `remove_pending` on, so
+        // the pending redemption — and the code that resumes it — survives.
+        if status >= 500 {
+            return RedeemOutcome::Retry(server_fault_sentence(status, None));
+        }
         return RedeemOutcome::Refused(format!("The redeem reply could not be read ({status})."));
     };
     if (200..300).contains(&status) {
         if let Some(state) = body.state {
-            return RedeemOutcome::Joined(state);
+            // A blank key is not a room and must never reach `open_room` —
+            // the same bar [`newly_joined_key`] holds the diff to.
+            let key = body
+                .room_key
+                .map(|key| key.trim().to_string())
+                .filter(|key| !key.is_empty());
+            return RedeemOutcome::Joined(state, key);
         }
     }
     let code = body
@@ -219,21 +266,29 @@ fn classify_redeem(status: u16, body: Option<RedeemBody>) -> RedeemOutcome {
             if let Some(sentence) = retry_sentence(code) {
                 return RedeemOutcome::Retry(sentence);
             }
-            RedeemOutcome::Refused(
-                refused_sentence(code).unwrap_or_else(|| format!("The invite was refused: {code}")),
-            )
+            if let Some(sentence) = refused_sentence(code) {
+                return RedeemOutcome::Refused(sentence);
+            }
+            // A code this bundle has never seen is still bounded by its
+            // status, and only a 403 spends the invite.
+            match status >= 500 {
+                true => RedeemOutcome::Retry(server_fault_sentence(status, Some(code))),
+                false => RedeemOutcome::Refused(format!("The invite was refused: {code}")),
+            }
         }
         // A 404 with no code is the daemon's unknown-route answer. Property 2:
         // the route itself has no 404, so this is the only 404 it can produce
         // and there is no room-missing reading to confuse it with.
         None if status == 404 => RedeemOutcome::State(route_absent_sentence()),
+        None if status >= 500 => RedeemOutcome::Retry(server_fault_sentence(status, None)),
         None => RedeemOutcome::Refused(format!("The redemption failed ({status}).")),
     }
 }
 
-/// What a redeemed room reads as. `key` is `None` when the diff could not name
-/// the room — see [`newly_joined_key`] — and the sentence then points at the
-/// list instead of at a key it does not have.
+/// What a redeemed room reads as. `key` is `None` only on the pre-#407 path,
+/// where the reply named no room and the diff could not either — see
+/// [`newly_joined_key`] — and the sentence then points at the list instead of
+/// at a key it does not have.
 ///
 /// Every successful redemption lands in `Connecting`: `recover_pending` ends
 /// on `update_room_access_safe(…, Some(Connecting), …)` and the bridge
@@ -305,13 +360,18 @@ impl RoomRedeemState {
         if code.is_empty() {
             self.error
                 .set(Some("Paste an invite code first.".to_string()));
+            // Every other path clears BOTH slots before it starts. Without
+            // this the empty submit stacks "Paste an invite code first." on
+            // top of a stale "Joined warroom. Connecting…" and the rail
+            // paints two contradictory answers at once.
+            self.note.set(None);
             return;
         }
         let base = self.base();
         let me = *self;
-        // Snapshotted BEFORE the request goes out: the diff that names the
-        // joined room is only sound against the list as it stood when the
-        // redemption started.
+        // Snapshotted BEFORE the request goes out: the pre-#407 diff is only
+        // sound against the list as it stood when the redemption started.
+        // Unread when the reply names the room itself.
         let before: Vec<String> = rooms
             .list
             .get_untracked()
@@ -323,18 +383,23 @@ impl RoomRedeemState {
         self.note.set(None);
         spawn_local(async move {
             let outcome = post_redeem(&redeem_url(&base), &code).await;
-            let joined = matches!(outcome, RedeemOutcome::Joined(_));
-            // Property 1: the reply cannot say which room this was, so ask the
-            // list. Its own request because `Rooms::fetch_rooms` is
-            // fire-and-forget and a diff needs an await point.
-            let key = match joined {
-                true => newly_joined_key(&before, &fetch_room_list(&base).await),
-                false => None,
+            let key = match &outcome {
+                // Property 1: from #407 on, the reply says which room this
+                // was and no second request is owed.
+                RedeemOutcome::Joined(_, Some(key)) => Some(key.clone()),
+                // An older daemon, so ask the list. Its own request because
+                // `Rooms::fetch_rooms` is fire-and-forget and a diff needs an
+                // await point.
+                RedeemOutcome::Joined(_, None) => {
+                    newly_joined_key(&before, &fetch_room_list(&base).await)
+                }
+                _ => None,
             };
+            let joined = matches!(outcome, RedeemOutcome::Joined(..));
             me.publish(outcome, key.as_deref());
             if joined {
-                // The canonical refresh, which the probe above deliberately is
-                // not: this is what merges read summaries and drives the
+                // The canonical refresh, which the fallback probe deliberately
+                // is not: this is what merges read summaries and drives the
                 // rail's own loading state.
                 rooms.fetch_rooms();
                 if let Some(key) = key {
@@ -348,7 +413,10 @@ impl RoomRedeemState {
     fn publish(&self, outcome: RedeemOutcome, key: Option<&str>) {
         self.redeeming.set(false);
         match outcome {
-            RedeemOutcome::Joined(state) => {
+            // `key` is the RESOLVED one — the reply's where it carried one,
+            // the diff's where it did not — so the arm's own key, which is
+            // only the input to that choice, is spent by here.
+            RedeemOutcome::Joined(state, _) => {
                 // Spent, and the only arm that clears the field. Every refusal
                 // keeps the code where the operator can run it again.
                 self.code.set(String::new());
@@ -388,10 +456,11 @@ async fn post_redeem(url: &str, code: &str) -> RedeemOutcome {
     }
 }
 
-/// The daemon's room list, for the diff alone. Every failure answers an empty
-/// list, which [`newly_joined_key`] reads as "cannot say" — the redemption has
-/// already succeeded by the time this runs, and a probe that did not land must
-/// not turn that into an error.
+/// The daemon's room list, for the pre-#407 diff alone, and not fetched at all
+/// when the reply named the room. Every failure answers an empty list, which
+/// [`newly_joined_key`] reads as "cannot say" — the redemption has already
+/// succeeded by the time this runs, and a probe that did not land must not
+/// turn that into an error.
 async fn fetch_room_list(base: &str) -> Vec<Room> {
     let url = format!("{base}/v1/rooms/persistent");
     let Ok(resp) = Request::get(&url).send().await else {
@@ -488,18 +557,57 @@ mod tests {
     /// Obviously not a grant. No fixture in this repo may carry a real one.
     const FAKE_CODE: &str = "not-a-real-invite-code";
 
-    /// The 200 is a bare `RoomAccessProjection` — no `{ok:true}` envelope and
-    /// no `invite` key. A decoder copied from the artifacts or workspace lanes
-    /// fails exactly here.
+    /// The 200 is a bare `RoomAccessProjection` plus #407's `room_key` — no
+    /// `{ok:true}` envelope, no `invite` key, and the projection FLATTENED
+    /// rather than nested under `access`, which is what keeps a top-level
+    /// `state` where success detection looks for it. A decoder copied from the
+    /// artifacts or workspace lanes fails exactly here.
     #[test]
-    fn the_ok_reply_is_a_bare_access_projection() {
+    fn the_ok_reply_is_a_bare_access_projection_plus_the_key() {
+        let outcome = classify_redeem(
+            200,
+            Some(body(
+                r#"{"state": "connecting", "members": [], "outbox": [], "room_key": "warroom"}"#,
+            )),
+        );
+        assert_eq!(
+            outcome,
+            RedeemOutcome::Joined(RoomAccessState::Connecting, Some("warroom".to_string()))
+        );
+    }
+
+    /// Property 1's whole reason for `Option`: a daemon predating #407 sends
+    /// no `room_key`, and by the time this decodes, its redemption has ALREADY
+    /// SUCCEEDED — room created, credential installed, no un-redeem. It must
+    /// still read as a join that falls back to the diff for a name, never a
+    /// hard failure over a reply that cannot be un-sent.
+    #[test]
+    fn a_reply_without_the_key_still_joins() {
         let outcome = classify_redeem(
             200,
             Some(body(
                 r#"{"state": "connecting", "members": [], "outbox": []}"#,
             )),
         );
-        assert_eq!(outcome, RedeemOutcome::Joined(RoomAccessState::Connecting));
+        assert_eq!(
+            outcome,
+            RedeemOutcome::Joined(RoomAccessState::Connecting, None)
+        );
+    }
+
+    /// A blank key is not a room. `newly_joined_key` already refuses one off
+    /// the list, and the wire has to clear the same bar: this key goes
+    /// straight to `open_room`.
+    #[test]
+    fn a_blank_room_key_reads_as_no_key() {
+        let outcome = classify_redeem(
+            200,
+            Some(body(r#"{"state": "connecting", "room_key": " "}"#)),
+        );
+        assert_eq!(
+            outcome,
+            RedeemOutcome::Joined(RoomAccessState::Connecting, None)
+        );
     }
 
     /// A 2xx with no `state` is not a projection, so it is not a redemption —
@@ -607,6 +715,54 @@ mod tests {
         let expected = RedeemOutcome::State(route_absent_sentence());
         assert_eq!(classify_redeem(404, None), expected);
         assert_eq!(classify_redeem(404, Some(body("{}"))), expected);
+    }
+
+    /// A gateway in front of the daemon answers HTML on a 502/504, so the
+    /// reply never decodes and the old reading of that was `Refused` — which
+    /// tells the operator their code is spent. It is not: `remove_pending`
+    /// runs on a 403 the daemon produced itself and on nothing else, and a
+    /// gateway fault means the daemon produced no refusal at all. The pending
+    /// redemption is still open and the same code resumes it.
+    #[test]
+    fn a_gateway_that_ate_the_reply_invites_the_same_code_again() {
+        for status in [500, 502, 503, 504] {
+            let outcome = classify_redeem(status, None);
+            let RedeemOutcome::Retry(sentence) = outcome else {
+                panic!("{status}: expected Retry, got {outcome:?}");
+            };
+            assert!(sentence.contains("Nothing was consumed"), "got: {sentence}");
+            assert!(sentence.contains("same code"), "got: {sentence}");
+        }
+    }
+
+    /// Below 500 an unreadable reply is still just unreadable — there is no
+    /// retained-redemption argument to make about it, and only the 5xx
+    /// reading moved.
+    #[test]
+    fn an_unreadable_reply_below_500_is_still_refused() {
+        assert!(matches!(
+            classify_redeem(400, None),
+            RedeemOutcome::Refused(_)
+        ));
+    }
+
+    /// A 5xx coded with something this bundle predates and a 5xx coded with
+    /// nothing at all retain the redemption for the same reason. Neither may
+    /// read as a spent code just because no sentence was written for it.
+    #[test]
+    fn a_server_error_retains_the_code_coded_or_not() {
+        let outcome = classify_redeem(500, Some(refusal("brand_new_code")));
+        let RedeemOutcome::Retry(coded) = outcome else {
+            panic!("a coded 5xx must retain the code, got {outcome:?}");
+        };
+        assert!(coded.contains("brand_new_code"), "got: {coded}");
+        assert!(coded.contains("Nothing was consumed"), "got: {coded}");
+
+        let outcome = classify_redeem(500, Some(body("{}")));
+        let RedeemOutcome::Retry(codeless) = outcome else {
+            panic!("a codeless 5xx must retain the code, got {outcome:?}");
+        };
+        assert!(codeless.contains("Nothing was consumed"), "got: {codeless}");
     }
 
     /// An unknown code still reaches the operator rather than vanishing.
@@ -730,7 +886,10 @@ mod tests {
         let state = fresh_state();
         state.code.set(FAKE_CODE.to_string());
         state.redeeming.set(true);
-        state.publish(RedeemOutcome::Joined(RoomAccessState::Connecting), None);
+        state.publish(
+            RedeemOutcome::Joined(RoomAccessState::Connecting, None),
+            None,
+        );
         assert_eq!(state.code.get_untracked(), "");
         assert!(!state.redeeming.get_untracked());
 
@@ -765,6 +924,60 @@ mod tests {
             assert!(state.error.get_untracked().is_some());
             assert_eq!(state.note.get_untracked(), None);
         }
+    }
+
+    /// The key off the reply is the one that gets USED, and the diff is only
+    /// what answers when there is not one. Pinned from source because
+    /// `redeem` needs a `Rooms`: without this, `redeem` could decode
+    /// `room_key` and then ignore it in favour of the probe — state written
+    /// and never read — and every classify test above would still pass.
+    #[test]
+    fn the_replys_key_is_used_and_the_diff_is_only_the_fallback() {
+        let source = include_str!("room_redeem.rs");
+        let at = source
+            .find("fn redeem(")
+            .expect("the redeem entry point moved");
+        let span = &source[at..];
+        let end = span
+            .find("fn publish(")
+            .expect("the redeem body no longer ends at publish");
+        let span = &span[..end];
+        let names = span
+            .find(&["Joined(_, ", "Some(key)) =>"].concat())
+            .expect("redeem no longer reads the key off the reply");
+        let falls_back = span
+            .find(&["Joined(_, ", "None) =>"].concat())
+            .expect("the pre-#407 fallback arm is gone");
+        let diff = span
+            .find(&["newly_joined", "_key(&before"].concat())
+            .expect("the fallback no longer diffs the room list");
+        assert!(names < falls_back, "the reply's key must be read first");
+        assert!(falls_back < diff, "the diff must run only when no key came");
+    }
+
+    /// An empty submit must not paint two answers at once. The guard sets
+    /// `error` and returns BEFORE the `note.set(None)` every other path runs,
+    /// so without a clear of its own it stacks "Paste an invite code first."
+    /// on top of a stale "Joined warroom. Connecting…". `redeem` needs a
+    /// `Rooms`, which needs a `Daemon` and reads the host through `web_sys`,
+    /// so the guard is pinned from source the way the mount guard below is,
+    /// sliced to end where the request starts being built so the main path's
+    /// own clear cannot answer for it.
+    #[test]
+    fn an_empty_submit_clears_the_stale_note() {
+        let source = include_str!("room_redeem.rs");
+        let at = source
+            .find("fn redeem(")
+            .expect("the redeem entry point moved");
+        let guard = &source[at..];
+        let end = guard
+            .find("let base = self.base();")
+            .expect("the guard no longer ends before the request is built");
+        let clear = ["self.note", ".set(None)"].concat();
+        assert!(
+            guard[..end].contains(&clear),
+            "an empty submit would leave a stale note under the error"
+        );
     }
 
     // ---- what reaches the screen --------------------------------------------
@@ -859,37 +1072,50 @@ mod tests {
         );
     }
 
-    /// No sentence this module can produce may echo the code back. It is a
-    /// bearer grant and the screen is not where it belongs twice.
+    /// No sentence this module puts on the screen may echo the code back. It
+    /// is a bearer grant and the screen is not where it belongs twice.
+    ///
+    /// Driven through `publish` with the code loaded in the state, rather than
+    /// over the four sentence builders directly. None of them takes the invite
+    /// code as an argument, so handing one a code proves only that a `format!`
+    /// which could never exist does not exist. `publish` is the one place
+    /// where a finished sentence and the signal holding the code are BOTH in
+    /// scope — a "joined with <code>" confirmation would be written there, and
+    /// that is what this catches.
     #[test]
-    fn no_sentence_can_carry_the_code() {
-        let sentences = [
-            joined_sentence(RoomAccessState::Connecting, Some("warroom")),
-            joined_sentence(RoomAccessState::Connecting, None),
-            route_absent_sentence(),
-        ]
-        .into_iter()
-        .chain(
-            [
-                "federation_conflict",
-                "federation_unavailable",
-                "internal_error",
-            ]
-            .into_iter()
-            .filter_map(retry_sentence),
-        )
-        .chain(
-            [
-                "invalid_request",
-                "invite_forbidden",
-                "federation_forbidden",
-                "federation_protocol",
-            ]
-            .into_iter()
-            .filter_map(refused_sentence),
-        );
-        for sentence in sentences {
-            assert!(!sentence.contains(FAKE_CODE), "got: {sentence}");
+    fn no_sentence_reaching_the_screen_can_carry_the_code() {
+        let replies = [
+            (
+                200,
+                Some(r#"{"state": "connecting", "room_key": "warroom"}"#),
+            ),
+            (200, Some(r#"{"state": "connecting"}"#)),
+            (200, Some("{}")),
+            (404, None),
+            (404, Some("{}")),
+            (409, Some(r#"{"error": "federation_conflict"}"#)),
+            (503, Some(r#"{"error": "federation_unavailable"}"#)),
+            (500, Some(r#"{"error": "internal_error"}"#)),
+            (400, Some(r#"{"error": "invalid_request"}"#)),
+            (403, Some(r#"{"error": "invite_forbidden"}"#)),
+            (403, Some(r#"{"error": "federation_forbidden"}"#)),
+            (502, Some(r#"{"error": "federation_protocol"}"#)),
+            (418, Some(r#"{"error": "brand_new_code"}"#)),
+            (502, None),
+        ];
+        for (status, json) in replies {
+            let outcome = classify_redeem(status, json.map(body));
+            let key = match &outcome {
+                RedeemOutcome::Joined(_, key) => key.clone(),
+                _ => None,
+            };
+            let state = fresh_state();
+            state.code.set(FAKE_CODE.to_string());
+            state.publish(outcome, key.as_deref());
+            for slot in [state.note.get_untracked(), state.error.get_untracked()] {
+                let Some(sentence) = slot else { continue };
+                assert!(!sentence.contains(FAKE_CODE), "{status} got: {sentence}");
+            }
         }
     }
 }
