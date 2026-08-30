@@ -3110,3 +3110,25 @@ bug) the keeps-the-owner-reason test fails at None vs Some. Gate re-run at
 land after rebase onto origin/main: 1133 tests green, clippy -D warnings,
 fmt, wasm32 -D warnings release-lane check all clean.
 _________________________________________________________________________________
+
+time:      [01:52] [08-30-26]
+agent:     [claude] [fable 5]
+worktree:  loop/surface-roster-agent-remove-control
+type:      [feature-request]
+area:      [frontend]
+
+The browser can finally take an agent OUT of a room. The daemon's
+participant DELETE landed long ago but only self-leave ever called it, so
+a mistyped agent sat in the roster forever. Rooms::remove_participant
+mirrors leave_open aimed at another row (status names who went, view
+stays up), and every Local member row except the caller's own grows a
+quiet x arming a remove/keep confirm -- two-step because the removal is
+durable, same vocabulary as the agent builder's delete. The armed id
+lives at component scope per the rail-closure warning (roster SSE
+rebuilds would disarm it mid-interaction), and a pruning effect drops it
+when the target leaves the roster or the room changes -- the room check
+exists because a same-id agent in the next room would otherwise inherit
+the primed confirm. Federated rosters untouched (bedrock-authoritative).
+Gate green: 1108 UI tests + integration suites, clippy -D warnings, fmt,
+wasm32 -D warnings release-lane check.
+_________________________________________________________________________________
