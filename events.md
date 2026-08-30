@@ -3422,3 +3422,45 @@ clippy -D warnings on --all-targets and on wasm32, the wasm32 -D warnings
 release-lane check, cargo check on the proxy, the wasm32 test build, and
 fmt --check all clean.
 _________________________________________________________________________________
+
+time:      [18:59] [08-30-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-redeem-reads-the-room-key-and-drops-the-diff
+type:      [feature-request]
+area:      [frontend]
+
+ocean-os #407 landed `room_key` on the redeem 200 two days ago and this bundle
+was not decoding it -- state written and never read -- so room_redeem.rs now
+reads the key off the reply and opens exactly that room, and the
+snapshot-the-list-then-diff-it dance is demoted to the fallback for a daemon
+predating #407. The field is OPTIONAL surface-side on purpose even though the
+daemon requires it: the bundle and the user's local daemon roll forward
+independently, and a hard decode requirement would turn a redemption that
+already succeeded -- room created, credential installed, no un-redeem -- into
+an unreadable reply. newly_joined_key, RoomsProbe, fetch_room_list, the
+`before` snapshot and joined_sentence's None branch all stay reachable through
+that fallback arm rather than being deleted or muted with #[allow(dead_code)],
+which is what the wasm32 -D warnings lane is there to catch. Three findings
+settled in the same file. A proxy 502/504 answers HTML, the body never decodes,
+and the old code called that Refused -- i.e. told the operator their invite is
+spent, which is a lie: the daemon runs remove_pending only on a 403 it produced
+itself (room_federation.rs:1367, :1408), so a gateway fault RETAINS the pending
+redemption and the same code resumes it; every 5xx that no known refusal code
+named is now Retry, on the undecodable path, the codeless path, and an unknown
+code. The empty-submit guard returned without clearing `note`, stacking "Paste
+an invite code first." on top of a stale "Joined warroom. Connecting..." -- it
+clears both slots now like every other path. And no_sentence_can_carry_the_code
+was true by construction: it fed the four sentence builders a room key and
+machine error codes, none of which takes the invite code as an argument, so a
+future format!("{code}") could not have failed it; it now drives every reply
+shape through classify_redeem into publish with the code loaded in the state,
+because publish is the one place a finished sentence and the code signal are
+both in scope. Two source-scan guards were added for wiring the type system
+cannot hold: redeem() needs a Rooms so it is not unit-testable, and without a
+pin nothing would notice it decoding room_key and then ignoring it. Every new
+test was verified by revert: dropping the note clear, restoring the
+unconditional diff, and each of the three 5xx arms individually all fail on the
+assertion written for them and on nothing else. Gate: 1176+4+8+4+7+5+2 tests
+green (seven new), clippy --all-targets -D warnings clean, fmt --check clean,
+and RUSTFLAGS="-D warnings" cargo check on wasm32-unknown-unknown clean.
+_________________________________________________________________________________
