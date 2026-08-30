@@ -3217,3 +3217,24 @@ as before. Gate: 1112+4+8+4+7+5+2 tests green (1 serde + 2 predicate + 1
 prune test new), clippy -D warnings on wasm32, fmt --check clean, wasm32
 -D warnings release-lane check green.
 _________________________________________________________________________________
+
+time:      [11:41] [08-30-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-ci-events-ledger-guard
+type:      [gh-actions]
+area:      [infra]
+
+Added a ledger job to CI so a PR that changes code must carry its events.md
+entry in the same diff. Ledger discipline slipped three consecutive waves of
+the automated loop that works this repo, and the land phase kept appending the
+missing entries afterwards from disposable worktrees; a machine check beats a
+fourth reminder. Mirrors the ocean-bedrock guard landed as its PR #50, with the
+guarded set re-derived for this repo rather than copied: crates/ and styles/ are
+the app (stylesheets live at the repo root here), index.html is trunk's entry
+point, and scripts/ ops/ deploy/ extension/ vscode-extension/ .github/ change
+how it builds or ships. docs/, mockups/, design-systems/, local_plans/, audit/,
+legacy-voice/, public/ and the root manifests stay unguarded. Like every other
+job here it is deliberately not a required check — red is information, not a
+lock. The predicate was exercised against eight diff shapes before landing,
+including this PR's own.
+_________________________________________________________________________________
