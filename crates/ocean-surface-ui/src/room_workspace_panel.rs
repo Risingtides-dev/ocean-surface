@@ -53,6 +53,19 @@
 //! marker, so the form re-reads the lanes itself instead of waiting on a
 //! wake that will never come.
 //!
+//! The owner's take-back rides the same lane — the documented recovery for
+//! output that should never have been published (a token that leaked into a
+//! tail before it was stored as a secret, or was rotated after a leak):
+//!
+//!   POST /v1/rooms/persistent/{key}/workspace/execs/purge → blank stored tails
+//!
+//! `{}` purges every finished row, `{exec_id}` one; still-running rows are
+//! skipped on purge-all (their tails do not exist yet) and refused in type
+//! (`exec_running`) when named. Owner-gated like destroy, unattributed like
+//! it too. A purged row comes back with `purged: true` and NULL tails, and
+//! this panel says "taken back" instead of letting it read as a command
+//! that printed nothing.
+//!
 //! What the wire promises, and this panel honors:
 //!
 //! 1. **Typed refusals are states.** Bedrock's `workspace_absent` 404 is
@@ -195,6 +208,14 @@ pub struct ExecRow {
     pub stdout_clipped: Option<bool>,
     #[serde(default)]
     pub stderr_clipped: Option<bool>,
+    /// Bedrock projects `purged: true` only on rows the owner took back
+    /// (never `false` — unpurged rows must project byte-identically to
+    /// before the column existed), so absence deserializes as the fact it
+    /// states. On a purged row the tails come back NULL, which without this
+    /// flag would read as "still being written" — a lie about a finished
+    /// command.
+    #[serde(default)]
+    pub purged: bool,
 }
 
 /// One row of the list route: the driver contract (`listFiles` in bedrock's
@@ -275,6 +296,11 @@ struct WorkspaceBody {
     removed: Option<Vec<String>>,
     #[serde(default)]
     total: Option<u64>,
+    /// The purge reply's row count — how many execs had their tails
+    /// blanked. Presence is what success means on that lane; the `exec_id`
+    /// echoed beside it is not read here.
+    #[serde(default)]
+    purged: Option<u64>,
     /// The destroy reply's flush report: `null` when no ready container
     /// stood to save.
     #[serde(default)]
@@ -370,6 +396,18 @@ fn secrets_set_url(base: &str, key: &str, actor: &str) -> String {
 fn exec_url(base: &str, key: &str, actor: &str) -> String {
     format!(
         "{base}/v1/rooms/persistent/{}/workspace/exec?actor_id={}",
+        encode(key),
+        encode(actor),
+    )
+}
+
+/// The owner's exec take-back — owner-gated and unattributed like destroy
+/// (the daemon strips any client-sent `actor_member_id`; none is composed
+/// here). The body names the target: `{}` for every finished row, an
+/// `exec_id` for one.
+fn execs_purge_url(base: &str, key: &str, actor: &str) -> String {
+    format!(
+        "{base}/v1/rooms/persistent/{}/workspace/execs/purge?actor_id={}",
         encode(key),
         encode(actor),
     )
@@ -937,6 +975,98 @@ fn exec_form_stands(view: Option<&WorkspaceView>) -> bool {
     )
 }
 
+/// What a purge is aimed at: the whole finished history, or one row. The
+/// armed confirm carries this too, so a first click on one control can
+/// never fire another's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PurgeTarget {
+    All,
+    One(String),
+}
+
+/// The sentence a typed purge answer earns — states in the calm voice,
+/// like the verbs this rides beside. `exec_running` is Bedrock refusing a
+/// NAMED running row (its tails do not exist yet); purge-all skips those
+/// silently instead.
+fn purge_state_sentence(code: &str) -> Option<String> {
+    let sentence = match code {
+        "exec_running" => {
+            "This command is still running \u{2014} its output can be taken back once it finishes."
+        }
+        "workspace_not_owner_principal" => "Only the room owner can take back command output.",
+        "room_not_federated" => "This room has no Bedrock workspace.",
+        _ => return None,
+    };
+    Some(sentence.to_string())
+}
+
+/// The landed sentence, from the reply's own count. Zero is an answer, not
+/// a fault: a named row already purged matches nothing (purge is
+/// idempotent), and a purge-all over a clean history had nothing standing.
+fn purge_sentence(target: &PurgeTarget, purged: u64) -> String {
+    match (target, purged) {
+        (PurgeTarget::One(_), 0) => "That command's output was already taken back.".to_string(),
+        (PurgeTarget::One(_), _) => {
+            "Output taken back \u{2014} it no longer reads back for anyone.".to_string()
+        }
+        (PurgeTarget::All, 0) => "No stored output stood to take back.".to_string(),
+        (PurgeTarget::All, 1) => "Took back the stored output of 1 command.".to_string(),
+        (PurgeTarget::All, n) => format!("Took back the stored output of {n} commands."),
+    }
+}
+
+/// Map a purge reply. Success is the reply's count, and the coded answers
+/// classify like the verbs beside it. The uncoded 404 needs the target to
+/// read honestly: on purge-all it can only be a deployment without the
+/// route (there is no other 404 on that path), but a NAMED purge also
+/// earns one for a vanished exec — Bedrock's 'No such exec in this room.'
+/// — and the two are only told apart by the relayed sentence, so it is
+/// relayed rather than guessed at, and the caller refreshes the history
+/// either way.
+fn classify_exec_purge(
+    target: &PurgeTarget,
+    status: u16,
+    body: Option<WorkspaceBody>,
+) -> LifecycleOutcome {
+    let Some(body) = body else {
+        if status == 404 {
+            return LifecycleOutcome::Unavailable;
+        }
+        return LifecycleOutcome::Failure(format!("The purge reply could not be read ({status})."));
+    };
+    if let Some(purged) = body.purged {
+        return LifecycleOutcome::Landed(purge_sentence(target, purged));
+    }
+    match body.refusal_code() {
+        Some("workspace_route_not_allowed") => LifecycleOutcome::Unavailable,
+        Some(code) => {
+            if let Some(sentence) = purge_state_sentence(code) {
+                return LifecycleOutcome::State(sentence);
+            }
+            LifecycleOutcome::Failure(
+                failure_sentence(code)
+                    .or_else(|| body.error.clone())
+                    .unwrap_or_else(|| format!("The purge failed ({status}).")),
+            )
+        }
+        None if status == 404 => match target {
+            PurgeTarget::All => LifecycleOutcome::Unavailable,
+            PurgeTarget::One(_) => LifecycleOutcome::State(
+                body.error
+                    .filter(|error| !error.is_empty())
+                    .map(|error| format!("The purge didn't land: {error}"))
+                    .unwrap_or_else(|| "The purge didn't land (404).".to_string()),
+            ),
+        },
+        None => LifecycleOutcome::Failure(
+            body.error
+                .filter(|error| !error.is_empty())
+                .map(|error| format!("The purge was refused: {error}"))
+                .unwrap_or_else(|| format!("The purge failed ({status}).")),
+        ),
+    }
+}
+
 /// Which lifecycle verbs the panel offers against what stands. Not
 /// authorization — the daemon's owner gate answers that in type — just the
 /// verbs that can possibly land: provision claims an absent, destroyed or
@@ -1073,6 +1203,11 @@ fn exec_status_line(row: &ExecRow) -> String {
 /// What a row's output area renders.
 #[derive(Debug, PartialEq, Eq)]
 enum RowTails {
+    /// The owner took this row's output back: the stored tails are gone for
+    /// everyone, whoever asks. Checked before the tail fields — a purged
+    /// row's NULL tails would otherwise read as "still being written", and
+    /// its absent ones as merely withheld.
+    Purged,
     /// The route withheld both tails: this run's output belongs to whoever
     /// ran it. A state with a sentence, never an empty box.
     Withheld,
@@ -1089,6 +1224,9 @@ struct StreamTail {
 }
 
 fn row_tails(row: &ExecRow) -> RowTails {
+    if row.purged {
+        return RowTails::Purged;
+    }
     if row.stdout_tail.is_none() && row.stderr_tail.is_none() {
         return RowTails::Withheld;
     }
@@ -1223,6 +1361,7 @@ enum PanelLane {
     Lifecycle,
     Secrets,
     Exec,
+    ExecPurge,
 }
 
 /// Whether a lane's successful read clears the standing error: only the one
@@ -1319,6 +1458,16 @@ pub struct RoomWorkspacePanelState {
     /// An exec is in flight — blocks re-submit for the whole command
     /// budget, which runs to 960s upstream.
     exec_busy: RwSignal<bool>,
+    /// The purge control one click from firing, and what it is aimed at.
+    /// Un-publishing output is destructive the same way destroy is, so it
+    /// arms first — and a close, reset or view flip disarms it.
+    confirm_purge: RwSignal<Option<PurgeTarget>>,
+    /// The purge lane's calm sentence — the landed count, or the typed
+    /// state that answered instead. Its own slot, like the notes beside it.
+    purge_note: RwSignal<Option<String>>,
+    /// A purge is in flight — blocks every purge control while the table
+    /// write runs.
+    purge_busy: RwSignal<bool>,
     /// The marker wake's watermark: `(room generation, highest transcript
     /// seq seen)`. `None` until the open room's transcript is first sighted.
     marker_seen: RwSignal<Option<(u64, u64)>>,
@@ -1358,6 +1507,9 @@ impl RoomWorkspacePanelState {
             exec_command: RwSignal::new(String::new()),
             exec_note: RwSignal::new(None),
             exec_busy: RwSignal::new(false),
+            confirm_purge: RwSignal::new(None),
+            purge_note: RwSignal::new(None),
+            purge_busy: RwSignal::new(false),
             marker_seen: RwSignal::new(None),
             panel: RwSignal::new(false),
             open_ref: NodeRef::new(),
@@ -1381,6 +1533,7 @@ impl RoomWorkspacePanelState {
     pub fn close_panel(&self) {
         self.panel.set(false);
         self.confirm_destroy.set(false);
+        self.confirm_purge.set(None);
         self.secret_value.set(String::new());
         self.poll_epoch
             .update(|epoch| *epoch = epoch.wrapping_add(1));
@@ -1425,6 +1578,9 @@ impl RoomWorkspacePanelState {
         self.exec_command.set(String::new());
         self.exec_note.set(None);
         self.exec_busy.set(false);
+        self.confirm_purge.set(None);
+        self.purge_note.set(None);
+        self.purge_busy.set(false);
         self.marker_seen.set(None);
         self.panel.set(false);
     }
@@ -1451,14 +1607,17 @@ impl RoomWorkspacePanelState {
         self.loading.set(false);
         match result {
             Ok(view) => {
-                // A view that flipped under a primed destroy confirm takes
-                // the confirm with it — armed against one state, it must
-                // not fire at another.
+                // A view that flipped under a primed confirm takes the
+                // confirm with it — armed against one state, it must not
+                // fire at another. The purge confirm rides the same rule:
+                // the history it aims at belongs to the workspace whose
+                // status just changed shape.
                 if self
                     .view
                     .with_untracked(|old| view_flip(old.as_ref(), &view))
                 {
                     self.confirm_destroy.set(false);
+                    self.confirm_purge.set(None);
                 }
                 self.view.set(Some(view));
                 self.clear_lane_error(PanelLane::Status);
@@ -1604,6 +1763,7 @@ impl RoomWorkspacePanelState {
         self.error.set(None);
         self.note.set(None);
         self.secrets_note.set(None);
+        self.purge_note.set(None);
         self.panel.set(true);
         self.files_path.set(WORKSPACE_ROOT_PATH.to_string());
         // A file left open when the panel last closed does not survive the
@@ -1847,6 +2007,54 @@ impl RoomWorkspacePanelState {
             }
         }
     }
+
+    /// Fire the owner's take-back. Same shape as `run_exec` — but unlike
+    /// the secrets set, the history below IS what a landed purge changed,
+    /// so it is re-read as truth. A typed state re-reads it too: the
+    /// vanished-exec answer means the list on screen is already stale.
+    fn run_exec_purge(&self, rooms: Rooms, key: String, actor: String, target: PurgeTarget) {
+        let base = self.base();
+        let me = *self;
+        let generation = rooms.generation_snapshot();
+        self.purge_busy.set(true);
+        self.confirm_purge.set(None);
+        self.purge_note.set(None);
+        self.error.set(None);
+        spawn_local(async move {
+            let url = execs_purge_url(&base, &key, &actor);
+            let outcome = post_exec_purge(&url, &target).await;
+            let current = rooms.room_is_current(generation, &key);
+            let refresh = matches!(
+                outcome,
+                LifecycleOutcome::Landed(_) | LifecycleOutcome::State(_)
+            );
+            me.publish_exec_purge(outcome, current);
+            if current && refresh {
+                refresh_lanes(me, &base, &key, &actor, false, true, false).await;
+            }
+        });
+    }
+
+    /// Publish a completed purge — but only into the room that started it.
+    fn publish_exec_purge(&self, outcome: LifecycleOutcome, room_is_current: bool) {
+        if !room_is_current {
+            return;
+        }
+        self.purge_busy.set(false);
+        match outcome {
+            LifecycleOutcome::Landed(sentence) | LifecycleOutcome::State(sentence) => {
+                self.purge_note.set(Some(sentence));
+            }
+            LifecycleOutcome::Unavailable => {
+                self.purge_note.set(Some(
+                    "Taking back output isn't available on this deployment yet.".to_string(),
+                ));
+            }
+            LifecycleOutcome::Failure(error) => {
+                self.error.set(Some((PanelLane::ExecPurge, error)));
+            }
+        }
+    }
 }
 
 /// The silent refresh the fallback poller and the marker wake share: read
@@ -2021,6 +2229,36 @@ async fn post_exec(url: &str, command: &str) -> LifecycleOutcome {
             Err(err) => LifecycleOutcome::Failure(format!(
                 "The request was cut ({err}) \u{2014} the command may still be \
                  running; the history below will say."
+            )),
+        },
+        Err(err) => LifecycleOutcome::Failure(format!("Workspace request encode error: {err}")),
+    }
+}
+
+/// The purge POST. `{}` means every finished row; a named row rides as
+/// `{"exec_id"}` — validated upstream strict deny-extra, and nothing else
+/// is ever composed here (the daemon would strip an `actor_member_id` as
+/// forgeable anyway).
+async fn post_exec_purge(url: &str, target: &PurgeTarget) -> LifecycleOutcome {
+    let body = match target {
+        PurgeTarget::All => serde_json::json!({}),
+        PurgeTarget::One(exec_id) => serde_json::json!({ "exec_id": exec_id }),
+    };
+    match Request::post(url)
+        .header("content-type", "application/json")
+        .json(&body)
+    {
+        Ok(request) => match request.send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.json::<WorkspaceBody>().await.ok();
+                classify_exec_purge(target, status, body)
+            }
+            // A prompt table write — but the cut connection still hides
+            // whether it landed, and the refreshed history is what says.
+            Err(err) => LifecycleOutcome::Failure(format!(
+                "The request was cut ({err}) \u{2014} the purge may or may not have \
+                 landed; the history below will say."
             )),
         },
         Err(err) => LifecycleOutcome::Failure(format!("Workspace request encode error: {err}")),
@@ -2263,6 +2501,15 @@ pub fn RoomWorkspacePanel(rooms: Rooms, state: RoomWorkspacePanelState) -> impl 
                                             <div class="rooms-workspace__compute-execs-title">
                                                 "Recent commands"
                                             </div>
+                                            {move || {
+                                                state.purge_note.get().map(|note| view! {
+                                                    <div class="rooms-workspace__compute-note">
+                                                        {note}
+                                                    </div>
+                                                })
+                                            }}
+                                            {(!rows.is_empty())
+                                                .then(|| purge_all_control(state, rooms, actor))}
                                             {if rows.is_empty() {
                                                 view! {
                                                     <div class="rooms-workspace__compute-note">
@@ -2272,7 +2519,9 @@ pub fn RoomWorkspacePanel(rooms: Rooms, state: RoomWorkspacePanelState) -> impl 
                                                 }.into_any()
                                             } else {
                                                 rows.iter()
-                                                    .map(exec_row_view)
+                                                    .map(|row| {
+                                                        exec_row_view(state, rooms, actor, row)
+                                                    })
                                                     .collect::<Vec<_>>()
                                                     .into_any()
                                             }}
@@ -2309,15 +2558,91 @@ fn panel_facts(workspace: &WorkspaceProjection) -> impl IntoView {
     }
 }
 
-/// One command in the history: verdict, headline, outcome, and its output —
-/// or the sentence explaining why the output is not here.
-fn exec_row_view(row: &ExecRow) -> impl IntoView {
+/// The whole-history take-back, under the section title. Rendered for
+/// every member the way destroy is — the daemon's owner gate answers
+/// authorization in type — and armed before it fires, because it
+/// un-publishes output for everyone at once.
+fn purge_all_control(
+    state: RoomWorkspacePanelState,
+    rooms: Rooms,
+    // `Send` on top of the sections' shared bound: the armed/disarmed pair
+    // is a reactive child closure, not just an event handler.
+    actor: impl Fn() -> Option<(String, String)> + Copy + Send + 'static,
+) -> impl IntoView {
+    view! {
+        <div class="rooms-workspace__compute-actions rooms-workspace__compute-actions--purge">
+            {move || {
+                let busy = state.purge_busy.get();
+                if state.confirm_purge.get() == Some(PurgeTarget::All) {
+                    view! {
+                        <span class="rooms-workspace__compute-destroy-warn">
+                            "Blanks every finished command's stored output, for everyone \
+                             \u{2014} still-running commands keep theirs."
+                        </span>
+                        <button
+                            class="rooms-workspace__compute-run \
+                                   rooms-workspace__compute-run--danger"
+                            type="button"
+                            disabled=busy
+                            on:click=move |_| {
+                                let Some((key, actor_id)) = actor() else { return };
+                                state.run_exec_purge(rooms, key, actor_id, PurgeTarget::All);
+                            }
+                        >
+                            "take back all"
+                        </button>
+                        <button
+                            class="rooms-workspace__compute-run"
+                            type="button"
+                            on:click=move |_| state.confirm_purge.set(None)
+                        >
+                            "keep"
+                        </button>
+                    }.into_any()
+                } else {
+                    view! {
+                        <button
+                            class="rooms-workspace__compute-run \
+                                   rooms-workspace__compute-run--danger"
+                            type="button"
+                            title="Take back the stored output of every finished command"
+                            disabled=busy
+                            on:click=move |_| {
+                                state.confirm_purge.set(Some(PurgeTarget::All));
+                            }
+                        >
+                            {if busy { "taking back\u{2026}" } else { "take back output\u{2026}" }}
+                        </button>
+                    }.into_any()
+                }
+            }}
+        </div>
+    }
+}
+
+/// One command in the history: verdict, headline, outcome, its output — or
+/// the sentence explaining why the output is not here — and the owner's
+/// per-row take-back, behind the same armed confirm the whole-history
+/// control carries. The armed target names this row's id, so two rows'
+/// confirms can never cross.
+fn exec_row_view(
+    state: RoomWorkspacePanelState,
+    rooms: Rooms,
+    // `Send` for the same reason `purge_all_control` carries it.
+    actor: impl Fn() -> Option<(String, String)> + Copy + Send + 'static,
+    row: &ExecRow,
+) -> impl IntoView {
     let build = is_build(&row.command);
     let mark = exec_mark(row);
     let headline = command_headline(&row.command);
     let full = row.command.clone();
     let status_line = exec_status_line(row);
     let tails = row_tails(row);
+    // A purged row has nothing left to take back (a second purge matches
+    // nothing), so it carries no control; a running row keeps its control
+    // and earns the typed `exec_running` answer.
+    let purgeable = !row.purged && !row.id.is_empty();
+    let row_id = row.id.clone();
     view! {
         <div class="rooms-workspace__compute-exec">
             <div class="rooms-workspace__compute-exec-head" title=full>
@@ -2329,6 +2654,11 @@ fn exec_row_view(row: &ExecRow) -> impl IntoView {
             </div>
             <div class="rooms-workspace__compute-exec-meta">{status_line}</div>
             {match tails {
+                RowTails::Purged => view! {
+                    <div class="rooms-workspace__compute-tail-note">
+                        "Output taken back by the room owner."
+                    </div>
+                }.into_any(),
                 RowTails::Withheld => view! {
                     <div class="rooms-workspace__compute-tail-note">
                         "Output withheld \u{2014} it belongs to the member who ran this."
@@ -2352,6 +2682,66 @@ fn exec_row_view(row: &ExecRow) -> impl IntoView {
                     .collect::<Vec<_>>()
                     .into_any(),
             }}
+            {purgeable.then(|| view! {
+                <div class="rooms-workspace__compute-exec-actions">
+                    {move || {
+                        let busy = state.purge_busy.get();
+                        let armed = state
+                            .confirm_purge
+                            .get()
+                            .is_some_and(|target| target == PurgeTarget::One(row_id.clone()));
+                        if armed {
+                            let fire = row_id.clone();
+                            view! {
+                                <span class="rooms-workspace__compute-destroy-warn">
+                                    "Blanks this command's stored output, for everyone."
+                                </span>
+                                <button
+                                    class="rooms-workspace__compute-run \
+                                           rooms-workspace__compute-run--danger"
+                                    type="button"
+                                    disabled=busy
+                                    on:click=move |_| {
+                                        let Some((key, actor_id)) = actor() else { return };
+                                        state.run_exec_purge(
+                                            rooms,
+                                            key,
+                                            actor_id,
+                                            PurgeTarget::One(fire.clone()),
+                                        );
+                                    }
+                                >
+                                    "take back"
+                                </button>
+                                <button
+                                    class="rooms-workspace__compute-run"
+                                    type="button"
+                                    on:click=move |_| state.confirm_purge.set(None)
+                                >
+                                    "keep"
+                                </button>
+                            }.into_any()
+                        } else {
+                            let arm = row_id.clone();
+                            view! {
+                                <button
+                                    class="rooms-workspace__compute-exec-purge"
+                                    type="button"
+                                    title="Take back this command's stored output"
+                                    disabled=busy
+                                    on:click=move |_| {
+                                        state.confirm_purge.set(Some(PurgeTarget::One(
+                                            arm.clone(),
+                                        )));
+                                    }
+                                >
+                                    "take back\u{2026}"
+                                </button>
+                            }.into_any()
+                        }
+                    }}
+                </div>
+            })}
         </div>
     }
 }
@@ -2795,6 +3185,9 @@ mod tests {
             exec_command: RwSignal::new(String::new()),
             exec_note: RwSignal::new(None),
             exec_busy: RwSignal::new(false),
+            confirm_purge: RwSignal::new(None),
+            purge_note: RwSignal::new(None),
+            purge_busy: RwSignal::new(false),
             marker_seen: RwSignal::new(None),
             panel: RwSignal::new(false),
             open_ref: NodeRef::new(),
@@ -4442,5 +4835,242 @@ mod tests {
         assert_eq!(state.secret_name.get_untracked(), "");
         assert_eq!(state.secrets_note.get_untracked(), None);
         assert!(!state.secrets_busy.get_untracked());
+    }
+
+    #[test]
+    fn the_purge_url_asserts_the_actor() {
+        assert_eq!(
+            execs_purge_url("http://d", "team room", "user@host"),
+            "http://d/v1/rooms/persistent/team%20room/workspace/execs/purge?actor_id=user%40host"
+        );
+    }
+
+    /// A purged row says "taken back" whoever asks: the owner sees NULL
+    /// tails (which unpurged would mean "still running"), everyone else
+    /// sees them absent (which unpurged would mean "withheld") — both
+    /// renders would lie about a row the owner blanked, so the flag wins
+    /// over the tail fields.
+    #[test]
+    fn a_purged_row_reads_as_taken_back_not_silence() {
+        let owner_view: ExecRow = serde_json::from_str(
+            r#"{"id": "e1", "command": "npm test", "status": "exited", "exit_code": 0,
+                "purged": true, "purged_at": "2026-08-29T10:00:00.000Z",
+                "stdout_tail": null, "stderr_tail": null,
+                "stdout_clipped": false, "stderr_clipped": false}"#,
+        )
+        .unwrap();
+        assert!(owner_view.purged);
+        assert_eq!(row_tails(&owner_view), RowTails::Purged);
+
+        let member_view: ExecRow = serde_json::from_str(
+            r#"{"id": "e1", "command": "npm test", "status": "exited", "exit_code": 0,
+                "purged": true, "purged_at": "2026-08-29T10:00:00.000Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(row_tails(&member_view), RowTails::Purged);
+
+        // An unpurged row is untouched by the flag's default: absent tails
+        // still read as withheld, null ones as running.
+        let unpurged: ExecRow = serde_json::from_str(
+            r#"{"id": "e2", "command": "npm test", "status": "exited", "exit_code": 0}"#,
+        )
+        .unwrap();
+        assert!(!unpurged.purged);
+        assert_eq!(row_tails(&unpurged), RowTails::Withheld);
+    }
+
+    /// The landed sentence carries the reply's own count, and zero is an
+    /// answer on both targets: an already-purged named row, or a clean
+    /// history.
+    #[test]
+    fn a_purge_reply_lands_its_count() {
+        let all = PurgeTarget::All;
+        let one = PurgeTarget::One("e1".to_string());
+        assert_eq!(
+            classify_exec_purge(&all, 200, Some(body(r#"{"purged": 3, "exec_id": null}"#))),
+            LifecycleOutcome::Landed("Took back the stored output of 3 commands.".to_string())
+        );
+        assert_eq!(
+            classify_exec_purge(&all, 200, Some(body(r#"{"purged": 1, "exec_id": null}"#))),
+            LifecycleOutcome::Landed("Took back the stored output of 1 command.".to_string())
+        );
+        assert_eq!(
+            classify_exec_purge(&all, 200, Some(body(r#"{"purged": 0, "exec_id": null}"#))),
+            LifecycleOutcome::Landed("No stored output stood to take back.".to_string())
+        );
+        assert_eq!(
+            classify_exec_purge(&one, 200, Some(body(r#"{"purged": 1, "exec_id": "e1"}"#))),
+            LifecycleOutcome::Landed(
+                "Output taken back \u{2014} it no longer reads back for anyone.".to_string()
+            )
+        );
+        assert_eq!(
+            classify_exec_purge(&one, 200, Some(body(r#"{"purged": 0, "exec_id": "e1"}"#))),
+            LifecycleOutcome::Landed("That command's output was already taken back.".to_string())
+        );
+    }
+
+    /// Typed answers read as states in the calm voice; the uncoded 404
+    /// depends on the target — purge-all has no other 404 so it is the
+    /// deployment's honest "not yet", while a named purge relays Bedrock's
+    /// own sentence rather than guessing between a vanished exec and a
+    /// route-less deployment.
+    #[test]
+    fn purge_states_classify_totally() {
+        let all = PurgeTarget::All;
+        let one = PurgeTarget::One("e1".to_string());
+        let running = body(
+            r#"{"ok": false,
+                "error": "This command is still running; purge it once it finishes.",
+                "details": {"code": "exec_running"}}"#,
+        );
+        assert_eq!(
+            classify_exec_purge(&one, 409, Some(running)),
+            LifecycleOutcome::State(
+                "This command is still running \u{2014} its output can be taken back once \
+                 it finishes."
+                    .to_string()
+            )
+        );
+        let not_owner = body(r#"{"ok": false, "code": "workspace_not_owner_principal"}"#);
+        assert_eq!(
+            classify_exec_purge(&all, 403, Some(not_owner)),
+            LifecycleOutcome::State(
+                "Only the room owner can take back command output.".to_string()
+            )
+        );
+        let coded = body(r#"{"ok": false, "code": "workspace_route_not_allowed"}"#);
+        assert_eq!(
+            classify_exec_purge(&all, 404, Some(coded)),
+            LifecycleOutcome::Unavailable
+        );
+        assert_eq!(
+            classify_exec_purge(&all, 404, None),
+            LifecycleOutcome::Unavailable
+        );
+        // An old Bedrock behind a new daemon: uncoded 404, relayed verbatim.
+        let routeless = body(r#"{"ok": false, "error": "Route not found."}"#);
+        assert_eq!(
+            classify_exec_purge(&all, 404, Some(routeless)),
+            LifecycleOutcome::Unavailable
+        );
+        let vanished = body(r#"{"ok": false, "error": "No such exec in this room."}"#);
+        assert_eq!(
+            classify_exec_purge(&one, 404, Some(vanished)),
+            LifecycleOutcome::State(
+                "The purge didn't land: No such exec in this room.".to_string()
+            )
+        );
+        let malformed = body(r#"{"ok": false, "error": "exec_id must be a UUID."}"#);
+        assert_eq!(
+            classify_exec_purge(&one, 400, Some(malformed)),
+            LifecycleOutcome::Failure("The purge was refused: exec_id must be a UUID.".to_string())
+        );
+        let unmapped = body(r#"{"ok": false, "code": "workspace_actor_unmapped"}"#);
+        assert_eq!(
+            classify_exec_purge(&all, 403, Some(unmapped)),
+            LifecycleOutcome::Failure(
+                "Your identity doesn't map to this room's compute service.".to_string()
+            )
+        );
+    }
+
+    /// The purge confirm disarms exactly where the destroy confirm does:
+    /// close, reset, and a status view flip — armed against one workspace
+    /// state, it must not fire at another.
+    #[test]
+    fn the_purge_confirm_disarms_on_close_reset_and_view_flips() {
+        let ready = || {
+            WorkspaceView::Present(Box::new(WorkspaceProjection {
+                status: "ready".to_string(),
+                ..WorkspaceProjection::default()
+            }))
+        };
+        let state = fresh_state();
+        state.view.set(Some(ready()));
+        state.confirm_purge.set(Some(PurgeTarget::All));
+        state.close_panel();
+        assert_eq!(
+            state.confirm_purge.get_untracked(),
+            None,
+            "close must disarm"
+        );
+
+        state
+            .confirm_purge
+            .set(Some(PurgeTarget::One("e1".to_string())));
+        state.reset();
+        assert_eq!(
+            state.confirm_purge.get_untracked(),
+            None,
+            "reset must disarm"
+        );
+
+        state.view.set(Some(ready()));
+        state.confirm_purge.set(Some(PurgeTarget::All));
+        let aged = WorkspaceProjection {
+            status: "ready".to_string(),
+            last_active_at: Some("2026-08-29T10:00:00.000Z".to_string()),
+            ..WorkspaceProjection::default()
+        };
+        state.publish_status(Ok(WorkspaceView::Present(Box::new(aged))), true);
+        assert_eq!(
+            state.confirm_purge.get_untracked(),
+            Some(PurgeTarget::All),
+            "a timestamp churn is not a flip"
+        );
+
+        state.publish_status(Ok(WorkspaceView::Absent), true);
+        assert_eq!(
+            state.confirm_purge.get_untracked(),
+            None,
+            "a shape flip must disarm"
+        );
+    }
+
+    /// Only the room that started a purge may hear its answer, states land
+    /// in the calm note, and a real refusal takes the alert its own lane
+    /// owns — no read's success may wipe it.
+    #[test]
+    fn a_purge_publish_admits_and_isolates() {
+        let state = fresh_state();
+        state.purge_busy.set(true);
+        state.publish_exec_purge(
+            LifecycleOutcome::Landed("Output taken back.".to_string()),
+            false,
+        );
+        assert!(
+            state.purge_busy.get_untracked(),
+            "a stale publish must not clear another room's in-flight state"
+        );
+        assert_eq!(state.purge_note.get_untracked(), None);
+
+        state.publish_exec_purge(
+            LifecycleOutcome::Landed("Output taken back.".to_string()),
+            true,
+        );
+        assert!(!state.purge_busy.get_untracked());
+        assert_eq!(
+            state.purge_note.get_untracked().as_deref(),
+            Some("Output taken back.")
+        );
+
+        state.publish_exec_purge(LifecycleOutcome::Failure("refused".to_string()), true);
+        assert_eq!(
+            state.error.get_untracked(),
+            Some((PanelLane::ExecPurge, "refused".to_string()))
+        );
+        state.publish_status(Ok(WorkspaceView::Absent), true);
+        assert_eq!(
+            state.error.get_untracked(),
+            Some((PanelLane::ExecPurge, "refused".to_string())),
+            "a read lane's success must not wipe a purge failure"
+        );
+
+        state.publish_exec_purge(LifecycleOutcome::Unavailable, true);
+        assert_eq!(
+            state.purge_note.get_untracked().as_deref(),
+            Some("Taking back output isn't available on this deployment yet.")
+        );
     }
 }
