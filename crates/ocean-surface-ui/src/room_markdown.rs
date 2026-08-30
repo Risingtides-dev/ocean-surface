@@ -112,7 +112,11 @@ fn authority_is_valid(authority: &str) -> bool {
     true
 }
 
-fn scheme_allowed(href: &str) -> bool {
+/// Crate-visible because this is the room-content link posture, not just this
+/// renderer's: any URL that reached the client through room data (the repo
+/// panel's recorded CI rows, say) passes the same allowlist before it may
+/// become an anchor.
+pub(crate) fn scheme_allowed(href: &str) -> bool {
     if href.is_empty()
         || href.trim() != href
         || href.contains('\\')

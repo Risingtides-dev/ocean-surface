@@ -2944,6 +2944,15 @@ pub fn App() -> impl IntoView {
                                             let id = m.id.clone();
                                             let id_sel = m.id.clone();
                                             let label = if m.label.is_empty() { m.id.clone() } else { m.label.clone() };
+                                            // Unready per the daemon (no credential
+                                            // in ITS env): still offered — readiness
+                                            // is configuration truth, not liveness —
+                                            // but say so instead of letting the pick
+                                            // fail at turn time.
+                                            let label = match m.unready_reason() {
+                                                Some(reason) => format!("{label} — {reason}"),
+                                                None => label,
+                                            };
                                             view! {
                                                 <option
                                                     prop:value=id.clone()

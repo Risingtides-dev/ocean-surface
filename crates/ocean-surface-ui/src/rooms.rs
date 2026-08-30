@@ -8,6 +8,7 @@
 //!   GET    /v1/rooms/persistent                       → list rooms
 //!   POST   /v1/rooms/persistent                       → create a room
 //!   GET    /v1/rooms/persistent/{key}                 → room + transcript
+//!   PATCH  /v1/rooms/persistent/{key}                 → update trigger policy
 //!   POST   /v1/rooms/persistent/{key}/participants    → join
 //!   DELETE /v1/rooms/persistent/{key}/participants/{id}→ leave
 //!   POST   /v1/rooms/persistent/{key}/messages        → post a message
@@ -16,8 +17,9 @@
 //! Live updates: the daemon's room-scoped SSE (TASK-10, `GET
 //! /v1/rooms/persistent/{key}/events`) streams every transcript row as a
 //! `room_message` frame with `id:=seq`. The surface hydrates once, then tails
-//! live with sequence resume (`?after_seq=` on each newly constructed browser
-//! connection) — no poll, no global-stream workaround (TASK-11).
+//! live with sequence resume (`?after_seq=` only when a hydrated sequence
+//! exists on each newly constructed browser connection) — no poll, no
+//! global-stream workaround (TASK-11).
 //!
 //! The whole module is self-contained — it carries its own request layer rather
 //! than threading rooms state through the `Daemon` handle — so it never touches
@@ -33,6 +35,8 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen_futures::spawn_local;
 
+use crate::rooms_workspace::access_allows_writes;
+
 /// SSE tail connection state for the live indicator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TailState {
@@ -44,10 +48,10 @@ enum TailState {
     Reconnecting,
 }
 
-/// localStorage key for this surface's stable room participant id, so a given
-/// browser keeps the same identity across reloads (join/leave/author are keyed
-/// on it).
-const ROOM_IDENTITY_KEY: &str = "ocean.room_identity";
+/// Stable identity used by explicit single-operator and direct-host surfaces.
+/// Browser deployments with a signed-in user never use this value: they stay
+/// unresolved until `/api/config` publishes the current login.
+const SINGLE_OPERATOR_ROOM_ID: &str = "surface-operator";
 
 // ---- Wire types (mirror ocean-core Room / RoomMessage / RoomParticipant) ----
 
@@ -128,9 +132,13 @@ pub struct RoomMessage {
     /// Root message sequence for a one-level thread reply. `None` for roots.
     #[serde(default)]
     pub thread_parent_seq: Option<u64>,
+    /// Attachment described by an upload/removal marker row. `None` on every
+    /// other row, and always absent from daemons predating the field.
+    #[serde(default)]
+    pub attachment_id: Option<String>,
 }
 
-// ---- Federated wire types (exact mirror of ocean-core 786c6ba4) -------------
+// ---- Federated wire types (exact mirror of ocean-core e2796999) -------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FederatedMessageMeta {
@@ -245,6 +253,8 @@ pub struct RoomAccessProjection {
     pub last_confirmed_global_sequence: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<FederatedRoomMemberProjection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_member_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outbox: Vec<RoomOutboxItem>,
 }
@@ -260,8 +270,14 @@ pub enum RoomAccessState {
 }
 
 /// How a room's agents are auto-woken. Mirrors `ocean_core::RoomTriggerPolicy`.
-/// All flags default off; the daemon reads this on `room_create` and evaluates
-/// it on every non-agent-authored message (OCEAN-65 / OCEAN-111).
+/// All flags default off. Three triggers are live — the daemon evaluates
+/// `on_mention`, `on_thread_reply` and `on_build_failure` on every
+/// non-agent-authored message (OCEAN-65 / OCEAN-111). `on_component_event`
+/// and `on_schedule` are unwired: nothing ever fires them, and the daemon's
+/// write routes answer a typed 400 (`trigger_unwired`) for a policy carrying
+/// `on_component_event: true` or a set `on_schedule`. Refusal is by VALUE,
+/// not presence, so serializing the defaults is accepted; both fields stay
+/// `Deserialize` because stored dead values remain readable.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RoomTriggerPolicy {
     /// Wake an agent when it is @-mentioned in the transcript (the common case).
@@ -270,10 +286,16 @@ pub struct RoomTriggerPolicy {
     /// Wake an agent when someone replies in a thread it participates in.
     #[serde(default)]
     pub on_thread_reply: bool,
-    /// Wake an agent when a rendered component emits an interaction event.
+    /// Unwired: never fires, and the daemon refuses any write where this is
+    /// `true` (`trigger_unwired`). Kept so stored `true` values still decode.
     #[serde(default)]
     pub on_component_event: bool,
-    /// Optional cron expression for scheduled wake-ups. `None`/empty = no schedule.
+    /// Wake the room's agents when a workspace build fails. Off by default,
+    /// so every policy stored before this field existed keeps its behavior.
+    #[serde(default)]
+    pub on_build_failure: bool,
+    /// Unwired: no schedule ever fires, and the daemon refuses any write
+    /// where this is set (`trigger_unwired`). Stored crons stay readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_schedule: Option<String>,
 }
@@ -397,6 +419,14 @@ struct CreateRoomBody<'a> {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct RoomPolicyPatchBody<'a> {
+    /// Always the COMPLETE policy. The daemon's PATCH replaces the stored
+    /// policy wholesale (absent = unchanged, null = clear), so a partial
+    /// object here would silently zero every flag it omitted.
+    trigger_policy: &'a RoomTriggerPolicy,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct JoinBody<'a> {
     id: &'a str,
     display_name: &'a str,
@@ -434,8 +464,9 @@ struct RetryOutboxErrorResponse {
     error: Option<String>,
 }
 
-/// Identity of this surface as a room participant. Stable per browser via
-/// localStorage so join/leave/author all key on the same id.
+/// Identity of this surface as a room participant. Browser hosts receive it
+/// from the current authenticated proxy session; direct hosts use the stable
+/// single-operator identity.
 #[derive(Debug, Clone)]
 pub struct RoomIdentity {
     pub id: String,
@@ -443,22 +474,34 @@ pub struct RoomIdentity {
 }
 
 impl RoomIdentity {
-    fn current() -> Self {
-        // Reuse a persisted id if present; otherwise mint one and store it.
-        let id = local_storage()
-            .and_then(|s| s.get_item(ROOM_IDENTITY_KEY).ok().flatten())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| {
-                let minted = format!("web-{}", mint_suffix());
-                if let Some(s) = local_storage() {
-                    let _ = s.set_item(ROOM_IDENTITY_KEY, &minted);
-                }
-                minted
-            });
+    fn unresolved() -> Self {
         Self {
-            display_name: id.clone(),
-            id,
+            id: String::new(),
+            display_name: String::new(),
         }
+    }
+
+    pub(crate) fn from_proxy_config(id: &str, display_name: &str) -> Self {
+        let id = id.trim();
+        if id.is_empty() {
+            return Self {
+                id: SINGLE_OPERATOR_ROOM_ID.to_string(),
+                display_name: "Operator".to_string(),
+            };
+        }
+        let display_name = display_name.trim();
+        Self {
+            id: id.to_string(),
+            display_name: if display_name.is_empty() {
+                id.to_string()
+            } else {
+                display_name.to_string()
+            },
+        }
+    }
+
+    pub(crate) fn direct_host() -> Self {
+        Self::from_proxy_config("", "")
     }
 }
 
@@ -509,6 +552,12 @@ pub struct Rooms {
     /// origin learned at bootstrap (phone-via-tunnel resolves it asynchronously,
     /// so we must read it live at request time, not snapshot it at construction).
     pub url: RwSignal<String>,
+    /// The daemon's model catalogue signal, shared with `Daemon::models` (`GET
+    /// /v1/models`, populated once at bootstrap). Rooms itself never reads it;
+    /// it is carried so the members rail can hand it to the agent builder,
+    /// whose model picker must offer the daemon's own list rather than a
+    /// hardcoded one. Sharing the handle means zero extra requests.
+    pub models: RwSignal<Vec<crate::daemon::ModelInfo>>,
     /// All persistent rooms (from `GET /v1/rooms/persistent`).
     pub list: RwSignal<Vec<Room>>,
     /// Whether the first `fetch_rooms` has resolved (success or failure). Starts
@@ -533,10 +582,17 @@ pub struct Rooms {
     /// Monotonic generation: bumped when the open room changes so a stale
     /// poll/SSE loop retires instead of writing into the wrong room.
     generation: RwSignal<u64>,
-    /// This browser's stable participant id, used for join/leave/post.
-    pub identity_id: RwSignal<&'static str>,
+    /// Current participant id, used for join/leave/post. Browser-hosted Rooms
+    /// keep this empty until the signed-in identity resolves from `/api/config`.
+    pub identity_id: RwSignal<String>,
     /// This browser's display name.
-    pub identity_name: RwSignal<&'static str>,
+    pub identity_name: RwSignal<String>,
+    /// Whether `identity_id` came from the DAEMON rather than from a
+    /// current authenticated config response. False until `/api/config`
+    /// answers on browser hosts. See
+    /// [`Rooms::identity_resolved`] for why the distinction is the whole
+    /// difference between a gate and a formality.
+    pub identity_authoritative: RwSignal<bool>,
     /// Tail state for the live connection indicator. Starts as Replaying during
     /// initial catch-up, switches to Live once connected, and to Reconnecting on
     /// drop/retry. The view reads this to render the status bar indicator.
@@ -562,6 +618,15 @@ pub struct Rooms {
     /// Surfaces snapshot the op_id before dispatching and gate only on the
     /// outcome carrying a matching id — concurrent submits never cross-resolve.
     pub create_op: RwSignal<(u64, Option<CreateOutcome>)>,
+    /// Whether a trigger-policy PATCH on the open room is in flight. The
+    /// workspace disables its toggles on this, so two flips can never
+    /// interleave and resolve out of order.
+    pub policy_update_in_flight: RwSignal<bool>,
+    /// Error from the last trigger-policy PATCH, shown inline by the toggles
+    /// section. A refused flip does not snap the box back — `open_room` is
+    /// untouched, so nothing re-renders — which is why the error must be
+    /// visible: the box alone would overstate what was stored.
+    pub policy_update_error: RwSignal<Option<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -581,14 +646,22 @@ impl Rooms {
     /// always targets the origin resolved by bootstrap. Room collaboration is
     /// daemon-native text; LiveKit state is intentionally outside this type.
     pub fn new(daemon: &crate::daemon::Daemon) -> Self {
-        let identity = RoomIdentity::current();
-        // Leak the small, app-lifetime identity strings to obtain `&'static str`
-        // signals, so the panel can pass them into request closures without a
-        // per-call clone.
-        let id_static: &'static str = Box::leak(identity.id.into_boxed_str());
-        let name_static: &'static str = Box::leak(identity.display_name.into_boxed_str());
-        Self {
+        // A browser login is authoritative, so never act under the identity a
+        // previous tenant left in localStorage while `/api/config` is in flight.
+        // Direct extension/Tauri hosts have no proxy login and use their stable
+        // local-operator identity immediately.
+        let direct_host =
+            crate::daemon::running_as_extension() || crate::daemon::running_as_tauri();
+        let identity = if direct_host {
+            RoomIdentity::direct_host()
+        } else {
+            RoomIdentity::unresolved()
+        };
+        let daemon_adopted_id = daemon.adopted_user_id;
+        let daemon_adopted_name = daemon.adopted_display_name;
+        let rooms = Self {
             url: daemon.url,
+            models: daemon.models,
             list: RwSignal::new(Vec::new()),
             rooms_loaded: RwSignal::new(false),
             rooms_loading: RwSignal::new(false),
@@ -599,8 +672,9 @@ impl Rooms {
             transcript: RwSignal::new(Vec::new()),
             status: RwSignal::new(String::new()),
             generation: RwSignal::new(0),
-            identity_id: RwSignal::new(id_static),
-            identity_name: RwSignal::new(name_static),
+            identity_id: RwSignal::new(identity.id),
+            identity_name: RwSignal::new(identity.display_name),
+            identity_authoritative: RwSignal::new(direct_host),
             tail_state: RwSignal::new(TailState::Replaying),
             available_agents: RwSignal::new(Vec::new()),
             agents_loaded: RwSignal::new(false),
@@ -610,7 +684,47 @@ impl Rooms {
             read_cursor_in_flight: RwSignal::new(None),
             last_sent_read_cursor: RwSignal::new(None),
             create_op: RwSignal::new((0, None)),
-        }
+            policy_update_in_flight: RwSignal::new(false),
+            policy_update_error: RwSignal::new(None),
+        };
+
+        // Identity is RESOLVED, not snapshotted. `Rooms::new` runs synchronously
+        // in the App body while bootstrap's /api/config fetch is still in
+        // flight, so the value read above is whatever the last session left
+        // behind. This effect rewrites it the moment bootstrap answers, which is
+        // what stops the first session after a login from acting as the previous
+        // identity.
+        let handle = rooms;
+        Effect::new(move |_| {
+            let id = daemon_adopted_id.get();
+            if id.is_empty() {
+                return;
+            }
+            let name = daemon_adopted_name.get();
+            let display = if name.is_empty() { id.clone() } else { name };
+            handle.identity_id.set(id);
+            handle.identity_name.set(display);
+            // Only now may this surface act. Set last, after both strings are
+            // in place, so nothing can observe an authoritative flag over a
+            // half-written identity.
+            handle.identity_authoritative.set(true);
+        });
+
+        rooms
+    }
+
+    /// Whether bootstrap has resolved who we are. Join and post refuse while
+    /// this is false: acting under an unresolved identity is exactly how ghost
+    /// members were created.
+    ///
+    /// The test is "the daemon answered", NOT merely "we have a non-empty id".
+    /// Direct hosts are authoritative at construction; browser hosts stay
+    /// unresolved until the current authenticated `/api/config` response.
+    pub fn identity_resolved(&self) -> bool {
+        identity_may_act(
+            self.identity_authoritative.get_untracked(),
+            &self.identity_id.get_untracked(),
+        )
     }
 
     fn base(&self) -> String {
@@ -650,6 +764,13 @@ impl Rooms {
         self.generation.get_untracked()
     }
 
+    /// Reactive generation read for UI lifecycle Effects whose state belongs
+    /// to one exact open-room admission. Request code should continue to use
+    /// [`Rooms::generation_snapshot`] plus [`Rooms::room_is_current`].
+    pub(crate) fn generation_snapshot_reactive(&self) -> u64 {
+        self.generation.get()
+    }
+
     /// Synchronously clear the open-room signals and pin `tail_state` to
     /// `Replaying` so no prior room state leaks into the next open. Shared
     /// by `open_room` (pre-hydrate) and `close_room`.
@@ -661,6 +782,9 @@ impl Rooms {
         self.read_cursor_in_flight.set(None);
         self.last_sent_read_cursor.set(None);
         self.tail_state.set(TailState::Replaying);
+        // In-flight stays as-is — the completion clears it itself — but a
+        // previous room's PATCH failure must not read as this room's.
+        self.policy_update_error.set(None);
     }
 
     /// Whether the current identity is joined according to the room's explicit
@@ -670,7 +794,7 @@ impl Rooms {
         joined_open_for(
             self.access.get().as_ref(),
             self.open_room.get().as_ref(),
-            self.identity_id.get(),
+            &self.identity_id.get(),
         )
     }
 
@@ -985,9 +1109,80 @@ impl Rooms {
         self.reset_room_state();
     }
 
+    /// Replace the open room's trigger policy (`PATCH /v1/rooms/persistent/{key}`).
+    /// Callers flip one flag on a copy of the room's CURRENT policy and pass
+    /// the whole thing — the daemon replaces rather than merges, so a delta
+    /// would clear every flag it omitted. Success re-renders from the record
+    /// the daemon returned, so a shown checkmark is always durable state.
+    /// Generation-gated like the read-cursor PATCH: a response that lands
+    /// after the operator switched rooms writes nothing.
+    pub fn update_open_room_policy(&self, policy: RoomTriggerPolicy) {
+        if self.policy_update_in_flight.get_untracked() {
+            return;
+        }
+        let Some(key) = self.open_key.get_untracked() else {
+            return;
+        };
+        let base = self.base();
+        let me = *self;
+        let generation_id = self.generation.get_untracked();
+        self.policy_update_in_flight.set(true);
+        self.policy_update_error.set(None);
+        spawn_local(async move {
+            let patch_url = format!("{base}/v1/rooms/persistent/{}", encode(&key));
+            let body = RoomPolicyPatchBody {
+                trigger_policy: &policy,
+            };
+            let result = match Request::patch(&patch_url)
+                .header("content-type", "application/json")
+                .json(&body)
+            {
+                Ok(req) => match req.send().await {
+                    Ok(resp) => match resp.json::<RoomMutateResponse>().await {
+                        Ok(r) if r.ok => Ok(r.room),
+                        Ok(r) => Err(r.error.unwrap_or_else(|| "unknown error".into())),
+                        Err(err) => Err(format!("decode: {err}")),
+                    },
+                    Err(err) => Err(format!("patch: {err}")),
+                },
+                Err(err) => Err(format!("encode: {err}")),
+            };
+            me.policy_update_in_flight.set(false);
+            if !me.room_is_current(generation_id, &key) {
+                // The operator moved on. On success the daemon already holds
+                // the change and the next open re-reads it; on failure the
+                // error belongs to a room that is no longer on screen.
+                return;
+            }
+            match result {
+                Ok(room) => {
+                    if let Some(room) = room {
+                        // Merge into the list too, so the flags survive a
+                        // list-driven re-render without a refetch.
+                        me.list.update(|rooms| {
+                            if let Some(entry) = rooms.iter_mut().find(|r| r.id == room.id) {
+                                *entry = room.clone();
+                            }
+                        });
+                        me.open_room.set(Some(room));
+                    }
+                }
+                Err(error) => me.policy_update_error.set(Some(error)),
+            }
+        });
+    }
+
     /// Join the open room as the current identity
     /// (`POST .../participants`).
     pub fn join_open(&self) {
+        // Refuse to join under an unresolved identity. This is the gate that
+        // stops ghost members: before it, a page-load whose bootstrap had not
+        // answered joined as a minted `web-<random>` and left a dead member in
+        // the roster on every visit.
+        if !self.identity_resolved() {
+            self.status.set("signing you in…".to_string());
+            return;
+        }
         let Some(key) = self.open_key.get_untracked() else {
             return;
         };
@@ -998,8 +1193,8 @@ impl Rooms {
         let name = self.identity_name.get_untracked();
         spawn_local(async move {
             let body = JoinBody {
-                id,
-                display_name: name,
+                id: &id,
+                display_name: &name,
                 kind: RoomParticipantKind::Human,
             };
             let post_url = format!("{base}/v1/rooms/persistent/{}/participants", encode(&key));
@@ -1092,16 +1287,6 @@ impl Rooms {
         });
     }
 
-    /// Ids of the open room's **agent** participants — the actors a human can
-    /// `@mention` to auto-convene. Used to render the composer's discoverability
-    /// hint.
-    #[allow(dead_code)]
-    pub fn agent_ids(&self) -> Vec<String> {
-        let access = self.access.get();
-        let room = self.open_room.get();
-        agent_ids_for(access.as_ref(), room.as_ref())
-    }
-
     /// Leave the open room (`DELETE .../participants/{id}`).
     pub fn leave_open(&self) {
         let Some(key) = self.open_key.get_untracked() else {
@@ -1115,7 +1300,7 @@ impl Rooms {
             let del_url = format!(
                 "{base}/v1/rooms/persistent/{}/participants/{}",
                 encode(&key),
-                encode(id)
+                encode(&id)
             );
             let result = match Request::delete(&del_url).send().await {
                 Ok(resp) => match resp.json::<RoomMutateResponse>().await {
@@ -1145,10 +1330,117 @@ impl Rooms {
         });
     }
 
+    /// Remove any participant from the open room
+    /// (`DELETE .../participants/{participant_id}`) — [`Self::leave_open`]
+    /// aimed at another roster row: same wire call and response handling, but
+    /// the status names who went, because "left" on removing someone else
+    /// would read as the remover having left.
+    pub fn remove_participant(&self, participant_id: String) {
+        if participant_id.is_empty() {
+            return;
+        }
+        let Some(key) = self.open_key.get_untracked() else {
+            return;
+        };
+        let base = self.base();
+        let me = *self;
+        let generation_id = self.generation.get_untracked();
+        spawn_local(async move {
+            let del_url = format!(
+                "{base}/v1/rooms/persistent/{}/participants/{}",
+                encode(&key),
+                encode(&participant_id)
+            );
+            let result = match Request::delete(&del_url).send().await {
+                Ok(resp) => match resp.json::<RoomMutateResponse>().await {
+                    Ok(r) if r.ok => Ok(r.room),
+                    Ok(r) => Err(format!(
+                        "remove failed: {}",
+                        r.error.unwrap_or_else(|| "unknown error".into())
+                    )),
+                    Err(err) => Err(format!("remove decode error: {err}")),
+                },
+                Err(err) => Err(format!("remove error: {err}")),
+            };
+            if result.is_ok() {
+                me.fetch_rooms();
+            }
+            if !me.room_is_current(generation_id, &key) {
+                return;
+            }
+            match result {
+                Ok(room) => {
+                    me.open_room.set(room);
+                    me.status.set(format!("removed '{participant_id}'"));
+                    me.refresh_open_transcript(&key, generation_id);
+                }
+                Err(error) => me.status.set(error),
+            }
+        });
+    }
+
+    /// Remove a member from the open federated room
+    /// (`DELETE .../members/{member_id}`). Unlike the participants DELETE,
+    /// a 200 carries the refreshed [`RoomAccessProjection`] itself — the
+    /// daemon re-reads bedrock's roster before answering, so the member is
+    /// already gone from it — and failures carry `{"ok":false,"error":code}`
+    /// (see [`decode_remove_member_response`]). Authorization is bedrock's
+    /// owner-or-self policy answered per attempt: the projection has no
+    /// "this is you" flag, so every row offers the control and a refusal is
+    /// a status line, never a revocation.
+    pub fn remove_member(&self, member_id: String, display_name: String) {
+        if member_id.is_empty() {
+            return;
+        }
+        let Some(key) = self.open_key.get_untracked() else {
+            return;
+        };
+        let base = self.base();
+        let me = *self;
+        let generation_id = self.generation.get_untracked();
+        spawn_local(async move {
+            let del_url = format!(
+                "{base}/v1/rooms/persistent/{}/members/{}",
+                encode(&key),
+                encode(&member_id)
+            );
+            let result = match Request::delete(&del_url).send().await {
+                Ok(resp) => {
+                    let http_ok = resp.ok();
+                    let http_status = resp.status();
+                    match resp.text().await {
+                        Ok(body) => decode_remove_member_response(http_ok, http_status, &body),
+                        Err(err) => Err(format!("remove decode error: {err}")),
+                    }
+                }
+                Err(err) => Err(format!("remove error: {err}")),
+            };
+            if result.is_ok() {
+                me.fetch_rooms();
+            }
+            if !me.room_is_current(generation_id, &key) {
+                return;
+            }
+            match result {
+                Ok(access) => {
+                    apply_access_projection(&me.access, access);
+                    me.status.set(format!("removed '{display_name}'"));
+                }
+                Err(error) => me.status.set(error),
+            }
+        });
+    }
+
     /// Post a message to the open room (`POST .../messages`). `@id` mentions in
     /// the body drive the daemon's trigger-policy auto-convene.
     pub fn post_message(&self, body: String, thread_parent_seq: Option<u64>) {
         if !access_allows_writes(self.access.get_untracked().as_ref()) {
+            return;
+        }
+        // A message authored under an unresolved identity is either refused by
+        // the daemon (author_not_in_roster) or lands attributed to nobody.
+        if !self.identity_resolved() {
+            self.status.set("signing you in…".to_string());
             return;
         }
         let body = body.trim().to_string();
@@ -1164,7 +1456,7 @@ impl Rooms {
         let id = self.identity_id.get_untracked();
         spawn_local(async move {
             let payload = PostMessageBody {
-                author_id: id,
+                author_id: &id,
                 author_kind: RoomParticipantKind::Human,
                 body: &body,
                 thread_parent_seq,
@@ -1261,17 +1553,20 @@ impl Rooms {
             if !me.room_is_current(generation_id, &key) {
                 return;
             }
-            let after = last_transcript_seq(&me.transcript.get_untracked());
-            let get_url = format!(
-                "{base}/v1/rooms/persistent/{}/transcript?after_seq={after}",
-                encode(&key)
+            let endpoint = format!("{base}/v1/rooms/persistent/{}/transcript", encode(&key));
+            let get_url = url_with_after_seq(
+                &endpoint,
+                last_transcript_seq(&me.transcript.get_untracked()),
             );
             if let Ok(resp) = Request::get(&get_url).send().await {
                 if let Ok(r) = resp.json::<TranscriptResponse>().await {
                     if r.ok && !r.transcript.is_empty() && me.room_is_current(generation_id, &key) {
                         me.transcript.update(|transcript| {
                             for message in r.transcript {
-                                if transcript.last().map(|last| last.seq).unwrap_or(0) < message.seq
+                                if transcript
+                                    .last()
+                                    .map(|last| last.seq < message.seq)
+                                    .unwrap_or(true)
                                 {
                                     transcript.push(message);
                                 }
@@ -1308,7 +1603,7 @@ impl Rooms {
                     TailState::Replaying
                 });
 
-                let url = format!("{events_url}?after_seq={resume_seq}");
+                let url = url_with_after_seq(&events_url, resume_seq);
                 let mut es = match EventSource::new(&url) {
                     Ok(es) => es,
                     Err(_) => {
@@ -1444,8 +1739,12 @@ impl Rooms {
                             );
                         }
                         RoomTailFrame::Message(entry) => {
-                            if entry.seq > last_seq.get_untracked() {
-                                last_seq.set(entry.seq);
+                            if last_seq
+                                .get_untracked()
+                                .map(|last| entry.seq > last)
+                                .unwrap_or(true)
+                            {
+                                last_seq.set(Some(entry.seq));
                             }
                             let is_roster_change = matches!(
                                 entry.kind,
@@ -1896,8 +2195,50 @@ fn replace_access_projection(
     true
 }
 
-fn last_transcript_seq(transcript: &[RoomMessage]) -> u64 {
-    transcript.last().map(|message| message.seq).unwrap_or(0)
+/// Decode the members DELETE response. This route does NOT answer the
+/// [`RoomMutateResponse`] envelope the participants DELETE uses: a 200 body
+/// is the refreshed [`RoomAccessProjection`] directly, an error body is
+/// `{"ok":false,"error":code}` — so the split has to be on HTTP status, not
+/// on an `ok` field.
+fn decode_remove_member_response(
+    http_ok: bool,
+    http_status: u16,
+    body: &str,
+) -> Result<RoomAccessProjection, String> {
+    if http_ok {
+        serde_json::from_str::<RoomAccessProjection>(body)
+            .map_err(|err| format!("remove decode error: {err}"))
+    } else {
+        let code = serde_json::from_str::<RoomErrorResponse>(body)
+            .ok()
+            .and_then(|r| r.error);
+        Err(remove_member_failure_status(http_status, code.as_deref()))
+    }
+}
+
+/// Status line for a refused member remove. `federation_forbidden` here is
+/// bedrock's owner-or-self policy answering "not yours to remove" — the
+/// credential and binding are untouched and a retry is admitted, so the copy
+/// must read as a refusal of this one attempt, never as revoked access.
+fn remove_member_failure_status(http_status: u16, code: Option<&str>) -> String {
+    match code {
+        Some("federation_forbidden") => {
+            "remove refused: only the room owner or the member's registrant can remove them".into()
+        }
+        Some(code) => format!("remove failed: {code}"),
+        None => format!("remove failed: HTTP {http_status}"),
+    }
+}
+
+fn last_transcript_seq(transcript: &[RoomMessage]) -> Option<u64> {
+    transcript.last().map(|message| message.seq)
+}
+
+fn url_with_after_seq(endpoint: &str, after_seq: Option<u64>) -> String {
+    match after_seq {
+        Some(sequence) => format!("{endpoint}?after_seq={sequence}"),
+        None => endpoint.to_string(),
+    }
 }
 
 fn list_request_is_current(expected_ticket: u64, current_ticket: u64) -> bool {
@@ -2001,62 +2342,6 @@ pub(crate) fn room_request_is_current(
     expected_generation == current_generation && current_key == Some(expected_key)
 }
 
-fn access_allows_writes(access: Option<&RoomAccessProjection>) -> bool {
-    matches!(
-        access.map(|projection| projection.state),
-        Some(RoomAccessState::Local | RoomAccessState::Live)
-    )
-}
-
-#[allow(dead_code)]
-fn access_banner(access: Option<&RoomAccessProjection>) -> Option<&'static str> {
-    match access.map(|projection| projection.state) {
-        Some(RoomAccessState::Connecting) => Some("Connecting"),
-        Some(RoomAccessState::Recovering) => Some("Recovering"),
-        Some(RoomAccessState::Revoked) => Some("Access revoked"),
-        None | Some(RoomAccessState::Local | RoomAccessState::Live) => None,
-    }
-}
-
-#[allow(dead_code)]
-fn agent_ids_for(access: Option<&RoomAccessProjection>, room: Option<&Room>) -> Vec<String> {
-    let Some(access) = access else {
-        return Vec::new();
-    };
-    if access.state != RoomAccessState::Local {
-        return access
-            .members
-            .iter()
-            .filter(|member| member.actor_type == FederatedActorType::Agent)
-            .map(|member| member.member_id.clone())
-            .collect();
-    }
-    room.map(|room| {
-        room.participants
-            .iter()
-            .filter(|participant| participant.kind == RoomParticipantKind::Agent)
-            .map(|participant| participant.id.clone())
-            .collect()
-    })
-    .unwrap_or_default()
-}
-
-fn local_storage() -> Option<web_sys::Storage> {
-    web_sys::window().and_then(|w| w.local_storage().ok().flatten())
-}
-
-/// A short, reasonably-unique suffix for a minted identity. We don't have a UUID
-/// crate in this WASM bundle, so derive one from the wall clock (`js_sys::Date`,
-/// no web-sys feature needed) XOR'd with a random.
-fn mint_suffix() -> String {
-    let now = js_sys::Date::now();
-    let rand = js_sys::Math::random();
-    format!(
-        "{:x}",
-        (now as u64).wrapping_mul(1_000_000) ^ (rand * 1e9) as u64
-    )
-}
-
 /// Derive a url/key-safe slug from a room name (lowercase alnum + `-`).
 fn slugify(name: &str) -> String {
     let mut out = String::new();
@@ -2076,7 +2361,10 @@ fn slugify(name: &str) -> String {
 /// Percent-encode a path segment (room keys can contain `-`/`_`/alnum already,
 /// but a defensive encode keeps an unexpected char from breaking the URL).
 /// Pure Rust so tests run on native targets.
-fn encode(s: &str) -> String {
+///
+/// `pub(crate)` so `agents.rs` addresses `/v1/agents/{name}` through the same
+/// encoder rather than growing a second, subtly different one.
+pub(crate) fn encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
@@ -2109,9 +2397,52 @@ pub(crate) fn livekit_token_path_for_room(key: &str) -> String {
     format!("/v1/rooms/{}/livekit-token", encode(key))
 }
 
+/// Whether this surface may act as a room participant yet.
+///
+/// Both halves are load-bearing. `authoritative` is the daemon having
+/// answered; a non-empty `id` alone is not, because the id warm-starts from
+/// localStorage and so is non-empty for any browser that has loaded rooms
+/// before — including one holding a `web-<random>` ghost or the previous
+/// tenant's id.
+fn identity_may_act(authoritative: bool, id: &str) -> bool {
+    authoritative && !id.is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acting_requires_the_daemon_to_have_answered_not_just_a_stored_id() {
+        // An id without current authenticated authority must never make the
+        // gate pass, even if a future warm-start source grows one again.
+        assert!(!identity_may_act(false, "web-18c72b1e64dc22de"));
+        assert!(!identity_may_act(false, "smaths"));
+        // Nothing to act as, however the flag stands.
+        assert!(!identity_may_act(false, ""));
+        assert!(!identity_may_act(true, ""));
+        // Resolved, and someone to be.
+        assert!(identity_may_act(true, "smaths"));
+    }
+
+    #[test]
+    fn proxy_identity_uses_login_and_normalizes_display_name() {
+        assert_eq!(
+            RoomIdentity::from_proxy_config("  ocean  ", "  Ocean Operator  ").id,
+            "ocean"
+        );
+        assert_eq!(
+            RoomIdentity::from_proxy_config("ocean", "").display_name,
+            "ocean"
+        );
+    }
+
+    #[test]
+    fn successful_single_operator_config_uses_stable_identity() {
+        let identity = RoomIdentity::from_proxy_config("", "");
+        assert_eq!(identity.id, SINGLE_OPERATOR_ROOM_ID);
+        assert_eq!(identity.display_name, "Operator");
+    }
 
     #[test]
     fn no_agents_hint_waits_for_agents_fetch() {
@@ -2158,6 +2489,7 @@ mod tests {
             state,
             last_confirmed_global_sequence: None,
             members: Vec::new(),
+            self_member_id: None,
             outbox: Vec::new(),
         }
     }
@@ -2172,6 +2504,7 @@ mod tests {
             created_at: "2026-07-16T22:00:00Z".into(),
             federated: None,
             thread_parent_seq: None,
+            attachment_id: None,
         }
     }
 
@@ -2245,6 +2578,55 @@ mod tests {
         assert_eq!(slugify("!!!hi!!!"), "hi");
         assert_eq!(slugify("---"), "");
         assert_eq!(slugify(""), "");
+    }
+
+    /// Every policy stored before `on_build_failure` existed decodes with the
+    /// flag off — same compat guarantee the daemon's own struct makes.
+    #[test]
+    fn trigger_policy_without_on_build_failure_decodes_with_flag_off() {
+        let policy: RoomTriggerPolicy = serde_json::from_value(serde_json::json!({
+            "on_mention": true,
+            "on_thread_reply": true
+        }))
+        .expect("legacy policy should decode");
+        assert!(policy.on_mention);
+        assert!(policy.on_thread_reply);
+        assert!(!policy.on_build_failure);
+        assert!(!policy.on_component_event);
+        assert_eq!(policy.on_schedule, None);
+    }
+
+    /// The PATCH body carries the COMPLETE policy under `trigger_policy`
+    /// because the daemon replaces the stored policy wholesale. The daemon
+    /// refuses dead trigger values by VALUE, not presence (`trigger_unwired`),
+    /// so the always-serialized `on_component_event: false` is accepted and
+    /// `on_schedule: None` stays omitted (skip_serializing_if), matching the
+    /// daemon's "absent = unset" encoding — a normalized policy's body always
+    /// passes the write gate.
+    #[test]
+    fn policy_patch_body_sends_the_complete_policy() {
+        let policy = RoomTriggerPolicy {
+            on_mention: true,
+            on_thread_reply: false,
+            on_component_event: false,
+            on_build_failure: true,
+            on_schedule: None,
+        };
+        let body = serde_json::to_value(RoomPolicyPatchBody {
+            trigger_policy: &policy,
+        })
+        .expect("body should encode");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "trigger_policy": {
+                    "on_mention": true,
+                    "on_thread_reply": false,
+                    "on_component_event": false,
+                    "on_build_failure": true
+                }
+            })
+        );
     }
 
     #[test]
@@ -2414,22 +2796,68 @@ mod tests {
     }
 
     #[test]
-    fn all_access_states_pin_write_and_banner_policy() {
-        let cases = [
-            (RoomAccessState::Local, true, None),
-            (RoomAccessState::Connecting, false, Some("Connecting")),
-            (RoomAccessState::Live, true, None),
-            (RoomAccessState::Recovering, false, Some("Recovering")),
-            (RoomAccessState::Revoked, false, Some("Access revoked")),
-        ];
+    fn access_projection_self_member_id_serde_compat() {
+        // Old-daemon payloads carry no `self_member_id` key → `None`; `None`
+        // never serializes, so older daemons never see an unknown key back.
+        let old: RoomAccessProjection =
+            serde_json::from_value(serde_json::json!({ "state": "live" })).unwrap();
+        assert_eq!(old.self_member_id, None);
+        let none_json = serde_json::to_value(&old).unwrap();
+        assert!(none_json.get("self_member_id").is_none());
 
-        assert!(!access_allows_writes(None));
-        assert_eq!(access_banner(None), None);
-        for (state, writes, banner) in cases {
-            let access = access_projection(state);
-            assert_eq!(access_allows_writes(Some(&access)), writes);
-            assert_eq!(access_banner(Some(&access)), banner);
-        }
+        let mut projection = access_projection(RoomAccessState::Live);
+        projection.self_member_id = Some("member-you".into());
+        let json = serde_json::to_value(&projection).unwrap();
+        assert_eq!(json["self_member_id"], "member-you");
+        let roundtrip: RoomAccessProjection = serde_json::from_value(json).unwrap();
+        assert_eq!(roundtrip, projection);
+    }
+
+    // ── members DELETE response decode ────────────────────────────────
+
+    #[test]
+    fn remove_member_success_body_is_the_projection_not_a_mutate_envelope() {
+        // The daemon refreshed the roster before answering, so the 200 body
+        // already shows the member gone — applying it IS the UI update.
+        let body = serde_json::json!({
+            "state": "live",
+            "last_confirmed_global_sequence": 9
+        })
+        .to_string();
+        let access = decode_remove_member_response(true, 200, &body)
+            .expect("200 body decodes as RoomAccessProjection");
+        assert_eq!(access.state, RoomAccessState::Live);
+        assert!(access.members.is_empty());
+    }
+
+    #[test]
+    fn remove_member_policy_403_reads_as_refusal_never_revocation() {
+        let error = decode_remove_member_response(
+            false,
+            403,
+            r#"{"ok":false,"error":"federation_forbidden"}"#,
+        )
+        .unwrap_err();
+        assert!(error.starts_with("remove refused"), "{error}");
+        assert!(!error.to_lowercase().contains("revok"), "{error}");
+    }
+
+    #[test]
+    fn remove_member_other_failures_carry_their_code_or_http_status() {
+        assert_eq!(
+            decode_remove_member_response(
+                false,
+                503,
+                r#"{"ok":false,"error":"federation_unavailable"}"#
+            )
+            .unwrap_err(),
+            "remove failed: federation_unavailable"
+        );
+        // An undecodable error body still names the HTTP status.
+        assert_eq!(
+            decode_remove_member_response(false, 502, "upstream burp").unwrap_err(),
+            "remove failed: HTTP 502"
+        );
     }
 
     #[test]
@@ -2469,8 +2897,13 @@ mod tests {
 
     #[test]
     fn transcript_cursor_is_seeded_from_last_hydrated_sequence() {
-        assert_eq!(last_transcript_seq(&[]), 0);
-        assert_eq!(last_transcript_seq(&[message(3), message(9)]), 9);
+        assert_eq!(last_transcript_seq(&[]), None);
+        assert_eq!(last_transcript_seq(&[message(3), message(9)]), Some(9));
+        assert_eq!(url_with_after_seq("/events", None), "/events");
+        assert_eq!(
+            url_with_after_seq("/events", Some(0)),
+            "/events?after_seq=0"
+        );
     }
 
     #[test]
@@ -2541,47 +2974,6 @@ mod tests {
             key,
             Some(key),
         ));
-    }
-
-    #[test]
-    fn agent_ids_switch_strictly_between_local_and_federated_rosters() {
-        let room = local_room();
-        let local = access_projection(RoomAccessState::Local);
-        assert_eq!(
-            agent_ids_for(Some(&local), Some(&room)),
-            vec!["local-agent"]
-        );
-        assert!(agent_ids_for(None, Some(&room)).is_empty());
-
-        let mut federated = access_projection(RoomAccessState::Live);
-        federated.members = vec![
-            FederatedRoomMemberProjection {
-                member_id: "opaque-agent".into(),
-                owner_member_id: None,
-                actor_type: FederatedActorType::Agent,
-                role_in_room: FederatedRoomRole::Member,
-                display_name: "Remote Agent".into(),
-                public_agent_descriptor: None,
-                joined_at: String::new(),
-                derived_presence: None,
-                local_binding_available: Some(false),
-            },
-            FederatedRoomMemberProjection {
-                member_id: "opaque-user".into(),
-                owner_member_id: None,
-                actor_type: FederatedActorType::User,
-                role_in_room: FederatedRoomRole::Owner,
-                display_name: "User".into(),
-                public_agent_descriptor: None,
-                joined_at: String::new(),
-                derived_presence: None,
-                local_binding_available: Some(true),
-            },
-        ];
-        assert_eq!(
-            agent_ids_for(Some(&federated), Some(&room)),
-            vec!["opaque-agent"]
-        );
     }
 
     #[test]

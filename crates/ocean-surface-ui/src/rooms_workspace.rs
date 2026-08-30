@@ -16,7 +16,8 @@ use crate::room_messages;
 use crate::rooms::{
     CreateResolution, FederatedActorType, FederatedRoomMemberProjection, FederatedRoomRole,
     MemberPresence, OutboxItemState, Room, RoomAccessProjection, RoomAccessState, RoomMessage,
-    RoomMessageKind, RoomParticipant, RoomParticipantKind, RoomReadCursorProjection, Rooms,
+    RoomMessageKind, RoomParticipant, RoomParticipantKind, RoomReadCursorProjection,
+    RoomTriggerPolicy, Rooms,
 };
 
 // ── Production helpers (testable directly, called from Effects) ─
@@ -29,6 +30,98 @@ use crate::rooms::{
 /// typing that happened while the send was in flight is never discarded.
 fn should_clear_composer(current: &str, original_draft: &str) -> bool {
     !original_draft.is_empty() && current == original_draft
+}
+
+/// The trigger-policy flags this workspace exposes. `on_component_event` and
+/// `on_schedule` have no control because the daemon ruled them unwired: its
+/// write routes refuse a policy carrying `on_component_event: true` or a set
+/// `on_schedule` with a typed 400 (`trigger_unwired`), so every write path
+/// here normalizes them away instead (see [`policy_with_toggle`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TriggerToggle {
+    Mention,
+    ThreadReply,
+    BuildFailure,
+}
+
+/// The full policy to PATCH when one exposed flag flips: a copy of the room's
+/// current policy with only that flag changed — and the unwired fields
+/// normalized away. Preserving them is impossible by ruling: the daemon
+/// refuses any write carrying their live values (`trigger_unwired`), so a
+/// room with dead state stored would 400 on every flip if we carried it
+/// through. Nothing ever fires those fields; dropping them on the next edit
+/// is the honest behavior.
+fn policy_with_toggle(
+    current: Option<&RoomTriggerPolicy>,
+    toggle: TriggerToggle,
+    enabled: bool,
+) -> RoomTriggerPolicy {
+    let mut policy = current.cloned().unwrap_or_default();
+    policy.on_component_event = false;
+    policy.on_schedule = None;
+    match toggle {
+        TriggerToggle::Mention => policy.on_mention = enabled,
+        TriggerToggle::ThreadReply => policy.on_thread_reply = enabled,
+        TriggerToggle::BuildFailure => policy.on_build_failure = enabled,
+    }
+    policy
+}
+
+/// Create-time policy from the three exposed toggles. All-off returns `None`
+/// so the create body omits the field entirely and the daemon's default (no
+/// automatic triggers) applies — exactly what creating a room did before this
+/// form had toggles.
+fn create_trigger_policy(
+    on_mention: bool,
+    on_thread_reply: bool,
+    on_build_failure: bool,
+) -> Option<RoomTriggerPolicy> {
+    if !on_mention && !on_thread_reply && !on_build_failure {
+        return None;
+    }
+    Some(RoomTriggerPolicy {
+        on_mention,
+        on_thread_reply,
+        on_build_failure,
+        ..RoomTriggerPolicy::default()
+    })
+}
+
+/// One editable trigger row in the right rail. `checked` is a plain bool on
+/// purpose: the enclosing section re-renders from `open_room` after every
+/// admitted PATCH, so an admitted flip settles to durable state. A refused
+/// PATCH leaves `open_room` untouched — no re-render — so the box keeps the
+/// user's flip next to the inline error until the next successful write. The
+/// flip reads the room's policy fresh at event time — not from the render that
+/// drew the box — so two quick flips compose instead of the second
+/// resurrecting the first's pre-state.
+fn trigger_toggle_row(
+    rooms: Rooms,
+    toggle: TriggerToggle,
+    label: &'static str,
+    checked: bool,
+) -> impl IntoView {
+    view! {
+        <label class="rooms-workspace__trigger">
+            <input
+                type="checkbox"
+                prop:checked=checked
+                disabled=move || rooms.policy_update_in_flight.get()
+                on:change=move |ev| {
+                    let current = rooms
+                        .open_room
+                        .get_untracked()
+                        .and_then(|room| room.trigger_policy);
+                    rooms.update_open_room_policy(policy_with_toggle(
+                        current.as_ref(),
+                        toggle,
+                        event_target_checked(&ev),
+                    ));
+                }
+            />
+            <span class="rooms-workspace__trigger-label">{label}</span>
+        </label>
+    }
 }
 
 fn normalized_message_body(draft: &str) -> String {
@@ -85,16 +178,84 @@ fn rooms_layout_is_compact() -> bool {
     window_inner_width().is_some_and(|width| width <= 650.0)
 }
 
-// ── Inline helpers (mirrors of private fns in rooms.rs) ──────────────
+// ── Access-policy helpers (the crate's single source; rooms.rs imports) ──
 
 /// Whether writes (composer, join, leave) are permitted under this access
 /// projection.
-#[allow(dead_code)]
-fn access_allows_writes(access: Option<&RoomAccessProjection>) -> bool {
+pub(crate) fn access_allows_writes(access: Option<&RoomAccessProjection>) -> bool {
     matches!(
         access.map(|a| a.state),
         Some(RoomAccessState::Local) | Some(RoomAccessState::Live)
     )
+}
+
+/// Whether this room federates through Bedrock at all. Only a federated room
+/// has a Bedrock workspace; a Local room renders nothing rather than a
+/// refusal, and `None` (no room open / still loading) also renders nothing.
+pub(crate) fn room_is_federated(access: Option<&RoomAccessProjection>) -> bool {
+    access.is_some_and(|projection| projection.state != RoomAccessState::Local)
+}
+
+/// The access-banner label for a state that blocks writes; `None` for the
+/// two writable states, where no banner mounts. The stage's banner match
+/// takes its text from here so the rendered strings and the pinning test
+/// cannot diverge; per-state CSS classes and roles stay with the view.
+fn access_banner(access: Option<&RoomAccessProjection>) -> Option<&'static str> {
+    match access.map(|projection| projection.state) {
+        Some(RoomAccessState::Connecting) => Some("Connecting to federated room…"),
+        Some(RoomAccessState::Recovering) => Some("Recovering connection…"),
+        Some(RoomAccessState::Revoked) => Some("Access revoked"),
+        None | Some(RoomAccessState::Local | RoomAccessState::Live) => None,
+    }
+}
+
+/// How one transcript row relates to the shared ledger.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LedgerMark {
+    /// Bedrock confirmed the row onto the shared ledger; the row wears the
+    /// positive mark.
+    Confirmed,
+    /// Federated room, but the row carries no confirmation — local-era/G1
+    /// history. Silence, never a pending/failed treatment: in-flight state
+    /// belongs to the outbox block, not the transcript.
+    Unmarked,
+    /// Local room (or no access projection yet): there is no ledger to
+    /// reach, so `federated: None` is simply correct and nothing renders.
+    NotApplicable,
+}
+
+fn ledger_mark(access: Option<&RoomAccessProjection>, message: &RoomMessage) -> LedgerMark {
+    if !room_is_federated(access) {
+        LedgerMark::NotApplicable
+    } else if message.federated.is_some() {
+        LedgerMark::Confirmed
+    } else {
+        LedgerMark::Unmarked
+    }
+}
+
+/// The per-row ledger glyph, rendered beside the timestamp so grouped rows —
+/// whose header collapses to the dimmed time — keep it. Only `Confirmed`
+/// renders anything; both silent states are deliberate (see [`LedgerMark`]).
+fn ledger_mark_view(access: Option<&RoomAccessProjection>, message: &RoomMessage) -> AnyView {
+    if ledger_mark(access, message) != LedgerMark::Confirmed {
+        return ().into_any();
+    }
+    view! {
+        <span
+            class="rooms-workspace__msg-ledger"
+            role="img"
+            title="On the shared ledger"
+            aria-label="On the shared ledger"
+        >
+            <svg viewBox="0 0 16 16" width="10" height="10"
+                fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 8.5l3.5 3.5L13 5"/>
+            </svg>
+        </span>
+    }
+    .into_any()
 }
 
 /// Render a compact clock label from the canonical RFC3339 wire timestamp.
@@ -430,6 +591,24 @@ fn sync_thread_selection(
     thread_root_for(transcript, Some(root_seq)).map(|_| root_seq)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RoomComposerEpoch {
+    generation: u64,
+    room_key: Option<String>,
+}
+
+fn room_composer_epoch_changed(
+    previous: Option<&RoomComposerEpoch>,
+    generation: u64,
+    room_key: Option<&str>,
+) -> bool {
+    previous
+        != Some(&RoomComposerEpoch {
+            generation,
+            room_key: room_key.map(str::to_string),
+        })
+}
+
 // ── View-state persistence (open room + open thread) ───────────────────────
 
 /// localStorage key for the last open room/thread. Bump the suffix on any
@@ -669,6 +848,68 @@ fn participant_kind_label(kind: RoomParticipantKind) -> &'static str {
     }
 }
 
+/// Whether a roster row offers a remove control: every row except the
+/// caller's own — self-removal is already the header's Leave, and a second
+/// path to it labeled "remove" would just be Leave with worse copy. Not an
+/// authorization check (the daemon's participant DELETE has none); the Local
+/// gate is structural — only the Local members branch renders removable rows,
+/// because federated rosters are bedrock-authoritative.
+fn participant_removable(participant_id: &str, identity_id: &str) -> bool {
+    participant_id != identity_id
+}
+
+/// Whether a federated roster row is the caller's own membership. `None`
+/// (a local room, or a daemon that predates `self_member_id`) marks no row,
+/// so every row keeps today's remove control and bedrock's 403 stays the
+/// answer of last resort.
+fn federated_member_is_self(self_member_id: Option<&str>, member_id: &str) -> bool {
+    self_member_id == Some(member_id)
+}
+
+/// Whether a federated roster row is an agent the caller owns — the rows
+/// bedrock's owner-or-self policy actually lets a non-owner remove, so the
+/// chip stands in for a dial-and-403 probe per attempt. Requires a known
+/// self: a bare `owner_member_id == self_member_id` would read `None == None`
+/// as ownership and badge every ownerless agent row.
+fn federated_member_is_yours(
+    self_member_id: Option<&str>,
+    member: &FederatedRoomMemberProjection,
+) -> bool {
+    self_member_id.is_some()
+        && matches!(member.actor_type, FederatedActorType::Agent)
+        && member.owner_member_id.as_deref() == self_member_id
+}
+
+/// Whether the armed remove confirm survives a room/roster change. The armed
+/// state is keyed by participant id and held OUTSIDE the members-rail closure
+/// (which is rebuilt by every roster SSE update — see the component doc), so
+/// this is the pruning rule that keeps a primed confirm from outliving its
+/// target: a different room, or a roster the target has left, disarms it.
+/// Without the room check, a same-id agent in the next room opened would
+/// inherit a confirm armed against a different room's row. Both rosters are
+/// consulted because only one renders at a time: a federated room's rows are
+/// the access projection's members, never `open_room.participants`, and a
+/// confirm armed against one of them must survive the SSE access updates
+/// that rebuild the rail. A self target disarms too: `self_member_id` can
+/// arrive AFTER a row was armed (the first access update to carry the
+/// field), and a confirm must not survive the discovery that it points at
+/// the caller's own row — that removal is the header's Leave.
+fn keep_armed_remove(
+    armed: Option<&str>,
+    room_changed: bool,
+    participants: &[RoomParticipant],
+    members: &[FederatedRoomMemberProjection],
+    self_member_id: Option<&str>,
+) -> bool {
+    let Some(armed) = armed else {
+        return false;
+    };
+    !room_changed
+        && !federated_member_is_self(self_member_id, armed)
+        && (participants.iter().any(|p| p.id == armed)
+            || members.iter().any(|m| m.member_id == armed))
+}
+
 /// Convert a UTF-16 code-unit offset (what `selectionStart` reports) into a
 /// byte offset into `s`, clamped to the string end.
 fn utf16_to_byte_idx(s: &str, utf16: usize) -> usize {
@@ -899,6 +1140,77 @@ pub fn RoomsWorkspace(
 ) -> impl IntoView {
     // ── Left-rail: create form signals ────────────────────────────────
     let new_room_name = RwSignal::new(String::new());
+
+    // ── Members rail: agent-builder form state ────────────────────────
+    // Constructed HERE, at component scope, not inside the members-rail
+    // closure: that closure re-runs on every `rooms.access` change (i.e. every
+    // roster update that arrives over SSE), so form state owned by it would be
+    // discarded mid-sentence and take a half-written system prompt with it.
+    let agent_builder = crate::agents::AgentBuilderState::new(&rooms);
+
+    // Room context files. Same reasoning as the agent builder above: an
+    // in-flight upload flag rebuilt by a roster SSE update would re-enable the
+    // control during its own upload.
+    let attachments = crate::attachments::RoomAttachmentsState::new(&rooms);
+
+    // The room's summary. Same reasoning again, and it costs more here: the
+    // in-flight flag guards a request that holds one of the daemon's turn
+    // permits for up to 45s, so a flag rebuilt by a roster SSE update would
+    // re-enable the control mid-run and buy a second provider turn nobody
+    // asked for.
+    let summary = crate::room_summary::RoomSummaryState::new(&rooms);
+
+    // The room's artifacts. Same reasoning again: this state owns an open
+    // editor and the version it was loaded against, and a rail closure re-run
+    // by a roster SSE update would rebuild both mid-edit — which is how a
+    // compare-and-swap loses the version it is supposed to be presenting.
+    let artifacts = crate::room_artifacts::RoomArtifactsState::new(&rooms);
+
+    // The room's repo binding. Same reasoning once more, and the stake is a
+    // container: the in-flight flag guards a clone/build that holds Bedrock's
+    // per-room checkout lock, so a flag rebuilt by a roster SSE update would
+    // re-enable the control mid-run and manufacture a 409 against our own
+    // command.
+    let repo = crate::room_repo::RoomRepoState::new(&rooms);
+
+    // The room's workspace status and command history. Same reasoning: the
+    // open panel owns a poll loop, and a rail closure re-run by a roster SSE
+    // update would orphan the loop and respawn it mid-tick.
+    let workspace_panel = crate::room_workspace_panel::RoomWorkspacePanelState::new(&rooms);
+
+    // Which roster row's remove control is one click from firing, by
+    // participant id. Same reasoning as the states above — the members-rail
+    // closure is rebuilt by every roster SSE update, and a confirm owned by
+    // it would disarm mid-interaction. Arming a row inherently disarms the
+    // previous one (there is one slot); the effect below prunes the rest.
+    let member_remove_armed: RwSignal<Option<String>> = RwSignal::new(None);
+    Effect::new(move |prev_key: Option<Option<String>>| {
+        let key = rooms.open_key.get();
+        let participants = rooms
+            .open_room
+            .get()
+            .map(|room| room.participants)
+            .unwrap_or_default();
+        let access = rooms.access.get();
+        let self_member_id = access
+            .as_ref()
+            .and_then(|access| access.self_member_id.clone());
+        let members = access.map(|access| access.members).unwrap_or_default();
+        let room_changed = prev_key.is_some_and(|prev| prev != key);
+        let armed = member_remove_armed.get_untracked();
+        if armed.is_some()
+            && !keep_armed_remove(
+                armed.as_deref(),
+                room_changed,
+                &participants,
+                &members,
+                self_member_id.as_deref(),
+            )
+        {
+            member_remove_armed.set(None);
+        }
+        key
+    });
 
     // Toggle for narrow-screen left-rail visibility.
     let show_left_rail = RwSignal::new(false);
@@ -1344,6 +1656,11 @@ pub fn RoomsWorkspace(
     //    prevents stale completions from overwriting later ops).
     let pending_create = RwSignal::new(false);
     let create_op_id: RwSignal<u64> = RwSignal::new(0);
+    // Auto-wake toggles for the room being created. Default off: an absent
+    // policy (all three off) posts no `trigger_policy` at all.
+    let create_on_mention = RwSignal::new(false);
+    let create_on_thread_reply = RwSignal::new(false);
+    let create_on_build_failure = RwSignal::new(false);
     let create_room = move || {
         // Prevent concurrent dispatch: if a create is already in flight,
         // ignore the keypress. The Effect clears pending_create when the
@@ -1355,7 +1672,14 @@ pub fn RoomsWorkspace(
         if name.trim().is_empty() {
             return;
         }
-        let op_id = rooms.create_room(name.clone(), None);
+        let op_id = rooms.create_room(
+            name.clone(),
+            create_trigger_policy(
+                create_on_mention.get_untracked(),
+                create_on_thread_reply.get_untracked(),
+                create_on_build_failure.get_untracked(),
+            ),
+        );
         if op_id == 0 {
             // Synchronous rejection — empty name or slug. Don't set
             // pending; the name field already shows the error via status.
@@ -1387,6 +1711,11 @@ pub fn RoomsWorkspace(
         match Rooms::resolve_create_op(current_op, my_op, outcome.as_ref()) {
             CreateResolution::Success => {
                 new_room_name.set(String::new());
+                // The toggles were part of the same draft: the next room
+                // starts from the no-triggers default, like the name field.
+                create_on_mention.set(false);
+                create_on_thread_reply.set(false);
+                create_on_build_failure.set(false);
                 pending_create.set(false);
             }
             CreateResolution::KeepDraft => {
@@ -1403,6 +1732,44 @@ pub fn RoomsWorkspace(
     let last_sent_wire = RwSignal::new(String::new());
     let last_sent_seq = RwSignal::new(0u64);
     let send_in_flight = RwSignal::new(false);
+    let composer_epoch = RwSignal::new(None::<RoomComposerEpoch>);
+
+    // Drafts and pending-send confirmation belong to one exact room
+    // generation. A completion from the previous room is intentionally
+    // generation-rejected by `Rooms`; synchronously clear its UI ownership too
+    // so neither content nor a stuck "Sending…" gate follows the operator.
+    Effect::new(move |_| {
+        let room_key = rooms.open_key.get();
+        let generation = rooms.generation_snapshot_reactive();
+        if !room_composer_epoch_changed(
+            composer_epoch.get_untracked().as_ref(),
+            generation,
+            room_key.as_deref(),
+        ) {
+            return;
+        }
+        composer_epoch.set(Some(RoomComposerEpoch {
+            generation,
+            room_key,
+        }));
+
+        composer.set(String::new());
+        mention_ctx.set(None);
+        mention_active.set(0);
+        last_sent_draft.set(String::new());
+        last_sent_wire.set(String::new());
+        last_sent_seq.set(0);
+        send_in_flight.set(false);
+
+        selected_thread_root_seq.set(None);
+        thread_composer.set(String::new());
+        thread_mention_ctx.set(None);
+        thread_mention_active.set(0);
+        thread_last_sent_draft.set(String::new());
+        thread_last_sent_wire.set(String::new());
+        thread_last_sent_seq.set(0);
+        thread_send_in_flight.set(false);
+    });
     let do_send = move || {
         let draft = composer.get_untracked();
         if !message_send_admitted(
@@ -1487,7 +1854,7 @@ pub fn RoomsWorkspace(
             access
                 .outbox
                 .iter()
-                .any(|item| outbox_matches_failed_message(item, me, &wire, None))
+                .any(|item| outbox_matches_failed_message(item, &me, &wire, None))
         });
         let request_failed = rooms.status.get().starts_with("message ");
         if failed_outbox || request_failed {
@@ -1530,7 +1897,7 @@ pub fn RoomsWorkspace(
             access
                 .outbox
                 .iter()
-                .any(|item| outbox_matches_failed_message(item, me, &wire, Some(root_seq)))
+                .any(|item| outbox_matches_failed_message(item, &me, &wire, Some(root_seq)))
         });
         let request_failed = rooms.status.get().starts_with("message ");
         if failed_outbox || request_failed {
@@ -1552,6 +1919,8 @@ pub fn RoomsWorkspace(
                                             children=move |reply: RoomMessage| {
                                                 let full_ts = reply.created_at.clone();
                                                 let is_system = room_messages::is_compact_system_row(&reply);
+                                                let media = crate::transcript_media::marker_media_view(rooms, &reply);
+                                                let ledger_row = reply.clone();
                                                 view! {
                                                     <div
                                                         class="rooms-workspace__msg rooms-workspace__msg--thread-reply"
@@ -1582,10 +1951,15 @@ pub fn RoomsWorkspace(
                                                                 >
                                                                     {canonical_wire_clock_time(&full_ts)}
                                                                 </time>
+                                                                {move || ledger_mark_view(
+                                                                    rooms.access.get().as_ref(),
+                                                                    &ledger_row,
+                                                                )}
                                                             </div>
                                                             <div class="rooms-workspace__msg-text">
                                                                 {crate::room_markdown::body_view(reply.body.clone(), member_ids)}
                                                             </div>
+                                                            {media}
                                                         </div>
                                                     </div>
                                                 }
@@ -1800,10 +2174,65 @@ pub fn RoomsWorkspace(
                 if ev.key() != "Escape" {
                     return;
                 }
-                // Topmost overlay first: an open members drawer sits above
-                // the left drawer and the app hierarchy, so it consumes the
-                // first Escape. Only when it actually renders as an overlay —
-                // an inline rail never owns the key.
+                // The repo panel shares the artifacts panel's overlay tier
+                // (z-index 445) and their rail triggers sit behind each
+                // other's scrims, so at most one is open; ask it first for
+                // the same reason the artifacts rung exists at all.
+                if crate::room_repo::repo_escape_closes(
+                    repo.panel_is_open(),
+                    ev.default_prevented(),
+                ) {
+                    ev.prevent_default();
+                    repo.close_panel();
+                    return;
+                }
+                // The workspace panel sits on the same overlay tier, behind
+                // the same at-most-one-open argument.
+                if crate::room_workspace_panel::workspace_panel_escape_closes(
+                    workspace_panel.panel_is_open(),
+                    ev.default_prevented(),
+                ) {
+                    ev.prevent_default();
+                    workspace_panel.close_panel();
+                    return;
+                }
+                // The summary and files panels sit on the same overlay tier
+                // with their rail triggers behind the other panels' scrims,
+                // so the same at-most-one-open argument holds and the order
+                // of these rungs never decides anything.
+                if crate::room_summary::summary_escape_closes(
+                    summary.panel_is_open(),
+                    ev.default_prevented(),
+                ) {
+                    ev.prevent_default();
+                    summary.close_panel();
+                    return;
+                }
+                if crate::attachments::files_escape_closes(
+                    attachments.panel_is_open(),
+                    ev.default_prevented(),
+                ) {
+                    ev.prevent_default();
+                    attachments.close_panel();
+                    return;
+                }
+                // Topmost overlay first, and that is the artifacts panel: a
+                // fixed modal at z-index 445, above the members drawer's 430
+                // and its backdrop's 425. Without this rung Escape closes a
+                // drawer UNDERNEATH an open modal, or falls through to the app
+                // rail and tears the whole rooms surface down with an unsaved
+                // artifact draft inside it.
+                if crate::room_artifacts::artifacts_escape_closes(
+                    artifacts.panel_is_open(),
+                    ev.default_prevented(),
+                ) {
+                    ev.prevent_default();
+                    artifacts.close_panel();
+                    return;
+                }
+                // Then the members drawer, which sits above the left drawer and
+                // the app hierarchy. Only when it actually renders as an
+                // overlay — an inline rail never owns the key.
                 let members_overlay = window_inner_width().is_some_and(|width| {
                     members_drawer_is_overlay(
                         width,
@@ -2094,7 +2523,47 @@ pub fn RoomsWorkspace(
                         }
                         disabled=move || pending_create.get()
                     />
-                    />
+                    // Auto-wake flags for the room being created. Only the
+                    // three live flags get a control; see TriggerToggle.
+                    <div
+                        class="rooms-workspace__create-triggers"
+                        role="group"
+                        aria-label="Auto-wake triggers for the new room"
+                    >
+                        <label class="rooms-workspace__trigger">
+                            <input
+                                type="checkbox"
+                                prop:checked=move || create_on_mention.get()
+                                on:change=move |ev| {
+                                    create_on_mention.set(event_target_checked(&ev))
+                                }
+                                disabled=move || pending_create.get()
+                            />
+                            <span class="rooms-workspace__trigger-label">"@mention"</span>
+                        </label>
+                        <label class="rooms-workspace__trigger">
+                            <input
+                                type="checkbox"
+                                prop:checked=move || create_on_thread_reply.get()
+                                on:change=move |ev| {
+                                    create_on_thread_reply.set(event_target_checked(&ev))
+                                }
+                                disabled=move || pending_create.get()
+                            />
+                            <span class="rooms-workspace__trigger-label">"thread reply"</span>
+                        </label>
+                        <label class="rooms-workspace__trigger">
+                            <input
+                                type="checkbox"
+                                prop:checked=move || create_on_build_failure.get()
+                                on:change=move |ev| {
+                                    create_on_build_failure.set(event_target_checked(&ev))
+                                }
+                                disabled=move || pending_create.get()
+                            />
+                            <span class="rooms-workspace__trigger-label">"build failure"</span>
+                        </label>
+                    </div>
                 </div>
             </div>
 
@@ -2204,8 +2673,9 @@ pub fn RoomsWorkspace(
 
                                 // Access status banner (Connecting, Recovering, Revoked)
                                 {move || {
-                                    let state = rooms.access.get().map(|a| a.state);
-                                    match state {
+                                    let access = rooms.access.get();
+                                    let label = access_banner(access.as_ref());
+                                    match access.map(|a| a.state) {
                                         Some(RoomAccessState::Connecting) => {
                                             view! {
                                                 <div
@@ -2213,7 +2683,7 @@ pub fn RoomsWorkspace(
                                                     role="status"
                                                     aria-live="polite"
                                                 >
-                                                    "Connecting to federated room…"
+                                                    {label}
                                                 </div>
                                             }.into_any()
                                         }
@@ -2224,7 +2694,7 @@ pub fn RoomsWorkspace(
                                                     role="status"
                                                     aria-live="polite"
                                                 >
-                                                    "Recovering connection…"
+                                                    {label}
                                                 </div>
                                             }.into_any()
                                         }
@@ -2234,7 +2704,7 @@ pub fn RoomsWorkspace(
                                                     class="room-stage__access-state room-stage__access-state--revoked"
                                                     role="alert"
                                                 >
-                                                    "Access revoked"
+                                                    {label}
                                                 </div>
                                             }.into_any()
                                         }
@@ -2283,6 +2753,7 @@ pub fn RoomsWorkspace(
                                         key=|(_, m): &(Option<RoomMessage>, RoomMessage)| m.seq
                                         children=move |(prev, m): (Option<RoomMessage>, RoomMessage)| {
                                             let is_system = room_messages::is_compact_system_row(&m);
+                                            let media = crate::transcript_media::marker_media_view(rooms, &m);
                                             let full_ts = m.created_at.clone();
                                             let root_seq = m.seq;
                                             let day_label = room_messages::day_separator_label(prev.as_ref(), &m)
@@ -2300,6 +2771,11 @@ pub fn RoomsWorkspace(
                                                 .as_ref()
                                                 .map(|p| room_messages::is_grouped(p, &m))
                                                 .unwrap_or(false);
+                                            // Cloned for the ledger mark, which
+                                            // re-reads reactively: the access
+                                            // projection can arrive after the
+                                            // keyed row was cached.
+                                            let ledger_row = m.clone();
                                             view! {
                                                 {day_label.map(|d| view! {
                                                     <div class="rooms-workspace__day-separator" data-day="true">{d}</div>
@@ -2339,10 +2815,15 @@ pub fn RoomsWorkspace(
                                                             >
                                                                 {canonical_wire_clock_time(&full_ts)}
                                                             </time>
+                                                            {move || ledger_mark_view(
+                                                                rooms.access.get().as_ref(),
+                                                                &ledger_row,
+                                                            )}
                                                         </div>
                                                         <div class="rooms-workspace__msg-text">
                                                             {crate::room_markdown::body_view(m.body.clone(), member_ids)}
                                                         </div>
+                                                        {media}
                                                         {move || {
                                                             if should_show_thread_button(&m) {
                                                                 let reply_count = move || reply_count_for(&rooms.transcript.get(), root_seq);
@@ -2844,6 +3325,9 @@ pub fn RoomsWorkspace(
                                                         .unwrap_or_default()
                                                     key=|p: &RoomParticipant| p.id.clone()
                                                     children=move |p: RoomParticipant| {
+                                                        let pid = p.id.clone();
+                                                        let display = p.display_name.clone();
+                                                        let kind = p.kind;
                                                         view! {
                                                             <div
                                                                 class="rooms-workspace__member"
@@ -2855,9 +3339,76 @@ pub fn RoomsWorkspace(
                                                                 <span class="rooms-workspace__member-name">
                                                                     {p.display_name.clone()}
                                                                 </span>
-                                                                <span class="rooms-workspace__member-kind">
-                                                                    {participant_kind_label(p.kind)}
-                                                                </span>
+                                                                // Row tail: the kind badge plus a remove
+                                                                // control, or — armed — the two-step
+                                                                // confirm in the badge's place, because a
+                                                                // 220px rail cannot hold both. Two-step
+                                                                // for the same reason the agent builder's
+                                                                // delete is: the removal is durable (a
+                                                                // ParticipantLeft marker in the
+                                                                // transcript), so one stray click must
+                                                                // not fire it.
+                                                                {move || {
+                                                                    let removable = participant_removable(
+                                                                        &pid,
+                                                                        &rooms.identity_id.get(),
+                                                                    );
+                                                                    let armed = removable
+                                                                        && member_remove_armed.get().as_deref()
+                                                                            == Some(pid.as_str());
+                                                                    if armed {
+                                                                        let confirm_id = pid.clone();
+                                                                        let confirm_label =
+                                                                            format!("Confirm removing {display} from room");
+                                                                        view! {
+                                                                            <button
+                                                                                class="rooms-workspace__member-remove-btn rooms-workspace__member-remove-btn--danger"
+                                                                                type="button"
+                                                                                aria-label=confirm_label
+                                                                                on:click=move |_| {
+                                                                                    member_remove_armed.set(None);
+                                                                                    rooms.remove_participant(confirm_id.clone());
+                                                                                }
+                                                                            >
+                                                                                "remove"
+                                                                            </button>
+                                                                            <button
+                                                                                class="rooms-workspace__member-remove-btn"
+                                                                                type="button"
+                                                                                on:click=move |_| member_remove_armed.set(None)
+                                                                            >
+                                                                                "keep"
+                                                                            </button>
+                                                                        }.into_any()
+                                                                    } else {
+                                                                        let arm_id = pid.clone();
+                                                                        let arm_label =
+                                                                            format!("Remove {display} from room");
+                                                                        view! {
+                                                                            <span class="rooms-workspace__member-kind">
+                                                                                {participant_kind_label(kind)}
+                                                                            </span>
+                                                                            {removable.then(|| view! {
+                                                                                <button
+                                                                                    class="rooms-workspace__member-remove"
+                                                                                    type="button"
+                                                                                    title="Remove from room"
+                                                                                    aria-label=arm_label
+                                                                                    on:click=move |_| {
+                                                                                        member_remove_armed
+                                                                                            .set(Some(arm_id.clone()))
+                                                                                    }
+                                                                                >
+                                                                                    <svg viewBox="0 0 16 16" width="10" height="10"
+                                                                                        fill="none" stroke="currentColor" stroke-width="1.6"
+                                                                                        stroke-linecap="round">
+                                                                                        <path d="M3 3l10 10M13 3L3 13"/>
+                                                                                    </svg>
+                                                                                </button>
+                                                                            })}
+                                                                        }.into_any()
+                                                                    }
+                                                                }}
                                                             </div>
                                                         }
                                                     }
@@ -2908,6 +3459,26 @@ pub fn RoomsWorkspace(
                                                                 }
                                                             />
                                                         </select>
+                                                        // The picker above only ADDS an agent that
+                                                        // already exists on disk. This authors one
+                                                        // in place — or edits one, or deletes one —
+                                                        // then refreshes that same picker so the
+                                                        // operator's next click puts it in the room
+                                                        // (or stops offering a folder that no longer
+                                                        // exists). No curl, no leaving the room to
+                                                        // write a folder by hand. `available_agents`
+                                                        // is reused as the edit target list rather
+                                                        // than fetched twice.
+                                                        <crate::agents::AgentBuilder
+                                                            state=agent_builder
+                                                            agents=rooms.available_agents
+                                                            on_saved=Callback::new(move |_name: String| {
+                                                                rooms.fetch_agents();
+                                                            })
+                                                            on_deleted=Callback::new(move |_name: String| {
+                                                                rooms.fetch_agents();
+                                                            })
+                                                        />
                                                     </div>
                                                 }.into_any()
                                             } else {
@@ -2934,6 +3505,7 @@ pub fn RoomsWorkspace(
                                     } else {
                                         let members = access.members.clone();
                                         let members_for_label = members.clone();
+                                        let self_member_id = access.self_member_id.clone();
                                         view! {
                                             // Roster is a real list: give AT an
                                             // item count + boundaries instead of
@@ -2997,6 +3569,16 @@ pub fn RoomsWorkspace(
                                                     let desc_title = member.public_agent_descriptor.as_ref()
                                                         .and_then(|d| d.description.clone())
                                                         .unwrap_or_default();
+                                                    let member_id = member.member_id.clone();
+                                                    let member_display = member.display_name.clone();
+                                                    let is_self = federated_member_is_self(
+                                                        self_member_id.as_deref(),
+                                                        &member.member_id,
+                                                    );
+                                                    let yours = federated_member_is_yours(
+                                                        self_member_id.as_deref(),
+                                                        &member,
+                                                    );
                                                     view! {
                                                         <div class="rooms-workspace__member"
                                                             role="listitem"
@@ -3013,28 +3595,115 @@ pub fn RoomsWorkspace(
                                                             {desc_line.map(|desc| view! {
                                                                 <span class="rooms-workspace__member-desc">{desc}</span>
                                                             })}
-                                                            <span class="rooms-workspace__member-kind">
-                                                                {actor_label}
-                                                            </span>
-                                                            <span class="rooms-workspace__member-role">
-                                                                {role_label}
-                                                            </span>
-                                                            {if presence.is_some() {
-                                                                view! {
-                                                                    <span
-                                                                        class="rooms-workspace__member-presence"
-                                                                        class:rooms-workspace__member-presence--live=move || {
-                                                                            presence == Some(MemberPresence::Live)
-                                                                        }
-                                                                        class:rooms-workspace__member-presence--unavailable=move || {
-                                                                            presence == Some(MemberPresence::Unavailable)
-                                                                        }
-                                                                        role="img"
-                                                                        aria-label=presence_label
-                                                                    ></span>
-                                                                }.into_any()
-                                                            } else {
-                                                                ().into_any()
+                                                            // Row tail: the badges plus a remove
+                                                            // control, or — armed — the two-step
+                                                            // confirm in their place, for the same
+                                                            // rail-width and durability reasons as
+                                                            // the Local branch. The projection's
+                                                            // self_member_id names the caller's
+                                                            // own row: that one renders NO control
+                                                            // (self-removal is the header's Leave,
+                                                            // and would sever your own federation)
+                                                            // and your agents get a "yours" chip —
+                                                            // the rows bedrock's owner-or-self
+                                                            // policy lets a non-owner remove. For
+                                                            // every other row, and whenever the
+                                                            // field is absent (local room, older
+                                                            // daemon), bedrock still answers each
+                                                            // attempt: a refusal lands in the
+                                                            // status line with the roster intact.
+                                                            {move || {
+                                                                // `!is_self` also unarms a confirm
+                                                                // primed before an access update
+                                                                // revealed the row is the caller.
+                                                                let armed = !is_self
+                                                                    && member_remove_armed.get().as_deref()
+                                                                        == Some(member_id.as_str());
+                                                                if armed {
+                                                                    let confirm_id = member_id.clone();
+                                                                    let confirm_display = member_display.clone();
+                                                                    let confirm_label =
+                                                                        format!("Confirm removing {member_display} from room");
+                                                                    view! {
+                                                                        <button
+                                                                            class="rooms-workspace__member-remove-btn rooms-workspace__member-remove-btn--danger"
+                                                                            type="button"
+                                                                            aria-label=confirm_label
+                                                                            on:click=move |_| {
+                                                                                member_remove_armed.set(None);
+                                                                                rooms.remove_member(
+                                                                                    confirm_id.clone(),
+                                                                                    confirm_display.clone(),
+                                                                                );
+                                                                            }
+                                                                        >
+                                                                            "remove"
+                                                                        </button>
+                                                                        <button
+                                                                            class="rooms-workspace__member-remove-btn"
+                                                                            type="button"
+                                                                            on:click=move |_| member_remove_armed.set(None)
+                                                                        >
+                                                                            "keep"
+                                                                        </button>
+                                                                    }.into_any()
+                                                                } else {
+                                                                    let arm_id = member_id.clone();
+                                                                    let arm_label =
+                                                                        format!("Remove {member_display} from room");
+                                                                    view! {
+                                                                        <span class="rooms-workspace__member-kind">
+                                                                            {actor_label}
+                                                                        </span>
+                                                                        <span class="rooms-workspace__member-role">
+                                                                            {role_label}
+                                                                        </span>
+                                                                        {yours.then(|| view! {
+                                                                            <span class="rooms-workspace__member-yours">
+                                                                                "yours"
+                                                                            </span>
+                                                                        })}
+                                                                        {if presence.is_some() {
+                                                                            view! {
+                                                                                <span
+                                                                                    class="rooms-workspace__member-presence"
+                                                                                    class:rooms-workspace__member-presence--live=move || {
+                                                                                        presence == Some(MemberPresence::Live)
+                                                                                    }
+                                                                                    class:rooms-workspace__member-presence--unavailable=move || {
+                                                                                        presence == Some(MemberPresence::Unavailable)
+                                                                                    }
+                                                                                    role="img"
+                                                                                    aria-label=presence_label
+                                                                                ></span>
+                                                                            }.into_any()
+                                                                        } else {
+                                                                            ().into_any()
+                                                                        }}
+                                                                        {if is_self {
+                                                                            ().into_any()
+                                                                        } else {
+                                                                            view! {
+                                                                                <button
+                                                                                    class="rooms-workspace__member-remove"
+                                                                                    type="button"
+                                                                                    title="Remove from room"
+                                                                                    aria-label=arm_label
+                                                                                    on:click=move |_| {
+                                                                                        member_remove_armed
+                                                                                            .set(Some(arm_id.clone()))
+                                                                                    }
+                                                                                >
+                                                                                    <svg viewBox="0 0 16 16" width="10" height="10"
+                                                                                        fill="none" stroke="currentColor" stroke-width="1.6"
+                                                                                        stroke-linecap="round">
+                                                                                        <path d="M3 3l10 10M13 3L3 13"/>
+                                                                                    </svg>
+                                                                                </button>
+                                                                            }.into_any()
+                                                                        }}
+                                                                    }.into_any()
+                                                                }
                                                             }}
                                                         </div>
                                                     }
@@ -3055,7 +3724,128 @@ pub fn RoomsWorkspace(
                     }}
                 </div>
 
-                // Trigger-policy summary at bottom of right rail
+                // How this room wakes its agents: the three live
+                // trigger-policy flags, editable in place. Local rooms only —
+                // a federated room's policy is evaluated by its owning daemon,
+                // and PATCHing the local mirror would only forge a copy that
+                // changes nothing. A sibling of the roster for the same reason
+                // as its neighbours: it owns a PATCH's in-flight state.
+                {move || {
+                    let local = matches!(
+                        rooms.access.get().map(|a| a.state),
+                        Some(RoomAccessState::Local)
+                    );
+                    let Some(room) = rooms.open_room.get() else {
+                        return ().into_any();
+                    };
+                    if !local {
+                        return ().into_any();
+                    }
+                    let policy = room.trigger_policy;
+                    let flag = |pick: fn(&RoomTriggerPolicy) -> bool| {
+                        policy.as_ref().map(pick).unwrap_or(false)
+                    };
+                    view! {
+                        <div
+                            class="rooms-workspace__triggers"
+                            role="group"
+                            aria-label="Agent wake triggers"
+                        >
+                            <div class="rooms-workspace__triggers-head">
+                                <span class="rooms-workspace__triggers-title">"Triggers"</span>
+                            </div>
+                            {trigger_toggle_row(
+                                rooms,
+                                TriggerToggle::Mention,
+                                "@mention",
+                                flag(|p| p.on_mention),
+                            )}
+                            {trigger_toggle_row(
+                                rooms,
+                                TriggerToggle::ThreadReply,
+                                "thread reply",
+                                flag(|p| p.on_thread_reply),
+                            )}
+                            {trigger_toggle_row(
+                                rooms,
+                                TriggerToggle::BuildFailure,
+                                "build failure",
+                                flag(|p| p.on_build_failure),
+                            )}
+                            {move || {
+                                rooms.policy_update_error.get().map(|error| view! {
+                                    <div class="rooms-workspace__triggers-error" role="alert">
+                                        {format!("trigger update failed: {error}")}
+                                    </div>
+                                })
+                            }}
+                        </div>
+                    }.into_any()
+                }}
+
+                // What the room says about itself, above the shelf of files it
+                // was handed. A sibling of the roster for the same reason as
+                // the files below — that closure re-runs on every access
+                // change, and this section owns a run's in-flight state.
+                <crate::room_summary::RoomSummary
+                    rooms=rooms
+                    state=summary
+                    writes_allowed=Signal::derive(move || {
+                        access_allows_writes(rooms.access.get().as_ref())
+                    })
+                    members=member_ids
+                />
+
+                // What the room produced: tasks, decisions, captured
+                // knowledge. A sibling for the same reason as its neighbours —
+                // it owns a write's in-flight state and an open editor. The
+                // rail holds only the compact list; reading and writing happen
+                // in the panel it opens, because 220px is not a measure prose
+                // can be edited at.
+                <crate::room_artifacts::RoomArtifacts
+                    rooms=rooms
+                    state=artifacts
+                    writes_allowed=Signal::derive(move || {
+                        access_allows_writes(rooms.access.get().as_ref())
+                    })
+                    members=member_ids
+                />
+
+                // Room context files. A sibling of the roster, not a child of
+                // the closure above: that closure re-runs on every access
+                // change, and this section owns an upload's in-flight state.
+                <crate::attachments::RoomAttachments
+                    rooms=rooms
+                    state=attachments
+                    writes_allowed=Signal::derive(move || {
+                        access_allows_writes(rooms.access.get().as_ref())
+                    })
+                />
+
+                // The room's bound repo — see, clone and build it from the
+                // room. A sibling for the same reason as its neighbours, and
+                // it renders NOTHING for a Local room: no Bedrock workspace
+                // exists there, and a refusal would read as breakage.
+                <crate::room_repo::RoomRepo
+                    rooms=rooms
+                    state=repo
+                    writes_allowed=Signal::derive(move || {
+                        access_allows_writes(rooms.access.get().as_ref())
+                    })
+                />
+
+                // The workspace itself and its command history — the read
+                // half of the lane the repo section drives. A sibling for the
+                // same reason as its neighbours, and pure reads: what a
+                // member may see, the daemon already decided per row.
+                <crate::room_workspace_panel::RoomWorkspacePanel
+                    rooms=rooms
+                    state=workspace_panel
+                />
+
+                // Trigger-policy summary at bottom of right rail. Only live
+                // triggers are listed — the unwired fields never fire, and
+                // writes carrying them are refused (`trigger_unwired`).
                 {move || {
                     rooms.open_room.get()
                         .and_then(|r| r.trigger_policy)
@@ -3063,8 +3853,7 @@ pub fn RoomsWorkspace(
                             let mut on: Vec<&str> = Vec::new();
                             if p.on_mention { on.push("mention"); }
                             if p.on_thread_reply { on.push("thread reply"); }
-                            if p.on_component_event { on.push("interaction"); }
-                            if p.on_schedule.is_some() { on.push("schedule"); }
+                            if p.on_build_failure { on.push("build failure"); }
                             let triggers = if on.is_empty() {
                                 "none".to_string()
                             } else {
@@ -3183,6 +3972,9 @@ pub fn RoomsWorkspace(
                                                     >
                                                         {canonical_wire_clock_time(&full_ts)}
                                                     </time>
+                                                    // The enclosing closure re-runs on access
+                                                    // changes, so this needs no closure of its own.
+                                                    {ledger_mark_view(rooms.access.get().as_ref(), &root)}
                                                 </div>
                                                 <div class="rooms-workspace__msg-text">
                                                     {crate::room_markdown::body_view(root.body.clone(), member_ids)}
@@ -3206,9 +3998,85 @@ mod tests {
     use super::*;
     use crate::rooms::{
         room_request_is_current, CreateOutcome, CreateResolution, FederatedActorType,
-        FederatedRoomMemberProjection, FederatedRoomRole, MemberPresence, RoomAccessProjection,
-        RoomAccessState, RoomMessage, RoomMessageKind, RoomParticipantKind,
+        FederatedMessageMeta, FederatedRoomMemberProjection, FederatedRoomRole, MemberPresence,
+        RoomAccessProjection, RoomAccessState, RoomMessage, RoomMessageKind, RoomParticipantKind,
     };
+
+    /// Flipping one exposed flag must normalize the unwired fields away —
+    /// the daemon refuses any write carrying `on_component_event: true` or a
+    /// set `on_schedule` (`trigger_unwired`), so carrying stored dead values
+    /// through would 400 every flip for that room, permanently breaking all
+    /// three working toggles. The live flags still carry through untouched.
+    #[test]
+    fn policy_with_toggle_normalizes_dead_fields_and_keeps_live_ones() {
+        let current = RoomTriggerPolicy {
+            on_mention: true,
+            on_thread_reply: false,
+            on_component_event: true,
+            on_build_failure: false,
+            on_schedule: Some("0 9 * * 1".into()),
+        };
+        let flipped = policy_with_toggle(Some(&current), TriggerToggle::BuildFailure, true);
+        assert_eq!(
+            flipped,
+            RoomTriggerPolicy {
+                on_mention: true,
+                on_thread_reply: false,
+                on_component_event: false,
+                on_build_failure: true,
+                on_schedule: None,
+            }
+        );
+        // Flipping back off never resurrects the dead values either.
+        let back = policy_with_toggle(Some(&flipped), TriggerToggle::BuildFailure, false);
+        assert_eq!(
+            back,
+            RoomTriggerPolicy {
+                on_mention: true,
+                ..RoomTriggerPolicy::default()
+            }
+        );
+    }
+
+    /// A room with no stored policy starts from all-off, so the first flip
+    /// enables exactly one flag.
+    #[test]
+    fn policy_with_toggle_from_no_policy_starts_from_default() {
+        let policy = policy_with_toggle(None, TriggerToggle::Mention, true);
+        assert_eq!(
+            policy,
+            RoomTriggerPolicy {
+                on_mention: true,
+                ..RoomTriggerPolicy::default()
+            }
+        );
+    }
+
+    /// All-off must post NO policy (the daemon default applies, as before the
+    /// form had toggles), and any set flag must produce a policy that never
+    /// touches the unexposed fields.
+    #[test]
+    fn create_trigger_policy_only_carries_exposed_flags() {
+        assert_eq!(create_trigger_policy(false, false, false), None);
+        let policy = create_trigger_policy(true, false, true).expect("policy");
+        assert!(policy.on_mention);
+        assert!(!policy.on_thread_reply);
+        assert!(policy.on_build_failure);
+        assert!(!policy.on_component_event);
+        assert_eq!(policy.on_schedule, None);
+    }
+
+    /// The toggle classes render from Rust; their rules must exist in the
+    /// root stylesheet or the controls ship unstyled.
+    #[test]
+    fn trigger_toggles_are_styled_in_the_root_stylesheet() {
+        let css = include_str!("../../../styles/rooms-workspace.css");
+        let normalized = css_without_whitespace(&strip_css_comments(css));
+        assert!(normalized.contains(".rooms-workspace__create-triggers{"));
+        assert!(normalized.contains(".rooms-workspace__triggers{"));
+        assert!(normalized.contains(".rooms-workspace__trigger{"));
+        assert!(normalized.contains(".rooms-workspace__triggers-error{"));
+    }
 
     #[test]
     fn read_advance_request_skips_hydration_but_advances_after_bottom_append() {
@@ -3735,43 +4603,259 @@ mod tests {
             state,
             last_confirmed_global_sequence: None,
             members: vec![],
+            self_member_id: None,
             outbox: vec![],
         }
     }
 
-    // ── access_allows_writes ──────────────────────────────────────────
+    // ── access policy: writes + banner ────────────────────────────────
 
     #[test]
-    fn access_allows_writes_local() {
-        assert!(access_allows_writes(Some(&test_access(
+    fn all_access_states_pin_write_and_banner_policy() {
+        // The banner strings are the RENDERED ones — the stage's banner
+        // match takes its label from `access_banner`, so this matrix pins
+        // exactly what users see.
+        let cases = [
+            (RoomAccessState::Local, true, None),
+            (
+                RoomAccessState::Connecting,
+                false,
+                Some("Connecting to federated room…"),
+            ),
+            (RoomAccessState::Live, true, None),
+            (
+                RoomAccessState::Recovering,
+                false,
+                Some("Recovering connection…"),
+            ),
+            (RoomAccessState::Revoked, false, Some("Access revoked")),
+        ];
+
+        assert!(!access_allows_writes(None));
+        assert_eq!(access_banner(None), None);
+        for (state, writes, banner) in cases {
+            let access = test_access(state);
+            assert_eq!(access_allows_writes(Some(&access)), writes);
+            assert_eq!(access_banner(Some(&access)), banner);
+        }
+    }
+
+    // ── roster remove control ─────────────────────────────────────────
+
+    #[test]
+    fn every_row_but_your_own_offers_remove() {
+        assert!(participant_removable("scout", "web-1"));
+        assert!(!participant_removable("web-1", "web-1"));
+    }
+
+    #[test]
+    fn armed_remove_survives_a_roster_update_that_keeps_its_target() {
+        let roster = [
+            part("web-1", "John", RoomParticipantKind::Human),
+            part("scout", "Scout", RoomParticipantKind::Agent),
+        ];
+        assert!(keep_armed_remove(Some("scout"), false, &roster, &[], None));
+    }
+
+    #[test]
+    fn armed_remove_disarms_when_its_target_leaves_the_roster() {
+        let roster = [part("web-1", "John", RoomParticipantKind::Human)];
+        assert!(!keep_armed_remove(Some("scout"), false, &roster, &[], None));
+    }
+
+    #[test]
+    fn armed_remove_disarms_across_a_room_switch_even_for_a_same_id_row() {
+        // The next room can list the very same agent id; a confirm armed
+        // against the previous room's row must not carry over to it.
+        let roster = [part("scout", "Scout", RoomParticipantKind::Agent)];
+        assert!(!keep_armed_remove(Some("scout"), true, &roster, &[], None));
+    }
+
+    #[test]
+    fn unarmed_state_has_nothing_to_keep() {
+        let roster = [part("scout", "Scout", RoomParticipantKind::Agent)];
+        assert!(!keep_armed_remove(None, false, &roster, &[], None));
+    }
+
+    #[test]
+    fn federated_armed_remove_survives_the_access_updates_that_rebuild_the_rail() {
+        // A federated member never appears in open_room.participants — the
+        // access projection is the roster that keeps its confirm alive, so
+        // an SSE access update that retains the target must not disarm it.
+        let members = [fed_member("member-agent")];
+        assert!(keep_armed_remove(
+            Some("member-agent"),
+            false,
+            &[],
+            &members,
+            None
+        ));
+    }
+
+    #[test]
+    fn federated_armed_remove_disarms_when_its_target_leaves_the_projection() {
+        let members = [fed_member("member-other")];
+        assert!(!keep_armed_remove(
+            Some("member-agent"),
+            false,
+            &[],
+            &members,
+            None
+        ));
+    }
+
+    #[test]
+    fn federated_armed_remove_disarms_across_a_room_switch() {
+        let members = [fed_member("member-agent")];
+        assert!(!keep_armed_remove(
+            Some("member-agent"),
+            true,
+            &[],
+            &members,
+            None
+        ));
+    }
+
+    #[test]
+    fn armed_remove_disarms_when_the_projection_reveals_the_target_is_you() {
+        // self_member_id can arrive AFTER a row was armed — the first SSE
+        // access update to carry the field. The confirm must not survive
+        // the discovery that it points at the caller's own row.
+        let members = [fed_member("member-you"), fed_member("member-agent")];
+        assert!(!keep_armed_remove(
+            Some("member-you"),
+            false,
+            &[],
+            &members,
+            Some("member-you")
+        ));
+        // A known self leaves confirms against OTHER rows alone.
+        assert!(keep_armed_remove(
+            Some("member-agent"),
+            false,
+            &[],
+            &members,
+            Some("member-you")
+        ));
+    }
+
+    // ── federated self / yours row marks ──────────────────────────────
+
+    #[test]
+    fn self_mark_needs_the_projection_to_name_the_row() {
+        assert!(federated_member_is_self(Some("member-you"), "member-you"));
+        assert!(!federated_member_is_self(
+            Some("member-you"),
+            "member-other"
+        ));
+        // Absent field (local room, older daemon): no row is self, so
+        // every row keeps today's remove control.
+        assert!(!federated_member_is_self(None, "member-you"));
+    }
+
+    #[test]
+    fn yours_mark_needs_a_known_self_owning_an_agent_row() {
+        let mut agent = fed_member("member-agent");
+        agent.owner_member_id = Some("member-you".into());
+        assert!(federated_member_is_yours(Some("member-you"), &agent));
+        assert!(!federated_member_is_yours(Some("member-else"), &agent));
+        // The None == None trap: an ownerless agent under an absent
+        // self_member_id belongs to nobody — no chip.
+        assert!(!federated_member_is_yours(
+            None,
+            &fed_member("member-agent")
+        ));
+        // A user row is never "yours", whatever it owns.
+        let mut human = fed_member("member-you");
+        human.actor_type = FederatedActorType::User;
+        human.owner_member_id = Some("member-you".into());
+        assert!(!federated_member_is_yours(Some("member-you"), &human));
+    }
+
+    // ── room_is_federated ─────────────────────────────────────────────
+
+    #[test]
+    fn only_a_federated_room_has_the_section() {
+        assert!(!room_is_federated(None));
+        assert!(!room_is_federated(Some(&test_access(
             RoomAccessState::Local
         ))));
-    }
-
-    #[test]
-    fn access_allows_writes_live() {
-        assert!(access_allows_writes(Some(&test_access(
-            RoomAccessState::Live
-        ))));
-    }
-
-    #[test]
-    fn access_blocks_writes_federated_connecting() {
-        assert!(!access_allows_writes(Some(&test_access(
+        assert!(room_is_federated(Some(&test_access(RoomAccessState::Live))));
+        assert!(room_is_federated(Some(&test_access(
             RoomAccessState::Connecting
         ))));
-    }
-
-    #[test]
-    fn access_blocks_writes_none() {
-        assert!(!access_allows_writes(None));
-    }
-
-    #[test]
-    fn access_blocks_writes_revoked() {
-        assert!(!access_allows_writes(Some(&test_access(
+        assert!(room_is_federated(Some(&test_access(
             RoomAccessState::Revoked
         ))));
+    }
+
+    // ── ledger_mark ───────────────────────────────────────────────────
+
+    fn test_meta() -> FederatedMessageMeta {
+        FederatedMessageMeta {
+            ledger_event_id: "evt-1".into(),
+            global_sequence: 7,
+            source_id: "surface-web".into(),
+            source_sequence: 3,
+            client_event_id: "client-1".into(),
+            origin_principal_id: "principal-1".into(),
+            origin_member_id: "user".into(),
+        }
+    }
+
+    #[test]
+    fn ledger_mark_confirms_only_rows_with_meta_in_federated_rooms() {
+        let mut confirmed = test_msg(1, "hello", None);
+        confirmed.federated = Some(test_meta());
+        let live = test_access(RoomAccessState::Live);
+
+        assert_eq!(ledger_mark(Some(&live), &confirmed), LedgerMark::Confirmed);
+        assert_eq!(
+            ledger_mark(Some(&live), &test_msg(2, "local-era", None)),
+            LedgerMark::Unmarked
+        );
+    }
+
+    /// Confirmation is a fact about the row, not about connection health:
+    /// a degraded federated room keeps its confirmed marks.
+    #[test]
+    fn ledger_mark_survives_degraded_federated_states() {
+        let mut confirmed = test_msg(1, "hello", None);
+        confirmed.federated = Some(test_meta());
+        for state in [
+            RoomAccessState::Connecting,
+            RoomAccessState::Recovering,
+            RoomAccessState::Revoked,
+        ] {
+            assert_eq!(
+                ledger_mark(Some(&test_access(state)), &confirmed),
+                LedgerMark::Confirmed
+            );
+        }
+    }
+
+    /// A Local room (or a room whose access projection has not loaded)
+    /// has no ledger to reach — nothing may render, even for a row that
+    /// somehow carries metadata.
+    #[test]
+    fn ledger_mark_is_silent_where_no_ledger_exists() {
+        let mut confirmed = test_msg(1, "hello", None);
+        confirmed.federated = Some(test_meta());
+        let local = test_access(RoomAccessState::Local);
+
+        assert_eq!(
+            ledger_mark(Some(&local), &confirmed),
+            LedgerMark::NotApplicable
+        );
+        assert_eq!(ledger_mark(None, &confirmed), LedgerMark::NotApplicable);
+        assert_eq!(
+            ledger_mark(Some(&local), &test_msg(2, "plain", None)),
+            LedgerMark::NotApplicable
+        );
+        assert_eq!(
+            ledger_mark(None, &test_msg(3, "plain", None)),
+            LedgerMark::NotApplicable
+        );
     }
 
     #[test]
@@ -3943,6 +5027,20 @@ mod tests {
             id: id.into(),
             kind,
             display_name: name.into(),
+        }
+    }
+
+    fn fed_member(id: &str) -> FederatedRoomMemberProjection {
+        FederatedRoomMemberProjection {
+            member_id: id.into(),
+            owner_member_id: None,
+            actor_type: FederatedActorType::Agent,
+            role_in_room: FederatedRoomRole::Member,
+            display_name: id.into(),
+            public_agent_descriptor: None,
+            joined_at: "2026-07-16T22:00:00Z".into(),
+            derived_presence: None,
+            local_binding_available: Some(true),
         }
     }
 
@@ -4244,6 +5342,7 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".into(),
             federated: None,
             thread_parent_seq,
+            attachment_id: None,
         }
     }
 
@@ -4371,6 +5470,22 @@ mod tests {
             sync_thread_selection(Some(9), Some("room-1"), &transcript),
             None
         );
+    }
+
+    #[test]
+    fn composer_epoch_changes_on_room_or_generation_and_not_on_rerender() {
+        let first = RoomComposerEpoch {
+            generation: 4,
+            room_key: Some("room-a".into()),
+        };
+        assert!(!room_composer_epoch_changed(
+            Some(&first),
+            4,
+            Some("room-a")
+        ));
+        assert!(room_composer_epoch_changed(Some(&first), 5, Some("room-a")));
+        assert!(room_composer_epoch_changed(Some(&first), 4, Some("room-b")));
+        assert!(room_composer_epoch_changed(Some(&first), 4, None));
     }
 
     // ── Behavioral: composer draft preservation (production helper) ──
@@ -4888,6 +6003,32 @@ mod tests {
         assert!(
             markup.contains(&emitter),
             "the timeline must emit the inline thread container"
+        );
+    }
+
+    /// The ledger mark must exist in both the stylesheet and the markup,
+    /// and only as the positive class — no pending/failed variant may ever
+    /// appear, because an unmarked row is not a failure state.
+    #[test]
+    fn ledger_mark_is_styled_and_emitted() {
+        let css = include_str!("../../../styles/rooms-workspace.css");
+        let stripped = strip_css_comments(css);
+        let normalized = css_without_whitespace(&stripped);
+        assert!(
+            normalized.contains(".rooms-workspace__msg-ledger{"),
+            "ledger mark needs a base rule"
+        );
+        assert!(
+            !normalized.contains("msg-ledger--"),
+            "the ledger mark is positive-only; no state variants"
+        );
+        // Needle built at runtime so this test's own literal can't satisfy
+        // the check if the emitter disappears from the markup.
+        let emitter = format!("class=\"{}\"", ["rooms-workspace__msg", "-ledger"].concat());
+        let markup = include_str!("rooms_workspace.rs");
+        assert!(
+            markup.contains(&emitter),
+            "confirmed rows must emit the ledger mark"
         );
     }
 

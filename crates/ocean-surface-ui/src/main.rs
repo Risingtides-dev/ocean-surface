@@ -9,7 +9,9 @@
 
 use leptos::prelude::*;
 
+mod agents;
 mod app;
+mod attachments;
 mod call;
 mod canvas;
 mod components;
@@ -28,14 +30,19 @@ mod model;
 mod observatory;
 mod palette;
 mod place_call;
+mod room_artifacts;
 mod room_markdown;
 mod room_messages;
+mod room_repo;
+mod room_summary;
+mod room_workspace_panel;
 mod rooms;
 mod rooms_workspace;
 mod search;
 mod sessions;
 mod slash_menu;
 mod transcript;
+mod transcript_media;
 mod tts;
 mod voice;
 mod widget;

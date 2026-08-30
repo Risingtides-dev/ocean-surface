@@ -2832,3 +2832,409 @@ stylesheet inventories. Verified 755 UI tests plus integration suites, strict
 WASM Clippy, formatting, diff/script hygiene, and a Trunk release bundle; an
 independent exact-commit review returned CLEAR.
 _________________________________________________________________________________
+time:      [23:42] [08-26-26]
+agent:     [claude] [opus 5 1m]
+worktree:  feat/agent-builder-ui
+type:      [feature-request]
+area:      [frontend]
+
+Built the agent builder into the rooms members rail, closing the gap where the
+daemon had full folder-as-agent CRUD but the surface only ever performed the
+read half — authoring an agent meant hand-writing agent.toml and instructions.md
+on disk, or curling JSON. Under the same `+ agent` disclosure that lists existing
+agents there is now a form (name, description, model, tools, instructions.md)
+that creates a new agent and edits an existing one, refreshing the picker above
+it on success so the agent is one click from being in the room. New module
+crates/ocean-surface-ui/src/agents.rs owns the write layer; the model picker is
+driven by the daemon's own /v1/models through a shared Rooms::models handle
+rather than a hardcoded list; tools stays free text because no /v1/tools
+catalogue exists to build a picker from. Two data-loss guards ship with edit: the
+write body round-trips capabilities and yolo verbatim (the daemon rebuilds
+agent.toml from what it is handed, so an omitted field is deleted from disk), and
+an agent declaring [[subprocess_capability]] is refused outright because the
+write API's AgentSpec cannot express it. Prefill reads config.tools, never the
+merged AgentDef.tools, so a no-op edit cannot promote tools/ filename stems into
+agent.toml. Also fixed the reason this would have been dead on web: the proxy is
+an allowlist, and /v1/agents was GET-only with no /v1/agents/{name} at all —
+added POST plus GET/PUT with the has_dot_segment guard (percent-encoding does not
+neutralise `..`; `.` is unreserved), pinned by production-router tests that
+discriminate 502-from-the-forwarder against 404/405-from-the-fallback. Landed as
+two commits: create, then edit with its guards. Verified cargo fmt --check, both
+cargo check targets, 878 native UI tests, 41 proxy tests, and the wasm test build.
+NOT verified against a live daemon: the write routes are on ocean-os
+feat/agent-crud (5a010452), not main, so this is blocked on that merge. One
+honest caveat — `cargo clippy -p ocean-surface-ui --target wasm32-unknown-unknown
+-- -D warnings` was ALREADY red on origin/main (dead `mint_suffix` in rooms.rs)
+before any of this work; my own code is clippy-clean and that error is untouched.
+_________________________________________________________________________________
+time:      [00:07] [08-27-26]
+agent:     [codex desktop] [gpt-5]
+worktree:  [fix/rooms-identity-ordering]
+type:      [bug report]
+area:      [frontend]
+
+Closed the cross-login Rooms identity race on top of the initial ordering fix.
+Browser Rooms now remain unresolved until the same-origin proxy publishes the
+current login, so a previous tenant's local storage can never authorize an
+early join or post. Single-operator, extension, and Tauri hosts use one stable
+local identity; reactive identity signals own their strings without leaking an
+allocation on each change. Removed the obsolete random-id generator and added
+identity normalization/fallback tests. Verified 869 UI tests plus integration
+suites, strict WASM Clippy, WASM and proxy checks, formatting, and diff hygiene.
+_________________________________________________________________________________
+time:      [00:42] [08-27-26]
+agent:     [codex desktop] [gpt-5]
+worktree:  [fix/rooms-identity-ordering]
+type:      [bug report]
+area:      [frontend]
+
+Rebased the fail-closed identity correction onto current Surface main and
+closed two additional Rooms lifecycle defects in the same client bundle.
+Channel and thread drafts, mentions, and pending-send confirmation now reset on
+the exact room generation, so switching or closing cannot carry content into a
+different room or strand both composers behind `Sending…`. Empty hydrated
+transcripts now omit `after_seq`; the first zero-based room row is no longer
+silently skipped by refresh or SSE startup.
+
+Verified 882 native UI tests plus integration suites, strict WASM Clippy, WASM
+check and test compilation, all 46 proxy tests, proxy check, formatting, and
+diff hygiene. Production deployment remains pending review and merge.
+_________________________________________________________________________________
+time:      [22:55] [08-27-26]
+agent:     [claude] [opus 5]
+worktree:  loop/attachments-ui
+type:      [feature-request]
+area:      [frontend]
+
+Room context files are reachable from a browser. The four daemon attachment
+routes had landed and been verified live, and nothing in the UI called them, so
+the feature read to the user as nothing at all. New attachments.rs owns the
+panel: list, upload with a real error rather than a hang at the 8 MiB cap, and
+open. The proxy half is where the substance is — the room lane forwarded
+everything under one 1 MiB JSON body limit and stamped every buffered reply
+`application/json`, so an upload could not physically reach the daemon and a
+download arrived mislabelled with its Content-Disposition dropped. The lane is
+now classified by segment shape, not by substring: a room literally keyed
+`attachments`, a path one segment deeper, and an empty id all stay JSON, and
+that is four negative tests rather than a comment.
+
+ATTACHMENT_UPLOAD_BODY_LIMIT mirrors the daemon's own MAX_ATTACHMENT_BYTES +
+BODY_LIMIT_SLACK exactly, verified against ocean-os origin/main rather than
+guessed. The slack is load-bearing: capping at the cap would turn every
+oversize upload into our own untyped 413, which reads as a proxy bug instead of
+the rule it is. The download lane early-returns before the JSON buffering and
+forwards the upstream content type verbatim, injecting nosniff only where
+upstream declared no type at all.
+
+Review found one real defect in the state machine, in exactly the area the
+module's comments claimed to have solved: the upload-completion path had no
+current-room guard, so a room switch mid-upload painted the previous room's file
+list under the new room's name with dead links and left the new room's control
+stuck on "uploading…". The module had invented a narrower ticket covering only
+the list path. It now uses the repo's own idiom — generation_snapshot() at start,
+room_is_current() re-validated immediately before ANY write in the completion
+arm — the same guard rooms.rs uses at its eight async-completion sites. reset()
+also clears `uploading`, which the doc comment already claimed it did.
+
+Two tests were dead weight and one is now gone. The ceiling test asserted a
+constant equals its own literal and stayed green with the body-limit fix fully
+reverted; clippy --all-targets rejected the same line as an assertion on a
+constant, so it was deleted. The constant's own doc already carries the why, at
+more length and better. Real coverage for the ceiling and the header contract
+lives in the build_app tests, which do fail on revert.
+
+Verified: 926 native UI tests, 50 proxy tests, cargo fmt --check, strict clippy
+on both crates under --all-targets, RUSTFLAGS="-D warnings" wasm check, and the
+frozen wasm --no-run test link. Deploy remains a human decision.
+_________________________________________________________________________________
+
+time:      [20:53] [08-27-26]
+agent:     [claude] [opus 5]
+worktree:  loop/room-summary-ui
+type:      [feature-request]
+area:      [frontend]
+
+A room can be summarized from a browser, and the summary reads back where
+people look. The daemon has been able to summarize since the summarize route
+landed — bounded transcript tail, one model turn, folded into the well-known
+room-summary artifact — and no browser could run it or read what it wrote, so
+the feature did not exist to anyone using Ocean. A control in the right rail
+now runs one turn, and the artifact renders in the room including on open,
+through the GET, so a room summarized last week reads back without spending
+another turn. Three things the wire contract forced and they are the design:
+summarized:false is not a failure (unchanged still carries the artifact that
+stands, and no_messages and empty_summary are equally truthful 200s, so notes
+and errors are separate signals with separate colours); the artifact is a
+singleton, so this side mints no ids and watches version move, which is what
+makes a repeat run an amend; and 403/429/502/504 each say something an
+operator can act on, at_capacity in particular reading as busy rather than
+broken. Follows attachments-ui throughout — workspace-scoped state mounted as
+a sibling of the roster closure, a monotonic read ticket, a (generation, key)
+re-validation on the run, and reset clearing the in-flight flag.
+
+Review found the module's load-bearing guards were decoration: three of the
+four its own doc comments call load-bearing could be deleted with all 908
+tests and clippy silent. One real behavioural hole rode along — summarize()
+minted no ticket, and since can_summarize deliberately does not wait on
+loading, the room-open GET was still out holding the PRE-run artifact and,
+landing last, published stale prose and an older v{n} over the summary the
+operator had just paid a turn for. begin_run now bumps the ticket and clears
+loading with it. The trade is stated in its doc rather than left to be found:
+a run that then FAILS leaves no standing summary until the next run or reopen,
+because the run is the authority for the room it started in. The two
+admissions moved into publish_read and publish_run as arguments rather than
+recomputed conditions, so each refusal is reachable with no Rooms and no
+browser; the old a_run_landing_after_a_room_change_cannot_publish asserted
+rooms.rs's own pre-existing predicate and is gone. The 404 arm now answers
+only to unknown_artifact, the daemon's only coded 404 there — an unknown room
+comes back with no code at all, and reading that as "no summary yet" told an
+operator a room that is GONE merely had nothing to say.
+
+Verified at land: ocean-surface-ui 913 lib tests plus 30 across the six
+integration binaries, proxy 50, clippy --all-targets -D warnings clean on both
+crates, cargo fmt --check clean, and RUSTFLAGS="-D warnings" cargo check
+--target wasm32-unknown-unknown exit 0 — the release lane the test profile does
+not stand in for. Five mutations, each applied alone and reverted, each failing
+a named test; the guard deletions were written with _-prefixed params so they
+do not trip the incidental unused-variable warning that was the only thing
+catching the naive version. INERT UNTIL THE DAEMON SHIPS: the summarize routes
+exist only on ocean-os main at 88c34cf0 and later, and a surface pointed at an
+older daemon now gets a real fault rather than a false "No summary yet." Surface
+deploy stays a human decision. No migration. PR #125.
+_________________________________________________________________________________
+
+time:      [03:33] [08-28-26]
+agent:     [claude] [fable 5]
+worktree:  loop/exec-and-build-history-in-the-room-ui, loop/proxy-forward-timeout-unpinned
+type:      [merge]
+area:      [frontend]
+
+Wave 6 landed two surface slices. PR #132: the room's workspace is no longer
+curl-only — a right-rail Workspace section opens a panel showing provision
+facts, the last build's outcome (derived from the exec list via Bedrock's
+"# ocean-room-build" marker), and recent execs with verdict, exit code, and
+per-stream tails. ABSENT tails render as a withheld sentence and NULL tails
+(still running) render nothing, kept distinct by a double-option serde shim
+that a test pins against reversion. The panel polls both lane routes at 4s
+using the room_repo ticket/epoch idiom because the daemon's federation ingest
+only accepts event_type=="message", so room.workspace.* events never reach the
+surface — the push path is filed as its own ocean-os slice
+(workspace-events-do-not-reach-the-room). No provision/destroy affordance:
+those routes are not on the daemon lane, so absence is stated, not offered.
+Until a human deploys both Bedrock (railway up) and a current daemon, the
+panel's "isn't available on this deployment yet" state is the expected
+production behavior. PR #133: the proxy's 990s workspace-command forward
+timeout — previously applied by one untested match arm — is now routed through
+fn forward_timeout(shape) and unit-tested: WorkspaceCommand gets 990s (above
+the daemon's 960s budget), buffered non-command shapes ride the 120s JSON
+budget, and EventsTail is deliberately absent because the SSE tail streams on
+the untimed client where any budget would sever every live tail. On the
+record: the builder-site wiring is guarded by clippy dead_code, not a test.
+Verified at land, both PRs: 998 UI + 53 proxy + integration suites 0 failed,
+clippy --all-targets -D warnings clean, fmt clean, RUSTFLAGS="-D warnings"
+wasm check clean.
+_________________________________________________________________________________
+time:      [13:46] [08-29-26]
+agent:     [claude] [fable 5]
+worktree:  loop/repo-bind-unbind-ui
+type:      [merge]
+area:      [frontend]
+
+Landed wave 17's two ocean-surface slices. PR #141: owner bind/unbind
+controls in the repo panel, entirely in room_repo.rs + the root stylesheet.
+Bind form (remote/branch/dir) builds its payload with a pure bind_payload()
+sending exactly the keys validateRepoBinding admits and omitting empty
+branch/dir so upstream defaults stay upstream's; unbind sits behind a
+one-click-arms-confirm flow since bedrock#40 made it delete the checkout,
+and posts {} because the daemon lane demands a JSON object. Neither verb
+trusts its mutation reply into the view — publish_command notes the outcome
+and the caller re-fetches GET repo (pinned by test). checkout_removed is
+surfaced honestly (removed / no_container / rm_failed), the owner refusal
+reads as a calm state, Bedrock's prose-only 403 relays in its own words, and
+no client-side authorization was invented — the daemon gate is the
+authority. 13 new tests. Inert until a daemon at >= ocean-os#390 is
+deployed; old daemons degrade gracefully. PR #142: exec history stops
+headlining a CI pull as "# ocean-room-ci" — command_headline sheds either
+bookkeeping marker via find_map, a CI row headlines its gh line, and a new
+test pins that last_build_sentence keys on the build marker alone so a CI
+pull can never masquerade as a build. Gates re-run at land after rebase:
+full suite green (1063 UI tests at #142), clippy -D warnings, fmt, and the
+RUSTFLAGS="-D warnings" wasm32 release-lane check all clean, both PRs.
+_________________________________________________________________________________
+
+time:      [23:54] [08-29-26]
+agent:     [claude] [fable 5]
+worktree:  loop/surface-agent-delete-control
+type:      [feature-request]
+area:      [frontend]
+
+Agents created in the UI are no longer immortal there: the agent builder's
+edit mode grew a delete control wired to the daemon's DELETE /v1/agents/{name}.
+First click arms, second removes (the workspace panel's destroy two-step);
+start_create, load_def, form close, and dispatch all disarm, so a primed
+confirm never survives a target switch. Success exits edit mode into a blank
+create and refreshes the picker via on_deleted; failures render inline through
+write_error_message, so a daemon or proxy without the verb reads as
+NO_WRITE_API rather than a decode error. The subprocess-capability block
+deliberately gates Save alone -- DELETE round-trips nothing, so a lossily
+unsaveable agent can still be removed whole (pinned by test). The proxy's
+pinned "DELETE is deliberately absent" test demanded this be a decision:
+decided -- proxy_agent_delete forwards through agent_daemon_path (same
+dot-segment guard as GET/PUT, pinned as 400 on %2e%2e), the allowlist comment
+records it, and the flipped test asserts the forwarder is reached. Known gap
+noted, not fixed (ocean-os work): a room already holding the agent keeps its
+roster row -- agentdir::remove deletes only the folder. Gate green: 1101 UI +
+54 proxy tests, clippy -D warnings, fmt, wasm32 -D warnings check.
+_________________________________________________________________________________
+
+time:      [00:59] [08-30-26]
+agent:     [claude] [fable 5]
+worktree:  loop/surface-workspace-failed-reason-discarded
+type:      [feature-request]
+area:      [frontend]
+
+A failed workspace provision now tells its owner why. Bedrock has been
+spreading last_error into the workspace projection all along -- owner-only,
+present only while status is failed -- but WorkspaceProjection had no field
+for it, so serde dropped the key and the panel rendered the bare word
+"failed". The projection grew `#[serde(default)] last_error: Option<String>`
+(plain Option, not double_option -- the key is never null on the wire), and a
+failed_reason guard renders it as a role="alert" div under the facts grid
+only when status is failed and the reason is non-empty. Absent renders
+nothing: a non-owner or an older Bedrock is unknown, never "no reason" --
+mirroring the repo panel's clone_error. view_flip deliberately untouched: a
+reason cannot change without the status flipping through provisioning first,
+because beginProvision forces failed -> provisioning. Negative control proven
+at review and re-proven at land: with the field #[serde(skip)] (the original
+bug) the keeps-the-owner-reason test fails at None vs Some. Gate re-run at
+land after rebase onto origin/main: 1133 tests green, clippy -D warnings,
+fmt, wasm32 -D warnings release-lane check all clean.
+_________________________________________________________________________________
+
+time:      [01:52] [08-30-26]
+agent:     [claude] [fable 5]
+worktree:  loop/surface-roster-agent-remove-control
+type:      [feature-request]
+area:      [frontend]
+
+The browser can finally take an agent OUT of a room. The daemon's
+participant DELETE landed long ago but only self-leave ever called it, so
+a mistyped agent sat in the roster forever. Rooms::remove_participant
+mirrors leave_open aimed at another row (status names who went, view
+stays up), and every Local member row except the caller's own grows a
+quiet x arming a remove/keep confirm -- two-step because the removal is
+durable, same vocabulary as the agent builder's delete. The armed id
+lives at component scope per the rail-closure warning (roster SSE
+rebuilds would disarm it mid-interaction), and a pruning effect drops it
+when the target leaves the roster or the room changes -- the room check
+exists because a same-id agent in the next room would otherwise inherit
+the primed confirm. Federated rosters untouched (bedrock-authoritative).
+Gate green: 1108 UI tests + integration suites, clippy -D warnings, fmt,
+wasm32 -D warnings release-lane check.
+_________________________________________________________________________________
+
+time:      [02:51] [08-30-26]
+agent:     [claude] [fable 5]
+worktree:  loop/surface-access-writes-single-source
+type:      [refactor]
+area:      [frontend]
+
+The access policy now has one source of truth. Two divergent copies of
+access_allows_writes gated every write control, and the banner policy had
+already split for real: rooms.rs pinned "Connecting"/"Recovering" in a
+test while the mounted banner rendered "Connecting to federated room..."
+-- the tested strings and the rendered strings disagreed. Hoisted along
+the #149 room_is_federated pattern: rooms_workspace.rs owns pub(crate)
+access_allows_writes (rooms.rs imports it) plus a private access_banner
+returning the RENDERED labels, which the stage banner match now calls for
+its text so test and UI cannot diverge again; classes and roles stay in
+the view. One matrix test pins write policy + rendered banner per state.
+Dead agent-id helpers (Rooms::agent_ids, agent_ids_for) deleted whole
+with their tests: zero callers, and the shape is wrong for the composer
+hint they promised (member UUIDs vs typed @names) -- that hint is a
+future slice. Net -98 lines. Gate green: 1102 UI tests + integration
+suites, clippy -D warnings, fmt, wasm32 -D warnings release-lane check.
+_________________________________________________________________________________
+
+time:      [04:03] [08-30-26]
+agent:     [claude] [fable 5]
+type:      [merge]
+area:      [frontend]
+
+Ocean-loop wave land phase: merged #155 (federated roster remove control) --
+the PR branch did not carry its ledger entry, so recording here. os#402
+landed the daemon's federated-member DELETE two days ago and no browser
+control reached it. Federated roster rows now carry the same arm-confirm
+remove control as local rows: Rooms::remove_member (DELETE
+/v1/rooms/persistent/{key}/members/{member_id}) with a status-discriminated
+pure decoder -- a 200 body IS the refreshed RoomAccessProjection, applied
+via apply_access_projection so the member is gone the moment the response
+lands; failures decode {"ok":false,"error":code}; 403 federation_forbidden
+renders as a per-attempt refusal, never as revocation; the generation guard
+keeps late responses out of other rooms. Every federated row offers the
+control (the projection carries no self flag -- bedrock's owner-or-self
+policy answers), and keep_armed_remove now also consults the access
+projection's members so an armed federated confirm survives the SSE access
+updates that rebuild the rail. styles/rooms-workspace.css needed zero
+delta. Gate at land after a no-op rebase: 1108+4+8+4+7+5+2 tests green (3
+new decode + 3 new federated prune tests), clippy -D warnings, fmt, wasm32
+-D warnings release-lane check; review mutation-tested the prune-survival
+test. Known nits backlogged: keep_armed_remove ORs both rosters instead of
+checking the rendered one (theoretical -- id namespaces do not overlap),
+and remove_member's success path skips refresh_open_transcript (the 200
+body already carries the roster; any transcript marker rides the SSE tail).
+NEEDS HUMAN for production effect: bedrock #46's owner-or-self policy is
+merged but undeployed (Railway has no GitHub source) -- until a railway up,
+production federated removes answer 404/unknown-route; local stack works.
+The projection's missing self identity is the queued
+os-access-projection-carries-self-member / surface-roster-marks-your-own-
+rows pair.
+_________________________________________________________________________________
+time:      [05:47] [08-30-26]
+agent:     [claude] [fable 5]
+worktree:  loop/surface-roster-marks-your-own-rows
+type:      [feature-request]
+area:      [frontend]
+
+Federated roster now knows which row is you. Mirrored ocean-os e2796999's
+RoomAccessProjection.self_member_id into the surface wire types (Option,
+default + skip-if-none, so absent keys and older daemons decode to None and
+None never serializes back) with an os-posture serde compat test. The
+federated members branch threads it per row: your own row renders badges but
+no remove control -- self-removal is the header's Leave, and removing your
+own membership would sever your federation -- and agent rows you own get a
+"yours" chip, the rows bedrock's owner-or-self policy actually lets a
+non-owner remove, replacing a dial-and-403 probe per attempt. Both marks are
+pure predicates (federated_member_is_self / federated_member_is_yours) in
+the file's house style; the yours one requires is_some() first because a
+naive owner_member_id == self_member_id reads None == None as ownership.
+keep_armed_remove gained a self_member_id param that disarms a confirm whose
+target the projection later reveals to be the caller, and the armed render
+gates on !is_self for the same race. The stale EVERY-row-offers-the-control
+comment now tells the new truth while keeping the 403 fallback half. When
+self_member_id is None (local room, older daemon) every row renders exactly
+as before. Gate: 1112+4+8+4+7+5+2 tests green (1 serde + 2 predicate + 1
+prune test new), clippy -D warnings on wasm32, fmt --check clean, wasm32
+-D warnings release-lane check green.
+_________________________________________________________________________________
+
+time:      [11:41] [08-30-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-ci-events-ledger-guard
+type:      [gh-actions]
+area:      [infra]
+
+Added a ledger job to CI so a PR that changes code must carry its events.md
+entry in the same diff. Ledger discipline slipped three consecutive waves of
+the automated loop that works this repo, and the land phase kept appending the
+missing entries afterwards from disposable worktrees; a machine check beats a
+fourth reminder. Mirrors the ocean-bedrock guard landed as its PR #50, with the
+guarded set re-derived for this repo rather than copied: crates/ and styles/ are
+the app (stylesheets live at the repo root here), index.html is trunk's entry
+point, and scripts/ ops/ deploy/ extension/ vscode-extension/ .github/ change
+how it builds or ships. docs/, mockups/, design-systems/, local_plans/, audit/,
+legacy-voice/, public/ and the root manifests stay unguarded. Like every other
+job here it is deliberately not a required check — red is information, not a
+lock. The predicate was exercised against eight diff shapes before landing,
+including this PR's own.
+_________________________________________________________________________________
