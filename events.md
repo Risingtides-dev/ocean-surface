@@ -3343,3 +3343,51 @@ Gate: 1163+4+8+4+7+5+2 tests green (25 new in room_redeem), clippy -D warnings
 on wasm32, the wasm32 -D warnings release-lane check, cargo check on the proxy,
 the wasm32 test build, and fmt --check all clean.
 _________________________________________________________________________________
+
+time:      [17:04] [08-30-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-trigger-toggle-is-hidden-on-exactly-the-rooms-where-it-fires
+type:      [bug-report]
+area:      [frontend]
+
+The build-failure toggle was visible in exactly the rooms where it cannot fire
+and hidden in exactly the rooms where it can. The Triggers section was wrapped
+in a Local-only gate whose comment claimed a federated room's policy "is
+evaluated by its owning daemon, and PATCHing the local mirror would only forge
+a copy that changes nothing." Traced through ocean-os at origin/main 0b32db5d,
+that premise is false: every one of the three flags is judged against a policy
+read from THIS daemon's store, and the federation bridge reads it too --
+ingest_message_row calls store.trigger_policy(&credential.room_id) and
+ingest_workspace_row calls store.trigger_policy(key), the same store
+room_update's PATCH writes, and neither that route nor
+Rooms::update_open_room_policy carries a local/federated gate. So a federated
+room's policy is live state, not a mirror. What actually varies is which flag's
+EVENT can be constructed for which kind of room, and it is a three-way split,
+not the one-way exemption the backlog guessed. RoomTriggerEvent::BuildFailed is
+built in one place -- ingest_workspace_row, on a room.workspace.build_failed
+marker -- and workspace markers arrive only over the bridge, so a Local room
+has no workspace to fail and the checkbox was pure decoration there. Mention is
+built on BOTH paths, so the gate was over-restrictive for it too. ThreadReply
+is genuinely Local-only, and for a reason worth writing down: it is built
+solely on the local post path from the thread root's author, and the federated
+MessagePayload decodes to {client_event_id, author_member_id, body,
+mention_member_ids} with no thread parent at all, so the bridge can never
+construct one. The section now renders in every access state and the decision
+moved per-row into trigger_row_dead_here, which returns the note a row wears
+when its flag is dead here; trigger_row_is_editable pairs it with the rail-wide
+access_allows_writes gate every other section already takes, so Connecting,
+Recovering and Revoked hold all three rows rather than offering a write the
+room is not accepting. A dead row renders disabled with its reason inline
+instead of vanishing, so the section keeps its shape and the user learns which
+kind of room the flag needs -- the existing :has(input:disabled) dimming
+already covered the treatment. This was reachable, not theoretical: since #159
+a room joined by redeeming an invite arrives federated and was never Local, so
+build-failure waking could not be turned on from the browser at all, not even
+via set-it-at-create-then-federate. The read half already contradicted the
+write half -- the Response Policy summary was never gated and has been printing
+"build failure" for federated rooms that had no control to change it. Gate:
+1168+4+8+4+7+5+2 tests green (5 new, one per arm of the split plus the
+write-gate and unknown-access rows), clippy -D warnings on wasm32 and on
+--all-targets, the wasm32 -D warnings release-lane check, cargo check on the
+proxy, the wasm32 test build, and fmt --check all clean.
+_________________________________________________________________________________
