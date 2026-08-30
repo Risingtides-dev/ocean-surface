@@ -29,16 +29,21 @@
 //! A daemon predating the leaves 404s them; the buttons answer "not
 //! available yet" in the reads' own voice.
 //!
-//! The owner's secrets SET rides the same lane, and it is SET-ONLY by
-//! ruling — the daemon's manifest pins "a secrets row is the owner-gated
-//! set, and nothing else", no name list, no read-back anywhere upstream:
+//! The owner's secrets SET rides the same lane, and VALUES are set-only
+//! by ruling — the daemon's manifest pins "a secrets row is the
+//! owner-gated set, and nothing else"; no route anywhere upstream returns
+//! a value:
 //!
 //!   POST /v1/rooms/persistent/{key}/workspace/secrets/set → upstream PUT
 //!
 //! so the control below is a submit and its copy says so. The reply is
 //! names only (`{set, removed, total}`), and the value's whole life on
 //! this side is the input signal and the in-flight request body — cleared
-//! on submit, never rendered back, never logged.
+//! on submit, never rendered back, never logged. What a room HOLDS is
+//! member-visible, though: since Bedrock's status body grew a `secrets`
+//! list beside the projection — name, key fingerprint, updated time,
+//! never a value — the panel lists it above the form. A status body
+//! WITHOUT the key is an older Bedrock, and renders no claim at all.
 //!
 //! Members RUN commands on the same lane — the daemon's allowlist exec
 //! row is a member act (write-gated, attributed, never owner-gated):
@@ -131,8 +136,9 @@ const PANEL_POLL_MS: u32 = 10_000;
 /// (~30s) instead of every one.
 const STATUS_FALLBACK_EVERY_TICKS: u64 = 3;
 
-/// Every marker the daemon composes opens with this word — nine variants,
-/// one prefix (`compose_workspace_marker` in ocean-os's room_federation.rs).
+/// Every marker the daemon composes opens with this word — twelve variants
+/// plus a catch-all, one prefix (`compose_workspace_marker` in ocean-os's
+/// room_federation.rs).
 const WORKSPACE_MARKER_PREFIX: &str = "workspace ";
 
 /// Rows asked of the execs route. Bedrock bounds the parameter to 1..=200
@@ -170,6 +176,27 @@ pub struct WorkspaceProjection {
     pub last_active_at: Option<String>,
     #[serde(default)]
     pub last_flushed_at: Option<String>,
+    /// The room's stored secret names — not a projection field on the
+    /// wire (the status body carries `secrets` BESIDE `workspace`, hence
+    /// the skip), folded in by `classify_status` so the Present view is
+    /// the whole status answer. `None` is a Bedrock that predates the
+    /// list: unknown, never "none stored".
+    #[serde(skip)]
+    pub secrets: Option<Vec<SecretRow>>,
+}
+
+/// One row of the status body's `secrets` list — `listSecretNames`'s
+/// projection (src/room-compute.mjs): name, sealing-key fingerprint,
+/// updated time. Names and metadata only; no route upstream returns a
+/// value, so nothing here can carry one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct SecretRow {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub key_id: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
 }
 
 /// Present (null or string) versus absent, kept apart: serde folds a JSON
@@ -295,6 +322,12 @@ struct WorkspaceBody {
     removed: Option<Vec<String>>,
     #[serde(default)]
     total: Option<u64>,
+    /// The status body's stored-secret names, riding beside `workspace`.
+    /// Absent on a Bedrock that predates the list — a distinction that
+    /// must survive to the render: absent is unknown, `[]` is "none
+    /// stored".
+    #[serde(default)]
+    secrets: Option<Vec<SecretRow>>,
     /// The purge reply's row count — how many execs had their tails
     /// blanked. Presence is what success means on that lane; the `exec_id`
     /// echoed beside it is not read here.
@@ -473,7 +506,10 @@ fn classify_status(status: u16, body: Option<WorkspaceBody>) -> Result<Workspace
             "The workspace status reply could not be read ({status})."
         ));
     };
-    if let Some(workspace) = body.workspace {
+    if let Some(mut workspace) = body.workspace {
+        // The secret names ride beside the projection on the wire; folded
+        // in here so the Present view carries the whole status answer.
+        workspace.secrets = body.secrets;
         return Ok(WorkspaceView::Present(Box::new(workspace)));
     }
     match body.refusal_code() {
@@ -888,6 +924,18 @@ fn secrets_form_stands(view: Option<&WorkspaceView>) -> bool {
         view,
         Some(WorkspaceView::Present(_) | WorkspaceView::Absent)
     )
+}
+
+/// What the secrets list may claim. `Some` rows are Bedrock's answer —
+/// empty honestly renders "none stored" — while `None` renders NO claim:
+/// a Bedrock that predates the list (its status body has no `secrets`
+/// key), or a view with no status answer to carry one. The absent-vs-empty
+/// discipline of `double_option`, one level up.
+fn secret_rows(view: Option<&WorkspaceView>) -> Option<&[SecretRow]> {
+    match view {
+        Some(WorkspaceView::Present(workspace)) => workspace.secrets.as_deref(),
+        _ => None,
+    }
 }
 
 /// The sentence a typed exec answer earns — the workspace that isn't
@@ -1883,10 +1931,15 @@ impl RoomWorkspacePanelState {
         Some((name, value))
     }
 
-    /// Fire the owner's secrets set. Same shape as `run_lifecycle`: the
-    /// reply never moves any view — a landed set changes nothing this
-    /// panel reads back, deliberately — and only the room that started the
-    /// command may hear its answer.
+    /// Fire the owner's secrets set. Same shape as `run_exec`, active
+    /// re-read included: the status body carries the room's secret names
+    /// now, so the list above the form is exactly what a landed set
+    /// changed. No marker wake follows — the daemon's allowlist files
+    /// `secrets_updated` under configuration bookkeeping — so other
+    /// members converge on the ~30s status fallback tick; this read is
+    /// the actor's own list amending immediately instead of waiting for
+    /// one. The generation guard admits the note as before — the ticket
+    /// inside `refresh_lanes` guards the status read itself.
     fn run_secrets_set(&self, rooms: Rooms, key: String, actor: String) {
         let Some((name, value)) = self.take_secret_submission() else {
             return;
@@ -1900,7 +1953,12 @@ impl RoomWorkspacePanelState {
         spawn_local(async move {
             let url = secrets_set_url(&base, &key, &actor);
             let outcome = post_secrets_set(&url, &name, &value).await;
-            me.publish_secrets(outcome, rooms.room_is_current(generation, &key));
+            let current = rooms.room_is_current(generation, &key);
+            let landed = matches!(outcome, LifecycleOutcome::Landed(_));
+            me.publish_secrets(outcome, current);
+            if current && landed {
+                refresh_lanes(me, &base, &key, &actor, true, false, false).await;
+            }
         });
     }
 
@@ -2840,25 +2898,63 @@ fn lifecycle_section(
     .into_any()
 }
 
-/// The owner's secrets set, under the lifecycle verbs. Set-only like the
-/// lane it rides: no name list, no read-back — the two inputs and the
-/// submit are the whole vocabulary, and the copy says so up front.
-/// Rendered for every member; the daemon's typed 403 is the authorization
-/// answer, same as the verbs above.
+/// The owner's secrets set, under the lifecycle verbs — and above it,
+/// what the room already holds: the status body's name list, when the
+/// Bedrock in front of us serves one. Values stay set-only — the list is
+/// names and metadata, there is no value on the wire to leak — and the
+/// copy says so up front. Rendered for every member; the daemon's typed
+/// 403 is the authorization answer, same as the verbs above.
 fn secrets_section(
     state: RoomWorkspacePanelState,
     rooms: Rooms,
     actor: impl Fn() -> Option<(String, String)> + Copy + 'static,
 ) -> AnyView {
-    if !secrets_form_stands(state.view.get().as_ref()) {
+    let view = state.view.get();
+    if !secrets_form_stands(view.as_ref()) {
         return ().into_any();
     }
+    let rows = secret_rows(view.as_ref()).map(<[SecretRow]>::to_vec);
     let busy = state.secrets_busy.get();
     view! {
         <div class="rooms-workspace__compute-secrets-title">"Secrets"</div>
         <div class="rooms-workspace__compute-secrets-copy">
-            "Set-only: a value is injected into workspace commands and never shown again."
+            "Values are set-only: injected into workspace commands, never shown again."
         </div>
+        {rows.map(|rows| {
+            if rows.is_empty() {
+                return view! {
+                    <div class="rooms-workspace__compute-note">
+                        "No secrets stored for this room."
+                    </div>
+                }
+                .into_any();
+            }
+            view! {
+                <ul class="rooms-workspace__compute-secrets-list">
+                    {rows
+                        .into_iter()
+                        .map(|row| view! {
+                            <li class="rooms-workspace__compute-secrets-row">
+                                <span
+                                    class="rooms-workspace__compute-secrets-row-name"
+                                    title=row
+                                        .key_id
+                                        .map(|key_id| format!("sealed under key {key_id}"))
+                                >
+                                    {row.name}
+                                </span>
+                                {row.updated_at.map(|at| view! {
+                                    <span class="rooms-workspace__compute-secrets-row-at">
+                                        {format!("updated {at}")}
+                                    </span>
+                                })}
+                            </li>
+                        })
+                        .collect::<Vec<_>>()}
+                </ul>
+            }
+            .into_any()
+        })}
         {state.secrets_note.get().map(|note| view! {
             <div class="rooms-workspace__compute-note">{note}</div>
         })}
@@ -4488,6 +4584,74 @@ mod tests {
         assert!(!secrets_form_stands(Some(&WorkspaceView::Unavailable)));
         assert!(!secrets_form_stands(Some(&WorkspaceView::NotFederated)));
         assert!(!secrets_form_stands(None));
+    }
+
+    /// The status body's `secrets` list rides into the Present view, and
+    /// absent-vs-empty survives the trip: a Bedrock that predates the list
+    /// sends no `secrets` key — the production answer until it redeploys —
+    /// and that must stay UNKNOWN, never the false "none stored" an empty
+    /// list honestly is.
+    #[test]
+    fn the_secret_names_ride_the_status_answer() {
+        let listed = body(
+            r#"{"workspace": {"status": "ready", "driver": "cloudflare"},
+                "secrets": [
+                    {"name": "GH_TOKEN", "key_id": "k1",
+                     "updated_at": "2026-08-27T10:00:00.000Z"},
+                    {"name": "NPM_TOKEN", "key_id": "k1",
+                     "updated_at": "2026-08-20T09:00:00.000Z"}
+                ]}"#,
+        );
+        let view = classify_status(200, Some(listed)).unwrap();
+        let rows = secret_rows(Some(&view)).expect("the rows must survive classify");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name, "GH_TOKEN");
+        assert_eq!(rows[0].key_id.as_deref(), Some("k1"));
+        assert_eq!(
+            rows[0].updated_at.as_deref(),
+            Some("2026-08-27T10:00:00.000Z")
+        );
+
+        // No `secrets` key at all — the pre-#43 status body verbatim.
+        let older = classify_status(200, Some(body(status_json()))).unwrap();
+        assert_eq!(
+            secret_rows(Some(&older)),
+            None,
+            "an older Bedrock must render no claim"
+        );
+
+        // An empty list is Bedrock's own answer: none stored.
+        let bare = body(r#"{"workspace": {"status": "ready"}, "secrets": []}"#);
+        let view = classify_status(200, Some(bare)).unwrap();
+        assert_eq!(secret_rows(Some(&view)), Some(&[][..]));
+
+        // No other shape has a status answer to carry rows.
+        assert_eq!(secret_rows(Some(&WorkspaceView::Absent)), None);
+        assert_eq!(secret_rows(None), None);
+    }
+
+    /// A secrets-only change is not a flip: the silent status refresh a
+    /// landed set fires must never disarm a primed destroy or purge
+    /// confirm, exactly like the timestamp churn beside it.
+    #[test]
+    fn a_secrets_change_is_not_a_view_flip() {
+        let ready = |secrets: Option<Vec<SecretRow>>| {
+            WorkspaceView::Present(Box::new(WorkspaceProjection {
+                status: "ready".to_string(),
+                secrets,
+                ..WorkspaceProjection::default()
+            }))
+        };
+        let grown = ready(Some(vec![SecretRow {
+            name: "GH_TOKEN".to_string(),
+            ..SecretRow::default()
+        }]));
+        assert!(!view_flip(Some(&ready(None)), &grown));
+        assert!(!view_flip(Some(&grown), &ready(Some(Vec::new()))));
+        assert!(
+            view_flip(Some(&grown), &WorkspaceView::Absent),
+            "a shape flip still flips"
+        );
     }
 
     /// The write-only discipline's mechanics: a submission takes the value
