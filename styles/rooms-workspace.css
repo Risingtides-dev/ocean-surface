@@ -2140,6 +2140,22 @@
   letter-spacing: 0.06em;
 }
 
+/* ── Your-agent chip ──────────────────────────────────────────────── */
+
+/* Marks federated agent rows the caller owns — the rows bedrock's
+   owner-or-self policy lets a non-owner remove, so the chip replaces a
+   dial-and-403 probe per attempt. */
+.rooms-workspace__member-yours {
+  flex: 0 0 auto;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 3px;
+  padding: 1px 4px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
 /* ── Member local/remote agent states ─────────────────────────────── */
 
 .rooms-workspace__member--local-agent .rooms-workspace__member-name {

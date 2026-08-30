@@ -858,6 +858,28 @@ fn participant_removable(participant_id: &str, identity_id: &str) -> bool {
     participant_id != identity_id
 }
 
+/// Whether a federated roster row is the caller's own membership. `None`
+/// (a local room, or a daemon that predates `self_member_id`) marks no row,
+/// so every row keeps today's remove control and bedrock's 403 stays the
+/// answer of last resort.
+fn federated_member_is_self(self_member_id: Option<&str>, member_id: &str) -> bool {
+    self_member_id == Some(member_id)
+}
+
+/// Whether a federated roster row is an agent the caller owns — the rows
+/// bedrock's owner-or-self policy actually lets a non-owner remove, so the
+/// chip stands in for a dial-and-403 probe per attempt. Requires a known
+/// self: a bare `owner_member_id == self_member_id` would read `None == None`
+/// as ownership and badge every ownerless agent row.
+fn federated_member_is_yours(
+    self_member_id: Option<&str>,
+    member: &FederatedRoomMemberProjection,
+) -> bool {
+    self_member_id.is_some()
+        && matches!(member.actor_type, FederatedActorType::Agent)
+        && member.owner_member_id.as_deref() == self_member_id
+}
+
 /// Whether the armed remove confirm survives a room/roster change. The armed
 /// state is keyed by participant id and held OUTSIDE the members-rail closure
 /// (which is rebuilt by every roster SSE update — see the component doc), so
@@ -868,17 +890,22 @@ fn participant_removable(participant_id: &str, identity_id: &str) -> bool {
 /// consulted because only one renders at a time: a federated room's rows are
 /// the access projection's members, never `open_room.participants`, and a
 /// confirm armed against one of them must survive the SSE access updates
-/// that rebuild the rail.
+/// that rebuild the rail. A self target disarms too: `self_member_id` can
+/// arrive AFTER a row was armed (the first access update to carry the
+/// field), and a confirm must not survive the discovery that it points at
+/// the caller's own row — that removal is the header's Leave.
 fn keep_armed_remove(
     armed: Option<&str>,
     room_changed: bool,
     participants: &[RoomParticipant],
     members: &[FederatedRoomMemberProjection],
+    self_member_id: Option<&str>,
 ) -> bool {
     let Some(armed) = armed else {
         return false;
     };
     !room_changed
+        && !federated_member_is_self(self_member_id, armed)
         && (participants.iter().any(|p| p.id == armed)
             || members.iter().any(|m| m.member_id == armed))
 }
@@ -1164,15 +1191,21 @@ pub fn RoomsWorkspace(
             .get()
             .map(|room| room.participants)
             .unwrap_or_default();
-        let members = rooms
-            .access
-            .get()
-            .map(|access| access.members)
-            .unwrap_or_default();
+        let access = rooms.access.get();
+        let self_member_id = access
+            .as_ref()
+            .and_then(|access| access.self_member_id.clone());
+        let members = access.map(|access| access.members).unwrap_or_default();
         let room_changed = prev_key.is_some_and(|prev| prev != key);
         let armed = member_remove_armed.get_untracked();
         if armed.is_some()
-            && !keep_armed_remove(armed.as_deref(), room_changed, &participants, &members)
+            && !keep_armed_remove(
+                armed.as_deref(),
+                room_changed,
+                &participants,
+                &members,
+                self_member_id.as_deref(),
+            )
         {
             member_remove_armed.set(None);
         }
@@ -3472,6 +3505,7 @@ pub fn RoomsWorkspace(
                                     } else {
                                         let members = access.members.clone();
                                         let members_for_label = members.clone();
+                                        let self_member_id = access.self_member_id.clone();
                                         view! {
                                             // Roster is a real list: give AT an
                                             // item count + boundaries instead of
@@ -3537,6 +3571,14 @@ pub fn RoomsWorkspace(
                                                         .unwrap_or_default();
                                                     let member_id = member.member_id.clone();
                                                     let member_display = member.display_name.clone();
+                                                    let is_self = federated_member_is_self(
+                                                        self_member_id.as_deref(),
+                                                        &member.member_id,
+                                                    );
+                                                    let yours = federated_member_is_yours(
+                                                        self_member_id.as_deref(),
+                                                        &member,
+                                                    );
                                                     view! {
                                                         <div class="rooms-workspace__member"
                                                             role="listitem"
@@ -3557,17 +3599,26 @@ pub fn RoomsWorkspace(
                                                             // control, or — armed — the two-step
                                                             // confirm in their place, for the same
                                                             // rail-width and durability reasons as
-                                                            // the Local branch. EVERY row offers
-                                                            // the control: the projection carries
-                                                            // no "this is you" flag, so instead of
-                                                            // guessing which row is the caller we
-                                                            // let bedrock's owner-or-self policy
-                                                            // answer each attempt; a refusal lands
-                                                            // in the status line with the roster
-                                                            // intact.
+                                                            // the Local branch. The projection's
+                                                            // self_member_id names the caller's
+                                                            // own row: that one renders NO control
+                                                            // (self-removal is the header's Leave,
+                                                            // and would sever your own federation)
+                                                            // and your agents get a "yours" chip —
+                                                            // the rows bedrock's owner-or-self
+                                                            // policy lets a non-owner remove. For
+                                                            // every other row, and whenever the
+                                                            // field is absent (local room, older
+                                                            // daemon), bedrock still answers each
+                                                            // attempt: a refusal lands in the
+                                                            // status line with the roster intact.
                                                             {move || {
-                                                                let armed = member_remove_armed.get().as_deref()
-                                                                    == Some(member_id.as_str());
+                                                                // `!is_self` also unarms a confirm
+                                                                // primed before an access update
+                                                                // revealed the row is the caller.
+                                                                let armed = !is_self
+                                                                    && member_remove_armed.get().as_deref()
+                                                                        == Some(member_id.as_str());
                                                                 if armed {
                                                                     let confirm_id = member_id.clone();
                                                                     let confirm_display = member_display.clone();
@@ -3607,6 +3658,11 @@ pub fn RoomsWorkspace(
                                                                         <span class="rooms-workspace__member-role">
                                                                             {role_label}
                                                                         </span>
+                                                                        {yours.then(|| view! {
+                                                                            <span class="rooms-workspace__member-yours">
+                                                                                "yours"
+                                                                            </span>
+                                                                        })}
                                                                         {if presence.is_some() {
                                                                             view! {
                                                                                 <span
@@ -3624,22 +3680,28 @@ pub fn RoomsWorkspace(
                                                                         } else {
                                                                             ().into_any()
                                                                         }}
-                                                                        <button
-                                                                            class="rooms-workspace__member-remove"
-                                                                            type="button"
-                                                                            title="Remove from room"
-                                                                            aria-label=arm_label
-                                                                            on:click=move |_| {
-                                                                                member_remove_armed
-                                                                                    .set(Some(arm_id.clone()))
-                                                                            }
-                                                                        >
-                                                                            <svg viewBox="0 0 16 16" width="10" height="10"
-                                                                                fill="none" stroke="currentColor" stroke-width="1.6"
-                                                                                stroke-linecap="round">
-                                                                                <path d="M3 3l10 10M13 3L3 13"/>
-                                                                            </svg>
-                                                                        </button>
+                                                                        {if is_self {
+                                                                            ().into_any()
+                                                                        } else {
+                                                                            view! {
+                                                                                <button
+                                                                                    class="rooms-workspace__member-remove"
+                                                                                    type="button"
+                                                                                    title="Remove from room"
+                                                                                    aria-label=arm_label
+                                                                                    on:click=move |_| {
+                                                                                        member_remove_armed
+                                                                                            .set(Some(arm_id.clone()))
+                                                                                    }
+                                                                                >
+                                                                                    <svg viewBox="0 0 16 16" width="10" height="10"
+                                                                                        fill="none" stroke="currentColor" stroke-width="1.6"
+                                                                                        stroke-linecap="round">
+                                                                                        <path d="M3 3l10 10M13 3L3 13"/>
+                                                                                    </svg>
+                                                                                </button>
+                                                                            }.into_any()
+                                                                        }}
                                                                     }.into_any()
                                                                 }
                                                             }}
@@ -4541,6 +4603,7 @@ mod tests {
             state,
             last_confirmed_global_sequence: None,
             members: vec![],
+            self_member_id: None,
             outbox: vec![],
         }
     }
@@ -4591,13 +4654,13 @@ mod tests {
             part("web-1", "John", RoomParticipantKind::Human),
             part("scout", "Scout", RoomParticipantKind::Agent),
         ];
-        assert!(keep_armed_remove(Some("scout"), false, &roster, &[]));
+        assert!(keep_armed_remove(Some("scout"), false, &roster, &[], None));
     }
 
     #[test]
     fn armed_remove_disarms_when_its_target_leaves_the_roster() {
         let roster = [part("web-1", "John", RoomParticipantKind::Human)];
-        assert!(!keep_armed_remove(Some("scout"), false, &roster, &[]));
+        assert!(!keep_armed_remove(Some("scout"), false, &roster, &[], None));
     }
 
     #[test]
@@ -4605,13 +4668,13 @@ mod tests {
         // The next room can list the very same agent id; a confirm armed
         // against the previous room's row must not carry over to it.
         let roster = [part("scout", "Scout", RoomParticipantKind::Agent)];
-        assert!(!keep_armed_remove(Some("scout"), true, &roster, &[]));
+        assert!(!keep_armed_remove(Some("scout"), true, &roster, &[], None));
     }
 
     #[test]
     fn unarmed_state_has_nothing_to_keep() {
         let roster = [part("scout", "Scout", RoomParticipantKind::Agent)];
-        assert!(!keep_armed_remove(None, false, &roster, &[]));
+        assert!(!keep_armed_remove(None, false, &roster, &[], None));
     }
 
     #[test]
@@ -4624,7 +4687,8 @@ mod tests {
             Some("member-agent"),
             false,
             &[],
-            &members
+            &members,
+            None
         ));
     }
 
@@ -4635,7 +4699,8 @@ mod tests {
             Some("member-agent"),
             false,
             &[],
-            &members
+            &members,
+            None
         ));
     }
 
@@ -4646,8 +4711,65 @@ mod tests {
             Some("member-agent"),
             true,
             &[],
-            &members
+            &members,
+            None
         ));
+    }
+
+    #[test]
+    fn armed_remove_disarms_when_the_projection_reveals_the_target_is_you() {
+        // self_member_id can arrive AFTER a row was armed — the first SSE
+        // access update to carry the field. The confirm must not survive
+        // the discovery that it points at the caller's own row.
+        let members = [fed_member("member-you"), fed_member("member-agent")];
+        assert!(!keep_armed_remove(
+            Some("member-you"),
+            false,
+            &[],
+            &members,
+            Some("member-you")
+        ));
+        // A known self leaves confirms against OTHER rows alone.
+        assert!(keep_armed_remove(
+            Some("member-agent"),
+            false,
+            &[],
+            &members,
+            Some("member-you")
+        ));
+    }
+
+    // ── federated self / yours row marks ──────────────────────────────
+
+    #[test]
+    fn self_mark_needs_the_projection_to_name_the_row() {
+        assert!(federated_member_is_self(Some("member-you"), "member-you"));
+        assert!(!federated_member_is_self(
+            Some("member-you"),
+            "member-other"
+        ));
+        // Absent field (local room, older daemon): no row is self, so
+        // every row keeps today's remove control.
+        assert!(!federated_member_is_self(None, "member-you"));
+    }
+
+    #[test]
+    fn yours_mark_needs_a_known_self_owning_an_agent_row() {
+        let mut agent = fed_member("member-agent");
+        agent.owner_member_id = Some("member-you".into());
+        assert!(federated_member_is_yours(Some("member-you"), &agent));
+        assert!(!federated_member_is_yours(Some("member-else"), &agent));
+        // The None == None trap: an ownerless agent under an absent
+        // self_member_id belongs to nobody — no chip.
+        assert!(!federated_member_is_yours(
+            None,
+            &fed_member("member-agent")
+        ));
+        // A user row is never "yours", whatever it owns.
+        let mut human = fed_member("member-you");
+        human.actor_type = FederatedActorType::User;
+        human.owner_member_id = Some("member-you".into());
+        assert!(!federated_member_is_yours(Some("member-you"), &human));
     }
 
     // ── room_is_federated ─────────────────────────────────────────────

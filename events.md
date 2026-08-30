@@ -3190,3 +3190,30 @@ The projection's missing self identity is the queued
 os-access-projection-carries-self-member / surface-roster-marks-your-own-
 rows pair.
 _________________________________________________________________________________
+time:      [05:47] [08-30-26]
+agent:     [claude] [fable 5]
+worktree:  loop/surface-roster-marks-your-own-rows
+type:      [feature-request]
+area:      [frontend]
+
+Federated roster now knows which row is you. Mirrored ocean-os e2796999's
+RoomAccessProjection.self_member_id into the surface wire types (Option,
+default + skip-if-none, so absent keys and older daemons decode to None and
+None never serializes back) with an os-posture serde compat test. The
+federated members branch threads it per row: your own row renders badges but
+no remove control -- self-removal is the header's Leave, and removing your
+own membership would sever your federation -- and agent rows you own get a
+"yours" chip, the rows bedrock's owner-or-self policy actually lets a
+non-owner remove, replacing a dial-and-403 probe per attempt. Both marks are
+pure predicates (federated_member_is_self / federated_member_is_yours) in
+the file's house style; the yours one requires is_some() first because a
+naive owner_member_id == self_member_id reads None == None as ownership.
+keep_armed_remove gained a self_member_id param that disarms a confirm whose
+target the projection later reveals to be the caller, and the armed render
+gates on !is_self for the same race. The stale EVERY-row-offers-the-control
+comment now tells the new truth while keeping the 403 fallback half. When
+self_member_id is None (local room, older daemon) every row renders exactly
+as before. Gate: 1112+4+8+4+7+5+2 tests green (1 serde + 2 predicate + 1
+prune test new), clippy -D warnings on wasm32, fmt --check clean, wasm32
+-D warnings release-lane check green.
+_________________________________________________________________________________
