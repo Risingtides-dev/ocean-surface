@@ -87,6 +87,47 @@ fn create_trigger_policy(
     })
 }
 
+/// The note a trigger row carries when its flag cannot fire in this kind of
+/// room — `None` when the flag is live here.
+///
+/// The policy all three flags are judged against is read from THIS daemon's
+/// store, on the federation bridge's ingest paths as much as on the local
+/// post path, so a federated room's policy is not an inert mirror and
+/// PATCHing it changes what actually fires. What varies is which flag's EVENT
+/// can reach which kind of room, and it is a three-way split:
+///
+/// - `on_mention` reaches both. The local post path parses mentions out of a
+///   posted body, and the bridge's message ingest evaluates the same event
+///   per federated mention.
+/// - `on_thread_reply` reaches a Local room only. It is built solely on the
+///   local post path, from the thread root's author; the federated message
+///   payload carries no thread parent, so the bridge can never build one.
+/// - `on_build_failure` reaches a federated room only. It is built solely
+///   from a `room.workspace.build_failed` marker, and workspace markers
+///   arrive through the bridge — a Local room has no workspace to fail.
+///
+/// A room whose access is still unknown gets no note: claiming a flag is
+/// dead there would be a guess, and the write gate already holds the row.
+fn trigger_row_dead_here(
+    toggle: TriggerToggle,
+    access: Option<&RoomAccessProjection>,
+) -> Option<&'static str> {
+    let access = access?;
+    let federated = room_is_federated(Some(access));
+    match toggle {
+        TriggerToggle::Mention => None,
+        TriggerToggle::ThreadReply => federated.then_some("local rooms only"),
+        TriggerToggle::BuildFailure => (!federated).then_some("federated rooms only"),
+    }
+}
+
+/// Whether a trigger row accepts a flip: the room must accept writes at all —
+/// the same gate every other section of this rail takes — and the flag must
+/// be one that can actually fire here (see [`trigger_row_dead_here`]).
+fn trigger_row_is_editable(toggle: TriggerToggle, access: Option<&RoomAccessProjection>) -> bool {
+    access_allows_writes(access) && trigger_row_dead_here(toggle, access).is_none()
+}
+
 /// One editable trigger row in the right rail. `checked` is a plain bool on
 /// purpose: the enclosing section re-renders from `open_room` after every
 /// admitted PATCH, so an admitted flip settles to durable state. A refused
@@ -100,13 +141,18 @@ fn trigger_toggle_row(
     toggle: TriggerToggle,
     label: &'static str,
     checked: bool,
+    access: Option<&RoomAccessProjection>,
 ) -> impl IntoView {
+    // Both read the projection the enclosing section already holds, so the
+    // note and the disabled state can never disagree about this room.
+    let dead_here = trigger_row_dead_here(toggle, access);
+    let editable = trigger_row_is_editable(toggle, access);
     view! {
         <label class="rooms-workspace__trigger">
             <input
                 type="checkbox"
                 prop:checked=checked
-                disabled=move || rooms.policy_update_in_flight.get()
+                disabled=move || !editable || rooms.policy_update_in_flight.get()
                 on:change=move |ev| {
                     let current = rooms
                         .open_room
@@ -120,6 +166,9 @@ fn trigger_toggle_row(
                 }
             />
             <span class="rooms-workspace__trigger-label">{label}</span>
+            {dead_here.map(|note| view! {
+                <span class="rooms-workspace__trigger-note">{note}</span>
+            })}
         </label>
     }
 }
@@ -3773,22 +3822,21 @@ pub fn RoomsWorkspace(
                 />
 
                 // How this room wakes its agents: the three live
-                // trigger-policy flags, editable in place. Local rooms only —
-                // a federated room's policy is evaluated by its owning daemon,
-                // and PATCHing the local mirror would only forge a copy that
-                // changes nothing. A sibling of the roster for the same reason
-                // as its neighbours: it owns a PATCH's in-flight state.
+                // trigger-policy flags, editable in place. Every access state
+                // renders it — the policy each flag is judged against is read
+                // from THIS daemon's store, on the federation bridge's ingest
+                // paths as much as on the local post path, so a federated
+                // room's policy is live state and not a mirror. What varies is
+                // which flag's EVENT can reach which kind of room, and that is
+                // a per-row decision (see `trigger_row_dead_here`), not a
+                // decision about the section. A sibling of the roster for the
+                // same reason as its neighbours: it owns a PATCH's in-flight
+                // state.
                 {move || {
-                    let local = matches!(
-                        rooms.access.get().map(|a| a.state),
-                        Some(RoomAccessState::Local)
-                    );
+                    let access = rooms.access.get();
                     let Some(room) = rooms.open_room.get() else {
                         return ().into_any();
                     };
-                    if !local {
-                        return ().into_any();
-                    }
                     let policy = room.trigger_policy;
                     let flag = |pick: fn(&RoomTriggerPolicy) -> bool| {
                         policy.as_ref().map(pick).unwrap_or(false)
@@ -3807,18 +3855,21 @@ pub fn RoomsWorkspace(
                                 TriggerToggle::Mention,
                                 "@mention",
                                 flag(|p| p.on_mention),
+                                access.as_ref(),
                             )}
                             {trigger_toggle_row(
                                 rooms,
                                 TriggerToggle::ThreadReply,
                                 "thread reply",
                                 flag(|p| p.on_thread_reply),
+                                access.as_ref(),
                             )}
                             {trigger_toggle_row(
                                 rooms,
                                 TriggerToggle::BuildFailure,
                                 "build failure",
                                 flag(|p| p.on_build_failure),
+                                access.as_ref(),
                             )}
                             {move || {
                                 rooms.policy_update_error.get().map(|error| view! {
@@ -4123,7 +4174,200 @@ mod tests {
         assert!(normalized.contains(".rooms-workspace__create-triggers{"));
         assert!(normalized.contains(".rooms-workspace__triggers{"));
         assert!(normalized.contains(".rooms-workspace__trigger{"));
+        assert!(normalized.contains(".rooms-workspace__trigger-note{"));
         assert!(normalized.contains(".rooms-workspace__triggers-error{"));
+    }
+
+    // ── trigger rows: which flag is live in which kind of room ────────
+    //
+    // Traced through the daemon at ocean-os origin/main 0b32db5d. All three
+    // flags are read from THIS daemon's store — the federation bridge's
+    // ingest paths call `store.trigger_policy(..)` exactly like the local
+    // post path does — so a federated room's policy is live state. What
+    // differs is which flag's EVENT can be constructed for which kind of
+    // room, and the three flags land in three different places.
+
+    /// `RoomTriggerEvent::Mention` is built on BOTH paths: the local post
+    /// path parses mentions out of a posted body, and the bridge's
+    /// `ingest_message_row` evaluates one per federated `mention_member_ids`
+    /// entry. So the row is live wherever the room takes writes at all.
+    #[test]
+    fn mention_is_live_in_local_and_federated_rooms_alike() {
+        for state in [RoomAccessState::Local, RoomAccessState::Live] {
+            let access = test_access(state);
+            assert_eq!(
+                trigger_row_dead_here(TriggerToggle::Mention, Some(&access)),
+                None,
+                "{state:?}"
+            );
+            assert!(
+                trigger_row_is_editable(TriggerToggle::Mention, Some(&access)),
+                "{state:?}"
+            );
+        }
+    }
+
+    /// `RoomTriggerEvent::ThreadReply` is built in exactly one place — the
+    /// local post path, from the thread root's author. The federated
+    /// `MessagePayload` carries `{client_event_id, author_member_id, body,
+    /// mention_member_ids}` and no thread parent at all, so the bridge can
+    /// never construct one. Local-only here is the CORRECT reading.
+    #[test]
+    fn thread_reply_is_dead_in_a_federated_room() {
+        let local = test_access(RoomAccessState::Local);
+        assert_eq!(
+            trigger_row_dead_here(TriggerToggle::ThreadReply, Some(&local)),
+            None
+        );
+        assert!(trigger_row_is_editable(
+            TriggerToggle::ThreadReply,
+            Some(&local)
+        ));
+
+        let live = test_access(RoomAccessState::Live);
+        assert_eq!(
+            trigger_row_dead_here(TriggerToggle::ThreadReply, Some(&live)),
+            Some("local rooms only")
+        );
+        assert!(!trigger_row_is_editable(
+            TriggerToggle::ThreadReply,
+            Some(&live)
+        ));
+    }
+
+    /// The inverse, and the bug this split was written for: a build failure
+    /// reaches a room only as a `room.workspace.build_failed` marker, and
+    /// markers arrive through the federation bridge. A Local room has no
+    /// workspace and can never produce one. The rail used to offer this
+    /// checkbox on Local rooms alone — visible exactly where it cannot fire,
+    /// hidden exactly where it can.
+    #[test]
+    fn build_failure_is_dead_in_a_local_room() {
+        let local = test_access(RoomAccessState::Local);
+        assert_eq!(
+            trigger_row_dead_here(TriggerToggle::BuildFailure, Some(&local)),
+            Some("federated rooms only")
+        );
+        assert!(!trigger_row_is_editable(
+            TriggerToggle::BuildFailure,
+            Some(&local)
+        ));
+
+        let live = test_access(RoomAccessState::Live);
+        assert_eq!(
+            trigger_row_dead_here(TriggerToggle::BuildFailure, Some(&live)),
+            None
+        );
+        assert!(trigger_row_is_editable(
+            TriggerToggle::BuildFailure,
+            Some(&live)
+        ));
+    }
+
+    /// Editability also takes the rail-wide write gate, so a room that
+    /// cannot be written to holds every row — including the ones whose event
+    /// would otherwise be live there. `Connecting` and `Recovering` are
+    /// federated, so they keep the federated NOTE while staying held.
+    #[test]
+    fn a_room_that_blocks_writes_holds_every_trigger_row() {
+        for state in [
+            RoomAccessState::Connecting,
+            RoomAccessState::Recovering,
+            RoomAccessState::Revoked,
+        ] {
+            let access = test_access(state);
+            for toggle in [
+                TriggerToggle::Mention,
+                TriggerToggle::ThreadReply,
+                TriggerToggle::BuildFailure,
+            ] {
+                assert!(
+                    !trigger_row_is_editable(toggle, Some(&access)),
+                    "{state:?} {toggle:?}"
+                );
+            }
+            assert_eq!(
+                trigger_row_dead_here(TriggerToggle::ThreadReply, Some(&access)),
+                Some("local rooms only"),
+                "{state:?}"
+            );
+            assert_eq!(
+                trigger_row_dead_here(TriggerToggle::BuildFailure, Some(&access)),
+                None,
+                "{state:?}"
+            );
+        }
+    }
+
+    /// Before the access projection lands, nothing is known about the room.
+    /// Every row is held by the write gate, and no row claims its flag is
+    /// dead — that claim would be a guess that flips once access arrives.
+    #[test]
+    fn an_unknown_access_state_claims_nothing_about_any_flag() {
+        for toggle in [
+            TriggerToggle::Mention,
+            TriggerToggle::ThreadReply,
+            TriggerToggle::BuildFailure,
+        ] {
+            assert_eq!(trigger_row_dead_here(toggle, None), None, "{toggle:?}");
+            assert!(!trigger_row_is_editable(toggle, None), "{toggle:?}");
+        }
+    }
+
+    /// The two helpers above are pure, so a test of them alone proves only
+    /// that they answer correctly if asked — the view is free to stop asking
+    /// and every one of those tests stays green while the defect returns.
+    /// Both halves of this fix are text in this file, so pin the wiring the
+    /// way the guards further down this module pin an emitter: read the
+    /// source and assert on it, with the needles concatenated at runtime so
+    /// this test's own literals cannot stand in for the code it is scanning.
+    #[test]
+    fn the_triggers_section_and_row_are_wired_to_the_per_row_gate() {
+        let markup = include_str!("rooms_workspace.rs");
+
+        // The section renders in every access state. The bug was an early
+        // return in this closure keyed on the access STATE, which hid the
+        // whole section — build failure included — on exactly the federated
+        // rooms where a build can fail. Nothing between the closure's brace
+        // and the group it emits may consult that state again; the split is
+        // per row now.
+        let group = markup
+            .find(&format!(
+                "class=\"{}\"",
+                ["rooms-workspace_", "_triggers"].concat()
+            ))
+            .expect("the triggers group must be emitted from this file");
+        let opens = markup[..group]
+            .rfind("{move || {")
+            .expect("the triggers group must render inside a closure");
+        assert!(
+            !markup[opens..group].contains("RoomAccessState"),
+            "the triggers section must render in every access state — an \
+             access-state gate here hides the build-failure row on exactly \
+             the federated rooms where a build failure can happen"
+        );
+
+        // And the row must actually take the per-row gate: without it in the
+        // `disabled=` binding, a flag whose event can never fire in this kind
+        // of room is offered as live again, note and all.
+        let row_at = markup
+            .find(&format!("fn {}(", ["trigger_toggle", "_row"].concat()))
+            .expect("the trigger row must render from this file");
+        let row = &markup[row_at..];
+        let row = &row[..row.find("\nfn ").unwrap_or(row.len())];
+        assert!(
+            row.contains(&["trigger_row", "_is_editable"].concat()),
+            "the trigger row must consult the per-row gate"
+        );
+        let disabled = row
+            .find("disabled=")
+            .map(|at| row[at..].lines().next().unwrap_or_default())
+            .expect("the trigger checkbox must carry a disabled binding");
+        assert!(
+            disabled.contains("editable"),
+            "`disabled=` must consult the per-row gate — on its own, \
+             `policy_update_in_flight` offers a dead row as a live one"
+        );
     }
 
     #[test]

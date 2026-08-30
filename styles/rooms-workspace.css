@@ -1176,9 +1176,11 @@
   cursor: not-allowed;
 }
 
-/* ── Room triggers (rail section, Local rooms only) ───────────────── */
+/* ── Room triggers (rail section) ─────────────────────────────────── */
 /* A fixed sliver like every section on this rail: a head and one row per
-   exposed wake flag. Shares `__trigger` rows with the create form. */
+   exposed wake flag. Renders in every access state; a flag whose event
+   cannot reach this kind of room is disabled and wears a `__trigger-note`
+   saying which kind it needs. Shares `__trigger` rows with the create form. */
 
 .rooms-workspace__triggers {
   flex: 0 0 auto;
@@ -1206,6 +1208,16 @@
 .rooms-workspace__triggers .rooms-workspace__trigger {
   display: flex;
   padding: 2px 0;
+}
+
+/* Why a disabled row is disabled, inline after its label. The row already
+   dims via `:has(input:disabled)`, so this only has to name the reason. */
+.rooms-workspace__trigger-note {
+  margin-left: auto;
+  padding-left: 6px;
+  color: var(--fg-3);
+  font-size: 10px;
+  white-space: nowrap;
 }
 
 .rooms-workspace__triggers-error {
