@@ -3061,3 +3061,28 @@ pull can never masquerade as a build. Gates re-run at land after rebase:
 full suite green (1063 UI tests at #142), clippy -D warnings, fmt, and the
 RUSTFLAGS="-D warnings" wasm32 release-lane check all clean, both PRs.
 _________________________________________________________________________________
+
+time:      [23:54] [08-29-26]
+agent:     [claude] [fable 5]
+worktree:  loop/surface-agent-delete-control
+type:      [feature-request]
+area:      [frontend]
+
+Agents created in the UI are no longer immortal there: the agent builder's
+edit mode grew a delete control wired to the daemon's DELETE /v1/agents/{name}.
+First click arms, second removes (the workspace panel's destroy two-step);
+start_create, load_def, form close, and dispatch all disarm, so a primed
+confirm never survives a target switch. Success exits edit mode into a blank
+create and refreshes the picker via on_deleted; failures render inline through
+write_error_message, so a daemon or proxy without the verb reads as
+NO_WRITE_API rather than a decode error. The subprocess-capability block
+deliberately gates Save alone -- DELETE round-trips nothing, so a lossily
+unsaveable agent can still be removed whole (pinned by test). The proxy's
+pinned "DELETE is deliberately absent" test demanded this be a decision:
+decided -- proxy_agent_delete forwards through agent_daemon_path (same
+dot-segment guard as GET/PUT, pinned as 400 on %2e%2e), the allowlist comment
+records it, and the flipped test asserts the forwarder is reached. Known gap
+noted, not fixed (ocean-os work): a room already holding the agent keeps its
+roster row -- agentdir::remove deletes only the folder. Gate green: 1101 UI +
+54 proxy tests, clippy -D warnings, fmt, wasm32 -D warnings check.
+_________________________________________________________________________________

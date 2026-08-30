@@ -3282,16 +3282,21 @@ pub fn RoomsWorkspace(
                                                         </select>
                                                         // The picker above only ADDS an agent that
                                                         // already exists on disk. This authors one
-                                                        // in place — or edits one — then refreshes
-                                                        // that same picker so the operator's next
-                                                        // click puts it in the room. No curl, no
-                                                        // leaving the room to write a folder by hand.
-                                                        // `available_agents` is reused as the edit
-                                                        // target list rather than fetched twice.
+                                                        // in place — or edits one, or deletes one —
+                                                        // then refreshes that same picker so the
+                                                        // operator's next click puts it in the room
+                                                        // (or stops offering a folder that no longer
+                                                        // exists). No curl, no leaving the room to
+                                                        // write a folder by hand. `available_agents`
+                                                        // is reused as the edit target list rather
+                                                        // than fetched twice.
                                                         <crate::agents::AgentBuilder
                                                             state=agent_builder
                                                             agents=rooms.available_agents
                                                             on_saved=Callback::new(move |_name: String| {
+                                                                rooms.fetch_agents();
+                                                            })
+                                                            on_deleted=Callback::new(move |_name: String| {
                                                                 rooms.fetch_agents();
                                                             })
                                                         />

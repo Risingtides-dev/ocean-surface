@@ -4,10 +4,11 @@
 //! (model, description, tools, capabilities, yolo) plus a required
 //! `instructions.md` system prompt. The daemon exposes it over
 //!
-//!   GET  /v1/agents          → the roster the room's `+ agent` picker reads
-//!   GET  /v1/agents/{name}   → one agent's full definition, for prefill
-//!   POST /v1/agents          → create one
-//!   PUT  /v1/agents/{name}   → edit one
+//!   GET    /v1/agents          → the roster the room's `+ agent` picker reads
+//!   GET    /v1/agents/{name}   → one agent's full definition, for prefill
+//!   POST   /v1/agents          → create one
+//!   PUT    /v1/agents/{name}   → edit one
+//!   DELETE /v1/agents/{name}   → remove one, folder and all
 //!
 //! …but until now the surface only ever performed the GET, so the only way to
 //! AUTHOR an agent was to hand-write the folder or curl the JSON. This module
@@ -286,6 +287,18 @@ pub fn blocks_save(config: &AgentConfigWire) -> Option<&'static str> {
     (!config.subprocess_capabilities.is_empty()).then_some(SUBPROCESS_CAPABILITY_BLOCK)
 }
 
+/// Whether the delete control may fire.
+///
+/// Needs an edit target (create mode has nothing to remove) and a quiet wire.
+/// Deliberately independent of [`blocks_save`]: the save block exists because
+/// a PUT rebuilds `agent.toml` from a spec that cannot express everything on
+/// disk, so saving would be lossy — a DELETE carries no spec and has nothing
+/// to round-trip, so an agent the surface refuses to save can still be
+/// removed whole.
+pub fn delete_allowed(editing: Option<&str>, pending: bool, loading_def: bool) -> bool {
+    editing.is_some() && !pending && !loading_def
+}
+
 /// Build a write body from raw form text.
 ///
 /// `name` is `Some` only on create — `PUT /v1/agents/{name}` takes identity
@@ -370,6 +383,12 @@ pub struct AgentBuilderState {
     pub pending: RwSignal<bool>,
     /// A definition fetch is in flight; the form is not yet trustworthy.
     pub loading_def: RwSignal<bool>,
+    /// The delete control is one click from firing. Removing an agent folder
+    /// is durable the way the workspace panel's destroy is, so the first
+    /// click only arms this — and a target switch, a form close, or the
+    /// dispatch itself disarms it, so a primed confirm can never carry over
+    /// to a different target.
+    pub confirm_delete: RwSignal<bool>,
     /// Why saving is refused outright, if it is — a state the operator cannot
     /// fix by editing the form, unlike [`error`](Self::error).
     pub blocked: RwSignal<Option<&'static str>>,
@@ -400,6 +419,7 @@ impl AgentBuilderState {
             yolo: RwSignal::new(None),
             pending: RwSignal::new(false),
             loading_def: RwSignal::new(false),
+            confirm_delete: RwSignal::new(false),
             blocked: RwSignal::new(None),
             def_ticket: RwSignal::new(0),
             error: RwSignal::new(None),
@@ -427,6 +447,7 @@ impl AgentBuilderState {
         self.capabilities.set(Vec::new());
         self.yolo.set(None);
         self.loading_def.set(false);
+        self.confirm_delete.set(false);
         self.blocked.set(None);
         self.error.set(None);
     }
@@ -445,6 +466,7 @@ impl AgentBuilderState {
         self.editing.set(Some(name.clone()));
         self.name.set(name.clone());
         self.loading_def.set(true);
+        self.confirm_delete.set(false);
         self.blocked.set(None);
         self.error.set(None);
 
@@ -600,6 +622,64 @@ impl AgentBuilderState {
             }
         });
     }
+
+    /// `DELETE /v1/agents/{name}` — remove the agent being edited.
+    ///
+    /// Fires only from the armed confirm, and disarms it on dispatch: a
+    /// failure renders inline and the operator re-arms to retry, so the
+    /// confirm never sits primed behind an error it already missed. On
+    /// success the name goes to `on_deleted` — the picker one line above
+    /// still lists a folder that no longer exists — and the form falls back
+    /// to a blank create, because staying in edit mode against a deleted
+    /// agent would be a lie.
+    pub fn delete(&self, on_deleted: Callback<String>) {
+        let editing = self.editing.get_untracked();
+        if !delete_allowed(
+            editing.as_deref(),
+            self.pending.get_untracked(),
+            self.loading_def.get_untracked(),
+        ) {
+            return;
+        }
+        let Some(name) = editing else { return };
+        self.confirm_delete.set(false);
+        self.error.set(None);
+        self.pending.set(true);
+
+        let base = self.base();
+        let me = *self;
+        spawn_local(async move {
+            let url = format!("{base}/v1/agents/{}", crate::rooms::encode(&name));
+            match Request::delete(&url).send().await {
+                Ok(resp) => {
+                    // TEXT, not `json()`, for the same reason save reads text:
+                    // a daemon or proxy without the verb answers an empty
+                    // body, and that should read as NO_WRITE_API, not as a
+                    // decode failure.
+                    let status = resp.status();
+                    let raw = resp.text().await.unwrap_or_default();
+                    let decoded = serde_json::from_str::<AgentWriteResponse>(&raw).ok();
+                    if decoded.as_ref().is_some_and(|r| r.ok) {
+                        me.pending.set(false);
+                        me.start_create();
+                        on_deleted.run(name);
+                    } else {
+                        let daemon_error = decoded.and_then(|r| r.error);
+                        let message = write_error_message(status, daemon_error.as_deref());
+                        log::error!("agent delete rejected ({status}): {message}");
+                        me.error.set(Some(message));
+                        me.pending.set(false);
+                    }
+                }
+                Err(err) => {
+                    log::error!("agent delete request error: {err}");
+                    me.error
+                        .set(Some(format!("could not reach the daemon: {err}")));
+                    me.pending.set(false);
+                }
+            }
+        });
+    }
 }
 
 // ---- Component ----
@@ -608,7 +688,10 @@ impl AgentBuilderState {
 ///
 /// Creates a new agent or edits an existing one; `agents` is the same list the
 /// picker above renders, reused as the edit target chooser rather than fetched
-/// again.
+/// again. Edit mode also carries the delete control — arm-confirm, because a
+/// folder removal is as durable as the workspace panel's destroy — and a
+/// confirmed delete reports through `on_deleted` so that same picker sheds
+/// the name.
 ///
 /// Deliberately does NOT auto-join a newly created agent to the open room:
 /// `on_saved` refreshes the picker directly above, so the operator's next
@@ -619,6 +702,7 @@ pub fn AgentBuilder(
     state: AgentBuilderState,
     agents: RwSignal<Vec<String>>,
     on_saved: Callback<String>,
+    on_deleted: Callback<String>,
 ) -> impl IntoView {
     let submit = move || state.save(on_saved);
     // Busy in either direction: a form mid-prefill is not yet the agent's real
@@ -633,7 +717,13 @@ pub fn AgentBuilder(
             title="Create or edit an agent on the daemon"
             aria-controls="rooms-workspace-agent-builder"
             aria-expanded=move || state.open.get().to_string()
-            on:click=move |_| state.open.update(|open: &mut bool| *open = !*open)
+            on:click=move |_| {
+                // A close must not leave the delete confirm primed for the
+                // reopen — the workspace panel's close_panel keeps the same
+                // promise for destroy.
+                state.confirm_delete.set(false);
+                state.open.update(|open: &mut bool| *open = !*open)
+            }
         >
             "+ new agent"
         </button>
@@ -762,6 +852,61 @@ pub fn AgentBuilder(
                         }
                     }}
                 </button>
+
+                // Delete belongs to edit mode alone: create mode has nothing
+                // to remove. First click arms, second click removes — the
+                // workspace panel's destroy two-step, because both discard
+                // something durable. `blocked` deliberately does not gate
+                // this (see [`delete_allowed`]): an agent the surface refuses
+                // to save lossily can still be removed whole.
+                <Show when=editing>
+                    <div class="rooms-workspace__agentbuilder-delete">
+                        {move || {
+                            if state.confirm_delete.get() {
+                                view! {
+                                    <span class="rooms-workspace__agentbuilder-delete-warn">
+                                        "The agent's folder is removed from the daemon."
+                                    </span>
+                                    <button
+                                        class="rooms-workspace__agentbuilder-delete-btn rooms-workspace__agentbuilder-delete-btn--danger"
+                                        type="button"
+                                        disabled=busy
+                                        on:click=move |_| state.delete(on_deleted)
+                                    >
+                                        "delete"
+                                    </button>
+                                    <button
+                                        class="rooms-workspace__agentbuilder-delete-btn"
+                                        type="button"
+                                        on:click=move |_| state.confirm_delete.set(false)
+                                    >
+                                        "keep"
+                                    </button>
+                                }
+                                    .into_any()
+                            } else {
+                                view! {
+                                    <button
+                                        class="rooms-workspace__agentbuilder-delete-btn rooms-workspace__agentbuilder-delete-btn--danger"
+                                        type="button"
+                                        title="Delete this agent from the daemon \u{2014} its folder and everything in it"
+                                        disabled=busy
+                                        on:click=move |_| state.confirm_delete.set(true)
+                                    >
+                                        {move || {
+                                            if state.pending.get() {
+                                                "deleting\u{2026}"
+                                            } else {
+                                                "delete\u{2026}"
+                                            }
+                                        }}
+                                    </button>
+                                }
+                                    .into_any()
+                            }
+                        }}
+                    </div>
+                </Show>
             </div>
         </Show>
     }
@@ -1041,5 +1186,49 @@ mod tests {
             "omitting capabilities would delete them from agent.toml",
         );
         assert_eq!(json.get("yolo").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    #[test]
+    fn delete_needs_an_edit_target_and_a_quiet_wire() {
+        assert!(delete_allowed(Some("researcher"), false, false));
+        assert!(
+            !delete_allowed(None, false, false),
+            "create mode has nothing to remove"
+        );
+        assert!(!delete_allowed(Some("researcher"), true, false));
+        assert!(!delete_allowed(Some("researcher"), false, true));
+    }
+
+    /// The subprocess-capability block exists because a PUT would silently
+    /// drop what its spec cannot express. A DELETE sends no spec, so the same
+    /// agent the surface refuses to save must still be removable — `blocked`
+    /// gates Save alone, never the delete control.
+    #[test]
+    fn a_save_blocked_agent_can_still_be_deleted() {
+        let wire = r#"{
+            "config": {
+                "subprocess_capability": [{ "name": "scrape", "command": "./tools/scrape" }]
+            },
+            "instructions": "be useful"
+        }"#;
+        let def: AgentDefWire = serde_json::from_str(wire).expect("def decodes");
+        assert_eq!(blocks_save(&def.config), Some(SUBPROCESS_CAPABILITY_BLOCK));
+        assert!(delete_allowed(Some("scraper"), false, false));
+    }
+
+    /// A delete answers `{ ok, removed }` — `removed` is the daemon's echo,
+    /// not something the form branches on, and it must not break the decode
+    /// the delete shares with the write verbs.
+    #[test]
+    fn a_delete_response_decodes_on_the_write_response_shape() {
+        let ok: AgentWriteResponse =
+            serde_json::from_str(r#"{"ok":true,"removed":"researcher"}"#).expect("decodes");
+        assert!(ok.ok);
+        assert_eq!(ok.error, None);
+
+        let refused: AgentWriteResponse =
+            serde_json::from_str(r#"{"ok":false,"error":"gone wrong"}"#).expect("decodes");
+        assert!(!refused.ok);
+        assert_eq!(refused.error.as_deref(), Some("gone wrong"));
     }
 }
