@@ -33,9 +33,10 @@ fn should_clear_composer(current: &str, original_draft: &str) -> bool {
 }
 
 /// The trigger-policy flags this workspace exposes. `on_component_event` and
-/// `on_schedule` deliberately have no control: their runtime semantics are
-/// still being ruled on daemon-side, so the UI neither sets nor clears them —
-/// it only carries them through untouched (see [`policy_with_toggle`]).
+/// `on_schedule` have no control because the daemon ruled them unwired: its
+/// write routes refuse a policy carrying `on_component_event: true` or a set
+/// `on_schedule` with a typed 400 (`trigger_unwired`), so every write path
+/// here normalizes them away instead (see [`policy_with_toggle`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TriggerToggle {
     Mention,
@@ -44,15 +45,20 @@ enum TriggerToggle {
 }
 
 /// The full policy to PATCH when one exposed flag flips: a copy of the room's
-/// current policy with only that flag changed. The daemon replaces the stored
-/// policy wholesale, so carrying the unexposed fields here is what keeps a
-/// policy set elsewhere (a schedule, component events) intact across a flip.
+/// current policy with only that flag changed — and the unwired fields
+/// normalized away. Preserving them is impossible by ruling: the daemon
+/// refuses any write carrying their live values (`trigger_unwired`), so a
+/// room with dead state stored would 400 on every flip if we carried it
+/// through. Nothing ever fires those fields; dropping them on the next edit
+/// is the honest behavior.
 fn policy_with_toggle(
     current: Option<&RoomTriggerPolicy>,
     toggle: TriggerToggle,
     enabled: bool,
 ) -> RoomTriggerPolicy {
     let mut policy = current.cloned().unwrap_or_default();
+    policy.on_component_event = false;
+    policy.on_schedule = None;
     match toggle {
         TriggerToggle::Mention => policy.on_mention = enabled,
         TriggerToggle::ThreadReply => policy.on_thread_reply = enabled,
@@ -2410,7 +2416,7 @@ pub fn RoomsWorkspace(
                         disabled=move || pending_create.get()
                     />
                     // Auto-wake flags for the room being created. Only the
-                    // three ruled-on flags get a control; see TriggerToggle.
+                    // three live flags get a control; see TriggerToggle.
                     <div
                         class="rooms-workspace__create-triggers"
                         role="group"
@@ -3436,7 +3442,7 @@ pub fn RoomsWorkspace(
                     }}
                 </div>
 
-                // How this room wakes its agents: the three ruled-on
+                // How this room wakes its agents: the three live
                 // trigger-policy flags, editable in place. Local rooms only —
                 // a federated room's policy is evaluated by its owning daemon,
                 // and PATCHing the local mirror would only forge a copy that
@@ -3555,7 +3561,9 @@ pub fn RoomsWorkspace(
                     state=workspace_panel
                 />
 
-                // Trigger-policy summary at bottom of right rail
+                // Trigger-policy summary at bottom of right rail. Only live
+                // triggers are listed — the unwired fields never fire, and
+                // writes carrying them are refused (`trigger_unwired`).
                 {move || {
                     rooms.open_room.get()
                         .and_then(|r| r.trigger_policy)
@@ -3563,8 +3571,7 @@ pub fn RoomsWorkspace(
                             let mut on: Vec<&str> = Vec::new();
                             if p.on_mention { on.push("mention"); }
                             if p.on_thread_reply { on.push("thread reply"); }
-                            if p.on_component_event { on.push("interaction"); }
-                            if p.on_schedule.is_some() { on.push("schedule"); }
+                            if p.on_build_failure { on.push("build failure"); }
                             let triggers = if on.is_empty() {
                                 "none".to_string()
                             } else {
@@ -3713,12 +3720,13 @@ mod tests {
         RoomAccessProjection, RoomAccessState, RoomMessage, RoomMessageKind, RoomParticipantKind,
     };
 
-    /// Flipping one exposed flag must carry every OTHER field through
-    /// untouched — the daemon replaces the stored policy wholesale, so this
-    /// is the only thing standing between "toggle build failure" and "silently
-    /// wipe the schedule someone set through the API".
+    /// Flipping one exposed flag must normalize the unwired fields away —
+    /// the daemon refuses any write carrying `on_component_event: true` or a
+    /// set `on_schedule` (`trigger_unwired`), so carrying stored dead values
+    /// through would 400 every flip for that room, permanently breaking all
+    /// three working toggles. The live flags still carry through untouched.
     #[test]
-    fn policy_with_toggle_preserves_unexposed_fields() {
+    fn policy_with_toggle_normalizes_dead_fields_and_keeps_live_ones() {
         let current = RoomTriggerPolicy {
             on_mention: true,
             on_thread_reply: false,
@@ -3730,13 +3738,22 @@ mod tests {
         assert_eq!(
             flipped,
             RoomTriggerPolicy {
+                on_mention: true,
+                on_thread_reply: false,
+                on_component_event: false,
                 on_build_failure: true,
-                ..current.clone()
+                on_schedule: None,
             }
         );
-        // Flipping off restores exactly the original, still untouched.
+        // Flipping back off never resurrects the dead values either.
         let back = policy_with_toggle(Some(&flipped), TriggerToggle::BuildFailure, false);
-        assert_eq!(back, current);
+        assert_eq!(
+            back,
+            RoomTriggerPolicy {
+                on_mention: true,
+                ..RoomTriggerPolicy::default()
+            }
+        );
     }
 
     /// A room with no stored policy starts from all-off, so the first flip
