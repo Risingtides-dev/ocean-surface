@@ -4314,6 +4314,62 @@ mod tests {
         }
     }
 
+    /// The two helpers above are pure, so a test of them alone proves only
+    /// that they answer correctly if asked — the view is free to stop asking
+    /// and every one of those tests stays green while the defect returns.
+    /// Both halves of this fix are text in this file, so pin the wiring the
+    /// way the guards further down this module pin an emitter: read the
+    /// source and assert on it, with the needles concatenated at runtime so
+    /// this test's own literals cannot stand in for the code it is scanning.
+    #[test]
+    fn the_triggers_section_and_row_are_wired_to_the_per_row_gate() {
+        let markup = include_str!("rooms_workspace.rs");
+
+        // The section renders in every access state. The bug was an early
+        // return in this closure keyed on the access STATE, which hid the
+        // whole section — build failure included — on exactly the federated
+        // rooms where a build can fail. Nothing between the closure's brace
+        // and the group it emits may consult that state again; the split is
+        // per row now.
+        let group = markup
+            .find(&format!(
+                "class=\"{}\"",
+                ["rooms-workspace_", "_triggers"].concat()
+            ))
+            .expect("the triggers group must be emitted from this file");
+        let opens = markup[..group]
+            .rfind("{move || {")
+            .expect("the triggers group must render inside a closure");
+        assert!(
+            !markup[opens..group].contains("RoomAccessState"),
+            "the triggers section must render in every access state — an \
+             access-state gate here hides the build-failure row on exactly \
+             the federated rooms where a build failure can happen"
+        );
+
+        // And the row must actually take the per-row gate: without it in the
+        // `disabled=` binding, a flag whose event can never fire in this kind
+        // of room is offered as live again, note and all.
+        let row_at = markup
+            .find(&format!("fn {}(", ["trigger_toggle", "_row"].concat()))
+            .expect("the trigger row must render from this file");
+        let row = &markup[row_at..];
+        let row = &row[..row.find("\nfn ").unwrap_or(row.len())];
+        assert!(
+            row.contains(&["trigger_row", "_is_editable"].concat()),
+            "the trigger row must consult the per-row gate"
+        );
+        let disabled = row
+            .find("disabled=")
+            .map(|at| row[at..].lines().next().unwrap_or_default())
+            .expect("the trigger checkbox must carry a disabled binding");
+        assert!(
+            disabled.contains("editable"),
+            "`disabled=` must consult the per-row gate — on its own, \
+             `policy_update_in_flight` offers a dead row as a live one"
+        );
+    }
+
     #[test]
     fn read_advance_request_skips_hydration_but_advances_after_bottom_append() {
         let transcript = vec![test_msg(4, "hello", None), test_msg(7, "world", None)];

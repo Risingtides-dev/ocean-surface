@@ -3391,3 +3391,34 @@ write-gate and unknown-access rows), clippy -D warnings on wasm32 and on
 --all-targets, the wasm32 -D warnings release-lane check, cargo check on the
 proxy, the wasm32 test build, and fmt --check all clean.
 _________________________________________________________________________________
+
+time:      [17:29] [08-30-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-trigger-toggle-is-hidden-on-exactly-the-rooms-where-it-fires
+type:      [review]
+area:      [frontend]
+
+Review sent the trigger-row fix back for the right reason: the engineering held
+up under independent re-tracing, but the five new tests were decoration. They
+exercise trigger_row_dead_here and trigger_row_is_editable, two pure functions
+the view is free to stop calling, and the reviewer proved it by reverting each
+half of the fix on its own -- re-inserting the old Local-only early return into
+the section closure, then dropping the gate out of the row's disabled binding
+-- and watching the whole suite stay green both times. A pure-function test can
+only show a helper answers correctly when asked; nothing pinned that anything
+asks. The wiring is text in this file, so it is now pinned the way the guards
+further down this module already pin an emitter: slice the source between the
+triggers closure's opening brace and the group it emits and assert no
+RoomAccessState survives in that span, then slice trigger_toggle_row and assert
+its disabled= line still mentions the gate. Needles are concatenated at runtime
+so the test's own literals cannot stand in for the code it scans -- the same
+trick the __thread-inline and __msg-ledger guards use, and the reason the
+recent room_redeem mount guard was caught passing on a strict prefix. Both of
+the reviewer's reverts were re-run against the new test and both now fail
+loudly, on the assertion written for them: experiment 1 on "the triggers
+section must render in every access state", experiment 2 on "`disabled=` must
+consult the per-row gate". Gate: 1169+4+8+4+7+5+2 tests green (one new),
+clippy -D warnings on --all-targets and on wasm32, the wasm32 -D warnings
+release-lane check, cargo check on the proxy, the wasm32 test build, and
+fmt --check all clean.
+_________________________________________________________________________________
