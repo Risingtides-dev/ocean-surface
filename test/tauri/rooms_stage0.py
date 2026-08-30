@@ -259,8 +259,11 @@ def main():
             state["webdriverDisplayed"] = client.displayed(drawer)
             drawer_state.clear()
             drawer_state.update(state)
-            return (state["webdriverDisplayed"] and
-                    "rooms-workspace__left--visible" in state["className"] and
+            # The embedded driver reports false for this fixed drawer even
+            # while WebKit exposes a flex box with a non-zero visible rect.
+            # Gate the rendered facts and retain the driver value as diagnostic
+            # evidence instead of promoting its false negative to a UI failure.
+            return ("rooms-workspace__left--visible" in state["className"] and
                     state["display"] != "none" and state["visibility"] != "hidden" and
                     state["width"] > 0 and state["height"] > 0)
 
