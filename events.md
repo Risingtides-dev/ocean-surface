@@ -1,3 +1,11 @@
+time:      [12:05] [08-30-26]
+agent:     [ocean] [rooms-pm]
+worktree:  [test/rooms-tauri-acceptance-scaffold]
+type:      testing
+area:      desktop
+
+Provisioned the isolated Rooms Tauri Stage0 fixture for the current daemon and offline Trunk contract: the daemon receives an explicit recognized model, while the exact locked wasm-bindgen CLI is version-checked, copied without following symlinks, and exposed only through the fixture build PATH. This removes false startup/tool-download failures without weakening fixture isolation.
+
 time:      [09:45am] [08-06-26]
 agent:     [ocean] [rooms-pm]
 worktree:  [feat/rooms-slack-workspace]
