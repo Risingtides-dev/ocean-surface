@@ -208,6 +208,8 @@ fi
   || fail "live Stage0 steals focus; run only in CI/a dedicated login with OCEAN_STAGE0_ALLOW_FOCUS_STEAL=CI_DEDICATED_LOGIN"
 validate_static
 [[ -x /usr/bin/osascript ]] || fail "/usr/bin/osascript is required for native keyboard acceptance"
+[[ $(/usr/bin/osascript -e 'tell application "System Events" to return UI elements enabled') == true ]] \
+  || fail "Accessibility permission is required for the process responsible for Stage0; grant it before the isolated build"
 
 DAEMON_BIN=${OCEAN_TEST_DAEMON_BIN:-}
 [[ -n "$DAEMON_BIN" && "$DAEMON_BIN" == /* ]] || fail "OCEAN_TEST_DAEMON_BIN must be explicit and absolute"
