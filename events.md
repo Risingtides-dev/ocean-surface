@@ -3155,3 +3155,38 @@ hint they promised (member UUIDs vs typed @names) -- that hint is a
 future slice. Net -98 lines. Gate green: 1102 UI tests + integration
 suites, clippy -D warnings, fmt, wasm32 -D warnings release-lane check.
 _________________________________________________________________________________
+
+time:      [04:03] [08-30-26]
+agent:     [claude] [fable 5]
+type:      [merge]
+area:      [frontend]
+
+Ocean-loop wave land phase: merged #155 (federated roster remove control) --
+the PR branch did not carry its ledger entry, so recording here. os#402
+landed the daemon's federated-member DELETE two days ago and no browser
+control reached it. Federated roster rows now carry the same arm-confirm
+remove control as local rows: Rooms::remove_member (DELETE
+/v1/rooms/persistent/{key}/members/{member_id}) with a status-discriminated
+pure decoder -- a 200 body IS the refreshed RoomAccessProjection, applied
+via apply_access_projection so the member is gone the moment the response
+lands; failures decode {"ok":false,"error":code}; 403 federation_forbidden
+renders as a per-attempt refusal, never as revocation; the generation guard
+keeps late responses out of other rooms. Every federated row offers the
+control (the projection carries no self flag -- bedrock's owner-or-self
+policy answers), and keep_armed_remove now also consults the access
+projection's members so an armed federated confirm survives the SSE access
+updates that rebuild the rail. styles/rooms-workspace.css needed zero
+delta. Gate at land after a no-op rebase: 1108+4+8+4+7+5+2 tests green (3
+new decode + 3 new federated prune tests), clippy -D warnings, fmt, wasm32
+-D warnings release-lane check; review mutation-tested the prune-survival
+test. Known nits backlogged: keep_armed_remove ORs both rosters instead of
+checking the rendered one (theoretical -- id namespaces do not overlap),
+and remove_member's success path skips refresh_open_transcript (the 200
+body already carries the roster; any transcript marker rides the SSE tail).
+NEEDS HUMAN for production effect: bedrock #46's owner-or-self policy is
+merged but undeployed (Railway has no GitHub source) -- until a railway up,
+production federated removes answer 404/unknown-route; local stack works.
+The projection's missing self identity is the queued
+os-access-projection-carries-self-member / surface-roster-marks-your-own-
+rows pair.
+_________________________________________________________________________________
