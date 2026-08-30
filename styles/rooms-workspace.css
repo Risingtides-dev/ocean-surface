@@ -2198,6 +2198,65 @@
   font-size: 12px;
 }
 
+/* ── Member remove control ────────────────────────────────────────── */
+/* Always rendered, not hover-revealed — the platform contract forbids
+   hover-only affordances (this rail is also the mobile drawer). Quiet by
+   default so a rail of rows doesn't read as a wall of delete buttons; the
+   armed pair borrows the agent builder's delete/keep vocabulary because
+   both discard something durable. */
+
+.rooms-workspace__member-remove {
+  appearance: none;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-4);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__member-remove:hover {
+  background: var(--err-soft);
+  color: var(--err);
+}
+
+.rooms-workspace__member-remove-btn {
+  appearance: none;
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-3);
+  font-family: var(--font);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__member-remove-btn:hover {
+  background: var(--bg-hover);
+}
+
+.rooms-workspace__member-remove-btn--danger {
+  border-color: var(--err);
+  color: var(--err);
+}
+
+.rooms-workspace__member-remove-btn--danger:hover {
+  background: var(--err-soft);
+}
+
 /* ── Agent builder (author a new agent in place) ──────────────────── */
 /* Sits directly under the picker above, inside the same disclosure: the
    picker offers agents that already exist, this authors one that does not.
@@ -2438,6 +2497,8 @@
 .rooms-workspace__agentbuilder-toggle:focus-visible,
 .rooms-workspace__agentbuilder-save:focus-visible,
 .rooms-workspace__agentbuilder-delete-btn:focus-visible,
+.rooms-workspace__member-remove:focus-visible,
+.rooms-workspace__member-remove-btn:focus-visible,
 .rooms-workspace__composer-send:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);

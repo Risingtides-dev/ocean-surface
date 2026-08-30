@@ -836,6 +836,34 @@ fn participant_kind_label(kind: RoomParticipantKind) -> &'static str {
     }
 }
 
+/// Whether a roster row offers a remove control: every row except the
+/// caller's own — self-removal is already the header's Leave, and a second
+/// path to it labeled "remove" would just be Leave with worse copy. Not an
+/// authorization check (the daemon's participant DELETE has none); the Local
+/// gate is structural — only the Local members branch renders removable rows,
+/// because federated rosters are bedrock-authoritative.
+fn participant_removable(participant_id: &str, identity_id: &str) -> bool {
+    participant_id != identity_id
+}
+
+/// Whether the armed remove confirm survives a room/roster change. The armed
+/// state is keyed by participant id and held OUTSIDE the members-rail closure
+/// (which is rebuilt by every roster SSE update — see the component doc), so
+/// this is the pruning rule that keeps a primed confirm from outliving its
+/// target: a different room, or a roster the target has left, disarms it.
+/// Without the room check, a same-id agent in the next room opened would
+/// inherit a confirm armed against a different room's row.
+fn keep_armed_remove(
+    armed: Option<&str>,
+    room_changed: bool,
+    participants: &[RoomParticipant],
+) -> bool {
+    let Some(armed) = armed else {
+        return false;
+    };
+    !room_changed && participants.iter().any(|p| p.id == armed)
+}
+
 /// Convert a UTF-16 code-unit offset (what `selectionStart` reports) into a
 /// byte offset into `s`, clamped to the string end.
 fn utf16_to_byte_idx(s: &str, utf16: usize) -> usize {
@@ -1103,6 +1131,27 @@ pub fn RoomsWorkspace(
     // open panel owns a poll loop, and a rail closure re-run by a roster SSE
     // update would orphan the loop and respawn it mid-tick.
     let workspace_panel = crate::room_workspace_panel::RoomWorkspacePanelState::new(&rooms);
+
+    // Which roster row's remove control is one click from firing, by
+    // participant id. Same reasoning as the states above — the members-rail
+    // closure is rebuilt by every roster SSE update, and a confirm owned by
+    // it would disarm mid-interaction. Arming a row inherently disarms the
+    // previous one (there is one slot); the effect below prunes the rest.
+    let member_remove_armed: RwSignal<Option<String>> = RwSignal::new(None);
+    Effect::new(move |prev_key: Option<Option<String>>| {
+        let key = rooms.open_key.get();
+        let participants = rooms
+            .open_room
+            .get()
+            .map(|room| room.participants)
+            .unwrap_or_default();
+        let room_changed = prev_key.is_some_and(|prev| prev != key);
+        let armed = member_remove_armed.get_untracked();
+        if armed.is_some() && !keep_armed_remove(armed.as_deref(), room_changed, &participants) {
+            member_remove_armed.set(None);
+        }
+        key
+    });
 
     // Toggle for narrow-screen left-rail visibility.
     let show_left_rail = RwSignal::new(false);
@@ -3216,6 +3265,9 @@ pub fn RoomsWorkspace(
                                                         .unwrap_or_default()
                                                     key=|p: &RoomParticipant| p.id.clone()
                                                     children=move |p: RoomParticipant| {
+                                                        let pid = p.id.clone();
+                                                        let display = p.display_name.clone();
+                                                        let kind = p.kind;
                                                         view! {
                                                             <div
                                                                 class="rooms-workspace__member"
@@ -3227,9 +3279,76 @@ pub fn RoomsWorkspace(
                                                                 <span class="rooms-workspace__member-name">
                                                                     {p.display_name.clone()}
                                                                 </span>
-                                                                <span class="rooms-workspace__member-kind">
-                                                                    {participant_kind_label(p.kind)}
-                                                                </span>
+                                                                // Row tail: the kind badge plus a remove
+                                                                // control, or — armed — the two-step
+                                                                // confirm in the badge's place, because a
+                                                                // 220px rail cannot hold both. Two-step
+                                                                // for the same reason the agent builder's
+                                                                // delete is: the removal is durable (a
+                                                                // ParticipantLeft marker in the
+                                                                // transcript), so one stray click must
+                                                                // not fire it.
+                                                                {move || {
+                                                                    let removable = participant_removable(
+                                                                        &pid,
+                                                                        &rooms.identity_id.get(),
+                                                                    );
+                                                                    let armed = removable
+                                                                        && member_remove_armed.get().as_deref()
+                                                                            == Some(pid.as_str());
+                                                                    if armed {
+                                                                        let confirm_id = pid.clone();
+                                                                        let confirm_label =
+                                                                            format!("Confirm removing {display} from room");
+                                                                        view! {
+                                                                            <button
+                                                                                class="rooms-workspace__member-remove-btn rooms-workspace__member-remove-btn--danger"
+                                                                                type="button"
+                                                                                aria-label=confirm_label
+                                                                                on:click=move |_| {
+                                                                                    member_remove_armed.set(None);
+                                                                                    rooms.remove_participant(confirm_id.clone());
+                                                                                }
+                                                                            >
+                                                                                "remove"
+                                                                            </button>
+                                                                            <button
+                                                                                class="rooms-workspace__member-remove-btn"
+                                                                                type="button"
+                                                                                on:click=move |_| member_remove_armed.set(None)
+                                                                            >
+                                                                                "keep"
+                                                                            </button>
+                                                                        }.into_any()
+                                                                    } else {
+                                                                        let arm_id = pid.clone();
+                                                                        let arm_label =
+                                                                            format!("Remove {display} from room");
+                                                                        view! {
+                                                                            <span class="rooms-workspace__member-kind">
+                                                                                {participant_kind_label(kind)}
+                                                                            </span>
+                                                                            {removable.then(|| view! {
+                                                                                <button
+                                                                                    class="rooms-workspace__member-remove"
+                                                                                    type="button"
+                                                                                    title="Remove from room"
+                                                                                    aria-label=arm_label
+                                                                                    on:click=move |_| {
+                                                                                        member_remove_armed
+                                                                                            .set(Some(arm_id.clone()))
+                                                                                    }
+                                                                                >
+                                                                                    <svg viewBox="0 0 16 16" width="10" height="10"
+                                                                                        fill="none" stroke="currentColor" stroke-width="1.6"
+                                                                                        stroke-linecap="round">
+                                                                                        <path d="M3 3l10 10M13 3L3 13"/>
+                                                                                    </svg>
+                                                                                </button>
+                                                                            })}
+                                                                        }.into_any()
+                                                                    }
+                                                                }}
                                                             </div>
                                                         }
                                                     }
@@ -4356,6 +4475,43 @@ mod tests {
     #[test]
     fn access_blocks_writes_none() {
         assert!(!access_allows_writes(None));
+    }
+
+    // ── roster remove control ─────────────────────────────────────────
+
+    #[test]
+    fn every_row_but_your_own_offers_remove() {
+        assert!(participant_removable("scout", "web-1"));
+        assert!(!participant_removable("web-1", "web-1"));
+    }
+
+    #[test]
+    fn armed_remove_survives_a_roster_update_that_keeps_its_target() {
+        let roster = [
+            part("web-1", "John", RoomParticipantKind::Human),
+            part("scout", "Scout", RoomParticipantKind::Agent),
+        ];
+        assert!(keep_armed_remove(Some("scout"), false, &roster));
+    }
+
+    #[test]
+    fn armed_remove_disarms_when_its_target_leaves_the_roster() {
+        let roster = [part("web-1", "John", RoomParticipantKind::Human)];
+        assert!(!keep_armed_remove(Some("scout"), false, &roster));
+    }
+
+    #[test]
+    fn armed_remove_disarms_across_a_room_switch_even_for_a_same_id_row() {
+        // The next room can list the very same agent id; a confirm armed
+        // against the previous room's row must not carry over to it.
+        let roster = [part("scout", "Scout", RoomParticipantKind::Agent)];
+        assert!(!keep_armed_remove(Some("scout"), true, &roster));
+    }
+
+    #[test]
+    fn unarmed_state_has_nothing_to_keep() {
+        let roster = [part("scout", "Scout", RoomParticipantKind::Agent)];
+        assert!(!keep_armed_remove(None, false, &roster));
     }
 
     // ── room_is_federated ─────────────────────────────────────────────

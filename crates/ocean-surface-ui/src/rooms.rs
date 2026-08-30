@@ -1336,6 +1336,55 @@ impl Rooms {
         });
     }
 
+    /// Remove any participant from the open room
+    /// (`DELETE .../participants/{participant_id}`) — [`Self::leave_open`]
+    /// aimed at another roster row: same wire call and response handling, but
+    /// the status names who went, because "left" on removing someone else
+    /// would read as the remover having left.
+    pub fn remove_participant(&self, participant_id: String) {
+        if participant_id.is_empty() {
+            return;
+        }
+        let Some(key) = self.open_key.get_untracked() else {
+            return;
+        };
+        let base = self.base();
+        let me = *self;
+        let generation_id = self.generation.get_untracked();
+        spawn_local(async move {
+            let del_url = format!(
+                "{base}/v1/rooms/persistent/{}/participants/{}",
+                encode(&key),
+                encode(&participant_id)
+            );
+            let result = match Request::delete(&del_url).send().await {
+                Ok(resp) => match resp.json::<RoomMutateResponse>().await {
+                    Ok(r) if r.ok => Ok(r.room),
+                    Ok(r) => Err(format!(
+                        "remove failed: {}",
+                        r.error.unwrap_or_else(|| "unknown error".into())
+                    )),
+                    Err(err) => Err(format!("remove decode error: {err}")),
+                },
+                Err(err) => Err(format!("remove error: {err}")),
+            };
+            if result.is_ok() {
+                me.fetch_rooms();
+            }
+            if !me.room_is_current(generation_id, &key) {
+                return;
+            }
+            match result {
+                Ok(room) => {
+                    me.open_room.set(room);
+                    me.status.set(format!("removed '{participant_id}'"));
+                    me.refresh_open_transcript(&key, generation_id);
+                }
+                Err(error) => me.status.set(error),
+            }
+        });
+    }
+
     /// Post a message to the open room (`POST .../messages`). `@id` mentions in
     /// the body drive the daemon's trigger-policy auto-convene.
     pub fn post_message(&self, body: String, thread_parent_seq: Option<u64>) {
