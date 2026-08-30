@@ -178,12 +178,11 @@ fn rooms_layout_is_compact() -> bool {
     window_inner_width().is_some_and(|width| width <= 650.0)
 }
 
-// ── Inline helpers (mirrors of private fns in rooms.rs) ──────────────
+// ── Access-policy helpers (the crate's single source; rooms.rs imports) ──
 
 /// Whether writes (composer, join, leave) are permitted under this access
 /// projection.
-#[allow(dead_code)]
-fn access_allows_writes(access: Option<&RoomAccessProjection>) -> bool {
+pub(crate) fn access_allows_writes(access: Option<&RoomAccessProjection>) -> bool {
     matches!(
         access.map(|a| a.state),
         Some(RoomAccessState::Local) | Some(RoomAccessState::Live)
@@ -195,6 +194,19 @@ fn access_allows_writes(access: Option<&RoomAccessProjection>) -> bool {
 /// refusal, and `None` (no room open / still loading) also renders nothing.
 pub(crate) fn room_is_federated(access: Option<&RoomAccessProjection>) -> bool {
     access.is_some_and(|projection| projection.state != RoomAccessState::Local)
+}
+
+/// The access-banner label for a state that blocks writes; `None` for the
+/// two writable states, where no banner mounts. The stage's banner match
+/// takes its text from here so the rendered strings and the pinning test
+/// cannot diverge; per-state CSS classes and roles stay with the view.
+fn access_banner(access: Option<&RoomAccessProjection>) -> Option<&'static str> {
+    match access.map(|projection| projection.state) {
+        Some(RoomAccessState::Connecting) => Some("Connecting to federated room…"),
+        Some(RoomAccessState::Recovering) => Some("Recovering connection…"),
+        Some(RoomAccessState::Revoked) => Some("Access revoked"),
+        None | Some(RoomAccessState::Local | RoomAccessState::Live) => None,
+    }
 }
 
 /// How one transcript row relates to the shared ledger.
@@ -2614,8 +2626,9 @@ pub fn RoomsWorkspace(
 
                                 // Access status banner (Connecting, Recovering, Revoked)
                                 {move || {
-                                    let state = rooms.access.get().map(|a| a.state);
-                                    match state {
+                                    let access = rooms.access.get();
+                                    let label = access_banner(access.as_ref());
+                                    match access.map(|a| a.state) {
                                         Some(RoomAccessState::Connecting) => {
                                             view! {
                                                 <div
@@ -2623,7 +2636,7 @@ pub fn RoomsWorkspace(
                                                     role="status"
                                                     aria-live="polite"
                                                 >
-                                                    "Connecting to federated room…"
+                                                    {label}
                                                 </div>
                                             }.into_any()
                                         }
@@ -2634,7 +2647,7 @@ pub fn RoomsWorkspace(
                                                     role="status"
                                                     aria-live="polite"
                                                 >
-                                                    "Recovering connection…"
+                                                    {label}
                                                 </div>
                                             }.into_any()
                                         }
@@ -2644,7 +2657,7 @@ pub fn RoomsWorkspace(
                                                     class="room-stage__access-state room-stage__access-state--revoked"
                                                     role="alert"
                                                 >
-                                                    "Access revoked"
+                                                    {label}
                                                 </div>
                                             }.into_any()
                                         }
@@ -4449,32 +4462,36 @@ mod tests {
         }
     }
 
-    // ── access_allows_writes ──────────────────────────────────────────
+    // ── access policy: writes + banner ────────────────────────────────
 
     #[test]
-    fn access_allows_writes_local() {
-        assert!(access_allows_writes(Some(&test_access(
-            RoomAccessState::Local
-        ))));
-    }
+    fn all_access_states_pin_write_and_banner_policy() {
+        // The banner strings are the RENDERED ones — the stage's banner
+        // match takes its label from `access_banner`, so this matrix pins
+        // exactly what users see.
+        let cases = [
+            (RoomAccessState::Local, true, None),
+            (
+                RoomAccessState::Connecting,
+                false,
+                Some("Connecting to federated room…"),
+            ),
+            (RoomAccessState::Live, true, None),
+            (
+                RoomAccessState::Recovering,
+                false,
+                Some("Recovering connection…"),
+            ),
+            (RoomAccessState::Revoked, false, Some("Access revoked")),
+        ];
 
-    #[test]
-    fn access_allows_writes_live() {
-        assert!(access_allows_writes(Some(&test_access(
-            RoomAccessState::Live
-        ))));
-    }
-
-    #[test]
-    fn access_blocks_writes_federated_connecting() {
-        assert!(!access_allows_writes(Some(&test_access(
-            RoomAccessState::Connecting
-        ))));
-    }
-
-    #[test]
-    fn access_blocks_writes_none() {
         assert!(!access_allows_writes(None));
+        assert_eq!(access_banner(None), None);
+        for (state, writes, banner) in cases {
+            let access = test_access(state);
+            assert_eq!(access_allows_writes(Some(&access)), writes);
+            assert_eq!(access_banner(Some(&access)), banner);
+        }
     }
 
     // ── roster remove control ─────────────────────────────────────────
@@ -4598,13 +4615,6 @@ mod tests {
             ledger_mark(None, &test_msg(3, "plain", None)),
             LedgerMark::NotApplicable
         );
-    }
-
-    #[test]
-    fn access_blocks_writes_revoked() {
-        assert!(!access_allows_writes(Some(&test_access(
-            RoomAccessState::Revoked
-        ))));
     }
 
     #[test]

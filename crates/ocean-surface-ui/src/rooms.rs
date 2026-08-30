@@ -35,6 +35,8 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen_futures::spawn_local;
 
+use crate::rooms_workspace::access_allows_writes;
+
 /// SSE tail connection state for the live indicator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TailState {
@@ -1283,16 +1285,6 @@ impl Rooms {
         });
     }
 
-    /// Ids of the open room's **agent** participants — the actors a human can
-    /// `@mention` to auto-convene. Used to render the composer's discoverability
-    /// hint.
-    #[allow(dead_code)]
-    pub fn agent_ids(&self) -> Vec<String> {
-        let access = self.access.get();
-        let room = self.open_room.get();
-        agent_ids_for(access.as_ref(), room.as_ref())
-    }
-
     /// Leave the open room (`DELETE .../participants/{id}`).
     pub fn leave_open(&self) {
         let Some(key) = self.open_key.get_untracked() else {
@@ -2261,46 +2253,6 @@ pub(crate) fn room_request_is_current(
     expected_generation == current_generation && current_key == Some(expected_key)
 }
 
-fn access_allows_writes(access: Option<&RoomAccessProjection>) -> bool {
-    matches!(
-        access.map(|projection| projection.state),
-        Some(RoomAccessState::Local | RoomAccessState::Live)
-    )
-}
-
-#[allow(dead_code)]
-fn access_banner(access: Option<&RoomAccessProjection>) -> Option<&'static str> {
-    match access.map(|projection| projection.state) {
-        Some(RoomAccessState::Connecting) => Some("Connecting"),
-        Some(RoomAccessState::Recovering) => Some("Recovering"),
-        Some(RoomAccessState::Revoked) => Some("Access revoked"),
-        None | Some(RoomAccessState::Local | RoomAccessState::Live) => None,
-    }
-}
-
-#[allow(dead_code)]
-fn agent_ids_for(access: Option<&RoomAccessProjection>, room: Option<&Room>) -> Vec<String> {
-    let Some(access) = access else {
-        return Vec::new();
-    };
-    if access.state != RoomAccessState::Local {
-        return access
-            .members
-            .iter()
-            .filter(|member| member.actor_type == FederatedActorType::Agent)
-            .map(|member| member.member_id.clone())
-            .collect();
-    }
-    room.map(|room| {
-        room.participants
-            .iter()
-            .filter(|participant| participant.kind == RoomParticipantKind::Agent)
-            .map(|participant| participant.id.clone())
-            .collect()
-    })
-    .unwrap_or_default()
-}
-
 /// Derive a url/key-safe slug from a room name (lowercase alnum + `-`).
 fn slugify(name: &str) -> String {
     let mut out = String::new();
@@ -2754,25 +2706,6 @@ mod tests {
     }
 
     #[test]
-    fn all_access_states_pin_write_and_banner_policy() {
-        let cases = [
-            (RoomAccessState::Local, true, None),
-            (RoomAccessState::Connecting, false, Some("Connecting")),
-            (RoomAccessState::Live, true, None),
-            (RoomAccessState::Recovering, false, Some("Recovering")),
-            (RoomAccessState::Revoked, false, Some("Access revoked")),
-        ];
-
-        assert!(!access_allows_writes(None));
-        assert_eq!(access_banner(None), None);
-        for (state, writes, banner) in cases {
-            let access = access_projection(state);
-            assert_eq!(access_allows_writes(Some(&access)), writes);
-            assert_eq!(access_banner(Some(&access)), banner);
-        }
-    }
-
-    #[test]
     fn tail_frame_decoder_tags_access_and_messages_without_cursor_blending() {
         let access =
             serde_json::to_string(&access_projection(RoomAccessState::Recovering)).unwrap();
@@ -2886,47 +2819,6 @@ mod tests {
             key,
             Some(key),
         ));
-    }
-
-    #[test]
-    fn agent_ids_switch_strictly_between_local_and_federated_rosters() {
-        let room = local_room();
-        let local = access_projection(RoomAccessState::Local);
-        assert_eq!(
-            agent_ids_for(Some(&local), Some(&room)),
-            vec!["local-agent"]
-        );
-        assert!(agent_ids_for(None, Some(&room)).is_empty());
-
-        let mut federated = access_projection(RoomAccessState::Live);
-        federated.members = vec![
-            FederatedRoomMemberProjection {
-                member_id: "opaque-agent".into(),
-                owner_member_id: None,
-                actor_type: FederatedActorType::Agent,
-                role_in_room: FederatedRoomRole::Member,
-                display_name: "Remote Agent".into(),
-                public_agent_descriptor: None,
-                joined_at: String::new(),
-                derived_presence: None,
-                local_binding_available: Some(false),
-            },
-            FederatedRoomMemberProjection {
-                member_id: "opaque-user".into(),
-                owner_member_id: None,
-                actor_type: FederatedActorType::User,
-                role_in_room: FederatedRoomRole::Owner,
-                display_name: "User".into(),
-                public_agent_descriptor: None,
-                joined_at: String::new(),
-                derived_presence: None,
-                local_binding_available: Some(true),
-            },
-        ];
-        assert_eq!(
-            agent_ids_for(Some(&federated), Some(&room)),
-            vec!["opaque-agent"]
-        );
     }
 
     #[test]
