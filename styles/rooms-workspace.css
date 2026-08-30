@@ -208,6 +208,76 @@
   box-shadow: var(--focus-ring);
 }
 
+/* ── Left rail — join by invite code ──────────────────────────────── */
+/* Sibling of the create block, wearing its footer geometry so the two read
+   as one group with a rule between the verbs. The field borrows
+   `__left-input` outright rather than growing a twin: it is the same control
+   in the same rail, and the shared class also picks up the 16px iOS
+   zoom-threshold rule below. */
+
+.rooms-workspace__redeem {
+  padding: 8px 10px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__redeem-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rooms-workspace__redeem-row .rooms-workspace__left-input {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+}
+
+.rooms-workspace__redeem-run {
+  appearance: none;
+  flex: 0 0 auto;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-family: var(--font);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__redeem-run:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__redeem-run:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.rooms-workspace__redeem-run:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.rooms-workspace__redeem-note {
+  padding-top: 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__redeem-error {
+  padding-top: 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--err);
+  overflow-wrap: anywhere;
+}
+
 /* ── Trigger-policy toggles ───────────────────────────────────────── */
 /* `__trigger` is shared by the create form below the name input and the
    right-rail Triggers section. Native checkboxes on purpose: policy flips
@@ -2567,6 +2637,18 @@
 .rooms-workspace__left-create {
   padding: 12px;
   background: var(--bg-raised);
+}
+
+/* Same footer surface as the create block above it — the polish pass raises
+   the rail's whole bottom group, not just the create half of it. */
+.rooms-workspace__redeem {
+  padding: 12px;
+  background: var(--bg-raised);
+}
+
+.rooms-workspace__redeem-run {
+  height: 34px;
+  border-radius: var(--radius);
 }
 
 .rooms-workspace__left-input {
