@@ -192,13 +192,6 @@ validate_static() {
   grep -A2 -F 'name = "wasm-bindgen"' "$ROOT/Cargo.lock" \
     | grep -Fxq "version = \"$WASM_BINDGEN_VERSION\"" \
     || fail "Cargo.lock wasm-bindgen version does not match the Stage0 tool version"
-  [[ -d "$SOURCE_TRUNK_TOOL_DIR" && ! -L "$SOURCE_TRUNK_TOOL_DIR" ]] \
-    || fail "cached wasm-bindgen tool directory is absent or symlinked"
-  [[ -f "$SOURCE_WASM_BINDGEN" && -x "$SOURCE_WASM_BINDGEN" \
-     && ! -L "$SOURCE_WASM_BINDGEN" ]] \
-    || fail "cached wasm-bindgen tool is absent, non-executable, or symlinked"
-  [[ $("$SOURCE_WASM_BINDGEN" --version) == "wasm-bindgen $WASM_BINDGEN_VERSION" ]] \
-    || fail "cached wasm-bindgen tool has the wrong version"
 }
 
 if [[ "$MODE" == "--validate" ]]; then
@@ -222,6 +215,13 @@ SOURCE_CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}
 SOURCE_REGISTRY="$SOURCE_CARGO_HOME/registry"
 [[ -d "$SOURCE_REGISTRY" && ! -L "$SOURCE_REGISTRY" ]] \
   || fail "public crates.io registry cache is absent or symlinked"
+[[ -d "$SOURCE_TRUNK_TOOL_DIR" && ! -L "$SOURCE_TRUNK_TOOL_DIR" ]] \
+  || fail "cached wasm-bindgen tool directory is absent or symlinked"
+[[ -f "$SOURCE_WASM_BINDGEN" && -x "$SOURCE_WASM_BINDGEN" \
+   && ! -L "$SOURCE_WASM_BINDGEN" ]] \
+  || fail "cached wasm-bindgen tool is absent, non-executable, or symlinked"
+[[ $("$SOURCE_WASM_BINDGEN" --version) == "wasm-bindgen $WASM_BINDGEN_VERSION" ]] \
+  || fail "cached wasm-bindgen tool has the wrong version"
 
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/ocean-rooms-stage0.XXXXXX")
 mkdir -p "$TMP_ROOT/home" "$TMP_ROOT/config" "$TMP_ROOT/cwd" "$TMP_ROOT/build-dist" \
