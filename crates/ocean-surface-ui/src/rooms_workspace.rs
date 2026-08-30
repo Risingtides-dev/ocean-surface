@@ -1173,6 +1173,12 @@ pub fn RoomsWorkspace(
     // command.
     let repo = crate::room_repo::RoomRepoState::new(&rooms);
 
+    // The room's invite control. Same reasoning again, and the stake is the
+    // room's own shape: on a Local room a mint bootstraps federation, so a
+    // flag rebuilt by a roster SSE update would re-enable the control mid-mint
+    // and publish the room twice over one intent.
+    let invite = crate::room_invite::RoomInviteState::new(&rooms);
+
     // The room's workspace status and command history. Same reasoning: the
     // open panel owns a poll loop, and a rail closure re-run by a roster SSE
     // update would orphan the loop and respawn it mid-tick.
@@ -2184,6 +2190,17 @@ pub fn RoomsWorkspace(
                 ) {
                     ev.prevent_default();
                     repo.close_panel();
+                    return;
+                }
+                // The invite panel sits on the same overlay tier, behind the
+                // same at-most-one-open argument — and it holds a code the
+                // operator may want off the screen in a hurry.
+                if crate::room_invite::invite_escape_closes(
+                    invite.panel_is_open(),
+                    ev.default_prevented(),
+                ) {
+                    ev.prevent_default();
+                    invite.close_panel();
                     return;
                 }
                 // The workspace panel sits on the same overlay tier, behind
@@ -3723,6 +3740,21 @@ pub fn RoomsWorkspace(
                             }
                     }}
                 </div>
+
+                // How a second person reaches this room: mint an invite code.
+                // Directly under the roster because that is what it changes.
+                // A sibling of it, not a child of the closure above — that
+                // closure re-runs on every access change, and this section
+                // owns a mint's in-flight state. Unlike the repo section it
+                // renders for a Local room too: minting is how a Local room
+                // becomes federated, so hiding it there hides the only door.
+                <crate::room_invite::RoomInvite
+                    rooms=rooms
+                    state=invite
+                    writes_allowed=Signal::derive(move || {
+                        access_allows_writes(rooms.access.get().as_ref())
+                    })
+                />
 
                 // How this room wakes its agents: the three live
                 // trigger-policy flags, editable in place. Local rooms only —

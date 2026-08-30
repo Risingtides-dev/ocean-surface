@@ -3238,3 +3238,64 @@ job here it is deliberately not a required check — red is information, not a
 lock. The predicate was exercised against eight diff shapes before landing,
 including this PR's own.
 _________________________________________________________________________________
+
+time:      [13:01] [08-30-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-room-invite-control
+type:      [feature-request]
+area:      [frontend]
+
+Rooms are the multiplayer surface and there was no way to put a second person
+in one from a browser: POST /v1/rooms/persistent/{key}/invites has been live in
+the daemon for months and grep for "invite" across crates/ocean-surface-ui
+returned nothing. New room_invite.rs in the house pattern -- a rail row under
+the roster, where adding a person belongs, and a panel with an optional
+recipient, an expiry, the minted code with copy, and when it expires. Three
+things about this lane differ from its neighbours and each is a test. The 201
+answers the raw InviteResponse with no {ok:true} envelope, so a decoder copied
+from artifacts or the workspace lane reads a successful mint as malformed.
+`code` is the grant on a success and the refusals carry their machine code in
+the top-level `error` instead, so success is settled on status-plus-code first
+and only a non-success is asked what its error means -- otherwise a minted code
+that happens to spell a refusal classifies as one. And a bare 404 is a daemon
+predating the route ("not available yet") while a 404 carrying room_not_found
+is the room being gone; 503 federation_unavailable is the deployment saying
+federation isn't configured, which is a state, not a failure. The trap worth
+the most: on a Local room this call BOOTSTRAPS federation -- room_federation.rs
+registers the room with Bedrock under the daemon's owner token and it stays
+federated -- so unlike RoomRepo this section renders for Local rooms and the
+first click only arms, with the consequence stated before anything is sent. The
+code is a bearer grant, so it lives in one signal and the open panel only: the
+rail line says an invite exists and never what it is, a room switch clears it,
+and a source guard fails the suite if anyone reaches for a logger in this
+module. Redeem is deliberately absent -- it belongs in the left rail beside
+create-room, not in a room. Gate: 1136+4+8+4+7+5+2 tests green (24 new), clippy
+-D warnings on wasm32, fmt --check clean, and the wasm32 -D warnings
+release-lane check green.
+_________________________________________________________________________________
+
+time:      [14:12] [08-30-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-room-invite-control
+type:      [review]
+area:      [frontend]
+
+Review pass on the invite control found two ways it answers into the void, both
+fixed here. The invalid_request sentence said "check the expiry", which is the
+one thing that cannot be wrong: parse_ttl already holds the field to the route's
+own 1..=10080, so a request that leaves this module can never earn the daemon's
+ttl 400. The reachable cause is create_invite's canonical_room_key check -- a
+Local room whose key isn't lowercase-ascii/digits/._- or runs past 128 bytes is
+refused at the federation bootstrap -- and room keys are never validated at
+create (RoomKey::new is a bare newtype, create_in_workspace only rejects empty),
+so any room made by the CLI or an agent, or a long slugified name, lands there.
+The sentence now names the key and states the rule. Second: MintOutcome::State
+rendered only inside the panel, while the error rendered in the rail too.
+Nothing cancels an in-flight mint when the panel closes and publish still
+writes, so closing the panel mid-mint and getting back a 503 or a route-absent
+404 left the operator with no answer anywhere on screen. Both slots now render
+in the rail, held by a source guard that slices the module at the panel gate and
+asserts each read appears before it. Gate: 1138+4+8+4+7+5+2 tests green (26 in
+room_invite, 2 new), clippy -D warnings on wasm32, the wasm32 -D warnings
+release-lane check, fmt --check, and the proxy clippy job all clean.
+_________________________________________________________________________________
