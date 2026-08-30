@@ -3132,3 +3132,26 @@ the primed confirm. Federated rosters untouched (bedrock-authoritative).
 Gate green: 1108 UI tests + integration suites, clippy -D warnings, fmt,
 wasm32 -D warnings release-lane check.
 _________________________________________________________________________________
+
+time:      [02:51] [08-30-26]
+agent:     [claude] [fable 5]
+worktree:  loop/surface-access-writes-single-source
+type:      [refactor]
+area:      [frontend]
+
+The access policy now has one source of truth. Two divergent copies of
+access_allows_writes gated every write control, and the banner policy had
+already split for real: rooms.rs pinned "Connecting"/"Recovering" in a
+test while the mounted banner rendered "Connecting to federated room..."
+-- the tested strings and the rendered strings disagreed. Hoisted along
+the #149 room_is_federated pattern: rooms_workspace.rs owns pub(crate)
+access_allows_writes (rooms.rs imports it) plus a private access_banner
+returning the RENDERED labels, which the stage banner match now calls for
+its text so test and UI cannot diverge again; classes and roles stay in
+the view. One matrix test pins write policy + rendered banner per state.
+Dead agent-id helpers (Rooms::agent_ids, agent_ids_for) deleted whole
+with their tests: zero callers, and the shape is wrong for the composer
+hint they promised (member UUIDs vs typed @names) -- that hint is a
+future slice. Net -98 lines. Gate green: 1102 UI tests + integration
+suites, clippy -D warnings, fmt, wasm32 -D warnings release-lane check.
+_________________________________________________________________________________
