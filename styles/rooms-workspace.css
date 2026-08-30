@@ -2337,6 +2337,55 @@
   cursor: not-allowed;
 }
 
+/* Delete belongs to edit mode and wears the risk it carries, like the
+   compute panel's destroy: first click arms, second removes the folder. */
+.rooms-workspace__agentbuilder-delete {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.rooms-workspace__agentbuilder-delete-btn {
+  appearance: none;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-3);
+  font-family: var(--font);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__agentbuilder-delete-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.rooms-workspace__agentbuilder-delete-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.rooms-workspace__agentbuilder-delete-btn--danger {
+  border-color: var(--err);
+  color: var(--err);
+}
+
+.rooms-workspace__agentbuilder-delete-btn--danger:hover:not(:disabled) {
+  background: var(--err-soft);
+}
+
+.rooms-workspace__agentbuilder-delete-warn {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--err);
+  overflow-wrap: anywhere;
+}
+
 /* ── Scrollbar ────────────────────────────────────────────────────── */
 
 .rooms-workspace__left-list,
@@ -2388,6 +2437,7 @@
 .rooms-workspace__join-btn:focus-visible,
 .rooms-workspace__agentbuilder-toggle:focus-visible,
 .rooms-workspace__agentbuilder-save:focus-visible,
+.rooms-workspace__agentbuilder-delete-btn:focus-visible,
 .rooms-workspace__composer-send:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);

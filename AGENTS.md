@@ -248,8 +248,9 @@ Web surface session UI:
 - The browser PWA proxy must forward `/v1/agents` as JSON and stream room SSE
   unbuffered while preserving `Last-Event-ID`; Tauri reaches the same daemon
   endpoints directly. The proxy is an ALLOWLIST, not a passthrough: the agent
-  builder's write verbs (`POST /v1/agents`, `GET`/`PUT /v1/agents/{name}`) are
-  registered explicitly, and an unregistered verb answers with an empty body
+  builder's write verbs (`POST /v1/agents`, `GET`/`PUT`/`DELETE
+  /v1/agents/{name}`) are registered explicitly, and an unregistered verb
+  answers with an empty body
   that the surface can only report as a JSON decode error. Adding an
   `/v1/agents/{name}` route requires the `has_dot_segment` guard —
   percent-encoding does not neutralise `..`, because `.` is unreserved.

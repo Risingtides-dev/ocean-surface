@@ -609,12 +609,15 @@ fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
         .route("/v1/agents", get(proxy_agents).post(proxy_agent_create))
         // GET is the agent builder's prefill (an edit must start from the
         // agent's real agent.toml, not from form defaults); PUT is the edit
-        // itself. DELETE is deliberately NOT here — removing an agent folder
-        // is not something this surface offers, and an allowlist should carry
-        // only the verbs a surface actually uses.
+        // itself. DELETE was deliberately withheld while no surface verb used
+        // it; the members rail's arm-confirm delete control now issues it, so
+        // the allowlist carries it — still exactly the verbs the surface
+        // actually uses, no more.
         .route(
             "/v1/agents/{name}",
-            get(proxy_agent_get).put(proxy_agent_update),
+            get(proxy_agent_get)
+                .put(proxy_agent_update)
+                .delete(proxy_agent_delete),
         )
         .route("/v1/fs/dirs", get(proxy_fs_dirs))
         .route(
@@ -1486,6 +1489,25 @@ async fn proxy_agent_update(
         return (StatusCode::BAD_REQUEST, "invalid path").into_response();
     };
     proxy_method_json(&state, &daemon, reqwest::Method::PUT, &path, body).await
+}
+
+/// Reverse-proxy DELETE /v1/agents/{name} (agent builder → remove an agent).
+async fn proxy_agent_delete(
+    State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
+    Path(name): Path<String>,
+) -> Response {
+    let Some(path) = agent_daemon_path(&name) else {
+        return (StatusCode::BAD_REQUEST, "invalid path").into_response();
+    };
+    proxy_method_json(
+        &state,
+        &daemon,
+        reqwest::Method::DELETE,
+        &path,
+        Bytes::new(),
+    )
+    .await
 }
 
 /// Reverse-proxy GET /v1/fs/dirs?path=<path> (filesystem directory listing).
@@ -3765,11 +3787,13 @@ mod tests {
     }
 
     /// `/v1/agents/{name}` did not exist on the allowlist AT ALL, so the
-    /// builder's edit mode — prefill (GET) and save (PUT) — had nowhere to go
-    /// on web. Same production-router discrimination as the create test:
-    /// 502 means the forwarder was reached, 404 means ServeDir swallowed it.
+    /// builder's edit mode — prefill (GET), save (PUT) and, since the members
+    /// rail grew its arm-confirm delete control, remove (DELETE) — had
+    /// nowhere to go on web. Same production-router discrimination as the
+    /// create test: 502 means the forwarder was reached, 404 means ServeDir
+    /// swallowed it, 405 would mean the method router refused the verb.
     #[tokio::test]
-    async fn agent_def_and_update_route_through_production_router() {
+    async fn agent_def_update_and_delete_route_through_production_router() {
         let dist = tempfile::tempdir().expect("tempdir");
         let state = Arc::new(AppState {
             http: reqwest::Client::new(),
@@ -3792,6 +3816,7 @@ mod tests {
         for (method, body) in [
             ("GET", Body::empty()),
             ("PUT", Body::from(r#"{"instructions":"be useful"}"#)),
+            ("DELETE", Body::empty()),
         ] {
             let resp = app
                 .clone()
@@ -3812,20 +3837,23 @@ mod tests {
             );
         }
 
-        // DELETE is intentionally absent from the allowlist: removing an agent
-        // folder is not an action this surface offers. Pinned so adding the
-        // verb has to be a decision, not a copy-paste.
+        // The verb this test once pinned OUT of the allowlist ("adding it
+        // has to be a decision, not a copy-paste") is in it now — the members
+        // rail's delete control is that decision. What still has to hold is
+        // the dot-segment guard: the new verb rides agent_daemon_path like
+        // GET and PUT, so a traversal name dies here as 400 and never reaches
+        // the daemon.
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri("/v1/agents/researcher")
+                    .uri("/v1/agents/%2e%2e")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     /// The room-scoped PATCHes — read cursor and trigger policy — ride the
