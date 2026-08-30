@@ -138,7 +138,15 @@ fn state_sentence(code: &str) -> Option<String> {
 /// `intent_error_response` can write for this route is answered here.
 fn failure_sentence(code: &str) -> Option<String> {
     let sentence = match code {
-        "invalid_request" => "The daemon rejected the invite request \u{2014} check the expiry.",
+        // NOT the expiry: `parse_ttl` already holds it to the route's own
+        // `1..=10080`, so a request that leaves here cannot earn the ttl 400.
+        // The cause left is the bootstrap's key check — a Local room whose key
+        // Bedrock will not register, which room creation never rejected.
+        "invalid_request" => {
+            "This room's key can't be registered for federation. It has to start with a \
+             lowercase letter or digit and hold only lowercase letters, digits, '.', '_' \
+             or '-', within 128 characters."
+        }
         "room_not_found" => "This room isn't on this daemon.",
         "federation_forbidden" => "This room's federation access was refused.",
         "invite_forbidden" => "This room's federation service wouldn't mint an invite.",
@@ -543,11 +551,21 @@ pub fn RoomInvite(
                         </button>
                     </div>
 
-                    // Rendered in the rail AND the panel: a failure while the
-                    // panel is closed must not vanish with it.
+                    // Both rendered in the rail AND the panel. Closing the
+                    // panel does not cancel an in-flight mint, so whichever
+                    // slot the answer lands in must survive the panel going
+                    // away — a 503 or a route-absent 404 that only the panel
+                    // could show would leave the operator with no answer at
+                    // all.
                     {move || {
                         state.error.get().map(|error| view! {
                             <div class="rooms-workspace__invite-error" role="alert">{error}</div>
+                        })
+                    }}
+
+                    {move || {
+                        state.note.get().map(|note| view! {
+                            <div class="rooms-workspace__invite-note">{note}</div>
                         })
                     }}
 
@@ -849,6 +867,23 @@ mod tests {
         }
     }
 
+    /// `parse_ttl` refuses an out-of-range expiry before the request exists,
+    /// so the ttl 400 is unreachable from here and the bootstrap's key check
+    /// is the only `invalid_request` left. The sentence has to send the
+    /// operator at the key rather than at the one input that cannot be wrong.
+    #[test]
+    fn a_rejected_request_names_the_key_not_the_expiry() {
+        let outcome = classify_mint(
+            400,
+            Some(body(r#"{"ok": false, "error": "invalid_request"}"#)),
+        );
+        let MintOutcome::Failure(sentence) = outcome else {
+            panic!("expected Failure, got {outcome:?}");
+        };
+        assert!(sentence.contains("key"), "got: {sentence}");
+        assert!(!sentence.contains("expir"), "got: {sentence}");
+    }
+
     /// A deployment predating the route answers a bare 404 — undecodable, or
     /// decodable but codeless. Both read as "not available yet".
     #[test]
@@ -1027,6 +1062,27 @@ mod tests {
         assert!(
             !source.contains(&needle),
             "an invite code is a bearer grant and must never be logged"
+        );
+    }
+
+    /// Closing the panel cancels nothing — the mint is still in flight and
+    /// `publish` still writes — so BOTH answer slots have to render in the
+    /// rail. A `State` only the panel could show, a 503 or a daemon without
+    /// the route, would otherwise land where nobody is looking.
+    #[test]
+    fn both_answer_slots_render_outside_the_panel() {
+        let source = include_str!("room_invite.rs");
+        let panel_at = source
+            .find("if !state.panel.get()")
+            .expect("the panel gate moved");
+        let rail = &source[..panel_at];
+        assert!(
+            rail.contains("state.error.get()"),
+            "a failure while the panel is closed would be invisible"
+        );
+        assert!(
+            rail.contains("state.note.get()"),
+            "a state while the panel is closed would be invisible"
         );
     }
 
