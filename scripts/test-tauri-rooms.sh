@@ -17,6 +17,10 @@ APP_PID=
 ACCEPTANCE_BIN=
 DIAGNOSTICS_DIR=
 FINAL_STATUS=1
+WASM_BINDGEN_VERSION=0.2.122
+FIXTURE_MODEL=gpt-5.6-sol
+SOURCE_TRUNK_TOOL_DIR="$HOME/Library/Caches/dev.trunkrs.trunk/wasm-bindgen-$WASM_BINDGEN_VERSION"
+SOURCE_WASM_BINDGEN="$SOURCE_TRUNK_TOOL_DIR/wasm-bindgen"
 
 fail() { echo "acceptance error: $*" >&2; return 1; }
 
@@ -185,6 +189,16 @@ validate_static() {
     "$TEST_DIR/rooms_stage0.py"
   python3 -I -c 'import ast,pathlib,sys; text=pathlib.Path(sys.argv[1]).read_text(); helper=text.split("<<'"'"'PY_DIAGNOSTIC_COPY'"'"'\n",1)[1].split("\nPY_DIAGNOSTIC_COPY",1)[0]; ast.parse(helper)' \
     "$0"
+  grep -A2 -F 'name = "wasm-bindgen"' "$ROOT/Cargo.lock" \
+    | grep -Fxq "version = \"$WASM_BINDGEN_VERSION\"" \
+    || fail "Cargo.lock wasm-bindgen version does not match the Stage0 tool version"
+  [[ -d "$SOURCE_TRUNK_TOOL_DIR" && ! -L "$SOURCE_TRUNK_TOOL_DIR" ]] \
+    || fail "cached wasm-bindgen tool directory is absent or symlinked"
+  [[ -f "$SOURCE_WASM_BINDGEN" && -x "$SOURCE_WASM_BINDGEN" \
+     && ! -L "$SOURCE_WASM_BINDGEN" ]] \
+    || fail "cached wasm-bindgen tool is absent, non-executable, or symlinked"
+  [[ $("$SOURCE_WASM_BINDGEN" --version) == "wasm-bindgen $WASM_BINDGEN_VERSION" ]] \
+    || fail "cached wasm-bindgen tool has the wrong version"
 }
 
 if [[ "$MODE" == "--validate" ]]; then
@@ -213,6 +227,18 @@ TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/ocean-rooms-stage0.XXXXXX")
 mkdir -p "$TMP_ROOT/home" "$TMP_ROOT/config" "$TMP_ROOT/cwd" "$TMP_ROOT/build-dist" \
   "$TMP_ROOT/web-target" "$TMP_ROOT/tauri-target" "$TMP_ROOT/tauri-crate" \
   "$TMP_ROOT/cargo-home/registry" "$TMP_ROOT/xdg-cache" "$TMP_ROOT/web-src"
+
+# Offline Trunk refuses to consult or install its download cache; it only accepts
+# an exact-version executable found on PATH. Materialize the locked tool through
+# the same no-follow copy used for retained diagnostics, then prepend this
+# isolated directory only to the Trunk build below.
+ISOLATED_TRUNK_TOOL_DIR="$TMP_ROOT/home/Library/Caches/dev.trunkrs.trunk/wasm-bindgen-$WASM_BINDGEN_VERSION"
+mkdir -p "$ISOLATED_TRUNK_TOOL_DIR"
+copy_diagnostic_nofollow "$SOURCE_TRUNK_TOOL_DIR" "$ISOLATED_TRUNK_TOOL_DIR" wasm-bindgen \
+  || fail "could not materialize the locked wasm-bindgen tool"
+chmod 700 "$ISOLATED_TRUNK_TOOL_DIR/wasm-bindgen"
+[[ $("$ISOLATED_TRUNK_TOOL_DIR/wasm-bindgen" --version) == "wasm-bindgen $WASM_BINDGEN_VERSION" ]] \
+  || fail "isolated wasm-bindgen tool has the wrong version"
 
 # Trust an exact cache id only when its own regular config.json identifies the
 # canonical crates.io download and API origins. No basename prefix is trusted.
@@ -285,7 +311,8 @@ DAEMON_URL="http://127.0.0.1:$DAEMON_PORT"
   cd "$TMP_ROOT/cwd"
   exec env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$TMP_ROOT/home" TMPDIR="$TMP_ROOT" \
     OCEAN_UNSUPERVISED=1 OCEAN_BIND="127.0.0.1:$DAEMON_PORT" \
-    OCEAN_CONFIG_DIR="$TMP_ROOT/config" OCEAN_DB_PATH="$TMP_ROOT/ocean.sqlite3" "$DAEMON_BIN"
+    OCEAN_CONFIG_DIR="$TMP_ROOT/config" OCEAN_DB_PATH="$TMP_ROOT/ocean.sqlite3" \
+    OCEAN_MODEL="$FIXTURE_MODEL" "$DAEMON_BIN"
 ) >"$TMP_ROOT/daemon.log" 2>&1 &
 DAEMON_PID=$!
 
@@ -320,7 +347,8 @@ if ! (
     HOME="$TMP_ROOT/home" CARGO_HOME="$TMP_ROOT/cargo-home" \
     CARGO_TARGET_DIR="$TMP_ROOT/web-target" \
     CARGO_NET_OFFLINE=true CARGO_BUILD_LOCKED=true XDG_CACHE_HOME="$TMP_ROOT/xdg-cache" \
-    OCEAN_DAEMON_URL="$DAEMON_URL" trunk build --release --offline --locked \
+    PATH="$ISOLATED_TRUNK_TOOL_DIR:$PATH" OCEAN_DAEMON_URL="$DAEMON_URL" \
+    trunk build --release --offline --locked \
     --dist "$TMP_ROOT/build-dist"
 ); then
   fail "offline locked Trunk build failed; public crates.io registry cache may be incomplete"
