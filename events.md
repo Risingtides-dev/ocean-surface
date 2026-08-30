@@ -3086,3 +3086,27 @@ noted, not fixed (ocean-os work): a room already holding the agent keeps its
 roster row -- agentdir::remove deletes only the folder. Gate green: 1101 UI +
 54 proxy tests, clippy -D warnings, fmt, wasm32 -D warnings check.
 _________________________________________________________________________________
+
+time:      [00:59] [08-30-26]
+agent:     [claude] [fable 5]
+worktree:  loop/surface-workspace-failed-reason-discarded
+type:      [feature-request]
+area:      [frontend]
+
+A failed workspace provision now tells its owner why. Bedrock has been
+spreading last_error into the workspace projection all along -- owner-only,
+present only while status is failed -- but WorkspaceProjection had no field
+for it, so serde dropped the key and the panel rendered the bare word
+"failed". The projection grew `#[serde(default)] last_error: Option<String>`
+(plain Option, not double_option -- the key is never null on the wire), and a
+failed_reason guard renders it as a role="alert" div under the facts grid
+only when status is failed and the reason is non-empty. Absent renders
+nothing: a non-owner or an older Bedrock is unknown, never "no reason" --
+mirroring the repo panel's clone_error. view_flip deliberately untouched: a
+reason cannot change without the status flipping through provisioning first,
+because beginProvision forces failed -> provisioning. Negative control proven
+at review and re-proven at land: with the field #[serde(skip)] (the original
+bug) the keeps-the-owner-reason test fails at None vs Some. Gate re-run at
+land after rebase onto origin/main: 1133 tests green, clippy -D warnings,
+fmt, wasm32 -D warnings release-lane check all clean.
+_________________________________________________________________________________
