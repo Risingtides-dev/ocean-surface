@@ -3054,6 +3054,271 @@
   flex-wrap: wrap;
 }
 
+/* ── Room invite (rail row + mint panel) ───────────────────────────── */
+
+/* The same rail contract as its neighbours: a fixed sliver, one line, and
+   every verb in the panel it opens. The line here says an invite EXISTS and
+   never what it is — the code is a bearer grant and the rail is on screen for
+   as long as the room is. */
+.rooms-workspace__invite {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 0 6px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__invite-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 12px 6px;
+}
+
+.rooms-workspace__invite-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-3);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__invite-open {
+  appearance: none;
+  padding: 2px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__invite-open:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__invite-note {
+  padding: 4px 12px 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__invite-error {
+  padding: 4px 12px 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--err);
+  overflow-wrap: anywhere;
+}
+
+.rooms-workspace__invite-line {
+  padding: 0 12px 4px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-2);
+}
+
+/* ── The panel: where an invite is minted and read ─────────────────── */
+
+.rooms-workspace__invite-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 440;
+  background: var(--scrim);
+}
+
+.rooms-workspace__invite-panel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 445;
+  display: flex;
+  flex-direction: column;
+  /* Narrow like the repo panel: two fields, one button and a code. Wide
+     enough that the code reads without wrapping mid-token. */
+  width: min(480px, 92vw);
+  max-height: min(70vh, 560px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-lg);
+}
+
+.rooms-workspace__invite-panel-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__invite-panel-title {
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.rooms-workspace__invite-close {
+  appearance: none;
+  flex: 0 0 auto;
+  width: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.rooms-workspace__invite-close:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__invite-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 16px 16px;
+}
+
+/* The consequence of minting on a Local room, said before the request
+   exists. It wears the error colour deliberately: publishing a private room
+   is not undoable from this surface. */
+.rooms-workspace__invite-warn {
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--err);
+  border-radius: var(--radius-sm);
+  color: var(--err);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.rooms-workspace__invite-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rooms-workspace__invite-input {
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.rooms-workspace__invite-input:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 1px;
+}
+
+.rooms-workspace__invite-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rooms-workspace__invite-run {
+  appearance: none;
+  height: var(--ctl-h-sm);
+  padding: 0 12px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--accent);
+  font-family: var(--font);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__invite-run:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+.rooms-workspace__invite-run:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* A mint that would federate the room wears the risk, like unbind does. */
+.rooms-workspace__invite-run--danger {
+  border-color: var(--err);
+  color: var(--err);
+}
+
+.rooms-workspace__invite-run--danger:hover:not(:disabled) {
+  background: var(--err-soft);
+}
+
+/* The code itself: mono and selectable, because it is copied by hand as
+   often as by the button beside it. */
+.rooms-workspace__invite-code {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+.rooms-workspace__invite-code-value {
+  flex: 1;
+  min-width: 0;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+  user-select: all;
+  overflow-wrap: anywhere;
+}
+
+.rooms-workspace__invite-copy {
+  appearance: none;
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: pointer;
+}
+
+.rooms-workspace__invite-copy:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__invite-footnote {
+  margin-top: 14px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-4);
+}
+
 /* ── Room repo (rail row + workspace panel) ────────────────────────── */
 
 /* A fixed sliver like the artifacts above it, and for the same reason: the
