@@ -190,10 +190,10 @@ fn access_allows_writes(access: Option<&RoomAccessProjection>) -> bool {
     )
 }
 
-/// Whether this room federates through Bedrock at all. Private copy of the
-/// same decision in `room_repo`/`room_workspace_panel`, kept file-scoped like
-/// its siblings.
-fn room_is_federated(access: Option<&RoomAccessProjection>) -> bool {
+/// Whether this room federates through Bedrock at all. Only a federated room
+/// has a Bedrock workspace; a Local room renders nothing rather than a
+/// refusal, and `None` (no room open / still loading) also renders nothing.
+pub(crate) fn room_is_federated(access: Option<&RoomAccessProjection>) -> bool {
     access.is_some_and(|projection| projection.state != RoomAccessState::Local)
 }
 
@@ -4351,6 +4351,23 @@ mod tests {
     #[test]
     fn access_blocks_writes_none() {
         assert!(!access_allows_writes(None));
+    }
+
+    // ── room_is_federated ─────────────────────────────────────────────
+
+    #[test]
+    fn only_a_federated_room_has_the_section() {
+        assert!(!room_is_federated(None));
+        assert!(!room_is_federated(Some(&test_access(
+            RoomAccessState::Local
+        ))));
+        assert!(room_is_federated(Some(&test_access(RoomAccessState::Live))));
+        assert!(room_is_federated(Some(&test_access(
+            RoomAccessState::Connecting
+        ))));
+        assert!(room_is_federated(Some(&test_access(
+            RoomAccessState::Revoked
+        ))));
     }
 
     // ── ledger_mark ───────────────────────────────────────────────────

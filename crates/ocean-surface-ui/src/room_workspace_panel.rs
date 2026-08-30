@@ -117,9 +117,8 @@ use leptos::prelude::*;
 use serde::{Deserialize, Deserializer};
 use wasm_bindgen_futures::spawn_local;
 
-use crate::rooms::{
-    encode, RoomAccessProjection, RoomAccessState, RoomMessage, RoomMessageKind, Rooms,
-};
+use crate::rooms::{encode, RoomMessage, RoomMessageKind, Rooms};
+use crate::rooms_workspace::room_is_federated;
 
 /// The open panel's fallback tick. The marker wake is the primary refresh
 /// now, so this only has to be honest where the push path is absent — and
@@ -1371,13 +1370,6 @@ enum PanelLane {
 /// failure.
 fn lane_success_clears(standing: Option<PanelLane>, lane: PanelLane) -> bool {
     standing == Some(lane)
-}
-
-/// Whether the section exists for this room at all. Only a federated room
-/// has a Bedrock workspace; a Local room renders nothing rather than a
-/// refusal, and `None` (no room open / still loading) also renders nothing.
-fn room_is_federated(access: Option<&RoomAccessProjection>) -> bool {
-    access.is_some_and(|projection| projection.state != RoomAccessState::Local)
 }
 
 /// Escape owned by this panel. Same contract as `repo_escape_closes`: a
@@ -3926,21 +3918,6 @@ mod tests {
     }
 
     // ---- gates --------------------------------------------------------------
-
-    #[test]
-    fn only_a_federated_room_has_the_section() {
-        assert!(!room_is_federated(None));
-        let projection = |state| RoomAccessProjection {
-            state,
-            last_confirmed_global_sequence: None,
-            members: Vec::new(),
-            outbox: Vec::new(),
-        };
-        assert!(!room_is_federated(Some(&projection(
-            RoomAccessState::Local
-        ))));
-        assert!(room_is_federated(Some(&projection(RoomAccessState::Live))));
-    }
 
     #[test]
     fn escape_closes_only_an_open_unclaimed_panel() {

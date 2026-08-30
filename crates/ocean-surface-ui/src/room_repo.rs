@@ -80,7 +80,8 @@ use serde::Deserialize;
 use wasm_bindgen_futures::spawn_local;
 
 use crate::room_workspace_panel::{is_workspace_marker, marker_wake};
-use crate::rooms::{encode, RoomAccessProjection, RoomAccessState, RoomMessage, Rooms};
+use crate::rooms::{encode, RoomMessage, Rooms};
+use crate::rooms_workspace::room_is_federated;
 
 /// How often the poller re-reads the binding while a clone is running. The
 /// clone itself takes tens of seconds to minutes; 4s keeps the panel honest
@@ -361,8 +362,8 @@ enum CommandOutcome {
 fn state_sentence(code: &str) -> Option<String> {
     let sentence = match code {
         "workspace_absent" => {
-            "This room has no workspace container yet \u{2014} provisioning is an owner act, \
-             by API for now."
+            "This room has no workspace container yet \u{2014} the owner can provision one \
+             from the workspace panel."
         }
         "repo_unbound" => "No repo is bound to this room yet.",
         // The daemon's owner gate answering a non-principal actor. For the
@@ -857,13 +858,6 @@ fn bind_payload(remote: &str, branch: &str, dir: &str) -> serde_json::Value {
         );
     }
     serde_json::Value::Object(payload)
-}
-
-/// Whether the repo section exists for this room at all. Only a federated
-/// room has a Bedrock workspace; a Local room renders nothing rather than a
-/// refusal, and `None` (no room open / still loading) also renders nothing.
-fn room_is_federated(access: Option<&RoomAccessProjection>) -> bool {
-    access.is_some_and(|projection| projection.state != RoomAccessState::Local)
 }
 
 /// Escape owned by the repo panel. Same contract as
@@ -2836,27 +2830,6 @@ mod tests {
     }
 
     // ---- gates --------------------------------------------------------------
-
-    #[test]
-    fn only_a_federated_room_has_the_section() {
-        assert!(!room_is_federated(None));
-        let projection = |state| RoomAccessProjection {
-            state,
-            last_confirmed_global_sequence: None,
-            members: Vec::new(),
-            outbox: Vec::new(),
-        };
-        assert!(!room_is_federated(Some(&projection(
-            RoomAccessState::Local
-        ))));
-        assert!(room_is_federated(Some(&projection(RoomAccessState::Live))));
-        assert!(room_is_federated(Some(&projection(
-            RoomAccessState::Connecting
-        ))));
-        assert!(room_is_federated(Some(&projection(
-            RoomAccessState::Revoked
-        ))));
-    }
 
     #[test]
     fn escape_closes_only_an_open_unclaimed_panel() {
