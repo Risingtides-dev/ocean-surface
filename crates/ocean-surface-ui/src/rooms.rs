@@ -138,7 +138,7 @@ pub struct RoomMessage {
     pub attachment_id: Option<String>,
 }
 
-// ---- Federated wire types (exact mirror of ocean-core 786c6ba4) -------------
+// ---- Federated wire types (exact mirror of ocean-core e2796999) -------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FederatedMessageMeta {
@@ -253,6 +253,8 @@ pub struct RoomAccessProjection {
     pub last_confirmed_global_sequence: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<FederatedRoomMemberProjection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_member_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outbox: Vec<RoomOutboxItem>,
 }
@@ -2487,6 +2489,7 @@ mod tests {
             state,
             last_confirmed_global_sequence: None,
             members: Vec::new(),
+            self_member_id: None,
             outbox: Vec::new(),
         }
     }
@@ -2790,6 +2793,24 @@ mod tests {
                 "state": "failed"
             })
         );
+    }
+
+    #[test]
+    fn access_projection_self_member_id_serde_compat() {
+        // Old-daemon payloads carry no `self_member_id` key → `None`; `None`
+        // never serializes, so older daemons never see an unknown key back.
+        let old: RoomAccessProjection =
+            serde_json::from_value(serde_json::json!({ "state": "live" })).unwrap();
+        assert_eq!(old.self_member_id, None);
+        let none_json = serde_json::to_value(&old).unwrap();
+        assert!(none_json.get("self_member_id").is_none());
+
+        let mut projection = access_projection(RoomAccessState::Live);
+        projection.self_member_id = Some("member-you".into());
+        let json = serde_json::to_value(&projection).unwrap();
+        assert_eq!(json["self_member_id"], "member-you");
+        let roundtrip: RoomAccessProjection = serde_json::from_value(json).unwrap();
+        assert_eq!(roundtrip, projection);
     }
 
     // ── members DELETE response decode ────────────────────────────────
