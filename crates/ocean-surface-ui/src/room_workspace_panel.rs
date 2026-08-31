@@ -45,6 +45,18 @@
 //! never a value — the panel lists it above the form. A status body
 //! WITHOUT the key is an older Bedrock, and renders no claim at all.
 //!
+//! What the room SERVES is member-visible on the same read: the status
+//! body carries a `ports` list beside the projection, exactly like
+//! `secrets` — port, preview URL, exposure time, only rows still open.
+//! It is a LIST and nothing more here. A preview URL is the compute
+//! driver's word relayed through Bedrock, so it passes the room link
+//! allowlist before it may become an anchor and stays plain text
+//! otherwise. Exposing and closing a port are member verbs on Bedrock
+//! (`permission: 'write'`, no owner check) that the daemon deliberately
+//! NARROWS to the owner, because a preview URL publishes the room's
+//! compute to anyone holding it — so when controls land here the gate to
+//! describe is the daemon's, not Bedrock's.
+//!
 //! Members RUN commands on the same lane — the daemon's allowlist exec
 //! row is a member act (write-gated, attributed, never owner-gated):
 //!
@@ -189,6 +201,12 @@ pub struct WorkspaceProjection {
     /// list: unknown, never "none stored".
     #[serde(skip)]
     pub secrets: Option<Vec<SecretRow>>,
+    /// The ports the room currently serves on — beside `workspace` on the
+    /// wire like `secrets`, hence the same skip, and folded in by
+    /// `classify_status` for the same reason. `None` is a Bedrock that
+    /// predates the list: unknown, never "none exposed".
+    #[serde(skip)]
+    pub ports: Option<Vec<PortRow>>,
 }
 
 /// One row of the status body's `secrets` list — `listSecretNames`'s
@@ -203,6 +221,20 @@ pub struct SecretRow {
     pub key_id: Option<String>,
     #[serde(default)]
     pub updated_at: Option<String>,
+}
+
+/// One row of the status body's `ports` list — `listPorts`'s projection
+/// (src/room-compute.mjs): the port, the preview URL the driver minted for
+/// it, and when it was exposed. Only rows still open are listed, so a row
+/// here is a port the room is serving on right now.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct PortRow {
+    #[serde(default)]
+    pub port: u64,
+    #[serde(default)]
+    pub preview_url: Option<String>,
+    #[serde(default)]
+    pub exposed_at: Option<String>,
 }
 
 /// Present (null or string) versus absent, kept apart: serde folds a JSON
@@ -334,6 +366,11 @@ struct WorkspaceBody {
     /// stored".
     #[serde(default)]
     secrets: Option<Vec<SecretRow>>,
+    /// The status body's open ports, riding beside `workspace` on the same
+    /// terms as `secrets` — absent is a Bedrock that predates the list,
+    /// `[]` is "none exposed".
+    #[serde(default)]
+    ports: Option<Vec<PortRow>>,
     /// The purge reply's row count — how many execs had their tails
     /// blanked. Presence is what success means on that lane; the `exec_id`
     /// echoed beside it is not read here.
@@ -513,9 +550,11 @@ fn classify_status(status: u16, body: Option<WorkspaceBody>) -> Result<Workspace
         ));
     };
     if let Some(mut workspace) = body.workspace {
-        // The secret names ride beside the projection on the wire; folded
-        // in here so the Present view carries the whole status answer.
+        // The secret names and the open ports ride beside the projection
+        // on the wire; folded in here so the Present view carries the whole
+        // status answer.
         workspace.secrets = body.secrets;
+        workspace.ports = body.ports;
         return Ok(WorkspaceView::Present(Box::new(workspace)));
     }
     match body.refusal_code() {
@@ -942,6 +981,30 @@ fn secret_rows(view: Option<&WorkspaceView>) -> Option<&[SecretRow]> {
         Some(WorkspaceView::Present(workspace)) => workspace.secrets.as_deref(),
         _ => None,
     }
+}
+
+/// What the ports list may claim, on exactly the terms `secret_rows` holds:
+/// `Some` rows are Bedrock's answer — empty honestly renders "none exposed"
+/// — while `None` renders NO claim, because a Bedrock predating the list
+/// sends no `ports` key and a view with no status answer has none to carry.
+fn port_rows(view: Option<&WorkspaceView>) -> Option<&[PortRow]> {
+    match view {
+        Some(WorkspaceView::Present(workspace)) => workspace.ports.as_deref(),
+        _ => None,
+    }
+}
+
+/// The href an exposed port may carry. `preview_url` is the compute
+/// driver's own string, recorded by Bedrock and relayed on — the same
+/// provenance as the repo panel's recorded check URL, and gated the same
+/// way (`room_repo`'s `check_href`): a URL that is not well-formed http(s)
+/// never becomes an anchor in the surface origin. Anything else the row
+/// still SHOWS, as text — a preview URL this side will not link is worth
+/// reading, and refusing to print it would hide what the room is serving.
+fn port_href(row: &PortRow) -> Option<String> {
+    row.preview_url
+        .clone()
+        .filter(|url| crate::room_markdown::scheme_allowed(url))
 }
 
 /// The sentence a typed exec answer earns — the workspace that isn't
@@ -2523,6 +2586,7 @@ pub fn RoomWorkspacePanel(rooms: Rooms, state: RoomWorkspacePanelState) -> impl 
                                         _ => ().into_any(),
                                     }}
                                     {move || lifecycle_section(state, rooms, actor)}
+                                    {move || ports_section(state)}
                                     {move || secrets_section(state, rooms, actor)}
                                     {move || files_section(state, actor)}
                                     {move || exec_section(state, rooms, actor)}
@@ -2922,6 +2986,86 @@ fn lifecycle_section(
                 })}
             </div>
         })}
+    }
+    .into_any()
+}
+
+/// What the room is serving on, under the lifecycle verbs: the status
+/// body's open-ports list, when the Bedrock in front of us sends one. A
+/// read and only a read: the daemon's allowlist carried no expose or close
+/// leaf when this landed, and a button posting to a route that does not
+/// exist is worse than no button. The pair is owner-gated at the daemon
+/// when it arrives, so the controls that follow say so.
+///
+/// The whole section is conditional on the list EXISTING: a Bedrock that
+/// predates `ports` makes no claim at all here, while `[]` is Bedrock
+/// saying none are open and says so in words.
+fn ports_section(state: RoomWorkspacePanelState) -> AnyView {
+    let view = state.view.get();
+    let Some(rows) = port_rows(view.as_ref()).map(<[PortRow]>::to_vec) else {
+        return ().into_any();
+    };
+    view! {
+        <div class="rooms-workspace__compute-ports-title">"Exposed ports"</div>
+        <div class="rooms-workspace__compute-ports-copy">
+            "A preview URL is a routing label, not a credential: whatever the room \
+             serves on that port is served to anyone holding it."
+        </div>
+        {if rows.is_empty() {
+            view! {
+                <div class="rooms-workspace__compute-note">
+                    "No ports exposed for this room."
+                </div>
+            }
+            .into_any()
+        } else {
+            view! {
+                <ul class="rooms-workspace__compute-ports-list">
+                    {rows.into_iter().map(port_row).collect::<Vec<_>>()}
+                </ul>
+            }
+            .into_any()
+        }}
+    }
+    .into_any()
+}
+
+/// One open port: the number, the preview URL it answers on, and when it
+/// was exposed. The URL is linked only when it clears the room link
+/// allowlist (`port_href`) and is printed as plain text when it does not,
+/// so a driver string this surface will not trust is still readable.
+fn port_row(row: PortRow) -> AnyView {
+    let href = port_href(&row);
+    let shown = row.preview_url.filter(|url| !url.is_empty());
+    view! {
+        <li class="rooms-workspace__compute-ports-row">
+            <span class="rooms-workspace__compute-ports-row-port">
+                {row.port.to_string()}
+            </span>
+            {match (href, shown) {
+                (Some(href), Some(text)) => view! {
+                    <a
+                        class="rooms-workspace__compute-ports-row-url"
+                        href=href
+                        target="_blank"
+                        rel="noopener noreferrer"
+                    >
+                        {text}
+                    </a>
+                }
+                .into_any(),
+                (_, Some(text)) => view! {
+                    <span class="rooms-workspace__compute-ports-row-url">{text}</span>
+                }
+                .into_any(),
+                (_, None) => ().into_any(),
+            }}
+            {row.exposed_at.map(|at| view! {
+                <span class="rooms-workspace__compute-ports-row-at">
+                    {format!("exposed {at}")}
+                </span>
+            })}
+        </li>
     }
     .into_any()
 }
@@ -4716,6 +4860,116 @@ mod tests {
         // No other shape has a status answer to carry rows.
         assert_eq!(secret_rows(Some(&WorkspaceView::Absent)), None);
         assert_eq!(secret_rows(None), None);
+    }
+
+    /// The status body's `ports` list rides into the Present view on the
+    /// same absent-vs-empty terms the secret names do — and it is the half
+    /// this panel used to drop on the floor: Bedrock has answered `ports`
+    /// beside `workspace` all along (the fixture above carries one), and
+    /// the projection had no key to receive it.
+    #[test]
+    fn the_open_ports_ride_the_status_answer() {
+        let listed = body(
+            r#"{"workspace": {"status": "ready", "driver": "cloudflare"},
+                "ports": [
+                    {"port": 3000, "preview_url": "https://p3000.example.com/",
+                     "exposed_at": "2026-08-27T10:00:00.000Z"},
+                    {"port": 8080, "preview_url": null, "exposed_at": null}
+                ]}"#,
+        );
+        let view = classify_status(200, Some(listed)).unwrap();
+        let rows = port_rows(Some(&view)).expect("the rows must survive classify");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].port, 3000);
+        assert_eq!(
+            rows[0].preview_url.as_deref(),
+            Some("https://p3000.example.com/")
+        );
+        assert_eq!(
+            rows[0].exposed_at.as_deref(),
+            Some("2026-08-27T10:00:00.000Z")
+        );
+        // A driver that minted no URL is still a port the room is serving
+        // on; the row states the number and withholds nothing else.
+        assert_eq!(rows[1].port, 8080);
+        assert_eq!(rows[1].preview_url, None);
+
+        // Bedrock's own "none open" — the empty list the fixture carries.
+        let empty = classify_status(200, Some(body(status_json()))).unwrap();
+        assert_eq!(port_rows(Some(&empty)), Some(&[][..]));
+
+        // No `ports` key at all: an older Bedrock, and no claim to make.
+        let older = body(r#"{"workspace": {"status": "ready"}}"#);
+        let older = classify_status(200, Some(older)).unwrap();
+        assert_eq!(
+            port_rows(Some(&older)),
+            None,
+            "an older Bedrock must render no claim"
+        );
+
+        // No other shape has a status answer to carry rows.
+        assert_eq!(port_rows(Some(&WorkspaceView::Absent)), None);
+        assert_eq!(port_rows(Some(&WorkspaceView::Unavailable)), None);
+        assert_eq!(port_rows(None), None);
+    }
+
+    /// A preview URL is the compute driver's string, recorded by Bedrock
+    /// and relayed on — the room container's word, not the surface's — so
+    /// it earns an anchor only by clearing the room link allowlist, the
+    /// same gate `room_repo::check_href` holds over a recorded check URL.
+    /// A refused one is not hidden: `port_row` still prints it as text, so
+    /// the operator reads what the room is claiming to serve.
+    #[test]
+    fn a_preview_url_is_an_anchor_only_when_it_clears_the_allowlist() {
+        let at = |url: &str| PortRow {
+            port: 3000,
+            preview_url: Some(url.to_string()),
+            exposed_at: None,
+        };
+        for refused in [
+            "javascript:alert(1)",
+            "JavaScript://x.example.com/",
+            "data:text/html,x",
+            "//x.example.com/",
+            "https://x.example.com/ ",
+            "",
+        ] {
+            assert_eq!(port_href(&at(refused)), None, "must not link {refused:?}");
+        }
+        for allowed in [
+            "https://p3000.rooms.example.com/",
+            "http://localhost:3000/",
+            "https://p3000.example.com:8443/path?q=1#f",
+        ] {
+            assert_eq!(
+                port_href(&at(allowed)).as_deref(),
+                Some(allowed),
+                "must link {allowed:?}"
+            );
+        }
+        // A driver that recorded no URL has nothing to link and nothing to
+        // print — absent is not an empty string here either.
+        assert_eq!(port_href(&PortRow::default()), None);
+    }
+
+    /// A port opening or closing is not a flip: the status poll that sees
+    /// it must not disarm a primed destroy or purge confirm, exactly like
+    /// the secrets churn beside it.
+    #[test]
+    fn a_port_change_is_not_a_view_flip() {
+        let ready = |ports: Option<Vec<PortRow>>| {
+            WorkspaceView::Present(Box::new(WorkspaceProjection {
+                status: "ready".to_string(),
+                ports,
+                ..WorkspaceProjection::default()
+            }))
+        };
+        let open = ready(Some(vec![PortRow {
+            port: 3000,
+            ..PortRow::default()
+        }]));
+        assert!(!view_flip(Some(&ready(None)), &open));
+        assert!(!view_flip(Some(&open), &ready(Some(Vec::new()))));
     }
 
     /// A secrets-only change is not a flip: the silent status refresh a
