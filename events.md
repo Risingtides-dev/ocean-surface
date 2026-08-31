@@ -3894,3 +3894,68 @@ wasm32 check, `cargo check -p ocean-surface-proxy`, wasm32 `cargo test --no-run`
 (nine executables), native `cargo test -p ocean-surface-ui` at 1189/5/4/2/8/4/
 7/5/2 passed, 0 failed. One test file touched. No migration, no deploy step.
 _________________________________________________________________________________
+
+time:      [07:07] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-check-href-scheme-allowlist
+type:      [review]
+area:      [frontend]
+
+`check_href`'s guard in room_repo.rs claimed to pin the http/https allowlist and
+did not: not one of its six hostile payloads reached the comparison.
+`room_markdown::scheme_allowed` splits on `://` before it ever compares a
+scheme, so "javascript:alert(1)", "JavaScript:alert(1)", the `data:text/html`
+one and "vbscript:x" all returned at that split; "" returned at the empty check
+five rules earlier and "java\tscript:alert(1)" at the control-character rule.
+The code was correct; the test was decoration for the one property its name
+asserts. Same hole ocean-os closed in wave 42.
+
+Added three authority-bearing payloads to the existing array --
+`ftp://example.test/runs/1`, `javascript://example.test/x`, and
+`vscode://vscode.git/clone?url=https://example.test/acme/site`. All three parse
+as valid authorities under `host_is_valid`, so the scheme comparison is the only
+rule left that can reject them. The third is the concrete shape a room container
+plausibly emits and the surface has no other defence against it. All six
+originals stay, because between them they pin the three earlier rules the new
+rows fly past: the `://` requirement for the four opaque ones, the empty-string
+check for "", and the control-character rule for the `\t` one.
+
+Mutation-proved rather than asserted: deleted the two-line
+`eq_ignore_ascii_case("http")`/`("https")` comparison at room_markdown.rs:132-134,
+ran `cargo test -p ocean-surface-ui`, and
+`room_repo::tests::a_check_href_is_gated_to_http_schemes` failed by name --
+`assertion left == right failed: "ftp://example.test/runs/1" linked`. Then
+reverted; the only source file this commit touches is room_repo.rs.
+
+Two findings worth the next reader's time. First, that mutation produced exactly
+ONE failure across 1188 tests, which means the explicit `[label](href)` link path
+at room_markdown.rs:231 -- a real dependent with no literal-prefix pre-check of
+its own -- is not pinned either. This slice's scope was room_repo.rs only and
+room_markdown.rs is claimed by no slice this wave, so it is left alone and noted
+here. Second, ocean-os's `ci_run_url` (room_federation.rs:3482) is deliberately
+stricter than this gate -- all Unicode whitespace rather than `trim`, and it
+compares its bounded output back. Whether the surface should converge with it is
+a real question and was explicitly not this slice; the code is untouched.
+
+Review sent this back once, and the finding was the same defect as the slice:
+the doc comment explaining which rule kills which row got the attribution wrong,
+crediting the opaque rows with pinning the empty-string and control-character
+rules they never reach. Read literally it made the `\t` row look redundant with
+`javascript:alert(1)`, so a reader tidying up would have deleted the only
+control-character coverage. Re-derived it empirically rather than by argument --
+a throwaway test inside room_markdown's module printed the rejecting rule for
+each of the nine payloads against the real private helpers, and the split is
+four to the `://` requirement, one to the empty check, one to the control-character
+rule, three to the scheme comparison. Probe reverted. Corrected the comment and
+the two places this entry and the commit message repeated the same mistake.
+
+Frozen gates all green: `cargo fmt --check`, `cargo clippy -p ocean-surface-ui
+--target wasm32-unknown-unknown -- -D warnings`, `RUSTFLAGS="-D warnings" cargo
+check -p ocean-surface-ui --target wasm32-unknown-unknown`, `cargo check -p
+ocean-surface-proxy`, `cargo test -p ocean-surface-ui --target
+wasm32-unknown-unknown --no-run`, `cargo test -p ocean-surface-ui` at 1223
+passed / 0 failed across all targets, and `cargo test -p ocean-surface-proxy` at
+54. Also ran `cargo clippy -p ocean-surface-ui --all-targets -- -D warnings`,
+the only invocation that lints the added test lines: clean. Test-only change;
+no migration, no deploy step.
+_________________________________________________________________________________
