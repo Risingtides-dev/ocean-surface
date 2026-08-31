@@ -41,8 +41,10 @@
 //! The minted code is a bearer grant to the room. It lives in one signal and
 //! the open panel's DOM and nowhere else — never a log line, never the rail
 //! (which is on screen for as long as the room is), and never past the room it
-//! was minted for. Everything that turns a reply into what the operator sees
-//! is a free function below, unit-testable natively.
+//! was minted for. The onboarding link the daemon may send alongside it EMBEDS
+//! that code in its path, so it is the same grant in a longer form and gets
+//! the same discipline to the letter. Everything that turns a reply into what
+//! the operator sees is a free function below, unit-testable natively.
 
 use gloo_net::http::Request;
 use leptos::prelude::*;
@@ -64,12 +66,21 @@ const MAX_TTL_MINUTES: u32 = 10080;
 /// the wire and are deliberately not decoded: this panel only ever renders an
 /// invite for the room it is open on, and echoing the daemon's idea of which
 /// room that is would only let the two disagree.
+///
+/// `onboard_url` is decoded where those two are not, and the difference is the
+/// whole reason: it is not a fact about the room this side could disagree
+/// with, it is a thing the operator has to SEND. Only the daemon knows the
+/// public Bedrock origin, so a panel that declined to read it could not show
+/// the link at all. Absent is a real answer — an older daemon, or a
+/// deployment with no public origin to name — and it renders nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Invite {
     #[serde(default)]
     pub code: String,
     #[serde(default)]
     pub expires_at: String,
+    #[serde(default)]
+    pub onboard_url: Option<String>,
 }
 
 /// The one lenient envelope both replies fit into. `code` is the invite on a
@@ -83,12 +94,16 @@ struct InviteBody {
     #[serde(default)]
     expires_at: Option<String>,
     #[serde(default)]
+    onboard_url: Option<String>,
+    #[serde(default)]
     error: Option<String>,
 }
 
 impl InviteBody {
     /// The invite, if this body is one. A code that is present but blank is
-    /// not an invite — nobody can redeem an empty grant.
+    /// not an invite — nobody can redeem an empty grant — and a blank
+    /// `onboard_url` is not a link, so it is dropped here rather than carried
+    /// forward to render as an empty control.
     fn invite(self) -> Option<Invite> {
         let code = self.code?;
         if code.trim().is_empty() {
@@ -96,6 +111,7 @@ impl InviteBody {
         }
         Some(Invite {
             expires_at: self.expires_at.unwrap_or_default(),
+            onboard_url: self.onboard_url.filter(|url| !url.trim().is_empty()),
             code,
         })
     }
@@ -297,6 +313,16 @@ fn expiry_line(invite: &Invite) -> String {
     }
 }
 
+/// The onboarding link to put on screen, if there is one. Belt and braces
+/// over `InviteBody::invite`, which already drops a blank: an `Invite` built
+/// any other way still must not render a control around an empty string.
+fn onboard_link(invite: &Invite) -> Option<&str> {
+    invite
+        .onboard_url
+        .as_deref()
+        .filter(|url| !url.trim().is_empty())
+}
+
 /// Escape owned by the invite panel. Same contract as `repo_escape_closes`:
 /// the panel is a fixed modal at the top of the rooms surface, so it consumes
 /// the key before the drawers under it.
@@ -335,6 +361,10 @@ pub struct RoomInviteState {
     confirm: RwSignal<bool>,
     /// Whether the code has been copied, for the control's own label.
     copied: RwSignal<bool>,
+    /// The same, for the onboarding link. Separate on purpose: one flag behind
+    /// two copy controls makes both read "copied" when either is pressed, and
+    /// the operator cannot then tell which of the two is on their clipboard.
+    copied_link: RwSignal<bool>,
     /// Whether the panel is open.
     panel: RwSignal<bool>,
     /// The rail control that opens the panel, so closing hands focus back.
@@ -353,6 +383,7 @@ impl RoomInviteState {
             minting: RwSignal::new(false),
             confirm: RwSignal::new(false),
             copied: RwSignal::new(false),
+            copied_link: RwSignal::new(false),
             panel: RwSignal::new(false),
             open_ref: NodeRef::new(),
         }
@@ -390,6 +421,7 @@ impl RoomInviteState {
         self.minting.set(false);
         self.confirm.set(false);
         self.copied.set(false);
+        self.copied_link.set(false);
         self.panel.set(false);
     }
 
@@ -421,6 +453,7 @@ impl RoomInviteState {
         self.error.set(None);
         self.note.set(None);
         self.copied.set(false);
+        self.copied_link.set(false);
         spawn_local(async move {
             let url = invite_url(&base, &key);
             let outcome = post_invite(&url, &payload).await;
@@ -440,6 +473,7 @@ impl RoomInviteState {
             MintOutcome::Minted(invite) => {
                 self.invite.set(Some(invite));
                 self.copied.set(false);
+                self.copied_link.set(false);
             }
             MintOutcome::State(sentence) => self.note.set(Some(sentence)),
             MintOutcome::Failure(error) => self.error.set(Some(error)),
@@ -703,6 +737,44 @@ pub fn RoomInvite(
                                             return ().into_any();
                                         };
                                         let code = invite.code.clone();
+                                        // Text beside a copy control, never an
+                                        // anchor: the link carries the code in
+                                        // its path, and one click would spend
+                                        // the grant into browsing history and
+                                        // whatever referrer the hop leaks it to.
+                                        let onboard = onboard_link(&invite)
+                                            .map(str::to_string)
+                                            .map(|url| {
+                                                let link = url.clone();
+                                                view! {
+                                                    <div class="rooms-workspace__invite-onboard">
+                                                        <code class="rooms-workspace__invite-onboard-value">
+                                                            {url}
+                                                        </code>
+                                                        <button
+                                                            class="rooms-workspace__invite-copy"
+                                                            type="button"
+                                                            on:click=move |_| {
+                                                                if let Some(window) = web_sys::window() {
+                                                                    let _ = window
+                                                                        .navigator()
+                                                                        .clipboard()
+                                                                        .write_text(&link);
+                                                                    state.copied_link.set(true);
+                                                                }
+                                                            }
+                                                        >
+                                                            {move || {
+                                                                if state.copied_link.get() {
+                                                                    "copied"
+                                                                } else {
+                                                                    "copy link"
+                                                                }
+                                                            }}
+                                                        </button>
+                                                    </div>
+                                                }
+                                            });
                                         view! {
                                             <div class="rooms-workspace__invite-code">
                                                 <code class="rooms-workspace__invite-code-value">
@@ -730,6 +802,7 @@ pub fn RoomInvite(
                                                     }}
                                                 </button>
                                             </div>
+                                            {onboard}
                                             <div class="rooms-workspace__invite-note">
                                                 {expiry_line(&invite)}
                                             </div>
@@ -737,8 +810,9 @@ pub fn RoomInvite(
                                     }}
 
                                     <div class="rooms-workspace__invite-footnote">
-                                        "Anyone holding the code can join this room until it \
-                                         expires. Send it the way you would a password."
+                                        "Anyone holding the code — or the link, which contains \
+                                         it — can join this room until it expires. Send either \
+                                         the way you would a password."
                                     </div>
                                 </div>
                             </div>
@@ -766,6 +840,7 @@ mod tests {
             minting: RwSignal::new(false),
             confirm: RwSignal::new(false),
             copied: RwSignal::new(false),
+            copied_link: RwSignal::new(false),
             panel: RwSignal::new(false),
             open_ref: NodeRef::new(),
         }
@@ -777,6 +852,12 @@ mod tests {
 
     /// Obviously not a grant. No fixture in this repo may carry a real one.
     const FAKE_CODE: &str = "not-a-real-invite-code";
+
+    /// Equally fake, and shaped like the real thing: Bedrock's onboarding path
+    /// carries the code, which is exactly why the link is a grant too.
+    fn fake_onboard_url() -> String {
+        format!("https://bedrock.invalid/api/v1/invites/{FAKE_CODE}/onboard")
+    }
 
     fn minted_json() -> String {
         format!(
@@ -824,6 +905,84 @@ mod tests {
             classify_mint(201, Some(body(r#"{"code": "   "}"#))),
             MintOutcome::Failure(_)
         ));
+    }
+
+    // ---- the onboarding link ------------------------------------------------
+
+    /// The daemon may send the link that turns a bare code into instructions.
+    /// When it does, it is decoded — unlike `room_key` and `room_name`, which
+    /// ride the same reply and are deliberately dropped.
+    #[test]
+    fn the_created_reply_carries_the_onboard_link() {
+        let json = format!(
+            r#"{{"code": "{FAKE_CODE}",
+                 "expires_at": "2026-08-31T09:00:00Z",
+                 "onboard_url": "{}"}}"#,
+            fake_onboard_url()
+        );
+        let MintOutcome::Minted(invite) = classify_mint(201, Some(body(&json))) else {
+            panic!("expected Minted");
+        };
+        assert_eq!(onboard_link(&invite), Some(fake_onboard_url().as_str()));
+    }
+
+    /// An older daemon, or one with no public origin to name, omits the field
+    /// entirely. That is a whole invite, not a broken one, and the panel shows
+    /// no link control rather than an empty one — `onboard_link` is what the
+    /// render maps over, so `None` here IS the absent control.
+    #[test]
+    fn an_invite_without_an_onboard_link_is_still_an_invite() {
+        let MintOutcome::Minted(invite) = classify_mint(201, Some(body(&minted_json()))) else {
+            panic!("expected Minted");
+        };
+        assert_eq!(invite.code, FAKE_CODE);
+        assert_eq!(onboard_link(&invite), None);
+    }
+
+    /// Present but blank is absent. A control wrapped around an empty string
+    /// would copy nothing and promise something.
+    #[test]
+    fn a_blank_onboard_link_is_not_a_link() {
+        for blank in [r#""""#, r#""   ""#] {
+            let json = format!(r#"{{"code": "{FAKE_CODE}", "onboard_url": {blank}}}"#);
+            let MintOutcome::Minted(invite) = classify_mint(201, Some(body(&json))) else {
+                panic!("expected Minted for {blank}");
+            };
+            assert_eq!(onboard_link(&invite), None, "for {blank}");
+        }
+    }
+
+    /// Two copy controls, two flags. Sharing one would make both read "copied"
+    /// on either press, leaving the operator unable to tell which grant is on
+    /// their clipboard — and the two are not interchangeable to send. Two
+    /// distinct signals are only half of that: the render is the one place
+    /// they can still be wired to the same flag, so it is asserted from source
+    /// the way `both_answer_slots_render_outside_the_panel` does.
+    #[test]
+    fn the_two_copy_controls_do_not_share_a_flag() {
+        let state = fresh_state();
+        state.copied.set(true);
+        assert!(!state.copied_link.get());
+        state.reset();
+        assert!(!state.copied.get() && !state.copied_link.get());
+
+        let source = include_str!("room_invite.rs");
+        let start = source
+            .find("let onboard = onboard_link(&invite)")
+            .expect("the onboard block moved");
+        let end = start
+            + source[start..]
+                .find(r#"class="rooms-workspace__invite-code""#)
+                .expect("the code view moved");
+        let onboard = &source[start..end];
+        assert!(
+            onboard.contains("state.copied_link"),
+            "the link control has to own its own flag"
+        );
+        assert!(
+            !onboard.contains("state.copied."),
+            "the link control reads the code's flag: either press would say copied"
+        );
     }
 
     /// A daemon with no Bedrock client or owner token is a deployment saying
@@ -1052,6 +1211,16 @@ mod tests {
         assert!(rule.contains("color:var(--err)"), "got: {rule}");
     }
 
+    /// The link is one unbroken token, and a fixed-width panel with nowhere to
+    /// break it would be pushed out from the inside. Selectable by hand too,
+    /// for the same reason the code above it is.
+    #[test]
+    fn the_onboard_link_wraps_and_is_selectable() {
+        let rule = css_rule(".rooms-workspace__invite-onboard-value");
+        assert!(rule.contains("overflow-wrap:anywhere;"), "got: {rule}");
+        assert!(rule.contains("user-select:all;"), "got: {rule}");
+    }
+
     /// The grant never reaches a log. Guarded from source in the house style,
     /// with the needle concatenated so this test's own literal cannot match
     /// the blob it scans.
@@ -1087,13 +1256,16 @@ mod tests {
     }
 
     /// The rail is on screen for as long as the room is, so its line says an
-    /// invite EXISTS and never what it is.
+    /// invite EXISTS and never what it is. The first fixture carries the
+    /// onboarding link as well, because that URL embeds the code: it is the
+    /// same grant in a longer form, and this is the test that has to see both.
     #[test]
     fn the_rail_line_never_carries_the_code() {
         assert_eq!(rail_line(None), None);
         let invite = Invite {
             code: FAKE_CODE.to_string(),
             expires_at: "2026-08-31T09:00:00Z".to_string(),
+            onboard_url: Some(fake_onboard_url()),
         };
         let line = rail_line(Some(&invite)).unwrap();
         assert!(!line.contains(FAKE_CODE), "got: {line}");
@@ -1101,6 +1273,7 @@ mod tests {
         let undated = Invite {
             code: FAKE_CODE.to_string(),
             expires_at: String::new(),
+            onboard_url: None,
         };
         let line = rail_line(Some(&undated)).unwrap();
         assert!(!line.contains(FAKE_CODE), "got: {line}");
@@ -1111,11 +1284,13 @@ mod tests {
         let invite = Invite {
             code: FAKE_CODE.to_string(),
             expires_at: String::new(),
+            onboard_url: None,
         };
         assert!(expiry_line(&invite).contains("didn't say"));
         let dated = Invite {
             code: FAKE_CODE.to_string(),
             expires_at: "2026-08-31T09:00:00Z".to_string(),
+            onboard_url: None,
         };
         assert_eq!(expiry_line(&dated), "Expires 2026-08-31T09:00:00Z.");
     }
@@ -1131,6 +1306,7 @@ mod tests {
             MintOutcome::Minted(Invite {
                 code: FAKE_CODE.to_string(),
                 expires_at: "2026-08-31T09:00:00Z".to_string(),
+                onboard_url: None,
             }),
             true,
         );
@@ -1152,6 +1328,7 @@ mod tests {
             MintOutcome::Minted(Invite {
                 code: FAKE_CODE.to_string(),
                 expires_at: String::new(),
+                onboard_url: None,
             }),
             false,
         );
