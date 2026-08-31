@@ -4121,3 +4121,47 @@ check -p ocean-surface-ui --target wasm32-unknown-unknown`, `cargo test
 `node scripts/surface-auto-deploy.test.mjs` (24 assertions) -- every one exit 0.
 No src/ change, no migration, no deploy step.
 _________________________________________________________________________________
+
+time:      [08:48] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-room-markdown-scheme-gate
+type:      [review]
+area:      [frontend]
+
+#169 proved `check_href`'s guard in room_repo.rs was decoration and rebuilt it,
+but left the same hole one module over: room_markdown's own suite could not see
+`scheme_allowed`'s http/https comparison deleted either. Both tests aiming at it
+--- `labeled_link_requires_allowed_scheme` and `unsafe_labeled_links_render_literal_text`
+--- use `javascript:alert(1)` and `data:text/html,hi`, and neither carries `://`,
+so the `split_once` guard four lines earlier refuses them before the comparison
+runs. The autolink path can't cover it either: it pre-checks the `http(s)://`
+prefix itself at :265 before calling `scheme_allowed`, so the explicit
+`[label](href)` link at :231 is the only route in this file that reaches the
+allowlist, and nothing in this file was standing on it. After #169 landed,
+deleting those two lines failed exactly one test in the repo and it lived in
+another module's file.
+
+Added `labeled_link_rejects_non_http_scheme_with_authority` with `[x](ftp://ocean.dev)`
+and an uppercase `[x](FTP://ocean.dev)`, asserted literal `MdSpan::Text`. Its doc
+comment records WHY the neighbouring payloads don't count --- that sentence is
+the point of the change, since the next reader would otherwise re-derive this
+gap or, worse, believe the old coverage.
+
+Verified by mutation, not by argument: deleted the two-line comparison (binding
+the now-unused `scheme` to `_scheme` so the mutant compiles) and ran the module.
+The new test failed by name with `left: [Link { href: "ftp://ocean.dev" }]`, and
+both pre-existing tests passed under the same mutant --- the gap reproduced
+exactly as reported. Reverted; `git diff --stat` is 16 added lines, test-only.
+
+Scoped to room_markdown.rs deliberately. room_repo.rs already holds this rule
+after #169 and the whole point here is that room_markdown's suite hold its own.
+
+Frozen gates all green: `cargo fmt --check`, `cargo clippy -p ocean-surface-ui
+--target wasm32-unknown-unknown -- -D warnings`, `cargo check -p ocean-surface-ui
+--target wasm32-unknown-unknown`, `cargo check -p ocean-surface-proxy`, `cargo
+test -p ocean-surface-ui --target wasm32-unknown-unknown --no-run`, `cargo test
+-p ocean-surface-ui` at 1227 passed / 0 failed across all targets. Also ran
+`cargo clippy -p
+ocean-surface-ui --all-targets -- -D warnings`, the only invocation that lints
+the added test lines: clean. Test-only change; no migration, no deploy step.
+_________________________________________________________________________________
