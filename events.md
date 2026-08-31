@@ -1,3 +1,35 @@
+time:      [23:14] [08-30-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-trigger-rail-writable-nonterminal]
+type:      review
+area:      frontend
+
+Ruled that the wake-trigger rail stays WRITABLE while a room is `Connecting`
+or `Recovering`, and made the code say so. Since #160 the rail took
+`access_allows_writes` — true only for `Local`/`Live` — so all three trigger
+rows went read-only on both non-terminal access states. Nothing asks for that:
+the daemon's `room_update` (ocean-os origin/main, persistent_rooms.rs:654) has
+no access check at all, and both readers of the policy — the local post path
+and the federation bridge's ingest — read it back from THIS daemon's store, so
+the PATCH lands whatever the link is doing. The cost was the sharpest one
+available: a room stuck `Recovering` while every mention woke an agent gave the
+operator no way to turn `on_mention` off. `Revoked` and unknown access stay
+held — the daemon would take those writes too, but configuring a room you have
+been removed from cannot mean anything, and unknown may yet resolve to
+`Revoked`. Implemented as a rail-local `trigger_policy_accepts_writes` matched
+exhaustively over the access states (a new state must be ruled on, not inherit
+"writable"); the shared `access_allows_writes` is untouched and still gates the
+composer, join/leave, invites and ~10 other call sites. Split the old
+`a_room_that_blocks_writes_holds_every_trigger_row` into a `Revoked` test and a
+`Connecting`/`Recovering` test, and added one pinning the divergence between
+the two gates as a difference. `on_thread_reply` stays held-with-note on the
+federated states for its own pre-existing reason (the bridge can never build
+that event). Verified both new tests fail against the old gate before landing.
+Frozen gate green: fmt, wasm32 clippy `-D warnings`, `RUSTFLAGS="-D warnings"`
+wasm32 check forced against a touched source, proxy check, wasm32 test no-run,
+native 1183/1183.
+_________________________________________________________________________________
+
 time:      [09:45am] [08-06-26]
 agent:     [ocean] [rooms-pm]
 worktree:  [feat/rooms-slack-workspace]
