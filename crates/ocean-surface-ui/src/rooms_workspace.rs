@@ -3922,7 +3922,7 @@ pub fn RoomsWorkspace(
                     })
                 />
 
-                // How this room wakes its agents: the three live
+                // How this room wakes its agents: the four live
                 // trigger-policy flags, editable in place. Every access state
                 // renders it — the policy each flag is judged against is read
                 // from THIS daemon's store, on the federation bridge's ingest
@@ -4209,7 +4209,7 @@ mod tests {
     /// the daemon refuses any write carrying `on_component_event: true` or a
     /// set `on_schedule` (`trigger_unwired`), so carrying stored dead values
     /// through would 400 every flip for that room, permanently breaking all
-    /// three working toggles. The live flags still carry through untouched.
+    /// four working toggles. The live flags still carry through untouched.
     #[test]
     fn policy_with_toggle_normalizes_dead_fields_and_keeps_live_ones() {
         let current = RoomTriggerPolicy {
@@ -4606,6 +4606,7 @@ mod tests {
             TriggerToggle::Mention,
             TriggerToggle::ThreadReply,
             TriggerToggle::BuildFailure,
+            TriggerToggle::CiFailure,
         ] {
             assert_eq!(trigger_row_dead_here(toggle, None), None, "{toggle:?}");
             assert!(!trigger_row_is_editable(toggle, None), "{toggle:?}");

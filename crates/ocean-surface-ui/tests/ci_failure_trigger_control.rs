@@ -81,6 +81,14 @@ fn the_create_call_passes_the_ci_failure_draft() {
 /// reply` and `build failure`, which are lowercase words. A rail and a summary
 /// disagreeing about the casing of the same trigger is exactly the drift this
 /// pins.
+///
+/// Only the rail needs pinning HERE. The summary's casing is a return value,
+/// so `trigger_summary_names_every_live_flag_that_is_on` already holds it. So
+/// the positive assert names the rail's CALL SITE rather than the bare
+/// literal: a file-wide search for `"CI failure"` is satisfied by the
+/// summary's own `on.push`, and by that file's test module quoting the
+/// summary's output, while the rail says whatever it likes. The scan stops at
+/// the test module for the same reason.
 #[test]
 fn the_ci_failure_label_is_capitalized_everywhere() {
     let source = rooms_workspace_source();
@@ -89,9 +97,13 @@ fn the_ci_failure_label_is_capitalized_everywhere() {
         "`ci failure` is the wrong casing for an initialism; both the rail row \
          and the policy summary say `CI failure`",
     );
+    let view = source
+        .split_once("#[cfg(test)]")
+        .expect("rooms_workspace.rs carries its unit tests at the bottom")
+        .0;
     assert!(
-        source.contains("\"CI failure\""),
-        "the rail row and the policy summary both label this trigger \
-         `CI failure`",
+        without_whitespace(view).contains(r#"TriggerToggle::CiFailure,"CIfailure","#),
+        "the rail row must label this trigger `CI failure`, the same casing \
+         the summary returns",
     );
 }

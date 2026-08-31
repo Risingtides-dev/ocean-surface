@@ -3743,3 +3743,45 @@ Gate green: 1223 UI tests (1188 lib + 3 new + 32 existing integration), clippy
 `--all-targets -D warnings`, `cargo fmt --check`, and the
 `RUSTFLAGS="-D warnings"` wasm32 check. No migration, no deploy step.
 _________________________________________________________________________________
+
+time:      [05:44] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-ci-failure-rail-row
+type:      [review]
+area:      [frontend]
+
+Refinement pass on the `on_ci_failure` control. Review found one of the three
+new guards was decoration and proved it by mutation: renaming the rail's label
+to "red CI" left the entire gate green, because
+`the_ci_failure_label_is_capitalized_everywhere` searched the RAW source of
+`rooms_workspace.rs` for the bare literal `"CI failure"` -- and that file's own
+`mod tests` holds it, quoting `trigger_summary`'s output. The claim in the entry
+above that all three guards were checked by mutation was true of the two
+deletions and NOT of this one; the mutation that mattered here was a rename, not
+a deletion, and it was never run. The positive assert now names the rail's call
+site (`TriggerToggle::CiFailure,"CIfailure",`, whitespace-stripped) over source
+truncated at `#[cfg(test)]`, since the summary's casing is a return value that
+`trigger_summary_names_every_live_flag_that_is_on` already holds; only the rail
+was unheld. Re-mutating the label to "red CI" now fails it.
+
+The entry above also says both hardcoded three-toggle arrays were extended.
+There were THREE, not two: `an_unknown_access_state_claims_nothing_about_any_flag`
+still iterated `[Mention, ThreadReply, BuildFailure]` under a doc claiming the
+universal "every row is held by the write gate, and no row claims its flag is
+dead". Behaviour was already correct -- `trigger_row_dead_here` early-returns on
+`access?` -- so this was a coverage lie rather than a live defect, which is
+exactly why nothing failed. Extended and mutation-checked: a CiFailure-specific
+`Some(..)` under unknown access now fails it, naming `CiFailure`.
+
+Two count comments left stale by the fourth flag were corrected: the rail
+section's "the three live trigger-policy flags" sat directly above four
+`trigger_toggle_row` calls, and `policy_with_toggle_normalizes_dead_fields`'s
+"breaking all three working toggles" is four now. The create panel's sibling
+comment had been updated and these had not, so it was an omission.
+
+Gate re-run green on all eight: 1223 UI tests, clippy `--all-targets -D
+warnings`, `cargo fmt --check`, `RUSTFLAGS="-D warnings"` wasm32 check, plus the
+repo's four other frozen gates the first pass skipped -- wasm32 clippy `-D
+warnings`, wasm32 `cargo check`, `cargo test --target wasm32 --no-run`, and
+`cargo check -p ocean-surface-proxy`. No migration, no deploy step.
+_________________________________________________________________________________
