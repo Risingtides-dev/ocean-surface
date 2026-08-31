@@ -3850,3 +3850,47 @@ native `cargo test -p ocean-surface-ui` at 1189 passed / 0 failed in the main
 binary and 0 failed across all nine. One source file touched, no CSS, no
 migration, no deploy step.
 _________________________________________________________________________________
+
+time:      [07:26] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-response-policy-summary-contradicts-the-rail-directly-above-it
+type:      [review]
+area:      [frontend]
+
+Refinement pass on the policy-summary fix. Review found that giving
+`trigger_summary` a `(TriggerToggle, bool, &str)` table had a side effect nobody
+intended: the rail's four `trigger_toggle_row` calls stopped being the only
+place a non-test build CONSTRUCTS a `TriggerToggle` variant, and that was the
+whole guard holding those rows. Reproduced it -- delete the `BuildFailure` row
+and `RUSTFLAGS="-D warnings" cargo check --target wasm32-unknown-unknown` now
+finishes clean, where on origin/main the same deletion fails with `variant
+BuildFailure is never constructed`. `ci_failure_trigger_control.rs` opens by
+stating that guard as fact, in a file whose own header records a control being
+silently deleted once with the full suite green, so the doc was wrong in the
+one place a person would go to check.
+
+Added `the_rail_offers_a_row_for_every_live_trigger` to that file: a source
+assertion over the non-test half pinning `trigger_toggle_row(rooms,
+TriggerToggle::X, "label",` for all four triggers. The needle stops after the
+label rather than running through the reactive `flag(..)` closure -- what needs
+holding is that the row exists and words the trigger the way the summary words
+it; the closure is already the compiler's business.
+
+Second finding, same fix shape: the half of this slice a user can actually SEE
+-- the call site handing the summary `access.as_ref()` -- had no coverage at
+all, because both unit tests call `trigger_summary` directly and pick their own
+argument. Passing `None` there restores the original bug with all six gates
+green. `the_summary_call_site_passes_the_access_projection` pins it, the same
+answer `the_create_call_passes_the_ci_failure_draft` already gives the sibling
+wiring. Factored the "scan only the half a release build compiles" split into a
+`view_source()` helper the casing test now shares, corrected the module doc so
+it describes the guard that exists rather than the one that did, and fixed a
+stale reference to `trigger_summary`'s `on.push`, which this slice replaced.
+
+Both new tests mutation-checked in the direction that matters -- each FAILS by
+name under the exact mutation the reviewer proved green. Frozen gate re-run
+whole and green: `cargo fmt --check`, wasm32 clippy `-D warnings`, `RUSTFLAGS`
+wasm32 check, `cargo check -p ocean-surface-proxy`, wasm32 `cargo test --no-run`
+(nine executables), native `cargo test -p ocean-surface-ui` at 1189/5/4/2/8/4/
+7/5/2 passed, 0 failed. One test file touched. No migration, no deploy step.
+_________________________________________________________________________________
