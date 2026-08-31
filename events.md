@@ -3779,6 +3779,17 @@ section's "the three live trigger-policy flags" sat directly above four
 "breaking all three working toggles" is four now. The create panel's sibling
 comment had been updated and these had not, so it was an omission.
 
+A third claim in the entry above does not survive its own diff.
+`create_trigger_policy_only_carries_exposed_flags` was described as rewritten
+rather than re-arity'd, on the grounds that its `!policy.on_ci_failure`
+assertion inverted in meaning once the parameter existed. The hunk is two
+changed lines and both are call arities; that assertion and the test's doc
+comment are byte-identical to origin/main. It never inverted -- false in, false
+out, exactly as it read before the parameter. Nothing is broken by it, the test
+is still sound, but it WAS re-arity'd, which is the thing the sentence claims it
+avoided. Recorded because a summary that describes a change it did not make is
+how a later reader stops trusting the rest of the entry.
+
 Gate re-run green on all eight: 1223 UI tests, clippy `--all-targets -D
 warnings`, `cargo fmt --check`, `RUSTFLAGS="-D warnings"` wasm32 check, plus the
 repo's four other frozen gates the first pass skipped -- wasm32 clippy `-D
