@@ -4767,7 +4767,7 @@ ________________________________________________________________________________
 time:      [18:54] [08-31-26]
 agent:     [claude] [opus 5]
 worktree:  loop/surface-ledger-is-eleven-boundaries-short-and-nothing-can-see-it
-type:      ci
+type:      [gh-actions]
 area:      infra
 
 Gave this repo the events.md checker it was the only one of the three missing,
@@ -4793,18 +4793,34 @@ ocean-os's: every executable line is byte-identical, only comments and the usage
 text differ, and the header says so — a fix to any copy ports to the others as a
 patch. `scripts/check-ledger.test.mjs` came with it so the copy cannot drift
 into calling a folded ledger clean; the one test not in the ocean-os original
-pins the 4-of-22 blank-line shape this ledger actually has. In ci.yml the
+pins the 4-of-22 blank-line shape this ledger actually has. REVIEW CAUGHT THAT
+ONE AS DECORATION, correctly: it asserted the rule and the blank that follow the
+prose but nothing after them, so a repair that doubled the blank — the exact
+defect its own name forbids — still passed. It now pins the next `time:` header,
+and is proved by falsification the way entries 2503 and 2521 require: replacing
+the `spaced` ternary in closeEntries with an unconditional `[rule, '']` yields
+`First. / RULE / '' / '' / time:` and takes the suite to 10 pass / 1 fail naming
+that test. A slice whose whole thesis is that unverified assertions about this
+ledger go stale had no business adding one that could not fail. In ci.yml the
 `ledger` job's `if: pull_request` moved off the JOB and onto the diff step,
 because the parse check needs no base branch and a merge folds a separator
 exactly the way a rebase does — this being the repo that gives events.md the
 union driver, a merge is precisely where folds come from, and the old job
 condition meant nothing ledger-related ran on push-to-main at all. Never `--fix`
-in CI. OUT OF SCOPE, FLAGGED: two comment lines in
+in CI. OUT OF SCOPE, FLAGGED: three comment lines in
 scripts/events-merge-driver.test.mjs said "ocean-bedrock has
 scripts/check-ledger.mjs for that; this repo does not", which this commit makes
 false; corrected in place, since a stale comment doing load-bearing reasoning is
 a bug class this ledger has already recorded once. Gate green: fmt, wasm32
 clippy `-D warnings`, `RUSTFLAGS="-D warnings"` wasm32 check, proxy and UI
 tests, plus `node --test scripts/check-ledger.test.mjs` 11/11 and the parse
-check exiting 0 on the repaired file.
+check exiting 0 on the repaired file. Corrected at land time, from the review
+notes: the `type:` field said `ci`, a value with no prior use in this ledger
+(`gh-actions` is the established one); the count above said two comment lines
+where the diff replaces three; and both AGENTS.md and the merge-driver test
+header claimed the job "runs on every push", when the workflow trigger is
+`pull_request` plus `push: branches: [main]` — a push to a loop branch runs
+nothing at all. Overstating a check's coverage in the two places an agent reads
+to decide whether to run it by hand is the same defect this slice exists to
+end.
 _________________________________________________________________________________

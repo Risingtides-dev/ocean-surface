@@ -105,6 +105,7 @@ test('an entry left open with its blank line intact is closed without doubling i
   assert.equal(openEntries(repaired.join('\n')).length, 0);
   assert.equal(repaired[5], RULE, 'the rule lands on the blank line the entry already had after its prose');
   assert.equal(repaired[6], '', 'and exactly one blank still separates it from the next header');
+  assert.match(repaired[7], /^time:/, 'and the next header follows that single blank');
 });
 
 test('a ledger whose every entry is open is fully repaired in one pass', () => {

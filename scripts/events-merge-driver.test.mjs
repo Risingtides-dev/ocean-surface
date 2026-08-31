@@ -35,8 +35,9 @@
 //
 // What it does NOT cover: the fold is reproduced in a scratch repo, never read
 // out of this repo's own events.md. scripts/check-ledger.mjs is the half that
-// reads the real file, and the `ledger` CI job runs it on every push and PR;
-// when it first did, 22 of 269 entries here had already folded open.
+// reads the real file, and the `ledger` CI job runs it on PRs and on pushes to
+// main -- not on a push to a feature branch, which runs nothing at all. When it
+// first ran, 22 of 269 entries here had already folded open.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
