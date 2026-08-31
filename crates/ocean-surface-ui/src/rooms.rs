@@ -269,15 +269,17 @@ pub enum RoomAccessState {
     Revoked,
 }
 
-/// How a room's agents are auto-woken. Mirrors `ocean_core::RoomTriggerPolicy`.
-/// All flags default off. Three triggers are live — the daemon evaluates
-/// `on_mention`, `on_thread_reply` and `on_build_failure` on every
-/// non-agent-authored message (OCEAN-65 / OCEAN-111). `on_component_event`
-/// and `on_schedule` are unwired: nothing ever fires them, and the daemon's
-/// write routes answer a typed 400 (`trigger_unwired`) for a policy carrying
-/// `on_component_event: true` or a set `on_schedule`. Refusal is by VALUE,
-/// not presence, so serializing the defaults is accepted; both fields stay
-/// `Deserialize` because stored dead values remain readable.
+/// How a room's agents are auto-woken. Mirrors `ocean_core::RoomTriggerPolicy`
+/// field for field. All flags default off. Four triggers are live: the daemon
+/// evaluates `on_mention` and `on_thread_reply` per non-agent-authored
+/// transcript message (OCEAN-65 / OCEAN-111), and `on_build_failure` /
+/// `on_ci_failure` per ingested workspace ledger row — a different lane, not a
+/// message evaluation. `on_component_event` and `on_schedule` are unwired:
+/// nothing ever fires them, and the daemon's write routes answer a typed 400
+/// (`trigger_unwired`) for a policy carrying `on_component_event: true` or a
+/// set `on_schedule`. Refusal is by VALUE, not presence, so serializing the
+/// defaults is accepted; both fields stay `Deserialize` because stored dead
+/// values remain readable.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RoomTriggerPolicy {
     /// Wake an agent when it is @-mentioned in the transcript (the common case).
@@ -294,6 +296,19 @@ pub struct RoomTriggerPolicy {
     /// so every policy stored before this field existed keeps its behavior.
     #[serde(default)]
     pub on_build_failure: bool,
+    /// Wake the room's agents when a workspace CI check comes back red. The
+    /// daemon half is live — `ocean_core` carries the flag and a `CiFailure`
+    /// event, the store round-trips the key, and a red
+    /// `room.workspace.ci_checked` row convenes the roster's agents — but this
+    /// surface has no CONTROL for it yet (see `TriggerToggle` in
+    /// `rooms_workspace.rs`), so today the flag only ever arrives already set.
+    /// Mirroring it is what keeps it set: this surface PATCHes the policy
+    /// WHOLESALE, so a room that has it on would lose it to the next flip of
+    /// any other row if this struct did not know the key. A daemon predating
+    /// the field drops it harmlessly — the room write routes deny no unknown
+    /// field.
+    #[serde(default)]
+    pub on_ci_failure: bool,
     /// Unwired: no schedule ever fires, and the daemon refuses any write
     /// where this is set (`trigger_unwired`). Stored crons stay readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2592,8 +2607,26 @@ mod tests {
         assert!(policy.on_mention);
         assert!(policy.on_thread_reply);
         assert!(!policy.on_build_failure);
+        assert!(!policy.on_ci_failure);
         assert!(!policy.on_component_event);
         assert_eq!(policy.on_schedule, None);
+    }
+
+    /// Same compat guarantee one field later: a policy stored while
+    /// `on_build_failure` was the newest flag decodes with `on_ci_failure`
+    /// off, so no room silently gains a wake trigger it never opted into.
+    #[test]
+    fn trigger_policy_without_on_ci_failure_decodes_with_flag_off() {
+        let policy: RoomTriggerPolicy = serde_json::from_value(serde_json::json!({
+            "on_mention": true,
+            "on_thread_reply": false,
+            "on_component_event": false,
+            "on_build_failure": true
+        }))
+        .expect("pre-CI policy should decode");
+        assert!(policy.on_mention);
+        assert!(policy.on_build_failure);
+        assert!(!policy.on_ci_failure);
     }
 
     /// The PATCH body carries the COMPLETE policy under `trigger_policy`
@@ -2602,7 +2635,9 @@ mod tests {
     /// so the always-serialized `on_component_event: false` is accepted and
     /// `on_schedule: None` stays omitted (skip_serializing_if), matching the
     /// daemon's "absent = unset" encoding — a normalized policy's body always
-    /// passes the write gate.
+    /// passes the write gate. `on_ci_failure` rides along the same way: a
+    /// daemon that has never heard of the key drops it (no route denies
+    /// unknown fields), so the body stays valid on both sides of that pair.
     #[test]
     fn policy_patch_body_sends_the_complete_policy() {
         let policy = RoomTriggerPolicy {
@@ -2610,6 +2645,7 @@ mod tests {
             on_thread_reply: false,
             on_component_event: false,
             on_build_failure: true,
+            on_ci_failure: false,
             on_schedule: None,
         };
         let body = serde_json::to_value(RoomPolicyPatchBody {
@@ -2623,7 +2659,8 @@ mod tests {
                     "on_mention": true,
                     "on_thread_reply": false,
                     "on_component_event": false,
-                    "on_build_failure": true
+                    "on_build_failure": true,
+                    "on_ci_failure": false
                 }
             })
         );
