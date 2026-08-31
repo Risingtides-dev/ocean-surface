@@ -3406,6 +3406,35 @@
   color: var(--fg);
 }
 
+/* The onboarding link, below the code and sharing its `__invite-copy` button
+   styling — NOT its copy control, which is a separate flag on purpose so one
+   click cannot make both rows read "copied". It is the same grant in a longer
+   form — the code sits inside the path — so it is painted as text to select,
+   not as an anchor to click. Quieter than the code above it: the code is the
+   thing, this is the thing that explains it. */
+.rooms-workspace__invite-onboard {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+/* `anywhere` is load-bearing, not cosmetic: the URL is one unbroken token and
+   would otherwise push the fixed-width panel out from the inside. */
+.rooms-workspace__invite-onboard-value {
+  flex: 1;
+  min-width: 0;
+  color: var(--fg-2);
+  font-family: var(--mono);
+  font-size: 11px;
+  user-select: all;
+  overflow-wrap: anywhere;
+}
+
 .rooms-workspace__invite-footnote {
   margin-top: 14px;
   font-size: 11px;

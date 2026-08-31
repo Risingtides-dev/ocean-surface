@@ -3464,3 +3464,41 @@ assertion written for them and on nothing else. Gate: 1176+4+8+4+7+5+2 tests
 green (seven new), clippy --all-targets -D warnings clean, fmt --check clean,
 and RUSTFLAGS="-D warnings" cargo check on wasm32-unknown-unknown clean.
 _________________________________________________________________________________
+
+time:      [21:26] [08-30-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-invite-panel-shows-the-onboard-link
+type:      [feature-request]
+area:      [frontend]
+
+The invite panel renders the onboarding link below the code, as one copyable
+thing, now that the daemon composes it. `Invite` decodes a third optional field
+and `onboard_link` is the seam the render maps over: absent renders nothing,
+present-but-blank is dropped, so a daemon pointed at a loopback Bedrock -- which
+suppresses the link on purpose -- shows exactly the panel it showed before.
+
+Painted as text to select, not as an anchor to click. It is the same grant as the
+code in a longer form (the code sits inside the path), so a click that navigates
+would be a click that spends the invite, and the panel's job is to hand it over,
+not to use it. It gets its own copy control with its own signal: one flag behind
+two buttons would make both rows read "copied" off a single click, and a source
+slice over the render now asserts the link block touches `state.copied_link` and
+never `state.copied.` -- reintroducing the shared flag turns that test red where
+before the whole suite stayed green through the mutation.
+
+Adding a field that carries the invite code also switched off a guard where the
+new risk is: `the_rail_line_never_carries_the_code` had both fixtures at
+`onboard_url: None`, so the "the rail line never spells the grant" assertion no
+longer saw the second carrier of it. The first fixture now carries a link
+(`bedrock.invalid`, an obviously fake code), which makes the existing assertion
+cover both; the undated fixture stays None because it exercises the empty
+`expires_at` arm. Making `rail_line` append the link turns it red.
+
+Landing correction: the CSS comment said the block shares the code's copy
+control, which is the exact bug the slice exists to avoid. What is shared is the
+`__invite-copy` class; the comment now says that, and says the flags are separate
+on purpose. Gate: 1211 UI tests green, clippy --all-targets -D warnings clean,
+fmt --check clean, and RUSTFLAGS="-D warnings" cargo check on
+wasm32-unknown-unknown clean. Needs the ocean-os half (its PR #409) to have a
+link to show. No migration, no deploy step.
+_________________________________________________________________________________
