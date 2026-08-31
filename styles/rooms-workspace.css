@@ -4700,8 +4700,7 @@ a.rooms-workspace__compute-ports-row-url:hover {
 .rooms-workspace__authority-narrow,
 .rooms-workspace__authority-requested,
 .rooms-workspace__authority-unavailable,
-.rooms-workspace__authority-membership,
-.rooms-workspace__authority-memory-note {
+.rooms-workspace__authority-membership {
   font-size: 10px;
   line-height: 1.4;
   color: var(--fg-3);
@@ -4727,7 +4726,6 @@ a.rooms-workspace__compute-ports-row-url:hover {
 
 .rooms-workspace__authority-unavailable,
 .rooms-workspace__authority-membership,
-.rooms-workspace__authority-memory-note,
 .rooms-workspace__authority-readonly[data-state="unavailable"] {
   padding: 6px 7px;
   border-left: 2px solid var(--err);

@@ -4498,3 +4498,36 @@ with nothing to explain it", which until now described today's bytes rather
 than a property anything held; it is now carried by a test, so the sentence
 stays. Same four-leg gate re-run green.
 _________________________________________________________________________________
+time:      [14:14] [31-08-26]
+agent:     [codex] [gpt-5.6-sol]
+worktree:  [codex/rooms-phase1-surface-auth-0831]
+type:      [feature-request]
+area:      [frontend]
+
+Prepared the first Surface candidate for Ocean Rooms Phase 1 authorization.
+Non-loopback startup refuses `OCEAN_SURFACE_AUTH=off`; privileged mutation
+support is routed through the platform seam and remains unavailable to
+Tauri/extension builds. Surface consumes server-derived owner eligibility,
+retains exact status-mutation decision ids across uncertain responses, and
+exposes only Active locally available agent bindings as new mention targets
+while preserving full historical rosters. The stale claim that partitioned
+room memory is unavailable was removed now that ocean-os supports
+`memory_scope=room`; the `none`/`room` choice remains.
+
+The proxy integration proof covered authorize, reauthorize, suspend, resume,
+and revoke receiving the proxy-owned mode-0600 key while browser-supplied
+authority headers were not forwarded. Package preview stayed credential-free.
+Added a source guard that keeps the legacy bare `rooms.add_agent` picker removed
+and pins the reviewed authorization panel as the Room-agent entry point. Updated
+the root Rooms and Agent Builder contracts; no child devlog exists for the
+touched crates. This was a review candidate, not a landed or deployed feature.
+
+Candidate verification: `cargo test -p ocean-surface-ui` (1203 unit plus 44
+integration), `cargo test -p ocean-surface-proxy` (60), UI WASM and native
+all-target Clippy with denied warnings, proxy all-target Clippy with denied
+warnings, WASM warnings-as-errors check, WASM test compilation, proxy check,
+`cargo fmt --all -- --check`, release Trunk build, and standalone Tauri check.
+Trunk 0.21.14 rejected the ambient `NO_COLOR=1` value before compilation; the
+same release build passed with only `NO_COLOR` unset. No push, deployment, or
+live daemon mutation was performed from this worktree.
+_________________________________________________________________________________

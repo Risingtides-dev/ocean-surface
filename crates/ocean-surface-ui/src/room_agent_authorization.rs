@@ -8,11 +8,13 @@
 //! never reads or stores that credential. Native and extension hosts remain
 //! explicitly read-only until they have an equivalent privileged transport.
 
+use std::collections::HashSet;
+
 use gloo_net::http::Request;
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::rooms::{encode, FederatedActorType, FederatedRoomRole, RoomAccessState, Rooms};
+use crate::rooms::{encode, RoomAccessState, Rooms};
 
 /// Kept in one function while ocean-os and Surface land concurrently. The
 /// daemon owns the preview: the client must never reproduce its digest or infer
@@ -88,6 +90,8 @@ pub(crate) struct RoomAgentBinding {
     pub room_capability_grants: Vec<String>,
     pub status: BindingStatus,
     #[serde(default)]
+    pub owner_eligible: bool,
+    #[serde(default)]
     pub generation: serde_json::Value,
 }
 
@@ -104,6 +108,8 @@ impl RoomAgentBinding {
 #[derive(Debug, Deserialize)]
 struct BindingsResponse {
     ok: bool,
+    #[serde(default)]
+    owner_eligible: bool,
     #[serde(default)]
     bindings: Vec<RoomAgentBinding>,
     #[serde(default)]
@@ -312,6 +318,29 @@ struct Notice {
     message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingStatusDecision {
+    room: String,
+    agent_member_id: String,
+    action: String,
+    decision_id: String,
+}
+
+fn pending_decision_id<'a>(
+    pending: Option<&'a PendingStatusDecision>,
+    room: &str,
+    agent_member_id: &str,
+    action: &str,
+) -> Option<&'a str> {
+    pending
+        .filter(|pending| {
+            pending.room == room
+                && pending.agent_member_id == agent_member_id
+                && pending.action == action
+        })
+        .map(|pending| pending.decision_id.as_str())
+}
+
 fn classify_error(status: u16, error: Option<String>) -> Notice {
     let message = error.unwrap_or_else(|| format!("authorization request rejected ({status})"));
     let state = match status {
@@ -322,43 +351,12 @@ fn classify_error(status: u16, error: Option<String>) -> Notice {
     Notice { state, message }
 }
 
-fn authority_mutations_supported(is_tauri: bool, is_extension: bool) -> bool {
-    !is_tauri && !is_extension
-}
-
 fn authority_mutations_supported_on_this_host() -> bool {
-    authority_mutations_supported(
-        crate::daemon::running_as_tauri(),
-        crate::daemon::running_as_extension(),
-    )
+    crate::host::room_authority_mutations_supported()
 }
 
-fn caller_can_authorize(rooms: Rooms) -> bool {
-    if !authority_mutations_supported_on_this_host() || !rooms.identity_resolved() {
-        return false;
-    }
-    let identity = rooms.identity_id.get();
-    match rooms.access.get() {
-        Some(access) if access.state == RoomAccessState::Local => {
-            rooms.open_room.get().is_some_and(|room| {
-                room.participants.iter().any(|participant| {
-                    participant.id == identity
-                        && participant.kind == crate::rooms::RoomParticipantKind::Human
-                })
-            })
-        }
-        Some(access) if access.state == RoomAccessState::Live => {
-            let Some(member_id) = access.self_member_id.as_deref() else {
-                return false;
-            };
-            access.members.iter().any(|member| {
-                member.member_id == member_id
-                    && member.actor_type == FederatedActorType::User
-                    && member.role_in_room == FederatedRoomRole::Owner
-            })
-        }
-        _ => false,
-    }
+fn caller_can_authorize(rooms: Rooms, owner_eligible: bool) -> bool {
+    authority_mutations_supported_on_this_host() && rooms.identity_resolved() && owner_eligible
 }
 
 fn grant_is_allowed(preview: &AgentPackagePreview, grant: &str) -> bool {
@@ -411,6 +409,7 @@ fn mint_decision_id() -> Result<String, &'static str> {
 #[derive(Clone, Copy)]
 pub(crate) struct RoomAgentAuthorizationState {
     bindings: RwSignal<Vec<RoomAgentBinding>>,
+    owner_eligible: RwSignal<bool>,
     loaded: RwSignal<bool>,
     busy: RwSignal<bool>,
     notice: RwSignal<Option<Notice>>,
@@ -423,6 +422,7 @@ pub(crate) struct RoomAgentAuthorizationState {
     decision_id: RwSignal<Option<String>>,
     reauthorize_member_id: RwSignal<Option<String>>,
     previous_digest: RwSignal<Option<String>>,
+    pending_status_decision: RwSignal<Option<PendingStatusDecision>>,
     op: RwSignal<u64>,
 }
 
@@ -430,6 +430,7 @@ impl RoomAgentAuthorizationState {
     pub(crate) fn new() -> Self {
         Self {
             bindings: RwSignal::new(Vec::new()),
+            owner_eligible: RwSignal::new(false),
             loaded: RwSignal::new(false),
             busy: RwSignal::new(false),
             notice: RwSignal::new(None),
@@ -442,6 +443,7 @@ impl RoomAgentAuthorizationState {
             decision_id: RwSignal::new(None),
             reauthorize_member_id: RwSignal::new(None),
             previous_digest: RwSignal::new(None),
+            pending_status_decision: RwSignal::new(None),
             op: RwSignal::new(0),
         }
     }
@@ -453,6 +455,24 @@ impl RoomAgentAuthorizationState {
 
     fn current(&self, op: u64, rooms: Rooms, generation: u64, room: &str) -> bool {
         self.op.get_untracked() == op && rooms.room_is_current(generation, room)
+    }
+
+    pub(crate) fn active_agent_member_ids(&self) -> HashSet<String> {
+        self.bindings
+            .get()
+            .into_iter()
+            .filter(|binding| binding.status == BindingStatus::Active)
+            .map(|binding| binding.agent_member_id)
+            .collect()
+    }
+
+    pub(crate) fn active_agent_member_ids_untracked(&self) -> HashSet<String> {
+        self.bindings
+            .get_untracked()
+            .into_iter()
+            .filter(|binding| binding.status == BindingStatus::Active)
+            .map(|binding| binding.agent_member_id)
+            .collect()
     }
 
     fn reset_form(&self) {
@@ -469,7 +489,16 @@ impl RoomAgentAuthorizationState {
 
     fn load_bindings(&self, rooms: Rooms, room: String, generation: u64) {
         let op = self.next_op();
+        if self
+            .pending_status_decision
+            .get_untracked()
+            .as_ref()
+            .is_some_and(|pending| pending.room != room)
+        {
+            self.pending_status_decision.set(None);
+        }
         self.bindings.set(Vec::new());
+        self.owner_eligible.set(false);
         self.loaded.set(false);
         self.busy.set(true);
         self.notice.set(None);
@@ -481,7 +510,9 @@ impl RoomAgentAuthorizationState {
                 Ok(response) => {
                     let status = response.status();
                     match response.json::<BindingsResponse>().await {
-                        Ok(body) if response_ok(status, body.ok) => Ok(body.bindings),
+                        Ok(body) if response_ok(status, body.ok) => {
+                            Ok((body.bindings, body.owner_eligible))
+                        }
                         Ok(body) => Err(classify_error(status, body.error)),
                         Err(_) => Err(Notice {
                             state: NoticeState::Unavailable,
@@ -500,7 +531,10 @@ impl RoomAgentAuthorizationState {
             me.busy.set(false);
             me.loaded.set(true);
             match outcome {
-                Ok(bindings) => me.bindings.set(bindings),
+                Ok((bindings, owner_eligible)) => {
+                    me.bindings.set(bindings);
+                    me.owner_eligible.set(owner_eligible);
+                }
                 Err(notice) => me.notice.set(Some(notice)),
             }
         });
@@ -904,16 +938,31 @@ impl RoomAgentAuthorizationState {
         let Some(room) = rooms.open_key.get_untracked() else {
             return;
         };
-        let decision_id = match mint_decision_id() {
-            Ok(decision_id) => decision_id,
-            Err(message) => {
-                self.notice.set(Some(Notice {
-                    state: NoticeState::Unavailable,
-                    message: message.to_owned(),
-                }));
-                return;
-            }
-        };
+        let agent_member_id = binding.agent_member_id.clone();
+        let existing = self.pending_status_decision.get_untracked();
+        let decision_id =
+            match pending_decision_id(existing.as_ref(), &room, &agent_member_id, action) {
+                Some(decision_id) => decision_id.to_owned(),
+                None => match mint_decision_id() {
+                    Ok(decision_id) => {
+                        self.pending_status_decision
+                            .set(Some(PendingStatusDecision {
+                                room: room.clone(),
+                                agent_member_id: agent_member_id.clone(),
+                                action: action.to_owned(),
+                                decision_id: decision_id.clone(),
+                            }));
+                        decision_id
+                    }
+                    Err(message) => {
+                        self.notice.set(Some(Notice {
+                            state: NoticeState::Unavailable,
+                            message: message.to_owned(),
+                        }));
+                        return;
+                    }
+                },
+            };
         let generation = rooms.generation_snapshot();
         let op = self.next_op();
         let base = rooms.url.get_untracked();
@@ -977,6 +1026,15 @@ impl RoomAgentAuthorizationState {
             me.busy.set(false);
             match outcome {
                 Ok(binding) => {
+                    if pending_decision_id(
+                        me.pending_status_decision.get_untracked().as_ref(),
+                        &room,
+                        &agent_member_id,
+                        action,
+                    ) == Some(decision_id.as_str())
+                    {
+                        me.pending_status_decision.set(None);
+                    }
                     let state = if binding.status == BindingStatus::Revoked {
                         NoticeState::Revoked
                     } else {
@@ -1166,12 +1224,6 @@ fn PackageAuthorizationPreview(
                         </select>
                     </label>
                 </div>
-                {move || (state.memory_scope.get() == "room").then(|| view! {
-                    <div class="rooms-workspace__authority-memory-note" data-state="unavailable">
-                        "Partitioned room-memory execution is unavailable on this node."
-                    </div>
-                })}
-
                 {move || match (state.decision_id.get(), state.preview.get()) {
                     (Some(decision_id), Some(preview)) => view! {
                         <div class="rooms-workspace__authority-confirm" data-state="requested">
@@ -1279,6 +1331,7 @@ pub(crate) fn RoomAgentAuthorizationPanel(
         } else {
             state.next_op();
             state.bindings.set(Vec::new());
+            state.owner_eligible.set(false);
             state.loaded.set(false);
             state.busy.set(false);
             state.notice.set(None);
@@ -1286,7 +1339,7 @@ pub(crate) fn RoomAgentAuthorizationPanel(
         }
     });
 
-    let can_authorize = Memo::new(move |_| caller_can_authorize(rooms));
+    let can_authorize = Memo::new(move |_| caller_can_authorize(rooms, state.owner_eligible.get()));
     let current_preview = move || state.preview.get();
     let authorizable_packages = move || {
         let bindings = state.bindings.get();
@@ -1331,7 +1384,7 @@ pub(crate) fn RoomAgentAuthorizationPanel(
                                     let resume_binding = binding.clone();
                                     let stale_binding = binding.clone();
                                     let revoke_binding = binding.clone();
-                                    let actions = if can_authorize.get() {
+                                    let actions = if can_authorize.get() && binding.owner_eligible {
                                         match status {
                                             BindingStatus::Active => view! {
                                                 <div class="rooms-workspace__authority-actions">
@@ -1577,6 +1630,7 @@ mod tests {
             requested_capabilities: vec![],
             room_capability_grants: vec![],
             status,
+            owner_eligible: true,
             generation: serde_json::json!(1),
         };
         for status in [
@@ -1606,10 +1660,24 @@ mod tests {
     }
 
     #[test]
-    fn native_and_extension_hosts_are_read_only_for_operator_mutations() {
-        assert!(authority_mutations_supported(false, false));
-        assert!(!authority_mutations_supported(true, false));
-        assert!(!authority_mutations_supported(false, true));
-        assert!(!authority_mutations_supported(true, true));
+    fn lost_status_response_reuses_the_exact_decision_id() {
+        let pending = PendingStatusDecision {
+            room: "room-a".into(),
+            agent_member_id: "agent-1".into(),
+            action: "suspend".into(),
+            decision_id: "018f0000-0000-4000-8000-000000000001".into(),
+        };
+        assert_eq!(
+            pending_decision_id(Some(&pending), "room-a", "agent-1", "suspend"),
+            Some("018f0000-0000-4000-8000-000000000001")
+        );
+        assert_eq!(
+            pending_decision_id(Some(&pending), "room-a", "agent-1", "resume"),
+            None
+        );
+        assert_eq!(
+            pending_decision_id(Some(&pending), "room-b", "agent-1", "suspend"),
+            None
+        );
     }
 }

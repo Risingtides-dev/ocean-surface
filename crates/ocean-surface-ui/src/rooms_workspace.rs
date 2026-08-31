@@ -1213,6 +1213,39 @@ fn mention_roster(
     }
 }
 
+/// The roster subset that can be selected as a new mention target.
+///
+/// Humans remain mentionable and every roster member still renders in the
+/// room. Agent candidates, however, require a currently Active local binding;
+/// an unauthorized/suspended/stale/revoked compatibility participant is never
+/// offered as clickable execution intent. Federated access must also project
+/// the local binding as available.
+fn mentionable_roster(
+    local_participants: &[RoomParticipant],
+    access: Option<&RoomAccessProjection>,
+    active_agent_member_ids: &std::collections::HashSet<String>,
+) -> Vec<RoomParticipant> {
+    mention_roster(local_participants, access)
+        .into_iter()
+        .filter(|participant| {
+            if participant.kind != RoomParticipantKind::Agent {
+                return true;
+            }
+            if !active_agent_member_ids.contains(&participant.id) {
+                return false;
+            }
+            match access {
+                Some(access) if access.state != RoomAccessState::Local => access
+                    .members
+                    .iter()
+                    .find(|member| member.member_id == participant.id)
+                    .is_some_and(|member| member.local_binding_available == Some(true)),
+                _ => true,
+            }
+        })
+        .collect()
+}
+
 /// Rank roster candidates for a mention partial: id prefix first, then
 /// display-name prefix, then substring anywhere; stable within each rank and
 /// capped at 8. An empty partial (caret right after `@`) lists the roster.
@@ -1544,7 +1577,11 @@ pub fn RoomsWorkspace(
             .get()
             .map(|room| room.participants)
             .unwrap_or_default();
-        let roster = mention_roster(&local_participants, rooms.access.get().as_ref());
+        let roster = mentionable_roster(
+            &local_participants,
+            rooms.access.get().as_ref(),
+            &room_agent_authority.active_agent_member_ids(),
+        );
         mention_suggestions(&roster, &partial)
     });
     let thread_mention_items = Memo::new(move |_| {
@@ -1556,7 +1593,11 @@ pub fn RoomsWorkspace(
             .get()
             .map(|room| room.participants)
             .unwrap_or_default();
-        let roster = mention_roster(&local_participants, rooms.access.get().as_ref());
+        let roster = mentionable_roster(
+            &local_participants,
+            rooms.access.get().as_ref(),
+            &room_agent_authority.active_agent_member_ids(),
+        );
         mention_suggestions(&roster, &partial)
     });
 
@@ -1579,7 +1620,11 @@ pub fn RoomsWorkspace(
             .get_untracked()
             .map(|room| room.participants)
             .unwrap_or_default();
-        let roster = mention_roster(&local_participants, rooms.access.get_untracked().as_ref());
+        let roster = mentionable_roster(
+            &local_participants,
+            rooms.access.get_untracked().as_ref(),
+            &room_agent_authority.active_agent_member_ids_untracked(),
+        );
         let Some(pick) = mention_suggestion_at(&roster, &partial, idx) else {
             mention_ctx.set(None);
             mention_active.set(0);
@@ -1620,7 +1665,11 @@ pub fn RoomsWorkspace(
             .get_untracked()
             .map(|room| room.participants)
             .unwrap_or_default();
-        let roster = mention_roster(&local_participants, rooms.access.get_untracked().as_ref());
+        let roster = mentionable_roster(
+            &local_participants,
+            rooms.access.get_untracked().as_ref(),
+            &room_agent_authority.active_agent_member_ids_untracked(),
+        );
         let Some(pick) = mention_suggestion_at(&roster, &partial, idx) else {
             thread_mention_ctx.set(None);
             thread_mention_active.set(0);
@@ -2268,9 +2317,10 @@ pub fn RoomsWorkspace(
                                                             .get_untracked()
                                                             .map(|room| room.participants)
                                                             .unwrap_or_default();
-                                                        let roster = mention_roster(
+                                                        let roster = mentionable_roster(
                                                             &local_participants,
                                                             rooms.access.get_untracked().as_ref(),
+                                                            &room_agent_authority.active_agent_member_ids_untracked(),
                                                         );
                                                         let selection = ev
                                                             .target()
@@ -3342,9 +3392,10 @@ pub fn RoomsWorkspace(
                                                         .get_untracked()
                                                         .map(|room| room.participants)
                                                         .unwrap_or_default();
-                                                    let roster = mention_roster(
+                                                    let roster = mentionable_roster(
                                                         &local_participants,
                                                         rooms.access.get_untracked().as_ref(),
+                                                        &room_agent_authority.active_agent_member_ids_untracked(),
                                                     );
                                                     let selection = ev
                                                         .target()
@@ -5931,6 +5982,63 @@ mod tests {
             );
         }
         assert!(mention_roster(&local, None).is_empty());
+    }
+
+    #[test]
+    fn mention_candidates_exclude_agents_without_active_local_authority() {
+        let local = vec![
+            part("human", "Human", RoomParticipantKind::Human),
+            part("active-agent", "Active", RoomParticipantKind::Agent),
+            part("compat-agent", "Compatibility", RoomParticipantKind::Agent),
+        ];
+        let access = test_access(RoomAccessState::Local);
+        let active = std::collections::HashSet::from(["active-agent".to_owned()]);
+        assert_eq!(
+            mentionable_roster(&local, Some(&access), &active),
+            vec![
+                part("human", "Human", RoomParticipantKind::Human),
+                part("active-agent", "Active", RoomParticipantKind::Agent),
+            ]
+        );
+        // Roster rendering remains unchanged for historical attribution.
+        assert_eq!(mention_roster(&local, Some(&access)), local);
+    }
+
+    #[test]
+    fn federated_mention_candidates_require_available_active_binding() {
+        let mut access = test_access(RoomAccessState::Live);
+        access.members = vec![
+            FederatedRoomMemberProjection {
+                member_id: "available".into(),
+                owner_member_id: None,
+                actor_type: FederatedActorType::Agent,
+                role_in_room: FederatedRoomRole::Member,
+                display_name: "Available".into(),
+                public_agent_descriptor: None,
+                joined_at: String::new(),
+                derived_presence: None,
+                local_binding_available: Some(true),
+            },
+            FederatedRoomMemberProjection {
+                member_id: "projection-denied".into(),
+                owner_member_id: None,
+                actor_type: FederatedActorType::Agent,
+                role_in_room: FederatedRoomRole::Member,
+                display_name: "Denied".into(),
+                public_agent_descriptor: None,
+                joined_at: String::new(),
+                derived_presence: None,
+                local_binding_available: Some(false),
+            },
+        ];
+        let active = std::collections::HashSet::from([
+            "available".to_owned(),
+            "projection-denied".to_owned(),
+        ]);
+        assert_eq!(
+            mentionable_roster(&[], Some(&access), &active),
+            vec![part("available", "Available", RoomParticipantKind::Agent)]
+        );
     }
 
     #[test]

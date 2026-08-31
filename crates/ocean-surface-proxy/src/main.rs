@@ -451,6 +451,13 @@ fn read_room_operator_key(path: &FsPath) -> Result<String, String> {
     Ok(key.to_owned())
 }
 
+fn validate_auth_bind(bind: SocketAddr, auth_disabled: bool) -> anyhow::Result<()> {
+    if auth_disabled && !bind.ip().is_loopback() {
+        anyhow::bail!("OCEAN_SURFACE_AUTH=off is allowed only on a loopback bind; got {bind}");
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -506,7 +513,9 @@ async fn main() -> anyhow::Result<()> {
     // since this binds to 0.0.0.0 behind a public tunnel. The browser exchanges
     // them once for an HttpOnly session cookie; unlike an HTTP Basic challenge,
     // that session survives standalone iOS/Chrome PWA launches reliably.
-    let basic_auth = if std::env::var("OCEAN_SURFACE_AUTH").as_deref() == Ok("off") {
+    let auth_disabled = std::env::var("OCEAN_SURFACE_AUTH").as_deref() == Ok("off");
+    validate_auth_bind(bind, auth_disabled)?;
+    let basic_auth = if auth_disabled {
         tracing::warn!("operator login DISABLED (OCEAN_SURFACE_AUTH=off)");
         None
     } else {
@@ -2701,8 +2710,8 @@ mod tests {
         livekit_token_daemon_path, load_users, observatory_token_path, percent_encode_path_segment,
         read_observer_token, read_room_operator_key, room_agent_authority_mutation,
         room_operator_key_path, rooms_persistent_shape, session_auth_gate, session_user,
-        sse_no_buffer_headers, wasm_headers, AppState, ProxyUser, ResolvedDaemon,
-        RoomsPersistentShape, ATTACHMENT_UPLOAD_BODY_LIMIT, CALL_PLACE_DAEMON_PATH,
+        sse_no_buffer_headers, validate_auth_bind, wasm_headers, AppState, ProxyUser,
+        ResolvedDaemon, RoomsPersistentShape, ATTACHMENT_UPLOAD_BODY_LIMIT, CALL_PLACE_DAEMON_PATH,
         JSON_FORWARD_TIMEOUT, SESSION_COOKIE, WASM_CACHE_CONTROL,
         WORKSPACE_COMMAND_FORWARD_TIMEOUT,
     };
@@ -2711,12 +2720,21 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    #[test]
+    fn auth_off_requires_loopback_bind() {
+        assert!(validate_auth_bind("127.0.0.1:8790".parse().unwrap(), true).is_ok());
+        assert!(validate_auth_bind("[::1]:8790".parse().unwrap(), true).is_ok());
+        assert!(validate_auth_bind("0.0.0.0:8790".parse().unwrap(), true).is_err());
+        assert!(validate_auth_bind("[::]:8790".parse().unwrap(), true).is_err());
+        assert!(validate_auth_bind("0.0.0.0:8790".parse().unwrap(), false).is_ok());
+    }
+
     use axum::{
         body::{Body, Bytes},
         extract::DefaultBodyLimit,
         http::{header, HeaderValue, Request, StatusCode},
         middleware,
-        routing::{get, post},
+        routing::{delete, get, post},
         Json, Router,
     };
     use base64::Engine;
@@ -4408,20 +4426,34 @@ mod tests {
     }
 
     async fn spawn_room_authority_daemon() -> (String, tokio::task::JoinHandle<()>) {
-        let app = Router::new().route(
-            "/v1/rooms/persistent/{key}/agents",
-            get(|| async { Json(json!({"ok": true, "bindings": []})) }).post(
-                |headers: HeaderMap| async move {
-                    Json(json!({
-                        "operator": headers
-                            .get("x-ocean-operator")
-                            .and_then(|value| value.to_str().ok()),
-                        "cookie": headers.contains_key(header::COOKIE),
-                        "origin": headers.contains_key(header::ORIGIN),
-                    }))
-                },
-            ),
-        );
+        async fn received_headers(headers: HeaderMap) -> Json<Value> {
+            Json(json!({
+                "operator": headers
+                    .get("x-ocean-operator")
+                    .and_then(|value| value.to_str().ok()),
+                "cookie": headers.contains_key(header::COOKIE),
+                "origin": headers.contains_key(header::ORIGIN),
+                "referer": headers.contains_key(header::REFERER),
+            }))
+        }
+
+        let app = Router::new()
+            .route(
+                "/v1/rooms/persistent/{key}/agents",
+                get(|| async { Json(json!({"ok": true, "bindings": []})) }).post(received_headers),
+            )
+            .route(
+                "/v1/rooms/persistent/{key}/agents/preview/{package}",
+                get(received_headers),
+            )
+            .route(
+                "/v1/rooms/persistent/{key}/agents/{member}/{action}",
+                post(received_headers),
+            )
+            .route(
+                "/v1/rooms/persistent/{key}/agents/{member}",
+                delete(received_headers),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind room authority upstream");
@@ -4433,7 +4465,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn room_authority_key_is_injected_server_side_on_mutation_only() {
+    async fn every_room_authority_mutation_gets_only_the_server_side_key() {
         let (daemon_url, upstream) = spawn_room_authority_daemon().await;
         let credential_dir = tempfile::tempdir().expect("credential tempdir");
         let key_path = credential_dir.path().join("operator.key");
@@ -4474,20 +4506,65 @@ mod tests {
         assert_eq!(seen["operator"], "proxy-owned-authority");
         assert_eq!(seen["cookie"], false);
         assert_eq!(seen["origin"], false);
+        assert_eq!(seen["referer"], false);
 
-        // Inspection is credential-free by contract. It succeeds without
-        // special forwarding and the browser never sees the key.
+        for (method, path) in [
+            (
+                "POST",
+                "/v1/rooms/persistent/team/agents/member-1/reauthorize",
+            ),
+            ("POST", "/v1/rooms/persistent/team/agents/member-1/suspend"),
+            ("POST", "/v1/rooms/persistent/team/agents/member-1/resume"),
+            ("DELETE", "/v1/rooms/persistent/team/agents/member-1"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header("x-ocean-operator", "browser-forged")
+                        .header(header::REFERER, "https://surface.example/private-room")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .expect("authority mutation response");
+            assert_eq!(response.status(), StatusCode::OK, "{method} {path}");
+            let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .expect("authority mutation body");
+            let seen: Value = serde_json::from_slice(&body).expect("authority mutation json");
+            assert_eq!(
+                seen["operator"], "proxy-owned-authority",
+                "{method} {path} must use proxy-owned authority"
+            );
+            assert_eq!(seen["referer"], false, "{method} {path}");
+        }
+
+        // Inspection is credential-free by contract. Even explicitly forged
+        // browser authority and a room-bearing Referer are stripped rather
+        // than forwarded to the daemon or replaced by the proxy-owned key.
         let inspected = app
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/v1/rooms/persistent/team/agents")
+                    .uri("/v1/rooms/persistent/team/agents/preview/researcher")
+                    .header("x-ocean-operator", "browser-forged")
+                    .header(header::REFERER, "https://surface.example/private-room")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .expect("inspect response");
         assert_eq!(inspected.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(inspected.into_body(), 64 * 1024)
+            .await
+            .expect("inspect body");
+        let seen: Value = serde_json::from_slice(&body).expect("inspect json");
+        assert_eq!(seen["operator"], Value::Null);
+        assert_eq!(seen["referer"], false);
         upstream.abort();
     }
 
