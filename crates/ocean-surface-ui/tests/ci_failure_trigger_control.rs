@@ -185,9 +185,17 @@ fn the_ci_failure_label_is_capitalized_everywhere() {
         "`ci failure` is the wrong casing for an initialism; both the rail row \
          and the policy summary say `CI failure`",
     );
+    // The needle names the RAIL's call site, not the bare literal, so a match
+    // anywhere else in the file cannot satisfy it. `trigger_toggle_row(rooms,`
+    // is load-bearing in it: the create panel now passes the same variant and
+    // the same label to `create_trigger_row`, so without that prefix this
+    // assertion is satisfied by the create rail alone and stops saying anything
+    // about the row its message names. Measured, not assumed — relabelling the
+    // rail row and leaving the create rows alone fails this test with the
+    // prefix and PASSES it without.
     assert!(
         without_whitespace(&view_source("rooms_workspace.rs"))
-            .contains(r#"TriggerToggle::CiFailure,"CIfailure","#),
+            .contains(r#"trigger_toggle_row(rooms,TriggerToggle::CiFailure,"CIfailure","#),
         "the rail row must label this trigger `CI failure`, the same casing \
          the summary returns",
     );

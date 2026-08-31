@@ -4443,11 +4443,35 @@ four rows go through the helper and that `disabled=` consults the note. No CSS â
 #164 already gave these rows `:has(input:disabled)` and `__trigger-note` is
 already styled globally.
 
-Gate green: `cargo test -p ocean-surface-ui` 1196 passed / 0 failed plus all
-integration binaries green; `cargo clippy -p ocean-surface-ui --all-targets --
--D warnings` exit 0; `cargo fmt --check` clean; `RUSTFLAGS="-D warnings" cargo
-check -p ocean-surface-ui --target wasm32-unknown-unknown` clean. No migration,
-no deploy step.
+One reviewer note taken at land, and it is the same defect class this slice was
+sent back for the first time. `the_ci_failure_label_is_capitalized_everywhere`
+documents its positive assert as naming "the rail's CALL SITE rather than the
+bare literal", so a match elsewhere in the file cannot satisfy it. That stopped
+being true here: the needle was `TriggerToggle::CiFailure,"CIfailure",`
+whitespace-stripped, and the create panel now passes the same variant and the
+same label to `create_trigger_row`, so the create rail alone satisfied it. The
+needle now carries `trigger_toggle_row(rooms,`. Measured rather than argued:
+relabelling the RAIL row while leaving the create rows saying `CI failure` fails
+this test with the prefix and PASSES it without -- 2 failures against 1.
+
+Gate re-run after rebasing onto main (which carried this wave's other surface
+slice): `cargo test -p ocean-surface-ui` 1249 passed / 0 failed across 10
+targets; `cargo clippy -p ocean-surface-ui --all-targets -- -D warnings` exit 0;
+`cargo fmt --all --check` exit 0; `RUSTFLAGS="-D warnings" cargo check -p
+ocean-surface-ui --target wasm32-unknown-unknown` exit 0; `cargo check -p
+ocean-surface-proxy` exit 0. The slice's load-bearing mutation was re-run AFTER
+the rebase, not just the gate, because this guard reads its own source through
+`include_str!` and a rebase is exactly where such a test goes vacuous while
+staying green: deleting the create row's `__trigger-note` span while leaving
+`disabled=` intact still fails it. No migration, no deploy step.
+
+This entry's boundary was hand-resolved. Both surface slices this wave appended
+to this file and ocean-surface has neither a union merge driver nor a ledger
+checker, so the rebase raised a real conflict whose two sides were complete
+entries sharing one trailing rule. Both were kept and the eaten separator
+restored; the resolution was then proved rather than eyeballed -- the first 4386
+lines of this file are byte-identical to origin/main's copy, so the append
+disturbed nothing already landed.
 _________________________________________________________________________________
 
 time:      [13:22] [08-31-26]
