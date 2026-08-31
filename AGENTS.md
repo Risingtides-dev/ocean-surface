@@ -516,10 +516,16 @@ permanently unpressable.
    deletion lets the control be renamed to anything. All six here were checked
    both ways.
 
-Mutation-verifying is cheap: the guard binary reads `src/` at RUNTIME and does
-not depend on it at compile time, so `cargo test --test unheld_room_controls`
-re-runs against a mutated `src/` with no rebuild, and the mutation does not
-even have to compile.
+**Budget the mutation runs; they are not free.** The guard reads `src/` at
+RUNTIME, but cargo builds every bin target of the package before it will run an
+integration test — it has to, for `CARGO_BIN_EXE_*` — so every `cargo test
+--test unheld_room_controls` against a mutated `src/` pays a full `Compiling
+ocean-surface-ui`, measured at ~30s in this tree. The mutation therefore MUST
+compile: append `this is not rust at all !!!` to any module and the run dies at
+`error: could not compile ocean-surface-ui (bin "ocean-surface-ui")` having
+executed no test at all. That same rebuild is what makes the RED rows above
+legible — a compiler-held control announces itself as a build error, not as a
+guard that passed.
 
 **A control measured as compiler-held is a finding, not a failure.** Record it
 and move on — but record it, because the hold has a shelf life. The rail rows

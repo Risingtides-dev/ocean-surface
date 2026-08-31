@@ -4032,3 +4032,48 @@ test -p ocean-surface-ui` at 1232 passed / 0 failed across all targets. Also ran
 invocation that lints the added test lines: clean. Test-only change; no
 migration, no deploy step.
 _________________________________________________________________________________
+
+time:      [09:33] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-has-no-test-that-can-see-a-control-was-deleted
+type:      [review]
+area:      [testing]
+
+Correction to the entry above and to the AGENTS.md paragraph it landed with.
+Both claimed mutation-verifying the control guards is nearly free — "the guard
+binary reads src/ at runtime and does not depend on it at compile time, so
+`cargo test --test unheld_room_controls` re-runs against a mutated src/ with no
+rebuild and the mutation need not compile." That is false, review caught it, and
+one command settles it: appending `this is not rust at all !!!` to room_repo.rs
+and running the documented command exits at `error: could not compile
+ocean-surface-ui (bin "ocean-surface-ui") due to 1 previous error` with no test
+executed. Cargo builds every bin target of the package before it will run an
+integration test — it has to, for CARGO_BIN_EXE_* — so the crate's own binary is
+compiled whether the guard needs it or not. Measured the compiling case as well:
+deleting room_summary.rs:587-601, the whole `open` button, costs a full
+`Compiling ocean-surface-ui` at ~30s wall clock and then the guard fires
+(the_summary_rail_offers_the_only_door_to_the_summarize_panel FAILED, 5 passed 1
+failed). The entry above contains its own refutation and nobody read it that
+way: the RED rows in its measurement table ARE compile errors, which can only
+happen because the bin is being compiled.
+
+So the procedure a future builder inherits is the opposite of what was written.
+The mutation MUST compile, and every mutated run pays a bin rebuild — budget
+~30s per mutation, not zero — which also means a mutation that fails to build is
+not evidence of anything, because the guard never ran. AGENTS.md now says that,
+and says why the RED rows look like build failures rather than passing guards.
+The entry above keeps its wrong sentence because this ledger is append-only;
+this entry is the correction. Nothing else moved: the six pins, the shared
+toolkit, and the measurement table all survived the reviewer's independent
+re-mutation of all six controls and are untouched, as is src/.
+
+Frozen gates all green, re-run whole after the edit: `cargo fmt --check`, `cargo
+clippy -p ocean-surface-ui --target wasm32-unknown-unknown -- -D warnings`,
+`RUSTFLAGS="-D warnings" cargo check -p ocean-surface-ui --target
+wasm32-unknown-unknown`, `cargo check -p ocean-surface-proxy`, `cargo test -p
+ocean-surface-ui --target wasm32-unknown-unknown --no-run`, and `cargo test -p
+ocean-surface-ui` at 1232 passed / 0 failed across all targets, plus `cargo test
+-p ocean-surface-proxy` at 54 and `cargo clippy -p ocean-surface-ui
+--all-targets -- -D warnings`, the only invocation that lints the test lines:
+every one exit 0. Docs-only change; no migration, no deploy step.
+_________________________________________________________________________________
