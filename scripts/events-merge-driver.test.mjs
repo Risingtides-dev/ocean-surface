@@ -34,9 +34,9 @@
 // warning in AGENTS.md, not to loosen it.
 //
 // What it does NOT cover: the fold is reproduced in a scratch repo, never read
-// out of this repo's own events.md, so a fold that has already landed here goes
-// on being invisible. ocean-bedrock has scripts/check-ledger.mjs for that; this
-// repo does not.
+// out of this repo's own events.md. scripts/check-ledger.mjs is the half that
+// reads the real file, and the `ledger` CI job runs it on every push and PR;
+// when it first did, 22 of 269 entries here had already folded open.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';

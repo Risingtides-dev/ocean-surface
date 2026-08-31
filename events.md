@@ -44,6 +44,7 @@ regressions. Grouped message timestamps now remain visible on touch/non-hover
 surfaces. Frozen gates passed: fmt/diff, wasm UI and proxy checks, strict wasm
 clippy, wasm test no-run, and native UI 787/787 plus auxiliary suites. Independent
 follow-up review was CLEAR.
+_________________________________________________________________________________
 
 time:      [01:15pm] [07-19-26]
 agent:     [claude] [ocean TUI]
@@ -58,6 +59,7 @@ zoomed the viewport. Added a `@media (pointer: coarse)` 16px floor for
 `.ocean-composer__input` in styles/compact.css — keyed on pointer
 coarseness (iPads zoom too), not the 720px breakpoint. Shell already uses
 100dvh so keyboard resize was fine. CSS-only. Committed 98c8a59, pushed.
+_________________________________________________________________________________
 
 time:      [11:52pm] [07-18-26]
 agent:     [ocean] [ocean-prs gate-authority]
@@ -70,6 +72,7 @@ Lane D: file preview intent — resolve, fetch, render (Tauri + web). 7 files,
 462 passed. Frozen gates: fmt, clippy wasm32 -D warnings, check wasm32,
 check proxy, test wasm32 --no-run, test native. Patch-id f2087203bb18cc5c.
 8 review rounds (v1→v8) with independent codex re-trace. Committed 4b932aa.
+_________________________________________________________________________________
 
 time:      [11:25pm] [06-26-26]
 agent:     [codex] [gpt-5]
@@ -1339,6 +1342,8 @@ deepseek-v4-pro (least-flaky of a currently-flaky provider set; codex/claude
 multi-minute provider STALLS remains an ocean-os follow-up (daemon holds the
 turn Running with no terminal frame; surface clears cleanly only on emitted
 TurnFinished).
+_________________________________________________________________________________
+
 time:      [11:08pm] [07-09-26]
 agent:     [codex] [gpt-5.6-sol]
 worktree:  gitbutler/workspace
@@ -1382,6 +1387,8 @@ type:      [feature-request]
 area:      [frontend]
 
 Shipped the voice-first menu IA and completed the STT/TTS ownership migration. The voice menu now leads with the two products - Voice chat (live speech-to-speech) then Dictate (transcript into the composer) - with a muted Microphone group label above the demoted Off / Push to talk / Hands-free radios and the Spoken replies toggle unchanged; pure presentation, no mode/persistence changes. The proxy's /api/stt and /api/tts stopped calling xAI directly: they forward to the daemon's new /v1/voice/stt and /v1/voice/tts (paired ocean-os landing fc8f5000), the xAI key/client/resolver code was deleted from the proxy, has_auth now reports route availability with per-request errors carrying daemon credential state, and the daemon-response translation is a pure unit-tested fn. AGENTS.md/README updated: the proxy holds no provider credentials. Verified 292 UI tests, 16 proxy tests, wasm check, live daemon round-trips (stt 200 {text:""} on a tone clip, tts 200 audio/mpeg 22KB), and the realtime mint now returns 200 with an ephemeral secret on the rebuilt daemon - Voice chat is live end-to-end pending a real-mic session.
+_________________________________________________________________________________
+
 time:      [03:51pm] [07-10-26]
 agent:     [claude] [fable-5]
 type:      [merge]
@@ -1443,6 +1450,8 @@ FilesPanel selected_path signal removed, dir_row recursion-only param dropped
 daemon_stop host seam + allow(too_many_arguments) on rehydrate_transcript with
 rationale. Gates on this exact tree: CI's five steps green locally (proxy
 build/test/clippy, ui wasm check/clippy 0 errors) + 296 host tests.
+_________________________________________________________________________________
+
 time:      [5:49pm] [07-10-26]
 agent:     [omp] [gpt-5.6-sol]
 worktree:  /tmp/ocean-realtime-signal-fix (origin/main detached)
@@ -2388,6 +2397,8 @@ GCP. GitHub secret-scanning alert 1 was resolved as `revoked`; current public
 `origin/main` retains containment commit `05f5283` and has zero
 Google-key-shaped literals in the proxy source. Public history was intentionally
 left intact because prior objects remain in public fork and PR refs.
+_________________________________________________________________________________
+
 time:      [07:07] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-71-traversal (fable, self-claimed)
@@ -2411,6 +2422,8 @@ type:      bug-report
 area:      infra
 
 TASK-73 landed a26f1e2 — proxy audit MEDIUM+LOW batch, closing the audit's actionable set (71 traversal, 72 headers, 73 this). The consequential one: every forward shared the untimed client SSE requires, so a wedged daemon hung each buffered JSON passthrough forever with no bound — split into a 120s-timeout client for buffered forwards, untimed retained for the four SSE stream paths. Also constant-time credential compare (local helper, no crypto dep on a boundary binary; both halves compared unconditionally), opaque error bodies (502s leaked the daemon bind address; the Observatory 503 leaked the FULL path of the credential file), dropped CorsLayer::permissive() which answered preflights BEFORE the auth gate and stamped * on 401s, oversized bodies now 413 instead of silently becoming EMPTY forwarded requests, and the boot log records that auth is on rather than who. PROBE FOUND WHAT TESTS DID NOT, twice: three stt/tts error sites a naive string replace missed, and a stale probe process from the TASK-72 lane still holding the port so my first run measured the OLD binary and reported false failures. Lesson recorded: kill probe processes by PORT not by path pattern, and re-verify the binary under test is the one bound. Final probe on the correct binary: good creds 200, wrong pass 401, wrong user 401, body exactly "daemon unreachable", zero CORS headers, four security headers present, no username logged. 22 tests, fmt, clippy raw-exit 0.
+_________________________________________________________________________________
+
 time:      [09:36] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-74-csp-report (fable, self-claimed)
@@ -2418,6 +2431,8 @@ type:      feature-request
 area:      infra
 
 TASK-74 PART 1 landed 68770cf: CSP violation sink at /csp-report. TASK-72's report-only policy had nowhere to report — decorative, browser-console only. Now it produces operator-visible signal, which is the prerequisite for enforcing script-src on evidence rather than assumption. DESIGN CALL worth recording: my first draft put it under /api/csp-report and the new test caught a 401 — /api/ is hard-rejected by the auth namespace guard, and that guard is precisely what makes the exemption list safe to reason about (audit finding L4). Rather than special-case /api/ and weaken a durable invariant for one endpoint, I moved the endpoint to root and allow-listed it explicitly. The test earned its keep on its first run. Handler is deliberately boring because it is publicly reachable: 16KB cap, body never trusted as structure, always 204 (a browser must never retry or show an error), info-level (violations are EXPECTED during measurement, must not read as incidents), handles both legacy envelope and flat shape. Probe-verified live: 204 without auth, garbage swallowed, report-uri in policy, app still serves, violation logged with parsed fields. PART 2 (nonce-enforced script-src) is now tractable and evidence-driven — the shell already propagates script[nonce] and has only two script tags — but should wait for real collected data before flipping enforcement on a live app.
+_________________________________________________________________________________
+
 time:      [10:23] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-76-tab-guidance (fable, self-claimed)
@@ -2425,6 +2440,8 @@ type:      bug-report
 area:      frontend
 
 TASK-76 landed 7ac844c — prompt injection via browser tab titles, found by the first extension audit and confirmed by reading the daemon in the sibling repo (which the audit could not see). Chain: any site the operator has open authors document.title -> extension snapshots it verbatim -> surface interpolated it into prose with NO escaping/cap/delimiter -> shipped as AgentTurnRequest::guidance -> daemon apply_turn_guidance HONORS it and renders under "Operator guidance for this turn:". Website text therefore reached a tool-ungated agent wearing OPERATOR authority, zero-click (tab open + operator types anything). ROOT CAUSE OF THE MISS: a stale in-repo comment (ocean-gui canvas/context.rs, OCEAN-143) asserted guidance was "a silent no-op, daemon discards it" — false on current daemon main. A comment was doing load-bearing safety reasoning and the code disagreed; this is the second time tonight code-over-comments mattered. Fix REMOVES the freeform channel rather than escaping it: the structured client_context path carries the same snapshot and is already sanitized daemon-side (sanitize_browser_field — cap, control chars collapsed, markdown neutered), so no capability is lost and one unsanitized channel disappears. Regression pins the SOURCE (the three builder fns are gone; reintroducing prose requires re-adding a producer) with needles assembled at runtime — a literal matched the test's own source and failed on first run, which is exactly the self-reference trap worth recording. 684+ tests, wasm, fmt, clippy raw-exit 0. SEVERITY CORRECTION recorded in the artifact: the explorer rated the structured path equally unsanitized; it is not, and I documented the daemon-side hardening rather than inflating the finding.
+_________________________________________________________________________________
+
 time:      [10:39] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-77-ext-hygiene (fable, self-claimed)
@@ -2432,6 +2449,8 @@ type:      refactor
 area:      frontend
 
 TASK-77 landed 8b22135, closing the extension audit's actionable set (76 injection, 77 this). Dropped the `storage` permission (zero chrome.storage refs anywhere — session state uses web localStorage) and the dead `ws://` connect-src entry (no WebSocket client exists; live updates are SSE). On an extension whose only network peer is an unauthenticated tool-executing daemon, unused permission/CSP latitude is worth deleting rather than leaving as future rope. Also percent-encoded session ids at four daemon-URL sites: NOT a live traversal (ids are daemon- or extension-localStorage-sourced, sidepanel takes no query params) but it is the exact raw-interpolation pattern that produced the CONFIRMED proxy traversal in TASK-71, and rooms.rs already did it correctly — consistency now instead of one module disciplined and its neighbour not. Regression covers encoder behavior on path-breaking chars AND pins that raw interpolation cannot return; its needle is runtime-assembled because a literal matched the test's own COMMENT and failed on first run — second occurrence of the self-reference trap in two tasks, now called out in both tests so the next person does not rediscover it. Gates: 684+ tests, wasm, fmt, clippy, and a real scripts/build-extension.sh run, all raw-exit 0.
+_________________________________________________________________________________
+
 time:      [11:14] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-78-daemon-bin (fable, self-claimed)
@@ -2439,6 +2458,8 @@ type:      bug-report
 area:      infra
 
 TASK-78 landed 17efb95 — first Tauri shell audit (tauri-audit-raw-v1.md) found a native code-execution primitive reachable from the webview: daemon_start/daemon_restart took a binary path from IPC, trimmed and non-empty-checked it, and handed it to ProcessCommand::spawn as a DETACHED child (not kill_on_drop) with output to a log file — silent, outliving the app. KEY FACT worth internalising: Tauri 2 capabilities do NOT gate generate_handler! commands (only plugin/core: ones), so this crate's genuinely minimal capability set — no fs, shell, http, or process plugins, shell:allow-execute absent — gave ZERO protection. The chain: daemon runs tools ungated so a turn can already write+chmod a payload; this supplied the missing exec primitive from a TCC-blessed native process. Authority was entirely unused (both callers passed None), so removal cost nothing. Closed on BOTH sides so it cannot return from either end: native commands take no path, wasm host seam sends none. The resolver signature is now the boundary — re-adding an explicit param breaks its test at compile time. THIRD self-reference trap today: my own explanatory doc comment matched the source-assertion needle; runtime-assembled and noted in-test. Gates: ocean-tauri 27 tests, surface 684+ across 7 suites, wasm, fmt, surface clippy all raw-exit 0. NOTE: ocean-tauri carries 8 PRE-EXISTING clippy errors on clean main (crate was never in the gate chain) — I verified my change adds none rather than fixing them in a security commit; worth its own hygiene task. Audit also CLEARED the deep-link handler (no fs/shell/nav/eval), the capability set, open_file's traversal check (correctly canonicalizes both sides), and confirmed TASK-63's Info.plist landed clean. Remaining open from it: no CSP + devtools in release (F2), deep-link id charset validation (F3), open_external_url gesture enforcement (F4).
+_________________________________________________________________________________
+
 time:      [11:36] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-80-deeplink-id (fable, self-claimed)
@@ -2446,6 +2467,8 @@ type:      bug-report
 area:      frontend
 
 TASK-80 landed 301c052 (Tauri audit F3). Deep links are attacker-triggerable by construction — any web page can navigate to ocean://…, and macOS scheme prompts are per-browser and commonly suppressed after first accept — and that untrusted string drove a real state change (foreground + active-session switch, clearing state and reconnecting the SSE tail) with no validation beyond non-empty/no-slash. parse_deep_link now requires the daemon-minted shape (ASCII alnum + - _, length-bounded); percent-encodings, dot segments, control chars, whitespace and unbounded input are rejected before becoming a DeepLinkAction. DEFENCE IN DEPTH, not a duplicate traversal fix: TASK-77 already encodes at the daemon URL format sites, so a malformed id was being safely encoded and then failing downstream as a confusing 404 — rejecting at the boundary is both safer and a better error. Tests cover the smuggling shapes AND assert uuid/slug/at-limit ids still work, because a guard that breaks the feature it protects is not a fix. NOTE the residual I did NOT close and left on the ticket: a website can still force a switch to a VALID id it happens to know — that needs a confirmation prompt, which is a UX decision rather than a validation one. Audit had CLEARED the native handler itself (shows window, re-emits, no fs/shell/nav/eval) — the entire gap was downstream in the surface. Gates: 684+ tests across 7 suites, wasm, fmt, clippy all raw-exit 0.
+_________________________________________________________________________________
+
 time:      [12:05] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-81-tauri-clippy (fable, self-claimed)
@@ -2453,6 +2476,8 @@ type:      refactor
 area:      infra
 
 TASK-81 landed 75adc95: cleared 6 clippy errors that sat on clean main in crates/ocean-tauri (doc comment split by a blank line, unused test import, hand-written Default -> derive with #[default], two same-type usize casts, useless format!). All mechanical, zero behavior change. THE REAL FINDING IS THE GAP, not the lints: the CI scope note enumerated THREE crates and ocean-tauri was not among them, so no gate ever ran over it and errors accumulated silently — the same crate that turned out to hold TASK-78's arbitrary-exec primitive. I deliberately did NOT add a CI job I cannot validate from this machine; instead the scope note now names the crate, records why it is ungated, and hands the next person the two concrete blockers, both verified by hand: (1) generate_context! panics at COMPILE time when frontendDist ../../dist is missing so even cargo check fails in a bare checkout — a stub dist/index.html suffices for a lint gate; (2) webkit2gtk/libsoup on the ubuntu runner, or a macOS runner. Removing dist/ reproduces the documented panic exactly, so the note is tested prose rather than a guess. Crate is clippy-clean now, so the job should go green first run — if not, the runner setup is at fault, not the source. Verified: 27 tauri tests, fmt clean, clippy -D warnings exit 0 with dist present.
+_________________________________________________________________________________
+
 time:      [12:46] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-82-traversal-bypass (fable)
@@ -2460,6 +2485,8 @@ type:      bug-report
 area:      infra
 
 TASK-82 landed 947e099 — MY TASK-71 FIX WAS BYPASSED AND I SHIPPED IT. The guard ran on the RAW request path in proxy_rooms_persistent and matched only literal dot segments, so %2e%2e passed; the url crate decodes BEFORE RFC-3986 collapse, so the traversal worked anyway. Confirmed on the LIVE proxy before fixing: raw ../../.. -> 400 blocked, %2e%2e x3 -> 200 REACHED THE DAEMON. proxy_longhouse was never affected (guards the already-decoded axum Path capture). TWO CAUSES, both mine: (1) the guard's own doc said "call this on the DECODED tail" and one of its two call sites passed the raw path — a rule depending on every caller passing the right form eventually meets a caller that does not, so the guard now decodes internally and is correct on either input; (2) my probe matrix tested raw-on-rooms and encoded-on-longhouse, never encoded-on-rooms — a partial matrix READS as thorough and proves nothing. Regression now enumerates {raw, encoded, mixed-case} x both forwarders. Decoding is single-pass to match the url crate exactly (%252e stays literal '%2e', which upstream also will not collapse); malformed escapes preserved literally so nothing decodes into something shorter that looks safe. Re-probed full matrix: all traversals 400, legitimate room.v2 still routes, listener received ONLY the legitimate request. FOUND BY the adversarial review I commissioned over my own nine solo landings — the single most valuable thing I did today was doubt my own work. Reviewer also flagged four more real defects (stt/tts/observatory still on the untimed client; TASK-77 missed three interpolation sites; tauri open_file takes a caller-supplied root so its containment check is self-satisfiable; TASK-76's guidance:None assertion is tautological) — all filed rather than fixed in this commit.
+_________________________________________________________________________________
+
 time:      [13:05] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-85-open-file (fable)
@@ -2467,6 +2494,8 @@ type:      bug-report
 area:      infra
 
 TASK-85 landed 1c9fd0f (adversarial-review finding). open_file's containment check is correctly WRITTEN but structurally vacuous: both root and path come from the same IPC caller, so target.starts_with(&root) is self-satisfiable — root "/" passes any absolute path — and Tauri 2 capabilities do not gate generate_handler! commands. On macOS opener::open IS open(1), so that made it an arbitrary-file-EXECUTION primitive: .command/.terminal/.workflow/.scpt run, as does anything with the exec bit. Same threat model TASK-78 closed, different door — daemon writes and chmods a payload, this launches it. Making root trustworthy would require the shell to independently know the session workspace, which it does not today, so rather than pretend the check is a boundary I closed the CONSEQUENCE: refuse targets macOS would execute (extension denylist, case-insensitive, plus any executable bit — the shape a tool-writing daemon actually produces). Root check REMAINS as defence in depth and is now documented as such in-code so the next reader cannot mistake it for a boundary. Tests drive the real predicate against real files: .command/.COMMAND/.terminal/.workflow/.scpt and an exec-bit .txt all refused; md/json/png/pdf/extensionless all still open — a guard that blocks the feature it protects is not a fix. 28 tauri tests, clippy, fmt green. NOTE the remaining structural debt this does NOT fix: watch_paths and repo_state still accept arbitrary caller paths (watchers anywhere, git metadata leak) — same root cause, filed in the TASK-85 ticket text for whoever pins roots shell-side properly.
+_________________________________________________________________________________
+
 time:      [13:34] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-83-timeouts (fable)
@@ -2474,6 +2503,8 @@ type:      bug-report
 area:      infra
 
 TASK-83 landed 6cc5a2d — finishing TASK-73, whose commit message claimed the timeout split covered "every buffered JSON passthrough" and did not. Three handlers stayed on the untimed SSE client: stt (buffers via .json()), tts (via .bytes()), and observatory /snapshot + /replay — so dictation, speech and Observatory still hung forever on a wedged daemon. Observatory needed a BRANCH not a swap: one handler serves both an SSE tail and buffered routes, and the client was chosen BEFORE the branch that distinguishes them; it now picks by route shape, tail keeps the untimed client (a timeout there severs a live session), buffered routes get the bounded one. Verified the inverse mistake never happened — exactly three untimed uses remain, all genuine SSE tails. REGRESSION PINS THE CLASSIFICATION: it walks every untimed use and asserts each sits in a handler that feeds sse_stream_response, reporting offending line numbers. I PROVED it non-tautological by introducing a buffered use in a non-streaming fn, watching it fail with the correct line, then reverting — a step I now consider mandatory for any source-assertion test, because three of mine today passed for the wrong reason. Found by the adversarial review, which classified every call site where I had spot-checked. 25 tests, fmt, clippy green.
+_________________________________________________________________________________
+
 time:      [14:06] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-84-encode (fable)
@@ -2481,6 +2512,8 @@ type:      bug-report
 area:      frontend
 
 TASK-84 landed 771e595 — fourth review finding, fourth one of mine. TASK-77 encoded four session-id sites and shipped a regression to hold them; that regression matched a SINGLE literal binding ({id}), so three sites binding {session_id} were invisible to it — two paths and one QUERY STRING (/v1/agent/events?session_id={}), where an & or # splits the query and injects a parameter rather than traversing a path. ROOT LESSON: a regression narrower than the invariant it protects is exactly how a fix looks complete while call sites stay raw. The check now enumerates every binding name across both path shapes AND the query position, and reports which forms it found instead of just failing. Broadening it immediately surfaced a FOURTH hit the adversarial review had not flagged — which proved to be a doc comment describing the URL shape, not a call site; comments cannot execute, so the scan now strips them. That is the same self-reference trap that has hit these source-assertion tests four times today (needle matching its own test, its own comment, and now prose elsewhere in the file). Proved non-tautological per my new standing rule: reverted one encoding, watched it fail naming the exact form, restored. 685+ tests across 7 suites, wasm, fmt, clippy green.
+_________________________________________________________________________________
+
 time:      [14:38] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-86-tautology (fable)
@@ -2488,6 +2521,8 @@ type:      bug-report
 area:      frontend
 
 TASK-86 landed de35279 — LAST adversarial-review finding, and the worst kind of mine: a test that could not fail while appearing to guard a prompt-injection boundary. TASK-76's pin was src.contains("guidance: None,") where src is the same file containing that literal INSIDE the assertion; it would have passed with guidance: Some(page_controlled_text) at the call site. A test that cannot fail is worse than no test — it converts an unchecked invariant into a checked-LOOKING one, which is how it survived my own review. Fix is not a cleverer string match: the decision now lives in a pure turn_guidance() fn the call site calls, so the invariant is behavior a unit test asserts. PROVED by falsification (my standing rule since TASK-83): body replaced with Some(page_controlled_text) -> test fails loudly; restored -> passes. Also corrected THREE stale ocean-gui comments claiming per OCEAN-143 that the daemon DISCARDS guidance and using it is "a silent no-op" — false on current daemon main (apply_turn_guidance live, renders under "Operator guidance for this turn:"). That stale claim was LOAD-BEARING: it made a dangerous field look inert and is why the surface shipped tab titles through it. Prompt-folding stays right in ocean-gui, for the honest reason (one daemon-controlled framing site), not because the alternative is harmless. Gates: 685+ tests across 7 suites, wasm, fmt, clippy, plus cargo check -p ocean-gui — all raw-exit 0. ADVERSARIAL REVIEW NOW FULLY ACTIONED: 5 findings, 5 fixed (82 traversal bypass, 85 open_file exec, 83 timeout split, 84 encoding sites, 86 this).
+_________________________________________________________________________________
+
 time:      [15:05] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  deploy-gap (fable, ops)
@@ -2495,6 +2530,8 @@ type:      handoff
 area:      infra
 
 DEPLOY GAP CLOSED + NAMED. Verifying rather than assuming (the TASK-82 lesson applied to my own deploy story) surfaced that BOTH Tauri security fixes were missing from the installed app: /Applications/Ocean.app was built 23:09 on 07-19, while TASK-78 (webview could spawn an arbitrary executable) landed 11:14 and TASK-85 (open_file executes any file; containment self-satisfiable) landed 13:05 on 07-20. The web surface auto-deploys via the rail; crates/ocean-tauri DOES NOT — so I landed two native-shell exec fixes, announced them, and the machine ran the vulnerable build for hours. Rebuilt (trunk release + cargo tauri build), verified BOTH fixes present in the compiled binary by string-matching the error paths rather than trusting build exit 0, checked no running instance before replacing, installed to /Applications at 15:05, confirmed mic key survived. STRUCTURAL LESSON, bigger than the incident: "landed" and "deployed" are DIFFERENT CLAIMS and I have been reporting the former while letting it read as the latter. For anything outside the surface rail they can be days apart. Filed TASK-87 so the shell gets either its own rail or an explicit rebuild-required signal when ocean-tauri changes; until then every shell fix carries this silent lag. Also verified live on the web side: encoded traversal 400, csp sink 204, rail at 0ea8425.
+_________________________________________________________________________________
+
 time:      [15:35] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-87-rail (fable)
@@ -2502,6 +2539,8 @@ type:      feature-request
 area:      infra
 
 TASK-87 landed 1e7d3b3 — closes the deploy gap that let two native exec fixes (78, 85) sit undeployed for hours while reported as landed. The rail promotes web assets and can restart the shell but never RECOMPILES it; crates/ocean-tauri changes are Rust and a restart cannot pick them up. Rail now diffs crates/ocean-tauri across outgoing->incoming and writes tauri-rebuild-required + an explicit "a restart will NOT pick this up" log line. Scoped deliberately: frontend-only deploys stay silent, because a signal that fires every promotion is one nobody reads. scripts/rebuild-tauri-app.sh clears it and encodes the two hand-earned safety rules — refuses to replace a RUNNING app, and verifies the security guards exist in the COMPILED BINARY via strings rather than trusting exit 0. Rebuild stays manual on purpose: minutes-long build, and replacing an app under the operator is hostile; the rail's job is making debt visible, not acting on it. BUG FOUND WHILE BUILDING IT, and it is the day's lesson in miniature: my first version read the previous revision AFTER $MARKER was overwritten, so prev always equalled the incoming rev and the detector never fired — and the source-assertion test PASSED anyway, because it checked the script CONTAINED the right strings rather than that the behavior worked. Running an actual promote caught it. That is the sixth tautological test I have written today. Both directions now proven by execution: shell-source range writes the marker and logs REBUILD REQUIRED; frontend-only range writes nothing. 24 rail assertions green.
+_________________________________________________________________________________
+
 time:      [16:50] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-88-canvas-inject (fable)
@@ -2529,6 +2568,7 @@ Updated the Surface routing map for the agent-package split. Public ocean-agents
 now owns only reusable profiles and package mechanisms; private
 risingtides-agents owns production Rising Tides assistants, couriers, Slack
 intake, and workflows. Surface remains a thin client of ocean-os.
+_________________________________________________________________________________
 
 time:      [01:34] [07-21-26]
 agent:     [claude] [opus 4.8]
@@ -4722,4 +4762,49 @@ driver guard passes all 15 assertions. The exact combined tree passes format,
 native and wasm Clippy, wasm check and test compilation, the release Trunk
 bundle, the standalone Tauri check, and `git diff --check`. This remains an
 unpublished candidate: it has not been pushed, merged, deployed, or served.
+_________________________________________________________________________________
+
+time:      [18:54] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-ledger-is-eleven-boundaries-short-and-nothing-can-see-it
+type:      ci
+area:      infra
+
+Gave this repo the events.md checker it was the only one of the three missing,
+and repaired the 22 entries that had already fused. THE DIFF CONTAINS A MID-FILE
+LEDGER REPAIR — eyeball it rather than assume it: 40 inserted lines spread over
+lines 33-2560, no deletions, produced by `node scripts/check-ledger.mjs
+events.md --fix` and verified insert-only with `git diff -U0 | grep -c '^-[^-]'`
+= 0. It is the non-append shape `merge=union` handles badly, but the last
+repaired entry sits ~2200 lines from EOF, nowhere near the tail hunk parallel
+appends touch. MEASUREMENT, because the number in the backlog was stale and the
+way it went stale is the argument for the check: 269 entries, 258 rule lines, 22
+open. Subtracting rules from entries gives ELEVEN — which is exactly the count
+the loop has been carrying since wave 38 — and it is wrong, because 11 other
+entries quote a second rule inside their prose and the two errors cancel to a
+plausible half-truth. Only "is THIS entry closed before the next one starts"
+holds. The 22 came in two shapes and `--fix` erases the distinction, so it is
+recorded here: 18 where the next `time:` header abuts the previous entry's prose
+with no blank line (the shape the union driver leaves — most of them one
+contiguous fable-5 run, lines 2407-2498), and 4 where a blank line survives but
+no rule was ever written (33, 48, 62, 2522). Same repair, different causes.
+`scripts/check-ledger.mjs` is a verbatim port of ocean-bedrock's by way of
+ocean-os's: every executable line is byte-identical, only comments and the usage
+text differ, and the header says so — a fix to any copy ports to the others as a
+patch. `scripts/check-ledger.test.mjs` came with it so the copy cannot drift
+into calling a folded ledger clean; the one test not in the ocean-os original
+pins the 4-of-22 blank-line shape this ledger actually has. In ci.yml the
+`ledger` job's `if: pull_request` moved off the JOB and onto the diff step,
+because the parse check needs no base branch and a merge folds a separator
+exactly the way a rebase does — this being the repo that gives events.md the
+union driver, a merge is precisely where folds come from, and the old job
+condition meant nothing ledger-related ran on push-to-main at all. Never `--fix`
+in CI. OUT OF SCOPE, FLAGGED: two comment lines in
+scripts/events-merge-driver.test.mjs said "ocean-bedrock has
+scripts/check-ledger.mjs for that; this repo does not", which this commit makes
+false; corrected in place, since a stale comment doing load-bearing reasoning is
+a bug class this ledger has already recorded once. Gate green: fmt, wasm32
+clippy `-D warnings`, `RUSTFLAGS="-D warnings"` wasm32 check, proxy and UI
+tests, plus `node --test scripts/check-ledger.test.mjs` 11/11 and the parse
+check exiting 0 on the repaired file.
 _________________________________________________________________________________
