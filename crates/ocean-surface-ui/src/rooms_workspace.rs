@@ -189,6 +189,47 @@ fn trigger_row_dead_here(
     }
 }
 
+/// The access a room created from the left rail has on its first day:
+/// `Local`, by construction. `POST /v1/rooms/persistent` carries a key, a
+/// name and a trigger policy and nothing else — there is no federation
+/// anywhere in that body — so the room the daemon writes is local until
+/// someone federates it later.
+///
+/// Built explicitly rather than handing [`trigger_row_dead_here`] the `None`
+/// a room-in-creation literally has. `None` there means "access unknown", and
+/// deliberately yields no note at all; wiring the create rows to it would
+/// compile, pass every test, and annotate nothing. A room being created is
+/// not unknown — it is Local, and saying so is this function's whole job.
+fn creating_room_access() -> RoomAccessProjection {
+    RoomAccessProjection {
+        state: RoomAccessState::Local,
+        last_confirmed_global_sequence: None,
+        members: Vec::new(),
+        self_member_id: None,
+        outbox: Vec::new(),
+    }
+}
+
+/// The note a create-time trigger row carries, or `None` when the flag is
+/// live in the room this form is about to make. Delegates to
+/// [`trigger_row_dead_here`] — the one authority the right rail's rows and its
+/// summary already share — against [`creating_room_access`], so the create
+/// panel and the panel two rails over can never disagree about which flags a
+/// Local room can fire.
+///
+/// The ruling, since a Local room may federate later and a build-failure tick
+/// made here would be dead now and live then: note AND disable, the treatment
+/// the right rail's own rows get, not a sentence calling these defaults a
+/// federated room will re-judge. "Later" already has a control — the right
+/// rail's row goes live the moment the room does, and that is where the
+/// decision belongs. Arming a flag at create time that the rail two panels
+/// over will immediately grey out and explain stores a contradiction on day
+/// one to buy a preference the room can express any time it actually
+/// federates.
+fn create_trigger_row_dead_here(toggle: TriggerToggle) -> Option<&'static str> {
+    trigger_row_dead_here(toggle, Some(&creating_room_access()))
+}
+
 /// Whether the trigger policy accepts a write under this access projection —
 /// the rail-local counterpart of [`access_allows_writes`], and deliberately
 /// more permissive than it.
@@ -271,6 +312,38 @@ fn trigger_toggle_row(
                         event_target_checked(&ev),
                     ));
                 }
+            />
+            <span class="rooms-workspace__trigger-label">{label}</span>
+            {dead_here.map(|note| view! {
+                <span class="rooms-workspace__trigger-note">{note}</span>
+            })}
+        </label>
+    }
+}
+
+/// One trigger row in the left rail's create form. The mirror of
+/// [`trigger_toggle_row`] for a room that does not exist yet: there is no
+/// policy to PATCH, so the flip lands in a local signal the submit reads, and
+/// the row is held either while the create POST is in flight or permanently,
+/// because the flag cannot fire in the Local room this form makes.
+///
+/// The note and the hold both come from [`create_trigger_row_dead_here`], the
+/// same single read the right rail's rows make, so a row can never be greyed
+/// out with nothing to explain it — or explained while still clickable.
+fn create_trigger_row(
+    toggle: TriggerToggle,
+    label: &'static str,
+    flag: RwSignal<bool>,
+    pending_create: RwSignal<bool>,
+) -> impl IntoView {
+    let dead_here = create_trigger_row_dead_here(toggle);
+    view! {
+        <label class="rooms-workspace__trigger">
+            <input
+                type="checkbox"
+                prop:checked=move || flag.get()
+                on:change=move |ev| flag.set(event_target_checked(&ev))
+                disabled=move || dead_here.is_some() || pending_create.get()
             />
             <span class="rooms-workspace__trigger-label">{label}</span>
             {dead_here.map(|note| view! {
@@ -2707,56 +2780,40 @@ pub fn RoomsWorkspace(
                         disabled=move || pending_create.get()
                     />
                     // Auto-wake flags for the room being created. Only the
-                    // four live flags get a control; see TriggerToggle.
+                    // four live flags get a control; see TriggerToggle. A row
+                    // whose flag cannot fire in a Local room — which is the
+                    // only kind this form makes — is held and says which kind
+                    // it needs, so the form cannot arm on day one exactly the
+                    // flag the right rail will grey out on day one.
                     <div
                         class="rooms-workspace__create-triggers"
                         role="group"
                         aria-label="Auto-wake triggers for the new room"
                     >
-                        <label class="rooms-workspace__trigger">
-                            <input
-                                type="checkbox"
-                                prop:checked=move || create_on_mention.get()
-                                on:change=move |ev| {
-                                    create_on_mention.set(event_target_checked(&ev))
-                                }
-                                disabled=move || pending_create.get()
-                            />
-                            <span class="rooms-workspace__trigger-label">"@mention"</span>
-                        </label>
-                        <label class="rooms-workspace__trigger">
-                            <input
-                                type="checkbox"
-                                prop:checked=move || create_on_thread_reply.get()
-                                on:change=move |ev| {
-                                    create_on_thread_reply.set(event_target_checked(&ev))
-                                }
-                                disabled=move || pending_create.get()
-                            />
-                            <span class="rooms-workspace__trigger-label">"thread reply"</span>
-                        </label>
-                        <label class="rooms-workspace__trigger">
-                            <input
-                                type="checkbox"
-                                prop:checked=move || create_on_build_failure.get()
-                                on:change=move |ev| {
-                                    create_on_build_failure.set(event_target_checked(&ev))
-                                }
-                                disabled=move || pending_create.get()
-                            />
-                            <span class="rooms-workspace__trigger-label">"build failure"</span>
-                        </label>
-                        <label class="rooms-workspace__trigger">
-                            <input
-                                type="checkbox"
-                                prop:checked=move || create_on_ci_failure.get()
-                                on:change=move |ev| {
-                                    create_on_ci_failure.set(event_target_checked(&ev))
-                                }
-                                disabled=move || pending_create.get()
-                            />
-                            <span class="rooms-workspace__trigger-label">"CI failure"</span>
-                        </label>
+                        {create_trigger_row(
+                            TriggerToggle::Mention,
+                            "@mention",
+                            create_on_mention,
+                            pending_create,
+                        )}
+                        {create_trigger_row(
+                            TriggerToggle::ThreadReply,
+                            "thread reply",
+                            create_on_thread_reply,
+                            pending_create,
+                        )}
+                        {create_trigger_row(
+                            TriggerToggle::BuildFailure,
+                            "build failure",
+                            create_on_build_failure,
+                            pending_create,
+                        )}
+                        {create_trigger_row(
+                            TriggerToggle::CiFailure,
+                            "CI failure",
+                            create_on_ci_failure,
+                            pending_create,
+                        )}
                     </div>
                 </div>
 
@@ -4772,6 +4829,97 @@ mod tests {
             "the per-row gate must NOT take the composer's write gate — that \
              holds the whole rail through `Connecting`/`Recovering`, where the \
              policy write lands in the local store regardless"
+        );
+    }
+
+    // ── create rows: the room this form makes is Local ─────────────
+
+    /// `POST /v1/rooms/persistent` has no federation in its body, so the room
+    /// the create rail makes is Local on day one. Judging the create rows
+    /// against that access — rather than against nothing — is what lets the
+    /// two workspace-marker flags say why they are held, in the same words
+    /// the right rail will use on the very same room a second later.
+    #[test]
+    fn a_created_room_is_local_and_its_dead_flags_say_so() {
+        assert_eq!(creating_room_access().state, RoomAccessState::Local);
+
+        assert_eq!(create_trigger_row_dead_here(TriggerToggle::Mention), None);
+        assert_eq!(
+            create_trigger_row_dead_here(TriggerToggle::ThreadReply),
+            None
+        );
+        assert_eq!(
+            create_trigger_row_dead_here(TriggerToggle::BuildFailure),
+            Some("federated rooms only")
+        );
+        assert_eq!(
+            create_trigger_row_dead_here(TriggerToggle::CiFailure),
+            Some("federated rooms only")
+        );
+    }
+
+    /// The trap this slice exists to avoid, pinned as a difference. A room
+    /// being created has no `RoomAccessProjection`, so the obvious wiring is
+    /// `trigger_row_dead_here(toggle, None)` — and that is the one reading
+    /// which annotates NOTHING, because unknown access deliberately makes no
+    /// claim (see [`an_unknown_access_state_claims_nothing_about_any_flag`]).
+    /// It compiles, it passes, and it ships silence. A room in creation is not
+    /// unknown; it is Local, and the two answers must not be allowed to
+    /// converge by someone "simplifying" the explicit projection away.
+    #[test]
+    fn create_rows_are_not_judged_against_unknown_access() {
+        for toggle in [TriggerToggle::BuildFailure, TriggerToggle::CiFailure] {
+            assert_eq!(trigger_row_dead_here(toggle, None), None, "{toggle:?}");
+            assert!(
+                create_trigger_row_dead_here(toggle).is_some(),
+                "{toggle:?} must be annotated at create time, not silently \
+                 armed — passing `None` access here notes nothing"
+            );
+        }
+    }
+
+    /// The pure helpers above only prove the create rail answers correctly if
+    /// it asks. Pin that it asks, and that every row asks through the one
+    /// helper — the same source-scan guard the right rail's row carries, for
+    /// the same reason: a checkbox is reachable only from a browser, so a row
+    /// that quietly goes back to longhand markup takes every one of these
+    /// tests green with it.
+    #[test]
+    fn the_create_trigger_rows_are_wired_to_the_created_rooms_access() {
+        let markup = include_str!("rooms_workspace.rs");
+
+        let group_class = ["rooms-workspace_", "_create-triggers"].concat();
+        let group = markup
+            .find(&format!("class=\"{group_class}\""))
+            .expect("the create-triggers group must be emitted from this file");
+        let group = &markup[group..];
+        let group = &group[..group.find("</div>").expect("the group must close")];
+        assert_eq!(
+            group
+                .matches(&format!("{}(", ["create_trigger", "_row"].concat()))
+                .count(),
+            4,
+            "every create trigger row must render through the shared helper — \
+             longhand markup here is a row that cannot carry its note"
+        );
+
+        let row_at = markup
+            .find(&format!("fn {}(", ["create_trigger", "_row"].concat()))
+            .expect("the create row must render from this file");
+        let row = &markup[row_at..];
+        let row = &row[..row.find("\nfn ").unwrap_or(row.len())];
+        assert!(
+            row.contains(&["create_trigger_row", "_dead_here"].concat()),
+            "the create row must judge its flag against the room it is making"
+        );
+        let disabled = row
+            .find("disabled=")
+            .map(|at| row[at..].lines().next().unwrap_or_default())
+            .expect("the create checkbox must carry a disabled binding");
+        assert!(
+            disabled.contains("dead_here"),
+            "`disabled=` must consult the dead-here note — on its own, \
+             `pending_create` arms a flag the created room can never fire"
         );
     }
 

@@ -23,11 +23,15 @@
 //!
 //! The checkbox is held by neither. `create_on_ci_failure` stays read by
 //! `create_room` and by the draft reset whether or not anything can set it, so
-//! deleting the `<label>` leaves a room-create form that silently cannot opt in
-//! and a build that is entirely green. That is not hypothetical: the create
+//! deleting its row leaves a room-create form that silently cannot opt in and
+//! a build that is entirely green. That is not hypothetical: the create
 //! panel's checkbox and the summary's line were both deleted during review of
 //! the change that added this flag's mirror, and the full suite plus the wasm
-//! check stayed green.
+//! check stayed green. The create rows render through one shared helper now —
+//! they grew a dead-here note and the rail's `<label>` was the only sane place
+//! to put it — so the guard follows them: the call sites pin that each row
+//! exists carrying its OWN draft signal, and the helper pins that a row reads
+//! and writes the signal it is handed at all.
 //!
 //! Whitespace is stripped wholesale before matching, the same trick
 //! `dead_trigger_row_affordance.rs` uses on CSS, so rustfmt is free to wrap
@@ -48,22 +52,52 @@ fn rooms_workspace_source() -> String {
 }
 
 #[test]
-fn the_create_panel_offers_a_ci_failure_checkbox() {
-    let source = without_whitespace(&rooms_workspace_source());
+fn the_create_panel_offers_a_row_for_every_live_trigger() {
+    let source = view_source("rooms_workspace.rs");
+    let view = without_whitespace(&source);
+    for (variant, label, draft) in [
+        ("Mention", r#""@mention""#, "create_on_mention"),
+        ("ThreadReply", r#""threadreply""#, "create_on_thread_reply"),
+        (
+            "BuildFailure",
+            r#""buildfailure""#,
+            "create_on_build_failure",
+        ),
+        ("CiFailure", r#""CIfailure""#, "create_on_ci_failure"),
+    ] {
+        assert!(
+            view.contains(&format!(
+                "create_trigger_row(TriggerToggle::{variant},{label},{draft},"
+            )),
+            "the create panel must render a row for `TriggerToggle::{variant}` \
+             carrying its OWN draft signal; a missing row leaves a form that \
+             silently cannot opt in, and a swapped one mirrors the wrong box",
+        );
+    }
+
+    // And the shared row has to be a control at all. Sliced to the helper
+    // because `trigger_toggle_row` renders byte-identical label markup — a
+    // file-wide scan for it would be satisfied by the rail while the create
+    // rows render nothing.
+    let row_at = source
+        .find("fn create_trigger_row(")
+        .expect("the create rows must render from a helper in rooms_workspace.rs");
+    let row = &source[row_at..];
+    let row = without_whitespace(&row[..row.find("\nfn ").unwrap_or(row.len())]);
     assert!(
-        source.contains("prop:checked=move||create_on_ci_failure.get()"),
-        "the create panel's CI-failure checkbox must read the draft signal — \
-         without it the box cannot show what the draft holds",
+        row.contains("prop:checked=move||flag.get()"),
+        "the create row must read the draft signal it is handed — without it \
+         no box can show what the draft holds",
     );
     assert!(
-        source.contains("create_on_ci_failure.set(event_target_checked(&ev))"),
-        "the create panel's CI-failure checkbox must write the draft signal — \
-         without it the box is inert and the room is created with the flag off",
+        row.contains("flag.set(event_target_checked(&ev))"),
+        "the create row must write the draft signal it is handed — without it \
+         every box is inert and the room is created with the flag off",
     );
     assert!(
-        source.contains(r#"<spanclass="rooms-workspace__trigger-label">"CIfailure"</span>"#),
-        "the CI-failure checkbox needs the same label markup as its three \
-         neighbours, or it renders unlabelled",
+        row.contains(r#"<spanclass="rooms-workspace__trigger-label">{label}</span>"#),
+        "the create rows need the same label markup as the rail's, or they \
+         render unlabelled",
     );
 }
 

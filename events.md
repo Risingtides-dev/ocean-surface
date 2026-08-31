@@ -4384,3 +4384,68 @@ present projection manage ports fails
 transport-ambiguity bit fails `an_ambiguous_port_transport_always_refreshes_the_list`.
 No migration, no deploy step.
 _________________________________________________________________________________
+
+time:      [12:58] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-create-room-triggers-teach-nothing-about-which-flags-are-dead
+type:      [bug-report]
+area:      [frontend]
+
+The create-room panel armed wake flags that cannot fire in the room it makes.
+Four checkboxes at rooms_workspace.rs:2710, all held by `pending_create` and
+nothing else, while a room created from that rail is Local by construction —
+`POST /v1/rooms/persistent` carries a key, a name and a trigger policy and no
+federation of any kind. So ticking `build failure` or `CI failure` there stored,
+on day one, exactly the flag the right rail greys out and explains on day one.
+
+Followed #160/#168: `trigger_row_dead_here` stays the single authority on "can
+this flag fire here", and the create rows became its third caller rather than
+re-reading `room_is_federated` themselves. The trap the slice warned about is
+real and I hit it deliberately in a test — that function opens `let access =
+access?;` and returns None for unknown access on purpose, so the obvious wiring
+`trigger_row_dead_here(toggle, None)` compiles, passes everything, and annotates
+nothing. `creating_room_access()` names the judgement instead: a room in
+creation is not unknown, it is Local, and a plain `RoomAccessProjection` saying
+so is cheap. `create_trigger_row_dead_here` delegates to the authority against
+it.
+
+The ruling I made, since a Local room can federate later and a build-failure
+tick would be dead now and live then: note AND disable, not a sentence calling
+these defaults a federated room will re-judge. "Later" already has a control —
+the right rail's row goes live the moment the room does, and that is where the
+decision belongs. The four longhand `<label>` blocks collapsed into
+`create_trigger_row`, the mirror of `trigger_toggle_row`, because the note
+markup was about to be pasted four times.
+
+One test outside src/ moved with the code and the reviewer should look at it:
+`ci_failure_trigger_control.rs::the_create_panel_offers_a_ci_failure_checkbox`
+pinned the longhand markup (`prop:checked=move||create_on_ci_failure.get()`),
+which the helper deletes. Rewrote it as
+`the_create_panel_offers_a_row_for_every_live_trigger`, which is strictly
+stronger: it pins each row's variant/label/OWN-draft-signal triple at the call
+site — the pairing a longhand block could get wrong silently — and slices to the
+helper to pin that a row still reads and writes the signal it is handed. Sliced,
+because `trigger_toggle_row` renders byte-identical label markup and a file-wide
+scan for it would be satisfied by the rail while the create rows render nothing.
+
+`create_trigger_policy` is untouched. It is the form's honest mapping of what
+the form says, and #167's `create_trigger_policy_carries_a_lone_ci_failure_tick`
+is a ruling about that plumbing, not about which boxes get offered; normalizing
+dead flags inside it would have overturned that ruling for no gain now that no
+box can set them. The two draft signals are provably false from this rail as a
+result — kept anyway, so the row helper stays uniform across all four and a
+future create-into-federation is one line.
+
+Three unit tests in `mod tests` plus the rewritten guard: the Local judgement
+for all four toggles, the None-vs-Local difference pinned as a difference so
+nobody "simplifies" the explicit projection away, and a source scan that all
+four rows go through the helper and that `disabled=` consults the note. No CSS —
+#164 already gave these rows `:has(input:disabled)` and `__trigger-note` is
+already styled globally.
+
+Gate green: `cargo test -p ocean-surface-ui` 1196 passed / 0 failed plus all
+integration binaries green; `cargo clippy -p ocean-surface-ui --all-targets --
+-D warnings` exit 0; `cargo fmt --check` clean; `RUSTFLAGS="-D warnings" cargo
+check -p ocean-surface-ui --target wasm32-unknown-unknown` clean. No migration,
+no deploy step.
+_________________________________________________________________________________
