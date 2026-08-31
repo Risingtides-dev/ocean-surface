@@ -446,3 +446,85 @@ styles/deck.css.
 ocean-surface-ui --target wasm32-unknown-unknown`, `cargo check -p
 ocean-surface-proxy`, `cargo test -p ocean-surface-ui --target
 wasm32-unknown-unknown --no-run`, `cargo test -p ocean-surface-ui`.
+
+## Guard Tests — Controls the Compiler Does Not Hold
+
+`crates/ocean-surface-ui` is a BINARY crate (`src/main.rs` + `fn main()`, no
+`[lib]`). An integration test in `tests/` therefore cannot import a single item
+from it, cannot mount a component, and cannot press anything. Every guard in
+that directory is a source scanner because that is the only lever available —
+do not spend time looking for a way to call a component.
+
+**The toolkit is shared: `tests/common/mod.rs`.** A subdirectory `mod.rs`, not
+a top-level file, because cargo compiles each top-level `tests/*.rs` as its own
+binary and a subdirectory is not a target. It carries `repo_root`, `read` (repo
+root-relative, for `styles/`), `src` (crate `src/`-relative), `view_source`
+(the half of a module a release build compiles), `without_whitespace`, and
+`all_rust_src`. It is `#![allow(dead_code)]` because inclusion is per-binary:
+each guard calls only some helpers, and an uncalled `pub fn` in a test binary
+is a `dead_code` warning the gate's `-D warnings` turns into a failure.
+Consumers: `ci_failure_trigger_control.rs`, `dead_selector_removal.rs`,
+`unheld_room_controls.rs`.
+
+**`tests/unheld_room_controls.rs`** pins six room controls that measurement
+proves nothing else holds. The failure it exists for: a reviewer deletes a
+control, every gate stays green, and a landed daemon route goes back to being
+unreachable — #165 deleted the create panel's CI-failure checkbox and the
+Response Policy summary line and the full suite plus the wasm check said
+nothing.
+
+**Measure before you pin. This is the lane's discipline, not a suggestion.**
+Some controls ARE compiler-held and a guard on one is maintenance that buys
+nothing. Apply the deletion for real, run the gate, pin only what stays green.
+Measured at `4ed9a7c`:
+
+| Control | Result |
+|---|---|
+| `room_summary.rs` summary rail `open` button | GREEN — pinned |
+| `room_repo.rs` unbind ARMING click | GREEN — pinned |
+| `room_workspace_panel.rs` destroy ARMING click | GREEN — pinned |
+| `room_workspace_panel.rs` exec purge-all ARMING click | GREEN — pinned |
+| `rooms_workspace.rs` both rosters' remove ARMING click | GREEN — pinned |
+| `room_redeem.rs` join button's `on:click` (markup kept) | GREEN — pinned |
+| `room_summary.rs` summarize RUN button | RED — compiler-held |
+| `room_workspace_panel.rs` `provision` button | RED — compiler-held |
+| `room_redeem.rs` join button's MARKUP | RED — held by an in-file test |
+
+The split is not where intuition puts it, and the pairs are the lesson. In one
+panel `provision` is held (`variant Provision is never constructed`) while
+`destroy`'s arm is not. In one component the summarize RUN button is held
+(deleting it takes `SummarizeRequest`, `summarize_url`, `classify_summarize`
+and `SummarizeOutcome` dead with it) while the `open` button that is the only
+door to it is not.
+
+**The shape that hides** is the arming half of a two-click confirm. Deleting
+the arm leaves the confirm branch standing, so the enum variant is still
+constructed, the fire method is still called, and the signal is still read and
+reset. Nothing is unreferenced; nothing warns. What is gone is the only way to
+reach the confirm — the destructive verb stays fully implemented and
+permanently unpressable.
+
+**Two rules a guard here must satisfy.**
+
+1. *Name the CALL SITE, not the literal.* A bare-literal assert is satisfied by
+   the module's own test module quoting it. Measured in this tree:
+   `state.confirm_destroy.set(true)` occurs 5x in `room_workspace_panel.rs` and
+   once outside `#[cfg(test)]`; `state.confirm_purge.set(Some(PurgeTarget::
+   All))` occurs 3x and once. So every needle carries its `on:click=` prefix
+   AND every scan runs over `view_source`. Either alone is insufficient.
+2. *Verify with a RENAME as well as a deletion.* A guard that only catches
+   deletion lets the control be renamed to anything. All six here were checked
+   both ways.
+
+Mutation-verifying is cheap: the guard binary reads `src/` at RUNTIME and does
+not depend on it at compile time, so `cargo test --test unheld_room_controls`
+re-runs against a mutated `src/` with no rebuild, and the mutation does not
+even have to compile.
+
+**A control measured as compiler-held is a finding, not a failure.** Record it
+and move on — but record it, because the hold has a shelf life. The rail rows
+in `ci_failure_trigger_control.rs` were compiler-held until a flag table
+elsewhere started constructing the same variants; that guard exists because the
+hold evaporated.
+
+**Frozen gates:** the same six listed under File Preview Deep-Link.
