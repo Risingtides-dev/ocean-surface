@@ -898,6 +898,59 @@ mod tests {
         assert_eq!(invite.code, "federation_unavailable");
     }
 
+    /// The same property from the other side, and the only shape that pins its
+    /// ORDER rather than its reading: one reply carrying both a code and an
+    /// error. The daemon never writes that pair, which is exactly why nothing
+    /// caught it — but a decoder that consulted the refusal code first would
+    /// answer "federation isn't configured" to a 201 that minted a real grant,
+    /// and drop the grant on the floor. Success has to settle first.
+    #[test]
+    fn a_success_carrying_an_error_field_is_still_a_mint() {
+        let json = format!(
+            r#"{{"code": "{FAKE_CODE}",
+                 "expires_at": "2026-08-31T09:00:00Z",
+                 "error": "federation_unavailable"}}"#
+        );
+        let outcome = classify_mint(201, Some(body(&json)));
+        let MintOutcome::Minted(invite) = outcome else {
+            panic!("expected Minted, got {outcome:?}");
+        };
+        assert_eq!(invite.code, FAKE_CODE);
+    }
+
+    /// And the half the ordering cannot cover: the refusal code is read from
+    /// `error`, never from `code`. On the same both-fields reply below 2xx the
+    /// success arm never runs, so only the SOURCE decides — and a decoder that
+    /// took `code` the way the workspace lane does would relay the
+    /// invite-shaped string as the reason the mint failed, putting a bearer
+    /// grant in the error slot.
+    #[test]
+    fn a_refusal_reads_its_code_from_error_not_from_code() {
+        let json =
+            format!(r#"{{"ok": false, "code": "{FAKE_CODE}", "error": "federation_unavailable"}}"#);
+        let outcome = classify_mint(503, Some(body(&json)));
+        let MintOutcome::State(sentence) = outcome else {
+            panic!("expected State, got {outcome:?}");
+        };
+        assert!(sentence.contains("isn't configured"), "got: {sentence}");
+        assert!(!sentence.contains(FAKE_CODE), "got: {sentence}");
+    }
+
+    /// The same rule from the direction that would actually leak. A reply
+    /// below 2xx carrying only `code` has NO refusal code — the daemon didn't
+    /// write one — and a decoder that fell back to `code` for a missing
+    /// `error` would print the grant as the reason the mint failed. It stays
+    /// the anonymous status failure, and the code stays off the screen.
+    #[test]
+    fn a_codeless_refusal_never_borrows_the_invite_code() {
+        let json = format!(r#"{{"code": "{FAKE_CODE}"}}"#);
+        let MintOutcome::Failure(sentence) = classify_mint(503, Some(body(&json))) else {
+            panic!("expected Failure");
+        };
+        assert!(sentence.contains("503"), "got: {sentence}");
+        assert!(!sentence.contains(FAKE_CODE), "got: {sentence}");
+    }
+
     /// A 2xx whose code is blank grants nothing, so it is not a mint.
     #[test]
     fn a_blank_code_is_not_an_invite() {
@@ -1168,6 +1221,32 @@ mod tests {
         // The in-flight guard wins over both, armed or not.
         assert_eq!(mint_click(true, true, true), MintClick::Ignore);
         assert_eq!(mint_click(false, false, true), MintClick::Ignore);
+        // Neither of those two pins the guard's ORDER. The first cannot happen
+        // at all — `Arm` is the only `confirm.set(true)` and it runs only with
+        // `minting` false — and the second is the federated double click,
+        // which an arming-first guard would still `Ignore` because `federates`
+        // is false. The order only shows on the triple a Local room ACTUALLY
+        // reaches: `Fire` clears `confirm` before it calls `mint`, so an
+        // in-flight Local room is armed=false, and arming first would re-arm a
+        // room whose invite is already away.
+        assert_eq!(mint_click(true, false, true), MintClick::Ignore);
+
+        // This guard is upstream of the request, not the request itself:
+        // `mint` opens with its own untracked re-check, which is what a caller
+        // reaching past this function still hits. It needs a `Rooms` and
+        // spawns a task, so it is pinned from source rather than called.
+        let source = include_str!("room_invite.rs");
+        let start = source
+            .find("fn mint(&self, rooms: Rooms, key: String)")
+            .expect("mint moved");
+        let end = start
+            + source[start..]
+                .find("spawn_local")
+                .expect("mint stopped spawning");
+        assert!(
+            source[start..end].contains("if self.minting.get_untracked() {"),
+            "mint lost the second half of the double-mint defence"
+        );
     }
 
     #[test]

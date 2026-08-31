@@ -4824,3 +4824,61 @@ nothing at all. Overstating a check's coverage in the two places an agent reads
 to decide whether to run it by hand is the same defect this slice exists to
 end.
 _________________________________________________________________________________
+
+time:      [00:41] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-invite-classify-guard]
+type:      review
+area:      frontend
+
+Closed three live mutation-proved holes in the invite decoder's own tests, and
+corrected the reading that sent me at them. `classify_mint` documents that
+"success is settled before any refusal code is consulted", but no fixture ever
+carried `code` and `error` at once, so the ordering was decoration: reversing
+it — consult the refusal code first — left all 31 room_invite tests green.
+Same for `mint_click`, whose in-flight guard was only ever asserted at
+(federates, armed, minting) triples that cannot pin its ORDER. (true,true,true)
+is unreachable — `Arm` is the only `confirm.set(true)` and it runs only when
+nothing is minting — and (false,false,true), the ordinary federated double
+click, stays `Ignore` under an arming-first guard anyway because `federates` is
+false. The triple that does pin the order, (true,false,true), was untested:
+`Fire` clears `confirm` BEFORE it calls `mint`, so a Local room mid-mint is
+armed=false, and swapping the two guards re-armed it while its invite was
+already away — the suite said nothing.
+
+The scout's brief named a second mutant, refusal code read from `code` instead
+of `error`, as also live. It is not: that literal swap was ALREADY red on main
+against five existing tests, because every refusal fixture omits `code` and the
+mutant degrades them to the anonymous status failure. What does survive is
+either FALLBACK form — `error.or(code)` and `code.or(error)` — and the first of
+those is the one with teeth, since it prints a bearer grant as the reason a
+mint failed the moment a refusal arrives carrying only `code`. So the slice
+landed three decoder cases, not two: a 2xx with both fields that must stay
+`Minted` (kills the reordering), a non-2xx with both that must read `error`
+(kills `code.or(error)`), and a non-2xx carrying only `code` that must stay the
+anonymous 503 with the grant off screen (kills `error.or(code)`). Each was
+proven by applying the mutation, watching the suite go red, and reverting —
+not by reading. `mint()`'s own `minting.get_untracked()` re-check, the second
+half of the double-mint defence, is pinned from source the way
+`the_two_copy_controls_do_not_share_a_flag` already pins its render, since a
+direct test would need a `Rooms` and a spawned task; deleting that guard now
+turns the suite red too.
+
+Worth naming for whoever scouts next: this is the loop's FIRST harvest of its
+own `follow_ups`. Roughly 65 of them across 29 landed slices, several
+mutation-proved by adversarial reviewers, and not one had ever been promoted
+into a ready slice. State written every wave and never read is exactly the
+anti-pattern the scout is told to hunt, and the loop was doing it to itself.
+Keep harvesting. One live trap found while doing it, measured by planting a
+`clippy::map_identity` inside `mod tests`: every clippy invocation in the frozen
+gate list builds the wasm BIN without `cfg(test)`, so `mod tests` is invisible
+to all of them and the planted lint passed clean, while `--all-targets` caught
+it. Narrower than "nothing in the gate lints a test file", though — `cargo test`
+does compile the test cfg, so rustc's OWN lints fire there; it is clippy
+specifically that never sees the file. Ran host `cargo clippy --all-targets` by
+hand to cover it; the hole is its own slice.
+
+Test-only, one file. Gate green: fmt, native 1222/1222 plus 44 integration,
+host clippy `--all-targets -D warnings`, wasm32 clippy `--all-targets
+-D warnings`, `RUSTFLAGS="-D warnings"` wasm32 check.
+_________________________________________________________________________________
