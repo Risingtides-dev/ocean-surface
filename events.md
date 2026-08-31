@@ -4384,3 +4384,117 @@ present projection manage ports fails
 transport-ambiguity bit fails `an_ambiguous_port_transport_always_refreshes_the_list`.
 No migration, no deploy step.
 _________________________________________________________________________________
+
+time:      [12:58] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-create-room-triggers-teach-nothing-about-which-flags-are-dead
+type:      [bug-report]
+area:      [frontend]
+
+The create-room panel armed wake flags that cannot fire in the room it makes.
+Four checkboxes at rooms_workspace.rs:2710, all held by `pending_create` and
+nothing else, while a room created from that rail is Local by construction —
+`POST /v1/rooms/persistent` carries a key, a name and a trigger policy and no
+federation of any kind. So ticking `build failure` or `CI failure` there stored,
+on day one, exactly the flag the right rail greys out and explains on day one.
+
+Followed #160/#168: `trigger_row_dead_here` stays the single authority on "can
+this flag fire here", and the create rows became its third caller rather than
+re-reading `room_is_federated` themselves. The trap the slice warned about is
+real and I hit it deliberately in a test — that function opens `let access =
+access?;` and returns None for unknown access on purpose, so the obvious wiring
+`trigger_row_dead_here(toggle, None)` compiles, passes everything, and annotates
+nothing. `creating_room_access()` names the judgement instead: a room in
+creation is not unknown, it is Local, and a plain `RoomAccessProjection` saying
+so is cheap. `create_trigger_row_dead_here` delegates to the authority against
+it.
+
+The ruling I made, since a Local room can federate later and a build-failure
+tick would be dead now and live then: note AND disable, not a sentence calling
+these defaults a federated room will re-judge. "Later" already has a control —
+the right rail's row goes live the moment the room does, and that is where the
+decision belongs. The four longhand `<label>` blocks collapsed into
+`create_trigger_row`, the mirror of `trigger_toggle_row`, because the note
+markup was about to be pasted four times.
+
+One test outside src/ moved with the code and the reviewer should look at it:
+`ci_failure_trigger_control.rs::the_create_panel_offers_a_ci_failure_checkbox`
+pinned the longhand markup (`prop:checked=move||create_on_ci_failure.get()`),
+which the helper deletes. Rewrote it as
+`the_create_panel_offers_a_row_for_every_live_trigger`, which is strictly
+stronger: it pins each row's variant/label/OWN-draft-signal triple at the call
+site — the pairing a longhand block could get wrong silently — and slices to the
+helper to pin that a row still reads and writes the signal it is handed. Sliced,
+because `trigger_toggle_row` renders byte-identical label markup and a file-wide
+scan for it would be satisfied by the rail while the create rows render nothing.
+
+`create_trigger_policy` is untouched. It is the form's honest mapping of what
+the form says, and #167's `create_trigger_policy_carries_a_lone_ci_failure_tick`
+is a ruling about that plumbing, not about which boxes get offered; normalizing
+dead flags inside it would have overturned that ruling for no gain now that no
+box can set them. The two draft signals are provably false from this rail as a
+result — kept anyway, so the row helper stays uniform across all four and a
+future create-into-federation is one line.
+
+Three unit tests in `mod tests` plus the rewritten guard: the Local judgement
+for all four toggles, the None-vs-Local difference pinned as a difference so
+nobody "simplifies" the explicit projection away, and a source scan that all
+four rows go through the helper and that `disabled=` consults the note. No CSS —
+#164 already gave these rows `:has(input:disabled)` and `__trigger-note` is
+already styled globally.
+
+One reviewer note taken at land, and it is the same defect class this slice was
+sent back for the first time. `the_ci_failure_label_is_capitalized_everywhere`
+documents its positive assert as naming "the rail's CALL SITE rather than the
+bare literal", so a match elsewhere in the file cannot satisfy it. That stopped
+being true here: the needle was `TriggerToggle::CiFailure,"CIfailure",`
+whitespace-stripped, and the create panel now passes the same variant and the
+same label to `create_trigger_row`, so the create rail alone satisfied it. The
+needle now carries `trigger_toggle_row(rooms,`. Measured rather than argued:
+relabelling the RAIL row while leaving the create rows saying `CI failure` fails
+this test with the prefix and PASSES it without -- 2 failures against 1.
+
+Gate re-run after rebasing onto main (which carried this wave's other surface
+slice): `cargo test -p ocean-surface-ui` 1249 passed / 0 failed across 10
+targets; `cargo clippy -p ocean-surface-ui --all-targets -- -D warnings` exit 0;
+`cargo fmt --all --check` exit 0; `RUSTFLAGS="-D warnings" cargo check -p
+ocean-surface-ui --target wasm32-unknown-unknown` exit 0; `cargo check -p
+ocean-surface-proxy` exit 0. The slice's load-bearing mutation was re-run AFTER
+the rebase, not just the gate, because this guard reads its own source through
+`include_str!` and a rebase is exactly where such a test goes vacuous while
+staying green: deleting the create row's `__trigger-note` span while leaving
+`disabled=` intact still fails it. No migration, no deploy step.
+
+This entry's boundary was hand-resolved. Both surface slices this wave appended
+to this file and ocean-surface has neither a union merge driver nor a ledger
+checker, so the rebase raised a real conflict whose two sides were complete
+entries sharing one trailing rule. Both were kept and the eaten separator
+restored; the resolution was then proved rather than eyeballed -- the first 4386
+lines of this file are byte-identical to origin/main's copy, so the append
+disturbed nothing already landed.
+_________________________________________________________________________________
+
+time:      [13:22] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-create-room-triggers-teach-nothing-about-which-flags-are-dead
+type:      [review]
+area:      [frontend]
+
+Refinement pass on the reviewer's one finding, and it was a real hole I put
+there. The right rail's `__trigger-note` span is held by the compiler for free:
+`trigger_toggle_row` reads `dead_here` only to render the note, so deleting the
+span is an unused-binding error under the release lane. `create_trigger_row`
+gives `dead_here` a second reader in `disabled=`, so deleting its span leaves
+the binding used and the entire gate green — 1196 tests, clippy, fmt and the
+wasm check all pass while the panel ships two permanently greyed checkboxes
+explaining nothing, which is this slice inverted. I reproduced exactly that
+before fixing it. One assert closes it, in the source scan that already slices
+the helper body and already pins `disabled=` consults the note; split-literal
+like its neighbours, because the scan reads this very file and a whole literal
+would match itself. Verified the guard bites by deleting the span again with
+the assert in place: the test fails on that line. That also retires the second
+finding — `create_trigger_row`'s doc claimed "a row can never be greyed out
+with nothing to explain it", which until now described today's bytes rather
+than a property anything held; it is now carried by a test, so the sentence
+stays. Same four-leg gate re-run green.
+_________________________________________________________________________________
