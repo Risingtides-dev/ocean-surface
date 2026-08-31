@@ -3692,3 +3692,54 @@ zero code risk. Nothing here can move the gate, and the frozen commands were
 run anyway, before and after the repair, because a green claim without a run
 is not a verification.
 _________________________________________________________________________________
+
+time:      [05:00] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-ci-failure-rail-row
+type:      [feature-request]
+area:      [frontend]
+
+`on_ci_failure` gets its control. The daemon has convened a roster on a red
+`room.workspace.ci_checked` row since ocean-os #413, and this surface has
+mirrored the flag since #165 so an unrelated flip could not clear it, but
+nothing on any screen could turn it on -- a live wake path reachable only by a
+room that already had the flag set. `TriggerToggle` gains a fourth variant and
+the three places a toggle surfaces gain a row: the rail, the create panel's
+checkbox group, and the right rail's policy summary.
+
+The dead-here ruling is BuildFailure's, and for the same reason rather than by
+analogy: `RoomTriggerEvent::CiFailure` has exactly one non-test construction
+site in ocean-os (`room_federation.rs` `ingest_workspace_row`, checked at
+b77f791c), so the event is a workspace marker that arrives through the
+federation bridge and a Local room has no workspace to check. Federated rooms
+only, note and all. `policy_with_toggle`'s rationale for carrying the flag
+through untouched is still load-bearing for the other three toggles and was
+reworded rather than deleted.
+
+Two of the three additions are guarded by nothing on their own, which is not a
+guess: reviewing #165 deleted the create checkbox and the summary line and the
+full suite plus the wasm check stayed green. So the summary composition came out
+of the view into `trigger_summary`, which a native unit test asserts over, and
+the checkbox got a source assertion in a new `ci_failure_trigger_control.rs`.
+All three guards were then checked by MUTATION, not by assertion: deleting the
+checkbox fails `the_create_panel_offers_a_ci_failure_checkbox`; deleting the
+summary's line fails `trigger_summary_names_every_live_flag_that_is_on`;
+deleting the rail row fails the wasm check with `variant CiFailure is never
+constructed`, which `--all-targets` clippy does NOT catch, because cfg(test)
+constructs the variant there. Both trap tests that iterate a hardcoded
+three-toggle array were extended -- a fourth variant does not fail them, it just
+quietly makes "every trigger row" a lie -- and
+`create_trigger_policy_only_carries_exposed_flags` was rewritten rather than
+re-arity'd, since its `!policy.on_ci_failure` assertion inverted in meaning once
+the parameter existed.
+
+OUT OF SCOPE, DELIBERATE: `rooms.rs` was scoped out on the grounds that
+`RoomTriggerPolicy` needs no code change, which is true. Its `on_ci_failure`
+doc, though, said this surface "has no CONTROL for it yet ... so today the flag
+only ever arrives already set" -- false the moment this landed, and pointing at
+the very enum being changed. Doc-only edit, no code touched.
+
+Gate green: 1223 UI tests (1188 lib + 3 new + 32 existing integration), clippy
+`--all-targets -D warnings`, `cargo fmt --check`, and the
+`RUSTFLAGS="-D warnings"` wasm32 check. No migration, no deploy step.
+_________________________________________________________________________________
