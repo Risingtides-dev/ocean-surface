@@ -257,23 +257,33 @@ Web surface session UI:
 - Agent participants are selected from daemon-owned `/v1/agents` identities and
   remain subject to daemon authorization and admission. The surface never mints
   a participant from free text or calls the legacy bare `add_agent` path: a
-  package becomes room execution authority only through the daemon-derived
-  preview, digest-bound owner ceremony, and durable binding. Activation,
-  context, grants, and `none`/`room` memory scope are operator choices in that
-  ceremony; the daemon remains authoritative for their accepted intersection.
+  package becomes a local first-agent participant only through the atomic
+  operator-authenticated `POST .../agents/bootstrap` response, and becomes room
+  execution authority only through that response's daemon-derived room/preview,
+  digest-bound owner ceremony, and durable binding. Never restore the local
+  unauthenticated participant POST as agent bootstrap. Activation, context,
+  grants, and `none`/`room` memory scope are operator choices in that ceremony;
+  the daemon remains authoritative for their accepted intersection.
 - Browser-PWA Room-agent mutations are available only through the server-side
   proxy host; every non-loopback host remains login-gated. The proxy injects
   its mode-0600 operator key only on the exact
-  authorize, reauthorize, suspend, resume, and revoke routes; inspection and
-  package preview stay credential-free. Browser `X-Ocean-Operator`, Cookie,
-  Origin, and Referer headers never cross that boundary. Auth-off startup is
-  refused on non-loopback binds. Tauri and extension hosts remain read-only
-  until they own an equivalent privileged transport.
+  bootstrap, authorize, reauthorize, suspend, resume, and revoke routes;
+  inspection and package preview stay credential-free. Browser
+  `X-Ocean-Operator`, Cookie, Origin, and Referer headers never cross that
+  boundary. In auth-off mode, a mutation carrying Origin or Referer must name
+  the exact loopback Host; reject it before credential lookup otherwise, while
+  retaining headerless localhost CLI clients. Auth-off startup is refused on
+  non-loopback binds. Tauri and extension hosts remain read-only until they own
+  an equivalent privileged transport.
 - Binding reads carry server-derived owner eligibility. Surface does not infer
-  owner authority from a local participant projection. Lost-response retries
-  for binding status changes reuse the exact decision id until the operation
-  settles. Agent mention candidates require an Active binding (and federated
-  `local_binding_available=true`); historical roster rows remain visible.
+  owner authority from a local participant projection. With no binding, a
+  resolved Human already in a Local roster may see only the bootstrap
+  affordance; the operator-authenticated daemon establishes or refuses the
+  durable owner role and returns the authoritative updated room plus package
+  preview. Lost-response retries for binding status changes reuse the exact
+  decision id until the operation settles. Agent mention candidates require an
+  Active binding (and federated `local_binding_available=true`); historical
+  roster rows remain visible.
 - Local rosters and mention ids come from `Room.participants`; every non-Local
   roster and mention id comes only from the safe access member projection.
   Composer writes are enabled only for `Local` and `Live` access.

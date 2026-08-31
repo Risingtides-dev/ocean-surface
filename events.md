@@ -4531,3 +4531,39 @@ Trunk 0.21.14 rejected the ambient `NO_COLOR=1` value before compilation; the
 same release build passed with only `NO_COLOR` unset. No push, deployment, or
 live daemon mutation was performed from this worktree.
 _________________________________________________________________________________
+time:      [14:50] [31-08-26]
+agent:     [codex] [gpt-5.6-sol]
+worktree:  [codex/rooms-phase1-surface-auth-0831]
+type:      [bug report]
+area:      [backend]
+
+Corrected the two P1 gaps found in review of the first Surface candidate. In
+auth-off mode, every Room-agent authority mutation carrying Origin or Referer
+must now name the exact loopback Host, including its port, before the proxy even
+looks up the operator key. Matching non-loopback Host and Origin is still
+refused, closing the DNS-rebinding shape. Foreign Origin, foreign Referer,
+opaque Origin, and form-compatible `text/plain` bodies return 403 without an
+upstream request; headerless local clients remain supported. Login-gated mode
+continues to treat the authenticated session rather than Origin as authority.
+
+First-agent setup now uses the daemon's atomic operator-authenticated
+`POST /v1/rooms/persistent/{key}/agents/bootstrap` contract with only the live
+Human member id and local package id in the request. Surface validates the
+returned room id, owner, derived agent/package identity, owner eligibility,
+updated room roster, and existing-shape package preview before publishing any
+state. It applies the daemon-returned room directly, never synthesizes a member,
+and then enters the existing digest-bound authorization ceremony. The old local
+unauthenticated participant POST is no longer used for agent bootstrap and a
+source guard keeps it out. An integration fixture proves empty bindings through
+atomic bootstrap, exact idempotent replay, nonowner conflict, preview, and the
+first Active binding; bootstrap itself creates no binding.
+
+Corrected candidate verification: `cargo test -p ocean-surface-proxy` (64),
+`cargo test -p ocean-surface-ui` (1218 unit plus 44 integration), native
+all-target Clippy with denied warnings for both crates, WASM warnings-as-errors
+check, WASM test compilation, proxy check, `cargo fmt --all -- --check`, Trunk
+0.21.14 release build with the ambient `NO_COLOR` unset, and standalone Tauri
+check. Updated the root Rooms contract; no child devlog exists for the touched
+crates. This is a corrected review candidate, not a pushed, deployed, or live
+daemon change.
+_________________________________________________________________________________

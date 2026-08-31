@@ -31,4 +31,14 @@ fn the_legacy_bare_agent_picker_stays_removed() {
         !read("styles/rooms-workspace.css").contains("authority-memory-note"),
         "the obsolete unavailable-room-memory notice has no emitter and its dead selector must not return",
     );
+
+    let authority = read("crates/ocean-surface-ui/src/room_agent_authorization.rs");
+    assert!(
+        !authority.contains("/{}/participants"),
+        "first-agent setup must never restore the unauthenticated participant POST; local bootstrap belongs to the operator-authenticated daemon route",
+    );
+    assert!(
+        authority.contains("/{}/agents/bootstrap"),
+        "the reviewed server-proven first-agent bootstrap route must remain wired",
+    );
 }

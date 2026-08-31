@@ -14,7 +14,9 @@ use gloo_net::http::Request;
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::rooms::{encode, RoomAccessState, Rooms};
+use crate::rooms::{
+    encode, Room, RoomAccessProjection, RoomAccessState, RoomParticipantKind, Rooms,
+};
 
 /// Kept in one function while ocean-os and Surface land concurrently. The
 /// daemon owns the preview: the client must never reproduce its digest or infer
@@ -29,6 +31,13 @@ fn package_preview_url(base: &str, room: &str, package: &str) -> String {
 
 fn bindings_url(base: &str, room: &str) -> String {
     format!("{base}/v1/rooms/persistent/{}/agents", encode(room))
+}
+
+fn bootstrap_url(base: &str, room: &str) -> String {
+    format!(
+        "{base}/v1/rooms/persistent/{}/agents/bootstrap",
+        encode(room)
+    )
 }
 
 fn binding_action_url(base: &str, room: &str, member: &str, action: &str) -> String {
@@ -265,11 +274,9 @@ struct StatusBody<'a> {
 }
 
 #[derive(Debug, Serialize)]
-struct LocalRegistrationBody<'a> {
-    id: &'a str,
-    display_name: &'a str,
-    kind: &'static str,
-    owner_id: &'a str,
+struct BootstrapBody<'a> {
+    owner_member_id: &'a str,
+    agent_package_id: &'a str,
 }
 
 #[derive(Debug, Serialize)]
@@ -278,17 +285,65 @@ struct FederatedRegistrationBody<'a> {
 }
 
 #[derive(Debug, Deserialize)]
-struct LocalRegistrationResponse {
+struct BootstrapResponse {
     ok: bool,
     #[serde(default)]
-    room: Option<crate::rooms::Room>,
+    created: Option<bool>,
+    #[serde(default)]
+    room_id: Option<String>,
+    #[serde(default)]
+    owner_member_id: Option<String>,
+    #[serde(default)]
+    agent_member_id: Option<String>,
+    #[serde(default)]
+    agent_package_id: Option<String>,
+    #[serde(default)]
+    owner_eligible: bool,
+    #[serde(default)]
+    room: Option<Room>,
+    #[serde(default)]
+    package_preview: Option<PreviewResponse>,
     #[serde(default)]
     error: Option<String>,
 }
 
-enum RegistrationProjection {
-    Local(crate::rooms::Room),
-    Federated(crate::rooms::RoomAccessProjection),
+impl BootstrapResponse {
+    fn into_server_projection(
+        self,
+        room_key: &str,
+        owner_member_id: &str,
+        agent_package_id: &str,
+    ) -> Option<(Room, AgentPackagePreview)> {
+        if self.created.is_none()
+            || self.room_id.as_deref() != Some(room_key)
+            || self.owner_member_id.as_deref() != Some(owner_member_id)
+            || self.agent_member_id.as_deref() != Some(agent_package_id)
+            || self.agent_package_id.as_deref() != Some(agent_package_id)
+            || !self.owner_eligible
+        {
+            return None;
+        }
+        let room = self.room?;
+        if room.id != room_key
+            || !room.participants.iter().any(|participant| {
+                participant.id == owner_member_id && participant.kind == RoomParticipantKind::Human
+            })
+            || !room.participants.iter().any(|participant| {
+                participant.id == agent_package_id && participant.kind == RoomParticipantKind::Agent
+            })
+        {
+            return None;
+        }
+        let preview = self.package_preview?.into_preview()?;
+        if !preview.valid_for(agent_package_id)
+            || !preview.allows_decision(None)
+            || preview.owner_member_id.as_deref() != Some(owner_member_id)
+            || preview.agent_member_id.as_deref() != Some(agent_package_id)
+        {
+            return None;
+        }
+        Some((room, preview))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -344,7 +399,7 @@ fn pending_decision_id<'a>(
 fn classify_error(status: u16, error: Option<String>) -> Notice {
     let message = error.unwrap_or_else(|| format!("authorization request rejected ({status})"));
     let state = match status {
-        401 | 403 => NoticeState::Denied,
+        401 | 403 | 409 => NoticeState::Denied,
         503 => NoticeState::Unavailable,
         _ => NoticeState::Unavailable,
     };
@@ -355,8 +410,44 @@ fn authority_mutations_supported_on_this_host() -> bool {
     crate::host::room_authority_mutations_supported()
 }
 
+/// This is an affordance check, never ownership proof. It only exposes the
+/// atomic bootstrap attempt for a resolved Human who is already present in a
+/// local room with no binding. The operator-authenticated daemon route alone
+/// decides whether that Human may establish or replay the durable owner role.
+fn local_owner_bootstrap_candidate(
+    access: Option<&RoomAccessProjection>,
+    room: Option<&Room>,
+    identity_resolved: bool,
+    identity_id: &str,
+    bindings: &[RoomAgentBinding],
+) -> bool {
+    identity_resolved
+        && bindings.is_empty()
+        && access.is_some_and(|access| access.state == RoomAccessState::Local)
+        && room.is_some_and(|room| {
+            room.participants.iter().any(|participant| {
+                participant.id == identity_id && participant.kind == RoomParticipantKind::Human
+            })
+        })
+}
+
+fn rooms_local_owner_bootstrap_candidate(rooms: Rooms, bindings: &[RoomAgentBinding]) -> bool {
+    local_owner_bootstrap_candidate(
+        rooms.access.get_untracked().as_ref(),
+        rooms.open_room.get_untracked().as_ref(),
+        rooms.identity_resolved(),
+        &rooms.identity_id.get_untracked(),
+        bindings,
+    )
+}
+
 fn caller_can_authorize(rooms: Rooms, owner_eligible: bool) -> bool {
     authority_mutations_supported_on_this_host() && rooms.identity_resolved() && owner_eligible
+}
+
+fn caller_can_configure(rooms: Rooms, owner_eligible: bool, bootstrap_candidate: bool) -> bool {
+    authority_mutations_supported_on_this_host()
+        && (caller_can_authorize(rooms, owner_eligible) || bootstrap_candidate)
 }
 
 fn grant_is_allowed(preview: &AgentPackagePreview, grant: &str) -> bool {
@@ -551,10 +642,98 @@ impl RoomAgentAuthorizationState {
             self.notice.set(None);
             return;
         }
-        self.load_preview(rooms, package);
+        if rooms_local_owner_bootstrap_candidate(rooms, &self.bindings.get_untracked()) {
+            self.bootstrap_local_package(rooms, package);
+        } else {
+            self.load_preview(rooms, package);
+        }
     }
 
-    fn register_membership(&self, rooms: Rooms) {
+    fn bootstrap_local_package(&self, rooms: Rooms, package: String) {
+        let Some(room) = rooms.open_key.get_untracked() else {
+            return;
+        };
+        let owner = rooms.identity_id.get_untracked();
+        if !rooms_local_owner_bootstrap_candidate(rooms, &self.bindings.get_untracked()) {
+            self.notice.set(Some(Notice {
+                state: NoticeState::Denied,
+                message: "the local room is not eligible for first-agent bootstrap".to_owned(),
+            }));
+            return;
+        }
+        let body = match serde_json::to_string(&BootstrapBody {
+            owner_member_id: &owner,
+            agent_package_id: &package,
+        }) {
+            Ok(body) => body,
+            Err(_) => return,
+        };
+        let generation = rooms.generation_snapshot();
+        let op = self.next_op();
+        self.busy.set(true);
+        self.notice.set(Some(Notice {
+            state: NoticeState::Requested,
+            message: "Establishing first-agent authority".to_owned(),
+        }));
+        let me = *self;
+        let url = bootstrap_url(&rooms.url.get_untracked(), &room);
+        wasm_bindgen_futures::spawn_local(async move {
+            let outcome = match Request::post(&url)
+                .header("content-type", "application/json")
+                .body(body)
+            {
+                Ok(request) => match request.send().await {
+                    Ok(response) => {
+                        let status = response.status();
+                        match response.json::<BootstrapResponse>().await {
+                            Ok(body) if response_ok(status, body.ok) => body
+                                .into_server_projection(&room, &owner, &package)
+                                .ok_or(Notice {
+                                    state: NoticeState::Unavailable,
+                                    message: "bootstrap response omitted server authority proof"
+                                        .to_owned(),
+                                }),
+                            Ok(body) => Err(classify_error(status, body.error)),
+                            Err(_) => Err(classify_error(status, None)),
+                        }
+                    }
+                    Err(_) => Err(Notice {
+                        state: NoticeState::Unavailable,
+                        message: "first-agent bootstrap is unavailable".to_owned(),
+                    }),
+                },
+                Err(_) => Err(Notice {
+                    state: NoticeState::Unavailable,
+                    message: "bootstrap request could not be built".to_owned(),
+                }),
+            };
+            if !me.current(op, rooms, generation, &room)
+                || me.selected_package.get_untracked() != package
+            {
+                return;
+            }
+            me.busy.set(false);
+            match outcome {
+                Ok((record, preview)) => {
+                    rooms.open_room.set(Some(record));
+                    rooms.fetch_rooms_silent();
+                    me.owner_eligible.set(true);
+                    me.preview.set(Some(preview));
+                    me.notice.set(Some(Notice {
+                        state: NoticeState::Requested,
+                        message: "Package resolved; no agent binding has been authorized"
+                            .to_owned(),
+                    }));
+                }
+                Err(notice) => {
+                    me.selected_package.set(String::new());
+                    me.notice.set(Some(notice));
+                }
+            }
+        });
+    }
+
+    fn register_federated_membership(&self, rooms: Rooms) {
         let Some(room) = rooms.open_key.get_untracked() else {
             return;
         };
@@ -569,42 +748,25 @@ impl RoomAgentAuthorizationState {
             return;
         }
         let package = preview.agent_package_id.clone();
-        let display_name = preview.display_name.clone();
         let Some(access) = rooms.access.get_untracked() else {
             return;
         };
-        let (url, body, federated) = if access.state == RoomAccessState::Local {
-            let owner = rooms.identity_id.get_untracked();
-            let url = format!(
-                "{}/v1/rooms/persistent/{}/participants",
-                rooms.url.get_untracked(),
-                encode(&room)
-            );
-            let body = serde_json::to_string(&LocalRegistrationBody {
-                id: &package,
-                display_name: &display_name,
-                kind: "agent",
-                owner_id: &owner,
-            });
-            (url, body, false)
-        } else if access.state == RoomAccessState::Live {
-            let url = format!(
-                "{}/v1/rooms/persistent/{}/members/agents",
-                rooms.url.get_untracked(),
-                encode(&room)
-            );
-            let packages = vec![package.clone()];
-            let body = serde_json::to_string(&FederatedRegistrationBody {
-                agent_names: &packages,
-            });
-            (url, body, true)
-        } else {
+        if access.state != RoomAccessState::Live {
             self.notice.set(Some(Notice {
                 state: NoticeState::Unavailable,
-                message: "room membership is not live".to_owned(),
+                message: "federated room membership is not live".to_owned(),
             }));
             return;
-        };
+        }
+        let url = format!(
+            "{}/v1/rooms/persistent/{}/members/agents",
+            rooms.url.get_untracked(),
+            encode(&room)
+        );
+        let packages = vec![package.clone()];
+        let body = serde_json::to_string(&FederatedRegistrationBody {
+            agent_names: &packages,
+        });
         let body = match body {
             Ok(body) => body,
             Err(_) => return,
@@ -625,24 +787,9 @@ impl RoomAgentAuthorizationState {
                 Ok(request) => match request.send().await {
                     Ok(response) => {
                         let status = response.status();
-                        if federated {
-                            match response.json::<crate::rooms::RoomAccessProjection>().await {
-                                Ok(access) if (200..300).contains(&status) => {
-                                    Ok(RegistrationProjection::Federated(access))
-                                }
-                                _ => Err(classify_error(status, None)),
-                            }
-                        } else {
-                            match response.json::<LocalRegistrationResponse>().await {
-                                Ok(body) if response_ok(status, body.ok) => {
-                                    body.room.map(RegistrationProjection::Local).ok_or(Notice {
-                                        state: NoticeState::Unavailable,
-                                        message: "membership response omitted the room".to_owned(),
-                                    })
-                                }
-                                Ok(body) => Err(classify_error(status, body.error)),
-                                Err(_) => Err(classify_error(status, None)),
-                            }
+                        match response.json::<RoomAccessProjection>().await {
+                            Ok(access) if (200..300).contains(&status) => Ok(access),
+                            _ => Err(classify_error(status, None)),
                         }
                     }
                     Err(_) => Err(Notice {
@@ -660,8 +807,7 @@ impl RoomAgentAuthorizationState {
             }
             me.busy.set(false);
             match outcome {
-                Ok(RegistrationProjection::Local(record)) => rooms.open_room.set(Some(record)),
-                Ok(RegistrationProjection::Federated(access)) => rooms.access.set(Some(access)),
+                Ok(access) => rooms.access.set(Some(access)),
                 Err(notice) => {
                     me.notice.set(Some(notice));
                     return;
@@ -1276,13 +1422,18 @@ fn PackageAuthorizationPreview(
             </div>
         }
         .into_any()
-    } else if owner_eligible {
+    } else if owner_eligible
+        && rooms
+            .access
+            .get_untracked()
+            .is_some_and(|access| access.state == RoomAccessState::Live)
+    {
         view! {
             <div class="rooms-workspace__authority-membership" data-state="unavailable">
-                <span>"Display membership is required before authority can be granted."</span>
+                <span>"Federated membership is required before authority can be granted."</span>
                 <button type="button"
                     disabled=move || state.busy.get()
-                    on:click=move |_| state.register_membership(rooms)>
+                    on:click=move |_| state.register_federated_membership(rooms)>
                     "Register membership"
                 </button>
             </div>
@@ -1340,6 +1491,18 @@ pub(crate) fn RoomAgentAuthorizationPanel(
     });
 
     let can_authorize = Memo::new(move |_| caller_can_authorize(rooms, state.owner_eligible.get()));
+    let can_configure = Memo::new(move |_| {
+        let bindings = state.bindings.get();
+        let identity_id = rooms.identity_id.get();
+        let bootstrap_candidate = local_owner_bootstrap_candidate(
+            rooms.access.get().as_ref(),
+            rooms.open_room.get().as_ref(),
+            rooms.identity_authoritative.get() && !identity_id.is_empty(),
+            &identity_id,
+            &bindings,
+        );
+        caller_can_configure(rooms, state.owner_eligible.get(), bootstrap_candidate)
+    });
     let current_preview = move || state.preview.get();
     let authorizable_packages = move || {
         let bindings = state.bindings.get();
@@ -1466,7 +1629,7 @@ pub(crate) fn RoomAgentAuthorizationPanel(
                 }
             }}
 
-            {move || if can_authorize.get() {
+            {move || if can_configure.get() {
                 view! {
                     <div class="rooms-workspace__authority-ceremony">
                         <label class="rooms-workspace__authority-label" for="room-agent-package">
@@ -1565,6 +1728,109 @@ mod tests {
             package_preview_url("http://d", "team/blue", "review agent"),
             "http://d/v1/rooms/persistent/team%2Fblue/agents/preview/review%20agent"
         );
+        assert_eq!(
+            bootstrap_url("http://d", "team/blue"),
+            "http://d/v1/rooms/persistent/team%2Fblue/agents/bootstrap"
+        );
+    }
+
+    #[test]
+    fn first_agent_bootstrap_requires_the_complete_server_projection() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let response = serde_json::json!({
+            "ok": true,
+            "created": true,
+            "room_id": "team",
+            "owner_member_id": "human-1",
+            "agent_member_id": "researcher",
+            "agent_package_id": "researcher",
+            "owner_eligible": true,
+            "room": {
+                "id": "team",
+                "name": "Team",
+                "participants": [
+                    {"id": "human-1", "kind": "human", "display_name": "Human"},
+                    {"id": "researcher", "kind": "agent", "display_name": "Researcher"}
+                ]
+            },
+            "package_preview": {
+                "ok": true,
+                "package_id": "researcher",
+                "display_name": "Researcher",
+                "definition_digest": digest,
+                "requested_capabilities": [],
+                "grantable_capabilities": [],
+                "unavailable_capabilities": [],
+                "binding": null,
+                "agent_member_id": "researcher",
+                "owner_member_id": "human-1",
+                "owner_eligible": true
+            }
+        });
+        let valid: BootstrapResponse = serde_json::from_value(response.clone()).unwrap();
+        let (room, preview) = valid
+            .into_server_projection("team", "human-1", "researcher")
+            .expect("server projection");
+        assert_eq!(room.participants.len(), 2);
+        assert!(preview.allows_decision(None));
+
+        let mut replay = response.clone();
+        replay["created"] = serde_json::json!(false);
+        let replay: BootstrapResponse = serde_json::from_value(replay).unwrap();
+        assert!(replay
+            .into_server_projection("team", "human-1", "researcher")
+            .is_some());
+
+        let mut forged = response;
+        forged["owner_member_id"] = serde_json::json!("different-human");
+        let forged: BootstrapResponse = serde_json::from_value(forged).unwrap();
+        assert!(forged
+            .into_server_projection("team", "human-1", "researcher")
+            .is_none());
+    }
+
+    #[test]
+    fn bootstrap_affordance_requires_a_live_local_human_and_no_binding() {
+        let access = RoomAccessProjection {
+            state: RoomAccessState::Local,
+            last_confirmed_global_sequence: None,
+            members: Vec::new(),
+            self_member_id: None,
+            outbox: Vec::new(),
+        };
+        let room = Room {
+            id: "team".into(),
+            name: "Team".into(),
+            participants: vec![crate::rooms::RoomParticipant {
+                id: "human-1".into(),
+                kind: RoomParticipantKind::Human,
+                display_name: "Human".into(),
+            }],
+            created_at: String::new(),
+            updated_at: String::new(),
+            trigger_policy: None,
+        };
+        assert!(local_owner_bootstrap_candidate(
+            Some(&access),
+            Some(&room),
+            true,
+            "human-1",
+            &[],
+        ));
+        assert!(!local_owner_bootstrap_candidate(
+            Some(&access),
+            Some(&room),
+            true,
+            "different-human",
+            &[],
+        ));
+        assert!(!local_owner_bootstrap_candidate(
+            Some(&access),
+            Some(&room),
+            false,
+            "human-1",
+            &[],
+        ));
     }
 
     #[test]
