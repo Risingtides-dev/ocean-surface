@@ -4498,3 +4498,78 @@ with nothing to explain it", which until now described today's bytes rather
 than a property anything held; it is now carried by a test, so the sentence
 stays. Same four-leg gate re-run green.
 _________________________________________________________________________________
+
+time:      [14:52] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-gitattributes-events-union
+type:      [workflow]
+area:      [infra]
+
+ocean-surface had no `.gitattributes` at all and not one line in AGENTS.md
+about the ledger, so the append/append collision at this file's EOF was landing
+on whoever rebased second. The entry directly above this one is the receipt: it
+records two surface slices in one wave hitting a real conflict whose two sides
+were complete entries sharing one trailing rule, resolved by hand. `ocean-os`
+has carried `events.md merge=union` since June (`0a64cd44`, #261), and
+`ocean-bedrock` adopted it YESTERDAY (`f5e72b4`, #54). So the line has months
+of production evidence behind it in one sibling and one day in the other —
+worth knowing before reading its adoption here as long-settled. This gives this
+repo the same driver and writes down what it costs.
+
+I measured the driver against this file's real entry shape rather than trusting
+the sibling repos' notes, in a throwaway repo with a base entry and two
+branches appending one entry each. Without `.gitattributes` the merge conflicts
+and git brackets the two entry bodies between the shared blank line and the
+shared `___` rule. With the driver it comes back clean and markerless — and the
+merged file is FUSED: the second entry's `time:` header sits directly on the
+first entry's prose, because union keeps a line both sides added only once and
+the two appends share both the blank and the rule. That is the same eaten
+separator the hand-resolution above had to restore, except union makes it
+silent instead of raising a conflict.
+
+`scripts/events-merge-driver.test.mjs` now holds that measurement as a guard:
+the rule read out of `.gitattributes` itself, git agreeing on what it resolves
+to, a two-branch append/append merge that must come back clean and markerless,
+the SAME merge without the file that must CONFLICT — without which the clean
+one would only be showing that git found the merge trivial — and the fold,
+pinned as the defect it is rather than as a contract. It follows the shape of
+the Node tests already in `scripts/`: bare top-level asserts, a scratch repo
+under `mkdtemp`, git identity passed as `-c` flags so nothing touches this
+process's env. It is falsifiable, which is the point: delete `.gitattributes`,
+change the rule to another driver, or drop the rule line and keep the comment,
+and it fails with a message naming what went. `git check-attr` alone would not
+have done that — git reads `.gitattributes` out of the INDEX when the
+working-tree file is gone, so a deleted file still answers `union` until the
+deletion is staged, which is why the guard reads the file first.
+
+An earlier draft of this entry said no such guard was possible here, because
+every check in this repo is a Rust scanner under `crates/` and that is a
+sibling slice's ground. That was simply wrong, and the review caught it:
+`scripts/` already holds three Node tests, one of them a CI step
+(`node scripts/surface-auto-deploy.test.mjs`, ci.yml). The guard is hand-run
+like `scripts/sw-wasm-magic.test.mjs`, since wiring it would mean editing
+`.github/workflows/ci.yml`, which is outside this slice's file scope. AGENTS.md
+says exactly that, and keeps the instruction to read the boundary by hand after
+any merge carrying two appends: the guard reproduces the fold in a scratch repo,
+it never reads THIS ledger, so a fold already landed here is still invisible.
+
+The new AGENTS.md "Repository Ledger" section also states the sharper rule the
+comment in `.gitattributes` carries: union is safe for append/append and unsafe
+for everything else, because a correction or a redaction to the tail entry
+lands in the hunk a concurrent append touches and union settles it by putting
+back the line the correction removed. Coming back clean is not evidence that it
+is right. It records the `ledger` job's watched paths from ci.yml as they
+actually read, and that the job reports rather than blocks. `.github/` was left
+untouched deliberately — it is inside the guard's own watched set, and it is
+also why the new test is hand-run rather than a CI step.
+
+Gate, on a tree touching no crate: `cargo fmt --all --check` exit 0;
+`RUSTFLAGS="-D warnings" cargo check -p ocean-surface-ui --target
+wasm32-unknown-unknown` exit 0; `cargo check -p ocean-surface-proxy` exit 0;
+`node --check` and a full run of the new test both exit 0. No migration, no
+deploy step. Adding a file under `scripts/` puts this PR INSIDE the ledger
+job's watched set, so the job now demands this entry rather than merely
+tolerating it — it is here. Land this before any other ocean-surface PR in the
+wave — the driver is read from the target branch at merge time, so landing it
+second means hand-resolving the exact conflict it exists to abolish.
+_________________________________________________________________________________
