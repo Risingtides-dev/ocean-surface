@@ -4572,4 +4572,64 @@ job's watched set, so the job now demands this entry rather than merely
 tolerating it — it is here. Land this before any other ocean-surface PR in the
 wave — the driver is read from the target branch at merge time, so landing it
 second means hand-resolving the exact conflict it exists to abolish.
+time:      [14:53] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-dead-trigger-row-cannot-be-unchecked-so-stored-dead-state-is-permanent
+type:      [bug-report]
+area:      [frontend]
+
+`trigger_row_is_editable` was one predicate doing two jobs, and the second job
+was wrong. It refused every flip on a flag whose event can never reach this
+kind of room -- correct for arming one, but it took the disarm with it, and a
+flag can be stored true and then become dead without anyone touching it: a room
+created Local with `on_thread_reply` that later federates, or one created with
+the workspace-marker flags that never does. The row then rendered CHECKED from
+the stored policy, greyed, noted `local rooms only`, and `trigger_summary`
+listed it as on -- deliberately, since hiding it only inverts the contradiction
+-- and no control anywhere in the app could clear it. The stored dead state was
+permanent. Split the gate by direction: the row already receives `checked`, so
+`trigger_toggle_row` needed no new information, only to pass what it had. A
+dead row that is on takes the un-tick; a dead row that is off still refuses the
+tick; `trigger_policy_accepts_writes` still leads both, so `Revoked` and unknown
+access hold everything as before. After an admitted un-tick the section
+re-renders from `open_room` with checked false and the row goes held in both
+directions -- the end state, not a regression. `dead_here` deliberately stays
+the note's only reader in that function, so the span the last wave pinned is
+still held by the compiler. The four existing live/dead tests now carry the
+direction and keep their reasoning; one new test pins the asymmetry, and I
+proved it bites by restoring the single gate and watching it fail on the
+un-tick assert. `create_trigger_row` is untouched: a room being created has no
+stored state, so its dead rows are correctly held both ways. Gate green --
+fmt, 1207 tests, wasm clippy, and the release-lane wasm check.
+_________________________________________________________________________________
+
+time:      [15:04] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-dead-trigger-row-cannot-be-unchecked-so-stored-dead-state-is-permanent
+type:      [review]
+area:      [frontend]
+
+Refinement pass on the same branch against three review findings, all in
+`rooms_workspace.rs`. The first was a comment I should have caught myself: the
+two reads in `trigger_toggle_row` were still introduced by "the note and the
+disabled state can never disagree about this room", which is precisely the
+invariant this change breaks on purpose, and which the same file sells as a bug
+in `create_trigger_row`'s doc. Left standing it is an invitation to re-couple
+them and re-close the door. It now says the note follows the access reading
+alone while the hold follows access and direction, and names the one row where
+they part company. The second was the real gap: the new third parameter is a
+degree of freedom the two-argument gate did not have, and nothing pinned that
+the row feeds its own `checked` into it -- every unit test calls the gate
+directly with a literal, so `trigger_row_is_editable(toggle, true, access)`
+would compile, stay green, and quietly re-arm every dead row in the browser,
+which is the half of the old gate that was always right. The rail's existing
+source-scan guard now pins the call form; reverting the call to a literal makes
+it the one test of 1207 that fails, which I checked rather than assumed. The
+third was cosmetic but operator-facing: the new test's panic message carried an
+18-space run mid-sentence that `cargo fmt` cannot reflow, so it printed
+verbatim at the moment the guard bites. It uses backslash continuation now,
+like every other multi-line assert in the file. Full gate re-run green -- fmt,
+1250 tests across ten binaries with 1207 in the main one, clippy at
+--all-targets and at wasm32 with -D warnings, the release-lane wasm check, the
+proxy check, and the wasm test-compile.
 _________________________________________________________________________________
