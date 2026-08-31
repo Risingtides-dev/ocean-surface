@@ -4921,6 +4921,16 @@ mod tests {
             "`disabled=` must consult the dead-here note — on its own, \
              `pending_create` arms a flag the created room can never fire"
         );
+        // The right rail's row holds its own note by compiling: `dead_here`
+        // has no other reader there, so deleting the span is an unused-binding
+        // error under the release lane. Here `disabled=` reads it too, so the
+        // span can be deleted with everything still green — leaving a greyed
+        // box that explains nothing, which is this slice inverted.
+        assert!(
+            row.contains(&["rooms-workspace_", "_trigger-note"].concat()),
+            "the create row must still render the note span — the hold is \
+             only half the product, and nothing but this line notices it going"
+        );
     }
 
     #[test]

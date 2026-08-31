@@ -4449,3 +4449,28 @@ integration binaries green; `cargo clippy -p ocean-surface-ui --all-targets --
 check -p ocean-surface-ui --target wasm32-unknown-unknown` clean. No migration,
 no deploy step.
 _________________________________________________________________________________
+
+time:      [13:22] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-create-room-triggers-teach-nothing-about-which-flags-are-dead
+type:      [review]
+area:      [frontend]
+
+Refinement pass on the reviewer's one finding, and it was a real hole I put
+there. The right rail's `__trigger-note` span is held by the compiler for free:
+`trigger_toggle_row` reads `dead_here` only to render the note, so deleting the
+span is an unused-binding error under the release lane. `create_trigger_row`
+gives `dead_here` a second reader in `disabled=`, so deleting its span leaves
+the binding used and the entire gate green — 1196 tests, clippy, fmt and the
+wasm check all pass while the panel ships two permanently greyed checkboxes
+explaining nothing, which is this slice inverted. I reproduced exactly that
+before fixing it. One assert closes it, in the source scan that already slices
+the helper body and already pins `disabled=` consults the note; split-literal
+like its neighbours, because the scan reads this very file and a whole literal
+would match itself. Verified the guard bites by deleting the span again with
+the assert in place: the test fails on that line. That also retires the second
+finding — `create_trigger_row`'s doc claimed "a row can never be greyed out
+with nothing to explain it", which until now described today's bytes rather
+than a property anything held; it is now carried by a test, so the sentence
+stays. Same four-leg gate re-run green.
+_________________________________________________________________________________
