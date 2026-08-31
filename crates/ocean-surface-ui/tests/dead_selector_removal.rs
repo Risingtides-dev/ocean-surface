@@ -12,40 +12,9 @@
 //! failing this guard. Live sibling selectors that must survive are asserted
 //! present so the deletions can't over-reach.
 
-use std::path::Path;
+mod common;
 
-fn repo_root() -> &'static Path {
-    // tests/ -> ocean-surface-ui/ -> crates/ -> repo root
-    Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
-}
-
-fn read(rel: &str) -> String {
-    let path = repo_root().join(rel);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
-}
-
-/// Every `.rs` file under the crate's `src/`, read into one blob so a class
-/// literal emitted anywhere in the component tree is detectable.
-fn all_rust_src() -> String {
-    let src = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
-    let mut blob = String::new();
-    let mut stack = vec![src.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in
-            std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()))
-        {
-            let entry = entry.expect("dir entry");
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-                blob.push_str(&std::fs::read_to_string(&path).unwrap_or_default());
-                blob.push('\n');
-            }
-        }
-    }
-    blob
-}
+use common::{all_rust_src, read};
 
 // ---- Deleted selectors are gone from CSS and never emitted from Rust --------
 

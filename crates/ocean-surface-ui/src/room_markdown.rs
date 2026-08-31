@@ -420,6 +420,22 @@ mod tests {
         assert_eq!(data, vec![MdSpan::Text("[x](data:text/html,hi)".into())]);
     }
 
+    /// The only case in this file that can watch the http/https comparison in
+    /// `scheme_allowed` be deleted. The `javascript:`/`data:` payloads above
+    /// carry no `://`, so the split refuses them before the comparison is ever
+    /// reached, and the autolink path pre-checks the `http(s)://` prefix
+    /// itself — an explicit link whose href is a well-formed `scheme://host`
+    /// is the one route that reaches the allowlist.
+    #[test]
+    fn labeled_link_rejects_non_http_scheme_with_authority() {
+        for body in ["[x](ftp://ocean.dev)", "[x](FTP://ocean.dev)"] {
+            assert_eq!(
+                tokenize(body, &members(&[])),
+                vec![MdSpan::Text(body.into())]
+            );
+        }
+    }
+
     #[test]
     fn unsafe_labeled_links_render_literal_text() {
         let cases = [

@@ -34,29 +34,17 @@
 //! these lines however it likes without breaking the test. It does mean the
 //! needles read without their spaces — `"CIfailure"` is the label `"CI
 //! failure"`.
+//!
+//! The scanners themselves live in `tests/common/mod.rs` now. This file grew
+//! them one incident at a time and `unheld_room_controls.rs` needed the same
+//! three; `view_source` takes a module path there, and nothing else changed.
+
+mod common;
+
+use common::{view_source, without_whitespace};
 
 fn rooms_workspace_source() -> String {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/rooms_workspace.rs");
-    std::fs::read_to_string(path).expect("read src/rooms_workspace.rs")
-}
-
-fn without_whitespace(source: &str) -> String {
-    source
-        .chars()
-        .filter(|char| !char.is_whitespace())
-        .collect()
-}
-
-/// The half of `rooms_workspace.rs` a release build actually compiles. A scan
-/// whose needle the file's own unit tests could quote stops here: those tests
-/// assert on what the view is supposed to render, so a needle they satisfy pins
-/// nothing while the view says whatever it likes.
-fn view_source() -> String {
-    rooms_workspace_source()
-        .split_once("#[cfg(test)]")
-        .expect("rooms_workspace.rs carries its unit tests at the bottom")
-        .0
-        .to_string()
+    common::src("rooms_workspace.rs")
 }
 
 #[test]
@@ -109,7 +97,7 @@ fn the_create_call_passes_the_ci_failure_draft() {
 /// tidy-up of it without holding anything the compiler is not already holding.
 #[test]
 fn the_rail_offers_a_row_for_every_live_trigger() {
-    let view = without_whitespace(&view_source());
+    let view = without_whitespace(&view_source("rooms_workspace.rs"));
     for (variant, label) in [
         ("Mention", r#""@mention""#),
         ("ThreadReply", r#""threadreply""#),
@@ -135,7 +123,7 @@ fn the_rail_offers_a_row_for_every_live_trigger() {
 /// create call passing the wrong draft signal, so it gets the same answer.
 #[test]
 fn the_summary_call_site_passes_the_access_projection() {
-    let view = without_whitespace(&view_source());
+    let view = without_whitespace(&view_source("rooms_workspace.rs"));
     assert!(
         view.contains("trigger_summary(&p,access.as_ref())"),
         "the Response Policy summary must be handed the open room's access \
@@ -164,7 +152,8 @@ fn the_ci_failure_label_is_capitalized_everywhere() {
          and the policy summary say `CI failure`",
     );
     assert!(
-        without_whitespace(&view_source()).contains(r#"TriggerToggle::CiFailure,"CIfailure","#),
+        without_whitespace(&view_source("rooms_workspace.rs"))
+            .contains(r#"TriggerToggle::CiFailure,"CIfailure","#),
         "the rail row must label this trigger `CI failure`, the same casing \
          the summary returns",
     );
