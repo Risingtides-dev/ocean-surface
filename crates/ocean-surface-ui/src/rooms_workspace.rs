@@ -38,18 +38,18 @@ fn should_clear_composer(current: &str, original_draft: &str) -> bool {
 /// `on_schedule` with a typed 400 (`trigger_unwired`), so every write path
 /// here normalizes them away instead (see [`policy_with_toggle`]).
 ///
-/// `on_ci_failure` has no control for a different reason: the daemon half is
-/// live — a `room.workspace.ci_checked` row whose checks read red convenes the
-/// roster's agents, the green and in-progress ones staying pure markers — but
-/// the rail row was never built. So the flag is writable and nothing refuses
-/// it; it is simply unreachable from this UI, and `RoomTriggerPolicy` mirrors
-/// it (see that field) purely so a flip of some other row cannot clear a value
-/// the daemon holds. Adding the row is a UI slice, not a wiring one.
+/// `on_ci_failure` is exposed on the same terms as the other three: the daemon
+/// half is live — a `room.workspace.ci_checked` row whose checks read red
+/// convenes the roster's agents, the green and in-progress ones staying pure
+/// markers — and nothing refuses the write. It reached this enum a release
+/// after the flag itself, so `RoomTriggerPolicy` mirrors it (see that field)
+/// for rooms whose value the daemon set before any control could.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TriggerToggle {
     Mention,
     ThreadReply,
     BuildFailure,
+    CiFailure,
 }
 
 /// The full policy to PATCH when one exposed flag flips: a copy of the room's
@@ -59,8 +59,9 @@ enum TriggerToggle {
 /// room with dead state stored would 400 on every flip if we carried it
 /// through. Nothing ever fires those fields; dropping them on the next edit
 /// is the honest behavior. `on_ci_failure` is deliberately NOT in that group:
-/// nothing refuses it, so it rides through untouched and a flip of some other
-/// row is never what clears a flag the daemon set.
+/// nothing refuses it, so the copy carries it through untouched and only its
+/// own row's flip ever changes it — which is what keeps a value the daemon set
+/// from being cleared by a flip of some unrelated row.
 fn policy_with_toggle(
     current: Option<&RoomTriggerPolicy>,
     toggle: TriggerToggle,
@@ -73,11 +74,12 @@ fn policy_with_toggle(
         TriggerToggle::Mention => policy.on_mention = enabled,
         TriggerToggle::ThreadReply => policy.on_thread_reply = enabled,
         TriggerToggle::BuildFailure => policy.on_build_failure = enabled,
+        TriggerToggle::CiFailure => policy.on_ci_failure = enabled,
     }
     policy
 }
 
-/// Create-time policy from the three exposed toggles. All-off returns `None`
+/// Create-time policy from the four exposed toggles. All-off returns `None`
 /// so the create body omits the field entirely and the daemon's default (no
 /// automatic triggers) applies — exactly what creating a room did before this
 /// form had toggles.
@@ -85,26 +87,57 @@ fn create_trigger_policy(
     on_mention: bool,
     on_thread_reply: bool,
     on_build_failure: bool,
+    on_ci_failure: bool,
 ) -> Option<RoomTriggerPolicy> {
-    if !on_mention && !on_thread_reply && !on_build_failure {
+    if !on_mention && !on_thread_reply && !on_build_failure && !on_ci_failure {
         return None;
     }
     Some(RoomTriggerPolicy {
         on_mention,
         on_thread_reply,
         on_build_failure,
+        on_ci_failure,
         ..RoomTriggerPolicy::default()
     })
+}
+
+/// The right rail's one-line reading of a stored policy: the live flags that
+/// are on, or `"none"`. A free function rather than inline view code because
+/// the view is only reachable from a browser — a control silently dropped from
+/// this list is invisible to `cargo test` and to the wasm build alike, which is
+/// exactly how the summary lost a line once before.
+///
+/// The unwired fields are never listed: they cannot fire, and a write carrying
+/// them is refused (`trigger_unwired`).
+fn trigger_summary(policy: &RoomTriggerPolicy) -> String {
+    let mut on: Vec<&str> = Vec::new();
+    if policy.on_mention {
+        on.push("mention");
+    }
+    if policy.on_thread_reply {
+        on.push("thread reply");
+    }
+    if policy.on_build_failure {
+        on.push("build failure");
+    }
+    if policy.on_ci_failure {
+        on.push("CI failure");
+    }
+    if on.is_empty() {
+        "none".to_string()
+    } else {
+        on.join(", ")
+    }
 }
 
 /// The note a trigger row carries when its flag cannot fire in this kind of
 /// room — `None` when the flag is live here.
 ///
-/// The policy all three flags are judged against is read from THIS daemon's
+/// The policy all four flags are judged against is read from THIS daemon's
 /// store, on the federation bridge's ingest paths as much as on the local
 /// post path, so a federated room's policy is not an inert mirror and
 /// PATCHing it changes what actually fires. What varies is which flag's EVENT
-/// can reach which kind of room, and it is a three-way split:
+/// can reach which kind of room, and it is a four-way split:
 ///
 /// - `on_mention` reaches both. The local post path parses mentions out of a
 ///   posted body, and the bridge's message ingest evaluates the same event
@@ -115,6 +148,9 @@ fn create_trigger_policy(
 /// - `on_build_failure` reaches a federated room only. It is built solely
 ///   from a `room.workspace.build_failed` marker, and workspace markers
 ///   arrive through the bridge — a Local room has no workspace to fail.
+/// - `on_ci_failure` reaches a federated room only, for the same reason and
+///   from the same lane: its sole event is a `room.workspace.ci_checked`
+///   marker the bridge reads red, so a Local room has no workspace to check.
 ///
 /// A room whose access is still unknown gets no note: claiming a flag is
 /// dead there would be a guess, and [`trigger_policy_accepts_writes`] already
@@ -129,6 +165,7 @@ fn trigger_row_dead_here(
         TriggerToggle::Mention => None,
         TriggerToggle::ThreadReply => federated.then_some("local rooms only"),
         TriggerToggle::BuildFailure => (!federated).then_some("federated rooms only"),
+        TriggerToggle::CiFailure => (!federated).then_some("federated rooms only"),
     }
 }
 
@@ -1769,10 +1806,11 @@ pub fn RoomsWorkspace(
     let pending_create = RwSignal::new(false);
     let create_op_id: RwSignal<u64> = RwSignal::new(0);
     // Auto-wake toggles for the room being created. Default off: an absent
-    // policy (all three off) posts no `trigger_policy` at all.
+    // policy (all four off) posts no `trigger_policy` at all.
     let create_on_mention = RwSignal::new(false);
     let create_on_thread_reply = RwSignal::new(false);
     let create_on_build_failure = RwSignal::new(false);
+    let create_on_ci_failure = RwSignal::new(false);
     let create_room = move || {
         // Prevent concurrent dispatch: if a create is already in flight,
         // ignore the keypress. The Effect clears pending_create when the
@@ -1790,6 +1828,7 @@ pub fn RoomsWorkspace(
                 create_on_mention.get_untracked(),
                 create_on_thread_reply.get_untracked(),
                 create_on_build_failure.get_untracked(),
+                create_on_ci_failure.get_untracked(),
             ),
         );
         if op_id == 0 {
@@ -1828,6 +1867,7 @@ pub fn RoomsWorkspace(
                 create_on_mention.set(false);
                 create_on_thread_reply.set(false);
                 create_on_build_failure.set(false);
+                create_on_ci_failure.set(false);
                 pending_create.set(false);
             }
             CreateResolution::KeepDraft => {
@@ -2647,7 +2687,7 @@ pub fn RoomsWorkspace(
                         disabled=move || pending_create.get()
                     />
                     // Auto-wake flags for the room being created. Only the
-                    // three live flags get a control; see TriggerToggle.
+                    // four live flags get a control; see TriggerToggle.
                     <div
                         class="rooms-workspace__create-triggers"
                         role="group"
@@ -2685,6 +2725,17 @@ pub fn RoomsWorkspace(
                                 disabled=move || pending_create.get()
                             />
                             <span class="rooms-workspace__trigger-label">"build failure"</span>
+                        </label>
+                        <label class="rooms-workspace__trigger">
+                            <input
+                                type="checkbox"
+                                prop:checked=move || create_on_ci_failure.get()
+                                on:change=move |ev| {
+                                    create_on_ci_failure.set(event_target_checked(&ev))
+                                }
+                                disabled=move || pending_create.get()
+                            />
+                            <span class="rooms-workspace__trigger-label">"CI failure"</span>
                         </label>
                     </div>
                 </div>
@@ -3871,7 +3922,7 @@ pub fn RoomsWorkspace(
                     })
                 />
 
-                // How this room wakes its agents: the three live
+                // How this room wakes its agents: the four live
                 // trigger-policy flags, editable in place. Every access state
                 // renders it — the policy each flag is judged against is read
                 // from THIS daemon's store, on the federation bridge's ingest
@@ -3923,6 +3974,13 @@ pub fn RoomsWorkspace(
                                 TriggerToggle::BuildFailure,
                                 "build failure",
                                 flag(|p| p.on_build_failure),
+                                access.as_ref(),
+                            )}
+                            {trigger_toggle_row(
+                                rooms,
+                                TriggerToggle::CiFailure,
+                                "CI failure",
+                                flag(|p| p.on_ci_failure),
                                 access.as_ref(),
                             )}
                             {move || {
@@ -4003,15 +4061,7 @@ pub fn RoomsWorkspace(
                     rooms.open_room.get()
                         .and_then(|r| r.trigger_policy)
                         .map(|p| {
-                            let mut on: Vec<&str> = Vec::new();
-                            if p.on_mention { on.push("mention"); }
-                            if p.on_thread_reply { on.push("thread reply"); }
-                            if p.on_build_failure { on.push("build failure"); }
-                            let triggers = if on.is_empty() {
-                                "none".to_string()
-                            } else {
-                                on.join(", ")
-                            };
+                            let triggers = trigger_summary(&p);
                             view! {
                                 <div class="rooms-workspace__policy">
                                     <div class="rooms-workspace__policy-label">
@@ -4159,7 +4209,7 @@ mod tests {
     /// the daemon refuses any write carrying `on_component_event: true` or a
     /// set `on_schedule` (`trigger_unwired`), so carrying stored dead values
     /// through would 400 every flip for that room, permanently breaking all
-    /// three working toggles. The live flags still carry through untouched.
+    /// four working toggles. The live flags still carry through untouched.
     #[test]
     fn policy_with_toggle_normalizes_dead_fields_and_keeps_live_ones() {
         let current = RoomTriggerPolicy {
@@ -4212,8 +4262,8 @@ mod tests {
     /// touches the unexposed fields.
     #[test]
     fn create_trigger_policy_only_carries_exposed_flags() {
-        assert_eq!(create_trigger_policy(false, false, false), None);
-        let policy = create_trigger_policy(true, false, true).expect("policy");
+        assert_eq!(create_trigger_policy(false, false, false, false), None);
+        let policy = create_trigger_policy(true, false, true, false).expect("policy");
         assert!(policy.on_mention);
         assert!(!policy.on_thread_reply);
         assert!(policy.on_build_failure);
@@ -4222,12 +4272,55 @@ mod tests {
         assert_eq!(policy.on_schedule, None);
     }
 
-    /// The whole reason `on_ci_failure` is mirrored here before it has a
-    /// control: a PATCH from this rail replaces the stored policy WHOLESALE,
-    /// so a flag the daemon set and this struct did not know about would be
-    /// cleared by the next flip of an unrelated row. It rides through — unlike
-    /// the two unwired fields above, nothing refuses it, so dropping it would
-    /// be destruction rather than the honest normalization those get.
+    /// `on_ci_failure` is an exposed toggle, not a flag that only ever arrives
+    /// from the daemon: it has to survive create on its own, and it has to be
+    /// enough on its own to post a policy at all. Ticking only the CI box and
+    /// getting `None` back would drop the box's whole meaning silently — the
+    /// room would be created with the daemon's no-triggers default.
+    #[test]
+    fn create_trigger_policy_carries_a_lone_ci_failure_tick() {
+        let policy = create_trigger_policy(false, false, false, true).expect("policy");
+        assert!(policy.on_ci_failure);
+        assert!(!policy.on_mention);
+        assert!(!policy.on_thread_reply);
+        assert!(!policy.on_build_failure);
+        assert!(!policy.on_component_event);
+        assert_eq!(policy.on_schedule, None);
+    }
+
+    /// The right rail's summary must name every live flag that is on. This is
+    /// the only guard on that list: the summary renders in a browser, so a
+    /// dropped line passes both `cargo test` and the wasm build otherwise.
+    #[test]
+    fn trigger_summary_names_every_live_flag_that_is_on() {
+        assert_eq!(trigger_summary(&RoomTriggerPolicy::default()), "none");
+        let all_on = RoomTriggerPolicy {
+            on_mention: true,
+            on_thread_reply: true,
+            on_build_failure: true,
+            on_ci_failure: true,
+            on_component_event: true,
+            on_schedule: Some("0 9 * * 1".into()),
+        };
+        assert_eq!(
+            trigger_summary(&all_on),
+            "mention, thread reply, build failure, CI failure"
+        );
+        let ci_only = RoomTriggerPolicy {
+            on_ci_failure: true,
+            ..RoomTriggerPolicy::default()
+        };
+        assert_eq!(trigger_summary(&ci_only), "CI failure");
+    }
+
+    /// Why `on_ci_failure` is mirrored and not just toggled: a PATCH from this
+    /// rail replaces the stored policy WHOLESALE, so a flag the daemon set and
+    /// this struct did not know about would be cleared by the next flip of an
+    /// unrelated row. Its own row is not what protects it — this asserts a
+    /// BuildFailure flip — and rooms that gained the flag before the row
+    /// existed still depend on that. It rides through: unlike the two unwired
+    /// fields above, nothing refuses it, so dropping it would be destruction
+    /// rather than the honest normalization those get.
     #[test]
     fn policy_with_toggle_carries_a_daemon_set_ci_failure_through_a_flip() {
         let current = RoomTriggerPolicy {
@@ -4266,12 +4359,13 @@ mod tests {
 
     // ── trigger rows: which flag is live in which kind of room ────────
     //
-    // Traced through the daemon at ocean-os origin/main 0b32db5d. All three
-    // flags are read from THIS daemon's store — the federation bridge's
-    // ingest paths call `store.trigger_policy(..)` exactly like the local
-    // post path does — so a federated room's policy is live state. What
-    // differs is which flag's EVENT can be constructed for which kind of
-    // room, and the three flags land in three different places.
+    // Traced through the daemon at ocean-os origin/main 0b32db5d, and
+    // re-traced at b77f791c when the CI row joined. All four flags are read
+    // from THIS daemon's store — the federation bridge's ingest paths call
+    // `store.trigger_policy(..)` exactly like the local post path does — so a
+    // federated room's policy is live state. What differs is which flag's
+    // EVENT can be constructed for which kind of room. The four flags land in
+    // three places, not four: the two workspace-marker flags share one.
 
     /// `RoomTriggerEvent::Mention` is built on BOTH paths: the local post
     /// path parses mentions out of a posted body, and the bridge's
@@ -4350,6 +4444,35 @@ mod tests {
         ));
     }
 
+    /// A red CI check reaches a room the same way a build failure does and
+    /// from the same lane: `RoomTriggerEvent::CiFailure` has exactly one
+    /// non-test construction site in the daemon (`ingest_workspace_row`, at
+    /// ocean-os b77f791c), off a `room.workspace.ci_checked` marker the bridge
+    /// reads red. A Local room has no workspace to check, so the row is dead
+    /// there for BuildFailure's reason rather than by analogy to it.
+    #[test]
+    fn ci_failure_is_dead_in_a_local_room() {
+        let local = test_access(RoomAccessState::Local);
+        assert_eq!(
+            trigger_row_dead_here(TriggerToggle::CiFailure, Some(&local)),
+            Some("federated rooms only")
+        );
+        assert!(!trigger_row_is_editable(
+            TriggerToggle::CiFailure,
+            Some(&local)
+        ));
+
+        let live = test_access(RoomAccessState::Live);
+        assert_eq!(
+            trigger_row_dead_here(TriggerToggle::CiFailure, Some(&live)),
+            None
+        );
+        assert!(trigger_row_is_editable(
+            TriggerToggle::CiFailure,
+            Some(&live)
+        ));
+    }
+
     /// `Revoked` is the one access state that holds every row. The daemon
     /// would take the PATCH — `room_update` has no access check — but the
     /// operator has been removed from this room, so a control that still
@@ -4363,6 +4486,7 @@ mod tests {
             TriggerToggle::Mention,
             TriggerToggle::ThreadReply,
             TriggerToggle::BuildFailure,
+            TriggerToggle::CiFailure,
         ] {
             assert!(
                 !trigger_row_is_editable(toggle, Some(&access)),
@@ -4375,6 +4499,10 @@ mod tests {
         );
         assert_eq!(
             trigger_row_dead_here(TriggerToggle::BuildFailure, Some(&access)),
+            None
+        );
+        assert_eq!(
+            trigger_row_dead_here(TriggerToggle::CiFailure, Some(&access)),
             None
         );
     }
@@ -4403,6 +4531,10 @@ mod tests {
                 "{state:?}"
             );
             assert!(
+                trigger_row_is_editable(TriggerToggle::CiFailure, Some(&access)),
+                "{state:?}"
+            );
+            assert!(
                 !trigger_row_is_editable(TriggerToggle::ThreadReply, Some(&access)),
                 "{state:?}"
             );
@@ -4414,6 +4546,11 @@ mod tests {
             );
             assert_eq!(
                 trigger_row_dead_here(TriggerToggle::BuildFailure, Some(&access)),
+                None,
+                "{state:?}"
+            );
+            assert_eq!(
+                trigger_row_dead_here(TriggerToggle::CiFailure, Some(&access)),
                 None,
                 "{state:?}"
             );
@@ -4469,6 +4606,7 @@ mod tests {
             TriggerToggle::Mention,
             TriggerToggle::ThreadReply,
             TriggerToggle::BuildFailure,
+            TriggerToggle::CiFailure,
         ] {
             assert_eq!(trigger_row_dead_here(toggle, None), None, "{toggle:?}");
             assert!(!trigger_row_is_editable(toggle, None), "{toggle:?}");
