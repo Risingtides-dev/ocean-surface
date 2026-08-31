@@ -4498,6 +4498,7 @@ with nothing to explain it", which until now described today's bytes rather
 than a property anything held; it is now carried by a test, so the sentence
 stays. Same four-leg gate re-run green.
 _________________________________________________________________________________
+
 time:      [14:14] [31-08-26]
 agent:     [codex] [gpt-5.6-sol]
 worktree:  [codex/rooms-phase1-surface-auth-0831]
@@ -4531,6 +4532,7 @@ Trunk 0.21.14 rejected the ambient `NO_COLOR=1` value before compilation; the
 same release build passed with only `NO_COLOR` unset. No push, deployment, or
 live daemon mutation was performed from this worktree.
 _________________________________________________________________________________
+
 time:      [14:50] [31-08-26]
 agent:     [codex] [gpt-5.6-sol]
 worktree:  [codex/rooms-phase1-surface-auth-0831]
@@ -4566,4 +4568,158 @@ check, WASM test compilation, proxy check, `cargo fmt --all -- --check`, Trunk
 check. Updated the root Rooms contract; no child devlog exists for the touched
 crates. This is a corrected review candidate, not a pushed, deployed, or live
 daemon change.
+_________________________________________________________________________________
+
+time:      [14:52] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-gitattributes-events-union
+type:      [workflow]
+area:      [infra]
+
+ocean-surface had no `.gitattributes` at all and not one line in AGENTS.md
+about the ledger, so the append/append collision at this file's EOF was landing
+on whoever rebased second. The entry directly above this one is the receipt: it
+records two surface slices in one wave hitting a real conflict whose two sides
+were complete entries sharing one trailing rule, resolved by hand. `ocean-os`
+has carried `events.md merge=union` since June (`0a64cd44`, #261), and
+`ocean-bedrock` adopted it YESTERDAY (`f5e72b4`, #54). So the line has months
+of production evidence behind it in one sibling and one day in the other —
+worth knowing before reading its adoption here as long-settled. This gives this
+repo the same driver and writes down what it costs.
+
+I measured the driver against this file's real entry shape rather than trusting
+the sibling repos' notes, in a throwaway repo with a base entry and two
+branches appending one entry each. Without `.gitattributes` the merge conflicts
+and git brackets the two entry bodies between the shared blank line and the
+shared `___` rule. With the driver it comes back clean and markerless — and the
+merged file is FUSED: the second entry's `time:` header sits directly on the
+first entry's prose, because union keeps a line both sides added only once and
+the two appends share both the blank and the rule. That is the same eaten
+separator the hand-resolution above had to restore, except union makes it
+silent instead of raising a conflict.
+
+`scripts/events-merge-driver.test.mjs` now holds that measurement as a guard:
+the rule read out of `.gitattributes` itself, git agreeing on what it resolves
+to, a two-branch append/append merge that must come back clean and markerless,
+the SAME merge without the file that must CONFLICT — without which the clean
+one would only be showing that git found the merge trivial — and the fold,
+pinned as the defect it is rather than as a contract. It follows the shape of
+the Node tests already in `scripts/`: bare top-level asserts, a scratch repo
+under `mkdtemp`, git identity passed as `-c` flags so nothing touches this
+process's env. It is falsifiable, which is the point: delete `.gitattributes`,
+change the rule to another driver, or drop the rule line and keep the comment,
+and it fails with a message naming what went. `git check-attr` alone would not
+have done that — git reads `.gitattributes` out of the INDEX when the
+working-tree file is gone, so a deleted file still answers `union` until the
+deletion is staged, which is why the guard reads the file first.
+
+An earlier draft of this entry said no such guard was possible here, because
+every check in this repo is a Rust scanner under `crates/` and that is a
+sibling slice's ground. That was simply wrong, and the review caught it:
+`scripts/` already holds three Node tests, one of them a CI step
+(`node scripts/surface-auto-deploy.test.mjs`, ci.yml). The guard is hand-run
+like `scripts/sw-wasm-magic.test.mjs`, since wiring it would mean editing
+`.github/workflows/ci.yml`, which is outside this slice's file scope. AGENTS.md
+says exactly that, and keeps the instruction to read the boundary by hand after
+any merge carrying two appends: the guard reproduces the fold in a scratch repo,
+it never reads THIS ledger, so a fold already landed here is still invisible.
+
+The new AGENTS.md "Repository Ledger" section also states the sharper rule the
+comment in `.gitattributes` carries: union is safe for append/append and unsafe
+for everything else, because a correction or a redaction to the tail entry
+lands in the hunk a concurrent append touches and union settles it by putting
+back the line the correction removed. Coming back clean is not evidence that it
+is right. It records the `ledger` job's watched paths from ci.yml as they
+actually read, and that the job reports rather than blocks. `.github/` was left
+untouched deliberately — it is inside the guard's own watched set, and it is
+also why the new test is hand-run rather than a CI step.
+
+Gate, on a tree touching no crate: `cargo fmt --all --check` exit 0;
+`RUSTFLAGS="-D warnings" cargo check -p ocean-surface-ui --target
+wasm32-unknown-unknown` exit 0; `cargo check -p ocean-surface-proxy` exit 0;
+`node --check` and a full run of the new test both exit 0. No migration, no
+deploy step. Adding a file under `scripts/` puts this PR INSIDE the ledger
+job's watched set, so the job now demands this entry rather than merely
+tolerating it — it is here. Land this before any other ocean-surface PR in the
+wave — the driver is read from the target branch at merge time, so landing it
+second means hand-resolving the exact conflict it exists to abolish.
+_________________________________________________________________________________
+
+time:      [14:53] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-dead-trigger-row-cannot-be-unchecked-so-stored-dead-state-is-permanent
+type:      [bug-report]
+area:      [frontend]
+
+`trigger_row_is_editable` was one predicate doing two jobs, and the second job
+was wrong. It refused every flip on a flag whose event can never reach this
+kind of room -- correct for arming one, but it took the disarm with it, and a
+flag can be stored true and then become dead without anyone touching it: a room
+created Local with `on_thread_reply` that later federates, or one created with
+the workspace-marker flags that never does. The row then rendered CHECKED from
+the stored policy, greyed, noted `local rooms only`, and `trigger_summary`
+listed it as on -- deliberately, since hiding it only inverts the contradiction
+-- and no control anywhere in the app could clear it. The stored dead state was
+permanent. Split the gate by direction: the row already receives `checked`, so
+`trigger_toggle_row` needed no new information, only to pass what it had. A
+dead row that is on takes the un-tick; a dead row that is off still refuses the
+tick; `trigger_policy_accepts_writes` still leads both, so `Revoked` and unknown
+access hold everything as before. After an admitted un-tick the section
+re-renders from `open_room` with checked false and the row goes held in both
+directions -- the end state, not a regression. `dead_here` deliberately stays
+the note's only reader in that function, so the span the last wave pinned is
+still held by the compiler. The four existing live/dead tests now carry the
+direction and keep their reasoning; one new test pins the asymmetry, and I
+proved it bites by restoring the single gate and watching it fail on the
+un-tick assert. `create_trigger_row` is untouched: a room being created has no
+stored state, so its dead rows are correctly held both ways. Gate green --
+fmt, 1207 tests, wasm clippy, and the release-lane wasm check.
+_________________________________________________________________________________
+
+time:      [15:04] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-dead-trigger-row-cannot-be-unchecked-so-stored-dead-state-is-permanent
+type:      [review]
+area:      [frontend]
+
+Refinement pass on the same branch against three review findings, all in
+`rooms_workspace.rs`. The first was a comment I should have caught myself: the
+two reads in `trigger_toggle_row` were still introduced by "the note and the
+disabled state can never disagree about this room", which is precisely the
+invariant this change breaks on purpose, and which the same file sells as a bug
+in `create_trigger_row`'s doc. Left standing it is an invitation to re-couple
+them and re-close the door. It now says the note follows the access reading
+alone while the hold follows access and direction, and names the one row where
+they part company. The second was the real gap: the new third parameter is a
+degree of freedom the two-argument gate did not have, and nothing pinned that
+the row feeds its own `checked` into it -- every unit test calls the gate
+directly with a literal, so `trigger_row_is_editable(toggle, true, access)`
+would compile, stay green, and quietly re-arm every dead row in the browser,
+which is the half of the old gate that was always right. The rail's existing
+source-scan guard now pins the call form; reverting the call to a literal makes
+it the one test of 1207 that fails, which I checked rather than assumed. The
+third was cosmetic but operator-facing: the new test's panic message carried an
+18-space run mid-sentence that `cargo fmt` cannot reflow, so it printed
+verbatim at the moment the guard bites. It uses backslash continuation now,
+like every other multi-line assert in the file. Full gate re-run green -- fmt,
+1250 tests across ten binaries with 1207 in the main one, clippy at
+--all-targets and at wasm32 with -D warnings, the release-lane wasm check, the
+proxy check, and the wasm test-compile.
+_________________________________________________________________________________
+
+time:      [16:03] [08-31-26]
+agent:     [codex] [gpt-5]
+worktree:  codex/rooms-phase1-surface-auth-0831
+type:      [workflow]
+area:      [testing]
+
+Reconciled the independently accepted Ocean Rooms Phase 1 Surface authorization
+candidate with `origin/main` at `9982a7f`. The sole textual conflict was this
+append-only ledger; resolution retained both branches' complete entries and
+restored every blank-line and separator boundary. The upstream union merge
+driver guard passes all 15 assertions. The exact combined tree passes format,
+64 proxy tests, 1,219 UI unit tests plus every integration suite, denied-warning
+native and wasm Clippy, wasm check and test compilation, the release Trunk
+bundle, the standalone Tauri check, and `git diff --check`. This remains an
+unpublished candidate: it has not been pushed, merged, deployed, or served.
 _________________________________________________________________________________

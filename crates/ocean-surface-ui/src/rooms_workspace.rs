@@ -268,12 +268,31 @@ fn trigger_policy_accepts_writes(access: Option<&RoomAccessProjection>) -> bool 
     }
 }
 
-/// Whether a trigger row accepts a flip: the policy must be writable under
-/// this access at all (see [`trigger_policy_accepts_writes`] — this rail's own
-/// gate, not the composer's) and the flag must be one that can actually fire
-/// here (see [`trigger_row_dead_here`]).
-fn trigger_row_is_editable(toggle: TriggerToggle, access: Option<&RoomAccessProjection>) -> bool {
-    trigger_policy_accepts_writes(access) && trigger_row_dead_here(toggle, access).is_none()
+/// Whether a trigger row accepts a flip, and in which direction. The policy
+/// must be writable under this access at all (see
+/// [`trigger_policy_accepts_writes`] — this rail's own gate, not the
+/// composer's), and a flag that cannot fire here (see
+/// [`trigger_row_dead_here`]) may still be turned OFF.
+///
+/// The direction is what `checked` carries, and splitting on it is the whole
+/// point. "This flag's event can never reach this room" is a reason to refuse
+/// ARMING the flag; it is never a reason to refuse disarming one that is
+/// already armed. Under a single gate it did both, and a room that stored
+/// `on_thread_reply: true` and then federated rendered that row checked,
+/// greyed, noted `local rooms only`, and listed as on by [`trigger_summary`] —
+/// with no control anywhere that could clear it. The stored contradiction
+/// outlived every session that looked at it.
+///
+/// An admitted un-tick re-renders the section from `open_room` with `checked`
+/// false, and the row goes held-in-both-directions again. That is the state
+/// this exists to reach, not a row that has come back to life.
+fn trigger_row_is_editable(
+    toggle: TriggerToggle,
+    checked: bool,
+    access: Option<&RoomAccessProjection>,
+) -> bool {
+    trigger_policy_accepts_writes(access)
+        && (checked || trigger_row_dead_here(toggle, access).is_none())
 }
 
 /// One editable trigger row in the right rail. `checked` is a plain bool on
@@ -284,6 +303,12 @@ fn trigger_row_is_editable(toggle: TriggerToggle, access: Option<&RoomAccessProj
 /// flip reads the room's policy fresh at event time — not from the render that
 /// drew the box — so two quick flips compose instead of the second
 /// resurrecting the first's pre-state.
+///
+/// `checked` is also the direction the gate is asked about: a dead flag that
+/// is stored on is the one case where a dead row still takes a click. If that
+/// un-tick is REFUSED the row stays enabled, because `checked` is still the
+/// true it rendered from — which is what lets the operator put back the flag
+/// the daemon would not let them clear.
 fn trigger_toggle_row(
     rooms: Rooms,
     toggle: TriggerToggle,
@@ -291,10 +316,13 @@ fn trigger_toggle_row(
     checked: bool,
     access: Option<&RoomAccessProjection>,
 ) -> impl IntoView {
-    // Both read the projection the enclosing section already holds, so the
-    // note and the disabled state can never disagree about this room.
+    // Both read the projection the enclosing section already holds, but they
+    // ask different things of it: the note follows the access reading alone,
+    // while the hold follows access AND the direction of the flip. So on one
+    // row they part company on purpose — a dead flag stored ON renders noted
+    // and still clickable, because that click is the un-tick.
     let dead_here = trigger_row_dead_here(toggle, access);
-    let editable = trigger_row_is_editable(toggle, access);
+    let editable = trigger_row_is_editable(toggle, checked, access);
     view! {
         <label class="rooms-workspace__trigger">
             <input
@@ -4504,10 +4532,12 @@ mod tests {
                 None,
                 "{state:?}"
             );
-            assert!(
-                trigger_row_is_editable(TriggerToggle::Mention, Some(&access)),
-                "{state:?}"
-            );
+            for checked in [false, true] {
+                assert!(
+                    trigger_row_is_editable(TriggerToggle::Mention, checked, Some(&access)),
+                    "{state:?} checked={checked}"
+                );
+            }
         }
     }
 
@@ -4523,10 +4553,13 @@ mod tests {
             trigger_row_dead_here(TriggerToggle::ThreadReply, Some(&local)),
             None
         );
-        assert!(trigger_row_is_editable(
-            TriggerToggle::ThreadReply,
-            Some(&local)
-        ));
+        for checked in [false, true] {
+            assert!(trigger_row_is_editable(
+                TriggerToggle::ThreadReply,
+                checked,
+                Some(&local)
+            ));
+        }
 
         let live = test_access(RoomAccessState::Live);
         assert_eq!(
@@ -4535,6 +4568,7 @@ mod tests {
         );
         assert!(!trigger_row_is_editable(
             TriggerToggle::ThreadReply,
+            false,
             Some(&live)
         ));
     }
@@ -4554,6 +4588,7 @@ mod tests {
         );
         assert!(!trigger_row_is_editable(
             TriggerToggle::BuildFailure,
+            false,
             Some(&local)
         ));
 
@@ -4562,10 +4597,13 @@ mod tests {
             trigger_row_dead_here(TriggerToggle::BuildFailure, Some(&live)),
             None
         );
-        assert!(trigger_row_is_editable(
-            TriggerToggle::BuildFailure,
-            Some(&live)
-        ));
+        for checked in [false, true] {
+            assert!(trigger_row_is_editable(
+                TriggerToggle::BuildFailure,
+                checked,
+                Some(&live)
+            ));
+        }
     }
 
     /// A red CI check reaches a room the same way a build failure does and
@@ -4583,6 +4621,7 @@ mod tests {
         );
         assert!(!trigger_row_is_editable(
             TriggerToggle::CiFailure,
+            false,
             Some(&local)
         ));
 
@@ -4591,9 +4630,65 @@ mod tests {
             trigger_row_dead_here(TriggerToggle::CiFailure, Some(&live)),
             None
         );
-        assert!(trigger_row_is_editable(
-            TriggerToggle::CiFailure,
-            Some(&live)
+        for checked in [false, true] {
+            assert!(trigger_row_is_editable(
+                TriggerToggle::CiFailure,
+                checked,
+                Some(&live)
+            ));
+        }
+    }
+
+    /// The asymmetry the three tests above are now only half of, and the bug
+    /// this pass closes. A flag is stored on a room, the room changes kind,
+    /// and the flag is suddenly one whose event can never reach it: a room
+    /// created Local with `on_thread_reply` that later federates, or one
+    /// created with the workspace-marker flags that never does. The row
+    /// renders CHECKED — `trigger_toggle_row` draws it from the stored policy
+    /// — greyed, noted, and [`trigger_summary`] lists it as on, deliberately,
+    /// because hiding it would only invert the contradiction. Under one gate
+    /// the un-tick was refused along with the tick and there was no control
+    /// anywhere in the app that could clear the flag.
+    ///
+    /// So the two directions part company. A dead row that is on takes the
+    /// un-tick; a dead row that is off still refuses the tick, which is the
+    /// half of the old gate that was always right — arming a flag this room
+    /// can never fire stores the same contradiction on purpose.
+    #[test]
+    fn a_dead_flag_that_is_stored_on_can_still_be_turned_off() {
+        let dead_pairings = [
+            (TriggerToggle::ThreadReply, RoomAccessState::Live),
+            (TriggerToggle::BuildFailure, RoomAccessState::Local),
+            (TriggerToggle::CiFailure, RoomAccessState::Local),
+        ];
+        for (toggle, state) in dead_pairings {
+            let access = test_access(state);
+            assert!(
+                trigger_row_dead_here(toggle, Some(&access)).is_some(),
+                "{toggle:?} in {state:?} must be the dead pairing this pins"
+            );
+
+            assert!(
+                trigger_row_is_editable(toggle, true, Some(&access)),
+                "{toggle:?} stored on in {state:?} must accept the un-tick — \
+                 otherwise the stored flag can never be cleared"
+            );
+            assert!(
+                !trigger_row_is_editable(toggle, false, Some(&access)),
+                "{toggle:?} off in {state:?} must still refuse the tick"
+            );
+        }
+
+        // And the write gate still leads. A `Revoked` room refuses both
+        // directions on every flag, stored-on ones included: the operator has
+        // been removed, so there is no edit left to offer them — see
+        // [`a_revoked_room_holds_every_trigger_row`], which pins the same
+        // ordering from the other side.
+        let revoked = test_access(RoomAccessState::Revoked);
+        assert!(!trigger_row_is_editable(
+            TriggerToggle::ThreadReply,
+            true,
+            Some(&revoked)
         ));
     }
 
@@ -4601,7 +4696,10 @@ mod tests {
     /// would take the PATCH — `room_update` has no access check — but the
     /// operator has been removed from this room, so a control that still
     /// worked would be offering an action that cannot mean anything to them
-    /// again. The federated NOTE survives being held: `Revoked` is non-Local,
+    /// again. Both directions, so a flag stored on is held too: the un-tick
+    /// [`a_dead_flag_that_is_stored_on_can_still_be_turned_off`] admits
+    /// elsewhere is an edit like any other, and this is the state that offers
+    /// none. The federated NOTE survives being held: `Revoked` is non-Local,
     /// so `on_thread_reply` is still dead here for its own reason.
     #[test]
     fn a_revoked_room_holds_every_trigger_row() {
@@ -4612,10 +4710,12 @@ mod tests {
             TriggerToggle::BuildFailure,
             TriggerToggle::CiFailure,
         ] {
-            assert!(
-                !trigger_row_is_editable(toggle, Some(&access)),
-                "{toggle:?}"
-            );
+            for checked in [false, true] {
+                assert!(
+                    !trigger_row_is_editable(toggle, checked, Some(&access)),
+                    "{toggle:?} checked={checked}"
+                );
+            }
         }
         assert_eq!(
             trigger_row_dead_here(TriggerToggle::ThreadReply, Some(&access)),
@@ -4636,8 +4736,9 @@ mod tests {
     /// daemon's own store and the PATCH that writes it never leaves the
     /// machine. `Connecting` and `Recovering` therefore keep every row whose
     /// event can fire in a federated room — and `on_thread_reply` stays held
-    /// there on the pre-existing, unrelated grounds that the bridge can never
-    /// construct that event, note and all.
+    /// there — against being ARMED, the direction that would store a flag
+    /// this room can never fire — on the pre-existing, unrelated grounds that
+    /// the bridge can never construct that event, note and all.
     ///
     /// This is the capability the gate used to take away: a room stuck
     /// `Recovering` while every mention woke an agent, and no way to stop it.
@@ -4646,20 +4747,22 @@ mod tests {
         for state in [RoomAccessState::Connecting, RoomAccessState::Recovering] {
             let access = test_access(state);
 
+            for checked in [false, true] {
+                assert!(
+                    trigger_row_is_editable(TriggerToggle::Mention, checked, Some(&access)),
+                    "{state:?} checked={checked}"
+                );
+                assert!(
+                    trigger_row_is_editable(TriggerToggle::BuildFailure, checked, Some(&access)),
+                    "{state:?} checked={checked}"
+                );
+                assert!(
+                    trigger_row_is_editable(TriggerToggle::CiFailure, checked, Some(&access)),
+                    "{state:?} checked={checked}"
+                );
+            }
             assert!(
-                trigger_row_is_editable(TriggerToggle::Mention, Some(&access)),
-                "{state:?}"
-            );
-            assert!(
-                trigger_row_is_editable(TriggerToggle::BuildFailure, Some(&access)),
-                "{state:?}"
-            );
-            assert!(
-                trigger_row_is_editable(TriggerToggle::CiFailure, Some(&access)),
-                "{state:?}"
-            );
-            assert!(
-                !trigger_row_is_editable(TriggerToggle::ThreadReply, Some(&access)),
+                !trigger_row_is_editable(TriggerToggle::ThreadReply, false, Some(&access)),
                 "{state:?}"
             );
 
@@ -4733,7 +4836,12 @@ mod tests {
             TriggerToggle::CiFailure,
         ] {
             assert_eq!(trigger_row_dead_here(toggle, None), None, "{toggle:?}");
-            assert!(!trigger_row_is_editable(toggle, None), "{toggle:?}");
+            for checked in [false, true] {
+                assert!(
+                    !trigger_row_is_editable(toggle, checked, None),
+                    "{toggle:?} checked={checked}"
+                );
+            }
         }
     }
 
@@ -4786,6 +4894,16 @@ mod tests {
         assert!(
             row.contains(&["trigger_row", "_is_editable"].concat()),
             "the trigger row must consult the per-row gate"
+        );
+        // And it must hand the gate its OWN `checked`. The direction argument
+        // is a degree of freedom the old two-argument gate did not have: a
+        // literal `true` there compiles, takes every unit test above green
+        // with it — they all call the gate directly — and re-arms every dead
+        // row in the browser, which is the half of the gate that was right.
+        assert!(
+            row.contains(&["trigger_row", "_is_editable(toggle, checked, access)"].concat()),
+            "the trigger row must pass its own `checked` to the per-row gate \
+             — a literal there decides the direction for every row at once"
         );
         let disabled = row
             .find("disabled=")
