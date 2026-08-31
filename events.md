@@ -4234,3 +4234,153 @@ wasm32-unknown-unknown --no-run`. Also ran `cargo clippy -p ocean-surface-ui
 --all-targets -- -D warnings`, the only invocation that lints the added test
 lines: exit 0. No migration, no deploy step.
 _________________________________________________________________________________
+
+time:      [13:22] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-ports-panel-lists-what-nobody-can-open-or-close
+type:      feature-request
+area:      frontend
+
+Wave 45 landed both halves of the ports chain and left the verb on the floor:
+ocean-os#419 put `ports` and `ports/close` into the daemon's workspace proxy
+allowlist, ocean-surface#172 landed the READ in `room_workspace_panel.rs` and
+said in its own commit that a control here had no route to post to. That
+sentence stopped being true the same wave, and the follow-up it named was never
+filed — so a room could run a dev server, Bedrock would mint a preview URL, the
+daemon would forward the call, this panel would list the result, and no human
+could open a port. `ports_section` now grows an expose control and every
+`port_row` a close, both riding the file's existing owner-verb machinery:
+`ports_expose_url`/`ports_close_url`, `post_port`, `classify_port`, and a
+`PortCommand` that carries its port so the row being closed labels itself while
+every other control on the lane disables. The module doc's "when controls land
+here" paragraph now says what actually landed.
+
+Two corrections to the scout's reading, both from the code. Bedrock's expose
+does NOT put `status` in the body — `handleWorkspacePortExpose` returns
+`{status, port, preview_url}` and the route uses `status` as the HTTP code,
+sending `{port, preview_url}` — so success is classified on the echoed `port`,
+which no refusal body on this wire carries. And `port_exposed`/`port_closed` ARE
+on the daemon's marker ingest allowlist (room_federation.rs:3355), so other
+members' panels wake on their own; the active re-read here is the actor's own
+list amending now instead of after the SSE round trip.
+
+The judgement worth naming is in `classify_port`'s two uncoded arms. Bedrock's
+port POLICY is a bare 400 — `validatePort` floors at 1024 and reserves 3000 —
+and that is a fix-and-retry STATE, relayed rather than restated, because the
+floor is Bedrock's to move; `parse_port` gates only the SHAPE the daemon proves
+for itself (`port_path_segment`, an integer in 1..=65535), so 80 and 3000 both
+still compose here and are refused upstream where the policy lives. A bare 404
+is the deployment's "not yet" on expose, but on CLOSE it is also Bedrock's "Port
+N is not currently exposed", a state that arrives with a body — the body tells
+the two apart. And a close whose `route_removed` is `false` never reads as
+"closed": Bedrock takes the preview route down best-effort and drops the row
+either way, so that is a URL still serving what the room stopped advertising,
+and the sentence says so and offers no retry, because the row is gone and a
+second close would answer "not currently exposed" as if the first had worked.
+
+Close fires on one click, unlike the destroy and take-back confirms beside it:
+Bedrock derives the preview token from `sha256(roomId:port)` rather than minting
+it, so re-exposing restores the SAME URL — nothing is discarded, nothing is
+un-published for good. Both controls render for every member and let the
+daemon's `workspace_not_owner_principal` be the answer, in a ports-shaped
+sentence rather than the lifecycle's "provision or destroy". The section copy
+now carries the thing nothing in the product said: a preview URL is a routing
+label, not a credential, and that world-readability is the whole reason the
+daemon narrows a pair Bedrock gates at member write.
+
+Seven unit tests over the free functions, in `classify_secrets`'s style: the URL
+pair, the shape-not-policy gate, the landed replies, the surviving-route
+sentence, the coded states, the uncoded arms, the per-verb unavailable voice.
+Then the `unheld_room_controls.rs` discipline applied for real rather than
+assumed — both controls were DELETED and the gate run. Both went red (expose:
+`variant Expose is never constructed`, `parse_port is never used`,
+`take_port_submission is never used`; close: `variant Close is never
+constructed` plus four unused-parameter errors, since stripping the only control
+in `port_row` orphans every parameter the row takes for it), so both are
+compiler-held and neither earns a guard. Recorded in that file's held list and
+in AGENTS.md's measurement table instead — the two files outside the slice's
+stated scope, comments and a table row only.
+
+All eight gates green: `cargo fmt --all --check`; `cargo clippy -p
+ocean-surface-ui --target wasm32-unknown-unknown -- -D warnings`; `RUSTFLAGS="-D
+warnings" cargo check -p ocean-surface-ui --target wasm32-unknown-unknown`;
+`cargo check -p ocean-surface-proxy`; `cargo test -p ocean-surface-ui --target
+wasm32-unknown-unknown --no-run`; `cargo test -p ocean-surface-ui` at 1243
+passed / 0 failed across all targets; `cargo clippy -p ocean-surface-ui
+--all-targets -- -D warnings`, the only invocation that lints the added test
+lines. No migration, no deploy step.
+_________________________________________________________________________________
+
+time:      [14:10] [08-31-26]
+agent:     [ocean] [pm review fix]
+worktree:  loop/surface-ports-panel-lists-what-nobody-can-open-or-close
+type:      [fix]
+area:      [rooms workspace ports]
+
+Closed the two blocking findings on the exposed-port controls after the feature
+commit. The safe RoomAccessProjection now provides an affordance-only owner
+preflight: Local is owner-operated; Live requires self_member_id to name an
+Owner row; member, unknown, connecting, recovering and revoked projections
+cannot dispatch expose or close. The daemon remains the binding authority.
+
+A transport cut after dispatch now carries an explicit refresh bit. The panel
+preserves the uncertainty sentence but performs the status read it promises,
+so a port that actually opened or closed while the response connection failed
+cannot leave the visible list stale. Added native tests for both the full access
+matrix and ambiguous-transport refresh policy. Focused tests and diff check pass.
+_________________________________________________________________________________
+
+time:      [14:20] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-ports-panel-lists-what-nobody-can-open-or-close
+type:      [merge]
+area:      [rooms workspace ports]
+
+Land pass on the ports controls. Three reviewer notes taken, all comment- or
+guard-level, plus one ledger repair.
+
+The `invalid_request` doc named a mechanism that is not the one at work -- the
+exact class of thing this file's standard forbids. It said the code was
+reachable "only for a port this side's `parse_port` should already have caught".
+Close never calls `parse_port`: its port comes from `row.port` on a
+server-listed row, so the daemon's port check is unreachable by CONSTRUCTION,
+not by a gate this side runs. The daemon also spends the same code on a call
+asserting no room participant (`GateError::MissingActor`,
+room_workspace_proxy.rs:722, read at ocean-os origin/main), where "A port must
+be a whole number." would be the wrong sentence -- closed here only because the
+`actor` closure gates on `identity_resolved()`. Both holds are structural and
+neither is pinned, so the comment now says so, and says why lifecycle and
+secrets relay the daemon's text for this code where ports invents one.
+
+`classify_port` read success off the echoed port BEFORE it looked at status, so
+a 4xx carrying a `port` key would have rendered "Port N is open." That cannot
+happen today -- no refusal on this wire names a port, which was verified in both
+upstreams -- but that is a fact about two other repos holding a gate in this one.
+A `status < 300` guard makes the discriminator fail CLOSED instead, and
+`a_refusal_carrying_a_port_is_still_a_refusal` holds it: removing the guard
+turns it red, and it was red before the guard existed.
+
+AGENTS.md's measurement table was attributing two rows to `4ed9a7c`, a commit
+where neither control existed. The measurements are sound; the attribution was
+not. One footnote names the real tree.
+
+Also repaired a boundary this branch introduced: the pm-review-fix entry above
+opened with its own rule under the previous entry's, giving the file a double
+separator. ocean-surface has neither a union driver nor a ledger checker, which
+is why nothing caught it -- the standing argument for
+`surface-gitattributes-events-union`, and the second piece of first-hand
+evidence for it this wave.
+
+Full four-leg gate re-run by me on the combined tree, including the
+pm-review-fix commit whose own note reported only focused tests: `cargo fmt
+--all --check` exit 0; `cargo test -p ocean-surface-ui` 1246 passed / 0 failed
+across 10 targets; `cargo clippy -p ocean-surface-ui --all-targets -- -D
+warnings` exit 0; `RUSTFLAGS="-D warnings" cargo check -p ocean-surface-ui
+--target wasm32-unknown-unknown` clean -- the release lane that has hidden a
+broken deploy here before. `cargo check -p ocean-surface-proxy` clean. That
+commit's two tests were mutation-checked rather than trusted: letting any
+present projection manage ports fails
+`port_controls_follow_the_safe_self_owner_projection`, and ignoring the
+transport-ambiguity bit fails `an_ambiguous_port_transport_always_refreshes_the_list`.
+No migration, no deploy step.
+_________________________________________________________________________________

@@ -4044,10 +4044,11 @@ a.rooms-workspace__repo-check-line:hover {
 }
 
 /* ── The ports the room serves on ──────────────────────────
-   A read, so no controls: the port, the preview URL it answers on, and
-   when it was exposed. The URL is an anchor only when it cleared the room
-   link allowlist — an un-linked one styles identically on purpose, since
-   the difference the operator cares about is what the URL SAYS. */
+   The port, the preview URL it answers on, when it was exposed, and the
+   verb that takes it down — with the expose form under the list. The URL
+   is an anchor only when it cleared the room link allowlist; an un-linked
+   one styles identically on purpose, since the difference the operator
+   cares about is what the URL SAYS. */
 .rooms-workspace__compute-ports-title {
   margin-top: 14px;
   padding-bottom: 4px;
@@ -4104,9 +4105,80 @@ a.rooms-workspace__compute-ports-row-url:hover {
 
 .rooms-workspace__compute-ports-row-at {
   flex-shrink: 0;
-  margin-left: auto;
   font-size: 10px;
   color: var(--fg-4);
+}
+
+/* Last in the row and pushed to its edge, so the control lands in the same
+   place whether or not the row has a URL or an exposure time to show. */
+.rooms-workspace__compute-port-close {
+  appearance: none;
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 1px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-4);
+  font-family: var(--font);
+  font-size: 11px;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__compute-port-close:hover:not(:disabled) {
+  color: var(--fg);
+  border-color: var(--border-strong);
+}
+
+.rooms-workspace__compute-port-close:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* The expose form, under the list its result joins. */
+.rooms-workspace__compute-ports-form {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* A port is four digits; the field says so rather than running the width of
+   the panel like the command and secret inputs beside it. */
+.rooms-workspace__compute-port-input {
+  box-sizing: border-box;
+  height: var(--ctl-h-sm);
+  min-width: 0;
+  flex: 0 1 90px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+  outline: none;
+  transition: border-color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__compute-port-input::placeholder {
+  color: var(--fg-4);
+}
+
+.rooms-workspace__compute-port-input:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.rooms-workspace__compute-port-input:focus:not(:disabled) {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.rooms-workspace__compute-port-input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* ── The room's secrets ─────────────────────────────────────────────

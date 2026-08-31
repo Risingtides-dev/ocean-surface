@@ -493,6 +493,11 @@ Measured at `4ed9a7c`:
 | `room_summary.rs` summarize RUN button | RED — compiler-held |
 | `room_workspace_panel.rs` `provision` button | RED — compiler-held |
 | `room_redeem.rs` join button's MARKUP | RED — held by an in-file test |
+| `room_workspace_panel.rs` `expose` button * | RED — compiler-held |
+| `room_workspace_panel.rs` port row's `close` button * | RED — compiler-held |
+
+\* Measured on the commit that ADDED these two controls, not at `4ed9a7c`
+where neither existed. Same method, later tree.
 
 The split is not where intuition puts it, and the pairs are the lesson. In one
 panel `provision` is held (`variant Provision is never constructed`) while
