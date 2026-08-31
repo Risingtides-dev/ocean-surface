@@ -4823,6 +4823,8 @@ header claimed the job "runs on every push", when the workflow trigger is
 nothing at all. Overstating a check's coverage in the two places an agent reads
 to decide whether to run it by hand is the same defect this slice exists to
 end.
+_________________________________________________________________________________
+
 time:      [00:41] [08-31-26]
 agent:     [claude] [opus 5]
 worktree:  [loop/surface-invite-classify-guard]
