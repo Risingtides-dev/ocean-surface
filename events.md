@@ -4234,3 +4234,79 @@ wasm32-unknown-unknown --no-run`. Also ran `cargo clippy -p ocean-surface-ui
 --all-targets -- -D warnings`, the only invocation that lints the added test
 lines: exit 0. No migration, no deploy step.
 _________________________________________________________________________________
+
+time:      [13:22] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-ports-panel-lists-what-nobody-can-open-or-close
+type:      feature-request
+area:      frontend
+
+Wave 45 landed both halves of the ports chain and left the verb on the floor:
+ocean-os#419 put `ports` and `ports/close` into the daemon's workspace proxy
+allowlist, ocean-surface#172 landed the READ in `room_workspace_panel.rs` and
+said in its own commit that a control here had no route to post to. That
+sentence stopped being true the same wave, and the follow-up it named was never
+filed — so a room could run a dev server, Bedrock would mint a preview URL, the
+daemon would forward the call, this panel would list the result, and no human
+could open a port. `ports_section` now grows an expose control and every
+`port_row` a close, both riding the file's existing owner-verb machinery:
+`ports_expose_url`/`ports_close_url`, `post_port`, `classify_port`, and a
+`PortCommand` that carries its port so the row being closed labels itself while
+every other control on the lane disables. The module doc's "when controls land
+here" paragraph now says what actually landed.
+
+Two corrections to the scout's reading, both from the code. Bedrock's expose
+does NOT put `status` in the body — `handleWorkspacePortExpose` returns
+`{status, port, preview_url}` and the route uses `status` as the HTTP code,
+sending `{port, preview_url}` — so success is classified on the echoed `port`,
+which no refusal body on this wire carries. And `port_exposed`/`port_closed` ARE
+on the daemon's marker ingest allowlist (room_federation.rs:3355), so other
+members' panels wake on their own; the active re-read here is the actor's own
+list amending now instead of after the SSE round trip.
+
+The judgement worth naming is in `classify_port`'s two uncoded arms. Bedrock's
+port POLICY is a bare 400 — `validatePort` floors at 1024 and reserves 3000 —
+and that is a fix-and-retry STATE, relayed rather than restated, because the
+floor is Bedrock's to move; `parse_port` gates only the SHAPE the daemon proves
+for itself (`port_path_segment`, an integer in 1..=65535), so 80 and 3000 both
+still compose here and are refused upstream where the policy lives. A bare 404
+is the deployment's "not yet" on expose, but on CLOSE it is also Bedrock's "Port
+N is not currently exposed", a state that arrives with a body — the body tells
+the two apart. And a close whose `route_removed` is `false` never reads as
+"closed": Bedrock takes the preview route down best-effort and drops the row
+either way, so that is a URL still serving what the room stopped advertising,
+and the sentence says so and offers no retry, because the row is gone and a
+second close would answer "not currently exposed" as if the first had worked.
+
+Close fires on one click, unlike the destroy and take-back confirms beside it:
+Bedrock derives the preview token from `sha256(roomId:port)` rather than minting
+it, so re-exposing restores the SAME URL — nothing is discarded, nothing is
+un-published for good. Both controls render for every member and let the
+daemon's `workspace_not_owner_principal` be the answer, in a ports-shaped
+sentence rather than the lifecycle's "provision or destroy". The section copy
+now carries the thing nothing in the product said: a preview URL is a routing
+label, not a credential, and that world-readability is the whole reason the
+daemon narrows a pair Bedrock gates at member write.
+
+Seven unit tests over the free functions, in `classify_secrets`'s style: the URL
+pair, the shape-not-policy gate, the landed replies, the surviving-route
+sentence, the coded states, the uncoded arms, the per-verb unavailable voice.
+Then the `unheld_room_controls.rs` discipline applied for real rather than
+assumed — both controls were DELETED and the gate run. Both went red (expose:
+`variant Expose is never constructed`, `parse_port is never used`,
+`take_port_submission is never used`; close: `variant Close is never
+constructed` plus four unused-parameter errors, since stripping the only control
+in `port_row` orphans every parameter the row takes for it), so both are
+compiler-held and neither earns a guard. Recorded in that file's held list and
+in AGENTS.md's measurement table instead — the two files outside the slice's
+stated scope, comments and a table row only.
+
+All eight gates green: `cargo fmt --all --check`; `cargo clippy -p
+ocean-surface-ui --target wasm32-unknown-unknown -- -D warnings`; `RUSTFLAGS="-D
+warnings" cargo check -p ocean-surface-ui --target wasm32-unknown-unknown`;
+`cargo check -p ocean-surface-proxy`; `cargo test -p ocean-surface-ui --target
+wasm32-unknown-unknown --no-run`; `cargo test -p ocean-surface-ui` at 1243
+passed / 0 failed across all targets; `cargo clippy -p ocean-surface-ui
+--all-targets -- -D warnings`, the only invocation that lints the added test
+lines. No migration, no deploy step.
+_________________________________________________________________________________
