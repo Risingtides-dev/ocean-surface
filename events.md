@@ -3796,3 +3796,57 @@ repo's four other frozen gates the first pass skipped -- wasm32 clippy `-D
 warnings`, wasm32 `cargo check`, `cargo test --target wasm32 --no-run`, and
 `cargo check -p ocean-surface-proxy`. No migration, no deploy step.
 _________________________________________________________________________________
+
+time:      [07:22] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-response-policy-summary-contradicts-the-rail-directly-above-it
+type:      [bug-report]
+area:      [frontend]
+
+Stopped the right rail contradicting itself about a stored trigger flag. The
+trigger rows and the Response Policy summary live in the same rail a few hundred
+lines apart in `rooms_workspace.rs`, and only the rows knew about access: in a
+Local room holding `on_build_failure` or `on_ci_failure`, the row rendered
+disabled and noted "federated rooms only" while the summary below it read
+"Response Policy: mention, build failure" as though the flag were live. #167
+doubled it -- `on_ci_failure` is a second federated-only flag, so a Local room
+could show two greyed-out rows and a summary naming both anyway. Same class as
+the landed dead-trigger-row work, one control further down the rail.
+
+`trigger_summary` now takes `access: Option<&RoomAccessProjection>` and asks
+`trigger_row_dead_here` for each on-flag's note, appending it in parentheses:
+`mention, build failure (federated rooms only)`. Annotated, not dropped --
+dropping would render "Response Policy: mention" above a row rendering checked,
+which is the same lie inverted and hides durable state. Reusing the row helper
+rather than re-deriving federated-ness is the pattern `access_banner` already
+sets in this file: one source for the string means the rail and the summary
+cannot word it differently. Unknown access annotates nothing, inherited from
+`trigger_row_dead_here`'s `let access = access?` rather than decided again. The
+call site reads `rooms.access.get()` the way three sibling sections in that view
+already do, and the comment above it claiming only live triggers are listed now
+says what the code does.
+
+Implemented as a local `(TriggerToggle, bool, &str)` table inside
+`trigger_summary`. The rail's four `trigger_toggle_row` calls were deliberately
+NOT refactored to share that table -- they pass reactive `flag(|p| ..)`
+closures, so the shapes do not match and the churn would exceed the fix.
+
+`trigger_summary_names_every_live_flag_that_is_on` was re-arity'd to pass
+`None`, which makes it the unknown-access assertion as well; its three expected
+strings are byte-identical to before, which is the point of it. Added
+`trigger_summary_annotates_a_flag_that_cannot_fire_in_this_room`, covering
+Local and Live in both directions plus a flag that is off. Both are unit tests
+over a returned String rather than source scans, so they survive a rename and
+not only a deletion -- wave 42's lesson, learned in this same file.
+Mutation-checked: collapsing the annotation back to a bare label fails the new
+test by name, `left: "mention, thread reply, build failure, CI failure"` against
+a right-hand side carrying both `(federated rooms only)` notes, and additionally
+trips the release lane's `-D warnings` with `unused variable: access`.
+
+Frozen gate green, all six from AGENTS.md: `cargo fmt --check`, wasm32 clippy
+`-D warnings`, `RUSTFLAGS="-D warnings"` wasm32 check, `cargo check -p
+ocean-surface-proxy`, wasm32 `cargo test --no-run` (nine executables built), and
+native `cargo test -p ocean-surface-ui` at 1189 passed / 0 failed in the main
+binary and 0 failed across all nine. One source file touched, no CSS, no
+migration, no deploy step.
+_________________________________________________________________________________

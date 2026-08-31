@@ -109,20 +109,40 @@ fn create_trigger_policy(
 ///
 /// The unwired fields are never listed: they cannot fire, and a write carrying
 /// them is refused (`trigger_unwired`).
-fn trigger_summary(policy: &RoomTriggerPolicy) -> String {
-    let mut on: Vec<&str> = Vec::new();
-    if policy.on_mention {
-        on.push("mention");
-    }
-    if policy.on_thread_reply {
-        on.push("thread reply");
-    }
-    if policy.on_build_failure {
-        on.push("build failure");
-    }
-    if policy.on_ci_failure {
-        on.push("CI failure");
-    }
+///
+/// A live flag that is on but cannot fire in THIS kind of room is listed with
+/// the note the rail's own row carries — `build failure (federated rooms
+/// only)`. Annotated rather than dropped, because the flag is stored true and
+/// its row two inches above renders checked: hiding it here would trade one
+/// contradiction for its inverse. The note comes from
+/// [`trigger_row_dead_here`] rather than a second reading of the access
+/// projection, so the rail's wording and the summary's cannot drift apart —
+/// the same reason the stage's banner takes its text from [`access_banner`].
+fn trigger_summary(policy: &RoomTriggerPolicy, access: Option<&RoomAccessProjection>) -> String {
+    let flags = [
+        (TriggerToggle::Mention, policy.on_mention, "mention"),
+        (
+            TriggerToggle::ThreadReply,
+            policy.on_thread_reply,
+            "thread reply",
+        ),
+        (
+            TriggerToggle::BuildFailure,
+            policy.on_build_failure,
+            "build failure",
+        ),
+        (TriggerToggle::CiFailure, policy.on_ci_failure, "CI failure"),
+    ];
+    let on: Vec<String> = flags
+        .into_iter()
+        .filter(|(_, enabled, _)| *enabled)
+        .map(
+            |(toggle, _, label)| match trigger_row_dead_here(toggle, access) {
+                Some(note) => format!("{label} ({note})"),
+                None => label.to_string(),
+            },
+        )
+        .collect();
     if on.is_empty() {
         "none".to_string()
     } else {
@@ -4056,12 +4076,16 @@ pub fn RoomsWorkspace(
 
                 // Trigger-policy summary at bottom of right rail. Only live
                 // triggers are listed — the unwired fields never fire, and
-                // writes carrying them are refused (`trigger_unwired`).
+                // writes carrying them are refused (`trigger_unwired`). A live
+                // flag that is on but cannot fire in this kind of room is
+                // listed carrying the same note its row above shows, so the
+                // two controls cannot say different things about one flag.
                 {move || {
+                    let access = rooms.access.get();
                     rooms.open_room.get()
                         .and_then(|r| r.trigger_policy)
                         .map(|p| {
-                            let triggers = trigger_summary(&p);
+                            let triggers = trigger_summary(&p, access.as_ref());
                             view! {
                                 <div class="rooms-workspace__policy">
                                     <div class="rooms-workspace__policy-label">
@@ -4291,9 +4315,16 @@ mod tests {
     /// The right rail's summary must name every live flag that is on. This is
     /// the only guard on that list: the summary renders in a browser, so a
     /// dropped line passes both `cargo test` and the wasm build otherwise.
+    ///
+    /// Access is `None` throughout, which makes this the unknown-access case
+    /// too: before the projection lands nothing is known about the room, so
+    /// every listed flag stays UNANNOTATED rather than guessing at a note that
+    /// would flip once access arrives. That silence is inherited from
+    /// [`trigger_row_dead_here`] rather than decided again here, which is why
+    /// it cannot drift from what the rows above render.
     #[test]
     fn trigger_summary_names_every_live_flag_that_is_on() {
-        assert_eq!(trigger_summary(&RoomTriggerPolicy::default()), "none");
+        assert_eq!(trigger_summary(&RoomTriggerPolicy::default(), None), "none");
         let all_on = RoomTriggerPolicy {
             on_mention: true,
             on_thread_reply: true,
@@ -4303,14 +4334,62 @@ mod tests {
             on_schedule: Some("0 9 * * 1".into()),
         };
         assert_eq!(
-            trigger_summary(&all_on),
+            trigger_summary(&all_on, None),
             "mention, thread reply, build failure, CI failure"
         );
         let ci_only = RoomTriggerPolicy {
             on_ci_failure: true,
             ..RoomTriggerPolicy::default()
         };
-        assert_eq!(trigger_summary(&ci_only), "CI failure");
+        assert_eq!(trigger_summary(&ci_only, None), "CI failure");
+    }
+
+    /// The bug this pass closes: the summary named a flag the trigger rail had
+    /// just greyed out and labelled dead, a few hundred lines above it in the
+    /// same right rail. A Local room stored with `on_build_failure` and
+    /// `on_ci_failure` showed two disabled rows reading `federated rooms only`
+    /// and a summary reading `mention, build failure, CI failure` anyway.
+    ///
+    /// The flag stays LISTED — it is stored true and its row renders checked,
+    /// so dropping it would only invert the contradiction — and carries the
+    /// rail's own note verbatim, since both strings come from
+    /// `trigger_row_dead_here`.
+    #[test]
+    fn trigger_summary_annotates_a_flag_that_cannot_fire_in_this_room() {
+        let all_on = RoomTriggerPolicy {
+            on_mention: true,
+            on_thread_reply: true,
+            on_build_failure: true,
+            on_ci_failure: true,
+            on_component_event: false,
+            on_schedule: None,
+        };
+
+        // A Local room has no workspace, so neither marker-fed flag can fire.
+        let local = test_access(RoomAccessState::Local);
+        assert_eq!(
+            trigger_summary(&all_on, Some(&local)),
+            "mention, thread reply, build failure (federated rooms only), \
+             CI failure (federated rooms only)"
+        );
+
+        // The federated inverse: the bridge carries no thread parent.
+        let live = test_access(RoomAccessState::Live);
+        assert_eq!(
+            trigger_summary(&all_on, Some(&live)),
+            "mention, thread reply (local rooms only), build failure, CI failure"
+        );
+
+        // A flag that is OFF is not listed at all, annotated or otherwise.
+        let ci_only = RoomTriggerPolicy {
+            on_ci_failure: true,
+            ..RoomTriggerPolicy::default()
+        };
+        assert_eq!(
+            trigger_summary(&ci_only, Some(&local)),
+            "CI failure (federated rooms only)"
+        );
+        assert_eq!(trigger_summary(&ci_only, Some(&live)), "CI failure");
     }
 
     /// Why `on_ci_failure` is mirrored and not just toggled: a PATCH from this
