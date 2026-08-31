@@ -4043,6 +4043,72 @@ a.rooms-workspace__repo-check-line:hover {
   color: var(--err);
 }
 
+/* ── The ports the room serves on ──────────────────────────
+   A read, so no controls: the port, the preview URL it answers on, and
+   when it was exposed. The URL is an anchor only when it cleared the room
+   link allowlist — an un-linked one styles identically on purpose, since
+   the difference the operator cares about is what the URL SAYS. */
+.rooms-workspace__compute-ports-title {
+  margin-top: 14px;
+  padding-bottom: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg-4);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__compute-ports-copy {
+  padding-bottom: 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__compute-ports-list {
+  margin: 0 0 6px;
+  padding: 0;
+  list-style: none;
+}
+
+.rooms-workspace__compute-ports-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.rooms-workspace__compute-ports-row-port {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-2);
+}
+
+/* A preview URL runs long and is the row's only wrapping part; the
+   exposure time keeps its place at the end. */
+.rooms-workspace__compute-ports-row-url {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-3);
+  text-decoration: none;
+}
+
+a.rooms-workspace__compute-ports-row-url:hover {
+  color: var(--fg);
+  text-decoration: underline;
+}
+
+.rooms-workspace__compute-ports-row-at {
+  flex-shrink: 0;
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--fg-4);
+}
+
 /* ── The room's secrets ─────────────────────────────────────────────
    The list above the form is what the room holds — names and metadata
    alone, the status body carries no value to show — and values stay
