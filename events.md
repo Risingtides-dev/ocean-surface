@@ -3534,3 +3534,44 @@ fmt --check clean, and RUSTFLAGS="-D warnings" cargo check on
 wasm32-unknown-unknown clean. Needs the ocean-os half (its PR #409) to have a
 link to show. No migration, no deploy step.
 _________________________________________________________________________________
+
+time:      [00:57] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-dead-trigger-row-still-reads-as-interactive
+type:      [bug-report]
+area:      [frontend]
+
+A wake-trigger row that can never fire kept inviting the click it would never
+honour. `.rooms-workspace__trigger` is a `<label>`, so the `cursor: not-allowed`
+sitting on `input:disabled` reached the checkbox and nothing else -- the label
+text and the `__trigger-note` beside it stayed on the label's own `cursor:
+pointer` and still brightened to `--fg` on hover. That gap was invisible while
+the only disabled state was `policy_update_in_flight`, one round-trip long. #160
+made `trigger_row_dead_here` hold a row disabled permanently (ThreadReply in a
+federated room, BuildFailure in a local one) with a note naming which kind of
+room the flag needs, and a permanent control that lifts under a pointer cursor
+works directly against that note's job of teaching rather than inviting.
+
+The fix is the file's own established idiom, five lines: the hover rule takes a
+`:hover:not(:has(input:disabled))` guard (`:not(:disabled)` cannot work here --
+the label is not the disabled element), and `cursor: default` joins the existing
+`:has(input:disabled)` block. `opacity: 0.45` stays untouched; the fade is #160's
+signal that the row is disabled at all, and this only stops it reading as live.
+`pointer-events: none` was deliberately not used -- on the label it would
+suppress the disabled checkbox's own `not-allowed` cursor along with the
+label's. The `:has(input:disabled)` guard covers every source of the disabled
+state, not only the permanent one: revoked/unknown access, a policy PATCH in
+flight, and the create form's three rows for the duration of a create POST all
+withdraw the pointer too. That is the intent -- none of those rows accepts a
+click while it holds, so for however long it holds the cursor should say so.
+
+Out of the filed scope, and flagged for review: a new integration test at
+crates/ocean-surface-ui/tests/dead_trigger_row_affordance.rs. The slice as filed
+was CSS-only with no guard, and nothing in the gate would have caught a revert of
+either rule. The file follows the repo's existing source-assertion pattern
+(mobile_composer_regressions.rs and its five siblings) and touches no component
+code, so it carries no conflict surface. Both tests were confirmed red against
+the pre-fix stylesheet before being confirmed green against the fixed one. Gate:
+all six frozen commands clean plus the loop's `RUSTFLAGS="-D warnings"` wasm
+check; 1215 UI tests green. No migration, no deploy step.
+_________________________________________________________________________________
