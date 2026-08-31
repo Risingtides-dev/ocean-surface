@@ -266,7 +266,32 @@ Web surface session UI:
   are informational; only failed items expose the daemon retry action, and the
   returned access projection applies immediately behind the room-generation
   guard before any duplicate SSE projection arrives.
-- Invite and redeem UI remains absent until daemon-owned outbound routes exist.
+- `room_invite.rs` owns minting: `POST /v1/rooms/persistent/{key}/invites`
+  answers 201 with the invite RAW — no `{ok:true}` envelope, unlike artifacts,
+  attachments and the workspace lane. Success is settled first, on the status
+  and a present `code`; only a reply that is not a success is asked what its
+  top-level `error` means. A decoder copied from those neighbours reads a
+  minted invite as a malformed reply, or as whatever its characters spell.
+- Minting from a `Local` room BOOTSTRAPS federation, permanently and
+  irreversibly from this surface, so the first click only ARMS the control and
+  states what firing it will do. A 503 `federation_unavailable` is the
+  deployment describing itself, not a fault.
+- `room_redeem.rs` owns joining: `POST /v1/rooms/persistent/invites/redeem`
+  answers 200 with a flattened `RoomAccessProjection` plus `room_key`.
+  `room_key` is decoded OPTIONAL on purpose — bundle and daemon roll forward
+  independently, and requiring it would make a redemption that ALREADY
+  succeeded unreadable on an older daemon. Absent it, `newly_joined_key` diffs
+  the room list and opens a room only when exactly one appeared. The panel
+  mounts in the left rail, because someone holding a code has no room open and
+  may have no rooms at all.
+- An invite code is a bearer grant to the room. A minted one arrives in the
+  RESPONSE body and lives in one signal and the open panel's DOM; a redeemed
+  one goes in the REQUEST body. Never a log line, never an error sentence, and
+  never the rail — `rail_line` is deliberately code-free because the rail is on
+  screen for as long as the room is and the panel is not — and never past the
+  room it was minted for. No fixture in this repo may carry a real one. The
+  onboarding link EMBEDS the code, so it is the same grant in a longer form and
+  gets the same discipline.
 - Rooms G1 is daemon-native text collaboration. LiveKit controls stay outside
   the room join, leave, roster, and transcript lifecycle until explicitly
   reintroduced behind a reviewed platform contract.

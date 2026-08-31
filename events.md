@@ -3632,3 +3632,63 @@ Gate green on all six frozen commands plus the loop's `RUSTFLAGS="-D warnings"`
 wasm check and the `--all-targets` clippy: 1217 UI tests, `cargo fmt --check`
 clean. No migration, no deploy step.
 _________________________________________________________________________________
+
+time:      [04:58] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-agents-md-says-the-redeem-ui-does-not-exist]
+type:      docs
+area:      docs
+
+Deleted the one line in the Rooms Contract that told every cold agent the
+invite and redeem UI had not been built yet. AGENTS.md:269 read, verbatim,
+"Invite and redeem UI remains absent until daemon-owned outbound routes
+exist." Grepping the whole file for invite, redeem or onboard returned that
+line and nothing else, so the contract's entire account of the feature was a
+claim that the feature did not exist — while `room_invite.rs` and
+`room_redeem.rs` have been on main for weeks, carrying #161's `room_key` read
+and #162's onboarding link. That is the expensive kind of stale: it does not
+merely omit the contract, it reads as permission to build the thing a second
+time, and it had survived eight passes.
+
+Replaced it with four bullets lifted from the two modules' own headers rather
+than invented, in the terse cross-referenced voice of the bullets either side.
+`room_invite.rs` owns minting and its 201 answers the invite RAW — no
+`{ok:true}` envelope, unlike artifacts, attachments and the workspace lane —
+so success is settled on the status and a present `code` before any `error` is
+read; a decoder copied from those neighbours reads a minted invite as
+malformed, or as whatever its characters spell. Minting from a `Local` room
+bootstraps federation permanently, which is why the first click only arms the
+control. `room_redeem.rs` owns joining, and its `room_key` is decoded
+`Option` on purpose: bundle and daemon roll forward independently, so
+requiring it would make a redemption that already succeeded unreadable against
+an older daemon, and `newly_joined_key` diffs the room list in that case. And
+the code is a bearer grant, minted into the RESPONSE body and held in one
+signal plus the open panel's DOM, sent in the REQUEST body when redeemed,
+never logged, never in the rail, never past its room — and the onboarding link
+embeds it, so it inherits the same discipline. Every claim was checked against
+the source before it was written: `mint_federates` is `Local`-only,
+`mint_click` really does arm before it fires, and the two route strings match
+`invite_url`/`redeem_url`. The neighbouring bullets that are still true were
+left alone.
+
+Review rejected the first cut of that last bullet and was right to: it said an
+invite code is "never a test fixture", which this repo contradicts twice over —
+`room_invite.rs:854` and `room_redeem.rs:558` both define
+`const FAKE_CODE: &str = "not-a-real-invite-code"` and put it straight into
+fixtures. The rule the code actually states sits one line above the const:
+"No fixture in this repo may carry a real one." A cold agent following the
+sentence as written would have had to either skip the test or "fix" the
+fixtures that already exist. The same bullet also put the minted code in the
+request body — that is redeem's half; mint's arrives in the response — and it
+dropped the two constraints mint enforces and a UI change could silently
+break: never the rail, which is what `rail_line` is deliberately code-free to
+guarantee, and never past the room it was minted for. Repaired in place, since
+a slice whose only product is the truth of a contract file cannot trade a
+stale falsehood for a fresh one in the same paragraph.
+
+Documentation only — `crates/` is untouched on purpose, which is the whole
+value of the slice: it corrects the most misleading line in the contract at
+zero code risk. Nothing here can move the gate, and the frozen commands were
+run anyway, before and after the repair, because a green claim without a run
+is not a verification.
+_________________________________________________________________________________
