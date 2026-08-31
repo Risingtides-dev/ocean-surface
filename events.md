@@ -3804,3 +3804,166 @@ repo's four other frozen gates the first pass skipped -- wasm32 clippy `-D
 warnings`, wasm32 `cargo check`, `cargo test --target wasm32 --no-run`, and
 `cargo check -p ocean-surface-proxy`. No migration, no deploy step.
 _________________________________________________________________________________
+
+time:      [07:22] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-response-policy-summary-contradicts-the-rail-directly-above-it
+type:      [bug-report]
+area:      [frontend]
+
+Stopped the right rail contradicting itself about a stored trigger flag. The
+trigger rows and the Response Policy summary live in the same rail a few hundred
+lines apart in `rooms_workspace.rs`, and only the rows knew about access: in a
+Local room holding `on_build_failure` or `on_ci_failure`, the row rendered
+disabled and noted "federated rooms only" while the summary below it read
+"Response Policy: mention, build failure" as though the flag were live. #167
+doubled it -- `on_ci_failure` is a second federated-only flag, so a Local room
+could show two greyed-out rows and a summary naming both anyway. Same class as
+the landed dead-trigger-row work, one control further down the rail.
+
+`trigger_summary` now takes `access: Option<&RoomAccessProjection>` and asks
+`trigger_row_dead_here` for each on-flag's note, appending it in parentheses:
+`mention, build failure (federated rooms only)`. Annotated, not dropped --
+dropping would render "Response Policy: mention" above a row rendering checked,
+which is the same lie inverted and hides durable state. Reusing the row helper
+rather than re-deriving federated-ness is the pattern `access_banner` already
+sets in this file: one source for the string means the rail and the summary
+cannot word it differently. Unknown access annotates nothing, inherited from
+`trigger_row_dead_here`'s `let access = access?` rather than decided again. The
+call site reads `rooms.access.get()` the way three sibling sections in that view
+already do, and the comment above it claiming only live triggers are listed now
+says what the code does.
+
+Implemented as a local `(TriggerToggle, bool, &str)` table inside
+`trigger_summary`. The rail's four `trigger_toggle_row` calls were deliberately
+NOT refactored to share that table -- they pass reactive `flag(|p| ..)`
+closures, so the shapes do not match and the churn would exceed the fix.
+
+`trigger_summary_names_every_live_flag_that_is_on` was re-arity'd to pass
+`None`, which makes it the unknown-access assertion as well; its three expected
+strings are byte-identical to before, which is the point of it. Added
+`trigger_summary_annotates_a_flag_that_cannot_fire_in_this_room`, covering
+Local and Live in both directions plus a flag that is off. Both are unit tests
+over a returned String rather than source scans, so they survive a rename and
+not only a deletion -- wave 42's lesson, learned in this same file.
+Mutation-checked: collapsing the annotation back to a bare label fails the new
+test by name, `left: "mention, thread reply, build failure, CI failure"` against
+a right-hand side carrying both `(federated rooms only)` notes, and additionally
+trips the release lane's `-D warnings` with `unused variable: access`.
+
+Frozen gate green, all six from AGENTS.md: `cargo fmt --check`, wasm32 clippy
+`-D warnings`, `RUSTFLAGS="-D warnings"` wasm32 check, `cargo check -p
+ocean-surface-proxy`, wasm32 `cargo test --no-run` (nine executables built), and
+native `cargo test -p ocean-surface-ui` at 1189 passed / 0 failed in the main
+binary and 0 failed across all nine. One source file touched, no CSS, no
+migration, no deploy step.
+_________________________________________________________________________________
+
+time:      [07:26] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-response-policy-summary-contradicts-the-rail-directly-above-it
+type:      [review]
+area:      [frontend]
+
+Refinement pass on the policy-summary fix. Review found that giving
+`trigger_summary` a `(TriggerToggle, bool, &str)` table had a side effect nobody
+intended: the rail's four `trigger_toggle_row` calls stopped being the only
+place a non-test build CONSTRUCTS a `TriggerToggle` variant, and that was the
+whole guard holding those rows. Reproduced it -- delete the `BuildFailure` row
+and `RUSTFLAGS="-D warnings" cargo check --target wasm32-unknown-unknown` now
+finishes clean, where on origin/main the same deletion fails with `variant
+BuildFailure is never constructed`. `ci_failure_trigger_control.rs` opens by
+stating that guard as fact, in a file whose own header records a control being
+silently deleted once with the full suite green, so the doc was wrong in the
+one place a person would go to check.
+
+Added `the_rail_offers_a_row_for_every_live_trigger` to that file: a source
+assertion over the non-test half pinning `trigger_toggle_row(rooms,
+TriggerToggle::X, "label",` for all four triggers. The needle stops after the
+label rather than running through the reactive `flag(..)` closure -- what needs
+holding is that the row exists and words the trigger the way the summary words
+it; the closure is already the compiler's business.
+
+Second finding, same fix shape: the half of this slice a user can actually SEE
+-- the call site handing the summary `access.as_ref()` -- had no coverage at
+all, because both unit tests call `trigger_summary` directly and pick their own
+argument. Passing `None` there restores the original bug with all six gates
+green. `the_summary_call_site_passes_the_access_projection` pins it, the same
+answer `the_create_call_passes_the_ci_failure_draft` already gives the sibling
+wiring. Factored the "scan only the half a release build compiles" split into a
+`view_source()` helper the casing test now shares, corrected the module doc so
+it describes the guard that exists rather than the one that did, and fixed a
+stale reference to `trigger_summary`'s `on.push`, which this slice replaced.
+
+Both new tests mutation-checked in the direction that matters -- each FAILS by
+name under the exact mutation the reviewer proved green. Frozen gate re-run
+whole and green: `cargo fmt --check`, wasm32 clippy `-D warnings`, `RUSTFLAGS`
+wasm32 check, `cargo check -p ocean-surface-proxy`, wasm32 `cargo test --no-run`
+(nine executables), native `cargo test -p ocean-surface-ui` at 1189/5/4/2/8/4/
+7/5/2 passed, 0 failed. One test file touched. No migration, no deploy step.
+_________________________________________________________________________________
+
+time:      [07:07] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-check-href-scheme-allowlist
+type:      [review]
+area:      [frontend]
+
+`check_href`'s guard in room_repo.rs claimed to pin the http/https allowlist and
+did not: not one of its six hostile payloads reached the comparison.
+`room_markdown::scheme_allowed` splits on `://` before it ever compares a
+scheme, so "javascript:alert(1)", "JavaScript:alert(1)", the `data:text/html`
+one and "vbscript:x" all returned at that split; "" returned at the empty check
+five rules earlier and "java\tscript:alert(1)" at the control-character rule.
+The code was correct; the test was decoration for the one property its name
+asserts. Same hole ocean-os closed in wave 42.
+
+Added three authority-bearing payloads to the existing array --
+`ftp://example.test/runs/1`, `javascript://example.test/x`, and
+`vscode://vscode.git/clone?url=https://example.test/acme/site`. All three parse
+as valid authorities under `host_is_valid`, so the scheme comparison is the only
+rule left that can reject them. The third is the concrete shape a room container
+plausibly emits and the surface has no other defence against it. All six
+originals stay, because between them they pin the three earlier rules the new
+rows fly past: the `://` requirement for the four opaque ones, the empty-string
+check for "", and the control-character rule for the `\t` one.
+
+Mutation-proved rather than asserted: deleted the two-line
+`eq_ignore_ascii_case("http")`/`("https")` comparison at room_markdown.rs:132-134,
+ran `cargo test -p ocean-surface-ui`, and
+`room_repo::tests::a_check_href_is_gated_to_http_schemes` failed by name --
+`assertion left == right failed: "ftp://example.test/runs/1" linked`. Then
+reverted; the only source file this commit touches is room_repo.rs.
+
+Two findings worth the next reader's time. First, that mutation produced exactly
+ONE failure across 1188 tests, which means the explicit `[label](href)` link path
+at room_markdown.rs:231 -- a real dependent with no literal-prefix pre-check of
+its own -- is not pinned either. This slice's scope was room_repo.rs only and
+room_markdown.rs is claimed by no slice this wave, so it is left alone and noted
+here. Second, ocean-os's `ci_run_url` (room_federation.rs:3482) is deliberately
+stricter than this gate -- all Unicode whitespace rather than `trim`, and it
+compares its bounded output back. Whether the surface should converge with it is
+a real question and was explicitly not this slice; the code is untouched.
+
+Review sent this back once, and the finding was the same defect as the slice:
+the doc comment explaining which rule kills which row got the attribution wrong,
+crediting the opaque rows with pinning the empty-string and control-character
+rules they never reach. Read literally it made the `\t` row look redundant with
+`javascript:alert(1)`, so a reader tidying up would have deleted the only
+control-character coverage. Re-derived it empirically rather than by argument --
+a throwaway test inside room_markdown's module printed the rejecting rule for
+each of the nine payloads against the real private helpers, and the split is
+four to the `://` requirement, one to the empty check, one to the control-character
+rule, three to the scheme comparison. Probe reverted. Corrected the comment and
+the two places this entry and the commit message repeated the same mistake.
+
+Frozen gates all green: `cargo fmt --check`, `cargo clippy -p ocean-surface-ui
+--target wasm32-unknown-unknown -- -D warnings`, `RUSTFLAGS="-D warnings" cargo
+check -p ocean-surface-ui --target wasm32-unknown-unknown`, `cargo check -p
+ocean-surface-proxy`, `cargo test -p ocean-surface-ui --target
+wasm32-unknown-unknown --no-run`, `cargo test -p ocean-surface-ui` at 1223
+passed / 0 failed across all targets, and `cargo test -p ocean-surface-proxy` at
+54. Also ran `cargo clippy -p ocean-surface-ui --all-targets -- -D warnings`,
+the only invocation that lints the added test lines: clean. Test-only change;
+no migration, no deploy step.
+_________________________________________________________________________________

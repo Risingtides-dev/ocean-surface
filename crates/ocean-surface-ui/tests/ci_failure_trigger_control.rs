@@ -1,15 +1,25 @@
 //! The create panel's CI-failure checkbox has no compiler guard, so it gets a
-//! source assertion instead.
+//! source assertion instead — and so, since the summary learned about access,
+//! do the four rail rows.
 //!
-//! The other two halves of this control are already held by something that
-//! fails loudly. The rail row is held by the compiler: `TriggerToggle` is a
-//! private enum whose `CiFailure` variant is CONSTRUCTED only there in a
-//! non-test build — `policy_with_toggle` and `trigger_row_dead_here` merely
-//! match on it — so deleting the row makes the release lane's
-//! `RUSTFLAGS="-D warnings"` wasm check fail on `variant is never constructed`.
-//! The summary line is held by `trigger_summary`, a free function a native
-//! unit test asserts over, and whose own call site is the only thing keeping it
-//! from being dead code on that same lane.
+//! The rail rows WERE held by the compiler. `TriggerToggle` is a private enum,
+//! and while the rows were the only place a non-test build constructed its
+//! variants — `policy_with_toggle` and `trigger_row_dead_here` merely match on
+//! them — deleting a row made the release lane's `RUSTFLAGS="-D warnings"` wasm
+//! check fail on `variant is never constructed`. `trigger_summary`'s flag table
+//! constructs all four in that same build now, so the rows are no longer the
+//! sole construction site and a deleted row compiles clean. That guard is gone
+//! and is not coming back; `the_rail_offers_a_row_for_every_live_trigger`
+//! replaces it.
+//!
+//! The summary LINE is still held twice over: `trigger_summary` is a free
+//! function a native unit test asserts over, and its own call site is the only
+//! thing keeping it from being dead code on that lane. Its ARGUMENTS are held
+//! by neither — handing it `None` instead of the room's access projection
+//! compiles clean, passes every unit test (they call the function directly),
+//! and silently restores a summary that names flags the rail two inches above
+//! it has just greyed out. Same failure shape as a wrong create-time draft
+//! below, so it gets the same answer.
 //!
 //! The checkbox is held by neither. `create_on_ci_failure` stays read by
 //! `create_room` and by the draft reset whether or not anything can set it, so
@@ -35,6 +45,18 @@ fn without_whitespace(source: &str) -> String {
         .chars()
         .filter(|char| !char.is_whitespace())
         .collect()
+}
+
+/// The half of `rooms_workspace.rs` a release build actually compiles. A scan
+/// whose needle the file's own unit tests could quote stops here: those tests
+/// assert on what the view is supposed to render, so a needle they satisfy pins
+/// nothing while the view says whatever it likes.
+fn view_source() -> String {
+    rooms_workspace_source()
+        .split_once("#[cfg(test)]")
+        .expect("rooms_workspace.rs carries its unit tests at the bottom")
+        .0
+        .to_string()
 }
 
 #[test]
@@ -76,6 +98,51 @@ fn the_create_call_passes_the_ci_failure_draft() {
     );
 }
 
+/// The rail's four rows, pinned by source because nothing pins them any more.
+/// Each row is a trigger's only live affordance — the create panel's checkboxes
+/// set a draft, not an open room — so a row deleted the way the compiler used
+/// to forbid leaves a flag a person can read in the summary and never turn off.
+///
+/// The needle stops after the label rather than running to the end of the call.
+/// What is held here is that the row EXISTS and says the same word the summary
+/// says; running on through the reactive `flag(..)` closure would break on any
+/// tidy-up of it without holding anything the compiler is not already holding.
+#[test]
+fn the_rail_offers_a_row_for_every_live_trigger() {
+    let view = without_whitespace(&view_source());
+    for (variant, label) in [
+        ("Mention", r#""@mention""#),
+        ("ThreadReply", r#""threadreply""#),
+        ("BuildFailure", r#""buildfailure""#),
+        ("CiFailure", r#""CIfailure""#),
+    ] {
+        assert!(
+            view.contains(&format!(
+                "trigger_toggle_row(rooms,TriggerToggle::{variant},{label},"
+            )),
+            "the trigger rail must render a row for `TriggerToggle::{variant}`; \
+             without it the flag stays stored, stays summarized, and cannot be \
+             switched off",
+        );
+    }
+}
+
+/// `trigger_summary` takes this room's access projection so a flag that cannot
+/// fire here carries the same note its row above it shows. Handing it `None`
+/// compiles clean and both unit tests over that function keep passing, because
+/// they call it directly and choose their own argument — the summary goes
+/// straight back to naming flags the rail has just greyed out. Same shape as a
+/// create call passing the wrong draft signal, so it gets the same answer.
+#[test]
+fn the_summary_call_site_passes_the_access_projection() {
+    let view = without_whitespace(&view_source());
+    assert!(
+        view.contains("trigger_summary(&p,access.as_ref())"),
+        "the Response Policy summary must be handed the open room's access \
+         projection, or it contradicts the trigger rail two inches above it",
+    );
+}
+
 /// The rail says `CI failure` and the summary says `CI failure`. `CI` is an
 /// initialism, so it stays capitalized in both — unlike `@mention`, `thread
 /// reply` and `build failure`, which are lowercase words. A rail and a summary
@@ -85,24 +152,19 @@ fn the_create_call_passes_the_ci_failure_draft() {
 /// Only the rail needs pinning HERE. The summary's casing is a return value,
 /// so `trigger_summary_names_every_live_flag_that_is_on` already holds it. So
 /// the positive assert names the rail's CALL SITE rather than the bare
-/// literal: a file-wide search for `"CI failure"` is satisfied by the
-/// summary's own `on.push`, and by that file's test module quoting the
-/// summary's output, while the rail says whatever it likes. The scan stops at
-/// the test module for the same reason.
+/// literal: a file-wide search for `"CI failure"` is satisfied by the label in
+/// `trigger_summary`'s own flag table, and by that file's test module quoting
+/// the summary's output, while the rail says whatever it likes. The scan stops
+/// at the test module for the same reason.
 #[test]
 fn the_ci_failure_label_is_capitalized_everywhere() {
-    let source = rooms_workspace_source();
     assert!(
-        !source.contains("\"ci failure\""),
+        !rooms_workspace_source().contains("\"ci failure\""),
         "`ci failure` is the wrong casing for an initialism; both the rail row \
          and the policy summary say `CI failure`",
     );
-    let view = source
-        .split_once("#[cfg(test)]")
-        .expect("rooms_workspace.rs carries its unit tests at the bottom")
-        .0;
     assert!(
-        without_whitespace(view).contains(r#"TriggerToggle::CiFailure,"CIfailure","#),
+        without_whitespace(&view_source()).contains(r#"TriggerToggle::CiFailure,"CIfailure","#),
         "the rail row must label this trigger `CI failure`, the same casing \
          the summary returns",
     );
