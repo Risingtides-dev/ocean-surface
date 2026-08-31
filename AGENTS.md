@@ -365,6 +365,42 @@ provider credentials or direct provider calls to the proxy. Google Maps is
 optional and enabled only by an explicit non-empty `GOOGLE_MAPS_API_KEY`; never
 commit an organization-owned browser key or restore a compiled-in default.
 
+## Repository Ledger
+
+Root `events.md` is this repo's append-only chronological ledger. Record
+meaningful work there; a PR touching `crates/`, `styles/`, `scripts/`, `ops/`,
+`deploy/`, `extension/`, `vscode-extension/`, `.github/` or `index.html` must
+carry its entry in the same diff, which the `ledger` job in
+`.github/workflows/ci.yml` reports on without blocking the merge.
+
+Parallel branches each append their OWN entry — never settle an `events.md`
+merge by dropping the other branch's. `.gitattributes` gives the file
+`merge=union` so those appends stop conflicting at EOF, which they did the last
+time two surface slices landed in one wave (#174, hand-resolved). Two costs
+come with the driver, and both are counter-intuitive:
+
+- **It eats a separator.** Union keeps a line both sides added only once, and
+  two appended entries share both a blank line and the trailing `___` rule. So
+  each extra parallel append folds one such pair away and the next entry's
+  `time:` header lands directly under the previous entry's prose: two entries
+  FUSE into one. No entry is lost and no conflict is raised.
+  `scripts/events-merge-driver.test.mjs` pins the fold, along with the driver
+  itself — but it reproduces the merge in a scratch repo and never reads THIS
+  file, and it is hand-run rather than a CI step, so a fold that has already
+  landed here stays invisible. `ocean-bedrock` has `scripts/check-ledger.mjs`
+  for that; this repo does not. Read the boundary after any merge that carried
+  two appends and put the blank line and the rule back by hand.
+- **union only fails safe for append/append.** A NON-append change to
+  `events.md` — a correction, a redaction, a repaired separator — lands in the
+  same tail hunk a concurrent append touches, and union settles it by keeping
+  both sides, silently restoring the line the change removed. Any merge
+  carrying one must be eyeballed; that it came back clean is not evidence that
+  it is right.
+
+Merged entries may also INTERLEAVE rather than land in strict wall-clock order,
+since union emits the current branch's lines before the merged branch's. That
+one is cosmetic: every entry carries its own `time:` field.
+
 ## Build / Check
 
 ```sh
