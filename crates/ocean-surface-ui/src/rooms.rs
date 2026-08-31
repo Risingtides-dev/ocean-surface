@@ -1247,61 +1247,6 @@ impl Rooms {
         });
     }
 
-    /// Add a daemon-owned agent identity to the open room.
-    pub fn add_agent(&self, agent_id: String) {
-        let agent_id = agent_id.trim().to_string();
-        if agent_id.is_empty() {
-            self.status.set("agent id required".into());
-            return;
-        }
-        let Some(key) = self.open_key.get_untracked() else {
-            return;
-        };
-        let base = self.base();
-        let me = *self;
-        let generation_id = self.generation.get_untracked();
-        spawn_local(async move {
-            let body = JoinBody {
-                id: &agent_id,
-                display_name: &agent_id,
-                kind: RoomParticipantKind::Agent,
-            };
-            let post_url = format!("{base}/v1/rooms/persistent/{}/participants", encode(&key));
-            let result = match Request::post(&post_url)
-                .header("content-type", "application/json")
-                .json(&body)
-            {
-                Ok(req) => match req.send().await {
-                    Ok(resp) => match resp.json::<RoomMutateResponse>().await {
-                        Ok(r) if r.ok => Ok(r.room),
-                        Ok(r) => Err(format!(
-                            "add agent failed: {}",
-                            r.error.unwrap_or_else(|| "unknown error".into())
-                        )),
-                        Err(err) => Err(format!("add agent decode error: {err}")),
-                    },
-                    Err(err) => Err(format!("add agent post error: {err}")),
-                },
-                Err(err) => Err(format!("add agent encode error: {err}")),
-            };
-            if result.is_ok() {
-                me.fetch_rooms();
-            }
-            if !me.room_is_current(generation_id, &key) {
-                return;
-            }
-            match result {
-                Ok(room) => {
-                    me.open_room.set(room);
-                    me.status
-                        .set(format!("agent '{agent_id}' added — mention @{agent_id}"));
-                    me.refresh_open_transcript(&key, generation_id);
-                }
-                Err(error) => me.status.set(error),
-            }
-        });
-    }
-
     /// Leave the open room (`DELETE .../participants/{id}`).
     pub fn leave_open(&self) {
         let Some(key) = self.open_key.get_untracked() else {

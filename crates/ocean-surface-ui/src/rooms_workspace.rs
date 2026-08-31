@@ -1376,6 +1376,7 @@ pub fn RoomsWorkspace(
     // roster update that arrives over SSE), so form state owned by it would be
     // discarded mid-sentence and take a half-written system prompt with it.
     let agent_builder = crate::agents::AgentBuilderState::new(&rooms);
+    let room_agent_authority = crate::room_agent_authorization::RoomAgentAuthorizationState::new();
 
     // Room context files. Same reasoning as the agent builder above: an
     // in-flight upload flag rebuilt by a roster SSE update would re-enable the
@@ -3564,7 +3565,6 @@ pub fn RoomsWorkspace(
                                     let participants = rooms.open_room.get()
                                         .map(|r| r.participants)
                                         .unwrap_or_default();
-                                    let show_add_agent = RwSignal::new(false);
                                     view! {
                                         {if participants.is_empty() {
                                             view! {
@@ -3677,74 +3677,6 @@ pub fn RoomsWorkspace(
                                             }.into_any()
                                         }}
 
-                                        <button
-                                            class="rooms-workspace__addagent"
-                                            type="button"
-                                            title="Add an agent participant"
-                                            aria-controls="rooms-workspace-agent-picker"
-                                            aria-expanded=move || show_add_agent.get().to_string()
-                                            on:click=move |_| show_add_agent.update(|v: &mut bool| *v = !*v)
-                                        >
-                                            "+ agent"
-                                        </button>
-                                        {move || {
-                                            if show_add_agent.get() {
-                                                view! {
-                                                    <div
-                                                        id="rooms-workspace-agent-picker"
-                                                        class="rooms-workspace__addagent-picker"
-                                                    >
-                                                        <select
-                                                            class="rooms-workspace__addagent-select"
-                                                            aria-label="Choose an agent to add"
-                                                            on:change=move |ev| {
-                                                                let val = event_target_value(&ev);
-                                                                if !val.is_empty() {
-                                                                    rooms.add_agent(val);
-                                                                    show_add_agent.set(false);
-                                                                }
-                                                            }
-                                                        >
-                                                            <option value="" selected=true>
-                                                                "-- pick an agent --"
-                                                            </option>
-                                                            <For
-                                                                each=move || rooms.available_agents.get()
-                                                                key=|id: &String| id.clone()
-                                                                children=move |id: String| {
-                                                                    let v = id.clone();
-                                                                    view! {
-                                                                        <option value=v>{id}</option>
-                                                                    }
-                                                                }
-                                                            />
-                                                        </select>
-                                                        // The picker above only ADDS an agent that
-                                                        // already exists on disk. This authors one
-                                                        // in place — or edits one, or deletes one —
-                                                        // then refreshes that same picker so the
-                                                        // operator's next click puts it in the room
-                                                        // (or stops offering a folder that no longer
-                                                        // exists). No curl, no leaving the room to
-                                                        // write a folder by hand. `available_agents`
-                                                        // is reused as the edit target list rather
-                                                        // than fetched twice.
-                                                        <crate::agents::AgentBuilder
-                                                            state=agent_builder
-                                                            agents=rooms.available_agents
-                                                            on_saved=Callback::new(move |_name: String| {
-                                                                rooms.fetch_agents();
-                                                            })
-                                                            on_deleted=Callback::new(move |_name: String| {
-                                                                rooms.fetch_agents();
-                                                            })
-                                                        />
-                                                    </div>
-                                                }.into_any()
-                                            } else {
-                                                ().into_any()
-                                            }
-                                        }}
                                     }.into_any()
                                 }
                                 Some(ref access)
@@ -3982,6 +3914,11 @@ pub fn RoomsWorkspace(
                                 }
                             }
                     }}
+                    <crate::room_agent_authorization::RoomAgentAuthorizationPanel
+                        rooms=rooms
+                        state=room_agent_authority
+                        agent_builder=agent_builder
+                    />
                 </div>
 
                 // How a second person reaches this room: mint an invite code.

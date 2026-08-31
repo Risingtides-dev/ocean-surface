@@ -104,6 +104,10 @@ struct AppState {
     /// Mode-0600 boot-bound credential minted and rotated by ocean-daemon.
     /// Read immediately before each Observatory request; never sent to the browser.
     observer_token_path: PathBuf,
+    /// Mode-0600 room-authorization credential minted by ocean-daemon. The
+    /// browser never receives it; exact Rooms authority mutations are the only
+    /// forwards that attach it to the upstream request.
+    operator_key_path: PathBuf,
 }
 
 impl AppState {
@@ -221,6 +225,10 @@ struct ProxyUser {
     /// right credential) and on a remote daemon that has not been configured
     /// for observatory access.
     observer_token_path: Option<PathBuf>,
+    /// The room-operator key belonging to this user's daemon. A remote daemon
+    /// without an explicit path gets no credential: falling back to this
+    /// machine's key would disclose local execution authority.
+    operator_key_path: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for ProxyUser {
@@ -230,6 +238,7 @@ impl std::fmt::Debug for ProxyUser {
             .field("password", &"[redacted]")
             .field("daemon_url", &self.daemon_url)
             .field("observer_token_path", &self.observer_token_path)
+            .field("operator_key_path", &self.operator_key_path)
             .field("session_token", &"[redacted]")
             .finish()
     }
@@ -262,6 +271,10 @@ struct UserFileEntry {
     /// sensible fallback. See `observatory_upstream`.
     #[serde(default)]
     observer_token_path: Option<String>,
+    /// Optional mode-0600 room-operator key for this exact daemon. Required
+    /// for authorization mutations when `daemon_url` is not the default.
+    #[serde(default)]
+    operator_key_path: Option<String>,
 }
 
 /// Where multi-user config lives. Same rule as the single-user credentials:
@@ -323,6 +336,7 @@ fn load_users(
             daemon_url,
             session_token,
             observer_token_path: entry.observer_token_path.map(PathBuf::from),
+            operator_key_path: entry.operator_key_path.map(PathBuf::from),
         });
     }
 
@@ -390,6 +404,51 @@ fn read_observer_token(path: &FsPath) -> Result<String, String> {
         return Err("observer credential is empty".to_owned());
     }
     Ok(token.to_owned())
+}
+
+/// Read the daemon's room-operator credential without weakening its custody
+/// contract. This is stricter than the Observatory reader because possession
+/// of this key permits durable local execution-authority mutations: the file
+/// must be owner-owned, single-linked, mode 0600, regular, and opened without
+/// following symlinks. The value is returned only to the server-side forwarder.
+fn read_room_operator_key(path: &FsPath) -> Result<String, String> {
+    let link = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("room operator credential unavailable: {error}"))?;
+    if link.file_type().is_symlink() || !link.is_file() {
+        return Err("room operator credential must be a regular file".to_owned());
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|error| format!("room operator credential unavailable: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("room operator credential unavailable: {error}"))?;
+    // SAFETY: `geteuid` takes no arguments, has no preconditions, and only
+    // reads the effective user id of this process.
+    let owner = unsafe { libc::geteuid() };
+    if !metadata.is_file()
+        || metadata.uid() != owner
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o777 != 0o600
+    {
+        return Err(
+            "room operator credential must be an owner-owned single-link mode-0600 regular file"
+                .to_owned(),
+        );
+    }
+    let mut key = String::new();
+    file.read_to_string(&mut key)
+        .map_err(|error| format!("room operator credential unavailable: {error}"))?;
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("room operator credential is empty".to_owned());
+    }
+    if axum::http::HeaderValue::try_from(key).is_err() {
+        return Err("room operator credential is not a valid header value".to_owned());
+    }
+    Ok(key.to_owned())
 }
 
 #[tokio::main]
@@ -509,6 +568,9 @@ async fn main() -> anyhow::Result<()> {
     let observer_token_path = std::env::var_os("OCEAN_OBSERVER_TOKEN_FILE")
         .map(PathBuf::from)
         .unwrap_or_else(|| ocean_config_dir().join("observatory-token"));
+    let operator_key_path = std::env::var_os("OCEAN_OPERATOR_KEY_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| ocean_config_dir().join("operator.key"));
 
     let state = Arc::new(AppState {
         users,
@@ -535,6 +597,7 @@ async fn main() -> anyhow::Result<()> {
         maps_key,
         maps_map_id,
         observer_token_path,
+        operator_key_path,
     });
 
     let app = build_app(state, &dist);
@@ -856,6 +919,27 @@ fn observatory_token_path(
         return None;
     }
     user.observer_token_path.clone()
+}
+
+/// Which room-operator key belongs to the daemon this request resolved to.
+///
+/// The key is local execution authority, so the no-fallback rule is absolute:
+/// a request routed to another user's daemon receives only that roster entry's
+/// explicitly configured key, or no key at all. The process-wide key is used
+/// solely for the process-wide default daemon.
+fn room_operator_key_path(
+    state: &AppState,
+    headers: &HeaderMap,
+    daemon: &ResolvedDaemon,
+) -> Option<PathBuf> {
+    if daemon.base() == state.daemon_url.trim_end_matches('/') {
+        return Some(state.operator_key_path.clone());
+    }
+    let user = session_user(state, headers)?;
+    if user.daemon_url.trim_end_matches('/') != daemon.base() {
+        return None;
+    }
+    user.operator_key_path.clone()
 }
 
 fn has_valid_basic_credentials(state: &AppState, headers: &HeaderMap) -> bool {
@@ -1955,6 +2039,30 @@ async fn proxy_longhouse(
     }
 }
 
+/// True only for the exact Phase 1 binding mutation routes. Read-only binding
+/// and package-preview requests deliberately stay credential-free; every
+/// other persistent-room mutation keeps its existing authority model.
+fn room_agent_authority_mutation(method: &axum::http::Method, path: &str) -> bool {
+    let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    let base = segments.len() >= 5
+        && segments[0] == "v1"
+        && segments[1] == "rooms"
+        && segments[2] == "persistent"
+        && !segments[3].is_empty()
+        && segments[4] == "agents";
+    if !base {
+        return false;
+    }
+    match *method {
+        axum::http::Method::POST if segments.len() == 5 => true,
+        axum::http::Method::POST if segments.len() == 7 => {
+            !segments[5].is_empty() && matches!(segments[6], "reauthorize" | "suspend" | "resume")
+        }
+        axum::http::Method::DELETE if segments.len() == 6 => !segments[5].is_empty(),
+        _ => false,
+    }
+}
+
 /// Which persistent-rooms request this is, because three of the shapes under
 /// one wildcard route cannot be forwarded the same way.
 ///
@@ -2114,6 +2222,40 @@ async fn proxy_rooms_persistent(
     // (axum rejects a separate {key}/events route alongside {*rest}).
     // We reconstruct this from path segments to avoid a loose ends_with.
     let shape = rooms_persistent_shape(&method, &path);
+    let operator_key = if room_agent_authority_mutation(&method, &path) {
+        let Some(key_path) = room_operator_key_path(&state, req.headers(), &daemon) else {
+            tracing::warn!(
+                daemon = %daemon.base(),
+                "room authorization has no credential for resolved daemon"
+            );
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::CONTENT_TYPE, "application/json")],
+                Bytes::from_static(br#"{"ok":false,"error":"operator_credential_unavailable"}"#),
+            )
+                .into_response();
+        };
+        match read_room_operator_key(&key_path) {
+            Ok(key) => Some(key),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path = %key_path.display(),
+                    "room operator credential unavailable"
+                );
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    Bytes::from_static(
+                        br#"{"ok":false,"error":"operator_credential_unavailable"}"#,
+                    ),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        None
+    };
     if shape == RoomsPersistentShape::EventsTail {
         let url = format!("{}{path}{q}", daemon.base());
         let mut upstream = state.http.get(&url);
@@ -2182,6 +2324,10 @@ async fn proxy_rooms_persistent(
         // replaces: workspace READS answer out of Bedrock's state in one
         // round trip and stay on the JSON budget.
         builder.timeout(forward_timeout(shape))
+    };
+    let builder = match operator_key {
+        Some(key) => builder.header("X-Ocean-Operator", key),
+        None => builder,
     };
     match builder.send().await {
         Ok(resp) => {
@@ -2553,7 +2699,8 @@ mod tests {
         agent_daemon_path, build_app, config_payload, constant_time_eq, daemon_for, decode_segment,
         forward_timeout, has_dot_segment, has_valid_session, is_hashed_asset,
         livekit_token_daemon_path, load_users, observatory_token_path, percent_encode_path_segment,
-        read_observer_token, rooms_persistent_shape, session_auth_gate, session_user,
+        read_observer_token, read_room_operator_key, room_agent_authority_mutation,
+        room_operator_key_path, rooms_persistent_shape, session_auth_gate, session_user,
         sse_no_buffer_headers, wasm_headers, AppState, ProxyUser, ResolvedDaemon,
         RoomsPersistentShape, ATTACHMENT_UPLOAD_BODY_LIMIT, CALL_PLACE_DAEMON_PATH,
         JSON_FORWARD_TIMEOUT, SESSION_COOKIE, WASM_CACHE_CONTROL,
@@ -2606,6 +2753,7 @@ mod tests {
             users: Vec::new(),
             secure_cookie: true,
             observer_token_path: PathBuf::from("/not-used-in-auth-tests"),
+            operator_key_path: PathBuf::from("/not-used-in-auth-tests"),
         })
     }
 
@@ -2621,6 +2769,7 @@ mod tests {
             daemon_url: daemon.to_string(),
             session_token: token.to_string(),
             observer_token_path: None,
+            operator_key_path: None,
         }
     }
 
@@ -2704,6 +2853,124 @@ mod tests {
             &ResolvedDaemon("http://10.0.0.9:4780".into()),
         );
         assert_eq!(path, None);
+    }
+
+    #[test]
+    fn only_exact_room_agent_mutations_receive_operator_authority() {
+        use axum::http::Method;
+
+        assert!(room_agent_authority_mutation(
+            &Method::POST,
+            "/v1/rooms/persistent/team/agents"
+        ));
+        assert!(room_agent_authority_mutation(
+            &Method::POST,
+            "/v1/rooms/persistent/team/agents/member-1/reauthorize"
+        ));
+        assert!(room_agent_authority_mutation(
+            &Method::POST,
+            "/v1/rooms/persistent/team/agents/member-1/suspend"
+        ));
+        assert!(room_agent_authority_mutation(
+            &Method::POST,
+            "/v1/rooms/persistent/team/agents/member-1/resume"
+        ));
+        assert!(room_agent_authority_mutation(
+            &Method::DELETE,
+            "/v1/rooms/persistent/team/agents/member-1"
+        ));
+
+        for (method, path) in [
+            (Method::GET, "/v1/rooms/persistent/team/agents"),
+            (
+                Method::GET,
+                "/v1/rooms/persistent/team/agents/preview/researcher",
+            ),
+            (Method::POST, "/v1/rooms/persistent/team/messages"),
+            (
+                Method::POST,
+                "/v1/rooms/persistent/team/agents/member-1/not-authorized",
+            ),
+            (
+                Method::DELETE,
+                "/v1/rooms/persistent/team/participants/alice",
+            ),
+        ] {
+            assert!(
+                !room_agent_authority_mutation(&method, path),
+                "{method} {path} must not receive the operator key"
+            );
+        }
+    }
+
+    #[test]
+    fn room_operator_credentials_follow_the_resolved_daemon_without_fallback() {
+        let state = multi_user_state();
+        assert_eq!(
+            room_operator_key_path(
+                &state,
+                &session_headers("tok-ocean"),
+                &ResolvedDaemon("http://127.0.0.1:4780".into()),
+            ),
+            Some(state.operator_key_path.clone()),
+        );
+        assert_eq!(
+            room_operator_key_path(
+                &state,
+                &session_headers("tok-eric"),
+                &ResolvedDaemon("http://100.119.217.76:4780".into()),
+            ),
+            None,
+            "another daemon must never receive the process-wide key",
+        );
+
+        let mut configured = state;
+        let inner = Arc::get_mut(&mut configured).expect("sole owner");
+        inner.users[1].operator_key_path = Some(PathBuf::from("/eric/operator.key"));
+        assert_eq!(
+            room_operator_key_path(
+                &configured,
+                &session_headers("tok-eric"),
+                &ResolvedDaemon("http://100.119.217.76:4780".into()),
+            ),
+            Some(PathBuf::from("/eric/operator.key")),
+        );
+    }
+
+    #[test]
+    fn room_operator_key_reader_enforces_custody_and_never_follows_links() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = dir.path().join("operator.key");
+        std::fs::write(&key, "server-side-secret\n").expect("write key");
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).expect("chmod key");
+        assert_eq!(
+            read_room_operator_key(&key).expect("secure key"),
+            "server-side-secret"
+        );
+
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod insecure");
+        assert!(read_room_operator_key(&key).is_err());
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600))
+            .expect("restore mode");
+
+        let hardlink = dir.path().join("operator-copy");
+        std::fs::hard_link(&key, &hardlink).expect("hard link");
+        assert!(
+            read_room_operator_key(&key).is_err(),
+            "multi-link key refused"
+        );
+
+        let symlink_target = dir.path().join("symlink-target");
+        std::fs::write(&symlink_target, "other-server-side-secret\n").expect("write target");
+        std::fs::set_permissions(&symlink_target, std::fs::Permissions::from_mode(0o600))
+            .expect("chmod target");
+        let symlink = dir.path().join("operator-symlink");
+        std::os::unix::fs::symlink(&symlink_target, &symlink).expect("symlink");
+        assert!(
+            read_room_operator_key(&symlink).is_err(),
+            "symlink key refused"
+        );
     }
 
     fn multi_user_state() -> Arc<AppState> {
@@ -3178,6 +3445,7 @@ mod tests {
             users: Vec::new(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used-in-config-tests"),
+            operator_key_path: PathBuf::from("/not-used-in-config-tests"),
         };
 
         let payload = config_payload(&state, None);
@@ -3258,6 +3526,7 @@ mod tests {
             users: Vec::new(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
+            operator_key_path: PathBuf::from("/not-used"),
         });
         let app = build_app(state, dist.path());
 
@@ -3339,6 +3608,7 @@ mod tests {
             users: Vec::new(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
+            operator_key_path: PathBuf::from("/not-used"),
         });
         let app = build_app(state, dist.path());
 
@@ -3477,6 +3747,7 @@ mod tests {
             users: Vec::new(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
+            operator_key_path: PathBuf::from("/not-used"),
         });
         let app = build_app(state, dist.path());
 
@@ -3570,6 +3841,7 @@ mod tests {
             users: Vec::new(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
+            operator_key_path: PathBuf::from("/not-used"),
         });
         let app = build_app(state, dist.path());
 
@@ -3670,6 +3942,7 @@ mod tests {
             users: Vec::new(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
+            operator_key_path: PathBuf::from("/not-used"),
         });
         let app = build_app(state, dist.path());
 
@@ -3730,6 +4003,7 @@ mod tests {
             users: Vec::new(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
+            operator_key_path: PathBuf::from("/not-used"),
         });
         let app = build_app(state, dist.path());
 
@@ -3810,6 +4084,7 @@ mod tests {
             users: Vec::new(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
+            operator_key_path: PathBuf::from("/not-used"),
         });
         let app = build_app(state, dist.path());
 
@@ -3881,6 +4156,7 @@ mod tests {
             users: Vec::new(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
+            operator_key_path: PathBuf::from("/not-used"),
         });
         let app = build_app(state, dist.path());
 
@@ -4131,6 +4407,123 @@ mod tests {
         }
     }
 
+    async fn spawn_room_authority_daemon() -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().route(
+            "/v1/rooms/persistent/{key}/agents",
+            get(|| async { Json(json!({"ok": true, "bindings": []})) }).post(
+                |headers: HeaderMap| async move {
+                    Json(json!({
+                        "operator": headers
+                            .get("x-ocean-operator")
+                            .and_then(|value| value.to_str().ok()),
+                        "cookie": headers.contains_key(header::COOKIE),
+                        "origin": headers.contains_key(header::ORIGIN),
+                    }))
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind room authority upstream");
+        let addr = listener.local_addr().expect("room authority addr");
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    #[tokio::test]
+    async fn room_authority_key_is_injected_server_side_on_mutation_only() {
+        let (daemon_url, upstream) = spawn_room_authority_daemon().await;
+        let credential_dir = tempfile::tempdir().expect("credential tempdir");
+        let key_path = credential_dir.path().join("operator.key");
+        std::fs::write(&key_path, "proxy-owned-authority\n").expect("write operator key");
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+            .expect("chmod operator key");
+
+        let mut state = auth_test_state();
+        let inner = Arc::get_mut(&mut state).expect("sole state owner");
+        inner.daemon_url = daemon_url;
+        inner.basic_auth = None;
+        inner.operator_key_path = key_path;
+        let dist = tempfile::tempdir().expect("dist tempdir");
+        let app = build_app(state, dist.path());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rooms/persistent/team/agents")
+                    // Browser-supplied ambient and forged authority never cross
+                    // the proxy boundary; the server-side key replaces them.
+                    .header("x-ocean-operator", "browser-forged")
+                    .header(header::COOKIE, "ambient=browser")
+                    .header(header::ORIGIN, "https://surface.example")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .expect("mutation response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("mutation body");
+        let seen: Value = serde_json::from_slice(&body).expect("mutation json");
+        assert_eq!(seen["operator"], "proxy-owned-authority");
+        assert_eq!(seen["cookie"], false);
+        assert_eq!(seen["origin"], false);
+
+        // Inspection is credential-free by contract. It succeeds without
+        // special forwarding and the browser never sees the key.
+        let inspected = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/rooms/persistent/team/agents")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("inspect response");
+        assert_eq!(inspected.status(), StatusCode::OK);
+        upstream.abort();
+    }
+
+    #[tokio::test]
+    async fn room_authority_mutation_fails_closed_before_upstream_without_key() {
+        let (daemon_url, upstream) = spawn_room_authority_daemon().await;
+        let mut state = auth_test_state();
+        let inner = Arc::get_mut(&mut state).expect("sole state owner");
+        inner.daemon_url = daemon_url;
+        inner.basic_auth = None;
+        inner.operator_key_path = PathBuf::from("/definitely/missing/operator.key");
+        let dist = tempfile::tempdir().expect("dist tempdir");
+        let app = build_app(state, dist.path());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/rooms/persistent/team/agents")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .expect("closed response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("closed body");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).expect("closed json")["error"],
+            "operator_credential_unavailable"
+        );
+        upstream.abort();
+    }
+
     /// A stand-in daemon for the two forwarding tests below. Mirrors the real
     /// attachment routes' shapes: the upload's `DefaultBodyLimit`, and the
     /// download's octet-stream + nosniff + disposition triple.
@@ -4196,6 +4589,7 @@ mod tests {
             users: Vec::new(),
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
+            operator_key_path: PathBuf::from("/not-used"),
         })
     }
 
