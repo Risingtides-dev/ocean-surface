@@ -3959,3 +3959,165 @@ passed / 0 failed across all targets, and `cargo test -p ocean-surface-proxy` at
 the only invocation that lints the added test lines: clean. Test-only change;
 no migration, no deploy step.
 _________________________________________________________________________________
+
+time:      [09:41] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-has-no-test-that-can-see-a-control-was-deleted
+type:      [feature-request]
+area:      [testing]
+
+Built the lane that catches a deleted UI control, and pinned the six controls
+measurement proved are unheld. Every 'landed API nobody can reach' slice this
+backlog files ends with a control being added, and almost nothing held those
+controls in place afterwards: #165's reviewer deleted the create-panel trigger
+checkbox and the Response Policy summary line and the full suite plus the wasm
+check stayed green.
+
+Lifted the scanners out of ci_failure_trigger_control.rs and
+dead_selector_removal.rs into tests/common/mod.rs, a subdirectory module because
+cargo compiles each top-level tests/*.rs as its own binary and a subdir mod.rs is
+not a target. It carries repo_root, read, src, view_source (generalised to take a
+module path), without_whitespace and all_rust_src, and all three guard binaries
+consume it. The `#![allow(dead_code)]` on it is load-bearing, not defensive:
+removing it fails `cargo clippy -p ocean-surface-ui --all-targets -- -D warnings`
+with six `never used` errors across ci_failure_trigger_control and
+dead_selector_removal, since each binary calls only some helpers.
+
+The slice's own discipline was to MEASURE before pinning rather than assume, and
+the measurement is what makes it worth having. For each candidate the deletion
+was actually applied at 4ed9a7c and the gate actually run. Three came back RED
+and were recorded rather than pinned: the summarize RUN button is compiler-held
+(deleting it takes SummarizeRequest, summarize_url, classify_summarize and
+SummarizeOutcome dead with it), `provision` is compiler-held (`variant Provision
+is never constructed`), and the redeem button's MARKUP is held by that module's
+own in-file class-literal scan. Six came back GREEN and are now pinned in
+tests/unheld_room_controls.rs.
+
+The split is not where intuition puts it, and the pairs are the finding. In one
+panel `provision` is held while `destroy`'s arming click is not. In one component
+the summarize RUN button is held while the `open` button that is the ONLY door to
+it is not — delete that one button and the whole summarize route is unreachable
+from the browser with every gate green. Four of the six are the arming half of a
+two-click confirm, silent for one reason: deleting the arm leaves the confirm
+branch standing, so the enum variant is still constructed, the fire method still
+called, the signal still read and reset. Nothing is unreferenced, nothing warns,
+and the destructive verb stays fully implemented and permanently unpressable. The
+sixth is a different shape again — strip `on:click` off the redeem button and the
+markup stays, so room_redeem's own guard passes straight through, `fire` stays
+alive on the input's Enter handler so nothing warns, and the button renders
+looking exactly like a working one.
+
+Honoured both rules the last two waves paid for, and both are now measured facts
+rather than received advice. Needles name the CALL SITE and carry their
+`on:click=` prefix because the bare literal is satisfied elsewhere:
+state.confirm_destroy.set(true) occurs 5x in room_workspace_panel.rs and once
+outside #[cfg(test)], state.confirm_purge.set(Some(PurgeTarget::All)) 3x and
+once. Every scan runs over view_source on top of that; either alone is
+insufficient. And each of the six was verified by a RENAME as well as a deletion
+— twelve mutations, twelve guards fired. That verification is cheap and worth
+knowing about: the guard binary reads src/ at runtime and does not depend on it
+at compile time, so `cargo test --test unheld_room_controls` re-runs against a
+mutated src/ with no rebuild and the mutation need not compile.
+
+src/ was never edited — every mutation was reverted and `git status` confirmed
+clean before the gate ran. Scope held to tests/ plus the two devlog files;
+dead_trigger_row_affordance.rs untouched.
+
+Frozen gates all green: `cargo fmt --check`, `cargo clippy -p ocean-surface-ui
+--target wasm32-unknown-unknown -- -D warnings`, `cargo check -p ocean-surface-ui
+--target wasm32-unknown-unknown`, `cargo check -p ocean-surface-proxy`, `cargo
+test -p ocean-surface-ui --target wasm32-unknown-unknown --no-run`, and `cargo
+test -p ocean-surface-ui` at 1232 passed / 0 failed across all targets. Also ran
+`cargo clippy -p ocean-surface-ui --all-targets -- -D warnings`, the only
+invocation that lints the added test lines: clean. Test-only change; no
+migration, no deploy step.
+_________________________________________________________________________________
+
+time:      [09:33] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-has-no-test-that-can-see-a-control-was-deleted
+type:      [review]
+area:      [testing]
+
+Correction to the entry above and to the AGENTS.md paragraph it landed with.
+Both claimed mutation-verifying the control guards is nearly free — "the guard
+binary reads src/ at runtime and does not depend on it at compile time, so
+`cargo test --test unheld_room_controls` re-runs against a mutated src/ with no
+rebuild and the mutation need not compile." That is false, review caught it, and
+one command settles it: appending `this is not rust at all !!!` to room_repo.rs
+and running the documented command exits at `error: could not compile
+ocean-surface-ui (bin "ocean-surface-ui") due to 1 previous error` with no test
+executed. Cargo builds every bin target of the package before it will run an
+integration test — it has to, for CARGO_BIN_EXE_* — so the crate's own binary is
+compiled whether the guard needs it or not. Measured the compiling case as well:
+deleting room_summary.rs:587-601, the whole `open` button, costs a full
+`Compiling ocean-surface-ui` at ~30s wall clock and then the guard fires
+(the_summary_rail_offers_the_only_door_to_the_summarize_panel FAILED, 5 passed 1
+failed). The entry above contains its own refutation and nobody read it that
+way: the RED rows in its measurement table ARE compile errors, which can only
+happen because the bin is being compiled.
+
+So the procedure a future builder inherits is the opposite of what was written.
+The mutation MUST compile, and every mutated run pays a bin rebuild — budget
+~30s per mutation, not zero — which also means a mutation that fails to build is
+not evidence of anything, because the guard never ran. AGENTS.md now says that,
+and says why the RED rows look like build failures rather than passing guards.
+The entry above keeps its wrong sentence because this ledger is append-only;
+this entry is the correction. Nothing else moved: the six pins, the shared
+toolkit, and the measurement table all survived the reviewer's independent
+re-mutation of all six controls and are untouched, as is src/.
+
+Frozen gates all green, re-run whole after the edit: `cargo fmt --check`, `cargo
+clippy -p ocean-surface-ui --target wasm32-unknown-unknown -- -D warnings`,
+`RUSTFLAGS="-D warnings" cargo check -p ocean-surface-ui --target
+wasm32-unknown-unknown`, `cargo check -p ocean-surface-proxy`, `cargo test -p
+ocean-surface-ui --target wasm32-unknown-unknown --no-run`, and `cargo test -p
+ocean-surface-ui` at 1232 passed / 0 failed across all targets, plus `cargo test
+-p ocean-surface-proxy` at 54 and `cargo clippy -p ocean-surface-ui
+--all-targets -- -D warnings`, the only invocation that lints the test lines:
+every one exit 0. Docs-only change; no migration, no deploy step.
+_________________________________________________________________________________
+
+time:      [10:22] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-has-no-test-that-can-see-a-control-was-deleted
+type:      [review]
+area:      [testing]
+
+Landing the guard lane with the three review notes the refine pass left on the
+table. None of them changes what the lane catches.
+
+First, `the_redeem_button_is_wired_and_not_just_rendered` opened with a markup
+assertion the file's own stated discipline forbids -- the module doc says only
+what stayed GREEN under mutation is pinned here, and the AGENTS.md table records
+`room_redeem.rs`'s join-button markup as RED, held by an in-file test at
+room_redeem.rs:1046 that quotes the class literal. The assert was also strictly
+dominated by the one below it: `on:click=move |_| fire()` lives INSIDE that
+button, so any mutation removing the class literal removes the handler needle
+too. Dropped. Re-measured after dropping rather than assuming: deleting
+room_redeem.rs:511 (the handler line) still fails the guard alone, 5 passed / 1
+failed, so the single remaining assertion carries the whole control.
+
+Second, `both_rosters_offer_the_click_that_arms_a_removal` pins the roster count
+at two, which is the right call -- it is what catches ONE roster losing its arm
+while the other keeps it -- but the failure text only described that direction.
+Legitimately adding a third roster failed with a message that misdiagnosed it.
+The message now names both directions.
+
+Third, the AGENTS.md paragraph on the shared toolkit presented
+`#![allow(dead_code)]` as pure necessity. It is necessary -- inclusion is
+per-binary and an uncalled `pub fn` is a `-D warnings` failure -- but it has a
+cost that went unnamed: these helpers previously sat inline in
+`dead_selector_removal.rs` and `ci_failure_trigger_control.rs` with no allow, so
+a helper that lost its last caller announced itself, and after the move it is
+silent forever. The paragraph now says so and tells the next reader to prune by
+reading.
+
+Gate re-run after all three edits: `cargo test -p ocean-surface-ui` 1232 passed
+/ 0 failed, `cargo test -p ocean-surface-proxy` 54 passed, fmt --all --check,
+clippy on ui (wasm and --all-targets) and proxy, `RUSTFLAGS="-D warnings" cargo
+check -p ocean-surface-ui --target wasm32-unknown-unknown`, `cargo test
+--target wasm32-unknown-unknown --no-run`, and
+`node scripts/surface-auto-deploy.test.mjs` (24 assertions) -- every one exit 0.
+No src/ change, no migration, no deploy step.
+_________________________________________________________________________________
