@@ -4310,3 +4310,23 @@ passed / 0 failed across all targets; `cargo clippy -p ocean-surface-ui
 --all-targets -- -D warnings`, the only invocation that lints the added test
 lines. No migration, no deploy step.
 _________________________________________________________________________________
+
+_________________________________________________________________________________
+time:      [14:10] [08-31-26]
+agent:     [ocean] [pm review fix]
+worktree:  loop/surface-ports-panel-lists-what-nobody-can-open-or-close
+type:      [fix]
+area:      [rooms workspace ports]
+
+Closed the two blocking findings on the exposed-port controls after the feature
+commit. The safe RoomAccessProjection now provides an affordance-only owner
+preflight: Local is owner-operated; Live requires self_member_id to name an
+Owner row; member, unknown, connecting, recovering and revoked projections
+cannot dispatch expose or close. The daemon remains the binding authority.
+
+A transport cut after dispatch now carries an explicit refresh bit. The panel
+preserves the uncertainty sentence but performs the status read it promises,
+so a port that actually opened or closed while the response connection failed
+cannot leave the visible list stale. Added native tests for both the full access
+matrix and ambiguous-transport refresh policy. Focused tests and diff check pass.
+_________________________________________________________________________________

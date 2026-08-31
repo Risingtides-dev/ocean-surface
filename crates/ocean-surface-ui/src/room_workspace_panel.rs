@@ -147,7 +147,10 @@ use leptos::prelude::*;
 use serde::{Deserialize, Deserializer};
 use wasm_bindgen_futures::spawn_local;
 
-use crate::rooms::{encode, RoomMessage, RoomMessageKind, Rooms};
+use crate::rooms::{
+    encode, FederatedRoomRole, RoomAccessProjection, RoomAccessState, RoomMessage, RoomMessageKind,
+    Rooms,
+};
 use crate::rooms_workspace::room_is_federated;
 
 /// The open panel's fallback tick. The marker wake is the primary refresh
@@ -1094,6 +1097,26 @@ impl PortCommand {
 fn parse_port(input: &str) -> Option<u64> {
     let port: u64 = input.trim().parse().ok()?;
     (1..=u64::from(u16::MAX)).contains(&port).then_some(port)
+}
+
+/// A client-side affordance gate only; the daemon remains authoritative. Local
+/// rooms are owner-operated by construction. A federated room can expose the
+/// controls only when the safe access projection identifies this browser's
+/// own member row as Owner. Unknown, transitional, revoked, and ordinary
+/// member projections cannot dispatch a guaranteed refusal.
+fn can_manage_ports(access: Option<&RoomAccessProjection>) -> bool {
+    let Some(access) = access else { return false };
+    match access.state {
+        RoomAccessState::Local => true,
+        RoomAccessState::Live => access.self_member_id.as_deref().is_some_and(|self_id| {
+            access.members.iter().any(|member| {
+                member.member_id == self_id && member.role_in_room == FederatedRoomRole::Owner
+            })
+        }),
+        RoomAccessState::Connecting | RoomAccessState::Recovering | RoomAccessState::Revoked => {
+            false
+        }
+    }
 }
 
 /// The sentence a typed port answer earns — states, not faults, like the
@@ -2336,16 +2359,13 @@ impl RoomWorkspacePanelState {
                 PortCommand::Expose(_) => ports_expose_url(&base, &key, &actor),
                 PortCommand::Close(_) => ports_close_url(&base, &key, &actor),
             };
-            let outcome = post_port(command, &url).await;
+            let result = post_port(command, &url).await;
             let current = rooms.room_is_current(generation, &key);
             // A typed state re-reads too: "not currently exposed" means the
             // list on screen is already stale about that row, exactly as a
             // vanished exec means it for the purge beside this.
-            let refresh = matches!(
-                outcome,
-                LifecycleOutcome::Landed(_) | LifecycleOutcome::State(_)
-            );
-            me.publish_port(command, outcome, current);
+            let refresh = port_refresh_needed(&result.outcome, result.refresh_after);
+            me.publish_port(command, result.outcome, current);
             if current && refresh {
                 refresh_lanes(me, &base, &key, &actor, true, false, false).await;
             }
@@ -2682,7 +2702,22 @@ async fn post_exec(url: &str, command: &str) -> LifecycleOutcome {
 /// all. It rides as a JSON NUMBER, not a string: the daemon proves the
 /// value with `as_u64` before it may become a path segment, and a string
 /// would be refused there having taught nobody anything.
-async fn post_port(command: PortCommand, url: &str) -> LifecycleOutcome {
+fn port_refresh_needed(outcome: &LifecycleOutcome, transport_ambiguous: bool) -> bool {
+    transport_ambiguous
+        || matches!(
+            outcome,
+            LifecycleOutcome::Landed(_) | LifecycleOutcome::State(_)
+        )
+}
+
+struct PortPostResult {
+    outcome: LifecycleOutcome,
+    /// True only when transport failed after dispatch and status must settle
+    /// whether the upstream command landed.
+    refresh_after: bool,
+}
+
+async fn post_port(command: PortCommand, url: &str) -> PortPostResult {
     match Request::post(url)
         .header("content-type", "application/json")
         .json(&serde_json::json!({ "port": command.port() }))
@@ -2691,19 +2726,28 @@ async fn post_port(command: PortCommand, url: &str) -> LifecycleOutcome {
             Ok(resp) => {
                 let status = resp.status();
                 let body = resp.json::<WorkspaceBody>().await.ok();
-                classify_port(command, status, body)
+                PortPostResult {
+                    outcome: classify_port(command, status, body),
+                    refresh_after: false,
+                }
             }
             // Both verbs drive the compute driver — a first expose can pay
             // for a cold container start — so a cut connection says nothing
             // about whether the route came up or down. The refreshed list
             // is what settles it.
-            Err(err) => LifecycleOutcome::Failure(format!(
-                "The request was cut ({err}) \u{2014} the {} may or may not have landed; \
-                 the list above will say.",
-                command.noun()
-            )),
+            Err(err) => PortPostResult {
+                outcome: LifecycleOutcome::Failure(format!(
+                    "The request was cut ({err}) \u{2014} the {} may or may not have landed; \
+                     the refreshed list above will say.",
+                    command.noun()
+                )),
+                refresh_after: true,
+            },
         },
-        Err(err) => LifecycleOutcome::Failure(format!("Workspace request encode error: {err}")),
+        Err(err) => PortPostResult {
+            outcome: LifecycleOutcome::Failure(format!("Workspace request encode error: {err}")),
+            refresh_after: false,
+        },
     }
 }
 
@@ -3369,6 +3413,7 @@ fn ports_section(
     // so one in flight disables every control here, and the row it names
     // says which.
     let busy = state.ports_busy.get();
+    let can_manage = can_manage_ports(rooms.access.get().as_ref());
     view! {
         <div class="rooms-workspace__compute-ports-title">"Exposed ports"</div>
         <div class="rooms-workspace__compute-ports-copy">
@@ -3388,7 +3433,7 @@ fn ports_section(
                 <ul class="rooms-workspace__compute-ports-list">
                     {rows
                         .into_iter()
-                        .map(|row| port_row(state, rooms, actor, busy, row))
+                        .map(|row| port_row(state, rooms, actor, busy, can_manage, row))
                         .collect::<Vec<_>>()}
                 </ul>
             }
@@ -3406,7 +3451,7 @@ fn ports_section(
                 aria-label="Port to expose"
                 autocomplete="off"
                 spellcheck="false"
-                disabled=busy.is_some()
+                disabled=busy.is_some() || !can_manage
                 prop:value=move || state.port_input.get()
                 on:input=move |ev| state.port_input.set(event_target_value(&ev))
             />
@@ -3418,7 +3463,8 @@ fn ports_section(
                 // already knows the daemon would refuse locally teaches
                 // nobody anything by being sent.
                 disabled=move || {
-                    state.ports_busy.get().is_some()
+                    !can_manage
+                        || state.ports_busy.get().is_some()
                         || state.port_input.with(|input| parse_port(input)).is_none()
                 }
                 on:click=move |_| {
@@ -3453,6 +3499,7 @@ fn port_row(
     rooms: Rooms,
     actor: impl Fn() -> Option<(String, String)> + Copy + 'static,
     busy: Option<PortCommand>,
+    can_manage: bool,
     row: PortRow,
 ) -> AnyView {
     let href = port_href(&row);
@@ -3490,7 +3537,7 @@ fn port_row(
                 class="rooms-workspace__compute-port-close"
                 type="button"
                 title="Stop serving this port at its preview URL"
-                disabled=busy.is_some()
+                disabled=busy.is_some() || !can_manage
                 on:click=move |_| {
                     let Some((key, actor_id)) = actor() else { return };
                     state.run_port(rooms, PortCommand::Close(port), key, actor_id);
@@ -5410,6 +5457,67 @@ mod tests {
         }]));
         assert!(!view_flip(Some(&ready(None)), &open));
         assert!(!view_flip(Some(&open), &ready(Some(Vec::new()))));
+    }
+
+    #[test]
+    fn port_controls_follow_the_safe_self_owner_projection() {
+        let local: RoomAccessProjection = serde_json::from_value(serde_json::json!({
+            "state": "local"
+        }))
+        .unwrap();
+        assert!(can_manage_ports(Some(&local)));
+        assert!(!can_manage_ports(None));
+
+        let access = |role: &str, state: &str, self_id: Option<&str>| {
+            serde_json::from_value::<RoomAccessProjection>(serde_json::json!({
+                "state": state,
+                "self_member_id": self_id,
+                "members": [{
+                    "member_id": "self",
+                    "actor_type": "user",
+                    "role_in_room": role,
+                    "display_name": "Operator",
+                    "joined_at": "2026-08-31T00:00:00Z",
+                    "local_binding_available": true
+                }]
+            }))
+            .unwrap()
+        };
+        assert!(can_manage_ports(Some(&access(
+            "owner",
+            "live",
+            Some("self")
+        ))));
+        assert!(!can_manage_ports(Some(&access(
+            "member",
+            "live",
+            Some("self")
+        ))));
+        assert!(!can_manage_ports(Some(&access(
+            "owner",
+            "live",
+            Some("other")
+        ))));
+        assert!(!can_manage_ports(Some(&access(
+            "owner",
+            "recovering",
+            Some("self")
+        ))));
+    }
+
+    #[test]
+    fn an_ambiguous_port_transport_always_refreshes_the_list() {
+        let failure = LifecycleOutcome::Failure("cut".into());
+        assert!(port_refresh_needed(&failure, true));
+        assert!(!port_refresh_needed(&failure, false));
+        assert!(port_refresh_needed(
+            &LifecycleOutcome::Landed("open".into()),
+            false
+        ));
+        assert!(port_refresh_needed(
+            &LifecycleOutcome::State("already closed".into()),
+            false
+        ));
     }
 
     #[test]
