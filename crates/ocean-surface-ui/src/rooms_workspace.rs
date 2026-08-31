@@ -107,7 +107,8 @@ fn create_trigger_policy(
 ///   arrive through the bridge — a Local room has no workspace to fail.
 ///
 /// A room whose access is still unknown gets no note: claiming a flag is
-/// dead there would be a guess, and the write gate already holds the row.
+/// dead there would be a guess, and [`trigger_policy_accepts_writes`] already
+/// holds the row.
 fn trigger_row_dead_here(
     toggle: TriggerToggle,
     access: Option<&RoomAccessProjection>,
@@ -121,11 +122,50 @@ fn trigger_row_dead_here(
     }
 }
 
-/// Whether a trigger row accepts a flip: the room must accept writes at all —
-/// the same gate every other section of this rail takes — and the flag must
-/// be one that can actually fire here (see [`trigger_row_dead_here`]).
+/// Whether the trigger policy accepts a write under this access projection —
+/// the rail-local counterpart of [`access_allows_writes`], and deliberately
+/// more permissive than it.
+///
+/// The two gates ask different questions. [`access_allows_writes`] asks "can
+/// this write reach a peer?", which is the right question for the composer: a
+/// message that never leaves is a lie about what was said. The trigger policy
+/// is not that kind of write. It is a field on a row in THIS daemon's store,
+/// `PATCH /v1/rooms/persistent/{key}` carries no access check of any kind, and
+/// both readers of the policy — the local post path and the federation
+/// bridge's ingest — read it back from that same store. A link that is down or
+/// coming back cannot make the write unlandable; it only delays the events the
+/// policy governs. So `Connecting` and `Recovering` keep this rail writable,
+/// and the loss they used to cause was the sharpest one available: a room
+/// stuck `Recovering` while every mention woke an agent gave the operator no
+/// way to turn `on_mention` off, at precisely the moment they wanted to.
+///
+/// `Revoked` stays held. The daemon would accept that PATCH too, but the
+/// operator has been removed from the room, and offering to configure a room
+/// you no longer stand in is offering an action that cannot mean anything to
+/// you again. Unknown access stays held for the weaker version of the same
+/// reason: it may yet resolve to `Revoked`, and a row that flips to disabled
+/// once the projection lands is worse than one that waits for it.
+///
+/// Matched exhaustively without a wildcard on purpose — a new access state
+/// must be ruled on here rather than quietly inheriting "writable".
+fn trigger_policy_accepts_writes(access: Option<&RoomAccessProjection>) -> bool {
+    match access.map(|projection| projection.state) {
+        Some(
+            RoomAccessState::Local
+            | RoomAccessState::Connecting
+            | RoomAccessState::Live
+            | RoomAccessState::Recovering,
+        ) => true,
+        Some(RoomAccessState::Revoked) | None => false,
+    }
+}
+
+/// Whether a trigger row accepts a flip: the policy must be writable under
+/// this access at all (see [`trigger_policy_accepts_writes`] — this rail's own
+/// gate, not the composer's) and the flag must be one that can actually fire
+/// here (see [`trigger_row_dead_here`]).
 fn trigger_row_is_editable(toggle: TriggerToggle, access: Option<&RoomAccessProjection>) -> bool {
-    access_allows_writes(access) && trigger_row_dead_here(toggle, access).is_none()
+    trigger_policy_accepts_writes(access) && trigger_row_dead_here(toggle, access).is_none()
 }
 
 /// One editable trigger row in the right rail. `checked` is a plain bool on
@@ -3829,9 +3869,13 @@ pub fn RoomsWorkspace(
                 // room's policy is live state and not a mirror. What varies is
                 // which flag's EVENT can reach which kind of room, and that is
                 // a per-row decision (see `trigger_row_dead_here`), not a
-                // decision about the section. A sibling of the roster for the
-                // same reason as its neighbours: it owns a PATCH's in-flight
-                // state.
+                // decision about the section. For the same reason the rows
+                // take their OWN write gate rather than the composer's: this
+                // PATCH lands in the local store, so a link that is down or
+                // coming back does not hold it (see
+                // `trigger_policy_accepts_writes`). A sibling of the roster
+                // for the same reason as its neighbours: it owns a PATCH's
+                // in-flight state.
                 {move || {
                     let access = rooms.access.get();
                     let Some(room) = rooms.open_room.get() else {
@@ -4264,28 +4308,63 @@ mod tests {
         ));
     }
 
-    /// Editability also takes the rail-wide write gate, so a room that
-    /// cannot be written to holds every row — including the ones whose event
-    /// would otherwise be live there. `Connecting` and `Recovering` are
-    /// federated, so they keep the federated NOTE while staying held.
+    /// `Revoked` is the one access state that holds every row. The daemon
+    /// would take the PATCH — `room_update` has no access check — but the
+    /// operator has been removed from this room, so a control that still
+    /// worked would be offering an action that cannot mean anything to them
+    /// again. The federated NOTE survives being held: `Revoked` is non-Local,
+    /// so `on_thread_reply` is still dead here for its own reason.
     #[test]
-    fn a_room_that_blocks_writes_holds_every_trigger_row() {
-        for state in [
-            RoomAccessState::Connecting,
-            RoomAccessState::Recovering,
-            RoomAccessState::Revoked,
+    fn a_revoked_room_holds_every_trigger_row() {
+        let access = test_access(RoomAccessState::Revoked);
+        for toggle in [
+            TriggerToggle::Mention,
+            TriggerToggle::ThreadReply,
+            TriggerToggle::BuildFailure,
         ] {
+            assert!(
+                !trigger_row_is_editable(toggle, Some(&access)),
+                "{toggle:?}"
+            );
+        }
+        assert_eq!(
+            trigger_row_dead_here(TriggerToggle::ThreadReply, Some(&access)),
+            Some("local rooms only")
+        );
+        assert_eq!(
+            trigger_row_dead_here(TriggerToggle::BuildFailure, Some(&access)),
+            None
+        );
+    }
+
+    /// The ruling this rail is built on: a link that is down or coming back
+    /// does not hold the trigger policy, because the policy is a row in this
+    /// daemon's own store and the PATCH that writes it never leaves the
+    /// machine. `Connecting` and `Recovering` therefore keep every row whose
+    /// event can fire in a federated room — and `on_thread_reply` stays held
+    /// there on the pre-existing, unrelated grounds that the bridge can never
+    /// construct that event, note and all.
+    ///
+    /// This is the capability the gate used to take away: a room stuck
+    /// `Recovering` while every mention woke an agent, and no way to stop it.
+    #[test]
+    fn a_reconnecting_room_keeps_its_live_trigger_rows_writable() {
+        for state in [RoomAccessState::Connecting, RoomAccessState::Recovering] {
             let access = test_access(state);
-            for toggle in [
-                TriggerToggle::Mention,
-                TriggerToggle::ThreadReply,
-                TriggerToggle::BuildFailure,
-            ] {
-                assert!(
-                    !trigger_row_is_editable(toggle, Some(&access)),
-                    "{state:?} {toggle:?}"
-                );
-            }
+
+            assert!(
+                trigger_row_is_editable(TriggerToggle::Mention, Some(&access)),
+                "{state:?}"
+            );
+            assert!(
+                trigger_row_is_editable(TriggerToggle::BuildFailure, Some(&access)),
+                "{state:?}"
+            );
+            assert!(
+                !trigger_row_is_editable(TriggerToggle::ThreadReply, Some(&access)),
+                "{state:?}"
+            );
+
             assert_eq!(
                 trigger_row_dead_here(TriggerToggle::ThreadReply, Some(&access)),
                 Some("local rooms only"),
@@ -4297,6 +4376,46 @@ mod tests {
                 "{state:?}"
             );
         }
+    }
+
+    /// The ruling stated as a difference, so the divergence between the two
+    /// gates is pinned rather than left to be re-derived from two separate
+    /// matrices. They agree everywhere the write's destination is the same
+    /// question, and part company on exactly the two non-terminal states —
+    /// where the composer's write must reach a peer and this rail's write
+    /// must only reach the local store.
+    #[test]
+    fn the_trigger_gate_diverges_from_the_composer_gate_only_while_reconnecting() {
+        let cases = [
+            (RoomAccessState::Local, true),
+            (RoomAccessState::Live, true),
+            (RoomAccessState::Connecting, true),
+            (RoomAccessState::Recovering, true),
+            (RoomAccessState::Revoked, false),
+        ];
+        for (state, policy_writable) in cases {
+            let access = test_access(state);
+            assert_eq!(
+                trigger_policy_accepts_writes(Some(&access)),
+                policy_writable,
+                "{state:?}"
+            );
+
+            let diverges = matches!(
+                state,
+                RoomAccessState::Connecting | RoomAccessState::Recovering
+            );
+            assert_eq!(
+                trigger_policy_accepts_writes(Some(&access)) != access_allows_writes(Some(&access)),
+                diverges,
+                "{state:?}"
+            );
+        }
+
+        // Unknown access is the one place the two gates must never diverge:
+        // the rail has nothing to rule on yet.
+        assert!(!trigger_policy_accepts_writes(None));
+        assert!(!access_allows_writes(None));
     }
 
     /// Before the access projection lands, nothing is known about the room.
@@ -4314,13 +4433,18 @@ mod tests {
         }
     }
 
-    /// The two helpers above are pure, so a test of them alone proves only
+    /// The three helpers above are pure, so a test of them alone proves only
     /// that they answer correctly if asked — the view is free to stop asking
     /// and every one of those tests stays green while the defect returns.
     /// Both halves of this fix are text in this file, so pin the wiring the
     /// way the guards further down this module pin an emitter: read the
     /// source and assert on it, with the needles concatenated at runtime so
     /// this test's own literals cannot stand in for the code it is scanning.
+    ///
+    /// The last assert pins WHICH gate the row takes. That one the behaviour
+    /// tests above would also catch, but only as three unexplained failures;
+    /// naming the rail-local gate here means a future revert to the composer's
+    /// gate has to delete the sentence explaining why it is not that gate.
     #[test]
     fn the_triggers_section_and_row_are_wired_to_the_per_row_gate() {
         let markup = include_str!("rooms_workspace.rs");
@@ -4367,6 +4491,28 @@ mod tests {
             disabled.contains("editable"),
             "`disabled=` must consult the per-row gate — on its own, \
              `policy_update_in_flight` offers a dead row as a live one"
+        );
+
+        // And the per-row gate must take the RAIL's write gate, not the
+        // composer's. `access_allows_writes` is the right question for a write
+        // that has to reach a peer; a trigger-policy PATCH lands in this
+        // daemon's local store, so pointing this row back at it would hold the
+        // rail through `Connecting`/`Recovering` for no reason that survives
+        // being stated.
+        let gate_at = markup
+            .find(&format!("fn {}(", ["trigger_row", "_is_editable"].concat()))
+            .expect("the per-row gate must be defined in this file");
+        let gate = &markup[gate_at..];
+        let gate = &gate[..gate.find("\n}").map_or(gate.len(), |at| at + 2)];
+        assert!(
+            gate.contains(&["trigger_policy", "_accepts_writes"].concat()),
+            "the per-row gate must take the rail-local write gate"
+        );
+        assert!(
+            !gate.contains(&["access_allows", "_writes"].concat()),
+            "the per-row gate must NOT take the composer's write gate — that \
+             holds the whole rail through `Connecting`/`Recovering`, where the \
+             policy write lands in the local store regardless"
         );
     }
 
