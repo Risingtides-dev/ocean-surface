@@ -299,14 +299,14 @@ pub struct RoomTriggerPolicy {
     /// Wake the room's agents when a workspace CI check comes back red. The
     /// daemon half is live — `ocean_core` carries the flag and a `CiFailure`
     /// event, the store round-trips the key, and a red
-    /// `room.workspace.ci_checked` row convenes the roster's agents — but this
-    /// surface has no CONTROL for it yet (see `TriggerToggle` in
-    /// `rooms_workspace.rs`), so today the flag only ever arrives already set.
-    /// Mirroring it is what keeps it set: this surface PATCHes the policy
-    /// WHOLESALE, so a room that has it on would lose it to the next flip of
-    /// any other row if this struct did not know the key. A daemon predating
-    /// the field drops it harmlessly — the room write routes deny no unknown
-    /// field.
+    /// `room.workspace.ci_checked` row convenes the roster's agents — and this
+    /// surface now carries a control for it too (see `TriggerToggle` in
+    /// `rooms_workspace.rs`). Mirroring it still matters for the rooms whose
+    /// flag the daemon set before that control existed: this surface PATCHes
+    /// the policy WHOLESALE, so such a room would lose the flag to the next
+    /// flip of any other row if this struct did not know the key. A daemon
+    /// predating the field drops it harmlessly — the room write routes deny no
+    /// unknown field.
     #[serde(default)]
     pub on_ci_failure: bool,
     /// Unwired: no schedule ever fires, and the daemon refuses any write
