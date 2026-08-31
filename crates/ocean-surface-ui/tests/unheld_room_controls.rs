@@ -149,7 +149,9 @@ fn both_rosters_offer_the_click_that_arms_a_removal() {
     assert_eq!(
         arms, 2,
         "the participant roster and the member roster each need the button \
-         that arms a removal; one of them has lost it",
+         that arms a removal. Fewer than two: one of them has lost it. More \
+         than two: a new roster arrived, which needs its own arm and this \
+         number bumped",
     );
 }
 
@@ -167,10 +169,6 @@ fn both_rosters_offer_the_click_that_arms_a_removal() {
 #[test]
 fn the_redeem_button_is_wired_and_not_just_rendered() {
     let view = without_whitespace(&view_source("room_redeem.rs"));
-    assert!(
-        view.contains(r#"class="rooms-workspace__redeem-run""#),
-        "the redeem control's button must still render",
-    );
     assert!(
         view.contains("on:click=move|_|fire()"),
         "the redeem button must still CALL `fire` — stripping the handler \

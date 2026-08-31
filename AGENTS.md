@@ -462,7 +462,11 @@ root-relative, for `styles/`), `src` (crate `src/`-relative), `view_source`
 (the half of a module a release build compiles), `without_whitespace`, and
 `all_rust_src`. It is `#![allow(dead_code)]` because inclusion is per-binary:
 each guard calls only some helpers, and an uncalled `pub fn` in a test binary
-is a `dead_code` warning the gate's `-D warnings` turns into a failure.
+is a `dead_code` warning the gate's `-D warnings` turns into a failure. That is
+the right trade here, but it is a trade: these helpers previously sat inline in
+`dead_selector_removal.rs` and `ci_failure_trigger_control.rs` with no allow, so
+one that lost its last caller announced itself. After the move, an orphaned
+helper is silent forever — prune by reading, not by waiting for the gate.
 Consumers: `ci_failure_trigger_control.rs`, `dead_selector_removal.rs`,
 `unheld_room_controls.rs`.
 

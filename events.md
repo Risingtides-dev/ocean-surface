@@ -4077,3 +4077,47 @@ ocean-surface-ui` at 1232 passed / 0 failed across all targets, plus `cargo test
 --all-targets -- -D warnings`, the only invocation that lints the test lines:
 every one exit 0. Docs-only change; no migration, no deploy step.
 _________________________________________________________________________________
+
+time:      [10:22] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-has-no-test-that-can-see-a-control-was-deleted
+type:      [review]
+area:      [testing]
+
+Landing the guard lane with the three review notes the refine pass left on the
+table. None of them changes what the lane catches.
+
+First, `the_redeem_button_is_wired_and_not_just_rendered` opened with a markup
+assertion the file's own stated discipline forbids -- the module doc says only
+what stayed GREEN under mutation is pinned here, and the AGENTS.md table records
+`room_redeem.rs`'s join-button markup as RED, held by an in-file test at
+room_redeem.rs:1046 that quotes the class literal. The assert was also strictly
+dominated by the one below it: `on:click=move |_| fire()` lives INSIDE that
+button, so any mutation removing the class literal removes the handler needle
+too. Dropped. Re-measured after dropping rather than assuming: deleting
+room_redeem.rs:511 (the handler line) still fails the guard alone, 5 passed / 1
+failed, so the single remaining assertion carries the whole control.
+
+Second, `both_rosters_offer_the_click_that_arms_a_removal` pins the roster count
+at two, which is the right call -- it is what catches ONE roster losing its arm
+while the other keeps it -- but the failure text only described that direction.
+Legitimately adding a third roster failed with a message that misdiagnosed it.
+The message now names both directions.
+
+Third, the AGENTS.md paragraph on the shared toolkit presented
+`#![allow(dead_code)]` as pure necessity. It is necessary -- inclusion is
+per-binary and an uncalled `pub fn` is a `-D warnings` failure -- but it has a
+cost that went unnamed: these helpers previously sat inline in
+`dead_selector_removal.rs` and `ci_failure_trigger_control.rs` with no allow, so
+a helper that lost its last caller announced itself, and after the move it is
+silent forever. The paragraph now says so and tells the next reader to prune by
+reading.
+
+Gate re-run after all three edits: `cargo test -p ocean-surface-ui` 1232 passed
+/ 0 failed, `cargo test -p ocean-surface-proxy` 54 passed, fmt --all --check,
+clippy on ui (wasm and --all-targets) and proxy, `RUSTFLAGS="-D warnings" cargo
+check -p ocean-surface-ui --target wasm32-unknown-unknown`, `cargo test
+--target wasm32-unknown-unknown --no-run`, and
+`node scripts/surface-auto-deploy.test.mjs` (24 assertions) -- every one exit 0.
+No src/ change, no migration, no deploy step.
+_________________________________________________________________________________
