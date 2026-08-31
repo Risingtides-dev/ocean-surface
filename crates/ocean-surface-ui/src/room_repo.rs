@@ -2806,6 +2806,15 @@ mod tests {
     /// The check URL is container-influenced gh output, not GitHub's word:
     /// only a well-formed http(s) URL survives to become an anchor, the same
     /// posture the markdown renderers hold against `javascript:` hrefs.
+    ///
+    /// Only the last three rows reach the http/https comparison at all.
+    /// `scheme_allowed` splits on `://` before it compares a scheme, so the
+    /// opaque rows — `javascript:`, `JavaScript:`, `data:` and `vbscript:` —
+    /// pin that split's requirement and nothing more, `""` pins the empty
+    /// check, and `java\tscript:` alone pins the control-character one. Only a
+    /// `<scheme>://<host>` row carries an authority that parses, which leaves
+    /// the scheme comparison as the only rule left to reject it — the
+    /// `vscode:` one being what a room container plausibly emits.
     #[test]
     fn a_check_href_is_gated_to_http_schemes() {
         let with_url = |url: &str| CiCheck {
@@ -2823,6 +2832,9 @@ mod tests {
             "data:text/html,<script>alert(1)</script>",
             "vbscript:x",
             "",
+            "ftp://example.test/runs/1",
+            "javascript://example.test/x",
+            "vscode://vscode.git/clone?url=https://example.test/acme/site",
         ] {
             assert_eq!(check_href(&with_url(hostile)), None, "{hostile:?} linked");
         }
