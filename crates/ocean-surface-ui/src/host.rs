@@ -75,6 +75,20 @@ pub struct RepoState {
 pub fn running_in_tauri() -> bool {
     crate::daemon::running_as_tauri()
 }
+
+fn room_authority_mutations_for_host(is_tauri: bool, is_extension: bool) -> bool {
+    !is_tauri && !is_extension
+}
+
+/// Whether this host can carry privileged Room-agent authority mutations.
+///
+/// The PWA proxy injects the operator credential server-side and requires login
+/// on every non-loopback bind. Tauri and extension builds deliberately remain
+/// read-only until their native shells own an equivalent privileged transport;
+/// the credential never enters the shared WASM bundle.
+pub fn room_authority_mutations_supported() -> bool {
+    room_authority_mutations_for_host(running_in_tauri(), crate::daemon::running_as_extension())
+}
 /// How a rendered anchor's raw `href` should be handled inside the native
 /// shell, decided *before* any `prevent_default`. The three arms are mutually
 /// exclusive and cover every href the Markdown renderer can emit.
@@ -813,5 +827,18 @@ mod watch_admission_tests {
                 }]
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod room_authority_host_tests {
+    use super::room_authority_mutations_for_host;
+
+    #[test]
+    fn only_server_side_proxy_host_supports_room_authority_mutations() {
+        assert!(room_authority_mutations_for_host(false, false));
+        assert!(!room_authority_mutations_for_host(true, false));
+        assert!(!room_authority_mutations_for_host(false, true));
+        assert!(!room_authority_mutations_for_host(true, true));
     }
 }

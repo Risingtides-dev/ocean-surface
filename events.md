@@ -4499,6 +4499,77 @@ than a property anything held; it is now carried by a test, so the sentence
 stays. Same four-leg gate re-run green.
 _________________________________________________________________________________
 
+time:      [14:14] [31-08-26]
+agent:     [codex] [gpt-5.6-sol]
+worktree:  [codex/rooms-phase1-surface-auth-0831]
+type:      [feature-request]
+area:      [frontend]
+
+Prepared the first Surface candidate for Ocean Rooms Phase 1 authorization.
+Non-loopback startup refuses `OCEAN_SURFACE_AUTH=off`; privileged mutation
+support is routed through the platform seam and remains unavailable to
+Tauri/extension builds. Surface consumes server-derived owner eligibility,
+retains exact status-mutation decision ids across uncertain responses, and
+exposes only Active locally available agent bindings as new mention targets
+while preserving full historical rosters. The stale claim that partitioned
+room memory is unavailable was removed now that ocean-os supports
+`memory_scope=room`; the `none`/`room` choice remains.
+
+The proxy integration proof covered authorize, reauthorize, suspend, resume,
+and revoke receiving the proxy-owned mode-0600 key while browser-supplied
+authority headers were not forwarded. Package preview stayed credential-free.
+Added a source guard that keeps the legacy bare `rooms.add_agent` picker removed
+and pins the reviewed authorization panel as the Room-agent entry point. Updated
+the root Rooms and Agent Builder contracts; no child devlog exists for the
+touched crates. This was a review candidate, not a landed or deployed feature.
+
+Candidate verification: `cargo test -p ocean-surface-ui` (1203 unit plus 44
+integration), `cargo test -p ocean-surface-proxy` (60), UI WASM and native
+all-target Clippy with denied warnings, proxy all-target Clippy with denied
+warnings, WASM warnings-as-errors check, WASM test compilation, proxy check,
+`cargo fmt --all -- --check`, release Trunk build, and standalone Tauri check.
+Trunk 0.21.14 rejected the ambient `NO_COLOR=1` value before compilation; the
+same release build passed with only `NO_COLOR` unset. No push, deployment, or
+live daemon mutation was performed from this worktree.
+_________________________________________________________________________________
+
+time:      [14:50] [31-08-26]
+agent:     [codex] [gpt-5.6-sol]
+worktree:  [codex/rooms-phase1-surface-auth-0831]
+type:      [bug report]
+area:      [backend]
+
+Corrected the two P1 gaps found in review of the first Surface candidate. In
+auth-off mode, every Room-agent authority mutation carrying Origin or Referer
+must now name the exact loopback Host, including its port, before the proxy even
+looks up the operator key. Matching non-loopback Host and Origin is still
+refused, closing the DNS-rebinding shape. Foreign Origin, foreign Referer,
+opaque Origin, and form-compatible `text/plain` bodies return 403 without an
+upstream request; headerless local clients remain supported. Login-gated mode
+continues to treat the authenticated session rather than Origin as authority.
+
+First-agent setup now uses the daemon's atomic operator-authenticated
+`POST /v1/rooms/persistent/{key}/agents/bootstrap` contract with only the live
+Human member id and local package id in the request. Surface validates the
+returned room id, owner, derived agent/package identity, owner eligibility,
+updated room roster, and existing-shape package preview before publishing any
+state. It applies the daemon-returned room directly, never synthesizes a member,
+and then enters the existing digest-bound authorization ceremony. The old local
+unauthenticated participant POST is no longer used for agent bootstrap and a
+source guard keeps it out. An integration fixture proves empty bindings through
+atomic bootstrap, exact idempotent replay, nonowner conflict, preview, and the
+first Active binding; bootstrap itself creates no binding.
+
+Corrected candidate verification: `cargo test -p ocean-surface-proxy` (64),
+`cargo test -p ocean-surface-ui` (1218 unit plus 44 integration), native
+all-target Clippy with denied warnings for both crates, WASM warnings-as-errors
+check, WASM test compilation, proxy check, `cargo fmt --all -- --check`, Trunk
+0.21.14 release build with the ambient `NO_COLOR` unset, and standalone Tauri
+check. Updated the root Rooms contract; no child devlog exists for the touched
+crates. This is a corrected review candidate, not a pushed, deployed, or live
+daemon change.
+_________________________________________________________________________________
+
 time:      [14:52] [08-31-26]
 agent:     [claude] [opus 5]
 worktree:  loop/surface-gitattributes-events-union
@@ -4572,6 +4643,8 @@ job's watched set, so the job now demands this entry rather than merely
 tolerating it — it is here. Land this before any other ocean-surface PR in the
 wave — the driver is read from the target branch at merge time, so landing it
 second means hand-resolving the exact conflict it exists to abolish.
+_________________________________________________________________________________
+
 time:      [14:53] [08-31-26]
 agent:     [claude] [opus 5]
 worktree:  loop/surface-dead-trigger-row-cannot-be-unchecked-so-stored-dead-state-is-permanent
@@ -4632,4 +4705,21 @@ like every other multi-line assert in the file. Full gate re-run green -- fmt,
 1250 tests across ten binaries with 1207 in the main one, clippy at
 --all-targets and at wasm32 with -D warnings, the release-lane wasm check, the
 proxy check, and the wasm test-compile.
+_________________________________________________________________________________
+
+time:      [16:03] [08-31-26]
+agent:     [codex] [gpt-5]
+worktree:  codex/rooms-phase1-surface-auth-0831
+type:      [workflow]
+area:      [testing]
+
+Reconciled the independently accepted Ocean Rooms Phase 1 Surface authorization
+candidate with `origin/main` at `9982a7f`. The sole textual conflict was this
+append-only ledger; resolution retained both branches' complete entries and
+restored every blank-line and separator boundary. The upstream union merge
+driver guard passes all 15 assertions. The exact combined tree passes format,
+64 proxy tests, 1,219 UI unit tests plus every integration suite, denied-warning
+native and wasm Clippy, wasm check and test compilation, the release Trunk
+bundle, the standalone Tauri check, and `git diff --check`. This remains an
+unpublished candidate: it has not been pushed, merged, deployed, or served.
 _________________________________________________________________________________

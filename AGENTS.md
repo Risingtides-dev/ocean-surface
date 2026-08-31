@@ -255,10 +255,35 @@ Web surface session UI:
   `/v1/agents/{name}` route requires the `has_dot_segment` guard —
   percent-encoding does not neutralise `..`, because `.` is unreserved.
 - Agent participants are selected from daemon-owned `/v1/agents` identities and
-  remain subject to daemon join validation. The surface never mints a
-  participant from free text: a name typed into the agent builder becomes a
-  participant only after the DAEMON creates the folder and the identity comes
-  back in `/v1/agents`.
+  remain subject to daemon authorization and admission. The surface never mints
+  a participant from free text or calls the legacy bare `add_agent` path: a
+  package becomes a local first-agent participant only through the atomic
+  operator-authenticated `POST .../agents/bootstrap` response, and becomes room
+  execution authority only through that response's daemon-derived room/preview,
+  digest-bound owner ceremony, and durable binding. Never restore the local
+  unauthenticated participant POST as agent bootstrap. Activation, context,
+  grants, and `none`/`room` memory scope are operator choices in that ceremony;
+  the daemon remains authoritative for their accepted intersection.
+- Browser-PWA Room-agent mutations are available only through the server-side
+  proxy host; every non-loopback host remains login-gated. The proxy injects
+  its mode-0600 operator key only on the exact
+  bootstrap, authorize, reauthorize, suspend, resume, and revoke routes;
+  inspection and package preview stay credential-free. Browser
+  `X-Ocean-Operator`, Cookie, Origin, and Referer headers never cross that
+  boundary. In auth-off mode, a mutation carrying Origin or Referer must name
+  the exact loopback Host; reject it before credential lookup otherwise, while
+  retaining headerless localhost CLI clients. Auth-off startup is refused on
+  non-loopback binds. Tauri and extension hosts remain read-only until they own
+  an equivalent privileged transport.
+- Binding reads carry server-derived owner eligibility. Surface does not infer
+  owner authority from a local participant projection. With no binding, a
+  resolved Human already in a Local roster may see only the bootstrap
+  affordance; the operator-authenticated daemon establishes or refuses the
+  durable owner role and returns the authoritative updated room plus package
+  preview. Lost-response retries for binding status changes reuse the exact
+  decision id until the operation settles. Agent mention candidates require an
+  Active binding (and federated `local_binding_available=true`); historical
+  roster rows remain visible.
 - Local rosters and mention ids come from `Room.participants`; every non-Local
   roster and mention id comes only from the safe access member projection.
   Composer writes are enabled only for `Local` and `Live` access.
@@ -307,10 +332,10 @@ Web surface session UI:
 
 ## Agent Builder Contract
 
-- `agents.rs` owns the agent write layer; the form mounts inside the members
-  rail's existing `+ agent` disclosure (`rooms_workspace.rs`) and reuses
-  `Rooms::available_agents` as both the add picker and the edit-target list.
-  No parallel agent list.
+- `agents.rs` owns the package write layer; its form mounts inside the Room-agent
+  authorization ceremony and reuses `Rooms::available_agents` as the ceremony's
+  package selector and the builder's edit-target list. No parallel agent list
+  and no bare participant picker.
 - The model picker is built from the daemon's `/v1/models` catalogue shared
   through `Rooms::models` — never a hardcoded list, never a second fetch.
   `model_options` must always include the current value, because `/v1/models`
@@ -337,8 +362,9 @@ Web surface session UI:
 - Requires `ocean-os` `feat/agent-crud` on main. Against an older daemon the
   write verbs answer 405 and `write_error_message` says so in words.
 
-**Files:** `crates/ocean-surface-ui/src/agents.rs`, `rooms_workspace.rs`
-(mount), `rooms.rs` (`models` handle, `pub(crate) encode`),
+**Files:** `crates/ocean-surface-ui/src/agents.rs`,
+`room_agent_authorization.rs`, `rooms_workspace.rs` (mount), `rooms.rs`
+(`models` handle, `pub(crate) encode`),
 `crates/ocean-surface-proxy/src/main.rs` (allowlist),
 `styles/rooms-workspace.css`.
 

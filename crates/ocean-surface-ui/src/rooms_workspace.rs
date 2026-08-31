@@ -1241,6 +1241,39 @@ fn mention_roster(
     }
 }
 
+/// The roster subset that can be selected as a new mention target.
+///
+/// Humans remain mentionable and every roster member still renders in the
+/// room. Agent candidates, however, require a currently Active local binding;
+/// an unauthorized/suspended/stale/revoked compatibility participant is never
+/// offered as clickable execution intent. Federated access must also project
+/// the local binding as available.
+fn mentionable_roster(
+    local_participants: &[RoomParticipant],
+    access: Option<&RoomAccessProjection>,
+    active_agent_member_ids: &std::collections::HashSet<String>,
+) -> Vec<RoomParticipant> {
+    mention_roster(local_participants, access)
+        .into_iter()
+        .filter(|participant| {
+            if participant.kind != RoomParticipantKind::Agent {
+                return true;
+            }
+            if !active_agent_member_ids.contains(&participant.id) {
+                return false;
+            }
+            match access {
+                Some(access) if access.state != RoomAccessState::Local => access
+                    .members
+                    .iter()
+                    .find(|member| member.member_id == participant.id)
+                    .is_some_and(|member| member.local_binding_available == Some(true)),
+                _ => true,
+            }
+        })
+        .collect()
+}
+
 /// Rank roster candidates for a mention partial: id prefix first, then
 /// display-name prefix, then substring anywhere; stable within each rank and
 /// capped at 8. An empty partial (caret right after `@`) lists the roster.
@@ -1404,6 +1437,7 @@ pub fn RoomsWorkspace(
     // roster update that arrives over SSE), so form state owned by it would be
     // discarded mid-sentence and take a half-written system prompt with it.
     let agent_builder = crate::agents::AgentBuilderState::new(&rooms);
+    let room_agent_authority = crate::room_agent_authorization::RoomAgentAuthorizationState::new();
 
     // Room context files. Same reasoning as the agent builder above: an
     // in-flight upload flag rebuilt by a roster SSE update would re-enable the
@@ -1571,7 +1605,11 @@ pub fn RoomsWorkspace(
             .get()
             .map(|room| room.participants)
             .unwrap_or_default();
-        let roster = mention_roster(&local_participants, rooms.access.get().as_ref());
+        let roster = mentionable_roster(
+            &local_participants,
+            rooms.access.get().as_ref(),
+            &room_agent_authority.active_agent_member_ids(),
+        );
         mention_suggestions(&roster, &partial)
     });
     let thread_mention_items = Memo::new(move |_| {
@@ -1583,7 +1621,11 @@ pub fn RoomsWorkspace(
             .get()
             .map(|room| room.participants)
             .unwrap_or_default();
-        let roster = mention_roster(&local_participants, rooms.access.get().as_ref());
+        let roster = mentionable_roster(
+            &local_participants,
+            rooms.access.get().as_ref(),
+            &room_agent_authority.active_agent_member_ids(),
+        );
         mention_suggestions(&roster, &partial)
     });
 
@@ -1606,7 +1648,11 @@ pub fn RoomsWorkspace(
             .get_untracked()
             .map(|room| room.participants)
             .unwrap_or_default();
-        let roster = mention_roster(&local_participants, rooms.access.get_untracked().as_ref());
+        let roster = mentionable_roster(
+            &local_participants,
+            rooms.access.get_untracked().as_ref(),
+            &room_agent_authority.active_agent_member_ids_untracked(),
+        );
         let Some(pick) = mention_suggestion_at(&roster, &partial, idx) else {
             mention_ctx.set(None);
             mention_active.set(0);
@@ -1647,7 +1693,11 @@ pub fn RoomsWorkspace(
             .get_untracked()
             .map(|room| room.participants)
             .unwrap_or_default();
-        let roster = mention_roster(&local_participants, rooms.access.get_untracked().as_ref());
+        let roster = mentionable_roster(
+            &local_participants,
+            rooms.access.get_untracked().as_ref(),
+            &room_agent_authority.active_agent_member_ids_untracked(),
+        );
         let Some(pick) = mention_suggestion_at(&roster, &partial, idx) else {
             thread_mention_ctx.set(None);
             thread_mention_active.set(0);
@@ -2295,9 +2345,10 @@ pub fn RoomsWorkspace(
                                                             .get_untracked()
                                                             .map(|room| room.participants)
                                                             .unwrap_or_default();
-                                                        let roster = mention_roster(
+                                                        let roster = mentionable_roster(
                                                             &local_participants,
                                                             rooms.access.get_untracked().as_ref(),
+                                                            &room_agent_authority.active_agent_member_ids_untracked(),
                                                         );
                                                         let selection = ev
                                                             .target()
@@ -3369,9 +3420,10 @@ pub fn RoomsWorkspace(
                                                         .get_untracked()
                                                         .map(|room| room.participants)
                                                         .unwrap_or_default();
-                                                    let roster = mention_roster(
+                                                    let roster = mentionable_roster(
                                                         &local_participants,
                                                         rooms.access.get_untracked().as_ref(),
+                                                        &room_agent_authority.active_agent_member_ids_untracked(),
                                                     );
                                                     let selection = ev
                                                         .target()
@@ -3592,7 +3644,6 @@ pub fn RoomsWorkspace(
                                     let participants = rooms.open_room.get()
                                         .map(|r| r.participants)
                                         .unwrap_or_default();
-                                    let show_add_agent = RwSignal::new(false);
                                     view! {
                                         {if participants.is_empty() {
                                             view! {
@@ -3705,74 +3756,6 @@ pub fn RoomsWorkspace(
                                             }.into_any()
                                         }}
 
-                                        <button
-                                            class="rooms-workspace__addagent"
-                                            type="button"
-                                            title="Add an agent participant"
-                                            aria-controls="rooms-workspace-agent-picker"
-                                            aria-expanded=move || show_add_agent.get().to_string()
-                                            on:click=move |_| show_add_agent.update(|v: &mut bool| *v = !*v)
-                                        >
-                                            "+ agent"
-                                        </button>
-                                        {move || {
-                                            if show_add_agent.get() {
-                                                view! {
-                                                    <div
-                                                        id="rooms-workspace-agent-picker"
-                                                        class="rooms-workspace__addagent-picker"
-                                                    >
-                                                        <select
-                                                            class="rooms-workspace__addagent-select"
-                                                            aria-label="Choose an agent to add"
-                                                            on:change=move |ev| {
-                                                                let val = event_target_value(&ev);
-                                                                if !val.is_empty() {
-                                                                    rooms.add_agent(val);
-                                                                    show_add_agent.set(false);
-                                                                }
-                                                            }
-                                                        >
-                                                            <option value="" selected=true>
-                                                                "-- pick an agent --"
-                                                            </option>
-                                                            <For
-                                                                each=move || rooms.available_agents.get()
-                                                                key=|id: &String| id.clone()
-                                                                children=move |id: String| {
-                                                                    let v = id.clone();
-                                                                    view! {
-                                                                        <option value=v>{id}</option>
-                                                                    }
-                                                                }
-                                                            />
-                                                        </select>
-                                                        // The picker above only ADDS an agent that
-                                                        // already exists on disk. This authors one
-                                                        // in place — or edits one, or deletes one —
-                                                        // then refreshes that same picker so the
-                                                        // operator's next click puts it in the room
-                                                        // (or stops offering a folder that no longer
-                                                        // exists). No curl, no leaving the room to
-                                                        // write a folder by hand. `available_agents`
-                                                        // is reused as the edit target list rather
-                                                        // than fetched twice.
-                                                        <crate::agents::AgentBuilder
-                                                            state=agent_builder
-                                                            agents=rooms.available_agents
-                                                            on_saved=Callback::new(move |_name: String| {
-                                                                rooms.fetch_agents();
-                                                            })
-                                                            on_deleted=Callback::new(move |_name: String| {
-                                                                rooms.fetch_agents();
-                                                            })
-                                                        />
-                                                    </div>
-                                                }.into_any()
-                                            } else {
-                                                ().into_any()
-                                            }
-                                        }}
                                     }.into_any()
                                 }
                                 Some(ref access)
@@ -4010,6 +3993,11 @@ pub fn RoomsWorkspace(
                                 }
                             }
                     }}
+                    <crate::room_agent_authorization::RoomAgentAuthorizationPanel
+                        rooms=rooms
+                        state=room_agent_authority
+                        agent_builder=agent_builder
+                    />
                 </div>
 
                 // How a second person reaches this room: mint an invite code.
@@ -6112,6 +6100,63 @@ mod tests {
             );
         }
         assert!(mention_roster(&local, None).is_empty());
+    }
+
+    #[test]
+    fn mention_candidates_exclude_agents_without_active_local_authority() {
+        let local = vec![
+            part("human", "Human", RoomParticipantKind::Human),
+            part("active-agent", "Active", RoomParticipantKind::Agent),
+            part("compat-agent", "Compatibility", RoomParticipantKind::Agent),
+        ];
+        let access = test_access(RoomAccessState::Local);
+        let active = std::collections::HashSet::from(["active-agent".to_owned()]);
+        assert_eq!(
+            mentionable_roster(&local, Some(&access), &active),
+            vec![
+                part("human", "Human", RoomParticipantKind::Human),
+                part("active-agent", "Active", RoomParticipantKind::Agent),
+            ]
+        );
+        // Roster rendering remains unchanged for historical attribution.
+        assert_eq!(mention_roster(&local, Some(&access)), local);
+    }
+
+    #[test]
+    fn federated_mention_candidates_require_available_active_binding() {
+        let mut access = test_access(RoomAccessState::Live);
+        access.members = vec![
+            FederatedRoomMemberProjection {
+                member_id: "available".into(),
+                owner_member_id: None,
+                actor_type: FederatedActorType::Agent,
+                role_in_room: FederatedRoomRole::Member,
+                display_name: "Available".into(),
+                public_agent_descriptor: None,
+                joined_at: String::new(),
+                derived_presence: None,
+                local_binding_available: Some(true),
+            },
+            FederatedRoomMemberProjection {
+                member_id: "projection-denied".into(),
+                owner_member_id: None,
+                actor_type: FederatedActorType::Agent,
+                role_in_room: FederatedRoomRole::Member,
+                display_name: "Denied".into(),
+                public_agent_descriptor: None,
+                joined_at: String::new(),
+                derived_presence: None,
+                local_binding_available: Some(false),
+            },
+        ];
+        let active = std::collections::HashSet::from([
+            "available".to_owned(),
+            "projection-denied".to_owned(),
+        ]);
+        assert_eq!(
+            mentionable_roster(&[], Some(&access), &active),
+            vec![part("available", "Available", RoomParticipantKind::Agent)]
+        );
     }
 
     #[test]

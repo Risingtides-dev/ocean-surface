@@ -4606,3 +4606,296 @@ a.rooms-workspace__compute-ports-row-url:hover {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* Room-agent authority is intentionally denser than a general settings form:
+   one bounded ceremony, four durable binding states, no parallel "available"
+   roster that could imply an unbound package may act. */
+.rooms-workspace__authority {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__authority-head,
+.rooms-workspace__authority-binding-main,
+.rooms-workspace__authority-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rooms-workspace__authority-title {
+  flex: 1;
+  margin: 0;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--fg);
+}
+
+.rooms-workspace__authority-count,
+.rooms-workspace__authority-binding-state {
+  padding: 1px 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__authority-list,
+.rooms-workspace__authority-ceremony,
+.rooms-workspace__authority-preview,
+.rooms-workspace__authority-ready {
+  display: grid;
+  gap: 7px;
+}
+
+.rooms-workspace__authority-binding,
+.rooms-workspace__authority-preview,
+.rooms-workspace__authority-confirm {
+  padding: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+.rooms-workspace__authority-binding[data-state="active"] {
+  border-left: 2px solid var(--ok);
+}
+
+.rooms-workspace__authority-binding[data-state="suspended"],
+.rooms-workspace__authority-binding[data-state="stale"] {
+  border-left: 2px solid var(--warn);
+}
+
+.rooms-workspace__authority-binding[data-state="revoked"],
+.rooms-workspace__authority-binding[data-state="unavailable"] {
+  border-left: 2px solid var(--err);
+}
+
+.rooms-workspace__authority-binding-name,
+.rooms-workspace__authority-preview-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.rooms-workspace__authority-digest,
+.rooms-workspace__authority-diff code,
+.rooms-workspace__authority-confirm code {
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--fg-3);
+  overflow-wrap: anywhere;
+}
+
+.rooms-workspace__authority-meta,
+.rooms-workspace__authority-empty,
+.rooms-workspace__authority-readonly,
+.rooms-workspace__authority-narrow,
+.rooms-workspace__authority-requested,
+.rooms-workspace__authority-unavailable,
+.rooms-workspace__authority-membership {
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__authority-requested {
+  display: grid;
+  gap: 2px;
+}
+
+.rooms-workspace__authority-requested > span,
+.rooms-workspace__authority-unavailable > span {
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__authority-requested code {
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.rooms-workspace__authority-unavailable,
+.rooms-workspace__authority-membership,
+.rooms-workspace__authority-readonly[data-state="unavailable"] {
+  padding: 6px 7px;
+  border-left: 2px solid var(--err);
+  background: var(--err-soft);
+}
+
+.rooms-workspace__authority-unavailable ul {
+  display: grid;
+  gap: 4px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rooms-workspace__authority-unavailable li {
+  display: grid;
+  gap: 1px;
+}
+
+.rooms-workspace__authority-unavailable code {
+  font-family: var(--mono);
+  color: var(--fg-2);
+}
+
+.rooms-workspace__authority-membership {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.rooms-workspace__authority-label,
+.rooms-workspace__authority-policies span,
+.rooms-workspace__authority-capabilities legend {
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__authority-select,
+.rooms-workspace__authority-policies select {
+  width: 100%;
+  min-width: 0;
+  padding: 5px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--fg-2);
+  font-size: 11px;
+}
+
+.rooms-workspace__authority-capabilities {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.rooms-workspace__authority-capabilities label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--fg-2);
+}
+
+.rooms-workspace__authority-policies {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.rooms-workspace__authority-policies label {
+  display: grid;
+  gap: 3px;
+}
+
+.rooms-workspace__authority-actions {
+  justify-content: flex-end;
+}
+
+.rooms-workspace__authority-actions button,
+.rooms-workspace__authority-review,
+.rooms-workspace__authority-membership button {
+  appearance: none;
+  padding: 4px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.rooms-workspace__authority-actions button:disabled,
+.rooms-workspace__authority-review:disabled,
+.rooms-workspace__authority-membership button:disabled {
+  color: var(--fg-4);
+  cursor: default;
+}
+
+.rooms-workspace__authority-actions .rooms-workspace__authority-approve {
+  border-color: var(--accent-ring);
+  background: var(--accent-soft);
+  color: var(--accent-bright);
+}
+
+.rooms-workspace__authority-actions .rooms-workspace__authority-danger {
+  color: var(--err);
+}
+
+.rooms-workspace__authority-confirm dl {
+  display: grid;
+  gap: 3px;
+  margin: 0 0 8px;
+}
+
+.rooms-workspace__authority-confirm dl > div {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  gap: 5px;
+  font-size: 9px;
+}
+
+.rooms-workspace__authority-confirm dt {
+  color: var(--fg-4);
+}
+
+.rooms-workspace__authority-confirm dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+
+.rooms-workspace__authority-notice {
+  display: flex;
+  gap: 6px;
+  padding: 6px 7px;
+  border-left: 2px solid var(--info);
+  background: var(--info-soft);
+  font-size: 10px;
+  color: var(--fg-2);
+}
+
+.rooms-workspace__authority-notice > span {
+  flex: 0 0 auto;
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__authority-notice[data-state="active"] {
+  border-left-color: var(--ok);
+  background: var(--ok-soft);
+}
+
+.rooms-workspace__authority-notice[data-state="revoked"],
+.rooms-workspace__authority-notice[data-state="denied"],
+.rooms-workspace__authority-notice[data-state="unavailable"] {
+  border-left-color: var(--err);
+  background: var(--err-soft);
+}
+
+@media (max-width: 420px) {
+  .rooms-workspace__authority-policies {
+    grid-template-columns: 1fr;
+  }
+}
