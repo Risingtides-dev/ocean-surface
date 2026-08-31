@@ -281,7 +281,12 @@
 /* ── Trigger-policy toggles ───────────────────────────────────────── */
 /* `__trigger` is shared by the create form below the name input and the
    right-rail Triggers section. Native checkboxes on purpose: policy flips
-   are rare, and a real checkbox keeps keyboard + AT semantics for free. */
+   are rare, and a real checkbox keeps keyboard + AT semantics for free.
+   The input's `not-allowed` reaches the checkbox alone — never the label
+   text or its note — so any disabled row withdraws the label's own cursor
+   and hover lift too. Any, not only the permanently dead one: a row held by
+   revoked access, by a policy PATCH in flight, or by the create POST refuses
+   the click just as squarely for as long as it lasts. */
 
 .rooms-workspace__create-triggers {
   display: flex;
@@ -301,7 +306,7 @@
   transition: color var(--dur-fast) var(--ease);
 }
 
-.rooms-workspace__trigger:hover {
+.rooms-workspace__trigger:hover:not(:has(input:disabled)) {
   color: var(--fg);
 }
 
@@ -317,6 +322,7 @@
 
 .rooms-workspace__trigger:has(input:disabled) {
   opacity: 0.45;
+  cursor: default;
 }
 
 /* ── Left rail — room list item ───────────────────────────────────── */
