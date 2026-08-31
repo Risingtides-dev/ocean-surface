@@ -4165,3 +4165,72 @@ test -p ocean-surface-ui --target wasm32-unknown-unknown --no-run`, `cargo test
 ocean-surface-ui --all-targets -- -D warnings`, the only invocation that lints
 the added test lines: clean. Test-only change; no migration, no deploy step.
 _________________________________________________________________________________
+
+time:      [14:05] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-workspace-panel-drops-the-ports-bedrock-already-sends
+type:      [feature-request]
+area:      [frontend]
+
+Bedrock has been answering the room's open ports on every status read and the
+workspace panel threw them away. `handleWorkspaceStatus` (bedrock
+src/server.mjs:2068) returns `ports` as a TOP-LEVEL sibling of `workspace` —
+the same wire shape `secrets` has — and the daemon's allowlist relays the
+status body verbatim, so `{port, preview_url, exposed_at}` for every row with
+`closed_at IS NULL` already reached the browser. `WorkspaceBody` had no key for
+it and serde dropped it silently. Bedrock's own CLI (scripts/room.mjs) printed
+these; the product never did.
+
+Followed the `secrets` precedent exactly, because it is the identical wire
+shape: `PortRow` beside `SecretRow`, `#[serde(default)] ports` on
+`WorkspaceBody`, `#[serde(skip)] ports` on `WorkspaceProjection` (it does not
+live inside the projection on the status wire), folded in by `classify_status`
+on the line under the secrets fold. `Option<Vec<PortRow>>` throughout: absent is
+a Bedrock predating the field and makes NO claim, `[]` is Bedrock saying none
+are open and says so in words. The whole section is conditional on the list
+existing, so an older Bedrock renders nothing rather than an empty heading.
+
+`preview_url` is gated through `room_markdown::scheme_allowed` before it may
+become an anchor, the way `room_repo::check_href` gates a recorded CI URL after
+#169. It is the compute driver's own string recorded by Bedrock — the room
+container's word, not the surface's — and an unvetted href here would hand that
+container a clickable `javascript:` anchor in the surface origin. A refused URL
+is still PRINTED, as text: what the room claims to be serving is worth reading
+even when this side will not link it.
+
+Shipped the LIST ONLY, and the brief's controls are deliberately not here.
+`git grep 'workspace/ports' origin/main` in ocean-os is empty — the allowlist
+names neither leaf on main — so at build time a control had no route to post to
+and I will not ship a button aimed at a 404. The co-dispatched daemon slice
+(loop/ports-lane-…) does add them, on the brief's exact URLs, so the follow-up
+is unblocked the moment that lands.
+
+One correction the next builder needs, because the gate is not where either
+half alone says it is. Bedrock's `handleWorkspacePortExpose`/`Close`
+(src/server.mjs:2367, 2392) gate on `permission: 'write'` with NO
+`requireRoomOwner` — member verbs upstream, like exec. The daemon lane
+deliberately NARROWS both to owner, on the reasoning that a preview URL
+publishes the room's compute to anyone holding it, and pins that with a
+manifest assertion. So the daemon is the binding gate: the controls' copy
+should say only the owner may expose or close a port, and
+`workspace_not_owner_principal` is a live answer — but it is the daemon's
+ruling, not Bedrock's, and reading Bedrock alone gives the wrong sentence.
+Bedrock also closes with `DELETE /workspace/ports/{port}`; the daemon
+translates its `POST …/ports/close` onto that, the way it does for destroy.
+
+Three tests in the existing `mod tests`: the absent/empty/rows discipline through
+`classify_status` (the status fixture at the top of the module already carried
+`"ports": []`, which is how long this has been on the floor), the scheme gate over
+six refused and three allowed URLs, and a pin that a port opening is not a
+`view_flip` — the status poll that sees one must not disarm a primed destroy or
+purge confirm.
+
+All six frozen gates green: `cargo fmt --check`; `cargo clippy -p ocean-surface-ui
+--target wasm32-unknown-unknown -- -D warnings`; `RUSTFLAGS="-D warnings" cargo
+check -p ocean-surface-ui --target wasm32-unknown-unknown`; `cargo check -p
+ocean-surface-proxy`; `cargo test -p ocean-surface-ui` at 1236 passed / 0 failed
+across all targets; `cargo test -p ocean-surface-ui --target
+wasm32-unknown-unknown --no-run`. Also ran `cargo clippy -p ocean-surface-ui
+--all-targets -- -D warnings`, the only invocation that lints the added test
+lines: exit 0. No migration, no deploy step.
+_________________________________________________________________________________
