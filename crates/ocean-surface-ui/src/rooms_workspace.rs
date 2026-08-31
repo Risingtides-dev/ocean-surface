@@ -37,6 +37,14 @@ fn should_clear_composer(current: &str, original_draft: &str) -> bool {
 /// write routes refuse a policy carrying `on_component_event: true` or a set
 /// `on_schedule` with a typed 400 (`trigger_unwired`), so every write path
 /// here normalizes them away instead (see [`policy_with_toggle`]).
+///
+/// `on_ci_failure` has no control for a different reason: the daemon half is
+/// live — a `room.workspace.ci_checked` row whose checks read red convenes the
+/// roster's agents, the green and in-progress ones staying pure markers — but
+/// the rail row was never built. So the flag is writable and nothing refuses
+/// it; it is simply unreachable from this UI, and `RoomTriggerPolicy` mirrors
+/// it (see that field) purely so a flip of some other row cannot clear a value
+/// the daemon holds. Adding the row is a UI slice, not a wiring one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TriggerToggle {
     Mention,
@@ -50,7 +58,9 @@ enum TriggerToggle {
 /// refuses any write carrying their live values (`trigger_unwired`), so a
 /// room with dead state stored would 400 on every flip if we carried it
 /// through. Nothing ever fires those fields; dropping them on the next edit
-/// is the honest behavior.
+/// is the honest behavior. `on_ci_failure` is deliberately NOT in that group:
+/// nothing refuses it, so it rides through untouched and a flip of some other
+/// row is never what clears a flag the daemon set.
 fn policy_with_toggle(
     current: Option<&RoomTriggerPolicy>,
     toggle: TriggerToggle,
@@ -4157,6 +4167,7 @@ mod tests {
             on_thread_reply: false,
             on_component_event: true,
             on_build_failure: false,
+            on_ci_failure: false,
             on_schedule: Some("0 9 * * 1".into()),
         };
         let flipped = policy_with_toggle(Some(&current), TriggerToggle::BuildFailure, true);
@@ -4167,6 +4178,7 @@ mod tests {
                 on_thread_reply: false,
                 on_component_event: false,
                 on_build_failure: true,
+                on_ci_failure: false,
                 on_schedule: None,
             }
         );
@@ -4205,8 +4217,38 @@ mod tests {
         assert!(policy.on_mention);
         assert!(!policy.on_thread_reply);
         assert!(policy.on_build_failure);
+        assert!(!policy.on_ci_failure);
         assert!(!policy.on_component_event);
         assert_eq!(policy.on_schedule, None);
+    }
+
+    /// The whole reason `on_ci_failure` is mirrored here before it has a
+    /// control: a PATCH from this rail replaces the stored policy WHOLESALE,
+    /// so a flag the daemon set and this struct did not know about would be
+    /// cleared by the next flip of an unrelated row. It rides through — unlike
+    /// the two unwired fields above, nothing refuses it, so dropping it would
+    /// be destruction rather than the honest normalization those get.
+    #[test]
+    fn policy_with_toggle_carries_a_daemon_set_ci_failure_through_a_flip() {
+        let current = RoomTriggerPolicy {
+            on_mention: true,
+            on_thread_reply: true,
+            on_component_event: true,
+            on_build_failure: false,
+            on_ci_failure: true,
+            on_schedule: Some("0 9 * * 1".into()),
+        };
+        assert_eq!(
+            policy_with_toggle(Some(&current), TriggerToggle::BuildFailure, true),
+            RoomTriggerPolicy {
+                on_mention: true,
+                on_thread_reply: true,
+                on_component_event: false,
+                on_build_failure: true,
+                on_ci_failure: true,
+                on_schedule: None,
+            }
+        );
     }
 
     /// The toggle classes render from Rust; their rules must exist in the
