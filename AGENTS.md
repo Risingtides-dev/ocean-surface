@@ -412,10 +412,14 @@ come with the driver, and both are counter-intuitive:
   FUSE into one. No entry is lost and no conflict is raised.
   `scripts/events-merge-driver.test.mjs` pins the fold, along with the driver
   itself — but it reproduces the merge in a scratch repo and never reads THIS
-  file, and it is hand-run rather than a CI step, so a fold that has already
-  landed here stays invisible. `ocean-bedrock` has `scripts/check-ledger.mjs`
-  for that; this repo does not. Read the boundary after any merge that carried
-  two appends and put the blank line and the rule back by hand.
+  file, and it is hand-run rather than a CI step. **Run `node
+  scripts/check-ledger.mjs events.md` on any change to `events.md`, and again
+  on either side of a rebase carrying one; the two verdicts must match.** It is
+  the only check that reads this file, it runs in CI on PRs and on pushes to
+  main, and its exit codes are 0 clean / 1 an entry is open / 2 the check
+  could not run at all. `--fix` closes what it finds, by insertion only —
+  never in CI, because that is a non-append edit to a file under `merge=union`
+  and the second cost below applies to it.
 - **union only fails safe for append/append.** A NON-append change to
   `events.md` — a correction, a redaction, a repaired separator — lands in the
   same tail hunk a concurrent append touches, and union settles it by keeping
