@@ -1123,9 +1123,19 @@ fn can_manage_ports(access: Option<&RoomAccessProjection>) -> bool {
 /// verbs this rides beside. `workspace_not_owner_principal` gets its own
 /// wording rather than the lifecycle's: the gate is the same daemon row,
 /// but "provision or destroy" is the wrong fact to state at a port.
-/// `invalid_request` is reachable only on close (the leaf whose body
-/// becomes a path) and only for a port this side's `parse_port` should
-/// already have caught, so it says the shape and nothing more.
+/// `invalid_request` is the one code here this side answers for the daemon
+/// rather than relaying, so what makes that safe is worth stating. It is
+/// reachable only on close — the leaf whose body becomes a path — and NOT
+/// because `parse_port` caught the bad shape first: close never calls
+/// `parse_port`, its port comes from `row.port` on a server-listed row, so the
+/// daemon's port check is unreachable by construction rather than by a gate
+/// this side runs. The daemon spends the same code on a call asserting no room
+/// participant, where "A port must be a whole number." would be the wrong
+/// sentence; that arm is closed here because the `actor` closure gates on
+/// `identity_resolved()`, so no call reaches the wire without one. Both holds
+/// are structural and neither is pinned by a test — if either changes, this
+/// sentence starts lying, which is why the lifecycle and secrets lanes relay
+/// the daemon's own text for this code and only ports invents one.
 fn port_state_sentence(code: &str) -> Option<String> {
     let sentence = match code {
         // One sentence for both verbs: a workspace destroyed under a
@@ -1217,11 +1227,18 @@ fn classify_port(
             "The {noun} reply could not be read ({status})."
         ));
     };
-    if let Some(port) = body.port {
-        return LifecycleOutcome::Landed(match command {
-            PortCommand::Expose(_) => expose_sentence(port, body.preview_url.as_deref()),
-            PortCommand::Close(_) => close_sentence(port, body.route_removed),
-        });
+    // The echoed port is the success discriminator because no refusal on this
+    // wire carries one — Bedrock answers `{ok, error, details}` and the daemon
+    // `{ok, code, error[, leaf]}`. The status is checked FIRST anyway so the
+    // discriminator fails CLOSED: a future producer adding `port` to a refusal
+    // body would otherwise render "Port N is open." over a 4xx.
+    if status < 300 {
+        if let Some(port) = body.port {
+            return LifecycleOutcome::Landed(match command {
+                PortCommand::Expose(_) => expose_sentence(port, body.preview_url.as_deref()),
+                PortCommand::Close(_) => close_sentence(port, body.route_removed),
+            });
+        }
     }
     match body.refusal_code() {
         Some("workspace_route_not_allowed") => LifecycleOutcome::Unavailable,
@@ -5692,6 +5709,29 @@ mod tests {
     /// THAT verb is a state (rule 1) and already reads as one, so it
     /// relays unframed. The same bare 404 on expose can only be a
     /// deployment without the leaf.
+    /// The echoed port is the success discriminator, and it is safe today only
+    /// because no refusal on this wire carries one: Bedrock answers
+    /// `{ok, error, details}` and the daemon `{ok, code, error[, leaf]}`. That
+    /// is a fact about two OTHER repos, so the discriminator is made to fail
+    /// CLOSED rather than to rest on it — a refusal that grew a `port` key
+    /// must still read as a refusal, not as "Port N is open."
+    #[test]
+    fn a_refusal_carrying_a_port_is_still_a_refusal() {
+        let forged = body(r#"{"ok": false, "code": "port_reserved", "port": 3000}"#);
+        assert_eq!(
+            classify_port(PortCommand::Expose(3000), 409, Some(forged)),
+            LifecycleOutcome::State(
+                "That port is reserved by the room runtime \u{2014} serve on another.".to_string()
+            )
+        );
+        // And with no code to fall back on, a Failure — never a Landed.
+        let bare = body(r#"{"ok": false, "error": "nope", "port": 3000}"#);
+        assert!(matches!(
+            classify_port(PortCommand::Close(3000), 500, Some(bare)),
+            LifecycleOutcome::Failure(_)
+        ));
+    }
+
     #[test]
     fn the_uncoded_port_refusals_read_as_states() {
         let floor = body(

@@ -4311,7 +4311,6 @@ passed / 0 failed across all targets; `cargo clippy -p ocean-surface-ui
 lines. No migration, no deploy step.
 _________________________________________________________________________________
 
-_________________________________________________________________________________
 time:      [14:10] [08-31-26]
 agent:     [ocean] [pm review fix]
 worktree:  loop/surface-ports-panel-lists-what-nobody-can-open-or-close
@@ -4329,4 +4328,59 @@ preserves the uncertainty sentence but performs the status read it promises,
 so a port that actually opened or closed while the response connection failed
 cannot leave the visible list stale. Added native tests for both the full access
 matrix and ambiguous-transport refresh policy. Focused tests and diff check pass.
+_________________________________________________________________________________
+
+time:      [14:20] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-ports-panel-lists-what-nobody-can-open-or-close
+type:      [merge]
+area:      [rooms workspace ports]
+
+Land pass on the ports controls. Three reviewer notes taken, all comment- or
+guard-level, plus one ledger repair.
+
+The `invalid_request` doc named a mechanism that is not the one at work -- the
+exact class of thing this file's standard forbids. It said the code was
+reachable "only for a port this side's `parse_port` should already have caught".
+Close never calls `parse_port`: its port comes from `row.port` on a
+server-listed row, so the daemon's port check is unreachable by CONSTRUCTION,
+not by a gate this side runs. The daemon also spends the same code on a call
+asserting no room participant (`GateError::MissingActor`,
+room_workspace_proxy.rs:722, read at ocean-os origin/main), where "A port must
+be a whole number." would be the wrong sentence -- closed here only because the
+`actor` closure gates on `identity_resolved()`. Both holds are structural and
+neither is pinned, so the comment now says so, and says why lifecycle and
+secrets relay the daemon's text for this code where ports invents one.
+
+`classify_port` read success off the echoed port BEFORE it looked at status, so
+a 4xx carrying a `port` key would have rendered "Port N is open." That cannot
+happen today -- no refusal on this wire names a port, which was verified in both
+upstreams -- but that is a fact about two other repos holding a gate in this one.
+A `status < 300` guard makes the discriminator fail CLOSED instead, and
+`a_refusal_carrying_a_port_is_still_a_refusal` holds it: removing the guard
+turns it red, and it was red before the guard existed.
+
+AGENTS.md's measurement table was attributing two rows to `4ed9a7c`, a commit
+where neither control existed. The measurements are sound; the attribution was
+not. One footnote names the real tree.
+
+Also repaired a boundary this branch introduced: the pm-review-fix entry above
+opened with its own rule under the previous entry's, giving the file a double
+separator. ocean-surface has neither a union driver nor a ledger checker, which
+is why nothing caught it -- the standing argument for
+`surface-gitattributes-events-union`, and the second piece of first-hand
+evidence for it this wave.
+
+Full four-leg gate re-run by me on the combined tree, including the
+pm-review-fix commit whose own note reported only focused tests: `cargo fmt
+--all --check` exit 0; `cargo test -p ocean-surface-ui` 1246 passed / 0 failed
+across 10 targets; `cargo clippy -p ocean-surface-ui --all-targets -- -D
+warnings` exit 0; `RUSTFLAGS="-D warnings" cargo check -p ocean-surface-ui
+--target wasm32-unknown-unknown` clean -- the release lane that has hidden a
+broken deploy here before. `cargo check -p ocean-surface-proxy` clean. That
+commit's two tests were mutation-checked rather than trusted: letting any
+present projection manage ports fails
+`port_controls_follow_the_safe_self_owner_projection`, and ignoring the
+transport-ambiguity bit fails `an_ambiguous_port_transport_always_refreshes_the_list`.
+No migration, no deploy step.
 _________________________________________________________________________________
