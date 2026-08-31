@@ -3575,3 +3575,60 @@ the pre-fix stylesheet before being confirmed green against the fixed one. Gate:
 all six frozen commands clean plus the loop's `RUSTFLAGS="-D warnings"` wasm
 check; 1215 UI tests green. No migration, no deploy step.
 _________________________________________________________________________________
+
+time:      [03:13] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-ci-failure-trigger-toggle
+type:      [feature-request]
+area:      [frontend]
+
+The surface's mirror of the daemon's trigger policy gains `on_ci_failure`, and
+deliberately gains NO control for it. The first cut of this slice shipped the
+whole rail row and the create-panel checkbox; review killed that half, correctly.
+Against ocean-os origin/main (549e2272) the daemon has no such field --
+`ocean_core::RoomTriggerPolicy` does not declare it, no `RoomTriggerEvent` variant
+carries a CI result, and `ocean-store`'s hand-rolled `parse_policy` drops the key
+-- so a live row would have taken the flip, PATCHed it, gotten a 200, and then
+settled straight back to unchecked, because `update_open_room_policy` re-renders
+the section from the record the daemon returns and that record cannot carry a
+field the daemon's struct does not have. Silent revert with no error, in exactly
+the federated rooms the note would have pointed people at. `on_ci_failure` joins
+`on_component_event` and `on_schedule` under this file's standing doctrine
+instead: a flag nothing fires gets no control.
+
+What the field still earns today is not cosmetic. This rail PATCHes the policy
+WHOLESALE, so the day the daemon does store the flag, a room with it on would
+lose it to the next flip of any other row if this mirror did not know the key.
+`policy_with_toggle` carries it through untouched -- unlike the two unwired
+fields it normalizes away, nothing refuses `on_ci_failure`, so dropping it would
+be destruction rather than honesty -- and a test pins that. The guard was checked
+by mutation, not by assertion: adding `policy.on_ci_failure = false` beside the
+two normalizations fails
+`policy_with_toggle_carries_a_daemon_set_ci_failure_through_a_flip` and nothing
+else. Serializing the key at today's daemon is inert: no room write route denies
+unknown fields, so it is dropped rather than 400ing the three working toggles.
+
+The daemon half, when someone writes it, is a `room.workspace.ci_checked` marker
+-- which Bedrock already emits and `room_federation.rs` already ingests, today as
+a pure marker with empty trigger targets -- PLUS a filter on the checks'
+conclusion, because an all-green run arrives as the same event. The first cut's
+comment asserted that event already existed; it does not, and the note now sits
+in `TriggerToggle`'s doc as the intended pairing rather than as fact.
+
+LANDED AGAINST A MOVED DAEMON. Between review and merge the ocean-os half went
+in (#413, main at 58832c7): `ocean_core` now declares `on_ci_failure`,
+`RoomTriggerEvent` has a `CiFailure` variant, `ocean-store` round-trips the key,
+and a red `ci_checked` row convenes the roster. Every doc line above that said
+otherwise was false by the time this branch was ready, so the three claims were
+corrected before landing rather than merged as a documented falsehood -- which
+is the exact defect review rejected the first cut for. What did NOT change is
+the code: the row is still not built, so the flag stays unreachable from this
+UI. The mirror's job flipped from speculative to load-bearing in the process --
+a daemon-set `on_ci_failure` can now genuinely exist, and without this field a
+flip of any other row would clear it. The rail row is now a plain UI slice with
+no wiring left to wait on.
+
+Gate green on all six frozen commands plus the loop's `RUSTFLAGS="-D warnings"`
+wasm check and the `--all-targets` clippy: 1217 UI tests, `cargo fmt --check`
+clean. No migration, no deploy step.
+_________________________________________________________________________________
