@@ -5155,3 +5155,115 @@ in `guards` order green, `cargo fmt --all -- --check` clean.
 file, so the cargo and wasm legs would re-derive main's own CI result on
 byte-identical crate trees.
 _________________________________________________________________________________
+
+time:      [02:53] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-open-room-hydrates-through-the-unpaged-route-and-calls-it-the-full-transcript]
+type:      bugfix
+area:      frontend
+
+`open_room`'s doc comment promised a "full transcript" the route it called has
+never been able to answer. Hydration read `GET /v1/rooms/persistent/{key}`,
+which returns `projected_transcript(rec.transcript)` and nothing else — no
+cursor, no `has_more` — while `rec.transcript` is `load_transcript_page(key,
+None, MAX_TRANSCRIPT_LIMIT)` and that query is `ORDER BY seq LIMIT 1000`,
+ascending. A room past a thousand messages therefore hydrated on its OLDEST
+thousand rows with no field in the body admitting the truncation. Verified in
+ocean-os at origin/main 594c2a1f: `persistent_rooms.rs` room_get, and
+`ocean-store/src/lib.rs` for `MAX_TRANSCRIPT_LIMIT` 1000 /
+`DEFAULT_TRANSCRIPT_LIMIT` 200. The daemon's own SSE docstring already stated as
+fact that "a surface hydrates through /snapshot and then tails here"; this makes
+that sentence true.
+
+Hydration now reads `GET /v1/rooms/persistent/{key}/snapshot?limit=1000` into a
+`RoomSnapshotResponse`, and the live tail resumes from the page's own `last_seq`
+instead of re-deriving one from the rows it just painted. The explicit limit is
+load-bearing: `/snapshot` defaults to 200, so hydrating without it would have
+SHRUNK the first paint from 1000 rows to 200 — a regression wearing a fix's
+clothes. `snapshot_resume_seq` keeps `last_transcript_seq` as its fallback, so a
+daemon predating `last_seq` and an empty room both resume exactly where they did
+before (`None`, which replays from the start of the log).
+
+Three things a reader should not have to re-derive. First, this is a silent
+change to an error path: `/snapshot` falls through to `get_including_closed`
+deliberately, so a finished call's frozen room stays hydratable for replay, while
+room_get uses `reg.get` and 404s. Opening a soft-closed room stops reporting
+"room load failed: no room with key…" and starts hydrating it. That is the
+daemon's documented intent, and no test in this repo asserted the 404 for this
+path. Second, `/snapshot` omits room_get's `agent_owners`; `git grep agent_owners
+-- crates` is empty across this repo, so nothing regresses. Third, `next_seq` and
+`has_more` ride the wire and are deliberately NOT decoded: the tail's durable
+replay is a loop (`send_room_catch_up` pages 128 rows at a time until caught up),
+so resuming at `last_seq` already delivers every row past the page and nothing
+here would read either field — and a field this crate never reads is dead code
+that the `-D warnings` release lane rejects, which is the exact failure mode that
+once held a bundle back for a day. The wave that builds backward paging should
+claim them.
+
+`RoomGetResponse` is gone rather than left behind for the same reason; the room
+GET survives only as the roster refresh inside the tail, which decodes
+`RoomMutateResponse`, and the module's route table now says so. Gate:
+`cargo test -p ocean-surface-ui` 1237 native plus the integration suites green,
+`cargo clippy -p ocean-surface-ui --all-targets -- -D warnings` clean,
+`cargo fmt --check` clean, and `RUSTFLAGS="-D warnings" cargo check -p
+ocean-surface-ui --target wasm32-unknown-unknown` clean.
+_________________________________________________________________________________
+
+time:      [03:21] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-open-room-hydrates-through-the-unpaged-route-and-calls-it-the-full-transcript]
+type:      review
+area:      frontend
+
+Refinement pass on the `/snapshot` hydration above, against a review that found
+the change defended by nothing. Two mutations proved it: reverting the URL to the
+old unpaged room GET passed 1237/1237 (only `dead_code` on the orphaned const —
+keep the const, write `?limit=200`, and the repo is silent), and reverting the
+tail's cursor to `RwSignal::new(last_transcript_seq(&self.transcript.get_untracked()))`
+— the precise behavior this change exists to stop — passed 1237/1237 including
+the test named after the thesis. The load-bearing line had zero coverage.
+
+The URL is now built by `room_snapshot_url(base, key)`, a pure fn asserted in
+`rooms.rs` against the literal
+`.../v1/rooms/persistent/ocean-surface/snapshot?limit=1000` (and a second case
+proving the key is percent-encoded while the query is not), so shrinking the
+limit to the route's own 200 default is red rather than silent. The resume test
+was strengthened from a body where the two cursor sources agree — which asserted
+nothing about precedence — to one where the page cursor sits three rows past the
+last painted row, plus an `assert_ne!` against the painted-row answer and the
+`?after_seq=1000` the tail then opens.
+
+`tests/room_hydration_resume.rs` is new, and is the answer to the wiring itself.
+`EventSource`/`spawn_local` are browser-only and `Rooms::new` takes a live
+`Daemon`, so nothing in this crate can start the tail and read the URL it asks
+for; the crate's own answer to that (a BINARY crate, `tests/common/mod.rs`,
+`unheld_room_controls.rs`) is a source scanner over `view_source`, and this is
+one — pinning the four expressions that carry the daemon's cursor from the
+response into the first SSE connection, plus a prohibition on
+`RwSignal::new(last_transcript_seq(`. Five mutations were run for real against
+this tree and are tabled in the file: the reviewer's seed swap (red on both
+guards), a behavior-identical rename of the seed's parameter (red — the chain is
+literal, and that cost is deliberate), `open_room` dropping
+`snapshot_resume_seq` (red), the route reverted to the unpaged GET (red here AND
+`dead_code` on the wasm lane), and the limit shrunk to 200 (red in `rooms.rs`).
+
+The closed-room fallthrough was disclosed last entry as a text change; it is
+bigger than that and the doc comment on `open_room` now says so. `/snapshot`
+falls through to `get_including_closed`, but `/events` refuses a closed room
+(`room_events_rejects_invalid_resume_unknown_closed_and_call_rooms` pins 404
+`room_not_found`) and so does `room_post_message`
+(`p2c_http_message_ignores_claimed_identity_and_closed_agent_route_is_404`). So
+opening a soft-closed room no longer fails with a terminal "room load failed: no
+room with key…" — it paints the transcript over a tail that rebuilds a doomed
+EventSource every ~3s for as long as the room stays open (2s timeout pump sees
+`Closed` → `Reconnecting` → 1s sleep → reconnect), above a composer whose every
+send 404s. Gating the tail on that is not available from this side: the snapshot
+body carries no closed marker — `ocean_core::Room` has no `closed_at` and a
+closed room's access projection is `Local`, identical to any other local room —
+so the honest fix is a daemon field (or an `is_closed` in the snapshot envelope)
+and a surface that paints a frozen audit view, which is its own slice. Gate:
+`cargo test -p ocean-surface-ui` 1238 native + integration green (1237 + the new
+URL test, plus 3 new guards), `cargo clippy -p ocean-surface-ui --all-targets --
+-D warnings` clean, `cargo fmt --check` clean, `RUSTFLAGS="-D warnings" cargo
+check -p ocean-surface-ui --target wasm32-unknown-unknown` clean.
+_________________________________________________________________________________
