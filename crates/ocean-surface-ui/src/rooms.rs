@@ -7,7 +7,9 @@
 //!
 //!   GET    /v1/rooms/persistent                       → list rooms
 //!   POST   /v1/rooms/persistent                       → create a room
-//!   GET    /v1/rooms/persistent/{key}                 → room + transcript
+//!   GET    /v1/rooms/persistent/{key}                 → room record (roster refresh)
+//!   GET    /v1/rooms/persistent/{key}/snapshot        → hydrate: room + one
+//!                                                       transcript page + cursor
 //!   PATCH  /v1/rooms/persistent/{key}                 → update trigger policy
 //!   POST   /v1/rooms/persistent/{key}/participants    → join
 //!   DELETE /v1/rooms/persistent/{key}/participants/{id}→ leave
@@ -16,10 +18,14 @@
 //!
 //! Live updates: the daemon's room-scoped SSE (TASK-10, `GET
 //! /v1/rooms/persistent/{key}/events`) streams every transcript row as a
-//! `room_message` frame with `id:=seq`. The surface hydrates once, then tails
+//! `room_message` frame with `id:=seq`. The surface hydrates once through
+//! `/snapshot` — the read that answers a cursor beside its page — then tails
 //! live with sequence resume (`?after_seq=` only when a hydrated sequence
 //! exists on each newly constructed browser connection) — no poll, no
-//! global-stream workaround (TASK-11).
+//! global-stream workaround (TASK-11). Hydration has never been the whole
+//! transcript for a long room: the daemon caps a page at 1000 rows and serves
+//! the OLDEST of them, and it is the tail's durable replay from that page's
+//! last sequence that delivers everything after it.
 //!
 //! The whole module is self-contained — it carries its own request layer rather
 //! than threading rooms state through the `Daemon` handle — so it never touches
@@ -47,6 +53,12 @@ enum TailState {
     /// Connection dropped, attempting reconnect.
     Reconnecting,
 }
+
+/// Rows asked for when hydrating a room through `/snapshot`. The route's own
+/// default is 200 while the store's ceiling is 1000, so naming the ceiling keeps
+/// the first paint exactly the size it was on the unpaged read — moving onto the
+/// cursor-bearing route adds the cursor without shrinking what an operator sees.
+const HYDRATION_TRANSCRIPT_LIMIT: usize = 1000;
 
 /// Stable identity used by explicit single-operator and direct-host surfaces.
 /// Browser deployments with a signed-in user never use this value: they stay
@@ -383,8 +395,17 @@ enum ReadCursorProjectionTarget {
     MirroredUpstream,
 }
 
+/// `GET /v1/rooms/persistent/{key}/snapshot` — the hydration envelope. The
+/// unpaged room GET answers a transcript with nothing beside it, so a room past
+/// the store's 1000-row cap hands back its oldest rows and no field says so.
+/// This route answers the same room, transcript and access plus the page's own
+/// cursor. `next_seq`/`has_more` ride along on the wire and are deliberately not
+/// decoded: the tail's durable replay from `last_seq` already delivers every row
+/// past the page, so nothing here would read them, and a field this crate never
+/// reads is dead code the `-D warnings` release lane rejects. The wave that
+/// builds backward paging is the one that should claim them.
 #[derive(Debug, Clone, Deserialize)]
-struct RoomGetResponse {
+struct RoomSnapshotResponse {
     #[serde(default)]
     ok: bool,
     #[serde(default)]
@@ -393,6 +414,13 @@ struct RoomGetResponse {
     transcript: Vec<RoomMessage>,
     /// Required on every successful room open, including local rooms.
     access: RoomAccessProjection,
+    /// Highest `seq` on this page, in the daemon's own words. The
+    /// `#[serde(default)]` is this module's idiom for every additive field
+    /// rather than a compatibility window: `/snapshot` has carried `last_seq`
+    /// since the commit that introduced the route, so no shipped daemon omits
+    /// it. The fallback below is a decode safety net, not a version bridge.
+    #[serde(default)]
+    last_seq: Option<u64>,
     #[serde(default)]
     error: Option<String>,
 }
@@ -1060,8 +1088,22 @@ impl Rooms {
         }
     }
 
-    /// Open a room: load its record + full transcript, bump the generation, and
-    /// start the room-scoped SSE live tail (TASK-10/TASK-11).
+    /// Open a room: load its record + the first transcript page, bump the
+    /// generation, and start the room-scoped SSE live tail (TASK-10/TASK-11).
+    /// Hydration reads `/snapshot`, the route that answers a cursor, so the tail
+    /// resumes from the sequence the daemon says it served rather than one
+    /// re-derived from the rows on screen. This never was a "full transcript" —
+    /// a room past 1000 rows paints its oldest page and the tail's replay from
+    /// `last_seq` brings the rest.
+    ///
+    /// `/snapshot` also falls through to the soft-closed audit view, so a room
+    /// that used to fail to open now hydrates. The tail underneath it does not:
+    /// `/events` and `POST /messages` both 404 a closed room, so what replaces
+    /// the old terminal "no room with key" is a transcript above a permanently
+    /// reconnecting tail and a composer that cannot send. Gating on that needs
+    /// the daemon to say the room is closed — nothing in this body does; the
+    /// entity carries no `closed_at` and a closed room's access projection is
+    /// `Local`, same as any other local room.
     pub fn open_room(&self, key: String) {
         let base = self.base();
         let me = *self;
@@ -1072,10 +1114,10 @@ impl Rooms {
         self.status.set("loading room…".into());
 
         spawn_local(async move {
-            let get_url = format!("{base}/v1/rooms/persistent/{}", encode(&key));
+            let get_url = room_snapshot_url(&base, &key);
             let result = match Request::get(&get_url).send().await {
-                Ok(resp) if resp.ok() => match resp.json::<RoomGetResponse>().await {
-                    Ok(r) if r.ok => Ok((r.room, r.transcript, r.access)),
+                Ok(resp) if resp.ok() => match resp.json::<RoomSnapshotResponse>().await {
+                    Ok(r) if r.ok => Ok((r.room, r.transcript, r.access, r.last_seq)),
                     Ok(r) => Err(format!(
                         "room load failed: {}",
                         r.error.unwrap_or_else(|| "unknown error".into())
@@ -1098,7 +1140,8 @@ impl Rooms {
                 return;
             }
             match result {
-                Ok((room, transcript, access)) => {
+                Ok((room, transcript, access, last_seq)) => {
+                    let resume_seq = snapshot_resume_seq(last_seq, &transcript);
                     me.open_room.set(room);
                     me.transcript.set(transcript.clone());
                     me.access.set(Some(access.clone()));
@@ -1111,7 +1154,7 @@ impl Rooms {
                     );
                     me.status.set(String::new());
                     me.fetch_agents();
-                    me.start_live_tail(key, generation_id);
+                    me.start_live_tail(key, generation_id, resume_seq);
                 }
                 Err(error) => me.status.set(error),
             }
@@ -1541,11 +1584,13 @@ impl Rooms {
     /// Start the live tail for `key` at `generation_id`: room-scoped SSE
     /// (`GET /v1/rooms/persistent/{key}/events`) with `?after_seq=` resume for
     /// newly constructed browser connections (TASK-10/TASK-11). Replaces the
-    /// 2.5s poll workaround.
-    fn start_live_tail(&self, key: String, generation_id: u64) {
+    /// 2.5s poll workaround. `resume_seq` is the hydration's cursor — the caller
+    /// owns it because only the caller knows whether the rows on screen are the
+    /// whole log or one page of it.
+    fn start_live_tail(&self, key: String, generation_id: u64, resume_seq: Option<u64>) {
         let me = *self;
         let base = self.base();
-        let last_seq = RwSignal::new(last_transcript_seq(&self.transcript.get_untracked()));
+        let last_seq = RwSignal::new(resume_seq);
         let tail_state = self.tail_state;
 
         spawn_local(async move {
@@ -2194,6 +2239,28 @@ fn last_transcript_seq(transcript: &[RoomMessage]) -> Option<u64> {
     transcript.last().map(|message| message.seq)
 }
 
+/// Where the live tail resumes after a `/snapshot` hydration. The page's own
+/// `last_seq` is authoritative — it is the daemon naming what it just served —
+/// and the painted rows are the fallback for a response that omits it. No
+/// shipped daemon does, so that arm is a decode safety net and not a
+/// compatibility window. Both are `None` for an empty room, which resumes from
+/// the start of the log exactly as an unhydrated open always has.
+fn snapshot_resume_seq(snapshot_last_seq: Option<u64>, transcript: &[RoomMessage]) -> Option<u64> {
+    snapshot_last_seq.or_else(|| last_transcript_seq(transcript))
+}
+
+/// The hydration read for `key`. `/snapshot` is the room read that answers a
+/// cursor beside its page; the row count is spelled out because the route's own
+/// default is 200, a fifth of what the unpaged read painted, so this one
+/// argument is the difference between moving onto the cursor and shrinking the
+/// first paint on the way there.
+fn room_snapshot_url(base: &str, key: &str) -> String {
+    format!(
+        "{base}/v1/rooms/persistent/{}/snapshot?limit={HYDRATION_TRANSCRIPT_LIMIT}",
+        encode(key)
+    )
+}
+
 fn url_with_after_seq(endpoint: &str, after_seq: Option<u64>) -> String {
     match after_seq {
         Some(sequence) => format!("{endpoint}?after_seq={sequence}"),
@@ -2667,8 +2734,8 @@ mod tests {
     }
 
     #[test]
-    fn room_get_requires_access_and_local_projection_is_exact() {
-        let response: RoomGetResponse = serde_json::from_value(serde_json::json!({
+    fn room_snapshot_requires_access_and_local_projection_is_exact() {
+        let response: RoomSnapshotResponse = serde_json::from_value(serde_json::json!({
             "ok": true,
             "room": null,
             "transcript": [],
@@ -2677,7 +2744,7 @@ mod tests {
         .expect("P1 room envelope should decode");
         assert_eq!(response.access, access_projection(RoomAccessState::Local));
 
-        let missing = serde_json::from_value::<RoomGetResponse>(serde_json::json!({
+        let missing = serde_json::from_value::<RoomSnapshotResponse>(serde_json::json!({
             "ok": true,
             "room": null,
             "transcript": []
@@ -2875,6 +2942,112 @@ mod tests {
         let recovering = access_projection(RoomAccessState::Recovering);
         assert!(replace_access_projection(&mut current, recovering.clone()));
         assert_eq!(current, Some(recovering));
+    }
+
+    /// Hydration addresses the cursor-bearing route at the store's full page.
+    /// The route defaults to 200 rows and the unpaged read it replaces painted
+    /// up to 1000, so the limit is not decoration: drop it and the first paint
+    /// silently loses four fifths of itself while every other assertion in this
+    /// module still passes.
+    #[test]
+    fn hydration_reads_snapshot_at_the_stores_full_page() {
+        assert_eq!(
+            room_snapshot_url("http://127.0.0.1:7777", "ocean-surface"),
+            "http://127.0.0.1:7777/v1/rooms/persistent/ocean-surface/snapshot?limit=1000"
+        );
+        // Room keys are free-form, so the segment is encoded and the query is
+        // not part of what gets encoded.
+        assert_eq!(
+            room_snapshot_url("https://ocean.example", "call/2026-09-01 standup"),
+            "https://ocean.example/v1/rooms/persistent/call%2F2026-09-01%20standup/snapshot?limit=1000"
+        );
+    }
+
+    /// A `/snapshot` body decodes whole — the `next_seq`/`has_more` this envelope
+    /// deliberately ignores must not break the decode — and the tail resumes at
+    /// the sequence the daemon named rather than one re-derived from the painted
+    /// rows.
+    ///
+    /// The body below puts the two sources three rows apart, which the daemon
+    /// cannot emit today (it derives `last_seq` from the page's own last row).
+    /// That is the point: the rule only has teeth on the day they diverge — a
+    /// filtered projection, a trimmed page, backward paging — and on that day
+    /// the daemon's number is the one that names what it actually served.
+    #[test]
+    fn snapshot_hydration_resumes_from_the_page_cursor() {
+        let response: RoomSnapshotResponse = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "room": null,
+            "participants": [],
+            "transcript": [
+                {
+                    "seq": 996,
+                    "author_id": "member-1",
+                    "author_kind": "human",
+                    "kind": "message",
+                    "body": "second to last painted row",
+                    "created_at": "2026-07-16T22:00:00Z"
+                },
+                {
+                    "seq": 997,
+                    "author_id": "member-1",
+                    "author_kind": "human",
+                    "kind": "message",
+                    "body": "last painted row",
+                    "created_at": "2026-07-16T22:00:01Z"
+                }
+            ],
+            "last_seq": 1000,
+            "next_seq": 1000,
+            "has_more": true,
+            "access": { "state": "local" }
+        }))
+        .expect("snapshot envelope should decode");
+        assert_eq!(response.last_seq, Some(1000));
+        assert_eq!(response.transcript.len(), 2);
+
+        let resume = snapshot_resume_seq(response.last_seq, &response.transcript);
+        assert_eq!(resume, Some(1000));
+        assert_ne!(
+            resume,
+            last_transcript_seq(&response.transcript),
+            "re-deriving the resume from the rows on screen is the behavior this \
+             hydration exists to stop"
+        );
+        // What `start_live_tail` opens first, given what hydration handed it.
+        assert_eq!(
+            url_with_after_seq("/v1/rooms/persistent/room-1/events", resume),
+            "/v1/rooms/persistent/room-1/events?after_seq=1000"
+        );
+
+        // An empty room has no cursor from either source, and `None` is what
+        // replays it from the start of the log.
+        let empty: RoomSnapshotResponse = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "room": null,
+            "transcript": [],
+            "last_seq": null,
+            "next_seq": null,
+            "has_more": false,
+            "access": { "state": "local" }
+        }))
+        .expect("empty snapshot should decode");
+        assert_eq!(snapshot_resume_seq(empty.last_seq, &empty.transcript), None);
+        assert_eq!(
+            url_with_after_seq(
+                "/events",
+                snapshot_resume_seq(empty.last_seq, &empty.transcript)
+            ),
+            "/events"
+        );
+
+        // A response that omits `last_seq` still resumes off the painted rows,
+        // exactly where the tail always did. No shipped daemon takes this arm;
+        // it is pinned so the fallback cannot rot into silence.
+        assert_eq!(
+            snapshot_resume_seq(None, &[message(3), message(9)]),
+            Some(9)
+        );
     }
 
     #[test]

@@ -234,9 +234,12 @@ Web surface session UI:
   extension/Tauri hosts use the stable `surface-operator` identity, and Room
   identity signals own `String` values rather than leaked process-lifetime
   string allocations.
-- Every successful `GET /v1/rooms/persistent/{key}` carries a required
-  `RoomAccessProjection`, including explicit `Local` for G1 rooms. Surface
-  `None` means loading or no open room; it is never a local-room discriminator.
+- Every successful room open carries a required `RoomAccessProjection`,
+  including explicit `Local` for G1 rooms. Hydration decodes it off `GET
+  /v1/rooms/persistent/{key}/snapshot`, which is the route an open now reads —
+  the unpaged `GET /v1/rooms/persistent/{key}` answers the same field and is no
+  longer what the surface opens with. Surface `None` means loading or no open
+  room; it is never a local-room discriminator.
 - Room transcripts hydrate once, then tail only the room-scoped SSE endpoint
   `GET /v1/rooms/persistent/{key}/events` with sequence resume. Subscribe to
   both `room_message` and `room_access` immediately: messages alone advance the
