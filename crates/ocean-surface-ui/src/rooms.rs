@@ -60,6 +60,14 @@ enum TailState {
 /// cursor-bearing route adds the cursor without shrinking what an operator sees.
 const HYDRATION_TRANSCRIPT_LIMIT: usize = 1000;
 
+/// Pages one catch-up read of `/transcript` will walk before it stops asking.
+/// The route serves 200 rows a page, so five is the same 1000 rows a fresh open
+/// paints ([`HYDRATION_TRANSCRIPT_LIMIT`]). Past that a read that runs on every
+/// join, leave, removal and send would be pulling a long-lived room's whole log
+/// through four unrelated mutations, which is the full-table read the route's
+/// paging exists to avoid. The live tail owns everything beyond the cap.
+const MAX_TRANSCRIPT_CATCHUP_PAGES: usize = 5;
+
 /// Stable identity used by explicit single-operator and direct-host surfaces.
 /// Browser deployments with a signed-in user never use this value: they stay
 /// unresolved until `/api/config` publishes the current login.
@@ -441,12 +449,31 @@ struct RoomMutateResponse {
     error: Option<String>,
 }
 
+/// `GET /v1/rooms/persistent/{key}/transcript` — ONE bounded page, never the
+/// log. The route's default is 200 rows, so the cursor beside the page is the
+/// whole difference between catching up and keeping the first 200 rows of a
+/// burst forever: `next_seq` is the daemon's own `after_seq` for the page after
+/// this one and `has_more` says such a page exists, and
+/// [`Rooms::refresh_open_transcript`] walks both.
+///
+/// [`RoomSnapshotResponse`] leaves the same two fields undecoded on purpose —
+/// nothing there reads them and a field this crate never reads is dead code the
+/// `-D warnings` release lane rejects. This envelope claims them because this
+/// one does read them, on the live catch-up path.
 #[derive(Debug, Clone, Deserialize)]
 struct TranscriptResponse {
     #[serde(default)]
     ok: bool,
     #[serde(default)]
     transcript: Vec<RoomMessage>,
+    /// `Some` only on a `has_more` page — the store leaves it null once a page
+    /// reaches the end of the log. `#[serde(default)]` is this module's idiom
+    /// for every additive field rather than a compatibility window: the route
+    /// has carried both since OCEAN-249.
+    #[serde(default)]
+    next_seq: Option<u64>,
+    #[serde(default)]
+    has_more: bool,
 }
 
 // ---- Request bodies (match the daemon's serde::Deserialize structs) ----------
@@ -620,6 +647,15 @@ pub struct Rooms {
     pub open_room: RwSignal<Option<Room>>,
     /// The open room's transcript, ascending by `seq`.
     pub transcript: RwSignal<Vec<RoomMessage>>,
+    /// The open room's resume point: the highest `seq` this client has ingested,
+    /// and the module's ONE answer to where a catch-up read starts. Hydration
+    /// seeds it from `/snapshot`'s own cursor through [`Rooms::start_live_tail`],
+    /// and both the tail and [`Rooms::refresh_open_transcript`] advance it as
+    /// they ingest — so nothing re-derives a resume from the painted rows, which
+    /// is the rule `start_live_tail` states and the catch-up read used to break.
+    /// Monotonic: see [`advanced_resume_seq`] for why a lagging ingest may never
+    /// lower it.
+    resume_seq: RwSignal<Option<u64>>,
     /// Free-form status line (errors, in-flight notices).
     pub status: RwSignal<String>,
     /// Monotonic generation: bumped when the open room changes so a stale
@@ -713,6 +749,7 @@ impl Rooms {
             open_key: RwSignal::new(None),
             open_room: RwSignal::new(None),
             transcript: RwSignal::new(Vec::new()),
+            resume_seq: RwSignal::new(None),
             status: RwSignal::new(String::new()),
             generation: RwSignal::new(0),
             identity_id: RwSignal::new(identity.id),
@@ -820,6 +857,7 @@ impl Rooms {
     fn reset_room_state(&self) {
         self.open_room.set(None);
         self.transcript.set(Vec::new());
+        self.resume_seq.set(None);
         self.access.set(None);
         self.open_read_cursor.set(None);
         self.read_cursor_in_flight.set(None);
@@ -1283,7 +1321,7 @@ impl Rooms {
                 Ok(room) => {
                     me.open_room.set(room);
                     me.status.set("joined".into());
-                    me.refresh_open_transcript(&key, generation_id);
+                    me.refresh_open_transcript(&key, generation_id, me.resume_seq.get_untracked());
                 }
                 Err(error) => me.status.set(error),
             }
@@ -1326,7 +1364,7 @@ impl Rooms {
                 Ok(room) => {
                     me.open_room.set(room);
                     me.status.set("left".into());
-                    me.refresh_open_transcript(&key, generation_id);
+                    me.refresh_open_transcript(&key, generation_id, me.resume_seq.get_untracked());
                 }
                 Err(error) => me.status.set(error),
             }
@@ -1375,7 +1413,7 @@ impl Rooms {
                 Ok(room) => {
                     me.open_room.set(room);
                     me.status.set(format!("removed '{participant_id}'"));
-                    me.refresh_open_transcript(&key, generation_id);
+                    me.refresh_open_transcript(&key, generation_id, me.resume_seq.get_untracked());
                 }
                 Err(error) => me.status.set(error),
             }
@@ -1483,7 +1521,9 @@ impl Rooms {
                 return;
             }
             match result {
-                Ok(()) => me.refresh_open_transcript(&key, generation_id),
+                Ok(()) => {
+                    me.refresh_open_transcript(&key, generation_id, me.resume_seq.get_untracked())
+                }
                 Err(error) => me.status.set(error),
             }
         });
@@ -1547,36 +1587,63 @@ impl Rooms {
         });
     }
 
-    /// Re-fetch the open room's transcript tail and append only new entries.
-    fn refresh_open_transcript(&self, key: &str, generation_id: u64) {
+    /// Re-read the open room's transcript from `after_seq` and append what is
+    /// new — the fallback for the day the tail is down. On a live connection the
+    /// tail already carries the rows the four calling mutations write.
+    ///
+    /// `after_seq` is the CALLER's, the same rule [`Self::start_live_tail`]
+    /// states. It used to be re-derived here from the rows on screen, which left
+    /// the module holding two contradictory answers to where a resume comes
+    /// from; [`Rooms::resume_seq`] is now the only one.
+    ///
+    /// And it PAGES. `/transcript` answers at most 200 rows, so the single
+    /// request this made kept the first page of anything larger and never asked
+    /// again — the daemon had been naming the rest in `next_seq`/`has_more`
+    /// since OCEAN-249 and nothing here decoded them. The walk stops at
+    /// [`MAX_TRANSCRIPT_CATCHUP_PAGES`]; hitting that cap is not a gap, because
+    /// the live tail is a separate connection holding its own position and keeps
+    /// delivering — it is this fallback declining to become a full-log read.
+    fn refresh_open_transcript(&self, key: &str, generation_id: u64, after_seq: Option<u64>) {
         let base = self.base();
         let me = *self;
         let key = key.to_string();
         spawn_local(async move {
-            if !me.room_is_current(generation_id, &key) {
-                return;
-            }
             let endpoint = format!("{base}/v1/rooms/persistent/{}/transcript", encode(&key));
-            let get_url = url_with_after_seq(
-                &endpoint,
-                last_transcript_seq(&me.transcript.get_untracked()),
-            );
-            if let Ok(resp) = Request::get(&get_url).send().await {
-                if let Ok(r) = resp.json::<TranscriptResponse>().await {
-                    if r.ok && !r.transcript.is_empty() && me.room_is_current(generation_id, &key) {
-                        me.transcript.update(|transcript| {
-                            for message in r.transcript {
-                                if transcript
-                                    .last()
-                                    .map(|last| last.seq < message.seq)
-                                    .unwrap_or(true)
-                                {
-                                    transcript.push(message);
-                                }
-                            }
-                        });
-                    }
+            let mut cursor = after_seq;
+            let mut pages_read = 0usize;
+            loop {
+                // Re-checked before EVERY page, not once at entry: each page is
+                // an await, and a room switched during one must not have the
+                // response that lands after it appended under the new room.
+                if !me.room_is_current(generation_id, &key) {
+                    return;
                 }
+                let Ok(response) = Request::get(&url_with_after_seq(&endpoint, cursor))
+                    .send()
+                    .await
+                else {
+                    return;
+                };
+                let Ok(page) = response.json::<TranscriptResponse>().await else {
+                    return;
+                };
+                if !page.ok || !me.room_is_current(generation_id, &key) {
+                    return;
+                }
+                let covered = last_transcript_seq(&page.transcript);
+                if let Some(highest) = covered {
+                    me.transcript
+                        .update(|transcript| append_transcript_page(transcript, page.transcript));
+                    me.resume_seq
+                        .update(|seq| *seq = advanced_resume_seq(*seq, highest));
+                }
+                pages_read += 1;
+                let Some(next) =
+                    transcript_catchup_cursor(pages_read, page.has_more, page.next_seq, covered)
+                else {
+                    return;
+                };
+                cursor = Some(next);
             }
         });
     }
@@ -1586,16 +1653,20 @@ impl Rooms {
     /// newly constructed browser connections (TASK-10/TASK-11). Replaces the
     /// 2.5s poll workaround. `resume_seq` is the hydration's cursor — the caller
     /// owns it because only the caller knows whether the rows on screen are the
-    /// whole log or one page of it.
+    /// whole log or one page of it — and it seeds [`Rooms::resume_seq`], the
+    /// room's single resume point. The tail advances that signal as it ingests
+    /// and re-reads it on every reconnect, so rows a catch-up read pulled in
+    /// between are not replayed here, and rows this tail already painted are not
+    /// re-read there.
     fn start_live_tail(&self, key: String, generation_id: u64, resume_seq: Option<u64>) {
         let me = *self;
         let base = self.base();
-        let last_seq = RwSignal::new(resume_seq);
         let tail_state = self.tail_state;
+        self.resume_seq.set(resume_seq);
 
         spawn_local(async move {
             let events_url = format!("{base}/v1/rooms/persistent/{}/events", encode(&key));
-            let mut resume_seq = last_seq.get_untracked();
+            let mut resume_seq = me.resume_seq.get_untracked();
             let mut reconnecting = false;
 
             loop {
@@ -1744,13 +1815,8 @@ impl Rooms {
                             );
                         }
                         RoomTailFrame::Message(entry) => {
-                            if last_seq
-                                .get_untracked()
-                                .map(|last| entry.seq > last)
-                                .unwrap_or(true)
-                            {
-                                last_seq.set(Some(entry.seq));
-                            }
+                            me.resume_seq
+                                .update(|seq| *seq = advanced_resume_seq(*seq, entry.seq));
                             let is_roster_change = matches!(
                                 entry.kind,
                                 RoomMessageKind::ParticipantJoined
@@ -1802,7 +1868,7 @@ impl Rooms {
                         }
                     }
                 }
-                resume_seq = last_seq.get_untracked();
+                resume_seq = me.resume_seq.get_untracked();
                 reconnecting = true;
                 if !me.room_is_current(generation_id, &key) {
                     break;
@@ -2259,6 +2325,58 @@ fn room_snapshot_url(base: &str, key: &str) -> String {
         "{base}/v1/rooms/persistent/{}/snapshot?limit={HYDRATION_TRANSCRIPT_LIMIT}",
         encode(key)
     )
+}
+
+/// Append one `/transcript` page to the painted rows, keeping only entries past
+/// the last one painted — stricter than the live tail's own ingest, which
+/// dedupes on `seq` equality across the whole vector and pushes in arrival
+/// order. A page whose rows are all already painted appends nothing: an
+/// overlapping read is a duplicate delivery, not a gap.
+fn append_transcript_page(transcript: &mut Vec<RoomMessage>, page: Vec<RoomMessage>) {
+    for message in page {
+        if transcript
+            .last()
+            .map(|last| last.seq < message.seq)
+            .unwrap_or(true)
+        {
+            transcript.push(message);
+        }
+    }
+}
+
+/// Where a catch-up read continues after the page it just ingested, or `None`
+/// when it must stop — and it stops for two different reasons. The daemon said
+/// the log ran out (`has_more` false), or this read has already taken
+/// [`MAX_TRANSCRIPT_CATCHUP_PAGES`] pages, which is the bound that keeps a walk
+/// running on every join/leave/removal/send off a 12 000-row room.
+///
+/// `next_seq` is the daemon's own `after_seq` for the next page;
+/// `page_covered_through` — the highest `seq` the page just served — is the
+/// fallback for a `has_more` page naming no cursor, and is also what forbids an
+/// endless walk over one, being strictly past the `after_seq` that produced the
+/// page. It mirrors [`snapshot_resume_seq`] with one difference worth naming:
+/// the fallback reads the page just served, never the rows on screen.
+fn transcript_catchup_cursor(
+    pages_read: usize,
+    has_more: bool,
+    next_seq: Option<u64>,
+    page_covered_through: Option<u64>,
+) -> Option<u64> {
+    if pages_read >= MAX_TRANSCRIPT_CATCHUP_PAGES || !has_more {
+        return None;
+    }
+    next_seq.or(page_covered_through)
+}
+
+/// Monotonic advance of the open room's resume point. A page overlapping what is
+/// already painted, or a frame replayed after a reconnect, must never lower it:
+/// the resume means "how far this client has ingested", and lowering it would
+/// re-read rows already on screen on the next catch-up.
+fn advanced_resume_seq(held: Option<u64>, ingested: u64) -> Option<u64> {
+    match held {
+        Some(held) if held >= ingested => Some(held),
+        _ => Some(ingested),
+    }
 }
 
 fn url_with_after_seq(endpoint: &str, after_seq: Option<u64>) -> String {
@@ -3058,6 +3176,170 @@ mod tests {
         assert_eq!(
             url_with_after_seq("/events", Some(0)),
             "/events?after_seq=0"
+        );
+    }
+
+    /// The catch-up read's whole reason to decode a cursor: `/transcript` answers
+    /// ONE bounded page, and the body names where the next one starts. A single
+    /// request kept the first 200 rows of a burst and dropped the rest in
+    /// silence, because nothing here read the two fields the daemon has answered
+    /// with since OCEAN-249.
+    ///
+    /// The first body below puts `next_seq` a row past its own last entry, which
+    /// the daemon cannot emit today — it derives the cursor from the page's last
+    /// row. That is the point, the same one
+    /// `snapshot_hydration_resumes_from_the_page_cursor` makes: the rule only has
+    /// teeth on the day the two sources diverge, and on that day the daemon's
+    /// number is the one naming what it actually served.
+    #[test]
+    fn transcript_page_decodes_the_daemon_cursor_and_stops_when_it_says_stop() {
+        let more: TranscriptResponse = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "transcript": [
+                {
+                    "seq": 201,
+                    "author_id": "member-1",
+                    "author_kind": "human",
+                    "kind": "message",
+                    "body": "first row past the caller's cursor",
+                    "created_at": "2026-07-16T22:00:00Z"
+                },
+                {
+                    "seq": 399,
+                    "author_id": "member-1",
+                    "author_kind": "human",
+                    "kind": "message",
+                    "body": "last row this page served",
+                    "created_at": "2026-07-16T22:00:01Z"
+                }
+            ],
+            "next_seq": 400,
+            "has_more": true
+        }))
+        .expect("a paged transcript body should decode");
+        assert!(more.ok);
+        assert!(more.has_more);
+        assert_eq!(more.next_seq, Some(400));
+        assert_eq!(last_transcript_seq(&more.transcript), Some(399));
+        assert_eq!(
+            transcript_catchup_cursor(
+                1,
+                more.has_more,
+                more.next_seq,
+                last_transcript_seq(&more.transcript)
+            ),
+            Some(400),
+            "the daemon's own cursor is where the next page starts — the rows it \
+             served are only the fallback for a body that names none"
+        );
+
+        let done: TranscriptResponse = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "transcript": [
+                {
+                    "seq": 500,
+                    "author_id": "member-1",
+                    "author_kind": "human",
+                    "kind": "message",
+                    "body": "the last row in the log",
+                    "created_at": "2026-07-16T22:00:02Z"
+                }
+            ],
+            "next_seq": null,
+            "has_more": false
+        }))
+        .expect("a final page should decode");
+        assert_eq!(
+            transcript_catchup_cursor(
+                1,
+                done.has_more,
+                done.next_seq,
+                last_transcript_seq(&done.transcript)
+            ),
+            None,
+            "a page the daemon says is the last must end the walk even though it \
+             served rows the fallback could have continued from"
+        );
+
+        // A body carrying neither field still decodes, and reads as "the log ran
+        // out" — the only answer that cannot invent a page the daemon never
+        // named. No shipped daemon takes this arm; it is pinned so the additive
+        // defaults cannot rot into an unbounded walk.
+        let bare: TranscriptResponse =
+            serde_json::from_value(serde_json::json!({ "ok": true, "transcript": [] }))
+                .expect("a body without the cursor should still decode");
+        assert_eq!(bare.next_seq, None);
+        assert!(!bare.has_more);
+        assert_eq!(
+            transcript_catchup_cursor(1, bare.has_more, bare.next_seq, None),
+            None
+        );
+    }
+
+    /// The walk itself: every request starts at the cursor the previous page
+    /// named — the caller's own resume point seeds the first — and the page cap,
+    /// not the daemon, is what ends a room that keeps saying there is more.
+    /// Unbounded, this runs on every join, leave, removal and send.
+    #[test]
+    fn transcript_catchup_follows_the_cursor_and_is_bounded_by_the_page_cap() {
+        let endpoint = "/v1/rooms/persistent/room-1/transcript";
+        // The caller's resume point, never the rows on screen.
+        let mut cursor = Some(200);
+        let mut pages_read = 0usize;
+        let mut requested = Vec::new();
+        loop {
+            requested.push(url_with_after_seq(endpoint, cursor));
+            pages_read += 1;
+            // A daemon with more to give, forever.
+            let covered = Some(200 + pages_read as u64 * 200);
+            let Some(next) = transcript_catchup_cursor(pages_read, true, covered, None) else {
+                break;
+            };
+            cursor = Some(next);
+        }
+        assert_eq!(
+            requested,
+            vec![
+                format!("{endpoint}?after_seq=200"),
+                format!("{endpoint}?after_seq=400"),
+                format!("{endpoint}?after_seq=600"),
+                format!("{endpoint}?after_seq=800"),
+                format!("{endpoint}?after_seq=1000"),
+            ],
+            "the second request is the one the old single-shot path never made"
+        );
+        assert_eq!(requested.len(), MAX_TRANSCRIPT_CATCHUP_PAGES);
+    }
+
+    /// Ingest: a page appends only what is past the paint, and the room's resume
+    /// point only ever moves forward.
+    #[test]
+    fn catchup_ingest_appends_past_the_paint_and_never_lowers_the_resume() {
+        let mut painted = vec![message(1), message(2)];
+        append_transcript_page(&mut painted, vec![message(2), message(3)]);
+        assert_eq!(
+            painted.iter().map(|m| m.seq).collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "the overlapping row is a duplicate delivery, not a second row 2"
+        );
+
+        append_transcript_page(&mut painted, vec![message(1), message(2)]);
+        assert_eq!(
+            painted.len(),
+            3,
+            "a page entirely behind the paint is a re-read, not a gap"
+        );
+
+        let mut unpainted = Vec::new();
+        append_transcript_page(&mut unpainted, vec![message(7)]);
+        assert_eq!(last_transcript_seq(&unpainted), Some(7));
+
+        assert_eq!(advanced_resume_seq(None, 3), Some(3));
+        assert_eq!(advanced_resume_seq(Some(3), 9), Some(9));
+        assert_eq!(
+            advanced_resume_seq(Some(9), 3),
+            Some(9),
+            "a replayed frame or an overlapping page must not rewind the resume"
         );
     }
 

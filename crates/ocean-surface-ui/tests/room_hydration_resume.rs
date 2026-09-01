@@ -1,15 +1,19 @@
-//! The hydration → live-tail handoff in `rooms.rs`, pinned where the compiler
-//! cannot hold it.
+//! The open room's ONE resume point, pinned where the compiler cannot hold it.
 //!
-//! Opening a room reads `/snapshot` and hands the tail the cursor that body
-//! names (`last_seq`) rather than the tail re-deriving one from the rows it just
-//! painted. That handoff is four expressions spread over 500 lines and every one
-//! of them is silent: the review of the change that introduced it replaced
-//! `RwSignal::new(resume_seq)` with
+//! Opening a room reads `/snapshot` and seeds `Rooms::resume_seq` with the
+//! cursor that body names (`last_seq`) rather than anything re-deriving one from
+//! the rows it just painted. Both readers of that signal are pinned here: the
+//! live tail's first connection and its reconnects, and the catch-up read the
+//! four roster/message mutations fire. That wiring is expressions spread over
+//! 500 lines and every one of them is silent: the review of the change that
+//! introduced it replaced `RwSignal::new(resume_seq)` with
 //! `RwSignal::new(last_transcript_seq(&self.transcript.get_untracked()))` — the
 //! exact behavior the change exists to stop — and all 1237 tests passed,
 //! including the unit test named after the thesis. A pure helper tested in
 //! isolation proves the RULE; nothing proved the rule was wired to anything.
+//! The same gap then survived the fix: `refresh_open_transcript` went on
+//! re-deriving its own cursor from the painted rows for another wave, one line
+//! below a doc comment declaring the opposite, and every gate stayed green.
 //!
 //! `EventSource` and `spawn_local` are browser-only and `Rooms::new` takes a
 //! live `Daemon`, so no test in this crate can start the tail and read the URL
@@ -31,6 +35,9 @@
 //! | `open_room`'s `snapshot_resume_seq(..)` → `last_transcript_seq(..)`  | RED — first needle |
 //! | `room_snapshot_url` call → the old unpaged `format!` room GET        | RED here, and `dead_code` on the wasm lane |
 //! | `HYDRATION_TRANSCRIPT_LIMIT` 1000 → 200 (`/snapshot`'s own default)  | RED in `rooms.rs`, not here — the URL literal is asserted there |
+//! | one catch-up call site's cursor → `last_transcript_seq(&me.transcript…)` | RED — the prohibition, and the counted call sites at 3 against 4 |
+//! | the catch-up walk's `page.next_seq` argument → `None`                | RED here; `rooms.rs`'s unit tests stay green, they own the rule and never its wiring |
+//! | the tail's `advanced_resume_seq(*seq, entry.seq)` → `Some(entry.seq)` | RED — the tail must advance the shared resume like everything else |
 //!
 //! The rename row is the cost of a literal chain and is deliberate: a local can
 //! be renamed freely as long as the needle moves with it, and the assert
@@ -63,30 +70,86 @@ fn the_snapshot_cursor_reaches_the_tails_first_connection() {
          started without it is a tail that has to guess",
     );
     assert!(
-        rooms.contains("letlast_seq=RwSignal::new(resume_seq);"),
-        "`start_live_tail` must seed its cursor signal from the resume point it \
-         was handed and from nothing else",
+        rooms.contains("self.resume_seq.set(resume_seq);"),
+        "`start_live_tail` must seed the room's resume signal from the resume \
+         point it was handed and from nothing else",
     );
     assert!(
-        rooms.contains("letmutresume_seq=last_seq.get_untracked();")
+        rooms.contains("letmutresume_seq=me.resume_seq.get_untracked();")
             && rooms.contains("leturl=url_with_after_seq(&events_url,resume_seq);"),
         "the seeded cursor must be what the first SSE connection resumes at — \
          `?after_seq=` is the whole reason hydration moved onto `/snapshot`",
     );
+    assert!(
+        rooms.contains("me.resume_seq.update(|seq|*seq=advanced_resume_seq(*seq,entry.seq));"),
+        "the tail must advance the ROOM's resume point as it ingests, not a \
+         signal of its own: a private cursor is how the catch-up read came to \
+         hold a second, contradictory answer to the same question",
+    );
 }
 
-/// The mutation itself, stated as a prohibition. `last_transcript_seq` is still
-/// the fallback INSIDE `snapshot_resume_seq`, where the daemon has declined to
-/// answer; anywhere it seeds a signal, the daemon's answer is being ignored.
+/// The catch-up read is handed the same signal, for the same reason. Mutations
+/// run: an `after_seq` argument at a call site replaced with
+/// `last_transcript_seq(&me.transcript.get_untracked())` (the shape this slice
+/// removed), and the walk's `page.next_seq` argument replaced with `None`, which
+/// silently demotes the daemon's cursor to the page's last row. Both leave
+/// clippy, both `cargo check`s and every unit test in `rooms.rs` green — the
+/// unit tests own the cursor RULE, never its wiring.
 #[test]
-fn the_tail_never_re_derives_its_cursor_from_the_painted_rows() {
+fn the_catchup_read_is_handed_the_rooms_resume_point_and_pages_on_the_daemons() {
+    let rooms = without_whitespace(&view_source("rooms.rs"));
+
+    assert!(
+        rooms.contains(
+            "fnrefresh_open_transcript(&self,key:&str,generation_id:u64,after_seq:Option<u64>){"
+        ),
+        "the catch-up read must take its start from the caller; deriving one \
+         inside is what left the module holding two answers",
+    );
+    // COUNTED, not merely present: `contains` stays green while three of the
+    // four sites hand over the resume and the fourth re-derives one, which is
+    // the shape of the bug this slice removed. A fifth caller reds this on
+    // purpose — the number is here to make its author say which cursor it hands
+    // over, and 4 is join, leave, remove-participant and post-message.
+    assert_eq!(
+        rooms
+            .matches("me.refresh_open_transcript(&key,generation_id,me.resume_seq.get_untracked())")
+            .count(),
+        4,
+        "every catch-up call site must hand over the room's resume point — the \
+         same signal the tail seeds and advances. If you have just ADDED a \
+         caller, this count is the ask, not the failure: check which cursor \
+         your call hands over, then bump the number",
+    );
+    assert!(
+        rooms.contains("transcript_catchup_cursor(pages_read,page.has_more,page.next_seq,covered)"),
+        "the walk must continue on the cursor the PAGE named: `/transcript` \
+         serves at most 200 rows, so one request keeps the first page of a \
+         burst and drops the rest in silence",
+    );
+}
+
+/// The mutation itself, stated as a prohibition over the whole module.
+/// `last_transcript_seq` is still the fallback INSIDE `snapshot_resume_seq`,
+/// where the daemon has declined to answer, and it still reads a PAGE the daemon
+/// just served in the catch-up walk. What it may never read is the transcript
+/// signal: those rows are one page of a log (the store caps a page at 1000 rows)
+/// and a resume taken from them is the daemon's answer thrown away.
+#[test]
+fn no_resume_is_ever_re_derived_from_the_painted_rows() {
     let rooms = without_whitespace(&view_source("rooms.rs"));
 
     assert!(
         !rooms.contains("RwSignal::new(last_transcript_seq("),
         "the tail's cursor must come from the hydration response, not from the \
-         transcript signal: the painted rows are ONE PAGE (the store caps a page \
-         at 1000 rows) and the daemon's `last_seq` is that page's own end",
+         transcript signal",
+    );
+    assert!(
+        !rooms.contains("last_transcript_seq(&me.transcript")
+            && !rooms.contains("last_transcript_seq(&self.transcript"),
+        "no resume may be re-derived from the transcript signal — the catch-up \
+         read did exactly this, one line below a doc comment stating the \
+         opposite rule, and nothing in the gate said so",
     );
 }
 
