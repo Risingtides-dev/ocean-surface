@@ -185,6 +185,41 @@ fn trim_autolink_tail(candidate: &str) -> &str {
     }
 }
 
+/// Byte offset of the `)` that closes `[label](href)`: the first one that is
+/// not answering a `(` the href opened itself. Same balance rule as
+/// `trim_autolink_tail`, moved onto the terminator scan rather than a trailing
+/// trim, so `https://ocean.dev/a(b)` survives instead of being cut at its own
+/// inner closer. `None` when no closer balances, which is the caller's "there
+/// was no closer at all" signal and leaves the bracket untokenized. Scanning
+/// bytes is safe because both brackets are ASCII, so a returned offset never
+/// lands inside a multi-byte character.
+///
+/// A space ends the scan the same way, because balancing alone has no bound:
+/// one unmatched `(` in the href would otherwise let the scan run past the URL
+/// and eat the rest of the sentence into the href, and a transcript must never
+/// swallow words the user typed. CommonMark bounds a bare destination the same
+/// way — no spaces — and declining here leaves the prose intact: the brackets
+/// go literal and the bare-URL path picks the URL up. Only the space, not
+/// `is_ascii_whitespace`: a tab or newline in an href has to reach the scheme
+/// gate so the whole `[…](…)` renders as one literal run.
+fn balanced_href_end(raw: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (offset, byte) in raw.bytes().enumerate() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                if depth == 0 {
+                    return Some(offset);
+                }
+                depth -= 1;
+            }
+            b' ' => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
 fn flush(out: &mut Vec<MdSpan>, text: &mut String) {
     if !text.is_empty() {
         out.push(MdSpan::Text(std::mem::take(text)));
@@ -249,8 +284,7 @@ pub fn tokenize(body: &str, members: &HashSet<String>) -> Vec<MdSpan> {
                 let after = &rest[close + 1..];
                 if !label.is_empty() && after.starts_with('(') {
                     if let Some(raw) = after.strip_prefix('(') {
-                        let end = raw.find(')').unwrap_or(raw.len());
-                        if end < raw.len() {
+                        if let Some(end) = balanced_href_end(raw) {
                             let href = &raw[..end];
                             let consumed = close + 1 + 1 + end + 1;
                             if !href.is_empty() && scheme_allowed(href) {
@@ -481,6 +515,133 @@ mod tests {
             assert_eq!(
                 tokenize(body, &members(&[])),
                 vec![MdSpan::Text(body.into())]
+            );
+        }
+    }
+
+    #[test]
+    fn labeled_link_href_keeps_a_paren_it_opened_itself() {
+        for (body, href) in [
+            ("[x](https://ocean.dev/a(b))", "https://ocean.dev/a(b)"),
+            (
+                "[x](https://ocean.dev/a(b(c))d)",
+                "https://ocean.dev/a(b(c))d",
+            ),
+            (
+                "[x](https://en.wikipedia.org/wiki/Ocean_(disambiguation))",
+                "https://en.wikipedia.org/wiki/Ocean_(disambiguation)",
+            ),
+        ] {
+            assert_eq!(
+                tokenize(body, &members(&[])),
+                vec![MdSpan::Link {
+                    href: href.into(),
+                    label: "x".into()
+                }],
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn labeled_link_still_ends_at_the_first_unbalanced_closer() {
+        assert_eq!(
+            tokenize("[x](https://ocean.dev/a)b", &members(&[])),
+            vec![
+                MdSpan::Link {
+                    href: "https://ocean.dev/a".into(),
+                    label: "x".into()
+                },
+                MdSpan::Text("b".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn labeled_link_href_end_is_a_byte_offset() {
+        // The scan hands the caller an offset it slices `raw` with, and the
+        // arm's `consumed` arithmetic is byte-counted too — a char index would
+        // cut inside one of these characters.
+        assert_eq!(
+            tokenize("[é](https://ocean.dev/é(b))ø", &members(&[])),
+            vec![
+                MdSpan::Link {
+                    href: "https://ocean.dev/é(b)".into(),
+                    label: "é".into()
+                },
+                MdSpan::Text("ø".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn labeled_link_with_no_balanced_closer_is_not_a_labeled_link() {
+        // An unterminated href leaves the arm entirely, exactly as an absent
+        // `)` always has. The bracket text is literal; the bare-URL path then
+        // picks the tail up on its own, which is why this is not one Text run.
+        for body in ["[x](https://ocean.dev/a", "[x](https://ocean.dev/a(b)"] {
+            let spans = tokenize(body, &members(&[]));
+            assert_eq!(spans.len(), 2, "{body}");
+            assert_eq!(spans[0], MdSpan::Text("[x](".into()), "{body}");
+            let href = body.strip_prefix("[x](").expect("literal prefix");
+            assert_eq!(
+                spans[1],
+                MdSpan::Link {
+                    href: href.into(),
+                    label: href.into()
+                },
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn labeled_link_scan_stops_at_a_space_instead_of_eating_the_sentence() {
+        // Balancing on its own is unbounded: one unmatched `(` in the href and
+        // the scan would run to a `)` further down the sentence, absorbing the
+        // words — and any markup between them — into the href. Nothing typed
+        // may leave the transcript, so the space ends the scan and the whole
+        // bracket form declines.
+        assert_eq!(
+            tokenize(
+                "[docs](https://ocean.dev/a(b) and **ship** it)",
+                &members(&[])
+            ),
+            vec![
+                MdSpan::Text("[docs](".into()),
+                MdSpan::Link {
+                    href: "https://ocean.dev/a(b)".into(),
+                    label: "https://ocean.dev/a(b)".into()
+                },
+                MdSpan::Text(" and ".into()),
+                MdSpan::Bold("ship".into()),
+                MdSpan::Text(" it)".into()),
+            ]
+        );
+        // Same bound on the literal-text fallback, where the href the widened
+        // scan would have built fails the scheme gate rather than passing it.
+        assert_eq!(
+            tokenize("[a](http://x.dev/y(z) **bold** ) tail", &members(&[])),
+            vec![
+                MdSpan::Text("[a](".into()),
+                MdSpan::Link {
+                    href: "http://x.dev/y(z)".into(),
+                    label: "http://x.dev/y(z)".into()
+                },
+                MdSpan::Text(" ".into()),
+                MdSpan::Bold("bold".into()),
+                MdSpan::Text(" ) tail".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn balanced_parens_do_not_smuggle_an_href_past_the_scheme_gate() {
+        for body in ["[x](javascript:alert((1)))", "[x](ftp://ocean.dev/a(b))"] {
+            assert_eq!(
+                tokenize(body, &members(&[])),
+                vec![MdSpan::Text(body.into())],
+                "{body}"
             );
         }
     }
