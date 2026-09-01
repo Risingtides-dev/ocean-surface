@@ -5487,3 +5487,70 @@ about resume provenance rather than about the count. Its failure text now says
 so out loud -- if you have just added a caller, the count is the ask, not the
 failure: check which cursor your call hands over, then bump the number.
 _________________________________________________________________________________ 05:28 loop/surface-refresh-open-transcript-discards-the-cursor-and-silently-keeps-one-page
+
+time:      [07:10] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-closed-room-audit-view]
+type:      bug-report
+area:      frontend
+
+Read the closedness marker ocean-os#434 landed, so a soft-closed room stops
+pretending to be alive. `/snapshot` has always fallen through to the daemon's
+soft-closed audit view (OCEAN-170), and since dbd3d220 the body says which of
+the two arms answered -- `closed`, a plain bool, true exactly when the open-room
+read missed. That flag is the ONLY discriminator on the wire: closing a room
+stamps `closed_at` and leaves the access row alone, so a closed room answers
+200, carries its transcript, and goes on projecting whatever access it had --
+`Local` for a room that never had an access row (every purely local room, and
+the daemon's own soft-closed fixture), an unchanged `Live` or `Revoked` with its
+members and outbox for a federated one. #187 moved hydration onto `/snapshot` and
+inherited the problem it fixes -- `room_get`'s 404 used to BE the signal -- so
+until now a finished room painted its transcript above an `EventSource`
+reconnecting forever and a composer whose every send 404d in silence. Now
+`open_room` decodes `closed` with `#[serde(default)]` (the contract's additive
+rule: a pre-field daemon says nothing and nothing means open), publishes it as
+`Rooms::closed` beside `access`, and on true opens no `EventSource` AT ALL. The
+gate is at the call site rather than inside `start_live_tail` because that
+function is an unconditional reconnect loop with no stop condition in it; the
+only connection that never reconnects is the one never opened. Closedness is a
+second axis and not derivable from access, so the write half went through one
+new `composer_writes_allowed(access, closed)` beside `access_allows_writes`
+rather than a second copy of the question at each site: `post_message` and all
+four `disabled=` bindings plus both send handlers now ask it, and the composer
+carries a sentence saying the room is closed and why nothing will send -- for an
+empty closed room that notice is the only thing on the pane, since the
+transcript's own empty state is suppressed until the tail reaches Live and this
+room's tail never starts. The two rails documented as deliberately keeping the
+composer's gate (invite, repo) were left alone: minting into a frozen room is
+plausibly also dead, but that is a separate ruling and this slice does not make
+it. The outbox Retry button in the same pane was a harder case and is gated
+here: a closed FEDERATED room still carries its outbox, and the daemon's
+`retry_failed_outbox` gates on the room EXISTING rather than on `closed_at`, so
+a press in the "frozen" view answers 202 and requeues a federated send. It now
+asks closedness both where it is painted and at `retry_outbox`'s head, while the
+outbox rows themselves stay visible as part of the record. Six tests: a decode
+unit test proving absent reads as OPEN and true reads as closed on one fixture,
+and five guards in a new `tests/closed_room_audit_view.rs` naming the call site,
+counting `start_live_tail`'s one caller and the composer gate's six sites,
+pinning the notice and its stylesheet rule, and holding both halves of the retry
+gate. Ten mutations run individually with the full suite executed each time:
+nine are caught by NOTHING in this repository except the new file, including one
+where five of six composer sites stay correct and the sixth drifts. The first
+mutation pass was thrown away and redone -- it
+reverted by swapping text back, and deleting `if !closed { ... }` leaves the
+`start_live_tail` line it wrapped, so the reverse swap was a no-op and seven
+runs measured a tree that still had the first mutation applied. Revert by
+writing the original bytes back and read the failing test's NAME, not its
+colour. Also corrected the scout's premise in passing: there is no visible
+"Reconnecting" indicator to replace -- `tail_state` has exactly one reader in
+the whole crate, `transcript_tail_is_live`, which only suppresses the empty
+state -- so the visible terminal state had to be built, not swapped. Review sent
+this back for the record rather than the mechanism, and both findings held up
+against ocean-os `origin/main`: the first draft claimed six times that a closed
+room projects `Local` "identical to every live local room", which is true only
+of a room with no access row (`SqliteRoomStore::room_access`), and that false
+premise is what hid the ungated Retry button. Both are fixed above. The invite
+and repo rails stay deferred -- they fail loudly, which retry did not. Frozen
+gate green, all six: fmt --check, wasm32 clippy -D warnings, wasm32 check, proxy
+check, wasm32 test --no-run, and the host suite at 1295 passing.
+_________________________________________________________________________________ 07:10 loop/surface-closed-room-audit-view

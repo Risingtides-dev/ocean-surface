@@ -753,6 +753,20 @@
   border-top: 1px solid var(--border-subtle);
 }
 
+/* The reason a dead composer is dead. Sits above the row rather than replacing
+   it: the input stays visible and disabled, so the room still looks like a room
+   you are reading and not a pane that failed to load. */
+.rooms-workspace__composer-closed {
+  margin-bottom: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--fg-3);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .rooms-workspace__composer-row {
   display: flex;
   gap: 8px;
