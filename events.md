@@ -5096,3 +5096,62 @@ native 1233/1233 plus 44 integration, and host `clippy --all-targets --
 -D warnings`, which is the only lane that lints the `mod tests` this diff grows
 and is not yet in the frozen list.
 _________________________________________________________________________________
+
+time:      [00:56] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-deploy-guard-destroys-the-developers-trunk-build]
+type:      bugfix
+area:      infra
+
+The deployment guard destroyed the tree it guards. `scripts/surface-auto-deploy.test.mjs`
+makes five child invocations of the auto-deploy rail and four of them — the two
+promotions, the invalid-bundle case, and the marker setup for the no-op — passed
+`OCEAN_SURFACE_STATE_DIR` without `OCEAN_SURFACE_REPO`, so the rail fell back to
+its default at `deploy/ocean-surface-auto-deploy.sh:10`, which is the checkout
+the script lives in. `promote_bundle` then `rm -rf`s `$REPO/dist` and refills it
+by rsync from the bundle it was handed, and `rebuild_extension` does the same to
+`$REPO/extension/dist`. The bundle it is handed here is a fixture: a 47-byte
+index.html, a 20-byte js, a five-byte wasm. Reproduced at 536282b by fabricating
+a hashed Trunk build — `ocean-surface-ui-DEADBEEF{.js,_bg.wasm}`,
+`tokens-DEADBEEF.css`, `fonts/` — checksumming it, running the guard, and
+checksumming again: every file gone, the fonts directory gone, the stylesheet
+gone, all of it replaced by the five-byte fixture wasm under both `dist/` and
+`extension/dist/`. In a checkout that holds no build (CI, a fresh clone) the
+same run conjures both directories out of nothing — which is the state the
+extension inventory guard reports as unbuilt, so it would have blamed the
+stylesheet inventory for a mess this guard made.
+
+All five now point at a `repo-stub` under the tmpdir the test already creates.
+On the `--promote` path three `$REPO` sites run and all three land in scratch:
+`$REPO/dist`, `$REPO/extension/dist` by way of `rebuild_extension`, and the
+`git -C "$REPO" diff` inside `note_tauri_rebuild_needed`, already
+`2>/dev/null || true` and so unable to fail on a non-repo path. The stub is
+given an `extension/sidepanel.html` on purpose: without it `rebuild_extension`
+returns at its first line and the ~35 lines it runs under `set -e` on every real
+promotion — the hashed-to-stable js/wasm mapping, the CSS hash strip, the fonts
+copy, the png/webmanifest loop — would stop executing at all, trading the damage
+for a silent coverage hole in a guard whose CI step is named "Deployment
+promotion stays atomic". With the file present the `EXTENSION: rebuilt` path
+runs in full and writes into the stub.
+
+The fifth invocation, the full rail, needs the checkout no more than the others
+do: `OCEAN_SURFACE_TARGET_REV` hands it the revision, so it never calls `git`
+to resolve one, the `CURRENT:` short-circuit references `$REPO` nowhere, and
+the cleanup trap's `worktree remove` is skipped while `$worktree` is empty.
+Pointing it at the stub also makes the hazard fail closed rather than merely
+documented — if the marker written above it ever stops matching HEAD, the rail
+falls through to `git worktree add` and now errors against a non-repo instead of
+cutting a worktree and running a full cargo/trunk build inside a developer's
+checkout. Guarding all of it, a new assertion fingerprints `dist/` and
+`extension/dist` either side of the run and requires them unchanged; drop the
+`OCEAN_SURFACE_REPO` override and it fails with exactly the listing #180's
+reviewer saw, so the pin is load-bearing rather than decorative.
+
+`ci.yml`'s `guards` job still explains its step ORDER by the side effect this
+removes; that repair is a separate slice, deliberately left to read the landed
+fix instead of predicting it. Gate: `node --check` clean, all four node guards
+in `guards` order green, `cargo fmt --all -- --check` clean.
+`git rev-list --count HEAD..origin/main` is 0 and the diff touches no `.rs`
+file, so the cargo and wasm legs would re-derive main's own CI result on
+byte-identical crate trees.
+_________________________________________________________________________________
