@@ -10,10 +10,22 @@
 # redaction, a repaired separator — lands in the same hunk a concurrent append
 # touches, and union settles it by keeping both sides, silently restoring the
 # line the edit removed. Any merge carrying one has to be eyeballed; that it
-# came back clean is not evidence that it is right. Its quieter cost is the
-# eaten separator described in AGENTS.md, "Repository Ledger".
+# came back clean is not evidence that it is right.
+#
+# What union CANNOT do is keep two entries apart when they end with the same
+# line. It emits a line both sides added exactly once, so while every entry
+# closed with the same bare `___` rule, xdiff anchored each append before that
+# shared rule and one rule came out for two entries — the next `time:` header
+# then landed under the previous entry's prose and the two FUSED. #181 folded
+# onto #180 that way. A rule now carries the identity of the entry it closes
+# (`___ HH:MM <worktree>`), so no two appends share a line and there is nothing
+# left to fold. AGENTS.md, "Repository Ledger", has the format and the three
+# things it does not buy — this paragraph's non-append case among them; `node
+# scripts/check-ledger.mjs events.md` is the guard on the bare rules that
+# predate it, which an append-only ledger keeps forever.
 #
 # Deleting this file is caught by scripts/events-merge-driver.test.mjs, which
-# also pins the fold. CI's `guards` job runs it, so a delete goes red on the PR
-# rather than waiting for someone to remember.
+# also pins that property: a three-way parallel append keeps every entry's rule.
+# CI's `guards` job runs it, so a delete goes red on the PR rather than waiting
+# for someone to remember.
 events.md merge=union

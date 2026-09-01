@@ -405,24 +405,57 @@ carry its entry in the same diff, which the `ledger` job in
 Parallel branches each append their OWN entry — never settle an `events.md`
 merge by dropping the other branch's. `.gitattributes` gives the file
 `merge=union` so those appends stop conflicting at EOF, which they did the last
-time two surface slices landed in one wave (#174, hand-resolved). Two costs
-come with the driver, and both are counter-intuitive:
+time two surface slices landed in one wave (#174, hand-resolved).
 
-- **It eats a separator.** Union keeps a line both sides added only once, and
-  two appended entries share both a blank line and the trailing `___` rule. So
-  each extra parallel append folds one such pair away and the next entry's
-  `time:` header lands directly under the previous entry's prose: two entries
-  FUSE into one. No entry is lost and no conflict is raised.
-  `scripts/events-merge-driver.test.mjs` pins the fold, along with the driver
-  itself — but it reproduces the merge in a scratch repo and never reads THIS
-  file, so CI's `guards` job running it proves the driver, not the ledger.
-  **Run `node scripts/check-ledger.mjs events.md` on any change to
-  `events.md`, and again on either side of a rebase carrying one; the two
-  verdicts must match.** It is the only check that reads this file, it runs in
-  CI on PRs and on pushes to main, and its exit codes are 0 clean / 1 an entry
-  is open / 2 the check could not run at all. `--fix` closes what it finds, by
-  insertion only — never in CI, because that is a non-append edit to a file
-  under `merge=union` and the second cost below applies to it.
+**Close an entry with a separator that carries the entry's own identity:** 81
+underscores, a space, the entry's `HH:MM`, and the `worktree:` it was written on
+when it has one — `______ 23:52 loop/my-slice`. Union emits a line both sides
+added only ONCE, so two entries that end with the same line cannot be kept
+apart: while every entry closed with the same bare rule, each extra parallel
+append ate one separator and the next entry's `time:` header landed directly
+under the previous entry's prose, FUSING two entries into one. #181 folded onto
+#180 twelve minutes after #180 landed the check that catches it. `HH:MM` alone
+is not the identity — it is minute resolution, and two slices in one wave land
+in the same minute often enough to have done it; the worktree is what the clock
+cannot give, and two parallel appends are by definition on two different
+branches. An entry with no worktree was written on the main checkout, where
+there is one writer and nothing to race, so its minute alone is enough.
+
+The bare rule stays valid forever — the 276 entries written before this
+convention all close with one, and `events.md` is append-only — so the check
+accepts both forms and NEVER asserts that a separator is unique or
+identity-bearing; requiring the new form would red every historical entry and
+every entry a slice in flight is writing right now. What it asserts is that each
+entry is CLOSED before the next one starts, which is what a fold destroys. **Run
+`node scripts/check-ledger.mjs events.md` on any change to `events.md`, and again
+on either side of a rebase carrying one; the two verdicts must match.** It is the
+only check that reads this file, it runs in CI on PRs and on pushes to main, and
+its exit codes are 0 clean / 1 an entry is open / 2 the check could not run at
+all. `--fix` closes what it finds by insertion only and writes the identity form,
+so a repair does not hand the next merge the same shared line — never in CI,
+because that is a non-append edit to a file under `merge=union` and the last cost
+below applies to it. `scripts/events-merge-driver.test.mjs` proves a three-way
+parallel append keeps all four rules and fuses nothing, but it reproduces the
+merge in a scratch repo and never reads THIS file, so CI's `guards` job running
+it proves the driver, not the ledger.
+
+Three things the identity separator does NOT buy:
+
+- **An entry owns its rule, not the blank line after it.** That is a ruling, not
+  an omission: a blank line cannot be given an identity, so it is the one part
+  of the format no convention can protect from union. A merged append can land
+  its `time:` header flush against the previous rule — the three-way fixture in
+  `scripts/events-merge-driver.test.mjs` loses the blank at every join, while
+  wave 52's real rebase kept this repo's and ate the sibling's, so it turns on
+  where xdiff anchors rather than on anything worth asserting. The entry
+  boundary survives either way. Cosmetic; close it up by hand if you mind, and
+  never make the check red for it.
+- **It saves an entry's TAIL, not its HEAD.** Two appends written in the same
+  minute open with two identical lines (`time:` and `agent:`) and union folds
+  those the same way, so the second entry can arrive without its header while
+  its rule survives — and the check reads the survivor as one closed entry and
+  exits 0. Eyeball the head of a merged entry when two slices share a minute;
+  the fix belongs to the entry schema, not to the separator.
 - **union only fails safe for append/append.** A NON-append change to
   `events.md` — a correction, a redaction, a repaired separator — lands in the
   same tail hunk a concurrent append touches, and union settles it by keeping
