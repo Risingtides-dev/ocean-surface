@@ -5379,3 +5379,75 @@ wasm32-unknown-unknown` green. The new assertion was mutated to 3 to prove it is
 live and fails `2 !== 3`. Comments, one step name and one assertion -- no route,
 no schema, no wire field, so nothing to deploy or migrate.
 _________________________________________________________________________________ 03:13 loop/surface-ledger-needs-the-per-entry-identity-separator-too
+
+time:      [05:07] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-refresh-open-transcript-discards-the-cursor-and-silently-keeps-one-page
+type:      [bug-report]
+area:      [frontend]
+
+The rooms panel's catch-up read could only ever fetch 200 rows, once, and it
+took its starting point from the rows on screen -- one line below a doc comment
+declaring that a resume point belongs to the caller. `/transcript` has answered
+`next_seq` and `has_more` since OCEAN-249 and `TranscriptResponse` declared
+neither, so `refresh_open_transcript` did one `Request::get`, appended what came
+back and returned. The route's default page is 200 rows, so any of the four
+mutations that fire it -- join, leave, remove-participant, post-message -- kept
+the first 200 rows of a larger burst and silently dropped the rest. I took the
+brief's option (a) over deleting the path: the tail covers all four sites on a
+healthy connection, but this is also what runs when the tail is down, and a
+paging fallback is a smaller diff than proving a reconnecting SSE stream is the
+only catch-up a room ever needs. So the envelope now claims both fields and the
+read walks them, which is also the wave the `RoomSnapshotResponse` comment
+nominated to claim them -- there, they stay undecoded, because nothing there
+reads them and an unread field is the dead code the `-D warnings` release lane
+rejects.
+
+The provenance half is the same bug wearing different clothes and is fixed in
+the same pass. #185 gave `start_live_tail` a private `RwSignal` for its cursor,
+which left the module with two answers to "where does a resume come from": the
+tail's, seeded from the daemon's own `last_seq`, and the catch-up read's,
+re-derived from the painted rows. There is one now. `Rooms::resume_seq` is the
+open room's resume point -- the highest seq this client has ingested -- seeded by
+hydration through `start_live_tail`, advanced by the tail as frames land and by
+the catch-up read as pages land, cleared with the rest of the room state. The
+four call sites hand it over explicitly, which is the rule #185 stated and could
+not enforce. A useful side effect: a reconnecting tail now resumes past whatever
+a catch-up read pulled in while it was down, instead of replaying it.
+
+The walk is bounded at five pages -- 1000 rows, the same window a fresh open
+paints -- because an unbounded `while has_more` inside `spawn_local` against a
+12 000-row room is the full-table read the route's paging exists to avoid, and it
+would run on every join, leave, removal and send. Hitting the cap is not a gap:
+the tail holds its own server-side position and keeps delivering. The generation
+guard is re-checked before EVERY page rather than once at entry, since each page
+is an await and a room switched mid-walk must not have the next response
+appended under it.
+
+Scope note for the reviewer: the slice named `rooms.rs` and `events.md`, and I
+had to edit `crates/ocean-surface-ui/tests/room_hydration_resume.rs` as well.
+That guard is a source scanner and it pins the exact line #185 wrote --
+`let last_seq = RwSignal::new(resume_seq);` -- which is the line this change had
+to replace, so the slice was not doable without it. Rather than only re-aiming
+the needles I widened the file to the thing it is now about: the prohibition
+covers every `last_transcript_seq(&me.transcript` / `&self.transcript` in the
+module instead of just `RwSignal::new(last_transcript_seq(`, the four call sites
+are COUNTED rather than merely present (a `contains` stays green while three
+sites hand over the resume and the fourth re-derives one, which is exactly the
+bug), and the tail's advance and the walk's cursor are pinned too.
+
+Gate: all six frozen gates green, plus `RUSTFLAGS="-D warnings" cargo check -p
+ocean-surface-ui --target wasm32-unknown-unknown` -- the lane that would have
+caught a decoded-but-unread field -- and `cargo test -p ocean-surface-ui` at
+1241 unit tests and 4 in `room_hydration_resume`. Nine mutations run
+individually against this tree: the daemon's cursor demoted below the page
+fallback (`Some(399)` vs `Some(400)`), the `has_more` stop dropped (`Some(500)`
+vs `None`), `has_more`'s serde default removed (`missing field 'has_more'`), the
+page cap loosened by one (six URLs against five), the append guard widened to
+`<=` (`[1, 2, 2, 3]` vs `[1, 2, 3]`), the monotonic resume flattened (`Some(3)`
+vs `Some(9)`), one call site re-derived from the painted rows (reds both guards,
+`left: 3 right: 4`), the walk's `page.next_seq` argument nulled, and the tail's
+`advanced_resume_seq` replaced with a bare `Some(entry.seq)`. Client-side only --
+no route, no schema, no migration, and the daemon fields consumed have shipped
+since OCEAN-249 -- so there is nothing to deploy by hand.
+_________________________________________________________________________________ 05:07 loop/surface-refresh-open-transcript-discards-the-cursor-and-silently-keeps-one-page
