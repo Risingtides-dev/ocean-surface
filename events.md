@@ -5267,3 +5267,65 @@ URL test, plus 3 new guards), `cargo clippy -p ocean-surface-ui --all-targets --
 -D warnings` clean, `cargo fmt --check` clean, `RUSTFLAGS="-D warnings" cargo
 check -p ocean-surface-ui --target wasm32-unknown-unknown` clean.
 _________________________________________________________________________________
+time:      [02:55] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-ledger-needs-the-per-entry-identity-separator-too
+type:      refactor
+area:      infra
+
+Ported ocean-bedrock's per-entry identity separator into this repo's ledger
+tooling, closing the last divergence between the three copies of
+`check-ledger.mjs`. A rule may now be bare or carry the entry's own `HH:MM` and
+the `worktree:` it was written on: `SEPARATOR_RULE` accepts both forms and the
+bare one forever, `ruleWidth` measures the underscore RUN rather than the line so
+a suffix cannot widen the next repair, a new exported `entryIdentity` reads those
+two fields off the entry's own lines, and `--fix` writes the identity form so a
+repair does not hand the next merge the same shared line to fold on. The defect
+it closes is the one #181 hit twelve minutes after #180 landed the checker that
+caught it: union emits a line both sides added only once, so while every entry
+ended with the same bare rule, two parallel appends anchored before the rule they
+shared, one rule came out for two entries, and the second `time:` header landed
+directly on the first entry's prose. `scripts/events-merge-driver.test.mjs` has
+stopped pinning that fold as an accepted cost and pins the property instead — a
+three-way wave keeps all four rules, no header sits on prose, and the merged text
+comes back clean from the checker's own reading — plus a same-minute pair,
+because two slices in one wave share a minute often and then the worktree is the
+whole of the identity. Its `rules()` matched bare rules only, which would have
+quietly stopped counting an identity-bearing rule and let the fold assertion go
+soft, and its failure message told the next reader to delete the check; both are
+gone. `scripts/check-ledger.test.mjs` was outside the backlog entry's scope and
+is where the implementation is actually proven: 17 tests now, covering an entry
+with a worktree, one written on the main checkout without one, one that can name
+neither and still gets a bare rule, and two sharing a minute.
+
+The blank line between a rule and the next header is now RULED rather than left
+open for a third wave: an entry owns its RULE and never the blank, because a
+blank line cannot be given an identity and is therefore the one part of this
+format no convention can protect from union. Measured rather than assumed — the
+new three-way fixture loses the blank at every join while keeping every rule, and
+wave 52's real rebase kept this repo's blank and ate the sibling's — so a lost
+blank is cosmetic, hand-repaired if anyone minds, and never red. AGENTS.md now
+carries the schema clause, that ruling, and the two limits identity does not buy:
+it saves an entry's tail and not its head (two same-minute appends still fold
+their identical opening lines, and the checker reads the survivor as closed and
+exits 0), and union still fails open for a non-append change. Uniqueness stays
+deliberately unasserted; a ready backlog slice owns that ruling for all three
+repos, and inventing a fourth shape here is the divergence this port exists to
+close. For the same reason `entryIdentity` keeps whatever the entry wrote,
+brackets included — 82 of this ledger's 251 `worktree:` fields are bracketed, and
+normalising them would be a local rule the sibling copies do not have.
+
+Gate: `node --test scripts/check-ledger.test.mjs` 17/17, `node
+scripts/events-merge-driver.test.mjs` 24 assertions green, `node
+scripts/check-ledger.mjs events.md` clean at 276 entries, `node --check` clean on
+all three touched files, and `RUSTFLAGS="-D warnings" cargo check -p
+ocean-surface-ui --target wasm32-unknown-unknown` green even though the diff
+touches no `.rs` file. Each of the seven executable changes was then mutated one
+at a time: narrowing `SEPARATOR_RULE` back to bare-only reds 7 tests, measuring
+the whole line for width reds 1, dropping the worktree half of `entryIdentity`
+reds 8 and dropping the time half reds 8, making `--fix` write a bare rule reds 7,
+and in the merge guard, counting bare rules only or giving the fixtures a shared
+rule both reproduce the original defect — 2 rules for 4 entries with slice B's
+header on slice A's prose. The worktree mutation is the one that matters: it is
+exactly what stayed green in bedrock's first port and cost it a refine pass.
+_________________________________________________________________________________ 02:55 loop/surface-ledger-needs-the-per-entry-identity-separator-too
