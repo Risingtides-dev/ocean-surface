@@ -4927,3 +4927,56 @@ there. And the AGENTS.md edit above had left `**Run \`node` orphaned as a
 two-word line mid-sentence; the bullet is reflowed. Prose only, no step, job,
 condition or assertion touched.
 _________________________________________________________________________________
+
+time:      [20:58] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-autolink-trims-a-trailing-paren-off-a-bare-url]
+type:      bug-report
+area:      frontend
+
+A bare autolink whose URL legitimately ends in a bracket pointed at the wrong
+page. `tokenize` trimmed its tail with `trim_end_matches(['.', ',', ';', ':',
+'!', '?', ')'])`, which strips every trailing character in the set
+unconditionally, so `https://en.wikipedia.org/wiki/Ocean_(disambiguation)`
+produced an href ending at `..._(disambiguation`: a real destination, just not
+the written one. It is not a misdirection — the label is the same trimmed
+string, so the anchor cannot claim a destination it does not have, which is why
+this path was accepted as-is once before — but it is still a link that goes
+somewhere else, and GitHub matrix-job URLs hit it as readily as wiki links. The
+same function carried a second, unfiled half of the bug: `autolink_boundary`
+opens a link after `(`, `[`, `<` or `{`, while the trim set closed only `)`.
+`<` and `>` were covered because the terminator scan stops on them, but `]` and
+`}` were neither terminated nor trimmed, so `[https://ocean.dev/a]` kept a
+bracket in its href. An opener set and a closer set that disagree is the defect;
+both halves are the same defect.
+
+Both are now `trim_autolink_tail`, balanced the way the CommonMark autolink
+extension balances parens: strip sentence punctuation, then peel a trailing
+closer only while it outnumbers its opener inside the candidate, and repeat.
+That keeps the wiki link whole and still unwraps `(https://ocean.dev/a)` — zero
+`(` inside the candidate against one `)`, so the wrapper is unbalanced and goes
+— which is the case that matters most, because `autolink_boundary` accepting a
+preceding `(` is exactly what makes wrapping common. Whatever survives stays in
+the href and is consumed by `i += url.len()`; whatever is peeled is re-scanned
+as text on the next iteration, and the new tests pin that by asserting the
+peeled closer comes back as its own Text span rather than vanishing.
+
+Five tests, one per behaviour, each proved to have teeth by planting the
+matching mutation and watching only that test go red: a balanced bracket of
+each family is kept (dies on unconditional peel), a URL wrapped in each family
+loses its closer to the following text (dies on never-peel, and separately on
+deleting the `]` arm or the `}` arm), sentence punctuation after a balanced
+bracket still trims, punctuation uncovered by a peel is trimmed too, and nested
+wrapping peels every unmatched closer (dies if the loop degrades to one pass).
+That fourth test exists because the mutation run demanded it: hoisting the
+punctuation strip out of the loop — a plausible reading of "strip first, then
+peel" — left the other four green while `(https://ocean.dev/a.)` kept a
+trailing period in its href, so the re-strip after a peel was live behaviour
+nothing held. The existing `bare_url_autolinks_and_trims_trailing_punctuation`
+is untouched and still green; it only ever pinned a trailing comma, so nothing
+on main asserted the `)` behaviour this changes.
+
+One file, `crates/ocean-surface-ui/src/room_markdown.rs`. Gate green: fmt,
+wasm32 clippy `-D warnings`, wasm32 check, proxy check, wasm32 test `--no-run`,
+native 1227/1227 plus 44 integration, `RUSTFLAGS="-D warnings"` wasm32 check.
+_________________________________________________________________________________

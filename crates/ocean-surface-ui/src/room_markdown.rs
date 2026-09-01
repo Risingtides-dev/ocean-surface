@@ -160,6 +160,31 @@ fn autolink_boundary(prev: Option<char>) -> bool {
     prev.is_none_or(|c| c.is_ascii_whitespace() || matches!(c, '(' | '[' | '<' | '{'))
 }
 
+/// Trailing punctuation belongs to the sentence, not to the URL — except a
+/// bracket the URL opened itself, as in `…/Ocean_(disambiguation)`. So peel a
+/// closer only while it outnumbers its opener inside the candidate: that keeps
+/// the wiki link whole and still unwraps `(https://ocean.dev/a)`, which
+/// `autolink_boundary` accepting `(` makes the common case. The closers here
+/// have to mirror that opener set or a URL written inside `[…]` keeps a
+/// bracket in its href; `<` and `>` need no entry because the terminator scan
+/// already stops on them.
+fn trim_autolink_tail(candidate: &str) -> &str {
+    let mut url = candidate;
+    loop {
+        url = url.trim_end_matches(['.', ',', ';', ':', '!', '?']);
+        let (closer, opener) = match url.chars().last() {
+            Some(')') => (')', '('),
+            Some(']') => (']', '['),
+            Some('}') => ('}', '{'),
+            _ => return url,
+        };
+        if url.matches(closer).count() <= url.matches(opener).count() {
+            return url;
+        }
+        url = &url[..url.len() - 1];
+    }
+}
+
 fn flush(out: &mut Vec<MdSpan>, text: &mut String) {
     if !text.is_empty() {
         out.push(MdSpan::Text(std::mem::take(text)));
@@ -261,7 +286,7 @@ pub fn tokenize(body: &str, members: &HashSet<String>) -> Vec<MdSpan> {
             let end = rest
                 .find(|ch: char| ch.is_whitespace() || matches!(ch, '<' | '>' | '"'))
                 .unwrap_or(rest.len());
-            let url = rest[..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')']);
+            let url = trim_autolink_tail(&rest[..end]);
             let scheme_len = if rest
                 .get(..8)
                 .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
@@ -472,6 +497,97 @@ mod tests {
                     label: "https://ocean.dev/a".into()
                 },
                 MdSpan::Text(", ok".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn bare_url_keeps_a_bracket_it_opened_itself() {
+        for url in [
+            "https://en.wikipedia.org/wiki/Ocean_(disambiguation)",
+            "https://ocean.dev/a[i]",
+            "https://ocean.dev/a{i}",
+        ] {
+            assert_eq!(
+                tokenize(&format!("see {url} ok"), &members(&[])),
+                vec![
+                    MdSpan::Text("see ".into()),
+                    MdSpan::Link {
+                        href: url.into(),
+                        label: url.into()
+                    },
+                    MdSpan::Text(" ok".into()),
+                ],
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn bare_url_inside_a_bracket_pair_leaves_the_closer_as_text() {
+        // Every opener `autolink_boundary` starts a link after has to have its
+        // closer peeled back off, or the wrapper ends up in the href.
+        for (open, close) in [('(', ')'), ('[', ']'), ('{', '}')] {
+            let body = format!("{open}https://ocean.dev/a{close}");
+            assert_eq!(
+                tokenize(&body, &members(&[])),
+                vec![
+                    MdSpan::Text(open.to_string()),
+                    MdSpan::Link {
+                        href: "https://ocean.dev/a".into(),
+                        label: "https://ocean.dev/a".into()
+                    },
+                    MdSpan::Text(close.to_string()),
+                ],
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn sentence_punctuation_after_a_balanced_bracket_still_trims() {
+        let url = "https://en.wikipedia.org/wiki/Ocean_(disambiguation)";
+        assert_eq!(
+            tokenize(&format!("see {url}."), &members(&[])),
+            vec![
+                MdSpan::Text("see ".into()),
+                MdSpan::Link {
+                    href: url.into(),
+                    label: url.into()
+                },
+                MdSpan::Text(".".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn punctuation_uncovered_by_a_peel_is_trimmed_too() {
+        // The period is behind the wrapper paren, so it only becomes the tail
+        // once that paren is off — the strip has to run again after a peel.
+        assert_eq!(
+            tokenize("(see https://ocean.dev/a.)", &members(&[])),
+            vec![
+                MdSpan::Text("(see ".into()),
+                MdSpan::Link {
+                    href: "https://ocean.dev/a".into(),
+                    label: "https://ocean.dev/a".into()
+                },
+                MdSpan::Text(".)".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_wrapping_peels_every_unmatched_closer() {
+        assert_eq!(
+            tokenize("see ((https://ocean.dev/a)) ok", &members(&[])),
+            vec![
+                MdSpan::Text("see ((".into()),
+                MdSpan::Link {
+                    href: "https://ocean.dev/a".into(),
+                    label: "https://ocean.dev/a".into()
+                },
+                MdSpan::Text(")) ok".into()),
             ]
         );
     }
