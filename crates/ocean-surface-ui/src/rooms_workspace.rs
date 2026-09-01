@@ -231,41 +231,20 @@ fn create_trigger_row_dead_here(toggle: TriggerToggle) -> Option<&'static str> {
 }
 
 /// Whether the trigger policy accepts a write under this access projection —
-/// the rail-local counterpart of [`access_allows_writes`], and deliberately
-/// more permissive than it.
+/// this rail's name for [`local_store_write_gate`], and the section where that
+/// ruling was first made.
 ///
-/// The two gates ask different questions. [`access_allows_writes`] asks "can
-/// this write reach a peer?", which is the right question for the composer: a
-/// message that never leaves is a lie about what was said. The trigger policy
-/// is not that kind of write. It is a field on a row in THIS daemon's store,
+/// The trigger policy is a field on a row in THIS daemon's store:
 /// `PATCH /v1/rooms/persistent/{key}` carries no access check of any kind, and
 /// both readers of the policy — the local post path and the federation
 /// bridge's ingest — read it back from that same store. A link that is down or
 /// coming back cannot make the write unlandable; it only delays the events the
-/// policy governs. So `Connecting` and `Recovering` keep this rail writable,
-/// and the loss they used to cause was the sharpest one available: a room
-/// stuck `Recovering` while every mention woke an agent gave the operator no
-/// way to turn `on_mention` off, at precisely the moment they wanted to.
-///
-/// `Revoked` stays held. The daemon would accept that PATCH too, but the
-/// operator has been removed from the room, and offering to configure a room
-/// you no longer stand in is offering an action that cannot mean anything to
-/// you again. Unknown access stays held for the weaker version of the same
-/// reason: it may yet resolve to `Revoked`, and a row that flips to disabled
-/// once the projection lands is worse than one that waits for it.
-///
-/// Matched exhaustively without a wildcard on purpose — a new access state
-/// must be ruled on here rather than quietly inheriting "writable".
+/// policy governs. The loss the composer's gate caused here was the sharpest
+/// one available: a room stuck `Recovering` while every mention woke an agent
+/// gave the operator no way to turn `on_mention` off, at precisely the moment
+/// they wanted to.
 fn trigger_policy_accepts_writes(access: Option<&RoomAccessProjection>) -> bool {
-    match access.map(|projection| projection.state) {
-        Some(
-            RoomAccessState::Local
-            | RoomAccessState::Connecting
-            | RoomAccessState::Live
-            | RoomAccessState::Recovering,
-        ) => true,
-        Some(RoomAccessState::Revoked) | None => false,
-    }
+    local_store_write_gate(access)
 }
 
 /// Whether a trigger row accepts a flip, and in which direction. The policy
@@ -444,6 +423,44 @@ pub(crate) fn access_allows_writes(access: Option<&RoomAccessProjection>) -> boo
         access.map(|a| a.state),
         Some(RoomAccessState::Local) | Some(RoomAccessState::Live)
     )
+}
+
+/// Whether a write that lands in THIS daemon's local store may proceed under
+/// this access projection — the rail-local counterpart of
+/// [`access_allows_writes`], and deliberately more permissive than it.
+///
+/// The two gates ask different questions. [`access_allows_writes`] asks "can
+/// this write reach a peer?", which is the right question for the composer and
+/// for anything that mints or drives federation: a message that never leaves is
+/// a lie about what was said. Most of what the right rail writes is not that
+/// kind of write. The trigger policy, a summarize run, an artifact and an
+/// attachment all land through the daemon's own store handle and announce
+/// themselves on the local event stream; ocean-os enqueues none of them to the
+/// federation outbox — a federated room's summary is documented local-only, the
+/// artifact routes write through `with_rooms` and publish a local wake, and the
+/// attachment module names the outbox nowhere at all. A link that is down or
+/// coming back cannot make such a write unlandable, so `Connecting` and
+/// `Recovering` keep these rails writable.
+///
+/// `Revoked` stays held. The daemon would accept those writes too, but the
+/// operator has been removed from the room, and offering to configure a room
+/// you no longer stand in is offering an action that cannot mean anything to
+/// you again. Unknown access stays held for the weaker version of the same
+/// reason: it may yet resolve to `Revoked`, and a control that flips to
+/// disabled once the projection lands is worse than one that waits for it.
+///
+/// Matched exhaustively without a wildcard on purpose — a new access state
+/// must be ruled on here rather than quietly inheriting "writable".
+fn local_store_write_gate(access: Option<&RoomAccessProjection>) -> bool {
+    match access.map(|projection| projection.state) {
+        Some(
+            RoomAccessState::Local
+            | RoomAccessState::Connecting
+            | RoomAccessState::Live
+            | RoomAccessState::Recovering,
+        ) => true,
+        Some(RoomAccessState::Revoked) | None => false,
+    }
 }
 
 /// Whether this room federates through Bedrock at all. Only a federated room
@@ -4007,6 +4024,10 @@ pub fn RoomsWorkspace(
                 // owns a mint's in-flight state. Unlike the repo section it
                 // renders for a Local room too: minting is how a Local room
                 // becomes federated, so hiding it there hides the only door.
+                // It keeps the COMPOSER's gate, and is one of the two rails
+                // that should: a mint registers this room with the federation
+                // control plane, so a code minted over a link that is down is
+                // a code no second person can ever redeem.
                 <crate::room_invite::RoomInvite
                     rooms=rooms
                     state=invite
@@ -4091,11 +4112,16 @@ pub fn RoomsWorkspace(
                 // was handed. A sibling of the roster for the same reason as
                 // the files below — that closure re-runs on every access
                 // change, and this section owns a run's in-flight state.
+                // A run reads this room's own transcript and amends the one
+                // `room-summary` artifact in this daemon's store — ocean-os
+                // documents a federated room's summary as local-only and never
+                // enqueues it — so the rail takes the local-store gate and
+                // stays usable while the link is coming back.
                 <crate::room_summary::RoomSummary
                     rooms=rooms
                     state=summary
                     writes_allowed=Signal::derive(move || {
-                        access_allows_writes(rooms.access.get().as_ref())
+                        local_store_write_gate(rooms.access.get().as_ref())
                     })
                     members=member_ids
                 />
@@ -4105,12 +4131,15 @@ pub fn RoomsWorkspace(
                 // it owns a write's in-flight state and an open editor. The
                 // rail holds only the compact list; reading and writing happen
                 // in the panel it opens, because 220px is not a measure prose
-                // can be edited at.
+                // can be edited at. Create and amend both land through the
+                // daemon's own store handle and announce themselves on the
+                // local event stream, with no outbox row anywhere on either
+                // path, so this rail takes the local-store gate too.
                 <crate::room_artifacts::RoomArtifacts
                     rooms=rooms
                     state=artifacts
                     writes_allowed=Signal::derive(move || {
-                        access_allows_writes(rooms.access.get().as_ref())
+                        local_store_write_gate(rooms.access.get().as_ref())
                     })
                     members=member_ids
                 />
@@ -4118,18 +4147,25 @@ pub fn RoomsWorkspace(
                 // Room context files. A sibling of the roster, not a child of
                 // the closure above: that closure re-runs on every access
                 // change, and this section owns an upload's in-flight state.
+                // An upload writes bytes and a row on THIS host and nothing
+                // else — the daemon's attachment module names the federation
+                // outbox nowhere — so the local-store gate again.
                 <crate::attachments::RoomAttachments
                     rooms=rooms
                     state=attachments
                     writes_allowed=Signal::derive(move || {
-                        access_allows_writes(rooms.access.get().as_ref())
+                        local_store_write_gate(rooms.access.get().as_ref())
                     })
                 />
 
                 // The room's bound repo — see, clone and build it from the
                 // room. A sibling for the same reason as its neighbours, and
                 // it renders NOTHING for a Local room: no Bedrock workspace
-                // exists there, and a refusal would read as breakage.
+                // exists there, and a refusal would read as breakage. The
+                // other rail that keeps the COMPOSER's gate, and the clearest
+                // case for it: every command here — bind, clone, build, CI —
+                // is executed by a Bedrock container, so a link that is down
+                // is a command that cannot run at all.
                 <crate::room_repo::RoomRepo
                     rooms=rooms
                     state=repo
@@ -5598,6 +5634,131 @@ mod tests {
             let access = test_access(state);
             assert_eq!(access_allows_writes(Some(&access)), writes);
             assert_eq!(access_banner(Some(&access)), banner);
+        }
+    }
+
+    /// The rail-local gate stated per state, and stated as a difference from
+    /// the composer's so the divergence is pinned rather than re-derived from
+    /// two matrices. They part company on exactly the two non-terminal states:
+    /// a write that has to reach a peer cannot land while the link is down or
+    /// coming back, and a write that lands in this daemon's store is untouched
+    /// by either.
+    #[test]
+    fn every_access_state_pins_the_local_store_write_gate() {
+        // Unknown access is the one place the two gates must never diverge:
+        // nothing is known about the room yet, and a control that flips to
+        // disabled once the projection lands is worse than one that waits.
+        assert!(!local_store_write_gate(None));
+        assert!(!access_allows_writes(None));
+
+        let cases = [
+            (RoomAccessState::Local, true),
+            (RoomAccessState::Connecting, true),
+            (RoomAccessState::Live, true),
+            (RoomAccessState::Recovering, true),
+            (RoomAccessState::Revoked, false),
+        ];
+        for (state, writable) in cases {
+            let access = test_access(state);
+            assert_eq!(local_store_write_gate(Some(&access)), writable, "{state:?}");
+
+            let diverges = matches!(
+                state,
+                RoomAccessState::Connecting | RoomAccessState::Recovering
+            );
+            assert_eq!(
+                local_store_write_gate(Some(&access)) != access_allows_writes(Some(&access)),
+                diverges,
+                "{state:?}"
+            );
+        }
+    }
+
+    /// Which gate a rail takes is a `Signal::derive` inside the view, so no
+    /// unit test of the predicates can reach it: both gates stay pure and
+    /// correct, and every test above stays green while a section is wired to
+    /// the wrong one. Read the source and assert on it instead, the way the
+    /// trigger section's guard does, with the needles concatenated at runtime
+    /// so this test's own literals cannot stand in for the code it scans.
+    ///
+    /// The ruling is per rail, so the table states it once. Summary, artifacts
+    /// and attachments all write through the daemon's own store handle with no
+    /// outbox row on any path, and take the local gate. Invite mints
+    /// federation and repo drives a Bedrock container, so both keep the
+    /// composer's — a code nobody can redeem and a build nothing can run are
+    /// not writes a down link merely delays.
+    #[test]
+    fn each_rail_takes_the_gate_its_write_destination_earns() {
+        let markup = include_str!("rooms_workspace.rs");
+        let local = ["local_store", "_write_gate"].concat();
+        let peer = ["access_allows", "_writes"].concat();
+
+        let sections = [
+            (["<crate::room_summary", "::RoomSummary"].concat(), true),
+            (["<crate::room_artifacts", "::RoomArtifacts"].concat(), true),
+            (["<crate::attachments", "::RoomAttachments"].concat(), true),
+            (["<crate::room_invite", "::RoomInvite"].concat(), false),
+            (["<crate::room_repo", "::RoomRepo"].concat(), false),
+        ];
+
+        for (tag, writes_land_locally) in sections {
+            let at = markup
+                .find(&tag)
+                .unwrap_or_else(|| panic!("{tag} must be mounted from this file"));
+            let section = &markup[at..];
+            let section = &section[..section
+                .find("/>")
+                .unwrap_or_else(|| panic!("{tag} must close in this file"))];
+            assert!(
+                section.contains("writes_allowed="),
+                "{tag} must carry a write gate"
+            );
+
+            let (wanted, refused) = if writes_land_locally {
+                (&local, &peer)
+            } else {
+                (&peer, &local)
+            };
+            assert!(
+                section.contains(wanted.as_str()),
+                "{tag} must take `{wanted}`"
+            );
+            assert!(
+                !section.contains(refused.as_str()),
+                "{tag} must not take `{refused}` — which gate a rail takes IS \
+                 its ruling on whether its write has to reach a peer"
+            );
+        }
+    }
+
+    /// Three sibling files carried a sentence this ruling falsifies: that the
+    /// control and the composer can never disagree about the same room's
+    /// access projection. They can now, and on purpose. A stale sentence there
+    /// is worse than none — it is the argument a future reader would use to
+    /// wire the rail back to the composer's gate — so pin both halves: the
+    /// claim is gone, and the gate that replaced it is NAMED beside the prop
+    /// that carries it. The second needle is the gate's identifier rather than
+    /// a sentence, because a prose needle breaks on the next doc rewrap and
+    /// this guard has to survive one.
+    #[test]
+    fn no_moved_rail_still_claims_it_cannot_disagree_with_the_composer() {
+        let stale = ["composer can never disagree", " about the same room"].concat();
+        let ruling = ["local_store", "_write_gate"].concat();
+        for (name, source) in [
+            ("room_summary.rs", include_str!("room_summary.rs")),
+            ("room_artifacts.rs", include_str!("room_artifacts.rs")),
+            ("attachments.rs", include_str!("attachments.rs")),
+        ] {
+            assert!(
+                !source.contains(&stale),
+                "{name} still claims this control and the composer can never \
+                 disagree — they now do, in `Connecting` and `Recovering`"
+            );
+            assert!(
+                source.contains(&ruling),
+                "{name} must name the gate it actually takes, so a revert to \
+                 the composer's leaves a doc that reads as wrong"
+            );
         }
     }
 

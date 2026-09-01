@@ -25,9 +25,11 @@
 //! 3. **`uploader_id` is caller-asserted and gated.** An id that resolves to an
 //!    Agent or System participant comes back 403 `forged_attachment_author`:
 //!    an agent's file is written by the daemon's own convene path, never by a
-//!    client claiming its identity. So the control is gated on the same two
-//!    conditions the composer is — a resolved identity, and an access
-//!    projection that permits writes.
+//!    client claiming its identity. So the control is gated on two conditions:
+//!    a resolved identity, and an access projection that permits a write to
+//!    this daemon's own store — the composer's SHAPE, but not the composer's
+//!    gate, which additionally asks whether the write can reach a peer (see
+//!    `local_store_write_gate`).
 //!
 //! Everything decided before a request goes out — the size ceiling, the empty
 //! body, an unusable filename, how a typed refusal should read — is a free
@@ -505,8 +507,10 @@ impl RoomAttachmentsState {
 /// `room_repo` do it.
 ///
 /// `writes_allowed` is supplied by the workspace rather than recomputed here so
-/// this control and the composer can never disagree about the same room's
-/// access projection.
+/// one place holds the ruling for every rail. It is deliberately NOT the
+/// composer's gate: an upload writes bytes and a row on this host and is never
+/// enqueued for a peer, so a link that is down or coming back does not hold it
+/// (see `local_store_write_gate`).
 #[component]
 pub fn RoomAttachments(
     rooms: Rooms,
@@ -527,8 +531,9 @@ pub fn RoomAttachments(
 
     // Identity is deliberately NOT part of this predicate. `identity_resolved`
     // reads its signals untracked, so a control disabled on it would never
-    // re-enable when bootstrap answers; the composer gates on access here and
-    // refuses on identity at the action, and the file picker does the same.
+    // re-enable when bootstrap answers; the composer gates on access at the
+    // control and refuses on identity at the action, and the file picker does
+    // the same — with its own access gate, not the composer's.
     let can_upload = move || {
         writes_allowed.get()
             && !state.uploading.get()
