@@ -117,7 +117,9 @@ fn the_catchup_read_is_handed_the_rooms_resume_point_and_pages_on_the_daemons() 
             .count(),
         4,
         "every catch-up call site must hand over the room's resume point — the \
-         same signal the tail seeds and advances",
+         same signal the tail seeds and advances. If you have just ADDED a \
+         caller, this count is the ask, not the failure: check which cursor \
+         your call hands over, then bump the number",
     );
     assert!(
         rooms.contains("transcript_catchup_cursor(pages_read,page.has_more,page.next_seq,covered)"),

@@ -5451,3 +5451,39 @@ vs `Some(9)`), one call site re-derived from the painted rows (reds both guards,
 no route, no schema, no migration, and the daemon fields consumed have shipped
 since OCEAN-249 -- so there is nothing to deploy by hand.
 _________________________________________________________________________________ 05:07 loop/surface-refresh-open-transcript-discards-the-cursor-and-silently-keeps-one-page
+
+time:      [05:28] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-refresh-open-transcript-discards-the-cursor-and-silently-keeps-one-page
+type:      [review]
+area:      [frontend]
+
+Refinement pass on the same branch against two review findings, both doc
+comments in `rooms.rs`, no code touched. The first is the one that mattered:
+`refresh_open_transcript` introduced itself as "the catch-up for the four
+mutations that write a row without going through the tail", and the tail does
+carry those rows -- its own `is_roster_change` arm exists for the
+ParticipantJoined/ParticipantLeft frames join/leave/remove write, and
+post_message's row is an ordinary message frame. The same file says the
+opposite at the `MAX_TRANSCRIPT_CATCHUP_PAGES` constant, "the live tail owns
+everything beyond the cap", which is the sentence the five-page bound is
+justified by -- so the module was telling two stories about who owns those
+rows, and the false one is exactly the premise a reader would use to argue the
+cap is unsafe and must go. It now says what it is: the fallback for the day the
+tail is down, with the tail carrying those rows on a live connection. The
+second claimed `append_transcript_page` applies "the same ascending-only rule
+the live tail's own ingest applies"; the tail's ingest dedupes on `seq`
+equality across the whole vector and pushes in arrival order, with no ordering
+rule at all, while the page append rejects anything not strictly past the last
+painted row. The difference is load-bearing -- it is why a tail frame landing
+after a catch-up page can sit out of order -- so the doc now names the append as
+the stricter of the two rather than equating them. Gate re-run on the amended
+tree: all six frozen gates green, plus the `RUSTFLAGS="-D warnings"` wasm
+release lane and `node scripts/check-ledger.mjs events.md`. 1241 unit tests and
+every integration binary green, `room_hydration_resume` still 4/4. One further
+line at land, from a reviewer note rather than a finding: the counted call-site
+assertion pins a magic 4, and a legitimate fifth caller reds it with a message
+about resume provenance rather than about the count. Its failure text now says
+so out loud -- if you have just added a caller, the count is the ask, not the
+failure: check which cursor your call hands over, then bump the number.
+_________________________________________________________________________________ 05:28 loop/surface-refresh-open-transcript-discards-the-cursor-and-silently-keeps-one-page

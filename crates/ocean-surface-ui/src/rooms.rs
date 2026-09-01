@@ -1588,8 +1588,8 @@ impl Rooms {
     }
 
     /// Re-read the open room's transcript from `after_seq` and append what is
-    /// new — the catch-up for the four mutations that write a row without going
-    /// through the tail, and the fallback for the day the tail is down.
+    /// new — the fallback for the day the tail is down. On a live connection the
+    /// tail already carries the rows the four calling mutations write.
     ///
     /// `after_seq` is the CALLER's, the same rule [`Self::start_live_tail`]
     /// states. It used to be re-derived here from the rows on screen, which left
@@ -2328,9 +2328,10 @@ fn room_snapshot_url(base: &str, key: &str) -> String {
 }
 
 /// Append one `/transcript` page to the painted rows, keeping only entries past
-/// the tail — the same ascending-only rule the live tail's own ingest applies. A
-/// page whose rows are all already painted appends nothing: an overlapping read
-/// is a duplicate delivery, not a gap.
+/// the last one painted — stricter than the live tail's own ingest, which
+/// dedupes on `seq` equality across the whole vector and pushes in arrival
+/// order. A page whose rows are all already painted appends nothing: an
+/// overlapping read is a duplicate delivery, not a gap.
 fn append_transcript_page(transcript: &mut Vec<RoomMessage>, page: Vec<RoomMessage>) {
     for message in page {
         if transcript
