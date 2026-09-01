@@ -248,6 +248,7 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$REPO/target}"
   cargo check -p ocean-surface-ui --target wasm32-unknown-unknown
   cargo test -p ocean-surface-ui
   cargo clippy -p ocean-surface-ui --target wasm32-unknown-unknown -- -D warnings
+  cargo clippy -p ocean-surface-ui --all-targets -- -D warnings
   cargo fmt --all -- --check
   node scripts/surface-auto-deploy.test.mjs
   env -u NO_COLOR trunk build --release

@@ -371,7 +371,7 @@ Web surface session UI:
 `crates/ocean-surface-proxy/src/main.rs` (allowlist),
 `styles/rooms-workspace.css`.
 
-**Frozen gates:** the same six listed under File Preview Deep-Link, plus
+**Frozen gates:** the same seven listed under File Preview Deep-Link, plus
 `cargo test -p ocean-surface-proxy`.
 
 ## Workspace Map
@@ -544,10 +544,20 @@ cwd-authoritative rule.
 styles/deck.css.
 
 **Frozen gates:** `cargo fmt --check`, `cargo clippy -p ocean-surface-ui
---target wasm32-unknown-unknown -- -D warnings`, `cargo check -p
+--target wasm32-unknown-unknown -- -D warnings`, `cargo clippy -p
+ocean-surface-ui --all-targets -- -D warnings`, `cargo check -p
 ocean-surface-ui --target wasm32-unknown-unknown`, `cargo check -p
 ocean-surface-proxy`, `cargo test -p ocean-surface-ui --target
 wasm32-unknown-unknown --no-run`, `cargo test -p ocean-surface-ui`.
+
+**Both clippy invocations are required and neither replaces the other.** The
+wasm32 one is the target the release lane actually denies warnings on, so it is
+the one whose verdict can stop a bundle promoting. It builds the bin without
+`cfg(test)`, which makes every `mod tests` block invisible to it — and this
+crate's tests are where most changes land. The `--all-targets` one is the only
+thing in this list that lints test code, and it runs on the host because
+`--all-targets` on wasm32 has nothing to add: `cargo test --target
+wasm32-unknown-unknown --no-run` already proves the test code compiles there.
 
 ## Guard Tests — Controls the Compiler Does Not Hold
 
@@ -644,4 +654,4 @@ in `ci_failure_trigger_control.rs` were compiler-held until a flag table
 elsewhere started constructing the same variants; that guard exists because the
 hold evaporated.
 
-**Frozen gates:** the same six listed under File Preview Deep-Link.
+**Frozen gates:** the same seven listed under File Preview Deep-Link.

@@ -5554,3 +5554,55 @@ and repo rails stay deferred -- they fail loudly, which retry did not. Frozen
 gate green, all six: fmt --check, wasm32 clippy -D warnings, wasm32 check, proxy
 check, wasm32 test --no-run, and the host suite at 1295 passing.
 _________________________________________________________________________________ 07:10 loop/surface-closed-room-audit-view
+
+time:      [09:41] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-clippy-lints-cfg-test]
+type:      workflow
+area:      infra
+
+Closed the hole where `ocean-surface-ui` was the one crate in this repo whose
+test code was never linted, by adding `cargo clippy -p ocean-surface-ui
+--all-targets -- -D warnings` to the frozen gate list, to CI, and to the release
+lane. Every clippy the three of them named for this crate targeted wasm32, which
+builds the bin without `cfg(test)` and so cannot see a single `mod tests` block
+— and this crate is where the loop's test-only slices land, so the blind spot
+sat directly under the traffic. Both other enumerations made the gap visible by
+contrast rather than closing it: CI lints the proxy and ocean-gui
+`--all-targets` and not this crate, and `deploy/ocean-surface-auto-deploy.sh`
+carries the same asymmetry one file over, running the proxy's test-code lints
+beside a wasm32-only clippy for the UI while already blocking a promote on that
+crate's `cargo test`. Proven rather than argued: a `comparison_to_empty` planted
+inside `app.rs`'s `mod tests` left the documented wasm32 clippy at exit 0 and
+failed the new command at exit 101 with `could not compile ocean-surface-ui (bin
+"ocean-surface-ui" test)`; the probe was reverted before the commit. The two
+clippy lines are not redundant and AGENTS.md now says why in place: wasm32 is
+the target the release lane denies warnings on and is what can stop a bundle
+promoting, host `--all-targets` is the only thing that lints test code, and host
+rather than a second wasm32 pass because `cargo test --target
+wasm32-unknown-unknown --no-run` already proves the test code compiles there —
+what was missing was a lint, not a compile. The seventh command also falsifies
+the two cross-references at AGENTS.md:374 and :657 that read "the same six
+listed under File Preview Deep-Link"; both now say seven, or the repo would have
+documented two different gates depending on which section you opened. Recent
+waves have covered this by hand — entry after entry above this one records
+running an `--all-targets` lane the frozen list does not name — which is the
+manual step this removes. Checked and deliberately did NOT change the `cargo fmt --check` /
+`cargo fmt --all -- --check` drift between this list and CI: `default-members`
+is proxy-only, so the shorter form looked like it might skip the UI crate, but
+cargo-fmt ignores `default-members` and a misformatted `app.rs` fails both
+identically (verified, exit 1 naming that file). Cosmetic, so the frozen list
+keeps its wording. Review sent the first draft back for two things and both
+held. The release lane was the third enumeration of the gate and had been left
+at six, carrying verbatim the asymmetry this slice exists to close; it is fixed
+above, and `node scripts/surface-auto-deploy.test.mjs` asserts nothing about the
+cargo lines, so the addition costs that suite nothing. And this entry itself was
+prepended at BOF and closed with a bare rule, violating the identity-separator
+convention 0379846 landed two commits before this branch's base — in a parallel
+loop append, the exact fold case that convention exists for, and one
+`check-ledger.mjs` deliberately never asserts. Re-appended at EOF with the
+identity form, which is the point: an unenforced documented rule is worthless,
+and this slice cannot make that argument while breaking the repo's freshest one
+in its own diff. Gate green: all six frozen commands plus the new seventh, the
+host suite at 1295 passing across 13 binaries.
+_________________________________________________________________________________ 09:41 loop/surface-clippy-lints-cfg-test

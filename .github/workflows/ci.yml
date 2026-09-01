@@ -97,6 +97,15 @@ jobs:
       - name: Clippy (ocean-surface-ui, wasm32)
         run: cargo clippy -p ocean-surface-ui --target wasm32-unknown-unknown -- -D warnings
 
+      # The wasm32 pass above builds the bin WITHOUT cfg(test), so every
+      # `mod tests` block is invisible to it — and this crate's changes land
+      # mostly in those blocks. This host pass is the only lint in the repo
+      # that sees them. Host rather than wasm32 because `cargo test --target
+      # wasm32-unknown-unknown --no-run` already proves the test code compiles
+      # there; what was missing was a lint, not a second compile.
+      - name: Clippy (ocean-surface-ui, host, all targets)
+        run: cargo clippy -p ocean-surface-ui --all-targets -- -D warnings
+
       # Formatting gate — closes the OCEAN-195 fmt deferral. The one-time
       # `cargo fmt --all` sweep was landed in OCEAN-324; this step enforces it
       # going forward. Any unformatted commit will fail CI here.
