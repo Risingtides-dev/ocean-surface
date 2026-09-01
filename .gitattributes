@@ -14,5 +14,6 @@
 # eaten separator described in AGENTS.md, "Repository Ledger".
 #
 # Deleting this file is caught by scripts/events-merge-driver.test.mjs, which
-# also pins the fold. It is hand-run, so run it after touching this line.
+# also pins the fold. CI's `guards` job runs it, so a delete goes red on the PR
+# rather than waiting for someone to remember.
 events.md merge=union

@@ -9,10 +9,10 @@
 //
 // Run:  node scripts/events-merge-driver.test.mjs
 //
-// Hand-run, not a CI step — wiring it would mean editing .github/, which this
-// slice leaves alone. Un-wired it still buys the thing that was missing:
-// deleting the attribute now fails something a human can run in two seconds
-// instead of failing nothing at all.
+// Also a CI step: the `guards` job in .github/workflows/ci.yml runs it on
+// every PR and on every push to main. It was hand-run at first, which for an
+// attribute nobody thinks about until a rebase raises a conflict is the same
+// as unrun — the delete and the run are never the same sitting.
 //
 // Four claims, because the cheap ones alone prove nothing. The file check reads
 // the rule out of .gitattributes itself; `git check-attr` is asked second and
