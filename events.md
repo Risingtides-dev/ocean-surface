@@ -5606,3 +5606,82 @@ and this slice cannot make that argument while breaking the repo's freshest one
 in its own diff. Gate green: all six frozen commands plus the new seventh, the
 host suite at 1295 passing across 13 binaries.
 _________________________________________________________________________________ 09:41 loop/surface-clippy-lints-cfg-test
+
+time:      [11:14] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-hydrates-room-at-tail]
+type:      bug-report
+area:      frontend
+
+Hydration now opens a room at its NEWEST page instead of its oldest. ocean-os#436
+landed `before_seq` on `/snapshot` in wave 55 and this surface had never sent it —
+`git grep before_seq -- crates/ocean-surface-ui/src` returned nothing at b8f9934 —
+so `room_snapshot_url` asked for a forward page and got the first thousand rows a
+room ever recorded. Correcting the scout's framing, which said the newest rows were
+never painted: for a LIVE room they did arrive, because `send_room_catch_up` in the
+daemon is an unbounded pager and the SSE tail dragged the whole log through the
+stream one row at a time to get there — the ecosystem contract's own "hydration
+opens at message #1 and the tail is reachable only by transferring the whole log".
+The genuinely unreachable case is a SOFT-CLOSED room: `open_room` opens no
+`EventSource` for one at all, so a finished call room past a thousand messages
+could only ever show its oldest thousand, permanently, with no affordance anywhere
+to reach the rest. Same fix for both.
+
+The trap is that `before_seq` alone would have stranded the other end — `/transcript`
+is forward-only by contract, so nothing in this module can reach a row older than
+the first one painted, and a 1500-message room that paints all of it today would
+have painted 1000 and lost 500. So the tail-anchored read comes with a bounded
+backward walk mirroring the forward catch-up: `prepend_transcript_page` as the
+sibling of `append_transcript_page`, `transcript_backfill_cursor` as the sibling of
+`transcript_catchup_cursor`, five pages of 200 replaying `prev_seq` as the next
+`before_seq`. Same 1000 + 5x200 row budget as before, anchored at the end an
+operator opens a room to read. `RoomSnapshotResponse` claims `prev_seq`/`has_more`
+as its doc comment asked the backward-paging wave to; `next_seq` stays undecoded
+for a stronger reason than before, being null on every backward page by
+construction.
+
+Past ~2000 messages the window is a real truncation, and the review was right that
+calling it "older history off-screen" undersold it. Two costs, and the second one
+is new rather than merely inherited. Nothing signals the cut: the last page's
+`has_more` is dropped, so the oldest row painted reads as the first message in the
+room. And a row INSIDE the window can render nowhere at all — `rooms_workspace.rs`
+builds the main list from `partition_thread_messages(&transcript, 0).roots`, which
+keeps only rows with no `thread_parent_seq`, so a reply at seq 2500 whose root sits
+at seq 800 is dropped from the list, and `thread_root_for` cannot find that root
+either, so no thread pane opens on it. It is invisible with nothing implying it
+exists. The unbounded `send_room_catch_up` could not leave that standing because
+the root arrived eventually. So the follow-on "load older" slice in
+`rooms_workspace.rs` is more than a scroll trigger: it needs the affordance
+replaying `prev_seq` (the walk here is already that request, only its trigger is
+missing) AND an answer for the orphaned reply, either fetching a root the window
+missed or rendering the reply where it can be seen. Both are stated on
+`backfill_open_transcript` so the next slice inherits them rather than rediscovers
+them.
+
+Seeded the walk from the hydration page's LENGTH rather than its `has_more`, which
+was not the first design. Carrying two more fields out of the decode arm broke two
+mutation-tested needles in `tests/closed_room_audit_view.rs` that pin that arm's
+literal shape to prove `closed` reaches the tail gate — a file outside this slice's
+scope, and guards worth more than the tidier seed. A backward page is the last
+`limit` rows that qualify, so a short page provably reached the start of the log
+and a full one is the only shape with rows behind it; the equivalence costs one
+request for a room whose length is an exact multiple of 1000. Left the inline test
+`hydration_reads_snapshot_at_the_stores_full_page` under its old name for the same
+reason: `room_hydration_resume.rs` cites it by name. Scope held at rooms.rs,
+`tests/room_hydration_resume.rs` and this file; nothing outside them changed.
+
+The refine pass closed the gap that stopped the first attempt landing: every unit
+test covering the backward walk was a pure-helper test, so the reviewer could move
+`me.backfill_open_transcript(..)` inside the `if !closed` gate — silently reverting
+the soft-closed case, the whole reason this slice exists — and keep all seven gates
+green. The wiring now has the same kind of guard the forward walk already had, in
+the file that owns hydration wiring: `room_hydration_resume.rs` pins the call
+sitting outside any closedness gate (the gate's body asserted to hold the tail and
+nothing else, and the snapshot's `closed` asserted to be consulted exactly once),
+the window the walk is seeded against, and `page.prev_seq` in the cursor call —
+which until now was caught only incidentally, by `dead_code` on the struct field.
+Four mutations run against the finished tree and all four RED: the call moved
+inside the gate, the call wrapped in a gate of its own, `prev_seq` dropped, and the
+seed measured against 200 instead of the window hydration asked for. Gate green,
+all seven frozen commands, host suite 1302 passing across 13 binaries.
+_________________________________________________________________________________ 11:14 loop/surface-hydrates-room-at-tail
