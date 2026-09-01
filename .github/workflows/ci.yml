@@ -205,10 +205,14 @@ jobs:
   # the job is seconds either way, and a red step should name the mechanism
   # that broke without anyone opening the log.
   #
-  # No install step — these import node: builtins only, and the repo has no
-  # root manifest for `npm ci` to read. Node is pinned for the reason the
-  # ledger job pins it. scripts/check-ledger.test.mjs is absent on purpose: it
-  # runs in `ledger`, next to the checker it proves.
+  # No install step — the repo has no root manifest for `npm ci` to read, and
+  # nothing here reaches outside it: node: builtins, plus one RELATIVE import,
+  # events-merge-driver.test.mjs -> ./check-ledger.mjs, which is deliberate.
+  # That guard reads the merged text through the checker's own `openEntries`
+  # rather than a private copy of the rule, so the two cannot drift apart on
+  # what closes an entry. Node is pinned for the reason the ledger job pins it.
+  # scripts/check-ledger.test.mjs is absent on purpose: it runs in `ledger`,
+  # next to the checker it proves.
   guards:
     name: script guards
     runs-on: ubuntu-latest
@@ -225,7 +229,7 @@ jobs:
         with:
           node-version: 22
 
-      - name: The events.md union merge driver still folds parallel appends
+      - name: The events.md union merge driver keeps parallel appends apart
         run: node scripts/events-merge-driver.test.mjs
 
       # Ordered before the deploy guard deliberately: that one invokes the
@@ -320,16 +324,20 @@ jobs:
 
       # The diff step proves an entry EXISTS; this one proves the ledger it was
       # appended to is still readable. The union merge driver this repo gives
-      # events.md keeps a line both sides added only once, so each extra
-      # parallel append eats the `___` rule the two entries share and the second
-      # entry's `time:` header lands directly under the first entry's prose: two
-      # entries fuse, with no conflict and nothing a merge check can see. 22 of
-      # the 269 entries here were open when this landed and were repaired in the
-      # same commit — 18 in the abutting shape the driver leaves, 4 written
-      # without a rule at all. The check asks whether an entry closes, not how
-      # it came to be open. Exit 1 names the open entries by line, 2 means the
-      # check could not run at all — an unreadable path, or a ledger that lost
-      # its contents.
+      # events.md keeps a line both sides added only once, so while every entry
+      # closed with the same bare `___` rule, each extra parallel append ate the
+      # separator the two entries shared and the second entry's `time:` header
+      # landed directly under the first entry's prose: two entries fused, with
+      # no conflict and nothing a merge check could see. 22 of the 269 entries
+      # here were open when this landed and were repaired in the same commit —
+      # 18 in the abutting shape that fold left, 4 written without a rule at
+      # all. A rule now carries its own entry's `HH:MM` and worktree, so two
+      # appends no longer share a line and xdiff has nothing to fold — but the
+      # rules already in events.md are bare and identical to one another, and an
+      # append-only ledger carries them forever. The check asks whether an entry
+      # closes, not how it came to be open. Exit 1 names the open entries by
+      # line, 2 means the check could not run at all — an unreadable path, or a
+      # ledger that lost its contents.
       #
       # Never `--fix` here. The repair is a non-append edit to a file under
       # `merge=union`, and CI rewriting the ledger nobody reviewed is worse than

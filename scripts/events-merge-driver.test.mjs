@@ -38,7 +38,7 @@
 // property at the width a wave actually lands, and the same-minute pair is the
 // reason the identity is not the clock alone.
 //
-// The fold has NOT left the repo, so nothing here was deleted lightly: the 287
+// The fold has NOT left the repo, so nothing here was deleted lightly: the 289
 // rules already in events.md are bare and identical, and an append-only ledger
 // keeps them forever. Detection and repair of that shape moved to
 // scripts/check-ledger.test.mjs, which pins it against hand-written text rather
@@ -281,7 +281,22 @@ for (const slice of ['a', 'b']) {
     `slice ${slice.toUpperCase()}'s rule did not survive the merge. Both entries were written in the same minute, so \`HH:MM\` alone cannot tell them apart and the worktree is the whole of the identity here:\n${minute.ledger}`,
   );
 }
+// The other half of what this fixture merges, counted so a known limit cannot
+// quietly get worse while the assertions above stay green. Identity saves an
+// entry's TAIL and not its HEAD: two same-minute appends OPEN with an identical
+// `time:` and `agent:` pair, union folds those the way it once folded the rule,
+// and slice B arrives decapitated — its rule intact, its header gone, its
+// remaining fields hanging under slice A's rule. check-ledger reads the survivor
+// as one closed entry and exits 0, so nothing else in this repo sees it.
+// AGENTS.md rules the fix belongs to the entry SCHEMA rather than the separator;
+// this holds the cost at exactly one header. Three would mean git stopped
+// folding the head — the good direction, and the line to relax, not widen.
+assert.equal(
+  headerCount(minute.ledger),
+  2,
+  `expected the same-minute head fold to cost exactly one \`time:\` header of three entries, got ${headerCount(minute.ledger)}:\n${minute.ledger}`,
+);
 
 console.log(
-  'ALL PASS: events.md union merge driver — the rule, git agreeing, a clean append/append merge, a conflicting control, a three-way wave that keeps every rule and fuses nothing, and a same-minute pair the worktree alone keeps apart (24 assertions)',
+  'ALL PASS: events.md union merge driver — the rule, git agreeing, a clean append/append merge, a conflicting control, a three-way wave that keeps every rule and fuses nothing, and a same-minute pair whose two RULES the worktree alone keeps apart, at the cost of one folded header (25 assertions)',
 );

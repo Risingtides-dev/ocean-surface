@@ -8,10 +8,13 @@
 // nothing a merge check would see — #181 folded onto #180 twelve minutes after
 // #180 landed this checker, which caught the fold and could not prevent it. So
 // a rule now carries its entry's own identity — `___ HH:MM <worktree>` — and
-// two appends no longer share a line. The loop still runs this before and after
-// every rebase and diffs the verdict, because the 287 rules already in this
-// ledger are bare and identical, and events.md is append-only: history keeps
-// folding for as long as it is history.
+// two appends no longer END on the same line. They can still SHARE one: two
+// entries written in the same minute open with the same blank and the same
+// `time:` line, which union folds whatever branch each was written on, because
+// `worktree:` sits below both. The loop still runs this before and after every
+// rebase and diffs the verdict, because the 289 rules already in this ledger
+// are bare and identical, and events.md is append-only: history keeps folding
+// for as long as it is history.
 //
 // Ported from ocean-bedrock's scripts/check-ledger.mjs (its PR #62 for the
 // checker, #98 for the identity separator), by way of the identical ocean-os
