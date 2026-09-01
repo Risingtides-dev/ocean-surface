@@ -4980,3 +4980,75 @@ One file, `crates/ocean-surface-ui/src/room_markdown.rs`. Gate green: fmt,
 wasm32 clippy `-D warnings`, wasm32 check, proxy check, wasm32 test `--no-run`,
 native 1227/1227 plus 44 integration, `RUSTFLAGS="-D warnings"` wasm32 check.
 _________________________________________________________________________________
+
+time:      [23:08] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-labeled-link-href-stops-at-the-first-paren]
+type:      bugfix
+area:      frontend
+
+Closed the labeled-link half of the defect #181 closed on the bare-URL path:
+`[x](https://ocean.dev/a(b))` linked to `https://ocean.dev/a(b` and dropped a
+stray `)` into the transcript. `tokenize`'s `[label](href)` arm terminated the
+href with `raw.find(')')`, and the first closer in that string belongs to the
+URL, not to the markdown. Same class as the trailing-bracket bug, same cure —
+count the brackets — but applied to the terminator SCAN rather than to a
+trailing trim, because here the closer is what ends the token in the first
+place. New `balanced_href_end` sits beside `trim_autolink_tail` so a reader
+sees the one rule at its two application points: walk the bytes, `(` pushes,
+`)` pops, and the terminator is the `)` that would take depth below zero.
+Bytes, not chars, because the caller slices `raw` with the result and builds
+`consumed` out of it; both brackets are ASCII so an offset can never land
+inside a multi-byte character, and a test asserts that with an `é` on each
+side of the boundary.
+
+`None` carries the old `end == raw.len()` signal, so an href with no closer at
+all still falls out of the arm untouched. TWO behaviour changes beyond the
+stated defect ride on that `None`, not the one an earlier draft of this entry
+claimed. The first: an href whose parens never balance —
+`[x](https://ocean.dev/a(b)` — which main used to make a link out of, href cut
+to `https://ocean.dev/a(b`. It now declines the labeled form, which is what
+CommonMark's balanced-destination rule says and what the scheme gate wants:
+the bracket text stays literal and the bare-URL path picks the URL up on its
+own.
+
+The second is the bound the scan has to have to be a scan at all, and review
+caught its absence. Balancing alone is unbounded: with a balancing `)` as the
+only terminator, one unmatched `(` let the scan run past the URL to a `)`
+further down the sentence and pull the prose in with it.
+`[docs](https://ocean.dev/a(b) and **ship** it)` collapsed from four spans into
+a single Link whose href was the whole sentence — the words and the bold simply
+stopped being rendered — and when the widened href failed the scheme gate the
+same swallow hit the literal-text fallback instead. main's href was wrong on
+those inputs too, but main kept every character the user typed on screen, and
+losing typed words out of a durable transcript is the worse failure. So a space
+ends the scan as well, which is the other half of the same CommonMark rule — a
+bare destination may not contain spaces — and the form declines rather than
+widening: the prose survives intact and the bare-URL path still autolinks the
+URL, now correctly. The space specifically and not `is_ascii_whitespace`: a tab
+or newline in an href has to reach the scheme gate so that
+`[x](https://ocean.dev\t)` renders as one literal run, and broadening the arm
+turns `unsafe_labeled_links_render_literal_text` red on exactly those two cases.
+
+Nine mutants planted, nine dead, none survived: reverting to `find(')')`, not
+counting the opener, never popping on a matched closer, `offset + 1`,
+`Some(raw.len())` for an unterminated href, a char index in place of the byte
+offset, the two brackets swapped, dropping the space arm, and broadening it to
+`is_ascii_whitespace`. Four of the six new tests are REGRESSION PINS, red the
+moment the fix is reverted — the balanced-paren href (including a nested pair
+and the wiki-link shape), the byte-offset test, the no-balanced-closer test,
+and `labeled_link_scan_stops_at_a_space_instead_of_eating_the_sentence`, which
+pins where the swallow stops on both the link and the literal-text path and is
+the only thing holding the space arm. The other two the old code also satisfies
+and they are there as MUTANT KILLERS: that an unbalanced closer still ends the
+href, which is the only thing holding `offset + 1` and the swap, and that
+`[x](javascript:alert((1)))` and `[x](ftp://ocean.dev/a(b))` stay literal,
+which holds the scheme gate against a longer href. The three security tests at
+the top of the arm are untouched and green.
+
+One file, `crates/ocean-surface-ui/src/room_markdown.rs`. Gate green: fmt,
+wasm32 clippy `-D warnings`, wasm32 check, proxy check, wasm32 test `--no-run`,
+native 1233/1233 plus 44 integration, and host `clippy --all-targets --
+-D warnings`, which is the only lane that lints the `mod tests` this diff grows
+and is not yet in the frozen list.
+_________________________________________________________________________________
