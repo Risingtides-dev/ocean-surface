@@ -27,8 +27,10 @@
 //! 4. **`requested_by` is caller-asserted and gated.** An id resolving to an
 //!    Agent or System participant comes back 403 `forged_artifact_author` — an
 //!    agent's artifact is written by the daemon, never by a client claiming its
-//!    identity. The control is therefore gated exactly as the composer is: on
-//!    the access projection, with identity refused at the action.
+//!    identity. The control is therefore gated on the access projection, with
+//!    identity refused at the action — the composer's SHAPE, but not the
+//!    composer's gate: a run lands in this daemon's store, so it stays offered
+//!    while the link is coming back (see `local_store_write_gate`).
 //!
 //! Everything that turns a reply into what the operator sees is a free function
 //! below, unit-testable natively without a browser or a daemon.
@@ -550,9 +552,12 @@ impl RoomSummaryState {
 /// `room_artifacts` and `room_repo` do it.
 ///
 /// `writes_allowed` is supplied by the workspace rather than recomputed here so
-/// this control and the composer can never disagree about the same room's
-/// access projection. `members` is the same roster memo the transcript renders
-/// against, so an `@id` means the same thing in a summary as in a message.
+/// one place holds the ruling for every rail. It is deliberately NOT the
+/// composer's gate: a run summarizes this room's own transcript into this
+/// daemon's store and is never enqueued for a peer, so a link that is down or
+/// coming back does not hold it (see `local_store_write_gate`). `members` is
+/// the same roster memo the transcript renders against, so an `@id` means the
+/// same thing in a summary as in a message.
 #[component]
 pub fn RoomSummary(
     rooms: Rooms,
@@ -572,8 +577,9 @@ pub fn RoomSummary(
 
     // Identity is deliberately NOT part of this predicate. `identity_resolved`
     // reads its signals untracked, so a control disabled on it would never
-    // re-enable when bootstrap answers; the composer gates on access here and
-    // refuses on identity at the action, and this control does the same.
+    // re-enable when bootstrap answers; the composer gates on access at the
+    // control and refuses on identity at the action, and this control does the
+    // same — with its own access gate, not the composer's.
     let can_summarize = move || {
         writes_allowed.get()
             && !state.summarizing.get()

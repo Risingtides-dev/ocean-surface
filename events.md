@@ -1,3 +1,47 @@
+time:      [01:06] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-sibling-rails-inherit-the-composer-gate-unexamined]
+type:      review
+area:      frontend
+
+Extended #163's ruling to the four rail sections that still inherited the
+composer's write gate without anyone having asked whether their write needs a
+peer, and made each of the five state its answer. Summary, artifacts and
+attachments all write to THIS daemon's store and nothing else — verified at
+ocean-os origin/main cd73312f rather than taken on trust: `crates/ocean-daemon/AGENTS.md`
+states a federated room's summary is local-only and never enqueued to the
+outbox, `room_create_artifact`/`room_amend_artifact` write through `with_rooms`
+and then `publish_room_wake` with no outbox row on either path, and
+`room_attachments.rs` contains no reference to the outbox at all (nor does
+`room_federation.rs` mirror artifacts or attachments). So all three now take a
+shared `local_store_write_gate` and stay writable through `Connecting` and
+`Recovering`, which is the whole user-visible change: startup and reconnect no
+longer grey out a summarize run, an artifact edit or an upload that would land
+regardless. Invite and repo keep `access_allows_writes` and gained the sentence
+saying why — a mint registers the room with the federation control plane, and
+every repo command is executed by a Bedrock container, so a down link is not a
+delay there but a write that cannot happen. `access_allows_writes` itself is
+untouched, still `Local|Live`, still the composer's; `trigger_policy_accepts_writes`
+keeps its name and #163's argument and now delegates to the shared gate rather
+than carrying a second copy of the same match. `Revoked` and unknown access stay
+held everywhere, exhaustively matched with no wildcard so a new access state must
+be ruled on. Three tests: the per-state table for the new gate stated as a
+difference from the composer's, a source guard pinning WHICH gate each of the
+five sections takes (the gate is a `Signal::derive` in the view, so no predicate
+test can reach it), and a guard that the three moved rails no longer carry the
+now-false doc line about never disagreeing with the composer and instead name the
+gate they do take. All three verified failing against the old wiring, in both
+directions, before landing. Two module headers the guard's needle does not reach
+were swept by hand for the same reason — `room_summary.rs` said the control is
+"gated exactly as the composer is" and `attachments.rs` said "the same two
+conditions the composer is", both now false — as were the three inline comments
+whose "the composer gates on access here" reads as a claim about WHICH gate this
+control takes. Frozen gate green: fmt, wasm32 clippy `-D warnings`,
+`RUSTFLAGS="-D warnings"` wasm32 check forced against a touched source, proxy
+check, wasm32 test no-run, native 1236/1236 — plus both `--all-targets` clippy
+lanes, which the frozen list does not cover and this diff adds test code to.
+_________________________________________________________________________________
+
 time:      [23:14] [08-30-26]
 agent:     [claude] [opus 5]
 worktree:  [loop/surface-trigger-rail-writable-nonterminal]
