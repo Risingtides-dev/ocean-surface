@@ -41,12 +41,38 @@ if (!buildScript.includes("cp dist/*.css \"$DIST/\"")) {
   throw new Error("build-extension.sh no longer copies dist/*.css into extension/dist/");
 }
 
-const copied = readdirSync(resolve(here, "../extension/dist"), { withFileTypes: true })
-  .filter((entry) => entry.isFile() && entry.name.endsWith(".css"))
-  .map((entry) => entry.name)
-  .sort();
+// The two claims above read checked-in source. This one reads extension/dist/,
+// a gitignored BUILD OUTPUT that only scripts/build-extension.sh produces, and
+// producing it costs a full `trunk build --release`. CI runs this guard on a
+// bare checkout, so it cannot make this claim — and a guard that goes red
+// because nobody built first teaches people to ignore it, which is worse than
+// the gap. Unbuilt, it says so and leaves the two source claims standing.
+//
+// No CSS at all counts as unbuilt rather than as drift. build-extension.sh
+// copies the stylesheets under `set -e`, so it cannot leave the directory
+// CSS-less; a bundle in that state was written by the auto-deploy script's
+// rebuild_extension instead — which scripts/surface-auto-deploy.test.mjs
+// triggers against this very checkout — and reporting that as a drifted
+// inventory sends the reader to the wrong file entirely.
+let copied = [];
+try {
+  copied = readdirSync(resolve(here, "../extension/dist"), { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".css"))
+    .map((entry) => entry.name)
+    .sort();
+} catch (err) {
+  if (err.code !== "ENOENT") throw err;
+}
 
-const missing = expected.filter((name) => !copied.includes(name));
-if (missing.length) {
-  throw new Error(`extension/dist missing expected css: ${missing.join(", ")}`);
+if (!copied.length) {
+  console.log(
+    `SOURCE CLAIMS PASS: sidepanel.html links ${expected.length} stylesheets in order and build-extension.sh still copies them — ` +
+      `extension/dist holds no built bundle, so its inventory went unchecked (run scripts/build-extension.sh to check it)`,
+  );
+} else {
+  const missing = expected.filter((name) => !copied.includes(name));
+  if (missing.length) {
+    throw new Error(`extension/dist missing expected css: ${missing.join(", ")}`);
+  }
+  console.log(`ALL PASS: side panel stylesheet inventory — ${expected.length} sheets linked, copied, and present in the built bundle`);
 }

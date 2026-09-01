@@ -4882,3 +4882,48 @@ Test-only, one file. Gate green: fmt, native 1222/1222 plus 44 integration,
 host clippy `--all-targets -D warnings`, wasm32 clippy `--all-targets
 -D warnings`, `RUSTFLAGS="-D warnings"` wasm32 check.
 _________________________________________________________________________________
+time:      [21:02] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-node-guards-in-ci]
+type:      gh-actions
+area:      infra
+
+Five node guards live in scripts/ and CI ran two of them. Added a `guards` job
+to ci.yml that runs the three nobody ran, and lifted surface-auto-deploy out of
+the 30-minute Rust `check` job, where a node assertion could not fail until
+cargo had passed and then reported itself as a Rust build failure. A named step
+per guard, so a red run names the broken mechanism without opening the log. The
+merge-driver guard's own header said "hand-run, not a CI step — wiring it would
+mean editing .github/, which this slice leaves alone"; that sentence, and the
+matching claims in .gitattributes, AGENTS.md, and the ledger job's own comment
+further down ci.yml, are now retired.
+
+Wiring them found what hand-running had hidden. extension-inventory could never
+have run on a bare checkout: its third claim reads extension/dist, an ignored
+build output only `trunk build --release` produces, so it exits 1 on any fresh
+tree. Its two source claims — sidepanel.html's 19 linked stylesheets in order,
+and build-extension.sh still copying them — need no build and are what CI now
+enforces; the inventory claim reports itself unchecked instead of going red
+because nobody built first, and still fails exactly as before once a bundle is
+there (verified both ways). Underneath that sat the reason it must treat a
+CSS-less bundle as unbuilt: surface-auto-deploy's four `--promote` calls omit
+OCEAN_SURFACE_REPO, so the script's `rm -rf "$REPO/dist"` and rebuild_extension
+run against the real checkout. The guard deletes the developer's trunk build
+every time it runs, and leaves extension/dist holding two non-CSS fixture files
+— which would have made the next guard blame the stylesheet inventory. Left
+unfixed and flagged: it is a different file and a different slice.
+
+Each of the three newly-wired guards was broken deliberately and confirmed red,
+then reverted. Gate green: fmt, wasm32 clippy -D warnings, wasm32 check, proxy
+check, wasm32 test --no-run, native ocean-surface-ui 1266/1266, plus
+RUSTFLAGS="-D warnings" wasm32 check.
+
+Two names corrected at landing. The inventory step was called "The side panel's
+stylesheet inventory", which is precisely the claim it CANNOT make on the bare
+checkout CI gives it -- a green check under that name reads as "the built bundle
+was inventoried" when the bundle went unbuilt; it is now "The side panel links
+every stylesheet the build copies", which is what the step actually enforces
+there. And the AGENTS.md edit above had left `**Run \`node` orphaned as a
+two-word line mid-sentence; the bullet is reflowed. Prose only, no step, job,
+condition or assertion touched.
+_________________________________________________________________________________
