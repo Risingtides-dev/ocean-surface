@@ -425,6 +425,25 @@ pub(crate) fn access_allows_writes(access: Option<&RoomAccessProjection>) -> boo
     )
 }
 
+/// Whether the composer may send into the OPEN room: the access gate above,
+/// AND the room not being the daemon's frozen soft-closed audit view.
+///
+/// Two axes, and neither implies the other. Closing a room stamps `closed_at`
+/// and leaves its access row untouched, so a frozen room projects whatever it
+/// projected while live — `Local` with no access row, an unchanged `Live` when
+/// federated — and `access_allows_writes` waves through every send into either
+/// shape, each of which `POST .../messages` answers 404. Asking both here
+/// rather than at each site is why `post_message` and the
+/// four `disabled=` bindings cannot drift into disagreeing about what a dead
+/// composer is: a room that refuses the send must be a room whose input is
+/// visibly shut, or the refusal reads as the message being swallowed.
+pub(crate) fn composer_writes_allowed(
+    access: Option<&RoomAccessProjection>,
+    room_closed: bool,
+) -> bool {
+    access_allows_writes(access) && !room_closed
+}
+
 /// Whether a write that lands in THIS daemon's local store may proceed under
 /// this access projection — the rail-local counterpart of
 /// [`access_allows_writes`], and deliberately more permissive than it.
@@ -2115,7 +2134,10 @@ pub fn RoomsWorkspace(
         if !message_send_admitted(
             send_in_flight.get_untracked(),
             thread_send_in_flight.get_untracked(),
-            access_allows_writes(rooms.access.get_untracked().as_ref()),
+            composer_writes_allowed(
+                rooms.access.get_untracked().as_ref(),
+                rooms.closed.get_untracked(),
+            ),
             &draft,
         ) {
             return;
@@ -2144,7 +2166,10 @@ pub fn RoomsWorkspace(
         if !message_send_admitted(
             thread_send_in_flight.get_untracked(),
             send_in_flight.get_untracked(),
-            access_allows_writes(rooms.access.get_untracked().as_ref()),
+            composer_writes_allowed(
+                rooms.access.get_untracked().as_ref(),
+                rooms.closed.get_untracked(),
+            ),
             &draft,
         ) {
             return;
@@ -2415,7 +2440,7 @@ pub fn RoomsWorkspace(
                                                     }
                                                 }
                                                 on:blur=move |_| thread_mention_ctx.set(None)
-                                                disabled=move || !access_allows_writes(rooms.access.get().as_ref())
+                                                disabled=move || !composer_writes_allowed(rooms.access.get().as_ref(), rooms.closed.get())
                                             />
                                             {move || {
                                                 let items = thread_mention_items.get();
@@ -2491,7 +2516,10 @@ pub fn RoomsWorkspace(
                                                 disabled=move || {
                                                     thread_send_in_flight.get()
                                                         || thread_composer.get().trim().is_empty()
-                                                        || !access_allows_writes(rooms.access.get().as_ref())
+                                                        || !composer_writes_allowed(
+                                                            rooms.access.get().as_ref(),
+                                                            rooms.closed.get(),
+                                                        )
                                                 }
                                             >
                                                 {move || if thread_send_in_flight.get() { "Sending…" } else { "Reply" }}
@@ -3324,11 +3352,20 @@ pub fn RoomsWorkspace(
 
                                 // Federation outbox is explicitly outside the
                                 // confirmed transcript. Pending items are
-                                // informational; only failed items can retry.
+                                // informational; only failed items can retry,
+                                // and only while the room is open. A closed
+                                // room keeps the outbox on screen — it is part
+                                // of the frozen record — and loses the button:
+                                // the daemon's retry gates on the room
+                                // EXISTING, not on `closed_at`, so a press
+                                // here would answer 202 and requeue a
+                                // federated send rather than fail the way
+                                // every other write into a closed room does.
                                 {move || {
                                     let outbox = rooms.access.get()
                                         .map(|access| access.outbox)
                                         .unwrap_or_default();
+                                    let room_closed = rooms.closed.get();
                                     if outbox.is_empty() {
                                         ().into_any()
                                     } else {
@@ -3345,6 +3382,7 @@ pub fn RoomsWorkspace(
                                                     key=|item| item.client_event_id.clone()
                                                     children=move |item| {
                                                         let failed = item.state == OutboxItemState::Failed;
+                                                        let can_retry = failed && !room_closed;
                                                         let body = item.payload.get("body")
                                                             .and_then(|body| body.as_str())
                                                             .unwrap_or("Message awaiting confirmation")
@@ -3361,7 +3399,7 @@ pub fn RoomsWorkspace(
                                                                 <span class="rooms-workspace__outbox-body">
                                                                     {body}
                                                                 </span>
-                                                                {if failed {
+                                                                {if can_retry {
                                                                     view! {
                                                                         <button
                                                                             class="rooms-workspace__outbox-retry"
@@ -3386,6 +3424,31 @@ pub fn RoomsWorkspace(
 
                                 // Composer + status line
                                 <div class="rooms-workspace__composer">
+                                    // Why the input below is dead. It belongs
+                                    // here and not in the status line: that
+                                    // line carries transient errors and is
+                                    // cleared by the next one, while this is
+                                    // the room's permanent condition. Without
+                                    // it a closed room is a composer that
+                                    // simply does not respond, which reads as
+                                    // the app being broken rather than the
+                                    // room being finished.
+                                    {move || {
+                                        if !rooms.closed.get() {
+                                            return ().into_any();
+                                        }
+                                        view! {
+                                            <div
+                                                class="rooms-workspace__composer-closed"
+                                                role="status"
+                                            >
+                                                "This room is closed. You are reading a frozen \
+                                                 audit view of its transcript — nothing can be \
+                                                 posted to it and no new messages will arrive."
+                                            </div>
+                                        }
+                                        .into_any()
+                                    }}
                                     <form
                                         class="rooms-workspace__composer-row"
                                         on:submit=move |ev| {
@@ -3490,7 +3553,7 @@ pub fn RoomsWorkspace(
                                                 }
                                             }
                                             on:blur=move |_| mention_ctx.set(None)
-                                            disabled=move || !access_allows_writes(rooms.access.get().as_ref())
+                                            disabled=move || !composer_writes_allowed(rooms.access.get().as_ref(), rooms.closed.get())
                                         />
                                         {move || {
                                             let items = mention_items.get();
@@ -3563,7 +3626,10 @@ pub fn RoomsWorkspace(
                                             disabled=move || {
                                                 send_in_flight.get()
                                                     || composer.get().trim().is_empty()
-                                                    || !access_allows_writes(rooms.access.get().as_ref())
+                                                    || !composer_writes_allowed(
+                                                        rooms.access.get().as_ref(),
+                                                        rooms.closed.get(),
+                                                    )
                                             }
                                         >
                                             {move || if send_in_flight.get() { "Sending…" } else { "Send" }}

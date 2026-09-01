@@ -41,7 +41,7 @@ use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen_futures::spawn_local;
 
-use crate::rooms_workspace::access_allows_writes;
+use crate::rooms_workspace::composer_writes_allowed;
 
 /// SSE tail connection state for the live indicator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -429,6 +429,25 @@ struct RoomSnapshotResponse {
     /// it. The fallback below is a decode safety net, not a version bridge.
     #[serde(default)]
     last_seq: Option<u64>,
+    /// Whether the soft-closed AUDIT view answered this read rather than the
+    /// live one. `/snapshot` has always fallen through to it so a finished
+    /// call stays replayable, and until ocean-os#434 the body never said which
+    /// arm produced the record — leaving a frozen room hydrating
+    /// indistinguishably from a live one, above a tail `/events` 404s forever
+    /// and a composer whose every send 404s too. Nothing else in this envelope
+    /// can stand in for it, `access` least of all: closing a room is a soft
+    /// stamp on the room row that leaves its access row untouched, so a closed
+    /// room answers 200 still projecting whatever its rail projected while it
+    /// was live — `Local` for a room that never had an access row, an
+    /// unchanged `Live` or `Revoked` (members and outbox included) for a
+    /// federated one.
+    ///
+    /// `#[serde(default)]` because the contract rules the field additive and a
+    /// daemon that predates it says nothing, which must read as OPEN — the
+    /// other direction would shut the composer on every room a pre-field
+    /// daemon serves.
+    #[serde(default)]
+    closed: bool,
     #[serde(default)]
     error: Option<String>,
 }
@@ -686,6 +705,18 @@ pub struct Rooms {
     /// Required access projection for the open room. `None` means loading or
     /// no room is open; local rooms carry `Some(state = Local)`.
     pub access: RwSignal<Option<RoomAccessProjection>>,
+    /// Whether the open room is the daemon's frozen soft-closed audit view
+    /// rather than a live room, from `/snapshot`'s `closed`. A separate axis
+    /// from `access` and not derivable from it — closing stamps `closed_at` on
+    /// the room row and leaves the access row alone, so a frozen room goes on
+    /// projecting exactly what it projected while it was live — which is why
+    /// it is a signal beside `access` rather than another access state. False
+    /// while loading, for every open room, and against a daemon that predates
+    /// the field. `open_room` publishes it and starts no tail on `true`; the
+    /// composer's write gate
+    /// ([`crate::rooms_workspace::composer_writes_allowed`]) reads it to hold
+    /// every send, and [`Rooms::retry_outbox`] refuses on it too.
+    pub closed: RwSignal<bool>,
     /// Per-room durable unread summary from the daemon room list.
     pub read_summaries: RwSignal<HashMap<String, RoomReadSummary>>,
     /// Durable read cursor for the currently open room.
@@ -759,6 +790,7 @@ impl Rooms {
             available_agents: RwSignal::new(Vec::new()),
             agents_loaded: RwSignal::new(false),
             access: RwSignal::new(None),
+            closed: RwSignal::new(false),
             read_summaries: RwSignal::new(HashMap::new()),
             open_read_cursor: RwSignal::new(None),
             read_cursor_in_flight: RwSignal::new(None),
@@ -859,6 +891,7 @@ impl Rooms {
         self.transcript.set(Vec::new());
         self.resume_seq.set(None);
         self.access.set(None);
+        self.closed.set(false);
         self.open_read_cursor.set(None);
         self.read_cursor_in_flight.set(None);
         self.last_sent_read_cursor.set(None);
@@ -1135,13 +1168,17 @@ impl Rooms {
     /// `last_seq` brings the rest.
     ///
     /// `/snapshot` also falls through to the soft-closed audit view, so a room
-    /// that used to fail to open now hydrates. The tail underneath it does not:
-    /// `/events` and `POST /messages` both 404 a closed room, so what replaces
-    /// the old terminal "no room with key" is a transcript above a permanently
-    /// reconnecting tail and a composer that cannot send. Gating on that needs
-    /// the daemon to say the room is closed — nothing in this body does; the
-    /// entity carries no `closed_at` and a closed room's access projection is
-    /// `Local`, same as any other local room.
+    /// that used to fail to open now hydrates. The tail underneath it cannot:
+    /// `/events` and `POST /messages` both 404 a closed room. The body now says
+    /// which view answered ([`RoomSnapshotResponse::closed`]), and this is the
+    /// one place that acts on it — a closed room opens NO `EventSource` at all.
+    /// The gate has to live at this call site because
+    /// [`Rooms::start_live_tail`] is an unconditional reconnect loop with no
+    /// stop condition in it; a tail started against a corpse retries until the
+    /// generation bumps. Publishing [`Rooms::closed`] beside the access
+    /// projection is the other half: it holds the composer shut and puts the
+    /// reason on screen, so the audit view reads as frozen rather than as a
+    /// live room that silently refuses every write.
     pub fn open_room(&self, key: String) {
         let base = self.base();
         let me = *self;
@@ -1155,7 +1192,7 @@ impl Rooms {
             let get_url = room_snapshot_url(&base, &key);
             let result = match Request::get(&get_url).send().await {
                 Ok(resp) if resp.ok() => match resp.json::<RoomSnapshotResponse>().await {
-                    Ok(r) if r.ok => Ok((r.room, r.transcript, r.access, r.last_seq)),
+                    Ok(r) if r.ok => Ok((r.room, r.transcript, r.access, r.last_seq, r.closed)),
                     Ok(r) => Err(format!(
                         "room load failed: {}",
                         r.error.unwrap_or_else(|| "unknown error".into())
@@ -1178,11 +1215,12 @@ impl Rooms {
                 return;
             }
             match result {
-                Ok((room, transcript, access, last_seq)) => {
+                Ok((room, transcript, access, last_seq, closed)) => {
                     let resume_seq = snapshot_resume_seq(last_seq, &transcript);
                     me.open_room.set(room);
                     me.transcript.set(transcript.clone());
                     me.access.set(Some(access.clone()));
+                    me.closed.set(closed);
                     update_open_summary_from_open_room(
                         &me.read_summaries,
                         me.open_key.get_untracked().as_deref(),
@@ -1192,7 +1230,13 @@ impl Rooms {
                     );
                     me.status.set(String::new());
                     me.fetch_agents();
-                    me.start_live_tail(key, generation_id, resume_seq);
+                    // Not started rather than started-and-stopped: `/events`
+                    // 404s a closed room and the loop below treats every
+                    // failure as a reason to retry, so the only connection
+                    // that never reconnects is the one never opened.
+                    if !closed {
+                        me.start_live_tail(key, generation_id, resume_seq);
+                    }
                 }
                 Err(error) => me.status.set(error),
             }
@@ -1475,7 +1519,10 @@ impl Rooms {
     /// Post a message to the open room (`POST .../messages`). `@id` mentions in
     /// the body drive the daemon's trigger-policy auto-convene.
     pub fn post_message(&self, body: String, thread_parent_seq: Option<u64>) {
-        if !access_allows_writes(self.access.get_untracked().as_ref()) {
+        if !composer_writes_allowed(
+            self.access.get_untracked().as_ref(),
+            self.closed.get_untracked(),
+        ) {
             return;
         }
         // A message authored under an unresolved identity is either refused by
@@ -1530,8 +1577,19 @@ impl Rooms {
     }
 
     /// Retry a failed outbox item (`POST …/outbox/retry`).
+    ///
+    /// Refuses a closed room, and unlike the composer's refusal this one is
+    /// not belt-and-braces over a route that would have said no anyway: the
+    /// daemon's `retry_failed_outbox` checks that the room EXISTS, not that it
+    /// is open, so a press against the frozen audit view answers 202 and
+    /// requeues a federated send out of a transcript the pane calls finished.
+    /// The button is not painted there either; this holds if it is reached
+    /// some other way.
     #[allow(dead_code)]
     pub fn retry_outbox(&self, client_event_id: String) {
+        if self.closed.get_untracked() {
+            return;
+        }
         let Some(key) = self.open_key.get_untracked() else {
             return;
         };
@@ -3091,6 +3149,55 @@ mod tests {
     /// That is the point: the rule only has teeth on the day they diverge — a
     /// filtered projection, a trimmed page, backward paging — and on that day
     /// the daemon's number is the one that names what it actually served.
+    /// `closed` is the ONLY thing in this envelope that tells the daemon's
+    /// frozen audit view apart from a live room: both answer 200, both carry a
+    /// transcript, and `access` describes the federation rail rather than the
+    /// room's life — closing never touches the access row, so a frozen room
+    /// projects what it always projected. Asserted in both directions on one
+    /// fixture — either
+    /// half alone stays green against a hardcoded constant, and `open_room`
+    /// trusts this field to discriminate before it decides whether to open an
+    /// `EventSource` at all.
+    ///
+    /// The absent case is the compatibility half and is not decoration: four
+    /// other fixtures in this module build the envelope with no `closed` key,
+    /// as does every daemon shipped before ocean-os#434, and the contract rules
+    /// a missing key open. Without `#[serde(default)]` that is a decode error,
+    /// which `open_room` reports as "room decode error" — every room on a
+    /// pre-field daemon failing to open.
+    #[test]
+    fn snapshot_closed_is_absent_open_and_reads_both_ways() {
+        let body = |closed: Option<bool>| {
+            let mut v = serde_json::json!({
+                "ok": true,
+                "room": null,
+                "transcript": [],
+                "access": { "state": "local" }
+            });
+            if let Some(closed) = closed {
+                v["closed"] = serde_json::json!(closed);
+            }
+            serde_json::from_value::<RoomSnapshotResponse>(v)
+                .expect("snapshot envelope should decode")
+        };
+
+        assert!(
+            !body(None).closed,
+            "a daemon that predates `closed` says nothing, and nothing means \
+             OPEN — reading absence as closed shuts the composer on every room \
+             such a daemon serves",
+        );
+        assert!(
+            !body(Some(false)).closed,
+            "an explicit `false` is an open room and must stay writable",
+        );
+        assert!(
+            body(Some(true)).closed,
+            "`true` is the soft-closed audit view — the flag `open_room` gates \
+             the live tail on and the composer refuses every send on",
+        );
+    }
+
     #[test]
     fn snapshot_hydration_resumes_from_the_page_cursor() {
         let response: RoomSnapshotResponse = serde_json::from_value(serde_json::json!({
