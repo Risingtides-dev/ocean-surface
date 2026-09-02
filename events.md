@@ -5802,3 +5802,29 @@ reds only the guard with the wasm32 clippy lane still green. Tree restored after
 each. Gate green: all seven frozen commands, host suite 1252 unit tests plus 61
 guards across 14 binaries.
 _________________________________________________________________________________ 20:39 loop/surface-load-older-affordance
+time:      [20:07] [09-01-26]
+agent:     [claude] [fable 5.1]
+worktree:  [docs/rooms-product-contract-truth]
+type:      docs
+area:      docs
+
+Corrected `docs/OCEAN_ROOMS_PRODUCT.md` to the wire shapes the daemon and this
+crate actually speak, verified at ocean-surface d58a145 and ocean-os 616293e:
+access states are `local|connecting|live|recovering|revoked` (no `Remote`);
+a message is `{author_id, author_kind, body, thread_parent_seq}` on a
+`deny_unknown_fields` struct (no `content`, no `mention_ids`; mentions are
+`@id` in the body); hydration goes through `/snapshot?before_seq&limit`, not
+`GET /{key}`; the stream carries `room_read_cursor` as a third frame; there
+is no `room_key` on `/v1/agent/turns` — turns are convened by trigger
+evaluation and fail closed with `workspace_unavailable` when the room has no
+`workspace_root`; the trigger policy carries `on_build_failure` and
+`on_ci_failure`; invites, redeem, federation, attachments and artifacts are
+shipped, so "Future" and three "NOT" claims were history. Where the product
+intent stands and the code lags (workspace_root never sent, list pagination
+undecoded, UTC timestamps, no load-older affordance, refusals not rendered),
+the doc now says so with a dated status line pointing at the rooms definition
+of done. `AGENTS.md` stops binding the dead `.rooms-panel__list` selector and
+names the live rooms workspace instead. Docs only; no code, no CSS, no test
+changed — the 57 orphaned `.rooms-*` rules in `styles/panels.css` and the
+`app.rs` test pinning them are a separate cleanup slice.
+_________________________________________________________________________________ 20:07 docs/rooms-product-contract-truth

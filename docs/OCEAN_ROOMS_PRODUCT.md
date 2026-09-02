@@ -18,15 +18,22 @@ A human creates a room from the surface:
 
 ```
 POST /v1/rooms/persistent
-{ "key": "my-room", "name": "My Room", "workspace_root": "/path/to/project" }
+{ "key": "my-room", "name": "My Room", "trigger_policy": { ... }, "workspace_root": "/path/to/project" }
 ```
 
-The `key` is a free-form identifier (sluggish: lower-kebab). `workspace_root` is
-optional — when set, agent turns in this room resolve their project and `cwd` from
-it. The creating human is automatically added as a `RoomParticipant { kind: Human }`.
+The `key` is a free-form identifier (sluggish: lower-kebab). `trigger_policy`
+is optional and stored verbatim (see Agent Wake Policy). `workspace_root` is
+optional on the wire but load-bearing for the product: when set, a room-bound
+agent turn resolves its project and `cwd` from it; when absent, the daemon
+leaves the room unbound and **every agent turn in it fails closed with
+`workspace_unavailable`**. The creating human is automatically added as a
+`RoomParticipant { kind: Human }`.
 
-The daemon responds with a `Room` entity including the full participant roster,
-timestamps, and trigger policy.
+Status 2026-09-01: the surface's create form sends `key`, `name` and
+`trigger_policy` only (`crates/ocean-surface-ui/src/rooms.rs`, `CreateRoomBody`),
+so surface-created rooms cannot wake agents until it sends `workspace_root` and
+offers a bind control for existing rooms. That is the rooms definition of done,
+line 1.4 (`ocean-os/docs/specs/2026-09-01-ocean-rooms-definition-of-done.md`).
 
 ### 2. Joining a Room
 
@@ -46,29 +53,46 @@ knows the room key can join. This is acceptable for G1 (trusted team use).
 
 ### 3. Opening a Room
 
-A surface opens a room by key:
+A surface opens a room by hydrating from its snapshot, newest page first:
 
 ```
-GET /v1/rooms/persistent/{key}
+GET /v1/rooms/persistent/{key}/snapshot?before_seq=<u64::MAX>&limit=1000
 ```
 
-The response includes the full `Room` entity plus a `RoomAccessProjection`:
-- `Local` — the room exists on this daemon; the operator is a participant.
-- `Remote` — the room key resolves but the daemon cannot serve it locally.
-- `None` — loading or no open room (surface state, never a local discriminator).
+The response carries the `Room` entity, the roster, `agent_owners`, one page of
+transcript, the paging cursors (`last_seq`, `next_seq`, `prev_seq`, `has_more`),
+`closed`, and a `RoomAccessProjection` whose `state` is one of:
 
-The transcript hydrates once from the room entity, then the surface subscribes
-to the room-scoped SSE endpoint:
+- `local` — the room lives on this daemon and the operator is a participant.
+- `connecting` — the room is federated and the bridge has not reached the
+  remote stream yet.
+- `live` — the federated stream is caught up.
+- `recovering` — the bridge is replaying from its durable cursor.
+- `revoked` — this principal's membership was removed; nothing here is writable.
+
+Older history is fetched by further backward pages (`before_seq`); `after_seq`
+and `before_seq` are never sent together (the daemon answers the pair with a
+typed 400, `conflicting_transcript_cursors`). `GET /v1/rooms/persistent/{key}`
+still serves the room with its oldest page and 404s on a closed room; the
+snapshot serves closed rooms too, which is why hydration goes through it.
+
+After hydrating, the surface subscribes to the room-scoped SSE endpoint:
 
 ```
-GET /v1/rooms/persistent/{key}/events
+GET /v1/rooms/persistent/{key}/events?after_seq=<last_seq>
 Last-Event-ID: <last_known_sequence>
 ```
 
-Both `room_message` and `room_access` frames arrive on this stream. Messages
-advance the sequence cursor; access projections replace state without advancing
-the sequence. The surface must **never** consume the global agent-event stream
-for room data — rooms have their own event namespace.
+Three frames arrive on this stream: `room_message` (the only frame with an
+`id:`, which advances the sequence cursor), `room_access` (replaces the access
+projection behind the room-generation guard without advancing the sequence),
+and `room_read_cursor` (the daemon-owned read cursor, see below). The surface
+must **never** consume the global agent-event stream for room data — rooms
+have their own event namespace.
+
+The daemon owns the read cursor: the surface advances it with
+`PATCH /v1/rooms/persistent/{key}/read-cursor` from scroll intent, and unread
+state on the rail derives from it, so a reload preserves what was read.
 
 ### 4. Sending Messages
 
@@ -76,13 +100,21 @@ A participant sends a chat message into an open room:
 
 ```
 POST /v1/rooms/persistent/{key}/messages
-{ "content": "Let's fix the map component", "mention_ids": ["builder"] }
+{ "author_id": "smaths", "author_kind": "human", "body": "Let's fix the map component @builder", "thread_parent_seq": null }
 ```
 
+The daemon's request struct is `deny_unknown_fields`: there is no `content`
+and no `mention_ids`. Mentions are `@id` tokens in `body`, resolved against the
+roster; they drive trigger evaluation. `thread_parent_seq` names the parent
+message for a one-level thread reply. Session attribution is derived by the
+daemon from the path that produced the row, never from the client.
+
 The daemon appends the message to the transcript, advances the sequence, and
-broadcasts a `room_message` SSE frame to all subscribers. The surface renders
-pending outbox items outside the confirmed transcript until the SSE frame
-confirms delivery.
+broadcasts a `room_message` SSE frame to all subscribers. In a federated room
+the post is a 202 outbox row until the ordered remote stream confirms it. The
+surface renders pending outbox items outside the confirmed transcript until
+the SSE frame confirms delivery; only failed items expose the retry action
+(`POST /v1/rooms/persistent/{key}/outbox/retry`).
 
 ### 5. Leaving / Closing
 
@@ -108,44 +140,48 @@ The daemon validates that `id` resolves to a known agent identity.
 
 ### Agent Wake Policy
 
-Each room carries an optional `RoomTriggerPolicy`:
+Each room carries an optional `RoomTriggerPolicy`, mirrored field for field
+between `ocean_core` and the surface:
 
 ```json
 {
   "on_mention": true,
   "on_thread_reply": true,
+  "on_build_failure": false,
+  "on_ci_failure": false,
   "on_component_event": false,
   "on_schedule": null
 }
 ```
 
-When `on_mention` is true, the daemon wakes the agent when its participant id
-appears in a message's `mention_ids`. When `on_thread_reply` is true, replies
-in a thread the agent participates in also wake it. `on_schedule` accepts an
-optional cron expression for periodic wake-ups.
+`on_mention` and `on_thread_reply` are evaluated per non-agent-authored
+transcript message; `on_build_failure` and `on_ci_failure` are evaluated per
+ingested workspace ledger row (a different lane). `on_component_event` and
+`on_schedule` are unwired: the daemon answers a typed 400 (`trigger_unwired`)
+for a policy carrying `on_component_event: true` or a set `on_schedule`, by
+value, so serializing the defaults is accepted. `on_thread_reply` cannot fire
+in a federated room (there is no confirmed federated thread source yet); the
+surface must say so rather than offer it there.
 
-The daemon's room loop handles wake delivery; the surface only renders the
-policy state and provides toggles for the human to configure it.
+`PATCH /v1/rooms/persistent/{key}` replaces the stored policy wholesale, so the
+surface always sends the complete object. The daemon's room loop handles wake
+delivery; the surface renders the policy state and provides toggles.
 
 ### Agent Turns in Rooms
 
-An agent turn in a room context resolves its `cwd` and `project_id` from the
-room's `workspace_root`. The surface posts via the standard turn endpoint:
+There is no room-aware turn endpoint and no `room_key` on `/v1/agent/turns`.
+An agent turn in a room is produced by the daemon: a posted message is
+evaluated against the room's trigger policy, and a matching trigger convenes
+the bound agent in a room-bound session whose `cwd` and `project_id` resolve
+from the room's `workspace_root`. The agent's reply is appended to the
+transcript under the agent's participant id and arrives on the room's event
+endpoint as an ordinary `room_message`.
 
-```
-POST /v1/agent/turns
-{
-  "session_id": "<room-bound session>",
-  "prompt": "@builder review the map PR",
-  "room_key": "ocean-surface-map-fix",
-  "client_type": "surface-web"
-}
-```
-
-The daemon resolves the owning project from `room_key → workspace_root` and
-injects it into the turn context. The agent's response streams back as SSE
-events on the room's event endpoint, rendered as a `room_message` with the
-agent's participant id.
+A room without `workspace_root` refuses the turn with `workspace_unavailable`;
+a room whose history the agent may not read refuses with
+`room_history_unavailable`. Today both refusals land only as a generic audit
+row; rendering them in the transcript, with a convening indicator while the
+turn runs, is the rooms definition of done, line 2.2.
 
 ---
 
@@ -153,36 +189,52 @@ agent's participant id.
 
 ### Browsing Rooms
 
-The rooms panel is a flex column listing all rooms the daemon knows about:
+The rooms rail lists the rooms the daemon knows about:
 
 ```
 GET /v1/rooms/persistent?limit=50&cursor=<opaque>
 ```
 
-Each room card shows:
+The response is `{ ok, rooms, read_states, next_cursor, has_more }`. The
+daemon pages (100 by default, 1000 at most). Each room card shows:
 - Room name and key
 - Participant count (human/agent breakdown)
 - Last activity timestamp
+- Unread state from the daemon-owned read cursor
 - A join/open affordance
 
-`.rooms-panel__list` keeps `min-height: 0` with vertical overflow — long room
-lists scroll instead of pushing status/actions outside the viewport.
+The rail scrolls inside its own column with `min-height: 0`; long room lists
+never push status or actions outside the viewport. The legacy `.rooms-panel`
+markup is gone; the live surface is the rooms workspace in
+`crates/ocean-surface-ui/src/rooms_workspace.rs` and its stylesheet.
+
+Status 2026-09-01: the surface does not decode `next_cursor` or `has_more`, so
+the hundred-and-first room is invisible, and it refreshes the full list every
+eight seconds while mounted. Both are the rooms definition of done, line 1.6.
 
 ### Transcript Rendering
 
 Messages render as a scrolling transcript with:
 - Participant display name + avatar
-- Timestamp (relative: "2m ago", "yesterday")
-- Message body (markdown)
-- @-mentions rendered as colored pills
+- Timestamp, in the reader's local time, relative for the recent past ("2m
+  ago", "yesterday") and absolute beyond it; day separators follow the local
+  calendar. Status 2026-09-01: times and day separators are UTC rendered as if
+  local (definition of done, line 1.9).
+- Message body (markdown-lite with a scheme allowlist, no `innerHTML`)
+- @-mentions resolved against the roster and rendered as pills
 - Agent messages distinguished by a subtle "agent" badge
+- One-level threads: replies carry `thread_parent_seq` and open in a thread
+  column; a reply whose root fell outside the hydrated window must still be
+  reachable (definition of done, line 1.5)
 - Pending outbox items rendered below the confirmed transcript with a spinner;
   failed items expose the daemon retry action
 
 **Live-follow is intent-aware:** the transcript follows new messages while the
 reader is at/near the bottom. Scrolled-up history reading is never yanked; a
 zero-height sticky `↓ latest` affordance returns and re-pins. Session switches
-always re-pin to the latest message.
+always re-pin to the latest message. Hydration opens at the newest page and
+backfills a bounded number of older pages; the member can ask for older
+history and can see whether more exists (definition of done, line 1.5).
 
 ### Composer
 
@@ -195,11 +247,18 @@ It supports:
 
 ### Federated Rooms (Future)
 
-Federated room outbox items render outside the confirmed transcript. Pending
-items are informational; only failed items expose the retry action. Invite and
-redeem UI is absent until daemon-owned outbound routes exist. The access
-projection returned by a retry applies immediately behind the room-generation
-guard.
+### Federated Rooms
+
+Shipped. A room becomes federated when its owner mints an invite
+(`POST /v1/rooms/persistent/{key}/invites`, which also registers the room with
+the Bedrock federation control plane) and another daemon redeems it
+(`POST /v1/rooms/persistent/invites/redeem`). The bridge keeps a durable cursor
+on Bedrock's room stream; the access projection moves through `connecting`,
+`live` and `recovering` as it does. Federated outbox items render outside the
+confirmed transcript; pending items are informational and only failed items
+expose retry. Summaries, artifacts and attachments write to this daemon's
+store only and stay writable through `connecting` and `recovering`; the
+composer, invites and repo commands need `local` or `live`.
 
 ---
 
@@ -226,8 +285,15 @@ streams directly to the daemon without a proxy intermediary.
 
 ### Inviting Another Human (Future — G2+)
 
-Invite and redeem routes are daemon future work. For G1, the operator tells the
-other human the room key, and they join via the rooms panel's "Join room" input.
+### Inviting Another Human
+
+Two paths exist. Inside one daemon, the operator tells the other human the
+room key and they join via the rail's "Join room" input (`POST
+/v1/rooms/persistent/{key}/participants` with `{ id, display_name, kind }`).
+Across daemons, the owner mints an invite and shares its `onboard_url`; the
+other daemon redeems it and the room federates. Bedrock-side operator rooms
+(public discovery and operator-targeted invites) are landing in ocean-bedrock
+(#117) and have no surface yet.
 
 ---
 
@@ -275,30 +341,41 @@ beyond posting turns — the daemon owns session creation, wake, and teardown.
 
 ## What Rooms Are NOT (G1)
 
+## What Rooms Are NOT
+
 - **Not a replacement for the chat/PTY session surface.** Rooms are additive —
   a collaboration layer for teams. The solo agent chat session remains the
   primary coding surface.
 - **Not a real-time voice/video space.** LiveKit controls stay outside the room
   lifecycle until explicitly reintroduced behind a reviewed platform contract.
-- **Not a federated protocol.** G1 rooms are daemon-local. Federation (remote
-  room resolution, cross-daemon messages) is G2+.
-- **Not a file-sharing surface.** Room messages carry text; file and image
-  attachments are future work.
-- **Not a project management tool.** No kanban, no issue tracker, no sprints.
-  Rooms carry conversation and agent turns. Workflows that need structured
-  tracking belong in the Longhouse or the agent session surface.
+- **Not daemon-local only.** Federation shipped (invites, redeem, the Bedrock
+  bridge); the G1 statement that rooms are daemon-local is history.
+- **Not a general file-sharing surface.** Room attachments exist (8 MiB, an
+  image allowlist for inline display, everything served as a download) but
+  rooms carry no sync, no folders and no external sharing.
+- **Not a project management tool.** Room artifacts (tasks, decisions,
+  knowledge, the room summary) are lightweight and CAS-versioned; there is no
+  kanban, no issue tracker, no sprints. Workflows that need structured tracking
+  belong in the Longhouse or the agent session surface.
 
 ---
 
 ## Daemon API Summary
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| `GET` | `/v1/rooms/persistent` | List rooms (paginated) |
-| `POST` | `/v1/rooms/persistent` | Create a room |
-| `GET` | `/v1/rooms/persistent/{key}` | Get room + transcript + access projection |
-| `GET` | `/v1/rooms/persistent/{key}/events` | SSE stream (room messages + access) |
-| `POST` | `/v1/rooms/persistent/{key}/messages` | Send a message |
-| `POST` | `/v1/rooms/persistent/{key}/participants` | Add a participant |
-| `DELETE` | `/v1/rooms/persistent/{key}/participants/{id}` | Remove a participant |
-| `GET` | `/v1/agents` | List known agent identities |
+The daemon serves forty room routes; `ocean-os/crates/ocean-daemon/src/main.rs`
+(`room_routes()`) and `docs/OCEAN_RUNTIME_OPERATOR_GUIDE.md` are authoritative.
+The families the surface calls:
+
+| Family | Routes |
+|--------|--------|
+| Lifecycle | `GET/POST /v1/rooms/persistent`, `GET/PATCH /v1/rooms/persistent/{key}` |
+| Hydration and history | `GET …/{key}/snapshot` (`after_seq` or `before_seq`, `limit`), `GET …/{key}/transcript` |
+| Live | `GET …/{key}/events` (`after_seq`, `Last-Event-ID`), `PATCH …/{key}/read-cursor` |
+| Messages | `POST …/{key}/messages`, `POST …/{key}/outbox/retry` |
+| Roster | `POST …/{key}/participants`, `DELETE …/{key}/participants/{id}` |
+| Federation | `POST …/{key}/invites`, `POST /v1/rooms/persistent/invites/redeem`, `POST …/{key}/members/agents`, `DELETE …/{key}/members/{id}` |
+| Room agents | `GET/POST …/{key}/agents`, `…/agents/bootstrap`, `…/agents/preview/{pkg}`, `…/agents/{id}` (`reauthorize`, `suspend`, `resume`, `invoke`) |
+| Artifacts and summary | `GET/POST …/{key}/artifacts[/{id}[/amend]]`, `POST …/{key}/summarize` |
+| Attachments | `GET/POST/DELETE …/{key}/attachments[/{id}]` |
+| Workspace and repo | `GET …/{key}/workspace`, `GET/POST …/{key}/workspace/{leaf}` (an allowlisted proxy to the room's Bedrock container: execs, files, ports, secrets, repo bind/clone/build/ci) |
+| Identity catalog | `GET /v1/agents`, `GET/PUT/DELETE /v1/agents/{name}` |
