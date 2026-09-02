@@ -1287,12 +1287,20 @@ impl Rooms {
                         *current =
                             merge_room_read_summaries(current, &rooms, &success.read_summaries);
                     });
+                    // The rail's paging boundary, read off the rail itself.
+                    // Taken before `rooms` is handed to the signal.
+                    let rail_ends_at = rooms.last().map(|room| room.id.clone());
                     me.list.set(rooms);
-                    // A poll that kept a paged tail must keep that tail's cursor
-                    // with it. Parking the FIRST page's cursor there would rewind
-                    // paging every 8 seconds, so the next press would re-serve
-                    // the pages already on screen instead of the ones behind them.
-                    if !retain_paged_tail {
+                    if retain_paged_tail {
+                        // A poll that kept a paged tail keeps its POSITION in the
+                        // list, and re-derives the key that names it. Parking the
+                        // first page's cursor here would rewind paging every 8
+                        // seconds; replaying the old key is the opposite failure,
+                        // and `retained_tail_cursor` explains it.
+                        let parked = me.rooms_next_cursor.get_untracked();
+                        me.rooms_next_cursor
+                            .set(retained_tail_cursor(parked, rail_ends_at.as_deref()));
+                    } else {
                         me.rooms_paged_beyond_first.set(false);
                         me.rooms_next_cursor.set(success.next_cursor);
                     }
@@ -3017,6 +3025,33 @@ fn rooms_next_page_cursor(grew: bool, page_cursor: Option<String>) -> Option<Str
         return None;
     }
     page_cursor
+}
+
+/// Where a RETAINING poll leaves the rail's paging boundary: the position is
+/// kept, and the KEY that names it is re-derived from the rail's own last row.
+///
+/// A cursor is a room KEY, and the daemon resolves its place in the order from
+/// that room's CURRENT `updated_at` — it looks the anchor row up per request
+/// (`SELECT updated_at, id FROM rooms WHERE id = ?1`) and pages from wherever
+/// that row now sits. So the one thing a parked key cannot survive is a message
+/// arriving in the room it names: `updated_at DESC` puts that room at the FRONT,
+/// and a press replaying its key asks for the hundred rooms behind the newest
+/// one — every one of them already on screen. [`rooms_next_page_cursor`] then
+/// retires the affordance for a page that added nothing, and the rooms past the
+/// real boundary are unreachable until an interactive refresh. On a rail that
+/// polls every 8 seconds and keeps its key for the life of the paging session,
+/// that is not a race; it is the expected outcome of any activity in one room.
+///
+/// The rail's own last row is the boundary, and it is stable under exactly the
+/// event that moves the old one: a tail room with new activity is by definition
+/// in the fresh first page, deduped out of the tail by [`append_rooms_page`],
+/// and the row behind it becomes the last — which is where the loaded pages
+/// genuinely end.
+///
+/// `None` in, `None` out. A rail that had already reached the end of the list
+/// must not grow the affordance back merely because a poll ran.
+fn retained_tail_cursor(parked: Option<String>, last_listed_room: Option<&str>) -> Option<String> {
+    parked.and(last_listed_room.map(str::to_owned))
 }
 
 /// The rail after a FIRST-page read.
@@ -5884,6 +5919,73 @@ mod tests {
             vec!["c", "a", "b"],
             "a room the fresh page promoted out of the tail appears once, not \
              twice",
+        );
+    }
+
+    /// A retaining poll keeps its POSITION in the list and re-derives the key.
+    #[test]
+    fn a_retaining_poll_re_derives_the_boundary_rather_than_replaying_its_key() {
+        assert_eq!(
+            retained_tail_cursor(Some("room-200".into()), Some("room-199")),
+            Some("room-199".to_string()),
+            "the rail's own last row is where the loaded pages end; the key the \
+             poll was holding is only where they ended when it was parked",
+        );
+        assert_eq!(
+            retained_tail_cursor(None, Some("room-199")),
+            None,
+            "a rail that had already reached the end of the list must not grow \
+             the affordance back merely because a poll ran",
+        );
+        assert_eq!(
+            retained_tail_cursor(Some("room-200".into()), None),
+            None,
+            "and an empty rail has no boundary to name",
+        );
+    }
+
+    /// The failure the re-derivation exists for, run end to end through the two
+    /// helpers that decide it.
+    ///
+    /// A cursor is a room KEY, and the daemon resolves its position from that
+    /// room's CURRENT `updated_at`. So a message in the room the cursor names
+    /// moves the boundary to the front of the list with it — and on a rail that
+    /// polls every 8 seconds and keeps its key for the life of the paging
+    /// session, that is not a race but the expected outcome of any activity in
+    /// one room.
+    #[test]
+    fn a_message_in_the_boundary_room_does_not_strand_the_pages_behind_it() {
+        // Two pages loaded of a 250-room deployment, parked on page two's last.
+        let rail: Vec<Room> = (1..=200)
+            .map(|n| listed_room(&format!("room-{n:03}")))
+            .collect();
+        let parked = Some("room-200".to_string());
+
+        // `room-200` receives a message. `updated_at DESC` puts it first, so the
+        // poll's one page opens with it and drops the page's former last row.
+        let mut fresh = vec![listed_room("room-200")];
+        fresh.extend((1..=99).map(|n| listed_room(&format!("room-{n:03}"))));
+
+        let merged = rooms_after_first_page(&rail, fresh, true);
+        assert_eq!(
+            merged.len(),
+            200,
+            "the promoted room is listed once, at the front, not twice",
+        );
+        assert_eq!(
+            merged.last().map(|room| room.id.as_str()),
+            Some("room-199"),
+            "the rail still ends where it ended — the promoted room left the \
+             tail, and the row behind it is the boundary now",
+        );
+
+        assert_eq!(
+            retained_tail_cursor(parked, merged.last().map(|room| room.id.as_str())),
+            Some("room-199".to_string()),
+            "replaying `room-200` would ask the daemon for the hundred rooms \
+             behind the NEWEST room — the first page over again — and a page \
+             that adds nothing retires the affordance, leaving rooms 201-250 \
+             unreachable until an interactive refresh",
         );
     }
 

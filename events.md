@@ -6292,3 +6292,49 @@ exactly one caller. Gate green: all seven frozen commands, 1258 unit tests and
 lines of this one's; the rail render at 2837 and the stylesheet's rail block are
 untouched by all three.
 _________________________________________________________________________________ 22:12 cloud/surface-room-list-paging
+
+time:      [23:58] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-room-list-paging]
+type:      review
+area:      frontend
+
+Refinement pass on the paging slice. Codex reviewed #200 at 6658de5 and found the
+one thing that would have shipped broken, and it was right. A cursor on this route
+is a room KEY, and the daemon resolves its place in the order from that room's
+CURRENT `updated_at` — `list_page` looks the anchor row up per request
+(`SELECT updated_at, id FROM rooms WHERE id = ?1 AND closed_at IS NULL`) and then
+pages strictly after wherever that row now sits. So the one event a parked key
+cannot survive is a message arriving in the room it names: `updated_at DESC` puts
+that room at the FRONT, and a press replaying its key asks for the hundred rooms
+behind the newest one, every one of them already on screen. `rooms_next_page_cursor`
+then does exactly what this slice built it to do — a page that adds nothing retires
+the affordance — and the rooms past the real boundary become unreachable until an
+interactive refresh. On a rail loaded to 200 of 250 rooms, one message in room 200
+strands rooms 201 to 250 and takes the control away while doing it.
+
+The retaining poll is where this bites, because it is the only path that holds a
+key across time: it re-read the first page every eight seconds and kept the parked
+key for the life of the paging session, so this is not a race but the expected
+outcome of any activity in one room. Fixed by keeping the POSITION and re-deriving
+the KEY: `retained_tail_cursor(parked, rail_ends_at)` parks the id of the rail's
+own last row, and only while a cursor was parked at all, so a rail that had reached
+the end of the list cannot grow the affordance back merely because a poll ran. That
+row is the boundary and it is stable under exactly the event that moves the old one
+— a tail room with new activity is by definition in the fresh first page, deduped
+out of the tail by `append_rooms_page`, and the row behind it becomes the last. The
+non-retaining path was checked and left alone: there `rooms.last()` and the daemon's
+own `next_cursor` are the same room by the daemon's own definition of the field, so
+there is nothing to re-derive, and the residual window between a page load and a
+press is inherent to a keyset cursor over a mutable sort key rather than anything
+this branch can close.
+
+Two mutations run for real against the finished tree, bringing this guard's total to
+nine. `rooms.last()` swapped for `rooms.first()` reds only `room_list_paging_affordance.rs`
+— both clippy lanes and all 1260 unit tests stay green while the same stranding is
+back — which is why the needle names the rail rather than merely naming a cursor.
+Replaying the parked key reds the wasm clippy lane too, but only because it orphans
+`rail_ends_at` and `retained_tail_cursor` along the way; that is the shape of the fix,
+not a hold worth relying on, and it is recorded in the file as such. Gate green: all
+seven frozen commands, 1260 unit tests and 66 guards across 15 binaries.
+_________________________________________________________________________________ 23:58 cloud/surface-room-list-paging

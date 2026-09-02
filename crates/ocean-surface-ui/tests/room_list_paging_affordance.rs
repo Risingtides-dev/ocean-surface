@@ -21,7 +21,7 @@
 //!
 //! ## Measured, not assumed
 //!
-//! Seven mutations applied for real against this tree. Each was run three ways:
+//! Nine mutations applied for real against this tree. Each was run three ways:
 //! this file, `cargo clippy -p ocean-surface-ui --target wasm32-unknown-unknown
 //! -- -D warnings`, and `cargo test -p ocean-surface-ui --bins`. Every unit-test
 //! column came back green, so it is not repeated per row.
@@ -35,11 +35,13 @@
 //! | `rooms_next_page_cursor(grew, ..)` replaced with `success.next_cursor` | RED | RED — see below |
 //! | the press's `rooms_more_in_flight` guard deleted                       | RED | green |
 //! | the press's parked-cursor re-check deleted                             | RED | green |
+//! | the retained boundary read off `rooms.first()` instead of `.last()`    | RED | green |
+//! | the parked key replayed instead of re-derived (the pre-review bug)     | RED | RED — see below |
 //!
-//! Five of the seven are this file's own catch: nothing else in the crate reads
-//! where the control sits, and the four wiring rules all live in pure helpers
+//! Six of the nine are this file's own catch: nothing else in the crate reads
+//! where the control sits, and the five wiring rules all live in pure helpers
 //! whose unit tests own the RULE and never its wiring — the mutated tree keeps
-//! all 1258 of them green while the rail silently drops every page below the
+//! all 1260 of them green while the rail silently drops every page below the
 //! first, once every eight seconds, in front of the member reading it.
 //!
 //! The two RED clippy rows are findings, not failures, and they have a shelf
@@ -49,8 +51,13 @@
 //! methods lose their only callers ("field `rooms_more_in_flight` is never
 //! read", "methods `more_rooms_available`, `more_rooms_in_flight`, and
 //! `load_more_rooms` are never used", "function `rooms_next_page_cursor` is
-//! never used"). Bypassing the cursor helper is held by the last of those three
-//! alone. Both holds are the accident of these being the helpers' ONLY callers,
+//! never used"). Bypassing either cursor helper is held by a dead-code error on
+//! that helper alone — and in the `retained_tail_cursor` case only because
+//! restoring the pre-review bug also orphans `rail_ends_at`, which is a
+//! coincidence of how the fix is shaped rather than a hold worth relying on:
+//! `rooms.first()` puts the same bug back with every symbol still used and only
+//! this file objects. Those holds are the accident of these being the helpers'
+//! ONLY callers,
 //! which a second caller anywhere would end — the same way the rail rows in
 //! `ci_failure_trigger_control.rs` were compiler-held until a flag table
 //! elsewhere started constructing the same variants.
@@ -170,13 +177,25 @@ fn the_press_is_one_page_and_keeps_the_guards_a_press_needs() {
 
 /// The 8-second unread poll, which is the half no screenshot shows.
 ///
-/// Mutations run: `retain_paged_tail` replaced with `false`, and the
-/// `if !retain_paged_tail` guard deleted. The first leaves `cargo test` fully
-/// green — `rooms_after_first_page`'s unit tests own the rule and never its
-/// wiring — and silently deletes every page below the first, once every eight
-/// seconds, while the member is looking at it. The second rewinds the parked
-/// cursor to the end of page one on the same tick, so the next press re-serves
-/// rooms already on screen instead of the ones behind them.
+/// Mutations run: `retain_paged_tail` replaced with `false`, the retaining
+/// branch's cursor re-derivation replaced by the parked key, and the boundary
+/// read off `rooms.first()`. The first leaves `cargo test` fully green —
+/// `rooms_after_first_page`'s unit tests own the rule and never its wiring — and
+/// silently deletes every page below the first, once every eight seconds, while
+/// the member is looking at it.
+///
+/// The last two are the same defect from two directions, and they are the reason
+/// the boundary needles below name the RAIL rather than merely naming a cursor.
+/// A cursor is a room KEY and the daemon resolves its position from that room's
+/// current `updated_at`, so a parked key whose room receives a message moves to
+/// the front of the order and takes the boundary with it: the next press reads
+/// the hundred rooms behind the newest one, every one already listed, and a page
+/// that adds nothing retires the affordance with the deepest pages never
+/// reached. On a rail that polls every eight seconds and holds its key for the
+/// life of the paging session that is not a race — it is what any activity in
+/// one room does. Codex found it on the first review of this branch
+/// (#200, `6658de5`); the `rooms.first()` mutation puts it back with every
+/// symbol still used, and only this file objects.
 #[test]
 fn the_unread_poll_reads_one_page_and_keeps_the_pages_it_did_not_read() {
     let rooms = without_whitespace(&view_source("rooms.rs"));
@@ -199,10 +218,25 @@ fn the_unread_poll_reads_one_page_and_keeps_the_pages_it_did_not_read() {
     );
     assert!(
         rooms.contains(
-            "if!retain_paged_tail{me.rooms_paged_beyond_first.set(false);me.rooms_next_cursor.set(success.next_cursor);}"
+            "}else{me.rooms_paged_beyond_first.set(false);me.rooms_next_cursor.set(success.next_cursor);}"
         ),
-        "a poll that kept a paged tail must keep that tail's cursor with it; \
-         parking the first page's cursor there rewinds paging on every tick",
+        "a poll that did NOT keep a tail parks the page's own cursor and forgets \
+         where the last paging session had got to — that is what makes an \
+         interactive read a fresh start",
+    );
+    assert!(
+        rooms.contains("letrail_ends_at=rooms.last().map(|room|room.id.clone());"),
+        "the boundary is read off the RAIL, and it has to be taken before the \
+         vector is handed to the signal",
+    );
+    assert!(
+        rooms.contains(
+            "letparked=me.rooms_next_cursor.get_untracked();me.rooms_next_cursor.set(retained_tail_cursor(parked,rail_ends_at.as_deref()));"
+        ),
+        "a poll that KEPT a tail keeps its position and re-derives the key: a \
+         cursor is a room key whose place the daemon resolves from that room's \
+         current `updated_at`, so a message in the room it names moves the \
+         boundary to the front of the list and strands every page behind it",
     );
     assert!(
         rooms.contains("letget_url=rooms_list_url(&base,None);"),
