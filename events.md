@@ -5998,3 +5998,52 @@ broken nothing that file is about. It now scans the arm for `r.closed` instead.
 Gate green: all seven frozen commands, host suite 1257 unit tests plus 65 guards
 across 15 binaries.
 _________________________________________________________________________________ 21:20 cloud/rooms-agent-owners
+
+time:      [00:11] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/rooms-agent-owners]
+type:      review
+area:      frontend
+
+Codex review on #195 found two real defects in the ownership slice, both mine, and
+both are fixed here rather than argued with.
+
+The first is a provenance collapse, and the irony is that the sibling slice on
+cloud/rooms-load-older was built entirely around not making it. `#[serde(default)]`
+on a bare `Vec` reads an ABSENT `agent_owners` — a daemon predating ocean-os#437,
+which may hold durable ownership rows it simply cannot project — identically to a
+current daemon answering `[]`. The rail then badged every agent in every room
+`unclaimed`: a confident claim assembled purely out of the surface's own ignorance.
+The field is `Option<Vec<RoomAgentOwner>>` now and the signal with it; `None` is no
+answer, `Some([])` is the daemon saying nobody owns anything. `AgentOwnership`
+grew an `Unknown` variant that renders NOTHING, which is the same three-state shape
+`OlderHistory` takes one branch over, for the same reason: an absent answer is not
+a negative one. The default stays — it is the compatibility half, and without it
+every room on such a daemon refuses to open.
+
+The second is staleness. `SqliteRoomStore` INSERTS a `room_agent_owners` row as
+part of creating an agent participant (crates/ocean-store/src/lib.rs, the
+participant_created arm), so a first-agent bootstrap leaves the room owned in the
+database and `unclaimed` on screen until it is closed and reopened — this slice's
+own bug arriving through the one door that bypasses hydration.
+`bootstrap_local_package` replaces only `rooms.open_room` and `authorize` only its
+own bindings list, neither of which the rail reads. Both now call a new
+`refresh_agent_owners`, which invalidates to `None` BEFORE it asks — a re-read that
+never answers must degrade to silence, not to a stale claim — and asks through
+`/snapshot?before_seq=0&limit=1`. That cursor is the contract's terminal empty page
+while the daemon resolves `agent_owners` from the room's own lock whichever page it
+serves, so the refresh costs one request and no transcript: re-hydrating would
+throw away every older page the operator had pressed for.
+
+Four mutations run for real for the fixes. One is compiler-held and recorded as a
+finding: `Option<Vec<_>>` back to `Vec<_>` does not build, because the rail's call
+site passes `as_deref()`. One is the reason measurement is not optional — rendering
+`unclaimed` from the Unknown arm left the guard GREEN, because the arm needle this
+header claimed had silently failed to apply and a bare `contains` on the unclaimed
+markup is satisfied by whichever arm emits it. The assertion is now a COUNT of
+exactly one unclaimed render plus a needle on the Unknown arm, and the mutation
+re-run against the fixed file comes back red. A guard written and not mutated is a
+guard that has not been measured; this one was written, not measured, and shipped
+green for an hour. Gate green: all seven frozen commands, host suite 1259 unit
+tests plus 66 guards across 15 binaries.
+_________________________________________________________________________________ 00:11 cloud/rooms-agent-owners
