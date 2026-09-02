@@ -6015,6 +6015,152 @@ mod tests {
         }
     }
 
+    /// The half of this module a release build compiles. Every source scan
+    /// below runs over it, never over the whole file: this module's own
+    /// fixtures quote rail markup, and a scan reading them would find its own
+    /// literals instead of the view's.
+    fn rail_view_source() -> &'static str {
+        include_str!("rooms_workspace.rs")
+            .split_once("#[cfg(test)]")
+            .expect("this module carries its unit tests at the bottom")
+            .0
+    }
+
+    /// The ATTRIBUTE REGION of one mounted rail, anchored to the tag it names.
+    ///
+    /// The window this replaced was `markup[at..]` truncated at the first
+    /// `/>`, which is the rail's own close only for as long as every rail
+    /// self-closes. Nothing held that. A rail that grows children — the
+    /// component gains a `children` prop, the mount becomes `<Rail …>…</Rail>`
+    /// — pushes the first `/>` into the NEXT rail, and the guard then reads
+    /// the neighbour's `writes_allowed=` while reporting on the rail it names.
+    ///
+    /// Measured, not argued (the mutation is preserved as
+    /// `a_rail_that_stops_self_closing_is_read_off_its_neighbour`): giving
+    /// `RoomSummary` a `children` prop, mounting it non-self-closing, and
+    /// replacing its gate with a hardcoded `Signal::derive(move || true)` —
+    /// a rail that writes no matter what the room's access projection says —
+    /// left `each_rail_takes_the_gate_its_write_destination_earns` GREEN,
+    /// along with all 1313 tests across 14 binaries and the wasm32 clippy
+    /// lane. It read `local_store_write_gate` out of `RoomArtifacts`.
+    ///
+    /// So: `Err` rather than a guess whenever the region cannot be bounded to
+    /// the named rail. A guard that cannot see its subject must say so, not
+    /// report on its neighbour.
+    fn rail_attribute_window<'a>(view: &'a str, tag: &str) -> Result<&'a str, String> {
+        let mut from = 0usize;
+        let at = loop {
+            let rel = view[from..]
+                .find(tag)
+                .ok_or_else(|| format!("{tag} must be mounted from this file"))?;
+            let at = from + rel;
+            // `<crate::x::Foo` is a prefix of `<crate::x::FooBar` too, so only
+            // a following separator makes this the element open it names.
+            match view[at + tag.len()..].chars().next() {
+                None => break at,
+                Some(c) if c.is_whitespace() || c == '/' || c == '>' => break at,
+                Some(_) => from = at + tag.len(),
+            }
+        };
+
+        let rest = &view[at..];
+        let body = &rest[tag.len()..];
+        let closes_at = body.find("/>");
+        // Any other component mount opening before this one closes means the
+        // window has left the rail it names. That is what a rail which stopped
+        // self-closing looks like from in here.
+        let next_mount = body.find("<crate::");
+        match (closes_at, next_mount) {
+            (Some(end), next) if next.is_none_or(|n| end < n) => Ok(&body[..end]),
+            _ => Err(format!(
+                "{tag} does not self-close before the next component mount. A \
+                 window ending at the first `/>` would read that NEIGHBOUR's \
+                 `writes_allowed=` and report it as this rail's. Re-anchor \
+                 this guard to the rail's own closing tag before landing \
+                 markup that gives it children."
+            )),
+        }
+    }
+
+    /// The flaw the anchored window closes, kept executable.
+    ///
+    /// Two rails. The first has children and no `/>` of its own inside them,
+    /// exactly as a Leptos mount looks once its component gains a `children`
+    /// prop; its gate is hardcoded open, which is the defect the guard exists
+    /// to catch. The second is an ordinary self-closing rail carrying the
+    /// needle the guard hunts for.
+    ///
+    /// Fake module paths on purpose: `rail_view_source` stops at
+    /// `#[cfg(test)]`, but a fixture naming a real rail would still be a
+    /// literal in this file that a future whole-file scan could read.
+    #[test]
+    fn a_rail_that_stops_self_closing_is_read_off_its_neighbour() {
+        let local = ["local_store", "_write_gate"].concat();
+        let peer = ["access_allows", "_writes"].concat();
+        let alpha = ["<crate::fixture_alpha", "::RailAlpha"].concat();
+        let beta = ["<crate::fixture_beta", "::RailBeta"].concat();
+        let markup = format!(
+            "\
+                {alpha}
+                    rooms=rooms
+                    writes_allowed=Signal::derive(move || true)
+                >
+                    <span class=\"lead\"></span>
+                </{alpha}>
+
+                {beta}
+                    rooms=rooms
+                    writes_allowed=Signal::derive(move || {{
+                        {local}(rooms.access.get().as_ref())
+                    }})
+                />",
+            alpha = alpha,
+            beta = beta,
+            local = local,
+        );
+
+        // What the window did before it was anchored: first `/>` wins. Alpha's
+        // children carry none, so the window runs through Alpha's close, on
+        // through Beta's attributes, and stops at BETA's `/>`.
+        let at = markup.find(&alpha).expect("fixture mounts alpha");
+        let naive = &markup[at..][..markup[at..].find("/>").expect("fixture closes")];
+        // All three of the guard's assertions pass over that window while
+        // Alpha's gate ignores access entirely — the silent green.
+        assert!(naive.contains("writes_allowed="));
+        assert!(
+            naive.contains(local.as_str()),
+            "the unanchored window satisfies `{local}` from the NEIGHBOUR: \
+             that is the whole defect"
+        );
+        assert!(!naive.contains(peer.as_str()));
+
+        // Anchored: refused, loudly, naming the rail.
+        let why = rail_attribute_window(&markup, &alpha)
+            .expect_err("an unanchored window must be refused, not guessed at");
+        assert!(why.contains(&alpha) && why.contains("does not self-close"));
+
+        // And an ordinary self-closing rail still reads exactly its own
+        // attributes — never a character of its neighbour's.
+        let window = rail_attribute_window(&markup, &beta).expect("beta self-closes");
+        assert!(window.contains(local.as_str()));
+        assert!(
+            !window.contains("RailAlpha") && !window.contains("move || true"),
+            "a rail's window must not reach back over its neighbour either"
+        );
+
+        // The real view has to keep satisfying the anchor, or the guard above
+        // is asserting on nothing.
+        for tag in [
+            ["<crate::room_summary", "::RoomSummary"].concat(),
+            ["<crate::room_repo", "::RoomRepo"].concat(),
+        ] {
+            assert!(
+                rail_attribute_window(rail_view_source(), &tag).is_ok(),
+                "{tag} must still be anchorable in the live view"
+            );
+        }
+    }
+
     /// Which gate a rail takes is a `Signal::derive` inside the view, so no
     /// unit test of the predicates can reach it: both gates stay pure and
     /// correct, and every test above stays green while a section is wired to
@@ -6030,7 +6176,6 @@ mod tests {
     /// not writes a down link merely delays.
     #[test]
     fn each_rail_takes_the_gate_its_write_destination_earns() {
-        let markup = include_str!("rooms_workspace.rs");
         let local = ["local_store", "_write_gate"].concat();
         let peer = ["access_allows", "_writes"].concat();
 
@@ -6043,13 +6188,8 @@ mod tests {
         ];
 
         for (tag, writes_land_locally) in sections {
-            let at = markup
-                .find(&tag)
-                .unwrap_or_else(|| panic!("{tag} must be mounted from this file"));
-            let section = &markup[at..];
-            let section = &section[..section
-                .find("/>")
-                .unwrap_or_else(|| panic!("{tag} must close in this file"))];
+            let section = rail_attribute_window(rail_view_source(), &tag)
+                .unwrap_or_else(|why| panic!("{why}"));
             assert!(
                 section.contains("writes_allowed="),
                 "{tag} must carry a write gate"

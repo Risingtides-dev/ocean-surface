@@ -5802,3 +5802,47 @@ reds only the guard with the wasm32 clippy lane still green. Tree restored after
 each. Gate green: all seven frozen commands, host suite 1252 unit tests plus 61
 guards across 14 binaries.
 _________________________________________________________________________________ 20:39 loop/surface-load-older-affordance
+
+time:      [22:25] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-rail-gate-guard]
+type:      fix
+area:      frontend
+
+Anchored the rail-gate guard to the rail it names. `each_rail_takes_the_gate_its_
+write_destination_earns` found its section by `markup.find(tag)` and truncated it at
+the first `/>`, which is the rail's own close only for as long as every rail
+self-closes — and nothing held that. The slice arrived carrying this as a claim
+nobody had verified, so it was verified before anything was written: a rail whose
+component gains a `children` prop mounts as `<Rail …>…</Rail>`, its children carry
+no `/>` of their own, and the first `/>` after the tag belongs to the NEXT rail.
+
+The mutation was run for real against origin/main. `RoomSummary` given a `children`
+prop, mounted non-self-closing with a `<span></span>` child, and its gate replaced
+with `Signal::derive(move || true)` — a rail whose writes ignore the room's access
+projection entirely, which is precisely the wiring this guard exists to catch. It
+passed. Not just the guard: 1313 tests across 14 binaries, plus the wasm32 clippy
+lane, all green, because the window ran through Summary's close and on into
+`RoomArtifacts`, whose `local_store_write_gate` satisfied the "must take" needle
+while Summary's hardcoded gate matched neither needle and so tripped nothing. A
+guard reporting on its neighbour and calling it by its neighbour's name.
+
+The window is now `rail_attribute_window(view, tag)`, which bounds the region at the
+earliest of the tag's own `/>` and the next `<crate::` mount, and returns `Err`
+rather than a guess when the mount comes first. Refusing is the point: a rail that
+legitimately grows children should red this gate and make someone re-anchor it, not
+quietly hand the assertion a different rail. Two smaller holes closed on the way —
+the scan runs over the production half of the file only (this module's own fixtures
+quote rail markup, and the old scan read the whole file), and the tag match requires
+a following separator, since `<crate::x::Foo` is a prefix of `<crate::x::FooBar`.
+
+The demonstration is kept as `a_rail_that_stops_self_closing_is_read_off_its_
+neighbour`: two fixture rails under fake module paths, the first non-self-closing
+with a hardcoded gate, and all three of the guard's own assertions shown passing
+over the unanchored window — the silent green, executable and permanent. Then the
+anchored window refused by name, a self-closing neighbour still reading exactly its
+own attributes, and the live view asserted still anchorable so the guard above is
+not asserting on nothing. Re-running the same source mutation against the fixed
+guard reds it with the rail named in the message. Tree restored after each run.
+Gate green: all seven frozen commands, 1314 tests across 14 binaries, 0 failed.
+_________________________________________________________________________________ 22:25 cloud/surface-rail-gate-guard
