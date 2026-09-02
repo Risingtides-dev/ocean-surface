@@ -973,6 +973,19 @@ pub fn room_is_unbound(room: &Room) -> bool {
         .is_none_or(|root| root.trim().is_empty())
 }
 
+/// Should the workspace field re-seed itself from the room's stored binding?
+///
+/// Only when the open room's IDENTITY changed. The seeding effect has to read
+/// `open_room` to find the stored value, which makes it re-run on every write
+/// to that signal — including a trigger-policy PATCH completing two inches
+/// away, or any hydration refresh. Re-seeding on each of those overwrites a
+/// path the operator is halfway through typing, so the text vanishes before
+/// Bind can be pressed. Keyed on identity, an unrelated update leaves the draft
+/// alone and only a room switch replaces it.
+pub fn workspace_draft_should_reseed(seeded_for: Option<&str>, open_room_id: Option<&str>) -> bool {
+    seeded_for != open_room_id
+}
+
 /// The value a create form's workspace field should send: the trimmed path, or
 /// `None` when the operator left it empty. Empty means "leave the room
 /// unbound", which is exactly what the field being absent from the body says.
@@ -1572,6 +1585,41 @@ impl Rooms {
         self.reset_room_state();
     }
 
+    /// Apply ONE field of a PATCH response onto the open room and its list row,
+    /// leaving every other field as it stands.
+    ///
+    /// Both room PATCHes answer with the WHOLE `Room`, and the two run
+    /// concurrently on purpose — separate in-flight flags, because they write
+    /// disjoint fields and holding one control while the other is mid-flight
+    /// would be a hold with nothing behind it. Disjoint on the WIRE is not
+    /// disjoint in the projection, though: the daemon applies the two writes in
+    /// ITS order and the replies race back in THEIRS, so a reply carrying the
+    /// other field's pre-change value can land last. Replacing the record
+    /// wholesale then reverts a field that is durably stored — and the trigger
+    /// toggle builds its next write from the record it can see, so a stale
+    /// projection becomes a stale WRITE that un-does a persisted flag.
+    ///
+    /// Each response therefore merges only the field it owns. The room's other
+    /// state (roster, timestamps) keeps arriving through hydration and the SSE
+    /// tail, which is where it came from before either control existed.
+    fn merge_room_field(&self, answered: &Room, apply: impl Fn(&mut Room, &Room)) {
+        self.list.update(|rooms| {
+            if let Some(entry) = rooms.iter_mut().find(|r| r.id == answered.id) {
+                apply(entry, answered);
+            }
+        });
+        self.open_room.update(|current| {
+            if let Some(current) = current.as_mut() {
+                // The generation guard already proved the room is current; this
+                // id check is what stops a merge landing on a different record
+                // if that ever stops being true.
+                if current.id == answered.id {
+                    apply(current, answered);
+                }
+            }
+        });
+    }
+
     /// Replace the open room's trigger policy (`PATCH /v1/rooms/persistent/{key}`).
     /// Callers flip one flag on a copy of the room's CURRENT policy and pass
     /// the whole thing — the daemon replaces rather than merges, so a delta
@@ -1620,14 +1668,12 @@ impl Rooms {
             match result {
                 Ok(room) => {
                     if let Some(room) = room {
-                        // Merge into the list too, so the flags survive a
-                        // list-driven re-render without a refetch.
-                        me.list.update(|rooms| {
-                            if let Some(entry) = rooms.iter_mut().find(|r| r.id == room.id) {
-                                *entry = room.clone();
-                            }
+                        // Only the policy — see `merge_room_field`. Replacing
+                        // the record wholesale here would revert a workspace
+                        // binding the other PATCH had already stored.
+                        me.merge_room_field(&room, |dst, src| {
+                            dst.trigger_policy = src.trigger_policy.clone();
                         });
-                        me.open_room.set(Some(room));
                     }
                 }
                 Err(error) => me.policy_update_error.set(Some(error)),
@@ -1659,6 +1705,14 @@ impl Rooms {
     /// silent no-op.
     pub fn set_open_room_workspace(&self, workspace_root: Option<String>) {
         if self.workspace_update_in_flight.get_untracked() {
+            return;
+        }
+        // A soft-closed room is a frozen audit view: the daemon's `update`
+        // writes an OPEN room only, so every bind against a closed one is a
+        // guaranteed 404 dressed up as a failed write. The controls are hidden
+        // in that state; this is the second lock, so a caller that reaches the
+        // method another way cannot spend a round trip to be told no.
+        if self.closed.get_untracked() {
             return;
         }
         let Some(key) = self.open_key.get_untracked() else {
@@ -1697,14 +1751,12 @@ impl Rooms {
             match result {
                 Ok(room) => {
                     if let Some(room) = room {
-                        // Merge into the list too, so the binding survives a
-                        // list-driven re-render without a refetch.
-                        me.list.update(|rooms| {
-                            if let Some(entry) = rooms.iter_mut().find(|r| r.id == room.id) {
-                                *entry = room.clone();
-                            }
+                        // Only the binding — see `merge_room_field`. Replacing
+                        // the record wholesale here would revert a trigger flag
+                        // the other PATCH had already stored.
+                        me.merge_room_field(&room, |dst, src| {
+                            dst.workspace_root = src.workspace_root.clone();
                         });
-                        me.open_room.set(Some(room));
                     }
                 }
                 Err(status) => me.workspace_update_status.set(Some(status)),
@@ -3721,6 +3773,32 @@ mod tests {
         assert!(room_is_unbound(&room(Some(""))));
         assert!(room_is_unbound(&room(Some("   "))));
         assert!(!room_is_unbound(&room(Some("/dev/ocean-os"))));
+    }
+
+    /// The draft re-seeds on a room SWITCH and on nothing else. The seeding
+    /// effect has to read `open_room`, so it re-runs whenever anything writes
+    /// that signal — a trigger PATCH completing, a hydration refresh — and
+    /// re-seeding on those wipes a path the operator is mid-way through
+    /// typing.
+    #[test]
+    fn the_workspace_draft_reseeds_only_when_the_room_identity_changes() {
+        // First open: nothing seeded yet, so seed.
+        assert!(workspace_draft_should_reseed(None, Some("room-1")));
+        // Same room, unrelated update — the draft is the operator's, not the
+        // record's.
+        assert!(!workspace_draft_should_reseed(
+            Some("room-1"),
+            Some("room-1")
+        ));
+        // Switched rooms: the previous room's path must not carry over.
+        assert!(workspace_draft_should_reseed(
+            Some("room-1"),
+            Some("room-2")
+        ));
+        // Closed the room entirely.
+        assert!(workspace_draft_should_reseed(Some("room-1"), None));
+        // Nothing open, nothing seeded — no write, so no needless clobber.
+        assert!(!workspace_draft_should_reseed(None, None));
     }
 
     /// An empty create field means "leave it unbound"; a filled one is sent

@@ -117,6 +117,67 @@ fn the_binding_controls_patch_the_room_route() {
     );
 }
 
+/// Neither PATCH response may replace the open room wholesale.
+///
+/// The two room PATCHes run concurrently and each answers with the WHOLE
+/// `Room`. The daemon applies them in its order; the replies race back in
+/// theirs. A reply carrying the other field's pre-change value landing last
+/// therefore reverts a durably stored field — and the trigger toggle builds its
+/// next write from what it can see, so a stale projection becomes a stale
+/// WRITE. Nothing in the compiler holds "merge one field rather than assign the
+/// record": `open_room.set(Some(room))` compiles and reads like the obvious
+/// thing, which is what it was before Codex caught it on #196.
+#[test]
+fn the_patch_responses_merge_one_field_instead_of_replacing_the_room() {
+    let rooms = without_whitespace(&view_source("rooms.rs"));
+    assert!(
+        rooms.contains("fnmerge_room_field(&self,answered:&Room,apply:implFn(&mutRoom,&Room))"),
+        "`merge_room_field` is what keeps two concurrent PATCH replies from \
+         reverting each other; if it was renamed, repoint this guard",
+    );
+    assert!(
+        rooms.contains(
+            "me.merge_room_field(&room,|dst,src|{dst.trigger_policy=src.trigger_policy.clone();});"
+        ),
+        "the policy PATCH must merge the POLICY alone, or its reply reverts a \
+         workspace binding the other PATCH already stored",
+    );
+    assert!(
+        rooms.contains(
+            "me.merge_room_field(&room,|dst,src|{dst.workspace_root=src.workspace_root.clone();});"
+        ),
+        "the workspace PATCH must merge the BINDING alone, or its reply reverts \
+         a trigger flag the other PATCH already stored",
+    );
+    assert!(
+        !rooms.contains("me.open_room.set(Some(room));"),
+        "neither PATCH response may assign the whole record back onto \
+         `open_room` — that is the revert this guard exists for",
+    );
+}
+
+/// A soft-closed room is a frozen audit view. The daemon's `update` writes an
+/// OPEN room only, so a bind there is a guaranteed 404 — and the access
+/// projection does not say a room is closed, since a closed room keeps whatever
+/// access state it had. Both the control and the dispatcher must read `closed`.
+#[test]
+fn the_binding_controls_refuse_a_closed_room() {
+    let rooms = without_whitespace(&view_source("rooms.rs"));
+    assert!(
+        rooms.contains("ifself.closed.get_untracked(){return;}"),
+        "`set_open_room_workspace` must refuse a closed room before spending a \
+         round trip to be told no",
+    );
+
+    let workspace = without_whitespace(&view_source("rooms_workspace.rs"));
+    assert!(
+        workspace.contains("(access_writable&&!rooms.closed.get()).then(||view!{"),
+        "the bind/unbind controls must be gated on the room being open as well \
+         as writable; `closed` is read reactively because a room can close \
+         under an open panel",
+    );
+}
+
 /// The unbound notice must say what an operator can act on: that agents cannot
 /// run, and that the folder lives on the daemon's machine rather than theirs.
 #[test]

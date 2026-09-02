@@ -5998,3 +5998,64 @@ broken nothing that file is about. It now scans the arm for `r.closed` instead.
 Gate green: all seven frozen commands, host suite 1257 unit tests plus 65 guards
 across 15 binaries.
 _________________________________________________________________________________ 21:20 cloud/rooms-agent-owners
+
+time:      [00:08] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/rooms-workspace-root-surface]
+type:      review
+area:      frontend
+
+Codex raised three P2s on #196. All three are real, all three are in code this
+slice added, and all three are fixed. Each was verified against the source
+before acting rather than taken on the bot's word.
+
+ONE — competing PATCH projections. The slice's own note claimed the two room
+PATCHes "cannot clobber each other's value" because each sends its field alone.
+True on the WIRE and false in the projection, which is the half that was wrong.
+The daemon applies the two writes in ITS order; the replies race back in THEIRS;
+and both success arms did `open_room.set(Some(room))` with the WHOLE returned
+`Room`. A reply carrying the other field's pre-change value landing last
+therefore reverts a durably stored field — and the trigger toggle builds its
+next policy from the record it can see, so a stale projection becomes a stale
+WRITE that un-does a persisted flag. Both arms now go through
+`merge_room_field`, which applies one closure to the open room and its list row
+and leaves everything else standing: the policy arm merges `trigger_policy`,
+the workspace arm merges `workspace_root`. Roster and timestamps keep arriving
+through hydration and the SSE tail, which is where they came from before either
+control existed. The separate in-flight flags stay — serialising the two would
+be a hold with nothing behind it now that neither reply can overwrite the other.
+
+TWO — the draft was wiped mid-type. The seeding Effect read `open_room` to find
+the stored binding, which makes it re-run on EVERY write to that signal: a
+trigger PATCH completing two inches away, any hydration refresh. Each re-run
+overwrote the field, so a typed path could vanish before Bind was pressed. It
+now keys on room IDENTITY through `workspace_draft_should_reseed(seeded_for,
+open_room_id)` — a room switch replaces the draft, an unrelated update leaves it
+alone. The effect still reads the signal reactively; it just no longer writes.
+
+THREE — the controls were live in a frozen room. A soft-closed room keeps
+whatever access state it had, so `trigger_policy_accepts_writes` alone said
+writable, while the daemon's `update` writes an OPEN room only — every press a
+guaranteed 404 dressed up as a failed write, inside a view the UI itself calls
+an audit view. The controls now take `access_writable && !rooms.closed.get()`,
+read reactively because a room can close under an open panel, and
+`set_open_room_workspace` refuses on `closed` as a second lock so a caller
+reaching the method another way cannot spend the round trip either.
+
+Note for whoever picks up the trigger rows: `trigger_toggle_row` has the same
+closed-room gap, since `trigger_policy_accepts_writes` is its whole gate too.
+That is PRE-EXISTING and deliberately not fixed here — widening this PR into a
+control it did not add is how a review round turns into a refactor — but it is
+the same bug one row up and worth its own slice.
+
+Tests: `the_workspace_draft_reseeds_only_when_the_room_identity_changes` covers
+the seeding rule at every transition (first open, unrelated update, switch,
+close, nothing-open). Two new source guards, because none of this is
+compiler-held: `open_room.set(Some(room))` compiles and reads like the obvious
+thing, so the merge guard asserts BOTH arms name their own field and that the
+wholesale assignment appears nowhere; the closed guard pins the reactive UI gate
+and the dispatcher's refusal.
+
+Gates: all seven frozen commands green, 1335 unit tests plus guards across 16
+binaries, ledger check PASS.
+_________________________________________________________________________________ 00:08 cloud/rooms-workspace-root-surface
