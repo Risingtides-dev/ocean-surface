@@ -20,7 +20,7 @@
 //!
 //! ## Measured, not assumed
 //!
-//! Ten mutations applied for real against this tree, each with this file run
+//! Twelve mutations applied for real against this tree, each with this file run
 //! against the mutated source. Where a row claims something about the REST of
 //! the gate, that lane was executed too:
 //!
@@ -35,6 +35,8 @@
 //! | the button's `disabled=` dropped                                       | RED — nothing else stops the second press |
 //! | `AnchorOlder` arm's body replaced with `{}`                            | RED — the prepend then jumps the viewport by a page |
 //! | `grew_at_front` argument replaced with `false`                         | RED — and `cargo test` stayed green at 1251 passed (run): the arm's unit tests own the rule and never its wiring |
+//! | `anchor.is_some()` argument replaced with `true`                       | RED — and `cargo test` stayed green (run): the walk's prepends take the anchor arm with no anchor, which is #190 again |
+//! | the `<For>` key reverted to `m.seq`                                    | RED — and every other lane green (run): nothing else in the crate reads that key |
 //! | the button's `on:click` deleted                                        | RED — but so is the wasm lane, see below |
 //!
 //! That last row is the one that came back other than expected, and it is worth
@@ -234,11 +236,18 @@ fn a_prepended_page_anchors_the_scroll_instead_of_reading_as_an_append() {
 
     assert!(
         workspace.contains(
-            "matchtranscript_pass_action(len,prev_len,el.is_some(),near_bottom,grew_at_front){"
+            "matchtranscript_pass_action(len,prev_len,el.is_some(),near_bottom,grew_at_front,anchor.is_some(),){"
         ),
-        "the pass must be told whether its growth arrived at the front; without \
+        "the pass must be told whether its growth arrived at the front — without \
          it a prepend is indistinguishable from a tail append and takes the \
-         jump-affordance arm",
+         jump-affordance arm — and whether a press ASKED for that growth, \
+         without which the hydration walk's own prepends take the anchor arm \
+         and land unanchored, which is #190 again",
+    );
+    assert!(
+        workspace.contains("letanchor=older_anchor.get_untracked();"),
+        "read untracked: two arms below clear this signal, and an Effect that \
+         tracked what it writes would re-enter itself",
     );
     assert!(
         workspace
@@ -272,6 +281,36 @@ fn a_prepended_page_anchors_the_scroll_instead_of_reading_as_an_append() {
         "measured in a frame callback, which is the first point that can see \
          the grown element; the same reason the at-bottom pin next to it uses \
          one",
+    );
+}
+
+/// The seam the press creates, which is the half a unit test cannot see at all.
+///
+/// `<For>` caches a child per key. Keyed on `m.seq` alone, the row that WAS the
+/// oldest keeps the view it was built with — built when its predecessor was
+/// `None`, and `day_separator_label(None, cur)` answers `Some` unconditionally.
+/// So a same-day row arriving directly above it leaves a stray day divider
+/// between them and the seam row still avatar-headed and ungrouped. One of each
+/// per press, exactly where the reader is looking.
+///
+/// Mutation run: the key reverted to `m.seq`. Every other lane stays green —
+/// nothing but this needle reads the key. The comment beside it, which used to
+/// assert the append-only invariant this slice exists to break, is corrected in
+/// the source and deliberately NOT pinned here: a needle spanning a wrapped
+/// comment breaks on rustfmt rather than on meaning, which is the guard that
+/// teaches the next author to delete it.
+#[test]
+fn the_row_a_prepend_gives_a_predecessor_is_rebuilt_not_reused() {
+    let workspace = without_whitespace(&view_source("rooms_workspace.rs"));
+
+    assert!(
+        workspace.contains(
+            "key=|(prev,m):&(Option<RoomMessage>,RoomMessage)|{(prev.as_ref().map(|p|p.seq),m.seq)}"
+        ),
+        "the predecessor is half the identity of a row whose density is derived \
+         from it, so it has to be half the key — the transcript grows at BOTH \
+         ends now, and a child cached under `seq` alone keeps a divider and a \
+         header that the page above it has just made wrong",
     );
 }
 

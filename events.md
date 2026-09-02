@@ -5752,3 +5752,53 @@ to say the first defect is closed and the second stands, rather than left claimi
 both. Gate green: all seven frozen commands, host suite 1251 unit tests plus 60
 guards across 14 binaries.
 _________________________________________________________________________________ 20:13 loop/surface-load-older-affordance
+
+time:      [20:39] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-load-older-affordance]
+type:      review
+area:      frontend
+
+Refinement pass. The review found the one thing the build asked it to look hardest
+at, and it was right: the `AnchorOlder` arm swallowed EVERY prepend but only acted
+on one — `older_anchor` is written in exactly one place, the button's `on:click`.
+So `backfill_open_transcript`'s remaining four pages routed to an arm that, with no
+anchor parked, fell through both `if let` bindings and did nothing at all. No pin,
+no anchor, nothing. On origin/main those passes took `PinAndQueue` and re-pinned to
+the bottom each time, because the first fill's rAF had already put the reader there
+and the walk's first page is a network round-trip later. `.rooms-workspace__transcript`
+is a plain `overflow-y: auto` column, so leaving `scroll_top` alone while rows land
+above it drifts the reader backwards by the height of the page that arrived, once
+per walk step, for every room past the 1000-row window — d58a145's exact symptom,
+reintroduced through a different mechanism one commit later. The knock-on was worse
+than the drift: a hydration ending scrolled up makes the access projection's
+re-entry pass (`len == prev_len`, `grew_at_front` false, `near_bottom` now false)
+take `Hold` instead of `PinAndQueue`, so the `last_confirmed_global_sequence` read
+advance that re-entry exists to queue was never queued for a long room at all.
+
+Fixed by giving the decision the fact it was missing rather than by moving the arm:
+`transcript_pass_action` takes an `anchored` argument and the prepend route is
+`grew_at_front && anchored`. An anchor is the only evidence a prepend was ASKED
+for, so an unasked one falls through to the same `prev_len == 0 || near_bottom` pin
+it took before this slice existed. The Effect reads `older_anchor` untracked — two
+arms below clear it, and tracking what the pass writes would re-enter the pass.
+
+Second finding, also right: the `<For>` comment asserted "the transcript is
+append-only under one generation, so a cached keyed child never sees its
+predecessor change", which is precisely the invariant this slice is built to break.
+Keyed on `m.seq`, the row that WAS the oldest keeps the view it was built with when
+its predecessor was `None`, and `day_separator_label(None, cur)` answers `Some`
+unconditionally — so a same-day row arriving directly above it left a stray day
+divider and an avatar-headed, ungrouped seam row. One of each per press, right
+where the reader is looking. The key is now `(prev.seq, m.seq)`: only the seam row's
+identity changes on a prepend, so exactly one child rebuilds and a tail append still
+caches the whole list. The comment says what is actually true now.
+
+Both findings measured, not argued. The two new mutations run for real against the
+finished tree: `anchor.is_some()` forced to `true` reds only the guard and leaves
+1252 unit tests green (which is why the guard names the call site rather than
+trusting the pure function's own tests), and the `<For>` key reverted to `m.seq`
+reds only the guard with the wasm32 clippy lane still green. Tree restored after
+each. Gate green: all seven frozen commands, host suite 1252 unit tests plus 61
+guards across 14 binaries.
+_________________________________________________________________________________ 20:39 loop/surface-load-older-affordance
