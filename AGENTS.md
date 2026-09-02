@@ -276,8 +276,25 @@ Web surface session UI:
   boundary. In auth-off mode, a mutation carrying Origin or Referer must name
   the exact loopback Host; reject it before credential lookup otherwise, while
   retaining headerless localhost CLI clients. Auth-off startup is refused on
-  non-loopback binds. Tauri and extension hosts remain read-only until they own
-  an equivalent privileged transport.
+  non-loopback binds. The Tauri shell now owns the equivalent privileged
+  transport this rule required: its `daemon_operator_request` command takes a
+  method and a PATH (never a URL, never a header), re-checks both against a
+  mirror of the same six-route allowlist, reads the same `operator.key` under
+  the same five-condition custody check, supplies the daemon origin itself from
+  `OCEAN_DAEMON_URL`, and returns only the daemon's status and body. Tauri 2
+  capabilities do not gate `generate_handler!` commands, so that allowlist is
+  the boundary. Dot segments are judged AFTER percent-decoding, because the
+  URL parser normalises `%2e%2e` into `..` and would otherwise carry the
+  credential to a route the allowlist approved a different string for; the
+  built URL is then re-parsed and refused unless its path still equals the
+  approved one, which makes the whole normalisation class inert. The shell
+  does not build for a non-unix target: its custody contract is POSIX, and a
+  ceremony rendered writable over a credential that cannot be read is the
+  opposite of "absence, not errors". The extension host has no shell and no proxy and REMAINS
+  read-only. On the surface side every privileged mutation leaves
+  `room_agent_authorization.rs` through one seam addressed by an
+  `AuthorityRoute` the four route builders alone construct; the credential
+  enters no host's WASM bundle.
 - Binding reads carry server-derived owner eligibility. Surface does not infer
   owner authority from a local participant projection. With no binding, a
   resolved Human already in a Local roster may see only the bootstrap
@@ -320,18 +337,50 @@ Web surface session UI:
   room it was minted for. No fixture in this repo may carry a real one. The
   onboarding link EMBEDS the code, so it is the same grant in a longer form and
   gets the same discipline.
+- A room's `workspace_root` is the folder its agent turns run in, resolved on
+  the DAEMON's host — not the browser's, which cannot see that filesystem, so
+  nothing here pre-validates a path and the daemon's canonicalizing
+  `400 invalid_workspace_root` is the only verdict. Unrelated to the SESSION
+  workspace root the rest of this crate means by that name. It rides the create
+  body (`key`, `name`, `trigger_policy?`, `workspace_root?`) and
+  `PATCH /v1/rooms/persistent/{key}`, where absent leaves the binding unchanged
+  and an explicit `null` unbinds — so the unbind body must NOT skip `None`, and
+  the policy and workspace PATCHes each send their own field alone rather than
+  clobbering the other's. An unbound room is not a cosmetic gap: every
+  room-bound agent turn in it is refused `503 workspace_unavailable` before the
+  agent sees the message, so the surface states that in words wherever the
+  trigger toggles render. That refusal is NOT `room_repo.rs`'s
+  `workspace_unavailable`, which is the compute lane saying Bedrock is
+  unreachable; do not share wording between them.
 - Rooms G1 is daemon-native text collaboration. LiveKit controls stay outside
   the room join, leave, roster, and transcript lifecycle until explicitly
   reintroduced behind a reviewed platform contract.
-- The rooms browser is a flex column; `.rooms-panel__list` keeps
-  `min-height: 0` with vertical overflow so long room lists scroll instead of
-  pushing status/actions outside the viewport.
+- The rooms browser is the left rail of `rooms_workspace.rs`, a flex column;
+  `.rooms-workspace__left-list` keeps `min-height: 0` with vertical overflow so
+  long room lists scroll instead of pushing the create field and status line
+  outside the viewport. (It was `.rooms-panel__list` in `styles/panels.css`
+  until that never-rendered panel's CSS was deleted.)
 - Channel/thread drafts, mention state, and pending-send confirmation are
   scoped to the exact open-room generation. A room switch or close clears them
   synchronously so content and a stale `Sending…` gate cannot cross rooms.
 - An empty hydrated transcript has no resume cursor. Surface omits
   `after_seq` until it owns a real room sequence, preserving the daemon's
   zero-based first row.
+- Mention notifications are raised from the LIVE TAIL only, by the same
+  `room_markdown` tokeniser that paints the highlight, so what notifies is what
+  shows. Hydration and the load-older backfill never notify — history arriving
+  is not someone talking to you now. A notification is suppressed only when the
+  reader is demonstrably looking at that room: focused, Rooms on screen, and
+  that room open. `open_key` alone is NOT "on screen" — it and the tail both
+  outlive the workspace unmounting behind Direct messages. Consequently a
+  mention in a room you do not have OPEN does not raise an OS notification:
+  only the open room has a tail, and standing up a tail per room to change that
+  would contradict the one-room rule above. The room-list response now carries
+  a daemon-derived, identity-scoped sparse `attention` projection for every
+  selected page. Surface uses it for unopened-room unread/mention badges and
+  never scans message text or opens N `EventSource`s to synthesize attention.
+  An absent projection means an older daemon and falls back to legacy sequence
+  unread state; a present empty projection is authoritative zero.
 
 ## Agent Builder Contract
 
@@ -428,8 +477,8 @@ identity-bearing; requiring the new form would red every historical entry and
 every entry a slice in flight is writing right now. What it asserts is that each
 entry is CLOSED before the next one starts, which is what a fold destroys. **Run
 `node scripts/check-ledger.mjs events.md` on any change to `events.md`, and again
-on either side of a rebase carrying one; the two verdicts must match.** It is the
-only check that reads this file, it runs in CI on PRs and on pushes to main, and
+on either side of a rebase carrying one; the two verdicts must match.** It runs in
+CI on PRs and on pushes to main, and
 its exit codes are 0 clean / 1 an entry is open / 2 the check could not run at
 all. `--fix` closes what it finds by insertion only and writes the identity form,
 so a repair does not hand the next merge the same shared line — never in CI,
@@ -438,6 +487,17 @@ below applies to it. `scripts/events-merge-driver.test.mjs` proves a three-way
 parallel append keeps all four rules and fuses nothing, but it reproduces the
 merge in a scratch repo and never reads THIS file, so CI's `guards` job running
 it proves the driver, not the ledger.
+
+**Run `node scripts/check-ledger-order.mjs events.md` beside it.** The checker
+never reads a `time:` header past the word, so five entries sat at the top of
+this ledger newest-first for months and it called the file clean. The order
+check reads the clock and reds any entry more than a day out of merge order —
+a prepend, a backdate — while descents of hours, which is how parallel slices
+land, pass. Same exit codes, no `--fix`: moving an entry is a decision, made
+once by hand and recorded in the ledger. `scripts/check-ledger.mjs` itself is
+one of three copies (bedrock, os, surface) and carries a code stamp; its test
+recomputes the digest, so an edit that forks it from bedrock's copy is red
+until the fork is written down.
 
 Three things the identity separator does NOT buy:
 

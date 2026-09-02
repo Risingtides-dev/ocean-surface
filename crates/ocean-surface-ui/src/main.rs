@@ -18,6 +18,7 @@ mod components;
 mod council;
 mod daemon;
 mod deck;
+mod devices;
 mod host;
 mod icons;
 mod island;

@@ -21,6 +21,10 @@ anyhow       = "1"
 tracing      = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 base64       = "0.22"
+# `take_until` on the reverse-proxied SSE body: a stream opened on one machine
+# has to END when the browser attaches to another. Already in the lock file as
+# a reqwest dependency; declared here because this crate now uses it directly.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 libc         = "0.2"
 getrandom    = "0.3"
 sha2         = "0.10"
@@ -28,3 +32,5 @@ sha2         = "0.10"
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
+# A stub daemon whose SSE body stays open for the teardown test.
+tokio-stream = "0.1"

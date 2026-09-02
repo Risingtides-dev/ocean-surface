@@ -77,18 +77,86 @@ pub fn running_in_tauri() -> bool {
 }
 
 fn room_authority_mutations_for_host(is_tauri: bool, is_extension: bool) -> bool {
-    !is_tauri && !is_extension
+    match (is_tauri, is_extension) {
+        // The Chrome extension is a browser page with no shell behind it and
+        // no server-side forwarder in front of it. It has no privileged
+        // transport and stays read-only.
+        (false, true) => false,
+        // The Tauri shell owns `daemon_operator_request` below: it reads the
+        // mode-0600 operator key under the same custody check the proxy uses
+        // and attaches it to the same six routes, beside the daemon it
+        // already supervises.
+        (true, _) => true,
+        // The browser PWA, where the server-side proxy injects the key.
+        (false, false) => true,
+    }
 }
 
 /// Whether this host can carry privileged Room-agent authority mutations.
 ///
 /// The PWA proxy injects the operator credential server-side and requires login
-/// on every non-loopback bind. Tauri and extension builds deliberately remain
-/// read-only until their native shells own an equivalent privileged transport;
-/// the credential never enters the shared WASM bundle.
+/// on every non-loopback bind; the Tauri shell injects it natively, beside the
+/// daemon it already supervises. The Chrome extension has neither and remains
+/// read-only. On no host does the credential enter the shared WASM bundle.
 pub fn room_authority_mutations_supported() -> bool {
     room_authority_mutations_for_host(running_in_tauri(), crate::daemon::running_as_extension())
 }
+
+/// The daemon's answer to a privileged Room-agent authority mutation carried
+/// by the native shell: the status and the body text, verbatim. The ceremony
+/// decodes the body itself, exactly as it decodes the browser proxy's reply.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct OperatorReply {
+    pub status: u16,
+    pub body: String,
+}
+
+/// True when this host carries authority mutations through the native
+/// privileged transport rather than through an ordinary same-origin fetch.
+/// The ceremony's one transport seam branches on this.
+pub fn room_authority_native_transport() -> bool {
+    running_in_tauri()
+}
+
+/// Send one Room-agent authority mutation through the Tauri shell's
+/// privileged forwarder. `method` is `POST` or `DELETE`; `path` is an absolute
+/// daemon route (`/v1/rooms/persistent/<key>/agents/…`) — never a URL, because
+/// the origin is the shell's, not the webview's. The shell re-checks the
+/// method and path against its own six-route allowlist and refuses anything
+/// else, so this wrapper is a convenience, never the boundary.
+///
+/// `None` on a non-Tauri host and on any transport failure or refusal; the
+/// operator credential is never returned, logged, or observable from here.
+pub async fn daemon_operator_request(
+    method: &str,
+    path: &str,
+    body: &str,
+) -> Option<OperatorReply> {
+    if !running_in_tauri() {
+        return None;
+    }
+    let args = Object::new();
+    for (key, value) in [("method", method), ("path", path), ("body", body)] {
+        if Reflect::set(&args, &JsValue::from_str(key), &JsValue::from_str(value)).is_err() {
+            return None;
+        }
+    }
+    match tauri_invoke("daemon_operator_request", &args).await {
+        Ok(val) if !val.is_null() && !val.is_undefined() => {
+            let reply = jsval_to::<OperatorReply>(&val);
+            // A default-decoded reply means the shell answered a shape this
+            // wrapper cannot read; treat it as a transport failure rather
+            // than as an HTTP 0.
+            (reply.status != 0).then_some(reply)
+        }
+        Ok(_) => None,
+        Err(err) => {
+            log::warn!("native operator transport: daemon_operator_request rejected: {err:?}");
+            None
+        }
+    }
+}
+
 /// How a rendered anchor's raw `href` should be handled inside the native
 /// shell, decided *before* any `prevent_default`. The three arms are mutually
 /// exclusive and cover every href the Markdown renderer can emit.
@@ -442,6 +510,86 @@ pub async fn notify(title: &str, body: &str) {
     let options = NotificationOptions::new();
     options.set_body(body);
     let _ = Notification::new_with_options(title, &options);
+}
+
+/// Ask for notification permission NOW, from a caller that has transient user
+/// activation, and drop the answer.
+///
+/// [`notify`] and [`notify_with_focus`] both request permission on their first
+/// call, and for a fresh browser user that request is refused: browsers gate
+/// `Notification.requestPermission()` on a user gesture, and both of those
+/// functions are entered from an arriving event — a finished turn, an SSE
+/// frame — never from a click. The permission then stays `default` forever and
+/// no notification is ever shown, silently.
+///
+/// This is the gesture-side half. Call it synchronously from inside a click
+/// handler, before any `await` or `spawn_local`, so the activation is still
+/// live. A permission that is already granted or denied resolves without
+/// prompting, so calling it on every click does not nag.
+///
+/// No-op where the host exposes no `window.Notification`. On the Tauri shell
+/// the plugin's polyfill answers from the OS, where activation is not a
+/// concern; this call is harmless there.
+pub fn prime_notification_permission() {
+    let Some(win) = web_sys::window() else { return };
+    if !Reflect::has(&win, &JsValue::from_str("Notification")).unwrap_or(false) {
+        return;
+    }
+    if Notification::permission() != NotificationPermission::Default {
+        return;
+    }
+    // The promise is deliberately dropped: the answer is read back through
+    // `Notification::permission()` when a notification is actually shown, and
+    // awaiting here would need an async caller — which is exactly the thing
+    // that loses the activation.
+    let _ = Notification::request_permission();
+}
+
+/// Show a desktop notification whose click brings the surface forward.
+///
+/// Same permission handling and same silent degradation as [`notify`] — this
+/// is that function plus an `onclick`, kept separate so the frozen `notify`
+/// signature is untouched.
+///
+/// **Where the click is delivered.** In the browser PWA and the extension this
+/// is the standard Web Notifications API and `onclick` fires on activation.
+/// On the Tauri shell the notification plugin polyfills `window.Notification`
+/// and posts through the OS notification center; whether the OS routes an
+/// activation back into the webview is the plugin's business and is not
+/// something this bundle can detect. The handler is therefore attached
+/// unconditionally and is simply never called where activation is not
+/// delivered — the notification still does its main job, which is to pull the
+/// reader back to a room that named them.
+///
+/// The click closure is leaked (`Closure::forget`), as the event subscriptions
+/// in this module are: a notification is a rare, user-triggered object and the
+/// handler must outlive this call by definition.
+pub async fn notify_with_focus(title: &str, body: &str, on_click: impl Fn() + 'static) {
+    let Some(win) = web_sys::window() else { return };
+    if !Reflect::has(&win, &JsValue::from_str("Notification")).unwrap_or(false) {
+        return;
+    }
+    if Notification::permission() == NotificationPermission::Default {
+        if let Ok(promise) = Notification::request_permission() {
+            let _ = JsFuture::from(promise).await;
+        }
+    }
+    if Notification::permission() != NotificationPermission::Granted {
+        return;
+    }
+    let options = NotificationOptions::new();
+    options.set_body(body);
+    let Ok(notification) = Notification::new_with_options(title, &options) else {
+        return;
+    };
+    let closure = Closure::wrap(Box::new(move |_event: JsValue| {
+        if let Some(win) = web_sys::window() {
+            win.focus().ok();
+        }
+        on_click();
+    }) as Box<dyn Fn(JsValue)>);
+    notification.set_onclick(Some(closure.as_ref().unchecked_ref()));
+    closure.forget();
 }
 
 /// Set the dock/taskbar badge count. `Some(n)` displays `n` on the macOS dock
@@ -834,11 +982,26 @@ mod watch_admission_tests {
 mod room_authority_host_tests {
     use super::room_authority_mutations_for_host;
 
+    /// Two hosts own a privileged transport: the server-side proxy (which
+    /// injects the operator key on six routes) and the Tauri shell (which
+    /// injects the same key natively, beside the daemon it supervises). The
+    /// extension owns neither and stays read-only — that is the whole
+    /// remaining content of this predicate.
     #[test]
-    fn only_server_side_proxy_host_supports_room_authority_mutations() {
+    fn every_host_with_a_privileged_transport_supports_room_authority_mutations() {
         assert!(room_authority_mutations_for_host(false, false));
-        assert!(!room_authority_mutations_for_host(true, false));
+        assert!(room_authority_mutations_for_host(true, false));
         assert!(!room_authority_mutations_for_host(false, true));
-        assert!(!room_authority_mutations_for_host(true, true));
+    }
+
+    /// The extension arm is the only `false` left, so it is the one worth its
+    /// own assertion: a browser page with no shell and no proxy in front of it
+    /// must never be handed authority. `(true, true)` is unreachable — the
+    /// shell is not a browser page — and resolves through the Tauri arm, which
+    /// does own a transport.
+    #[test]
+    fn the_extension_alone_stays_read_only() {
+        assert!(!room_authority_mutations_for_host(false, true));
+        assert!(room_authority_mutations_for_host(true, true));
     }
 }

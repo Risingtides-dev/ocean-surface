@@ -1489,6 +1489,501 @@ mod external_url_tests {
     }
 }
 
+// ── privileged room-authority transport (spec 1.12) ──────────────────────
+//
+// The browser PWA can run the Room-agent authorization ceremony because the
+// proxy injects its mode-0600 operator key server-side on six exact daemon
+// routes; the key never enters the shared WASM bundle. The Tauri shell was
+// read-only for the same reason — it had no equivalent privileged transport.
+// It runs beside the daemon and already supervises it, so it can own one:
+// this command is that transport, and it is deliberately the same shape as
+// the proxy's forwarder.
+//
+// What this command does NOT do: take a URL, take a header, or return the
+// key. The webview names a METHOD and a PATH; the origin comes from
+// `OCEAN_DAEMON_URL` (operator-set, exactly as the daemon probe does), the
+// credential comes from disk under a custody check, and the reply carries
+// only the daemon's status and body. Tauri 2 capabilities do NOT gate
+// `generate_handler!` commands (see TASK-78 above), so the ALLOWLIST here —
+// not the ACL — is the security boundary.
+
+/// Where the room-operator credential lives, mirroring the proxy's resolution
+/// (`OCEAN_OPERATOR_KEY_FILE` → `<config dir>/operator.key`) so one machine's
+/// two surfaces read one file.
+fn room_operator_key_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("OCEAN_OPERATOR_KEY_FILE") {
+        return PathBuf::from(path);
+    }
+    ocean_config_dir().join("operator.key")
+}
+
+/// The `ocean-rs` configuration directory, resolved exactly as
+/// `ocean-surface-proxy` resolves it.
+fn ocean_config_dir() -> PathBuf {
+    if let Some(path) = std::env::var_os("OCEAN_CONFIG_DIR") {
+        return PathBuf::from(path);
+    }
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        return PathBuf::from(xdg).join("ocean-rs");
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home).join(".config").join("ocean-rs");
+    }
+    PathBuf::from(".ocean-rs")
+}
+
+/// Read the room-operator credential without weakening its custody contract.
+/// Possession of this key permits durable local execution-authority
+/// mutations, so the file must be owner-owned, single-linked, mode 0600, a
+/// regular file, and opened without following symlinks — the same five
+/// conditions `ocean-surface-proxy::read_room_operator_key` enforces. The
+/// value is returned only to the forwarder below; no error message and no
+/// command reply ever carries it.
+#[cfg(unix)]
+fn read_room_operator_key(path: &Path) -> Result<String, String> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let link = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("room operator credential unavailable: {error}"))?;
+    if link.file_type().is_symlink() || !link.is_file() {
+        return Err("room operator credential must be a regular file".to_owned());
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|error| format!("room operator credential unavailable: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("room operator credential unavailable: {error}"))?;
+    // SAFETY: `geteuid` takes no arguments, has no preconditions, and only
+    // reads the effective user id of this process.
+    let owner = unsafe { libc::geteuid() };
+    if !metadata.is_file()
+        || metadata.uid() != owner
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o777 != 0o600
+    {
+        return Err(
+            "room operator credential must be an owner-owned single-link mode-0600 regular file"
+                .to_owned(),
+        );
+    }
+    let mut key = String::new();
+    {
+        use std::io::Read as _;
+        let mut file = file;
+        file.read_to_string(&mut key)
+            .map_err(|error| format!("room operator credential unavailable: {error}"))?;
+    }
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("room operator credential is empty".to_owned());
+    }
+    if key.bytes().any(|b| !(0x20..0x7f).contains(&b)) {
+        return Err("room operator credential is not a valid header value".to_owned());
+    }
+    Ok(key.to_owned())
+}
+
+// The custody contract above is expressed in POSIX ownership, link count,
+// mode and `O_NOFOLLOW`. A non-unix host cannot satisfy it.
+//
+// The first draft of this shipped a stub returning `Err` on such a host, and
+// that was the wrong shape: `host::room_authority_mutations_for_host` reports
+// Tauri as authority-capable unconditionally, so a Windows build would have
+// rendered the full ceremony — Authorize, suspend, resume, revoke — with
+// every one of them guaranteed to fail on a credential that could not be
+// read. The platform contract's rule is "absence, not errors"
+// (AGENTS.md 30-32), and a control that is present and always fails is the
+// exact opposite.
+//
+// Refusing to build is the honest version. This shell is macOS-first and has
+// never been built for Windows, so nothing regresses today; what changes is
+// that the requirement is explicit instead of latent. A Windows shell needs
+// two things, and the compile error names both: a real custody equivalent
+// (an ACL check — POSIX mode bits have no meaning there), and a capability
+// handshake so the surface can render the ceremony ABSENT rather than
+// writable. Linux is unix and is unaffected.
+#[cfg(not(unix))]
+compile_error!(
+    "ocean-tauri's Room-agent authority forwarder has no custody implementation \
+     for this target. Its contract is POSIX (owner, link count, mode 0600, \
+     O_NOFOLLOW). Implementing it here needs an ACL-based equivalent AND a \
+     capability handshake so `room_authority_mutations_supported()` reports \
+     absence rather than a ceremony whose every action fails."
+);
+
+/// True only for the exact six daemon routes the operator credential may be
+/// attached to. A byte-for-byte mirror of the proxy's
+/// `room_agent_authority_mutation`: bootstrap, authorize, reauthorize,
+/// suspend, resume, revoke. Read-only binding inspection and package preview
+/// stay credential-free and are not reachable through this command at all.
+///
+/// `path` arrives percent-encoded from the surface (`rooms::encode` escapes
+/// `/`), so a room key or member id can never split into extra segments here.
+fn room_agent_authority_mutation(method: &str, path: &str) -> bool {
+    let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    let base = segments.len() >= 5
+        && segments[0] == "v1"
+        && segments[1] == "rooms"
+        && segments[2] == "persistent"
+        && !segments[3].is_empty()
+        && segments[4] == "agents";
+    if !base {
+        return false;
+    }
+    match method {
+        "POST" if segments.len() == 5 => true,
+        "POST" if segments.len() == 6 && segments[5] == "bootstrap" => true,
+        "POST" if segments.len() == 7 => {
+            !segments[5].is_empty() && matches!(segments[6], "reauthorize" | "suspend" | "resume")
+        }
+        "DELETE" if segments.len() == 6 => !segments[5].is_empty(),
+        _ => false,
+    }
+}
+
+/// Shape of a request path this command will forward: absolute, single-line,
+/// no query or fragment, no dot segment. The allowlist above decides WHICH
+/// route; this decides that the string is a route at all, before it is
+/// concatenated onto the daemon origin.
+fn forwardable_operator_path(path: &str) -> bool {
+    if !path.starts_with('/') || path.len() > 1024 {
+        return false;
+    }
+    if path
+        .chars()
+        .any(|c| c.is_control() || c.is_whitespace() || matches!(c, '?' | '#' | '\\'))
+    {
+        return false;
+    }
+    // Dot segments are tested on the DECODED segment, not the literal one.
+    // `%2e%2e` is not `..` to a string comparison, but it IS to the URL
+    // parser: it normalises the escape and collapses the segment, so
+    // `DELETE /v1/rooms/persistent/team/agents/%2e%2e` would pass a literal
+    // check, pass the six-route allowlist as a non-empty member id, and then
+    // carry the operator credential to `DELETE /v1/rooms/persistent/team/` —
+    // a destructive route on no allowlist. The proxy never had this hole
+    // because `has_dot_segment` runs there on axum's already-decoded capture
+    // (main.rs 2264); this mirror had copied the allowlist and not that guard.
+    !path.split('/').any(is_dot_segment)
+}
+
+/// True when a path segment IS a dot segment once percent-decoding is
+/// accounted for. Any run of dots counts, not just `.` and `..`: the URL
+/// parser only acts on those two, but a segment that is nothing but dots has
+/// no legitimate meaning here and refusing the whole shape leaves no edge to
+/// re-derive.
+fn is_dot_segment(segment: &str) -> bool {
+    let decoded = percent_decode_segment(segment);
+    !decoded.is_empty() && decoded.bytes().all(|b| b == b'.')
+}
+
+/// Percent-decode one path segment, byte-wise. Enough to answer "what does
+/// the URL parser see here"; an invalid or truncated escape is left literal,
+/// which is safe because the only question asked of the result is whether it
+/// is a run of dots. Not a general-purpose decoder and not used to build the
+/// request — the path is forwarded exactly as given.
+fn percent_decode_segment(segment: &str) -> String {
+    let bytes = segment.as_bytes();
+    let mut out = String::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 3 <= bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((((hi << 4) | lo) as u8) as char);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+/// The daemon's answer, verbatim: status plus body text. The surface decodes
+/// the body itself, exactly as it decodes the browser proxy's reply, so one
+/// ceremony reads one wire shape on both hosts.
+#[derive(Clone, Serialize)]
+struct OperatorReplyDto {
+    status: u16,
+    body: String,
+}
+
+/// Forward one Room-agent authority mutation to the supervised daemon with the
+/// operator credential attached. Errors are human-readable and credential-free.
+#[tauri::command]
+async fn daemon_operator_request(
+    method: String,
+    path: String,
+    body: Option<String>,
+) -> Result<OperatorReplyDto, String> {
+    if method != "POST" && method != "DELETE" {
+        return Err("unsupported operator request method".to_owned());
+    }
+    if !forwardable_operator_path(&path) {
+        return Err("operator request path is not a forwardable daemon route".to_owned());
+    }
+    if !room_agent_authority_mutation(&method, &path) {
+        return Err("not a room authority mutation route".to_owned());
+    }
+    let url = format!("{}{path}", daemon_url_from_env().trim_end_matches('/'));
+    // Belt and braces, and the half that matters more than the pre-check:
+    // parse the URL and require that it STILL addresses the path the
+    // allowlist just approved. Every check above reasons about a string; this
+    // one reasons about what will actually be sent. `%2e%2e` was one way a
+    // parser could rewrite a path out from under an allowlist decision, and
+    // the class is bigger than that instance — normalisation rules change,
+    // and the next one arrives as a dependency bump rather than as a diff
+    // here. Refusing on any disagreement makes the whole class inert.
+    //
+    // Ordering is deliberate: this runs BEFORE the credential is read, so a
+    // path the parser would rewrite never reaches the key at all.
+    let parsed =
+        reqwest::Url::parse(&url).map_err(|error| format!("operator request URL: {error}"))?;
+    if parsed.path() != path {
+        return Err("operator request path would not survive URL parsing".to_owned());
+    }
+    let key = read_room_operator_key(&room_operator_key_path())?;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("operator transport unavailable: {error}"))?;
+    let request = if method == "DELETE" {
+        client.delete(&url)
+    } else {
+        client.post(&url)
+    }
+    .header("content-type", "application/json")
+    .header("X-Ocean-Operator", key)
+    .body(body.unwrap_or_default());
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("daemon is unreachable: {error}"))?;
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("daemon reply could not be read: {error}"))?;
+    Ok(OperatorReplyDto { status, body })
+}
+
+#[cfg(test)]
+mod operator_transport_tests {
+    use super::{
+        forwardable_operator_path, is_dot_segment, read_room_operator_key,
+        room_agent_authority_mutation, room_operator_key_path,
+    };
+
+    const ROOM: &str = "/v1/rooms/persistent/team-blue/agents";
+
+    #[test]
+    fn the_allowlist_admits_exactly_the_six_ceremony_routes() {
+        // The six the proxy injects on, and nothing else.
+        assert!(room_agent_authority_mutation("POST", ROOM));
+        assert!(room_agent_authority_mutation(
+            "POST",
+            &format!("{ROOM}/bootstrap")
+        ));
+        for action in ["reauthorize", "suspend", "resume"] {
+            assert!(room_agent_authority_mutation(
+                "POST",
+                &format!("{ROOM}/agent-1/{action}")
+            ));
+        }
+        assert!(room_agent_authority_mutation(
+            "DELETE",
+            &format!("{ROOM}/agent-1")
+        ));
+    }
+
+    #[test]
+    fn the_allowlist_refuses_every_other_route_and_method() {
+        // Inspection and preview are credential-free and must stay that way.
+        assert!(!room_agent_authority_mutation("GET", ROOM));
+        assert!(!room_agent_authority_mutation(
+            "POST",
+            &format!("{ROOM}/preview/reviewer")
+        ));
+        // Neighbouring room routes the ceremony also calls, but unprivileged.
+        assert!(!room_agent_authority_mutation(
+            "POST",
+            "/v1/rooms/persistent/team-blue/members/agents"
+        ));
+        assert!(!room_agent_authority_mutation(
+            "POST",
+            "/v1/rooms/persistent/team-blue/messages"
+        ));
+        // Wrong verb on an allowlisted shape.
+        assert!(!room_agent_authority_mutation(
+            "DELETE",
+            &format!("{ROOM}/agent-1/suspend")
+        ));
+        assert!(!room_agent_authority_mutation("DELETE", ROOM));
+        // Unknown action verb, empty member, wrong prefix, too short.
+        assert!(!room_agent_authority_mutation(
+            "POST",
+            &format!("{ROOM}/agent-1/promote")
+        ));
+        assert!(!room_agent_authority_mutation(
+            "POST",
+            &format!("{ROOM}//suspend")
+        ));
+        assert!(!room_agent_authority_mutation("POST", "/v1/agents"));
+        assert!(!room_agent_authority_mutation(
+            "POST",
+            "/v1/rooms/persistent//agents"
+        ));
+        assert!(!room_agent_authority_mutation("POST", "/"));
+    }
+
+    #[test]
+    fn a_path_must_be_an_absolute_dot_free_single_line_route() {
+        assert!(forwardable_operator_path(ROOM));
+        assert!(!forwardable_operator_path("v1/rooms/persistent/x/agents"));
+        assert!(!forwardable_operator_path(
+            "/v1/rooms/persistent/x/../../agents"
+        ));
+        assert!(!forwardable_operator_path("/v1/./agents"));
+        assert!(!forwardable_operator_path("/v1/agents?x=1"));
+        assert!(!forwardable_operator_path("/v1/agents#frag"));
+        assert!(!forwardable_operator_path("/v1/agents\nHost: evil"));
+        assert!(!forwardable_operator_path("/v1/ agents"));
+        assert!(!forwardable_operator_path(&format!(
+            "/{}",
+            "a".repeat(1024)
+        )));
+    }
+
+    /// A path cannot name the origin: no scheme, no authority, ever. This is
+    /// what keeps the credential pointed at the supervised daemon.
+    /// P1 from review: `%2e%2e` is not `..` to a string comparison but IS to
+    /// the URL parser, which normalises the escape and collapses the segment.
+    /// Measured against the real parser: `/v1/rooms/persistent/team/agents/%2e%2e`
+    /// resolves to `/v1/rooms/persistent/team/`, so a literal-only check would
+    /// have carried the operator credential to a destructive route on no
+    /// allowlist.
+    #[test]
+    fn percent_encoded_dot_segments_are_refused() {
+        for hostile in [
+            "/v1/rooms/persistent/team/agents/%2e%2e",
+            "/v1/rooms/persistent/team/agents/%2E%2E",
+            "/v1/rooms/persistent/team/agents/%2e",
+            "/v1/rooms/persistent/team/agents/%2E",
+            "/v1/rooms/persistent/%2e%2e/agents",
+            "/v1/rooms/persistent/team/agents/%2e%2e%2e",
+            // Mixed literal and encoded, and a nested escape of the percent.
+            "/v1/rooms/persistent/team/agents/.%2e",
+            "/v1/rooms/persistent/team/agents/%2e.",
+        ] {
+            assert!(
+                !forwardable_operator_path(hostile),
+                "{hostile} must be refused: the URL parser reads it as a dot segment",
+            );
+        }
+        // And the feature still works. A guard that blocks the thing it
+        // protects is not a fix: an encoded room key or member id is ordinary
+        // here, because `rooms::encode` produces exactly these.
+        for ok in [
+            "/v1/rooms/persistent/team%2Fblue/agents/agent-1",
+            "/v1/rooms/persistent/team.blue/agents/agent-1",
+            "/v1/rooms/persistent/team/agents/a%2e%2eb",
+            "/v1/rooms/persistent/team/agents/review%20agent",
+        ] {
+            assert!(
+                forwardable_operator_path(ok),
+                "{ok} is a legitimate encoded route and must forward",
+            );
+        }
+    }
+
+    /// The decoder answers one question — "is this a run of dots" — and a
+    /// truncated or invalid escape must not make it answer wrongly.
+    #[test]
+    fn the_segment_decoder_survives_malformed_escapes() {
+        assert!(is_dot_segment("%2e"));
+        assert!(is_dot_segment("."));
+        assert!(!is_dot_segment(""));
+        assert!(!is_dot_segment("%2"));
+        assert!(!is_dot_segment("%"));
+        assert!(!is_dot_segment("%zz"));
+        assert!(!is_dot_segment("agent-1"));
+        assert!(!is_dot_segment("a."));
+    }
+
+    #[test]
+    fn a_path_can_never_carry_an_origin() {
+        for hostile in [
+            "http://evil.example/v1/rooms/persistent/x/agents",
+            "//evil.example/v1/rooms/persistent/x/agents",
+        ] {
+            assert!(
+                !room_agent_authority_mutation("POST", hostile),
+                "{hostile} must not be an authority mutation",
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_credential_reader_enforces_custody_and_never_follows_links() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = dir.path().join("operator.key");
+        std::fs::write(&key, "secret-value\n").unwrap();
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            read_room_operator_key(&key).expect("secure key"),
+            "secret-value"
+        );
+
+        // Group/world-readable is refused.
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(read_room_operator_key(&key).is_err());
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        // A second hard link means a second custodian.
+        let hard = dir.path().join("hardlink.key");
+        std::fs::hard_link(&key, &hard).unwrap();
+        assert!(read_room_operator_key(&key).is_err());
+        std::fs::remove_file(&hard).unwrap();
+
+        // A symlink is refused before it is opened.
+        let symlink = dir.path().join("symlink.key");
+        std::os::unix::fs::symlink(&key, &symlink).unwrap();
+        assert!(read_room_operator_key(&symlink).is_err());
+
+        // Empty is refused: an empty header is not a credential.
+        let empty = dir.path().join("empty.key");
+        std::fs::write(&empty, "   \n").unwrap();
+        std::fs::set_permissions(&empty, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(read_room_operator_key(&empty).is_err());
+
+        // A missing file is an error, never a credential-free forward.
+        assert!(read_room_operator_key(&dir.path().join("absent.key")).is_err());
+    }
+
+    #[test]
+    fn the_key_path_follows_the_proxys_resolution() {
+        // Both surfaces read one file on one machine; the env override is the
+        // seam an operator uses to move it.
+        let path = room_operator_key_path();
+        assert!(
+            path.ends_with("operator.key"),
+            "resolved key path {} must name operator.key",
+            path.display(),
+        );
+    }
+}
+
 pub fn run() {
     // Daemon probe target: parse once from `OCEAN_DAEMON_URL` so the shell
     // and the wasm bundle share one configurable origin (default 127.0.0.1:4780).
@@ -1834,7 +2329,8 @@ pub fn run() {
             daemon_restart,
             ui_ready,
             ui_debug_resize,
-            open_external_url
+            open_external_url,
+            daemon_operator_request
         ])
         .run(tauri::generate_context!())
         .expect("error while running ocean-tauri");

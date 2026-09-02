@@ -51,8 +51,10 @@ if (!buildScript.includes("cp dist/*.css \"$DIST/\"")) {
 // No CSS at all counts as unbuilt rather than as drift. build-extension.sh
 // copies the stylesheets under `set -e`, so it cannot leave the directory
 // CSS-less; a bundle in that state was written by the auto-deploy script's
-// rebuild_extension instead — which scripts/surface-auto-deploy.test.mjs
-// triggers against this very checkout — and reporting that as a drifted
+// rebuild_extension instead. (Its guard, scripts/surface-auto-deploy.test.mjs,
+// used to trigger that against this very checkout; since #184 it runs against
+// a stub repository and pins this tree untouched, so a CSS-less extension/dist
+// here means someone ran the script by hand.) Reporting that as a drifted
 // inventory sends the reader to the wrong file entirely.
 let copied = [];
 try {

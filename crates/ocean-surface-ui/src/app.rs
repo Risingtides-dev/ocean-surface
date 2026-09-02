@@ -496,7 +496,11 @@ fn append_dictation(current: &str, fragment: &str) -> String {
 /// Whether the surface window currently has focus (`document.hasFocus()`).
 /// Defaults to `true` when the document can't be read so an off-focus
 /// notification is never fired on an uncertain state.
-fn window_focused() -> bool {
+///
+/// `pub(crate)` because the room mention notifier in `rooms.rs` needs the same
+/// rule — including the "uncertain means focused" default, which is the half
+/// worth not re-deriving.
+pub(crate) fn window_focused() -> bool {
     web_sys::window()
         .and_then(|w| w.document())
         .and_then(|d| d.has_focus().ok())
@@ -1573,6 +1577,25 @@ pub fn App() -> impl IntoView {
     };
     let rooms = Rooms::new(&daemon);
 
+    // Which of this person's machines they are on. Same-origin, login-gated,
+    // and independent of the daemon URL, so it rides alongside boot rather
+    // than inside it. Offers the picker once when the profile has more than
+    // one machine and nobody has chosen yet; silent everywhere there is no
+    // proxy to ask (extension, Tauri), which leaves the header exactly as it
+    // was on those hosts. Declared after `rooms` because a device switch
+    // has to close the open room as well as re-attach the daemon.
+    let devices = crate::devices::DeviceState::new();
+    devices.load(true);
+    // A selection is per browser, so another tab can move this one. The proxy
+    // ends this tab's stream when that happens and it reconnects onto the new
+    // machine; this is what stops it from showing the OLD machine's transcript
+    // above the new machine's events.
+    let device_attach = crate::devices::Attachments {
+        daemon: daemon.clone(),
+        rooms,
+    };
+    devices.recheck_on_focus(device_attach.clone());
+
     // Context deck (north star): the WEB/EXTENSION reveal rail. At most ONE
     // panel revealed at a time, reveal-on-intent via ⌘K commands, never
     // permanent chrome. On Tauri the deck never mounts (the Show gate below
@@ -2074,15 +2097,25 @@ pub fn App() -> impl IntoView {
 
     // Deep links (ocean://...): the Tauri shell brings the window forward and
     // emits `deep-link` with the raw URL when the OS asks Ocean to open one.
-    // Parse it into an action — v1 understands only `ocean://session/<id>`,
-    // which reuses the exact path a SessionsPanel row click takes
-    // (`Daemon::switch_session`): clear state, set the id, hydrate the
-    // persisted transcript, reconnect the SSE tail. Title is fetched from the
-    // GET /v1/sessions/<id> snapshot inside switch_session, so an empty title
-    // here is overwritten once that returns. Unknown/unparseable URLs are
-    // logged and dropped. No-op off the Tauri shell; the effect reads nothing
-    // reactive, so it registers the listener once at mount (mirrors
-    // on_menu_command above).
+    // Parse it into an action. `ocean://session/<id>` reuses the exact path a
+    // SessionsPanel row click takes (`Daemon::switch_session`): clear state,
+    // set the id, hydrate the persisted transcript, reconnect the SSE tail.
+    // Title is fetched from the GET /v1/sessions/<id> snapshot inside
+    // switch_session, so an empty title here is overwritten once that returns.
+    //
+    // `ocean://room/<key>` reveals Rooms and hands the key to the workspace's
+    // one-shot restore path rather than opening the room from here. That path
+    // already waits for the fetched room list before it acts, which is what
+    // makes an EARLY link — one that arrives while the list is still in
+    // flight, the common case for a cold launch from the OS — open the room
+    // anyway instead of silently missing. Revealing Rooms and closing Sessions
+    // is all the reveal discipline this needs: the mutual-exclusion Effect
+    // above closes the Island for any sibling opened directly, which is the
+    // "future deep link" its comment names.
+    //
+    // Unknown/unparseable URLs are logged and dropped. No-op off the Tauri
+    // shell; the effect reads nothing reactive, so it registers the listener
+    // once at mount (mirrors on_menu_command above).
     let daemon_for_deeplink = daemon.clone();
     Effect::new(move |_| {
         let daemon = daemon_for_deeplink.clone();
@@ -2090,8 +2123,36 @@ pub fn App() -> impl IntoView {
             Some(DeepLinkAction::SelectSession(id)) => {
                 daemon.switch_session(id, String::new());
             }
+            Some(DeepLinkAction::OpenRoom(key)) => {
+                show_sessions.set(false);
+                show_rooms.set(true);
+                rooms.request_deep_link_room(key);
+            }
             None => log::info!("ignoring unparseable ocean:// deep link: {raw}"),
         });
+    });
+
+    // Rooms visibility, mirrored onto the Rooms handle. The handle is
+    // App-scope, so `open_key` and the room-scoped tail both outlive the
+    // workspace unmounting when the reader switches to Direct messages —
+    // which means the tail cannot tell "this room is on screen" from "this
+    // room is still selected behind another surface". The mention notifier
+    // needs the first, and this is where the first is known.
+    Effect::new(move |_| {
+        rooms.workspace_visible.set(show_rooms.get());
+    });
+
+    // Reveal Rooms on request from below the reveal signals — a mention
+    // notification's click handler is the caller. Routed through here rather
+    // than by setting `show_rooms` at the call site, because revealing a peer
+    // surface has to close the competing ones (AGENTS.md 222-227) and this is
+    // where those live. Skips the initial 0 so a mount reveals nothing.
+    Effect::new(move |_| {
+        if rooms.reveal_request.get() == 0 {
+            return;
+        }
+        show_sessions.set(false);
+        show_rooms.set(true);
     });
 
     // WKWebView occasionally loses the native responder-chain handoff for Copy.
@@ -2592,6 +2653,10 @@ pub fn App() -> impl IntoView {
                             <span class="ocean-status__text">"daemon offline"</span>
                         </div>
                     </Show>
+                    // Which machine this session is attached to. Absent until
+                    // the proxy names one, so single-device and off-proxy hosts
+                    // keep the header they have.
+                    <crate::devices::DeviceChip state=devices />
                     </div>
                     // Secondary actions live behind one overflow control:
                     // council deck, rooms, voice mute, extension tab capture.
@@ -2674,6 +2739,23 @@ pub fn App() -> impl IntoView {
                                     }
                                 >
                                     "Capture tab"
+                                </button>
+                            </Show>
+                            // Reachable from the rail as well as the header
+                            // chip, and absent until the proxy names a machine
+                            // — one more menu row is not worth it on a host
+                            // that has no devices to choose between.
+                            <Show when=move || devices.has_choice()>
+                                <button
+                                    class="ocean-more__item"
+                                    type="button"
+                                    role="menuitem"
+                                    on:click=move |_| {
+                                        if let Some(d) = more_ref.get() { let _ = d.remove_attribute("open"); }
+                                        devices.open.set(true);
+                                    }
+                                >
+                                    "Devices"
                                 </button>
                             </Show>
                         </div>
@@ -3264,6 +3346,11 @@ pub fn App() -> impl IntoView {
             // ⌘K command palette — the deep-menu engine over the registry.
             <PaletteView registry=registry_for_view open=palette_open />
 
+            // Device picker. Like the palette, a self-contained overlay that
+            // consumes its own Escape rather than joining the reveal rail's
+            // close-exactly-one chain.
+            <crate::devices::DevicePicker state=devices attach=device_attach.clone() />
+
             // Council/quorum observability deck (OCEAN-96). Native workflow
             // stage now lives inside the surface instead of an iframe.
             <Show when=move || show_council.get()>
@@ -3323,27 +3410,32 @@ fn fmt_tokens(n: u64) -> String {
 /// What a parsed `ocean://` deep link asks the surface to do.
 ///
 /// The Tauri shell forwards each opened URL (host.rs `on_deep_link`); the
-/// surface decides what it means. v1 supports only session selection.
+/// surface decides what it means.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum DeepLinkAction {
     /// `ocean://session/<id>` — switch to the session with this id.
     SelectSession(String),
+    /// `ocean://room/<key>` — reveal Rooms and open this room.
+    OpenRoom(String),
 }
 
 /// Parse an `ocean://` deep-link URL into a [`DeepLinkAction`].
 ///
-/// The single supported shape is `ocean://session/<id>`, mapping to
-/// [`DeepLinkAction::SelectSession`]. The host must be exactly `session` and
-/// the path exactly one non-empty segment (the session id); a trailing query
+/// Two supported shapes, each host exactly one non-empty path segment:
+/// `ocean://session/<id>` → [`DeepLinkAction::SelectSession`], and
+/// `ocean://room/<key>` → [`DeepLinkAction::OpenRoom`]. A trailing query
 /// (`?…`) or fragment ("#…") is allowed and ignored. Anything else returns
 /// `None` so the caller logs and drops it — an unknown scheme/host/shape is
-/// not an error, just not something v1 acts on.
+/// not an error, just not something we act on.
 ///
-/// Pure on purpose: no WASM, fully unit-testable on the native target.
+/// Pure on purpose: no WASM, fully unit-testable on the native target. The two
+/// hosts get two validators, because the two ids are minted by different
+/// things — see each function for the shape it admits.
+///
 /// Accept only the shape a daemon-minted session id actually takes: ASCII
-/// alphanumerics plus `-` and `_` (covers both UUIDs and slug ids), bounded in
-/// length. Deliberately strict — see the call site in [`parse_deep_link`] for
-/// why an untrusted id is rejected rather than sanitized.
+/// alphanumerics plus `-` and `_`, bounded in length. Deliberately strict —
+/// see the call site in [`parse_deep_link`] for why an untrusted id is
+/// rejected rather than sanitized.
 fn is_valid_session_id(id: &str) -> bool {
     // A uuid is 36 chars; allow generous headroom for slug ids without
     // admitting an unbounded string from an untrusted source.
@@ -3355,14 +3447,49 @@ fn is_valid_session_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// A room key is NOT a session id, and reusing the session rule silently drops
+/// links to real rooms.
+///
+/// `rooms::slugify` — what THIS surface mints from a room name — produces
+/// lowercase alphanumerics and `-` with no length bound, but a daemon
+/// `RoomKey` is a bare string and a room created by a CLI or agent path can
+/// carry a `.` or run long. Either is a room that appears in the rooms list,
+/// opens on a click, and would have had its deep link silently ignored.
+///
+/// So the admitted set is the RFC 3986 unreserved characters —
+/// `ALPHA / DIGIT / "-" / "." / "_" / "~"` — which is exactly the set
+/// `rooms::encode` passes through without escaping. That is the principled
+/// line: a key this validator accepts is one the URL builder does not have to
+/// change to address. Anything outside it (a space, a `%`, a `#`, a control
+/// character) stays rejected, because admitting percent-encoding here would
+/// re-open the structure-smuggling TASK-80 closed, and a key needing an escape
+/// cannot be written in an `ocean://` URL unambiguously anyway.
+///
+/// The one carve-out `.` forces: `encode` leaves a dot VERBATIM, so a key of
+/// `.` or `..` would put a real dot segment into the daemon path this key is
+/// interpolated into. A key that is nothing but dots is refused for that
+/// reason; `a..b` is not a dot segment and is fine.
+fn is_valid_room_key(key: &str) -> bool {
+    // Generous, because a slug derived from a long room name is legitimate —
+    // but still bounded, because the string is attacker-supplied.
+    const MAX: usize = 512;
+    !key.is_empty()
+        && key.len() <= MAX
+        && !key.bytes().all(|b| b == b'.')
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~'))
+}
+
 pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
     // Drop any query ("?…") / fragment ("#…") so `ocean://session/abc?ref=x`
     // resolves to the same action as the bare URL.
     let path = raw.split(['?', '#']).next().unwrap_or("");
-    let rest = path.strip_prefix("ocean://session/")?;
-    // The id is everything after the prefix. Reject an empty id and a
-    // multi-segment path (`ocean://session/a/b`) — a session id is atomic.
-    if rest.is_empty() || rest.contains('/') {
+    let rest = path.strip_prefix("ocean://")?;
+    let (host, id) = rest.split_once('/')?;
+    // The id is everything after the host. Reject an empty id and a
+    // multi-segment path (`ocean://session/a/b`) — both ids are atomic.
+    if id.is_empty() || id.contains('/') {
         return None;
     }
     // TASK-80: charset-validate the id before it becomes an action.
@@ -3371,10 +3498,10 @@ pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
     // navigate to `ocean://…`, and macOS scheme prompts are per-browser and
     // commonly suppressed after the first accept. So this string arrives from
     // an untrusted source and then drives a real state change — foregrounding
-    // the app and switching the operator's active session, which clears state
-    // and reconnects the SSE tail.
+    // the app and switching the operator's active session, or revealing Rooms
+    // and opening one, either of which clears state and reconnects a tail.
     //
-    // A session id is a daemon-minted opaque token (uuid or slug), so the
+    // A session id and a room key are both daemon-minted opaque tokens, so the
     // legitimate charset is narrow. Anything outside it is either a mistake or
     // an attempt to smuggle structure — percent-encodings (`%2f`), dot
     // segments, control characters, whitespace — into a value that is later
@@ -3382,10 +3509,17 @@ pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
     // format sites; rejecting here as well means a malformed id never becomes
     // an action in the first place, rather than being safely encoded and then
     // failing downstream as a confusing 404.
-    if !is_valid_session_id(rest) {
-        return None;
+    //
+    // The two hosts validate SEPARATELY. They are minted by different things,
+    // and a shared rule is not a simplification: applying the session charset
+    // to a room key silently drops links to real rooms (see
+    // [`is_valid_room_key`]), while widening the session rule to match the
+    // room one would loosen a boundary nothing asked to loosen.
+    match host {
+        "session" if is_valid_session_id(id) => Some(DeepLinkAction::SelectSession(id.to_string())),
+        "room" if is_valid_room_key(id) => Some(DeepLinkAction::OpenRoom(id.to_string())),
+        _ => None,
     }
-    Some(DeepLinkAction::SelectSession(rest.to_string()))
 }
 
 #[cfg(test)]
@@ -3823,11 +3957,22 @@ mod tests {
         assert!(!window_escape_should_handle("Enter", false));
     }
 
+    /// The room-list flex child must be able to shrink and scroll, or a long
+    /// list pushes the create field and status line out of the viewport.
+    ///
+    /// This guard used to read the never-rendered rooms panel's list selector
+    /// out of styles/panels.css. Nothing emitted that panel's classes: the
+    /// shipped rooms browser is the left rail in `rooms_workspace.rs`, which
+    /// renders `.rooms-workspace__left-list`. So the assert held a dead rule in
+    /// place while the live one was unguarded. Re-pointed rather than deleted
+    /// with the dead CSS — the invariant is still real, only its selector
+    /// moved. (The needles this scan must not contain live in
+    /// tests/dead_selector_removal.rs, which asserts their absence.)
     #[test]
     fn rooms_list_flex_child_can_shrink_and_scroll() {
-        let css = include_str!("../../../styles/panels.css");
+        let css = include_str!("../../../styles/rooms-workspace.css");
         let start = css
-            .find(".rooms-panel__list {")
+            .find(".rooms-workspace__left-list {")
             .expect("rooms list production selector");
         let block = &css[start..start + css[start..].find('}').expect("selector closes")];
         assert!(block.contains("min-height: 0;"));
@@ -3988,6 +4133,142 @@ mod tests {
             Some(DeepLinkAction::SelectSession(
                 "11111111-2222-4333-8444-555555555555".into()
             ))
+        );
+    }
+
+    #[test]
+    fn deep_link_opens_a_room() {
+        assert_eq!(
+            parse_deep_link("ocean://room/team-blue"),
+            Some(DeepLinkAction::OpenRoom("team-blue".into()))
+        );
+        // `rooms::slugify` builds keys from lowercase alphanumerics and `-`,
+        // so every key it can mint parses.
+        for key in ["a", "room-1", "a-very-long-room-name-2", "abc123"] {
+            assert_eq!(
+                parse_deep_link(&format!("ocean://room/{key}")),
+                Some(DeepLinkAction::OpenRoom(key.into())),
+                "{key} is a shape slugify can mint and must open",
+            );
+        }
+    }
+
+    /// A daemon `RoomKey` is a bare string, so a room made by a CLI or agent
+    /// path can carry a `.` or `~`, and this surface puts no length bound on a
+    /// room name (so none on the slug it derives). Every such room shows in
+    /// the rooms list and opens on a click; the session-id rule would have
+    /// dropped its link in silence. The admitted set is the RFC 3986
+    /// unreserved characters — exactly what `rooms::encode` leaves alone.
+    #[test]
+    fn deep_link_opens_room_keys_the_session_rule_would_have_dropped() {
+        for key in [
+            "team.blue",
+            "v1.2.3-release",
+            "room~archive",
+            "under_scored",
+            "a.b~c-d_1",
+        ] {
+            assert_eq!(
+                parse_deep_link(&format!("ocean://room/{key}")),
+                Some(DeepLinkAction::OpenRoom(key.into())),
+                "{key} is a real room key shape and must open",
+            );
+        }
+        // A slug from a long room name is legitimate; 128 is a session id's
+        // bound, not a room's.
+        let long = "a".repeat(200);
+        assert_eq!(
+            parse_deep_link(&format!("ocean://room/{long}")),
+            Some(DeepLinkAction::OpenRoom(long))
+        );
+        let max = "a".repeat(512);
+        assert_eq!(
+            parse_deep_link(&format!("ocean://room/{max}")),
+            Some(DeepLinkAction::OpenRoom(max))
+        );
+    }
+
+    /// Widening the room charset must not widen the SESSION one: a session id
+    /// is minted by the daemon out of a narrower set, and TASK-80's boundary
+    /// stands where it was.
+    #[test]
+    fn the_room_charset_does_not_leak_into_the_session_one() {
+        for hostile in [
+            "ocean://session/team.blue",
+            "ocean://session/room~archive",
+            "ocean://session/v1.2.3",
+        ] {
+            assert_eq!(
+                parse_deep_link(hostile),
+                None,
+                "{hostile} must stay outside the session charset",
+            );
+        }
+        let long = "a".repeat(200);
+        assert_eq!(parse_deep_link(&format!("ocean://session/{long}")), None);
+    }
+
+    /// A room key reaches the surface from the same untrusted place a session
+    /// id does, and drives the same kind of state change — a reveal plus a
+    /// room open that resets the transcript and reconnects a tail. It gets the
+    /// same charset and length rule, not a looser one.
+    #[test]
+    fn deep_link_rejects_room_keys_outside_the_charset() {
+        for hostile in [
+            // Percent-encoding stays rejected: admitting it here would re-open
+            // exactly the structure-smuggling TASK-80 closed.
+            "ocean://room/..%2f..%2fhealth",
+            "ocean://room/%2e%2e",
+            "ocean://room/a%2fb",
+            // `encode` passes a dot through VERBATIM, so a key that is nothing
+            // but dots would put a real dot segment in the daemon path.
+            "ocean://room/.",
+            "ocean://room/..",
+            "ocean://room/...",
+            // Structure, whitespace, control characters, non-ASCII.
+            "ocean://room/a b",
+            "ocean://room/a:b",
+            "ocean://room/a\nb",
+            "ocean://room/café",
+            "ocean://room/a/b",
+            "ocean://room/",
+            "ocean://room",
+        ] {
+            assert_eq!(parse_deep_link(hostile), None, "{hostile} must not parse");
+        }
+        // Bounded, even though the bound is generous.
+        let long = "a".repeat(513);
+        assert_eq!(parse_deep_link(&format!("ocean://room/{long}")), None);
+        // A dot that is part of a name, not a segment, is fine.
+        assert_eq!(
+            parse_deep_link("ocean://room/a..b"),
+            Some(DeepLinkAction::OpenRoom("a..b".into()))
+        );
+        // `#` is NOT in this list: a fragment is stripped before validation,
+        // by the same documented rule that makes `ocean://session/abc#frag`
+        // select `abc`. So `ocean://room/a#b` opens `a`, deliberately.
+        assert_eq!(
+            parse_deep_link("ocean://room/a#b"),
+            Some(DeepLinkAction::OpenRoom("a".into()))
+        );
+        assert_eq!(
+            parse_deep_link("ocean://room/team.blue?ref=tray"),
+            Some(DeepLinkAction::OpenRoom("team.blue".into()))
+        );
+    }
+
+    /// Adding a second host must not turn the host into a wildcard: only the
+    /// two named ones resolve, and `session` still means session.
+    #[test]
+    fn deep_link_hosts_stay_an_allowlist_of_two() {
+        assert_eq!(parse_deep_link("ocean://rooms/team-blue"), None);
+        assert_eq!(parse_deep_link("ocean://roo/team-blue"), None);
+        assert_eq!(parse_deep_link("ocean://Room/team-blue"), None);
+        assert_eq!(parse_deep_link("ocean://project/team-blue"), None);
+        assert_eq!(parse_deep_link("ocean:///team-blue"), None);
+        assert_eq!(
+            parse_deep_link("ocean://session/team-blue"),
+            Some(DeepLinkAction::SelectSession("team-blue".into()))
         );
     }
 

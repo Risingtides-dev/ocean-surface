@@ -99,8 +99,19 @@ fn the_snapshots_closed_flag_reaches_the_open_room_call_site() {
          decode error, and `open_room` reports decode errors as a failed \
          open — every room on a pre-field daemon refusing to load",
     );
+    // The ARM, not the whole tuple. This assertion used to quote every element
+    // of `open_room`'s success tuple, which made it red for the next slice that
+    // carried one more field out of the same envelope — `agent_owners` was the
+    // first, and it went red having broken nothing this file is about. What is
+    // load-bearing is that `closed` leaves the response at all; the arm's other
+    // passengers are somebody else's guard.
+    let hydration_arm = rooms
+        .split_once("Ok(r)ifr.ok=>Ok((")
+        .and_then(|(_, rest)| rest.split_once("))"))
+        .map(|(arm, _)| arm)
+        .expect("`open_room`'s hydration decode arm builds a tuple");
     assert!(
-        rooms.contains("Ok(r)ifr.ok=>Ok((r.room,r.transcript,r.access,r.last_seq,r.closed)),"),
+        hydration_arm.contains("r.closed"),
         "the hydration decode arm must carry `closed` out with the record it \
          describes; a field decoded and left in the response is a field nothing \
          can gate on",
