@@ -53,10 +53,66 @@ fn parse_iso_epoch(ts: &str) -> Option<i64> {
     Some(days_from_civil(y, mo, d) * 86_400 + h * 3_600 + mi * 60 + s)
 }
 
-/// The `YYYY-MM-DD` day key of a message, `None` when unparseable.
-fn day_key(msg: &RoomMessage) -> Option<&str> {
-    let ts = msg.created_at.as_str();
-    (parse_iso_epoch(ts).is_some()).then(|| &ts[0..10])
+/// Civil date for epoch seconds — the inverse of `days_from_civil`, same
+/// algorithm. Used to name the day a local-shifted instant falls on, which is
+/// not in general the day its UTC wire value spells.
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+// ── The member's clock ─────────────────────────────────────────────────────
+//
+// The daemon writes `created_at` as RFC 3339 UTC — `to_rfc3339_opts(Nanos,
+// true)` in ocean-os's `fmt_ts`, so always a `Z` — and the surface used to
+// render bytes 11..16 of that string as the row's clock. That is the UTC
+// hour, shown to the member as if it were theirs. West of Greenwich every
+// timestamp read hours late; east, hours early; and a room busy across UTC
+// midnight drew its day separator in the middle of the member's afternoon.
+//
+// Everything below takes the offset as an argument — minutes to ADD to UTC —
+// so it stays pure and testable. The view supplies it per timestamp, which is
+// also what makes a transcript spanning a DST change render each row against
+// the offset that was actually in force.
+
+/// Epoch seconds shifted into the viewer's zone. `None` for a wire value that
+/// is not the canonical shape — callers degrade, never guess.
+fn local_epoch(ts: &str, utc_offset_minutes: i64) -> Option<i64> {
+    Some(parse_iso_epoch(ts)? + utc_offset_minutes * 60)
+}
+
+/// The member's wall clock for this instant, `HH:MM`, 24-hour. `None` when
+/// the wire value is not canonical RFC 3339 — the caller shows the raw wire
+/// string rather than inventing a time.
+pub(crate) fn local_clock_time(ts: &str, utc_offset_minutes: i64) -> Option<String> {
+    let secs = local_epoch(ts, utc_offset_minutes)?;
+    let day_secs = secs.rem_euclid(86_400);
+    Some(format!(
+        "{:02}:{:02}",
+        day_secs / 3_600,
+        day_secs % 3_600 / 60
+    ))
+}
+
+/// The `YYYY-MM-DD` the member would call this instant. `None` when
+/// unparseable.
+pub(crate) fn local_day_key(ts: &str, utc_offset_minutes: i64) -> Option<String> {
+    let secs = local_epoch(ts, utc_offset_minutes)?;
+    let (y, m, d) = civil_from_days(secs.div_euclid(86_400));
+    Some(format!("{y:04}-{m:02}-{d:02}"))
+}
+
+/// The local day key of a message, `None` when unparseable.
+fn day_key(msg: &RoomMessage, utc_offset_minutes: i64) -> Option<String> {
+    local_day_key(&msg.created_at, utc_offset_minutes)
 }
 
 // ── Density decisions ──────────────────────────────────────────────────────
@@ -72,7 +128,12 @@ pub(crate) fn is_compact_system_row(msg: &RoomMessage) -> bool {
 /// after `prev`, and no day boundary sits between them. Unparseable or
 /// out-of-order timestamps degrade to un-grouped — a wrong group is worse
 /// than a missing one.
-pub(crate) fn is_grouped(prev: &RoomMessage, cur: &RoomMessage) -> bool {
+///
+/// The elapsed-seconds half needs no offset; the day boundary does, and it is
+/// the MEMBER'S midnight, not Greenwich's. Two messages a minute apart that
+/// straddle UTC midnight are one conversation to a reader in New York and
+/// must not be split into two headed rows.
+pub(crate) fn is_grouped(prev: &RoomMessage, cur: &RoomMessage, utc_offset_minutes: i64) -> bool {
     if !matches!(prev.kind, RoomMessageKind::Message)
         || !matches!(cur.kind, RoomMessageKind::Message)
     {
@@ -86,7 +147,8 @@ pub(crate) fn is_grouped(prev: &RoomMessage, cur: &RoomMessage) -> bool {
         parse_iso_epoch(&cur.created_at),
     ) {
         (Some(p), Some(c)) => {
-            (0..=GROUP_WINDOW_SECS).contains(&(c - p)) && day_key(prev) == day_key(cur)
+            (0..=GROUP_WINDOW_SECS).contains(&(c - p))
+                && day_key(prev, utc_offset_minutes) == day_key(cur, utc_offset_minutes)
         }
         _ => false,
     }
@@ -108,11 +170,19 @@ pub(crate) fn needs_gap_header(prev: &RoomMessage, cur: &RoomMessage) -> bool {
 /// opens the transcript or lands on a different day than `prev`.
 /// (Humanizing "Today"/"Yesterday" is presentational and needs a client
 /// clock — the adopting view layers that on top.)
-pub(crate) fn day_separator_label(prev: Option<&RoomMessage>, cur: &RoomMessage) -> Option<String> {
-    let cur_day = day_key(cur)?;
+///
+/// The day is the MEMBER'S. A separator drawn on UTC days lands mid-afternoon
+/// for a reader in New York and splits one evening's conversation in two,
+/// while the real local midnight it should have marked passes unmarked.
+pub(crate) fn day_separator_label(
+    prev: Option<&RoomMessage>,
+    cur: &RoomMessage,
+    utc_offset_minutes: i64,
+) -> Option<String> {
+    let cur_day = day_key(cur, utc_offset_minutes)?;
     match prev {
-        None => Some(cur_day.to_string()),
-        Some(p) => (day_key(p) != Some(cur_day)).then(|| cur_day.to_string()),
+        None => Some(cur_day),
+        Some(p) => (day_key(p, utc_offset_minutes).as_ref() != Some(&cur_day)).then_some(cur_day),
     }
 }
 
@@ -156,6 +226,16 @@ mod tests {
         msg(seq, author, RoomMessageKind::Message, ts)
     }
 
+    /// America/New_York in summer: UTC-04:00. The offset every local test
+    /// below is written against, because it is where the operator reads this
+    /// transcript and because it is the sign that used to be wrong.
+    const NEW_YORK_EDT: i64 = -240;
+    /// Asia/Kolkata: UTC+05:30 — the half-hour offset that catches an
+    /// implementation carrying whole hours.
+    const KOLKATA: i64 = 330;
+    /// Greenwich, where the old rendering was accidentally right.
+    const UTC: i64 = 0;
+
     #[test]
     fn parse_iso_epoch_handles_day_and_bad_input() {
         assert_eq!(parse_iso_epoch("1970-01-01T00:00:00Z"), Some(0));
@@ -174,15 +254,19 @@ mod tests {
         let a = m(1, "u1", "2026-07-29T12:00:00Z");
         let b = m(2, "u1", "2026-07-29T12:05:00Z"); // exactly 300s: inclusive
         let c = m(3, "u1", "2026-07-29T12:05:01Z"); // 301s: full row
-        assert!(is_grouped(&a, &b));
-        assert!(!is_grouped(&a, &c));
+        assert!(is_grouped(&a, &b, UTC));
+        assert!(!is_grouped(&a, &c, UTC));
+        // Elapsed time is offset-invariant: the window says the same thing
+        // wherever it is read.
+        assert!(is_grouped(&a, &b, NEW_YORK_EDT));
+        assert!(!is_grouped(&a, &c, KOLKATA));
     }
 
     #[test]
     fn never_groups_across_author_kind_or_disorder() {
         let a = m(1, "u1", "2026-07-29T12:00:00Z");
-        assert!(!is_grouped(&a, &m(2, "u2", "2026-07-29T12:00:30Z")));
-        assert!(!is_grouped(&a, &m(2, "u1", "2026-07-29T11:59:59Z"))); // out of order
+        assert!(!is_grouped(&a, &m(2, "u2", "2026-07-29T12:00:30Z"), UTC));
+        assert!(!is_grouped(&a, &m(2, "u1", "2026-07-29T11:59:59Z"), UTC)); // out of order
         assert!(!is_grouped(
             &a,
             &msg(
@@ -191,15 +275,33 @@ mod tests {
                 RoomMessageKind::ParticipantJoined,
                 "2026-07-29T12:00:30Z"
             ),
+            UTC,
         ));
-        assert!(!is_grouped(&a, &m(2, "u1", "not-a-time")));
+        assert!(!is_grouped(&a, &m(2, "u1", "not-a-time"), UTC));
     }
 
     #[test]
     fn never_groups_across_midnight_even_within_window() {
         let a = m(1, "u1", "2026-07-29T23:58:00Z");
         let b = m(2, "u1", "2026-07-30T00:01:00Z"); // 180s but new day
-        assert!(!is_grouped(&a, &b));
+        assert!(!is_grouped(&a, &b, UTC));
+    }
+
+    #[test]
+    fn the_midnight_that_splits_a_group_is_the_member_s_own() {
+        // 23:58Z and 00:01Z: two UTC days, one New York evening (19:58 and
+        // 20:01 the same afternoon). One conversation, so one headed row.
+        let a = m(1, "u1", "2026-07-29T23:58:00Z");
+        let b = m(2, "u1", "2026-07-30T00:01:00Z");
+        assert!(!is_grouped(&a, &b, UTC));
+        assert!(is_grouped(&a, &b, NEW_YORK_EDT));
+
+        // And the reverse: one UTC day, two New York days. 03:58Z is 23:58
+        // the previous evening; 04:01Z is 00:01 the next morning.
+        let c = m(3, "u1", "2026-07-29T03:58:00Z");
+        let d = m(4, "u1", "2026-07-29T04:01:00Z");
+        assert!(is_grouped(&c, &d, UTC));
+        assert!(!is_grouped(&c, &d, NEW_YORK_EDT));
     }
 
     #[test]
@@ -215,18 +317,125 @@ mod tests {
         let a = m(1, "u1", "2026-07-29T23:00:00Z");
         let b = m(2, "u1", "2026-07-30T01:00:00Z");
         assert_eq!(
-            day_separator_label(None, &a),
+            day_separator_label(None, &a, UTC),
             Some("2026-07-29".to_string())
         );
         assert_eq!(
-            day_separator_label(Some(&a), &b),
+            day_separator_label(Some(&a), &b, UTC),
             Some("2026-07-30".to_string())
         );
         assert_eq!(
-            day_separator_label(Some(&a), &m(3, "x", "2026-07-29T23:59:00Z")),
+            day_separator_label(Some(&a), &m(3, "x", "2026-07-29T23:59:00Z"), UTC),
             None
         );
-        assert_eq!(day_separator_label(Some(&a), &m(3, "x", "bad")), None);
+        assert_eq!(day_separator_label(Some(&a), &m(3, "x", "bad"), UTC), None);
+    }
+
+    #[test]
+    fn the_day_a_separator_marks_is_the_member_s_day() {
+        // The pair that used to draw a separator in the middle of a New York
+        // evening: 23:00Z and 01:00Z are two UTC days and one local day.
+        let a = m(1, "u1", "2026-07-29T23:00:00Z"); // 19:00 local, 07-29
+        let b = m(2, "u1", "2026-07-30T01:00:00Z"); // 21:00 local, still 07-29
+        assert_eq!(
+            day_separator_label(Some(&a), &b, UTC),
+            Some("2026-07-30".to_string()),
+        );
+        assert_eq!(day_separator_label(Some(&a), &b, NEW_YORK_EDT), None);
+
+        // And the local midnight the UTC reading walked straight past.
+        let c = m(3, "u1", "2026-07-29T03:00:00Z"); // 23:00 local, 07-28
+        let d = m(4, "u1", "2026-07-29T05:00:00Z"); // 01:00 local, 07-29
+        assert_eq!(day_separator_label(Some(&c), &d, UTC), None);
+        assert_eq!(
+            day_separator_label(Some(&c), &d, NEW_YORK_EDT),
+            Some("2026-07-29".to_string()),
+        );
+
+        // The label a member sees names their day, not the wire's: the row
+        // that opens the transcript is dated where they are.
+        assert_eq!(
+            day_separator_label(None, &c, NEW_YORK_EDT),
+            Some("2026-07-28".to_string()),
+        );
+        // East of Greenwich the shift runs the other way, and by a half hour.
+        assert_eq!(
+            day_separator_label(None, &m(5, "u1", "2026-07-29T19:45:00Z"), KOLKATA),
+            Some("2026-07-30".to_string()),
+        );
+    }
+
+    #[test]
+    fn local_clock_reads_the_member_s_wall_time() {
+        let ts = "2026-07-29T03:43:12Z";
+        assert_eq!(local_clock_time(ts, UTC).as_deref(), Some("03:43"));
+        // The whole defect in one line: 03:43Z is 23:43 the previous evening
+        // in New York, and the surface used to print "03:43".
+        assert_eq!(local_clock_time(ts, NEW_YORK_EDT).as_deref(), Some("23:43"));
+        // Half-hour zones are not a rounding of whole ones.
+        assert_eq!(local_clock_time(ts, KOLKATA).as_deref(), Some("09:13"));
+        // Fractional seconds are what the daemon actually sends
+        // (`to_rfc3339_opts(Nanos, true)`), and must not shift the clock.
+        assert_eq!(
+            local_clock_time("2026-07-29T03:43:12.987654321Z", NEW_YORK_EDT).as_deref(),
+            Some("23:43"),
+        );
+        // Midnight and the last minute of the day, both directions.
+        assert_eq!(
+            local_clock_time("2026-07-29T04:00:00Z", NEW_YORK_EDT).as_deref(),
+            Some("00:00"),
+        );
+        assert_eq!(
+            local_clock_time("2026-07-29T03:59:00Z", NEW_YORK_EDT).as_deref(),
+            Some("23:59"),
+        );
+        // Nothing is invented for a wire value the parser does not accept.
+        assert_eq!(local_clock_time("bad", NEW_YORK_EDT), None);
+        assert_eq!(local_clock_time("", NEW_YORK_EDT), None);
+        assert_eq!(local_clock_time("2026-06-05T12", NEW_YORK_EDT), None);
+        assert_eq!(local_clock_time("2026-06-05 12:34:56Z", NEW_YORK_EDT), None);
+        // Multi-byte input must not panic or index into a char boundary.
+        assert_eq!(
+            local_clock_time("\u{ff12}\u{ff10}\u{ff12}\u{ff16}-07-25T03:43:12Z", UTC),
+            None,
+        );
+    }
+
+    #[test]
+    fn local_day_key_crosses_the_boundary_in_both_directions() {
+        // Crossing back over midnight, including over a month end.
+        assert_eq!(
+            local_day_key("2026-08-01T02:00:00Z", NEW_YORK_EDT).as_deref(),
+            Some("2026-07-31"),
+        );
+        // And forward, including over a year end.
+        assert_eq!(
+            local_day_key("2026-12-31T19:00:00Z", KOLKATA).as_deref(),
+            Some("2027-01-01"),
+        );
+        // A leap day is a day like any other, in either direction.
+        assert_eq!(
+            local_day_key("2028-03-01T03:00:00Z", NEW_YORK_EDT).as_deref(),
+            Some("2028-02-29"),
+        );
+        assert_eq!(local_day_key("bad", NEW_YORK_EDT), None);
+    }
+
+    #[test]
+    fn civil_dates_round_trip_through_the_epoch() {
+        // `civil_from_days` is the inverse of the `days_from_civil` the day
+        // keys were already built on; a disagreement between them would
+        // mis-date rows only near the boundaries these keys are for.
+        for (y, m, d) in [
+            (1970, 1, 1),
+            (1999, 12, 31),
+            (2000, 3, 1),
+            (2026, 7, 29),
+            (2028, 2, 29),
+            (2100, 3, 1),
+        ] {
+            assert_eq!(civil_from_days(days_from_civil(y, m, d)), (y, m, d));
+        }
     }
 
     #[test]

@@ -555,16 +555,55 @@ fn ledger_mark_view(access: Option<&RoomAccessProjection>, message: &RoomMessage
 /// Extracts the shared `HH:MM` prefix for `Z`, fractional-second, and offset
 /// variants without converting timezones or localizing; invalid/non-canonical
 /// input passes through unchanged.
-/// The client's current UTC day key (`YYYY-MM-DD`), matching the daemon's
-/// ISO-8601 UTC timestamps, for humanizing day separators.
+/// The member's current day key (`YYYY-MM-DD`) in THEIR zone, for humanizing
+/// day separators to "Today" / "Yesterday".
+///
+/// `Date::to_iso_string()` is UTC and this read it, so between local midnight
+/// and UTC midnight — every evening, for every member west of Greenwich —
+/// "Today" was tomorrow's date and today's rows were labelled with a bare
+/// date. `get_full_year`/`get_month`/`get_date` are the LOCAL getters, and
+/// `get_month` is 0-based.
 fn today_day_key() -> String {
-    js_sys::Date::new_0()
-        .to_iso_string()
-        .as_string()
-        .unwrap_or_default()
-        .chars()
-        .take(10)
-        .collect()
+    let now = js_sys::Date::new_0();
+    format!(
+        "{:04}-{:02}-{:02}",
+        now.get_full_year(),
+        now.get_month() + 1,
+        now.get_date(),
+    )
+}
+
+/// Minutes to ADD to a UTC instant to reach the member's wall clock.
+///
+/// Read for the instant itself, not for "now": a transcript that spans a DST
+/// change has rows on both sides of it, and one offset for the whole list
+/// would render half of them an hour out. `getTimezoneOffset` reports
+/// `utc - local`, which is why the sign is flipped here — `room_messages`
+/// works in minutes to add.
+///
+/// `0` for a wire value the browser will not parse. That is not a guess about
+/// the zone: the pure formatter rejects the same value and the caller falls
+/// back to showing the raw wire string, so the offset is never applied to it.
+fn viewer_utc_offset_minutes(ts: &str) -> i64 {
+    let minutes = js_sys::Date::new(&wasm_bindgen::JsValue::from_str(ts)).get_timezone_offset();
+    if minutes.is_nan() {
+        0
+    } else {
+        -(minutes as i64)
+    }
+}
+
+/// The clock a member reads on a transcript row: their own wall time for the
+/// instant the daemon recorded.
+///
+/// The full RFC 3339 wire value stays on the row's `datetime`, `title` and
+/// `aria-label` — the instant is what a machine and a screen reader want, and
+/// it is unambiguous. Only the visible text is localized. A wire value the
+/// formatter will not accept passes through unchanged rather than becoming a
+/// plausible wrong time.
+fn local_clock_time(full: &str) -> String {
+    room_messages::local_clock_time(full, viewer_utc_offset_minutes(full))
+        .unwrap_or_else(|| full.to_string())
 }
 
 /// Whether to show the "No messages yet" empty state in the transcript.
@@ -1113,40 +1152,6 @@ fn thread_panel_subtitle(reply_count: usize, root_author_display: &str) -> Strin
     )
 }
 
-/// Row timestamp: show only the canonical wire clock (HH:MM) for RFC3339
-/// timestamps while preserving the full wire value for machine-readable and
-/// accessible render paths. Accepts only ASCII canonical structure at the
-/// byte positions we actually rely on, never panics on Unicode/invalid input,
-/// and returns the original string unchanged when the wire value is not the
-/// expected RFC3339 shape.
-fn canonical_wire_clock_time(full: &str) -> String {
-    let bytes = full.as_bytes();
-    let is_digit = |idx: usize| bytes.get(idx).is_some_and(|b| b.is_ascii_digit());
-
-    if bytes.len() < 16
-        || !full.is_ascii()
-        || !is_digit(0)
-        || !is_digit(1)
-        || !is_digit(2)
-        || !is_digit(3)
-        || bytes[4] != b'-'
-        || !is_digit(5)
-        || !is_digit(6)
-        || bytes[7] != b'-'
-        || !is_digit(8)
-        || !is_digit(9)
-        || bytes[10] != b'T'
-        || !is_digit(11)
-        || !is_digit(12)
-        || bytes[13] != b':'
-        || !is_digit(14)
-        || !is_digit(15)
-    {
-        return full.to_string();
-    }
-
-    full[11..16].to_string()
-}
 fn avatar_identity_class(author_id: &str) -> &'static str {
     const HUES: [&str; 5] = [
         "rooms-workspace__msg-avatar--hue0",
@@ -2418,7 +2423,7 @@ pub fn RoomsWorkspace(
                                                                     aria-label=full_ts.clone()
                                                                     title=full_ts.clone()
                                                                 >
-                                                                    {canonical_wire_clock_time(&full_ts)}
+                                                                    {local_clock_time(&full_ts)}
                                                                 </time>
                                                                 {move || ledger_mark_view(
                                                                     rooms.access.get().as_ref(),
@@ -3290,7 +3295,12 @@ pub fn RoomsWorkspace(
                                             let media = crate::transcript_media::marker_media_view(rooms, &m);
                                             let full_ts = m.created_at.clone();
                                             let root_seq = m.seq;
-                                            let day_label = room_messages::day_separator_label(prev.as_ref(), &m)
+                                            // Every density decision below that
+                                            // turns on a DAY turns on the member's
+                                            // day, so all of them read the offset
+                                            // in force at this row's own instant.
+                                            let offset = viewer_utc_offset_minutes(&full_ts);
+                                            let day_label = room_messages::day_separator_label(prev.as_ref(), &m, offset)
                                                 .map(|d| room_messages::humanize_day_label(&d, &today_day_key()));
                                             // A long silence gets a time header —
                                             // unless a day separator already marks
@@ -3300,10 +3310,10 @@ pub fn RoomsWorkspace(
                                                     .as_ref()
                                                     .map(|p| room_messages::needs_gap_header(p, &m))
                                                     .unwrap_or(false))
-                                            .then(|| canonical_wire_clock_time(&full_ts));
+                                            .then(|| local_clock_time(&full_ts));
                                             let grouped = prev
                                                 .as_ref()
-                                                .map(|p| room_messages::is_grouped(p, &m))
+                                                .map(|p| room_messages::is_grouped(p, &m, offset))
                                                 .unwrap_or(false);
                                             // Cloned for the ledger mark, which
                                             // re-reads reactively: the access
@@ -3347,7 +3357,7 @@ pub fn RoomsWorkspace(
                                                                 aria-label=full_ts.clone()
                                                                 title=full_ts.clone()
                                                             >
-                                                                {canonical_wire_clock_time(&full_ts)}
+                                                                {local_clock_time(&full_ts)}
                                                             </time>
                                                             {move || ledger_mark_view(
                                                                 rooms.access.get().as_ref(),
@@ -4522,7 +4532,7 @@ pub fn RoomsWorkspace(
                                                         aria-label=full_ts.clone()
                                                         title=full_ts.clone()
                                                     >
-                                                        {canonical_wire_clock_time(&full_ts)}
+                                                        {local_clock_time(&full_ts)}
                                                     </time>
                                                     // The enclosing closure re-runs on access
                                                     // changes, so this needs no closure of its own.
@@ -6322,11 +6332,6 @@ mod tests {
     }
 
     #[test]
-    fn canonical_wire_clock_time_extracts_hhmm_from_rfc3339_z() {
-        assert_eq!(canonical_wire_clock_time("2026-07-25T03:43:12Z"), "03:43");
-    }
-
-    #[test]
     fn transcript_bottom_threshold_matches_follow_contract() {
         assert!(transcript_is_near_bottom(1000, 810, 100, 120));
         assert!(!transcript_is_near_bottom(1000, 700, 100, 120));
@@ -6377,43 +6382,6 @@ mod tests {
                 Some(&test_access(RoomAccessState::Connecting))
             ),
             None
-        );
-    }
-
-    #[test]
-    fn canonical_wire_clock_time_extracts_hhmm_from_rfc3339_fractional() {
-        assert_eq!(
-            canonical_wire_clock_time("2026-07-25T03:43:12.987Z"),
-            "03:43"
-        );
-    }
-
-    #[test]
-    fn canonical_wire_clock_time_extracts_hhmm_from_rfc3339_offset() {
-        assert_eq!(
-            canonical_wire_clock_time("2026-07-25T03:43:12+07:00"),
-            "03:43"
-        );
-    }
-
-    #[test]
-    fn canonical_wire_clock_time_passthrough_short_string() {
-        assert_eq!(canonical_wire_clock_time("abc"), "abc");
-    }
-
-    #[test]
-    fn canonical_wire_clock_time_passthrough_noncanonical_separator() {
-        assert_eq!(
-            canonical_wire_clock_time("2026-07-25 03:43:12Z"),
-            "2026-07-25 03:43:12Z"
-        );
-    }
-
-    #[test]
-    fn canonical_wire_clock_time_passthrough_unicode_without_panic() {
-        assert_eq!(
-            canonical_wire_clock_time("２０２６-07-25T03:43:12Z"),
-            "２０２６-07-25T03:43:12Z"
         );
     }
 
@@ -6469,18 +6437,96 @@ mod tests {
         assert_eq!(roster_presence_count(&members), 2);
     }
 
+    /// The two halves of a row's time, and the reason they differ.
+    ///
+    /// `datetime`, `aria-label` and `title` carry the daemon's wire value
+    /// VERBATIM — an unambiguous instant, which is what a machine and a
+    /// screen reader want, and what keeps the row quotable across zones. The
+    /// visible text is the member's own wall clock for that same instant.
+    /// Localizing the attributes too would throw away the only unambiguous
+    /// value on the row; localizing NEITHER is what this slice fixed.
     #[test]
-    fn room_timestamp_markup_preserves_full_wire_datetime_and_visible_clock() {
-        let ts = "2026-07-25T03:43:12.987+07:00";
-        let clock = canonical_wire_clock_time(ts);
+    fn room_timestamp_markup_preserves_full_wire_datetime_and_localizes_only_the_visible_clock() {
+        let ts = "2026-07-25T03:43:12.987Z";
+        // What the view's `local_clock_time` computes once the browser
+        // supplies the offset; the wrapper needs a DOM, the arithmetic does
+        // not. -240 is America/New_York in summer.
+        let clock = room_messages::local_clock_time(ts, -240).expect("canonical wire value");
         let markup = format!(
             "<time class=\"rooms-workspace__msg-time\" datetime=\"{ts}\" aria-label=\"{ts}\" title=\"{ts}\">{clock}</time>"
         );
         assert!(markup.contains("<time"));
-        assert!(markup.contains("datetime=\"2026-07-25T03:43:12.987+07:00\""));
-        assert!(markup.contains("aria-label=\"2026-07-25T03:43:12.987+07:00\""));
-        assert!(markup.contains("title=\"2026-07-25T03:43:12.987+07:00\""));
-        assert!(markup.ends_with(">03:43</time>"));
+        assert!(markup.contains("datetime=\"2026-07-25T03:43:12.987Z\""));
+        assert!(markup.contains("aria-label=\"2026-07-25T03:43:12.987Z\""));
+        assert!(markup.contains("title=\"2026-07-25T03:43:12.987Z\""));
+        // 03:43Z is the previous evening in New York. The attributes still
+        // say 03:43Z; the member reads 23:43.
+        assert!(markup.ends_with(">23:43</time>"));
+    }
+
+    /// Which formatter a row's visible clock takes is a call inside the view,
+    /// so no unit test can reach it: `room_messages::local_clock_time` stays
+    /// pure and correct while a row prints bytes 11..16 of the wire string.
+    /// That WAS the defect — every row rendered Greenwich's hour under the
+    /// member's name — and re-introducing it is an edit that compiles and
+    /// passes every other test in this file. Read the source and assert on
+    /// it, with the needles concatenated at runtime so this test's own
+    /// literals cannot stand in for the code it scans, and over the
+    /// production half of the file only.
+    #[test]
+    fn every_transcript_row_clock_reads_the_member_s_local_formatter() {
+        // The production half only: this module's fixtures quote row markup,
+        // and a whole-file scan would find its own literals.
+        let view = include_str!("rooms_workspace.rs")
+            .split_once("#[cfg(test)]")
+            .expect("this module carries its unit tests at the bottom")
+            .0;
+        let call = ["{local_clock", "_time(&full_ts)}"].concat();
+
+        // Three rows render a clock: the main transcript row, the thread
+        // panel's reply, and the thread panel's root. All three, or one of
+        // them is quietly still on the wire's hour.
+        assert_eq!(
+            view.matches(call.as_str()).count(),
+            3,
+            "every `<time>` in the transcript must render `{call}`",
+        );
+
+        // The conversation-gap header is a clock too, and takes the same one.
+        assert!(
+            view.contains(&["then(|| local_clock", "_time(&full_ts))"].concat()),
+            "the conversation-gap header is a clock and takes the local one",
+        );
+
+        // The slicing formatter this replaced is gone rather than merely
+        // unused, and nothing renders the raw wire value as visible text.
+        assert!(
+            !view.contains(&["canonical_wire", "_clock_time"].concat()),
+            "the UTC-slicing formatter must not come back — it renders \
+             Greenwich's hour under the member's name",
+        );
+        assert!(
+            !view.contains("{full_ts}") && !view.contains("{full_ts.clone()}"),
+            "the wire value belongs on datetime/title/aria-label, never as \
+             the visible clock",
+        );
+
+        // "Today"/"Yesterday" is a day comparison, so its clock is local too.
+        // `to_iso_string` is UTC, and reading it made "Today" mean tomorrow
+        // every evening west of Greenwich.
+        let at = view
+            .find(&["fn today_day", "_key() -> String {"].concat())
+            .expect("today_day_key is a production fn");
+        let body = &view[at..][..view[at..].find("\n}").expect("fn closes")];
+        assert!(
+            !body.contains(&["to_iso", "_string"].concat()),
+            "today_day_key must read the LOCAL date getters, not the UTC ISO \
+             string",
+        );
+        assert!(
+            body.contains("get_full_year") && body.contains("get_date"),
+            "today_day_key must build its key from the local getters",
+        );
     }
 
     // ── Mention autosuggest helpers ──
@@ -7009,19 +7055,6 @@ mod tests {
     }
 
     // ── Behavioral: composer draft preservation (production helper) ──
-
-    #[test]
-    fn canonical_wire_clock_time_strips_redundant_date_for_rfc3339() {
-        assert_eq!(canonical_wire_clock_time("2026-06-05T12:34:56Z"), "12:34");
-        // Non-canonical inputs fall back to the full string — never lie.
-        assert_eq!(canonical_wire_clock_time(""), "");
-        assert_eq!(canonical_wire_clock_time("12:34"), "12:34");
-        assert_eq!(canonical_wire_clock_time("2026-06-05T12"), "2026-06-05T12");
-        assert_eq!(
-            canonical_wire_clock_time("2026-06-05 12:34"),
-            "2026-06-05 12:34"
-        );
-    }
 
     #[test]
     fn avatar_identity_is_deterministic_and_bounded() {

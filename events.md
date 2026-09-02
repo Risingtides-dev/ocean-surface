@@ -5802,3 +5802,54 @@ reds only the guard with the wasm32 clippy lane still green. Tree restored after
 each. Gate green: all seven frozen commands, host suite 1252 unit tests plus 61
 guards across 14 binaries.
 _________________________________________________________________________________ 20:39 loop/surface-load-older-affordance
+
+time:      [22:35] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-transcript-local-time]
+type:      fix
+area:      frontend
+
+Room transcript times are the member's now, not Greenwich's. The slice arrived with
+unverified anchors, so the wire contract was established from both trees before any
+edit. ocean-os mints `created_at` through `fmt_ts`, `to_rfc3339_opts(Nanos, true)` —
+always a `Z`, always UTC. The surface rendered bytes 11..16 of that string as the
+row's visible clock (`canonical_wire_clock_time`, at 1122, the proposal's "1061-
+1088" having drifted) and compared `ts[0..10]` UTC date keys for day separators,
+with `today_day_key` at 560 (the proposal's "556-572") reading `Date::to_iso_string`,
+which is also UTC. So for an operator in New York every timestamp on every row read
+four hours late, the day separator landed at 20:00 in the middle of an evening's
+conversation, the local midnight it should have marked passed unmarked, and between
+local and UTC midnight "Today" meant tomorrow. Nothing in the transcript was right
+except in Greenwich.
+
+`room_messages` was extended rather than duplicated, as the slice asked. It already
+owned `parse_iso_epoch` and `days_from_civil`; it now owns their inverse
+`civil_from_days`, plus `local_clock_time` and `local_day_key`, both taking the
+offset as minutes to ADD to UTC so they stay pure. `day_key` reads local, which
+carries `day_separator_label` and `is_grouped`'s midnight rule with it — both gained
+the offset argument, so the compiler holds every call site and no guard needs to.
+
+The offset is read per timestamp, not once. A transcript that spans a DST change has
+rows on both sides of it, and one offset for the whole list renders half of them an
+hour out; `viewer_utc_offset_minutes` asks the browser about the row's own instant.
+`today_day_key` now builds its key from `get_full_year`/`get_month`/`get_date`, the
+local getters. The full wire value stays verbatim on `datetime`, `title` and
+`aria-label` — the instant is what a machine and a screen reader want, and it is the
+only unambiguous value on the row. Only the visible text moved.
+
+`canonical_wire_clock_time` is deleted, not left unused, and its seven tests with it;
+their coverage — fractional seconds, garbage, a short string, a non-canonical
+separator, multi-byte input that must not panic — is carried by the new pure tests,
+which also pin a half-hour zone, both midnights, a month end, a year end and a leap
+day, and assert `civil_from_days` round-trips against the `days_from_civil` the day
+keys were already built on. Three mutations measured against the finished tree: a row
+reverted to the UTC slicer reds only the new source guard while 1250 tests stay green
+(which is why the guard names the call site and counts all three `<time>` rows);
+`today_day_key` reverted to `to_iso_string` reds the same guard on its own clause;
+and `day_key` ignoring the offset reds exactly the two pure tests written for the
+boundary. Tree restored after each. This slice touches the transcript row closure
+that #197 also touches — its hunks there add an orphan-reply note below the ledger
+mark, mine sit above it at the density decisions and on the `<time>` line, so a
+rebase should be mechanical but is expected. Gate green: all seven frozen commands,
+1312 tests across 14 binaries, 0 failed.
+_________________________________________________________________________________ 22:35 cloud/surface-transcript-local-time
