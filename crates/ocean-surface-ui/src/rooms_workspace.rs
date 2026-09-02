@@ -1518,6 +1518,13 @@ pub(crate) enum RoomOpenSource {
 pub(crate) struct PendingRoomOpen {
     pub key: String,
     pub source: RoomOpenSource,
+    /// For a deep link, the `Rooms::list_settled` value observed when the
+    /// request was queued: the entry resolves only once a room-list fetch has
+    /// settled AFTER that, so the answer never comes out of a stale list.
+    /// `None` for a persisted restore, which keeps its existing behaviour of
+    /// answering as soon as any list has loaded — it reports nothing, so a
+    /// stale answer costs nothing to say.
+    pub awaiting_settle: Option<u64>,
 }
 
 impl PendingRoomOpen {
@@ -1525,14 +1532,40 @@ impl PendingRoomOpen {
         Self {
             key,
             source: RoomOpenSource::Persisted,
+            awaiting_settle: None,
         }
     }
 
-    fn deep_link(key: String) -> Self {
+    fn deep_link(key: String, settled_at: u64) -> Self {
         Self {
             key,
             source: RoomOpenSource::DeepLink,
+            awaiting_settle: Some(settled_at),
         }
+    }
+}
+
+/// May a pending open be resolved against the room list yet?
+///
+/// The two sources wait on different things, and the difference is the whole
+/// point. A persisted restore waits on `rooms_loaded` — "a list has loaded" —
+/// because it answers silently and a stale answer is free. A deep link waits
+/// for `list_settled` to move past the value it recorded, because it answers
+/// OUT LOUD: `rooms_loaded` is set by any settled fetch, success or failure,
+/// is never cleared, and lives on an App-scope handle that outlives the
+/// workspace, so it is equally true of a list fetched ten minutes ago and of
+/// an empty list left by a failed fetch. Answering "no room named X" out of
+/// either is a lie about a room that exists.
+pub(crate) fn room_open_is_ready(
+    pending: &PendingRoomOpen,
+    rooms_loaded: bool,
+    list_settled: u64,
+) -> bool {
+    match pending.awaiting_settle {
+        None => rooms_loaded,
+        // Wrapping-safe: the counter wraps at u64::MAX and `!=` is the only
+        // comparison that survives it.
+        Some(seen) => list_settled != seen,
     }
 }
 
@@ -1584,8 +1617,22 @@ pub(crate) fn room_open_outcome(
 /// The `rooms ` prefix is load-bearing: it is what routes the line to the
 /// room-list status lane rather than the open-transcript one, and in this case
 /// there is no open transcript to put it under.
+///
+/// Only say this when a room-list fetch has actually settled successfully —
+/// see [`room_open_is_ready`]. Said out of a stale or failed-empty list, it
+/// names a room the person is looking at in another client as missing.
 pub(crate) fn unknown_deep_link_room_status(key: &str) -> String {
     format!("rooms — no room named {key} here")
+}
+
+/// Left-rail status for a deep link whose room list could not be fetched.
+///
+/// Distinct from the unknown-key line on purpose: "this room does not exist"
+/// and "I could not find out whether it exists" are different facts, and
+/// reporting the first when the second is true sends someone hunting for a
+/// room they have.
+pub(crate) fn unreachable_deep_link_room_status(key: &str) -> String {
+    format!("rooms — could not load the room list to open {key}")
 }
 
 // ── Component ─────────────────────────────────────────────────────────
@@ -2150,14 +2197,18 @@ pub fn RoomsWorkspace(
     // room list, so a link arriving during a cold launch — while the list is
     // still in flight, which is the normal case when the OS starts the app to
     // handle the URL — is held rather than lost. `request_deep_link_room`
-    // sets the signal; this is the only consumer, and it clears it in the
-    // same pass.
+    // sets the signal (and kicks a silent refresh); this is the only consumer,
+    // and it clears it in the same pass. The `list_settled` value recorded
+    // here is what the entry waits to move past, so its answer comes from a
+    // list fetched after the link arrived rather than from whatever the handle
+    // was carrying — see `room_open_is_ready`.
     Effect::new(move |_| {
         let Some(key) = rooms.deep_link_room.get() else {
             return;
         };
         rooms.deep_link_room.set(None);
-        pending_room_restore.set(Some(PendingRoomOpen::deep_link(key)));
+        let settled_at = rooms.list_settled.get_untracked();
+        pending_room_restore.set(Some(PendingRoomOpen::deep_link(key, settled_at)));
     });
 
     // Resolve the queued open once the fetched list confirms what exists.
@@ -2167,10 +2218,19 @@ pub fn RoomsWorkspace(
         let Some(pending) = pending_room_restore.get() else {
             return;
         };
-        if !rooms.rooms_loaded.get() {
+        if !room_open_is_ready(&pending, rooms.rooms_loaded.get(), rooms.list_settled.get()) {
             return;
         }
         pending_room_restore.set(None);
+        // A settle that could not answer must not be read as an answer: a
+        // deep link waited for THIS fetch, and if it failed the list it would
+        // be checked against is the stale or empty one the failure left.
+        if pending.awaiting_settle.is_some() && rooms.rooms_error.get_untracked().is_some() {
+            rooms
+                .status
+                .set(unreachable_deep_link_room_status(&pending.key));
+            return;
+        }
         let open_key = rooms.open_key.get_untracked();
         let key_is_known = rooms
             .list
@@ -7761,7 +7821,7 @@ mod tests {
     }
 
     fn deep_link(key: &str) -> PendingRoomOpen {
-        PendingRoomOpen::deep_link(key.to_string())
+        PendingRoomOpen::deep_link(key.to_string(), 7)
     }
 
     /// The persisted restore's behaviour is unchanged by the deep link
@@ -7819,6 +7879,54 @@ mod tests {
         assert_eq!(
             room_open_outcome(&deep_link("team-blue"), Some("team-blue"), true),
             RoomOpenOutcome::Drop,
+        );
+    }
+
+    /// A persisted restore answers as soon as any list has loaded, because it
+    /// answers silently. A deep link waits for a list fetched AFTER it was
+    /// queued, because it answers out loud.
+    #[test]
+    fn only_a_deep_link_waits_for_a_list_fetched_after_it_was_queued() {
+        // Persisted: `rooms_loaded` is the whole gate, settle count ignored.
+        assert!(!room_open_is_ready(&persisted("team-blue"), false, 0));
+        assert!(room_open_is_ready(&persisted("team-blue"), true, 0));
+        assert!(room_open_is_ready(&persisted("team-blue"), true, 99));
+
+        // Deep link queued at settle 7: `rooms_loaded` alone is not enough.
+        // This is the regression — a remounted workspace and a failed first
+        // load both leave `rooms_loaded` true over a list that cannot answer.
+        let link = deep_link("team-blue");
+        assert!(!room_open_is_ready(&link, true, 7));
+        assert!(room_open_is_ready(&link, true, 8));
+        // And it is released even if `rooms_loaded` were somehow still false:
+        // the counter only moves when a fetch settles, which sets that flag.
+        assert!(room_open_is_ready(&link, false, 8));
+    }
+
+    /// The counter wraps at `u64::MAX`; the readiness test must survive that
+    /// rather than becoming permanently true or permanently false.
+    #[test]
+    fn readiness_survives_the_settle_counter_wrapping() {
+        let link = PendingRoomOpen::deep_link("team-blue".into(), u64::MAX);
+        assert!(!room_open_is_ready(&link, true, u64::MAX));
+        assert!(room_open_is_ready(&link, true, u64::MAX.wrapping_add(1)));
+    }
+
+    /// "This room does not exist" and "I could not find out" are different
+    /// facts, and the second must never be reported as the first.
+    #[test]
+    fn an_unreachable_room_list_says_so_instead_of_denying_the_room() {
+        let unreachable = unreachable_deep_link_room_status("team-blue");
+        let unknown = unknown_deep_link_room_status("team-blue");
+        assert_ne!(unreachable, unknown);
+        assert!(
+            unreachable.starts_with("rooms "),
+            "{unreachable} must reach the room-list lane too",
+        );
+        assert!(unreachable.contains("team-blue"));
+        assert!(
+            !unreachable.contains("no room named"),
+            "{unreachable} must not deny a room it could not look up",
         );
     }
 
