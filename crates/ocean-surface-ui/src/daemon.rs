@@ -2018,6 +2018,14 @@ pub struct Daemon {
     /// cannot steal focus from a session started while its POST was in flight
     /// (TASK-43, finding 1). See [`admit_create_intent`].
     session_intent_generation: RwSignal<u64>,
+    /// Which machine the catalogues on screen belong to.
+    ///
+    /// Bumped by [`Self::reattach_to_selected_device`]. Every fetch that
+    /// REPLACES a catalogue wholesale captures it before its await and drops a
+    /// response that arrives after a switch — otherwise the old machine's
+    /// models or projects win the last write and the picker offers choices the
+    /// attached daemon does not own, which a later turn then submits.
+    device_epoch: RwSignal<u64>,
     /// First-open readiness for the active agent and permission streams. Voice
     /// Planner awaits both before posting its first normal turn, then reconciles
     /// the durable permission snapshot so no gate can be missed in the handoff.
@@ -2560,6 +2568,7 @@ impl Daemon {
             tldraw_sync_uri: RwSignal::new(String::new()),
             sse_generation: RwSignal::new(0),
             session_intent_generation: RwSignal::new(0),
+            device_epoch: RwSignal::new(0),
             agent_stream_ready: RwSignal::new(None),
             permission_stream_ready: RwSignal::new(None),
             permission_revision: RwSignal::new(0),
@@ -2645,6 +2654,7 @@ impl Daemon {
             tldraw_sync_uri: RwSignal::new(String::new()),
             sse_generation: RwSignal::new(0),
             session_intent_generation: RwSignal::new(0),
+            device_epoch: RwSignal::new(0),
             agent_stream_ready: RwSignal::new(None),
             permission_stream_ready: RwSignal::new(None),
             permission_revision: RwSignal::new(0),
@@ -2733,7 +2743,10 @@ impl Daemon {
                     load_persisted_session().as_deref(),
                     daemon.session_id.get_untracked().as_deref(),
                 ) {
-                    if restore_session_or_clear(&daemon, id).await {
+                    let intent = daemon.session_intent_generation.get_untracked();
+                    if restore_session_or_clear(&daemon, id, intent).await
+                        == RestoreOutcome::Restored
+                    {
                         daemon.fetch_models();
                         daemon.fetch_projects();
                         return;
@@ -2826,7 +2839,8 @@ impl Daemon {
                 load_persisted_session().as_deref(),
                 daemon.session_id.get_untracked().as_deref(),
             ) {
-                if restore_session_or_clear(&daemon, id).await {
+                let intent = daemon.session_intent_generation.get_untracked();
+                if restore_session_or_clear(&daemon, id, intent).await == RestoreOutcome::Restored {
                     daemon.fetch_models();
                     daemon.fetch_projects();
                     return;
@@ -4181,6 +4195,10 @@ impl Daemon {
         let url = self.url.get_untracked();
         let models = self.models;
         let model = self.model;
+        // The catalogue belongs to one machine; a reply that lands after a
+        // switch describes the machine we left.
+        let epoch = self.device_epoch;
+        let asked_at = epoch.get_untracked();
         spawn_local(async move {
             #[derive(Deserialize)]
             struct Current {
@@ -4198,6 +4216,10 @@ impl Daemon {
             match Request::get(&get_url).send().await {
                 Ok(resp) => match resp.json::<ModelsResponse>().await {
                     Ok(r) => {
+                        if epoch.get_untracked() != asked_at {
+                            log::debug!("model catalogue from a machine we left; dropped");
+                            return;
+                        }
                         if let Some(cur) = r.current {
                             if !cur.model.is_empty() {
                                 model.set(Some(cur.model));
@@ -4219,6 +4241,11 @@ impl Daemon {
         let url = self.url.get_untracked();
         let projects = self.projects;
         let current = self.project;
+        // Same rule as the model catalogue, and it matters more here: this
+        // fetch also CLEARS a selection its list does not contain, so a late
+        // reply from the old machine would drop a project the new one owns.
+        let epoch = self.device_epoch;
+        let asked_at = epoch.get_untracked();
         spawn_local(async move {
             #[derive(Deserialize)]
             struct ProjectsResponse {
@@ -4229,6 +4256,10 @@ impl Daemon {
             match Request::get(&get_url).send().await {
                 Ok(resp) => match resp.json::<ProjectsResponse>().await {
                     Ok(r) => {
+                        if epoch.get_untracked() != asked_at {
+                            log::debug!("project catalogue from a machine we left; dropped");
+                            return;
+                        }
                         // Drop a persisted selection that no longer exists.
                         if let Some(sel) = current.get_untracked() {
                             if !r.projects.iter().any(|p| p.id == sel) {
@@ -5185,16 +5216,49 @@ impl Daemon {
             // reset safe to share with `new_session`.
             let persisted = load_persisted_session();
             daemon.reset_session_local_state();
+            // Everything on screen now describes a machine we are leaving.
+            // Retiring the epoch here is what lets a catalogue fetch already
+            // in flight against it be dropped rather than land on top of the
+            // new machine's.
+            daemon.device_epoch.update(|e| *e = e.wrapping_add(1));
+            daemon.models.set(Vec::new());
+            daemon.projects.set(Vec::new());
             daemon.status.set("switching device".into());
-            let restored = match should_restore_session(
+            // The intent this restore belongs to. A session-detail fetch is a
+            // round trip, and the composer is live throughout it: whoever
+            // starts a session in that window owns the focus, and a restore
+            // that lands afterwards must not yank it back or clear the id that
+            // session just persisted.
+            let intent = daemon.session_intent_generation.get_untracked();
+            let outcome = match should_restore_session(
                 persisted.as_deref(),
                 daemon.session_id.get_untracked().as_deref(),
             ) {
-                Some(id) => restore_session_or_clear(&daemon, id).await,
-                None => false,
+                Some(id) => restore_session_or_clear(&daemon, id, intent).await,
+                None => RestoreOutcome::Cleared,
             };
-            if !restored {
-                daemon.connect();
+            match outcome {
+                // The machine has that session; its own workspace root and
+                // model arrive with the projection commit.
+                RestoreOutcome::Restored => {}
+                RestoreOutcome::Cleared => {
+                    // No session to inherit a workspace from, and the cwd and
+                    // project still on the signals belong to the machine we
+                    // left. A path from another machine either fails session
+                    // creation or — worse — resolves to an unrelated directory
+                    // that happens to share the name, and the next prompt would
+                    // run the agent there. Fall back to the same projectless
+                    // Chat root `begin_chat_session` uses; the new machine's
+                    // own projects arrive with its catalogue.
+                    daemon.set_project(None);
+                    daemon.cwd.set(CHAT_WORKSPACE_ROOT.to_string());
+                    daemon.connect();
+                }
+                // Somebody started another session while the restore was in
+                // flight. That intent owns the focus and has opened its own
+                // stream; touching either here is the yank this guard exists
+                // to prevent.
+                RestoreOutcome::Superseded => {}
             }
             // The catalogues are per-machine too: a model, project or session
             // list from the old daemon is a list of things that are not here.
@@ -8079,7 +8143,21 @@ fn should_restore_session<'a>(persisted: Option<&'a str>, active: Option<&str>) 
 /// restore via [`Daemon::switch_session`]. On failure (non-200, decode error,
 /// missing session) the persisted key is cleared and this returns `false` so
 /// the caller falls through to the normal boot path with state untouched.
-async fn restore_session_or_clear(daemon: &Daemon, id: &str) -> bool {
+/// What became of a remembered session id on the machine we asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RestoreOutcome {
+    /// The machine had it and it is now the focused session.
+    Restored,
+    /// It is not there (or the reply was unreadable): forgotten, and the
+    /// caller opens a fresh stream.
+    Cleared,
+    /// A different session intent took over while this was in flight. The
+    /// answer is stale by definition — neither the focus nor the persisted id
+    /// is ours to touch any more.
+    Superseded,
+}
+
+async fn restore_session_or_clear(daemon: &Daemon, id: &str, intent: u64) -> RestoreOutcome {
     let url = daemon.url.get_untracked();
     let get_url = format!(
         "{}/v1/sessions/{}",
@@ -8093,12 +8171,21 @@ async fn restore_session_or_clear(daemon: &Daemon, id: &str) -> bool {
             // machine it just moved to. Absence is `Clear`, never an error
             // (`crate::devices::classify_session_restore`).
             Ok(r) => {
+                // The round trip is over; whoever owns the intent NOW owns the
+                // answer to what this browser should be looking at.
+                if !crate::devices::claim_is_current(
+                    intent,
+                    daemon.session_intent_generation.get_untracked(),
+                ) {
+                    log::info!("session restore superseded by a newer intent");
+                    return RestoreOutcome::Superseded;
+                }
                 if crate::devices::classify_session_restore(r.ok, r.session.is_some())
                     == crate::devices::SessionRestore::Restore
                 {
                     if let Some(detail) = r.session {
                         daemon.switch_session(detail.id, detail.title);
-                        return true;
+                        return RestoreOutcome::Restored;
                     }
                 }
             }
@@ -8110,8 +8197,14 @@ async fn restore_session_or_clear(daemon: &Daemon, id: &str) -> bool {
             log::error!("session restore fetch error: {err}");
         }
     }
+    // Same guard on the clearing arm, and it is the half that bites hardest:
+    // clearing here after a new session persisted its id would lose it.
+    if !crate::devices::claim_is_current(intent, daemon.session_intent_generation.get_untracked()) {
+        log::info!("session restore superseded before it could clear");
+        return RestoreOutcome::Superseded;
+    }
     clear_persisted_session();
-    false
+    RestoreOutcome::Cleared
 }
 
 /// Resolve the daemon URL at startup from compile-time env → page origin → loopback.

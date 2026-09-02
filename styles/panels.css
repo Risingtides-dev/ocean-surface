@@ -9,7 +9,7 @@
   z-index: 100;
   display: flex;
   justify-content: flex-end;
-  background: rgba(6, 6, 6, 0.72);
+  background: var(--overlay);
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
   opacity: 0;
@@ -1717,7 +1717,7 @@
   display: grid;
   place-items: center;
   padding: 24px;
-  background: rgba(6, 6, 6, 0.72);
+  background: var(--overlay);
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
 }

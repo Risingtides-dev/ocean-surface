@@ -1464,20 +1464,6 @@ pub fn App() -> impl IntoView {
     // URL belongs INSIDE bootstrap_then_connect, after url.set().
     daemon.bootstrap_then_connect();
 
-    // Which of this person's machines they are on. Same-origin, login-gated,
-    // and independent of the daemon URL, so it rides alongside boot rather
-    // than inside it. Offers the picker once when the profile has more than
-    // one machine and nobody has chosen yet; silent everywhere there is no
-    // proxy to ask (extension, Tauri), which leaves the header exactly as it
-    // was on those hosts.
-    let devices = crate::devices::DeviceState::new();
-    devices.load(true);
-    // A selection is per browser, so another tab can move this one. The proxy
-    // ends this tab's stream when that happens and it reconnects onto the new
-    // machine; this is what stops it from showing the OLD machine's transcript
-    // above the new machine's events.
-    devices.recheck_on_focus(daemon.clone());
-
     // Daemon supervision (Tauri shell only). The shell supervises the
     // ocean-daemon process and reports liveness via `daemon-status` events;
     // we mirror it into a signal so a quiet, conditional indicator can surface
@@ -1587,6 +1573,25 @@ pub fn App() -> impl IntoView {
     };
     let rooms = Rooms::new(&daemon);
 
+    // Which of this person's machines they are on. Same-origin, login-gated,
+    // and independent of the daemon URL, so it rides alongside boot rather
+    // than inside it. Offers the picker once when the profile has more than
+    // one machine and nobody has chosen yet; silent everywhere there is no
+    // proxy to ask (extension, Tauri), which leaves the header exactly as it
+    // was on those hosts. Declared after `rooms` because a device switch
+    // has to close the open room as well as re-attach the daemon.
+    let devices = crate::devices::DeviceState::new();
+    devices.load(true);
+    // A selection is per browser, so another tab can move this one. The proxy
+    // ends this tab's stream when that happens and it reconnects onto the new
+    // machine; this is what stops it from showing the OLD machine's transcript
+    // above the new machine's events.
+    let device_attach = crate::devices::Attachments {
+        daemon: daemon.clone(),
+        rooms,
+    };
+    devices.recheck_on_focus(device_attach.clone());
+
     // Context deck (north star): the WEB/EXTENSION reveal rail. At most ONE
     // panel revealed at a time, reveal-on-intent via ⌘K commands, never
     // permanent chrome. On Tauri the deck never mounts (the Show gate below
@@ -1692,7 +1697,6 @@ pub fn App() -> impl IntoView {
     // Pinned rail: StoredValue (Copy) so the root view! can hand the daemon
     // to <PinnedRail> without moving the plain clone out of the closure.
     let daemon_for_pinned = StoredValue::new(daemon.clone());
-    let daemon_for_devices = StoredValue::new(daemon.clone());
 
     // Persist the pane open/collapse state so a relaunch restores it. Runs
     // once at setup (writing the init value back — idempotent) and on every
@@ -2699,7 +2703,7 @@ pub fn App() -> impl IntoView {
                             // chip, and absent until the proxy names a machine
                             // — one more menu row is not worth it on a host
                             // that has no devices to choose between.
-                            <Show when=move || devices.known()>
+                            <Show when=move || devices.has_choice()>
                                 <button
                                     class="ocean-more__item"
                                     type="button"
@@ -3303,7 +3307,7 @@ pub fn App() -> impl IntoView {
             // Device picker. Like the palette, a self-contained overlay that
             // consumes its own Escape rather than joining the reveal rail's
             // close-exactly-one chain.
-            <crate::devices::DevicePicker state=devices daemon=daemon_for_devices.get_value() />
+            <crate::devices::DevicePicker state=devices attach=device_attach.clone() />
 
             // Council/quorum observability deck (OCEAN-96). Native workflow
             // stage now lives inside the surface instead of an iframe.

@@ -15,6 +15,7 @@
 //! | `app.rs` `<DeviceChip>` mount | RED — compiler-held |
 //! | `app.rs` `<DevicePicker>` mount | RED — compiler-held |
 //! | `app.rs` `devices.recheck_on_focus(..)` | RED — compiler-held |
+//! | `devices.rs` `reattach`'s `rooms.close_room()` | GREEN — pinned |
 //!
 //! The two held ones announce themselves loudly, which is why they are
 //! recorded rather than pinned: deleting the chip's mount leaves
@@ -32,8 +33,8 @@
 //! by the picker. Nothing goes unreferenced. What goes is a person's ability
 //! to see, or reach, the machines their login owns — the whole slice, silently.
 //!
-//! Both needles name the CALL SITE and run over `view_source`, per the lane's
-//! two rules, and both were verified by a rename as well as a deletion.
+//! Every needle names the CALL SITE and runs over `view_source`, per the
+//! lane's two rules, and each was verified by a rename as well as a deletion.
 
 mod common;
 
@@ -54,6 +55,25 @@ fn boot_asks_the_proxy_which_machines_this_login_has() {
         "app boot is the only thing that populates the device list; without it \
          the picker is empty, the header chip never appears, and a person with \
          two machines is silently pinned to one",
+    );
+}
+
+/// A device switch closes the open room before re-attaching.
+///
+/// Nothing holds this. `Rooms::close_room` is still called by the rooms UI's
+/// own close control, and `attach.rooms` is still used on the very next line
+/// by `fetch_rooms`, so deleting it leaves nothing unreferenced — and leaves
+/// the room that was open on the machine you just left rendering its
+/// transcript, roster and drafts while its tail reconnects to a room of the
+/// same key on the machine you moved to. That is the blend the rooms contract
+/// forbids, arriving through the one door the contract does not mention.
+#[test]
+fn a_device_switch_closes_the_room_open_on_the_machine_being_left() {
+    let view = without_whitespace(&view_source("devices.rs"));
+    assert!(
+        view.contains("fnreattach(attach:&Attachments){attach.rooms.close_room();"),
+        "a switch must close the open room BEFORE re-attaching; without it the \
+         room's transcript and access outlive the machine that held them",
     );
 }
 
