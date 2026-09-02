@@ -4,12 +4,18 @@ This block is not an entry, and it is the one non-append edit this file accepts.
 `scripts/check-ledger.mjs` finds entries by line anchors — `/^time:/` opens one,
 `/^_{5,}(?:[ \t].*)?$/` closes one — so every sample line below is indented two
 spaces and matches neither. The first real entry begins under it, untouched.
+**Strip that two-space indent when you copy the template**, or your header opens no
+entry and your rule closes none. The underscore run in it is the full 81 this ledger
+writes, so a copy is correct once it is flush left.
 
 That indentation is load-bearing, and the exit code alone will not tell you so.
 Measured on this ledger: un-indent the whole template and the checker still exits
-0 while the entry count goes from 287 to 288 — the sample rule quietly closes the
-phantom entry the sample header opened. Un-indent only the header and it exits 1,
-naming line 14. So after any edit to this block, read the COUNT, not just the code.
+0 while the entry count goes up by ONE — the sample rule quietly closes the phantom
+entry the sample header opened. Un-indent only the header and it exits 1, naming the
+template's `time:` line. A delta rather than two absolute numbers on purpose: the
+count moves with every append, so only the change this block causes is stable enough
+to write down. So after any edit to this block, read the COUNT, not just the code —
+against the same tree with the block removed, not against a number quoted here.
 
 An entry is appended at EOF and never edited afterwards. `.github/workflows/ci.yml`
 (job `ledger`) asks for it in these words: "time [HH:MM] [MM-DD-YY] (24-hour),
@@ -26,7 +32,7 @@ paragraph on what changed and why."
 
   One plain-prose paragraph on what changed and why. Prose, not bullets.
 
-  _______________________________________________________ HH:MM branch-name
+  _________________________________________________________________________________ HH:MM branch-name
 ```
 
 **The closing rule is the load-bearing line.** An entry is CLOSED when a rule
@@ -6777,11 +6783,17 @@ is indented two spaces. That indent was measured, not assumed, and the measureme
 found something worth writing down. Un-indent the whole template and the checker
 still exits 0 while the entry count rises from 287 to 288, because the sample rule
 closes the phantom entry the sample header opened — a silent miscount the exit code
-cannot see. Un-indent only the header and it exits 1 naming line 14. As written the
-verdict is byte-for-byte the baseline's: 287 entries, every one closed, exit 0,
-identical to origin/main before the block, and `git diff` is 82 lines of pure
-insertion with nothing removed, so the first entry is untouched. The block says all
-of this and tells the next editor to read the count and not just the code.
+cannot see. Un-indent only the header and it exits 1 naming the template's `time:`
+line. Those measurements were taken on the BLOCK-ONLY tree, before this entry was
+appended, where the ledger held 287 entries and the un-indent took it to 288; the
+committed tree holds 288 and the same mutation would take it to 289. The number that
+survives an append is the DELTA — the block adds no entry, a mis-indented one adds
+exactly one — so the block states it that way and this entry does too, rather than
+leaving a pair of absolute counts that stop being reproducible the moment anyone
+appends. On the committed tree: 288 entries, every one closed, exit 0. Against
+origin/main with this branch's changes removed the verdict is identical but for the
+one entry this branch adds, and `git diff` for the block commit is 82 lines of pure
+insertion with nothing removed, so the first entry is untouched.
 Two corrections to this entry as first written, both mine. It said the #194 that
 brings the r2 stamps and the order sibling "is not in this repo": wrong, and wrong in
 the way that matters. #194 is OPEN, on cloud/surface-check-ledger. It is unmerged, so
