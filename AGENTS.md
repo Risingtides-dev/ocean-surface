@@ -428,8 +428,8 @@ identity-bearing; requiring the new form would red every historical entry and
 every entry a slice in flight is writing right now. What it asserts is that each
 entry is CLOSED before the next one starts, which is what a fold destroys. **Run
 `node scripts/check-ledger.mjs events.md` on any change to `events.md`, and again
-on either side of a rebase carrying one; the two verdicts must match.** It is the
-only check that reads this file, it runs in CI on PRs and on pushes to main, and
+on either side of a rebase carrying one; the two verdicts must match.** It runs in
+CI on PRs and on pushes to main, and
 its exit codes are 0 clean / 1 an entry is open / 2 the check could not run at
 all. `--fix` closes what it finds by insertion only and writes the identity form,
 so a repair does not hand the next merge the same shared line — never in CI,
@@ -438,6 +438,17 @@ below applies to it. `scripts/events-merge-driver.test.mjs` proves a three-way
 parallel append keeps all four rules and fuses nothing, but it reproduces the
 merge in a scratch repo and never reads THIS file, so CI's `guards` job running
 it proves the driver, not the ledger.
+
+**Run `node scripts/check-ledger-order.mjs events.md` beside it.** The checker
+never reads a `time:` header past the word, so five entries sat at the top of
+this ledger newest-first for months and it called the file clean. The order
+check reads the clock and reds any entry more than a day out of merge order —
+a prepend, a backdate — while descents of hours, which is how parallel slices
+land, pass. Same exit codes, no `--fix`: moving an entry is a decision, made
+once by hand and recorded in the ledger. `scripts/check-ledger.mjs` itself is
+one of three copies (bedrock, os, surface) and carries a code stamp; its test
+recomputes the digest, so an edit that forks it from bedrock's copy is red
+until the fork is written down.
 
 Three things the identity separator does NOT buy:
 

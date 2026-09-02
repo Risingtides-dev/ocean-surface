@@ -17,11 +17,12 @@
 // for as long as it is history.
 //
 // Ported from ocean-bedrock's scripts/check-ledger.mjs (its PR #62 for the
-// checker, #98 for the identity separator), by way of the identical ocean-os
-// copy. Every executable line is byte-identical to bedrock's; only comments and
-// the usage text differ, and the usage text only because it can name no npm
-// script — this repo has no node manifest to hold one. Keeping the code itself
-// identical is deliberate: a fix to any copy ports to the others as a patch.
+// checker, #98 for the identity separator, #103 for the realpath entry guard at
+// the bottom and #124 for the stamp below the imports), the first two by way of
+// the ocean-os copy. Only comments and the usage text differ from bedrock's,
+// and the usage text only because it can name no npm script — this repo has no
+// node manifest to hold one. That used to be a sentence here; it is now a
+// digest that scripts/check-ledger.test.mjs recomputes on every run.
 //
 // WHAT THIS CHECK OWNS, AND THE TWO NEIGHBOURING THINGS IT DOES NOT:
 //   It owns FUSION — an entry whose rule is gone and whose prose the next
@@ -38,38 +39,104 @@
 //   boundary survives either way, so a lost blank stays cosmetic and
 //   hand-repaired, never red.
 //   It does NOT own separator uniqueness. Requiring the identity form would red
-//   every one of the 276 entries written before it and every entry a slice in
+//   every one of the 278 entries written before it and every entry a slice in
 //   flight is writing right now. The bare form stays valid forever; `--fix` is
 //   what writes the new one.
 //
 // TWO THINGS THIS CHECK DELIBERATELY DOES NOT DO:
 //   Compare totals. Rule lines against entry count is a different question and
-//   this ledger is the cleanest demonstration available that it lies: 288 rules
-//   against 277 entries reads as eleven rules to SPARE, while the true open
+//   this ledger is the cleanest demonstration available that it lies: 298 rules
+//   against 287 entries reads as eleven rules to SPARE, while the true open
 //   count is zero — 11 entries carry a second rule inside their prose, so the
-//   surplus IS the miscount. The same subtraction read eleven short here while
-//   22 entries were open. Only "is THIS entry closed before the next one
-//   starts" holds everywhere.
+//   surplus IS the miscount. The same subtraction once read eleven short here
+//   while 22 entries were open. Only "is THIS entry closed before the next one
+//   starts" holds everywhere. (Counts as of the port of #124; they move with
+//   every append and are not asserted anywhere.)
 //   Match a fixed rule width. Every rule this ledger has written is 81
 //   underscores and scripts/events-merge-driver.test.mjs builds its fixtures at
 //   the same width, but the sibling repos use widths of their own; all of them
 //   are the same rule, so the shape is what matters and never the length.
+//
+// AND ONE THING IT DOES NOT DO THAT A SIBLING SCRIPT NOW DOES: read the clock.
+// Five entries sat at the TOP of this ledger newest-first for months and this
+// checker called the file clean, because it never reads a `time:` header past
+// the word. scripts/check-ledger-order.mjs owns that question, in its own file
+// on purpose: an order rule that tolerates the union merge landing entries in
+// MERGE order rather than clock order is this repo's own business, and the
+// three copies of THIS file are meant to digest the same.
 import path from 'node:path';
-import { readFile, writeFile } from 'node:fs/promises';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createHash } from 'node:crypto';
+import { readFile, realpath, writeFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const scriptPath = fileURLToPath(import.meta.url);
+const repoRoot = path.resolve(path.dirname(scriptPath), '..');
+
+// ONE OF THREE COPIES. ocean-bedrock's scripts/check-ledger.mjs is the source
+// and ocean-os carries the third. bedrock #103 made the entry guard at the
+// bottom of this file compare REALPATHS, because comparing the two paths as
+// typed silences the whole program under any symlinked invocation path and a
+// ledger of open entries then exits 0 — and this copy sat on the pre-#103 guard
+// through three bedrock waves while its header claimed byte-identity, which is
+// exactly the rot bedrock #124 replaced with this stamp. CODE_REVISION names
+// the code SHAPE and not the copy — copies in sync read the same revision —
+// and CODE_DIGEST is a digest over this file's logic that
+// scripts/check-ledger.test.mjs asserts against the bytes. Edit anything the
+// digest covers and the suite reds until both are bumped on purpose: a header
+// claim rots in silence, a digest is recomputed every run. Checking a sibling
+// is one grep for CODE_DIGEST, or `--digest <copy>` against its file. r2 reads
+// 56adab136337 in bedrock and here; r1, the shape ocean-os still carried on
+// 09-01-26, answers de98a632f0df, and a copy that prints that is a copy still
+// owed #103's fix.
+//
+// WHAT THE DIGEST COVERS, and why "every non-comment line" is the wrong rule.
+// The usage text is excluded by name: copies that agree on every executable
+// line already differ inside it — this one names no npm script — and a digest
+// that read it would report a fork between copies that have none. Comments are
+// excluded because each repo explains this file in its own terms.
+//   The strip is textual — a line is a comment when its first non-space is a
+// comment marker — which is exact for this file today, with no trailing
+// comments and no string holding a marker, and would OVER-report if either
+// arrived. That direction is deliberate: a fork reported where there is none
+// costs a two-minute diff, and the quiet that let #103 sit unported here is
+// the failure this is here to stop.
+export const CODE_REVISION = 'r2';
+export const CODE_DIGEST = '56adab136337';
+
+const STAMP_LINE = /^export const CODE_(?:REVISION|DIGEST) = /;
+const USAGE_OPEN = /^const HELP = `/;
+const USAGE_CLOSE = /`;$/;
+
+// Skips its own stamp lines, or the constant could never satisfy the digest it
+// names. Rename either one and the skip stops matching, both lines join the
+// body and the digest moves — which is right: a rename is an edit.
+export function codeDigest(source) {
+  const body = [];
+  let inUsage = false;
+  for (const raw of source.split('\n')) {
+    const line = raw.replace(/\s+$/, '');
+    if (inUsage || USAGE_OPEN.test(line)) {
+      inUsage = !USAGE_CLOSE.test(line);
+      continue;
+    }
+    if (line === '' || line.trimStart().startsWith('//') || STAMP_LINE.test(line)) continue;
+    body.push(line);
+  }
+  return createHash('sha256').update(body.join('\n')).digest('hex').slice(0, 12);
+}
 
 const HELP = `Usage:
-  node scripts/check-ledger.mjs                check this repo's events.md
-  node scripts/check-ledger.mjs <path>         check another ledger
-  node scripts/check-ledger.mjs [path] --fix   close every open entry in place
+  node scripts/check-ledger.mjs                  check this repo's events.md
+  node scripts/check-ledger.mjs <path>           check another ledger
+  node scripts/check-ledger.mjs [path] --fix     close every open entry in place
+  node scripts/check-ledger.mjs [copy] --digest  print a checker copy's code digest
 
 Reports every entry not closed by a \`___\` rule before the next \`time:\`
 header. A rule may be bare or carry the entry's identity (\`___ HH:MM
 <worktree>\`); both close an entry, and \`--fix\` writes the identity form.
 Exit 0 when the ledger is clean, 1 when an entry is open, 2 when the check
-could not run — an unreadable file, or one holding no entries at all.`;
+could not run — an unreadable file, or one holding no entries at all.
+Order is a different question, owned by scripts/check-ledger-order.mjs.`;
 
 const ENTRY_HEADER = /^time:/;
 // Both forms, and the bare one forever: every rule written before the identity
@@ -181,18 +248,27 @@ function report(entries) {
 
 export async function main(argv = process.argv.slice(2)) {
   const fix = argv.includes('--fix');
-  const args = argv.filter((arg) => arg !== '--fix');
+  const digest = argv.includes('--digest');
+  const args = argv.filter((arg) => arg !== '--fix' && arg !== '--digest');
   if (args.some((arg) => arg === '-h' || arg === '--help') || args.length > 1) {
     console.log(HELP);
     return args.length > 1 ? 2 : 0;
   }
-  const file = path.resolve(args[0] || path.join(repoRoot, 'events.md'));
+  // `--digest` reads a CHECKER copy rather than a ledger, so it defaults to this
+  // file and not to events.md. Everything else about the read is the same, which
+  // is why it shares the branch: an unreadable path is still exit 2.
+  const file = path.resolve(args[0] || (digest ? scriptPath : path.join(repoRoot, 'events.md')));
   let text;
   try {
     text = await readFile(file, 'utf8');
   } catch (error) {
     console.error(`check-ledger: cannot read ${file}: ${error.message}`);
     return 2;
+  }
+
+  if (digest) {
+    console.log(`${codeDigest(text)}  ${file}`);
+    return 0;
   }
 
   const entries = readEntries(text);
@@ -226,6 +302,29 @@ export async function main(argv = process.argv.slice(2)) {
   return 1;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Both sides RESOLVED, because the two are not written the same way.
+// `process.argv[1]` is the path the shell was handed, symlinks and all, while
+// the ESM loader has already realpathed `import.meta.url`. Compare them as
+// written and any symlinked component makes them disagree — /tmp is one on
+// macOS, and so is the /var every `os.tmpdir()` sits under — so `main()` never
+// runs, nothing is printed, and a ledger of open entries exits 0. Reporting
+// nothing is the worst answer this script can give: the `ledger` job in CI and
+// the loop's rebase gate both read that 0 as a clean file.
+//
+// bedrock #103's fix, and the last as-typed guard under this repo's scripts/.
+// scripts/check-ledger.test.mjs runs this file through a symlink and expects
+// the open-ledger exit, so the guard cannot quietly regress to the comparison
+// it replaced.
+async function invokedAsScript() {
+  if (!process.argv[1]) return false;
+  try {
+    return (await realpath(scriptPath)) === (await realpath(process.argv[1]));
+  } catch {
+    // An argv[1] that resolves to nothing is not this script being run.
+    return false;
+  }
+}
+
+if (await invokedAsScript()) {
   process.exitCode = await main();
 }
