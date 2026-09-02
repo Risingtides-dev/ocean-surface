@@ -5,8 +5,17 @@
 //! revocable local execution authority. Package previews and binding reads are
 //! credential-free. Browser-PWA mutations use the same-origin Surface proxy,
 //! which injects the daemon's mode-0600 operator key server-side; browser code
-//! never reads or stores that credential. Native and extension hosts remain
-//! explicitly read-only until they have an equivalent privileged transport.
+//! never reads or stores that credential. The Tauri shell injects the same key
+//! natively, beside the daemon it supervises. The Chrome extension has neither
+//! and remains explicitly read-only.
+//!
+//! Every mutation on that privileged allowlist — bootstrap, authorize,
+//! reauthorize, suspend, resume, revoke — leaves this module through ONE
+//! transport seam, [`send_authority_mutation`], addressed by an
+//! [`AuthorityRoute`] that nothing else constructs and nothing else consumes.
+//! That is what keeps the host branch in one place instead of once per verb.
+//! Credential-free calls (binding inspection, package preview, federated
+//! membership registration) keep their ordinary same-origin `Request`.
 
 use std::collections::HashSet;
 
@@ -29,32 +38,136 @@ fn package_preview_url(base: &str, room: &str, package: &str) -> String {
     )
 }
 
+fn bindings_path(room: &str) -> String {
+    format!("/v1/rooms/persistent/{}/agents", encode(room))
+}
+
+/// Binding INSPECTION is credential-free and stays an ordinary same-origin
+/// GET on every host, so it is addressed by a URL rather than a route.
 fn bindings_url(base: &str, room: &str) -> String {
-    format!("{base}/v1/rooms/persistent/{}/agents", encode(room))
+    format!("{base}{}", bindings_path(room))
 }
 
-fn bootstrap_url(base: &str, room: &str) -> String {
-    format!(
-        "{base}/v1/rooms/persistent/{}/agents/bootstrap",
+/// One privileged daemon route on the Room-agent authority allowlist, held as
+/// a PATH and never as a full URL.
+///
+/// The type IS the seam. It is constructed only by the four builders below and
+/// consumed only by [`send_authority_mutation`], so a privileged mutation
+/// cannot reach the network by a path the transport did not choose — the
+/// compiler holds that, not a reviewer. Holding a path rather than a URL is
+/// what lets the native shell supply the origin itself: the webview names the
+/// route, the shell names the daemon.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AuthorityRoute(String);
+
+impl AuthorityRoute {
+    fn path(&self) -> &str {
+        &self.0
+    }
+}
+
+/// `POST .../agents` — authorize a first binding for a resolved member.
+fn bindings_route(room: &str) -> AuthorityRoute {
+    AuthorityRoute(bindings_path(room))
+}
+
+/// `POST .../agents/bootstrap` — establish durable local first-agent authority.
+fn bootstrap_route(room: &str) -> AuthorityRoute {
+    AuthorityRoute(format!(
+        "/v1/rooms/persistent/{}/agents/bootstrap",
         encode(room)
-    )
+    ))
 }
 
-fn binding_action_url(base: &str, room: &str, member: &str, action: &str) -> String {
-    format!(
-        "{base}/v1/rooms/persistent/{}/agents/{}/{}",
+/// `POST .../agents/<member>/<reauthorize|suspend|resume>`.
+fn binding_action_route(room: &str, member: &str, action: &str) -> AuthorityRoute {
+    AuthorityRoute(format!(
+        "/v1/rooms/persistent/{}/agents/{}/{}",
         encode(room),
         encode(member),
         action
-    )
+    ))
 }
 
-fn binding_url(base: &str, room: &str, member: &str) -> String {
-    format!(
-        "{base}/v1/rooms/persistent/{}/agents/{}",
+/// `DELETE .../agents/<member>` — revoke.
+fn binding_route(room: &str, member: &str) -> AuthorityRoute {
+    AuthorityRoute(format!(
+        "/v1/rooms/persistent/{}/agents/{}",
         encode(room),
         encode(member)
-    )
+    ))
+}
+
+/// The two verbs the authority allowlist admits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthorityMethod {
+    Post,
+    Delete,
+}
+
+impl AuthorityMethod {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Post => "POST",
+            Self::Delete => "DELETE",
+        }
+    }
+}
+
+/// Why a privileged mutation never produced a daemon answer. The two arms are
+/// the two the call sites already worded differently: a request that could not
+/// be constructed, and one that was constructed and not delivered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthorityFailure {
+    Build,
+    Send,
+}
+
+/// A daemon answer to a privileged mutation: status plus body text, undecoded.
+/// Both transports produce exactly this, which is why one decode path serves
+/// both hosts.
+struct AuthorityReply {
+    status: u16,
+    body: String,
+}
+
+/// The ONE seam every privileged Room-agent authority mutation takes.
+///
+/// On the Tauri shell it hands method, route and body to
+/// `daemon_operator_request`, which attaches the mode-0600 operator key and
+/// supplies the daemon origin natively. Everywhere else it is the ordinary
+/// same-origin `Request` the browser PWA has always sent, joined onto `base`,
+/// where the Surface proxy injects the same key server-side. Neither path
+/// exposes the credential to this module.
+async fn send_authority_mutation(
+    base: &str,
+    method: AuthorityMethod,
+    route: AuthorityRoute,
+    body: String,
+) -> Result<AuthorityReply, AuthorityFailure> {
+    if crate::host::room_authority_native_transport() {
+        return match crate::host::daemon_operator_request(method.as_str(), route.path(), &body)
+            .await
+        {
+            Some(reply) => Ok(AuthorityReply {
+                status: reply.status,
+                body: reply.body,
+            }),
+            None => Err(AuthorityFailure::Send),
+        };
+    }
+    let url = format!("{base}{}", route.path());
+    let request = match method {
+        AuthorityMethod::Post => Request::post(&url),
+        AuthorityMethod::Delete => Request::delete(&url),
+    }
+    .header("content-type", "application/json")
+    .body(body)
+    .map_err(|_| AuthorityFailure::Build)?;
+    let response = request.send().await.map_err(|_| AuthorityFailure::Send)?;
+    let status = response.status();
+    let body = response.text().await.map_err(|_| AuthorityFailure::Send)?;
+    Ok(AuthorityReply { status, body })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -676,33 +789,27 @@ impl RoomAgentAuthorizationState {
             message: "Establishing first-agent authority".to_owned(),
         }));
         let me = *self;
-        let url = bootstrap_url(&rooms.url.get_untracked(), &room);
+        let base = rooms.url.get_untracked();
+        let route = bootstrap_route(&room);
         wasm_bindgen_futures::spawn_local(async move {
-            let outcome = match Request::post(&url)
-                .header("content-type", "application/json")
-                .body(body)
+            let outcome = match send_authority_mutation(&base, AuthorityMethod::Post, route, body)
+                .await
             {
-                Ok(request) => match request.send().await {
-                    Ok(response) => {
-                        let status = response.status();
-                        match response.json::<BootstrapResponse>().await {
-                            Ok(body) if response_ok(status, body.ok) => body
-                                .into_server_projection(&room, &owner, &package)
-                                .ok_or(Notice {
-                                    state: NoticeState::Unavailable,
-                                    message: "bootstrap response omitted server authority proof"
-                                        .to_owned(),
-                                }),
-                            Ok(body) => Err(classify_error(status, body.error)),
-                            Err(_) => Err(classify_error(status, None)),
-                        }
-                    }
-                    Err(_) => Err(Notice {
-                        state: NoticeState::Unavailable,
-                        message: "first-agent bootstrap is unavailable".to_owned(),
-                    }),
+                Ok(reply) => match serde_json::from_str::<BootstrapResponse>(&reply.body) {
+                    Ok(body) if response_ok(reply.status, body.ok) => body
+                        .into_server_projection(&room, &owner, &package)
+                        .ok_or(Notice {
+                            state: NoticeState::Unavailable,
+                            message: "bootstrap response omitted server authority proof".to_owned(),
+                        }),
+                    Ok(body) => Err(classify_error(reply.status, body.error)),
+                    Err(_) => Err(classify_error(reply.status, None)),
                 },
-                Err(_) => Err(Notice {
+                Err(AuthorityFailure::Send) => Err(Notice {
+                    state: NoticeState::Unavailable,
+                    message: "first-agent bootstrap is unavailable".to_owned(),
+                }),
+                Err(AuthorityFailure::Build) => Err(Notice {
                     state: NoticeState::Unavailable,
                     message: "bootstrap request could not be built".to_owned(),
                 }),
@@ -973,8 +1080,9 @@ impl RoomAgentAuthorizationState {
         let context = self.context_policy.get_untracked();
         let memory = self.memory_scope.get_untracked();
         let grants = canonical_grants(&preview, &self.grants.get_untracked());
-        let (url, body) = if let Some(member) = reauthorize_member.as_deref() {
-            let url = binding_action_url(&rooms.url.get_untracked(), &room, member, "reauthorize");
+        let base = rooms.url.get_untracked();
+        let (route, body) = if let Some(member) = reauthorize_member.as_deref() {
+            let route = binding_action_route(&room, member, "reauthorize");
             let body = serde_json::to_string(&ReauthorizeBody {
                 decision_id: &decision_id,
                 activation_policy: &activation,
@@ -982,9 +1090,9 @@ impl RoomAgentAuthorizationState {
                 memory_scope: &memory,
                 room_capability_grants: &grants,
             });
-            (url, body)
+            (route, body)
         } else {
-            let url = bindings_url(&rooms.url.get_untracked(), &room);
+            let route = bindings_route(&room);
             let body = serde_json::to_string(&AuthorizeBody {
                 agent_member_id,
                 agent_package_id: &preview.agent_package_id,
@@ -995,7 +1103,7 @@ impl RoomAgentAuthorizationState {
                 memory_scope: &memory,
                 room_capability_grants: &grants,
             });
-            (url, body)
+            (route, body)
         };
         let body = match body {
             Ok(body) => body,
@@ -1014,34 +1122,25 @@ impl RoomAgentAuthorizationState {
         }));
         let me = *self;
         wasm_bindgen_futures::spawn_local(async move {
-            let outcome = match Request::post(&url)
-                .header("content-type", "application/json")
-                .body(body)
+            let outcome = match send_authority_mutation(&base, AuthorityMethod::Post, route, body)
+                .await
             {
-                Ok(request) => match request.send().await {
-                    Ok(response) => {
-                        let status = response.status();
-                        match response.json::<BindingMutationResponse>().await {
-                            Ok(body) if response_ok(status, body.ok) => {
-                                body.binding.ok_or(Notice {
-                                    state: NoticeState::Unavailable,
-                                    message: "authorization response omitted the binding"
-                                        .to_owned(),
-                                })
-                            }
-                            Ok(body) => Err(classify_error(status, body.error)),
-                            Err(_) => Err(Notice {
-                                state: NoticeState::Unavailable,
-                                message: "authorization response returned invalid data".to_owned(),
-                            }),
-                        }
-                    }
+                Ok(reply) => match serde_json::from_str::<BindingMutationResponse>(&reply.body) {
+                    Ok(body) if response_ok(reply.status, body.ok) => body.binding.ok_or(Notice {
+                        state: NoticeState::Unavailable,
+                        message: "authorization response omitted the binding".to_owned(),
+                    }),
+                    Ok(body) => Err(classify_error(reply.status, body.error)),
                     Err(_) => Err(Notice {
                         state: NoticeState::Unavailable,
-                        message: "authorization request is unavailable".to_owned(),
+                        message: "authorization response returned invalid data".to_owned(),
                     }),
                 },
-                Err(_) => Err(Notice {
+                Err(AuthorityFailure::Send) => Err(Notice {
+                    state: NoticeState::Unavailable,
+                    message: "authorization request is unavailable".to_owned(),
+                }),
+                Err(AuthorityFailure::Build) => Err(Notice {
                     state: NoticeState::Unavailable,
                     message: "authorization request could not be built".to_owned(),
                 }),
@@ -1112,10 +1211,18 @@ impl RoomAgentAuthorizationState {
         let generation = rooms.generation_snapshot();
         let op = self.next_op();
         let base = rooms.url.get_untracked();
-        let url = if action == "revoke" {
-            binding_url(&base, &room, &binding.agent_member_id)
+        // Revoke is the allowlist's only DELETE; the other three are POSTs to
+        // the member's action route.
+        let (method, route) = if action == "revoke" {
+            (
+                AuthorityMethod::Delete,
+                binding_route(&room, &binding.agent_member_id),
+            )
         } else {
-            binding_action_url(&base, &room, &binding.agent_member_id, action)
+            (
+                AuthorityMethod::Post,
+                binding_action_route(&room, &binding.agent_member_id, action),
+            )
         };
         let body = match serde_json::to_string(&StatusBody {
             decision_id: &decision_id,
@@ -1130,38 +1237,23 @@ impl RoomAgentAuthorizationState {
         }));
         let me = *self;
         wasm_bindgen_futures::spawn_local(async move {
-            let builder = if action == "revoke" {
-                Request::delete(&url)
-            } else {
-                Request::post(&url)
-            };
-            let outcome = match builder
-                .header("content-type", "application/json")
-                .body(body)
-            {
-                Ok(request) => match request.send().await {
-                    Ok(response) => {
-                        let status = response.status();
-                        match response.json::<BindingMutationResponse>().await {
-                            Ok(body) if response_ok(status, body.ok) => {
-                                body.binding.ok_or(Notice {
-                                    state: NoticeState::Unavailable,
-                                    message: "authority response omitted the binding".to_owned(),
-                                })
-                            }
-                            Ok(body) => Err(classify_error(status, body.error)),
-                            Err(_) => Err(Notice {
-                                state: NoticeState::Unavailable,
-                                message: "authority response returned invalid data".to_owned(),
-                            }),
-                        }
-                    }
+            let outcome = match send_authority_mutation(&base, method, route, body).await {
+                Ok(reply) => match serde_json::from_str::<BindingMutationResponse>(&reply.body) {
+                    Ok(body) if response_ok(reply.status, body.ok) => body.binding.ok_or(Notice {
+                        state: NoticeState::Unavailable,
+                        message: "authority response omitted the binding".to_owned(),
+                    }),
+                    Ok(body) => Err(classify_error(reply.status, body.error)),
                     Err(_) => Err(Notice {
                         state: NoticeState::Unavailable,
-                        message: "authority request is unavailable".to_owned(),
+                        message: "authority response returned invalid data".to_owned(),
                     }),
                 },
-                Err(_) => Err(Notice {
+                Err(AuthorityFailure::Send) => Err(Notice {
+                    state: NoticeState::Unavailable,
+                    message: "authority request is unavailable".to_owned(),
+                }),
+                Err(AuthorityFailure::Build) => Err(Notice {
                     state: NoticeState::Unavailable,
                     message: "authority request could not be built".to_owned(),
                 }),
@@ -1674,7 +1766,7 @@ pub(crate) fn RoomAgentAuthorizationPanel(
                         {if authority_mutations_supported_on_this_host() {
                             "Only the room owner can authorize local agents."
                         } else {
-                            "Room authorization is read-only in this host. Use the authenticated Surface proxy to change authority."
+                            "Room authorization is read-only in this host. Use the desktop app or the authenticated Surface proxy to change authority."
                         }}
                     </div>
                 }.into_any()
@@ -1729,9 +1821,62 @@ mod tests {
             "http://d/v1/rooms/persistent/team%2Fblue/agents/preview/review%20agent"
         );
         assert_eq!(
-            bootstrap_url("http://d", "team/blue"),
-            "http://d/v1/rooms/persistent/team%2Fblue/agents/bootstrap"
+            bootstrap_route("team/blue").path(),
+            "/v1/rooms/persistent/team%2Fblue/agents/bootstrap"
         );
+    }
+
+    /// Every privileged route is a PATH, encodes each untrusted identity into
+    /// exactly one segment, and lands on the same six shapes both the Surface
+    /// proxy and the Tauri shell allowlist. A route that grew an origin, or an
+    /// identity that split into two segments, would be a credential pointed
+    /// somewhere nobody chose.
+    #[test]
+    fn every_privileged_route_is_an_encoded_single_segment_path() {
+        for route in [
+            bindings_route("team/blue"),
+            bootstrap_route("team/blue"),
+            binding_action_route("team/blue", "agent/one", "suspend"),
+            binding_route("team/blue", "agent/one"),
+        ] {
+            let path = route.path();
+            assert!(
+                path.starts_with("/v1/rooms/persistent/team%2Fblue/agents"),
+                "{path} must be an absolute daemon path under the room's agents route",
+            );
+            assert!(
+                !path.contains("://") && !path.contains("team/blue"),
+                "{path} must carry no origin and no unencoded room key",
+            );
+        }
+        assert_eq!(
+            bindings_route("team/blue").path(),
+            "/v1/rooms/persistent/team%2Fblue/agents"
+        );
+        assert_eq!(
+            binding_action_route("team/blue", "agent/one", "reauthorize").path(),
+            "/v1/rooms/persistent/team%2Fblue/agents/agent%2Fone/reauthorize"
+        );
+        assert_eq!(
+            binding_route("team/blue", "agent/one").path(),
+            "/v1/rooms/persistent/team%2Fblue/agents/agent%2Fone"
+        );
+    }
+
+    /// The browser transport joins the route onto the daemon base, so the
+    /// URL the PWA sends is byte-for-byte the one it sent before the seam.
+    #[test]
+    fn the_browser_transport_joins_the_route_onto_the_daemon_base() {
+        assert_eq!(
+            format!("http://d{}", bindings_route("team/blue").path()),
+            bindings_url("http://d", "team/blue"),
+        );
+    }
+
+    #[test]
+    fn the_allowlist_verbs_are_the_two_the_daemon_admits() {
+        assert_eq!(AuthorityMethod::Post.as_str(), "POST");
+        assert_eq!(AuthorityMethod::Delete.as_str(), "DELETE");
     }
 
     #[test]

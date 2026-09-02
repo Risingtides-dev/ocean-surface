@@ -2540,9 +2540,11 @@ name = "ocean-tauri"
 version = "0.1.0"
 dependencies = [
  "git2",
+ "libc",
  "notify",
  "opener",
  "parking_lot",
+ "reqwest",
  "serde",
  "serde_json",
  "tauri",

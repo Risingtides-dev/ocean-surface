@@ -5802,3 +5802,49 @@ reds only the guard with the wasm32 clippy lane still green. Tree restored after
 each. Gate green: all seven frozen commands, host suite 1252 unit tests plus 61
 guards across 14 binaries.
 _________________________________________________________________________________ 20:39 loop/surface-load-older-affordance
+
+time:      [04:58] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-desktop-parity]
+type:      feature-request
+area:      frontend
+
+The desktop app can now run the Room-agent authorization ceremony, which it has
+been locked out of since Phase 1 landed. The lock was never about the desktop
+being less trusted: `room_authority_mutations_for_host` returned false on Tauri
+because the operator credential is injected server-side by the browser proxy on
+six exact routes, and the shell owned no equivalent privileged transport, so a
+mutation from the desktop would have reached the daemon bare and failed closed as
+an opaque 401. AGENTS.md said "until they own an equivalent privileged transport";
+this slice gives the shell one. `daemon_operator_request` takes a METHOD and a
+PATH — never a URL, never a header — re-checks both against a byte-for-byte mirror
+of the proxy's six-route allowlist (Tauri 2 capabilities do not gate
+`generate_handler!` commands, so that allowlist is the boundary, not the ACL),
+reads `operator.key` under the same five-condition custody check the proxy uses
+(regular file, owner-owned, single-linked, mode 0600, opened `O_NOFOLLOW`),
+supplies the daemon origin itself from `OCEAN_DAEMON_URL`, and returns the
+daemon's status and body and nothing else — the key never crosses back into the
+webview. On the surface side every privileged mutation now leaves the ceremony
+through ONE seam, `send_authority_mutation`, addressed by an `AuthorityRoute` that
+only four builders construct and only the seam consumes, so the compiler holds
+what a reviewer used to: bootstrap, authorize/reauthorize and the three status
+mutations cannot be addressed by a path the transport did not choose. The host
+branch lives in that seam and nowhere else. The extension stays read-only — it is
+a browser page with no shell behind it and no proxy in front of it — and the
+host predicate is now a four-arm match that says so in words. Pinned four ways:
+the flipped host test, six ocean-tauri unit tests over the allowlist and the
+custody reader (including that a path can never carry an origin), route tests
+proving each privileged path encodes its untrusted identity into one segment and
+that the browser join still produces the byte-identical URL, and a source guard
+that scans BELOW the seam's own body — the seam's two `Request` builders are the
+browser half of the transport and would otherwise satisfy an assertion about call
+sites — for exactly three seam calls, zero bare `Request::delete`, and exactly one
+surviving `Request::post` (federated membership, on no allowlist and deliberately
+credential-free). `scripts/rebuild-tauri-app.sh` gains a third `strings` needle,
+because this is Rust in the shell: a restart cannot pick it up, and an installed
+app missing that string still shows the read-only notice while being reported as
+shipped. Gate green: all seven frozen commands, 1319 host assertions across 14
+binaries, plus ocean-tauri's own fmt, `clippy --all-targets -D warnings` and 34
+tests (6 new) — the crate is ungated by CI but does build headless once
+`libgtk-3-dev` and `libwebkit2gtk-4.1-dev` are installed.
+_________________________________________________________________________________ 04:58 cloud/surface-desktop-parity

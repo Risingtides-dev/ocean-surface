@@ -40,12 +40,19 @@ log "==> building shell bundle (this takes a few minutes)"
 [[ -d "$BUNDLE" ]] || fail "build reported success but no bundle at $BUNDLE"
 
 # --- verify the binary, not the exit code -----------------------------------
-# A successful build is not evidence the fix is in the binary. Both of these
-# strings are error paths added by the shell's security fixes; if the bundle
+# A successful build is not evidence the fix is in the binary. Each of these
+# strings is an error path added by a shell security boundary; if the bundle
 # were stale or built from the wrong tree they would be absent.
+#
+# The third is the room-authority forwarder's allowlist refusal (spec 1.12).
+# It is what makes the desktop authorization ceremony writable, and it is
+# Rust: a running shell cannot pick it up by restarting, only by this rebuild.
+# An installed app missing this string still shows the read-only notice, so
+# the string is the difference between "shipped" and "reported as shipped".
 BIN="$BUNDLE/Contents/MacOS/ocean-tauri"
 [[ -x "$BIN" ]] || fail "no executable at $BIN"
-for needle in "refusing to open an executable file" "path escapes workspace root"; do
+for needle in "refusing to open an executable file" "path escapes workspace root" \
+              "not a room authority mutation route"; do
   if ! strings "$BIN" 2>/dev/null | grep -qF "$needle"; then
     fail "built binary is missing an expected guard ('$needle') — refusing to install."
   fi
