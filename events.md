@@ -5872,3 +5872,129 @@ nothing was replaced. Two new ones were added instead — one for the askable ed
 its three states, one for the inline orphaned reply. Gate green: all seven frozen
 commands, host suite 1260 unit tests plus 65 guards across 15 binaries.
 _________________________________________________________________________________ 21:46 cloud/rooms-load-older
+time:      [21:24] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/rooms-workspace-root-surface]
+type:      bug report
+area:      frontend
+
+A room this surface created could never wake an agent. The daemon has taken an
+optional `workspace_root` on `POST /v1/rooms/persistent` since OCEAN-260, and a
+room without one is unbound: `spawn_room_agent_turn` resolves a room-bound turn's
+project and `cwd` from that binding and refuses every turn `503
+workspace_unavailable` before the agent sees the message. `CreateRoomBody` carried
+`key`, `name` and `trigger_policy` only. So every room this product made was
+unbound, and every agent mention in one did nothing — with all four trigger rows
+rendering exactly as they do in a room that works.
+
+`Room` now decodes `workspace_root` (serde default, so an older daemon that omits
+it reads as no binding rather than failing the whole decode and blanking the
+panel). `CreateRoomBody` carries it, skipped when `None` because an ABSENT key is
+what the daemon reads as unbound and an always-present null would say the same
+thing while looking like a chosen value. The create form gains a text field with
+helper text naming whose filesystem the path is resolved on — the browser cannot
+see the daemon's, so nothing here pre-validates and the daemon's canonicalizing
+400 is the only verdict.
+
+Beside the trigger toggles, because that is the condition which makes all four
+inert: an unbound notice saying agents in this room cannot run until a folder is
+bound, the bound path when there is one, and Bind/Unbind. `RoomWorkspacePatchBody`
+sends `workspace_root` ALONE and deliberately does NOT skip `None` — the daemon
+leaves an absent field unchanged, so a skipped `None` would make every unbind a
+request that changes nothing and still answers 200. One field per body also means
+this PATCH and the policy PATCH cannot clobber each other's value. Generation-gated
+like the policy write; a reply landing after a room switch writes nothing.
+
+Two deviations from the brief, both because the code said otherwise. The bind
+control is gated on `trigger_policy_accepts_writes` — the same gate the rows above
+it take — and NOT on a room owner: this repo's contract is that owner authority is
+server-derived and never inferred from a participant projection, there is no
+server-derived room-owner signal at this site, and the daemon's PATCH applies no
+owner check of its own, so a local gate would be a lock on the surface only. And
+`OCEAN_ROOMS_PRODUCT.md` §1 had no dated status paragraph to replace: it was
+already written as intent, describing a create body the surface never sent. It now
+states what is true, including the fail-closed consequence and the PATCH path,
+which it never carried.
+
+Tests: serde wire-shape round-trips (create body sends the key only when set; the
+PATCH body's `None` IS an explicit null and the body is one field wide; `Room`
+decodes with and without), the `room_is_unbound` predicate reading blank the same
+as absent, `create_workspace_root` trimming, and `WorkspaceBindStatus` matching the
+daemon's frozen code EXACTLY rather than by substring — with an assertion that its
+sentence is not `room_repo.rs`'s `workspace_unavailable` wording, which is the
+COMPUTE lane saying Bedrock is unreachable and a different condition entirely. Plus
+a source guard, `tests/room_workspace_binding.rs`: nothing in the compiler holds a
+field's presence in a serialized body, so both wire structs, both control click
+sites, the create form's pass-through, and the notice's wording are pinned by scan
+over `view_source`.
+
+Gates: all seven frozen commands green — fmt --check, both clippy lanes with -D
+warnings (the wasm one caught a redundant closure on the input's `disabled`, fixed),
+both checks, the wasm test build, and the host suite at 1258 unit tests plus 65
+guards across 15 binaries. Paired with ocean-os `cloud/rooms-workspace-root-daemon`,
+which adds the PATCH field the bind control needs; create-time binding works against
+today's daemon without it.
+_________________________________________________________________________________ 21:24 cloud/rooms-workspace-root-surface
+time:      [21:20] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/rooms-agent-owners]
+type:      feature
+area:      frontend
+
+Finish-line item 1.8. The daemon has served `agent_owners` on room detail and on
+`/snapshot` since ocean-os#437 — one row per owned Agent participant, naming the
+agent, the WORKER who owns it, and whether that worker is still on the roster,
+ordered by roster position — and `git grep agent_owners crates/ocean-surface-ui/src`
+returned nothing. Served, contracted, decoded nowhere. A member could not see who
+owned an agent, or that an agent was unclaimed, including in the audit view of a
+closed room where there is nobody left to ask.
+
+`RoomAgentOwner` decodes off `RoomSnapshotResponse` with `#[serde(default)]`, which
+is not decoration here: a daemon predating #437 omits the key entirely, and without
+the default that body is a decode error `open_room` reports as a failed open — every
+room on such a daemon refusing to load over a field the open path never needs. The
+mutation confirms it reds six `rooms.rs` unit tests, every fixture in that module
+that builds a snapshot body without the key. `open_room` publishes the rows into a
+new `Rooms::agent_owners` signal AHEAD of the `if !closed` tail gate and outside it,
+because a soft-closed room reports ownership unchanged and the snapshot IS its audit
+view; `reset_room_state` clears it beside `access` and `closed`, or the next room
+opened badges its same-named agents with the previous room's owners.
+
+The rail half is one pure function, `agent_ownership`, and one call site in the
+LOCAL members branch of `rooms_workspace.rs`. Agent rows get a second line — `owned
+by <name>` with the rail's own presence dot, or `unclaimed` — and unclaimed is a
+distinct rendered state rather than an absent badge, because before this slice an
+agent nobody owns and a rail with nothing to say looked identical.
+
+Two limits are deliberate and both are written into the doc. Presence is the
+daemon's `owner_present` AND the owner still being on the roster in front of the
+reader: join, leave and remove all replace `Room::participants` from routes that
+carry no `agent_owners` at all, so a `true` beside a worker the rail no longer shows
+is one read stale, and rendering it would badge a present owner nobody can find
+three pixels above. Not symmetric — a daemon that says absent stays absent, since a
+participant id is reusable and a rejoin is not evidence the original binding
+survived. And the FEDERATED rail renders no ownership: `SqliteRoomStore::agent_owners`
+joins the ownership row to `participants` and orders by `p.position`, so both ids in
+every row are local participant ids, while a federated row's `member_id` is a
+bedrock-minted binding id out of `room_agent_bindings`. Looking one up in the other
+matches nothing and would mark every federated agent unclaimed — a confident lie
+where saying nothing is the truth.
+
+Two contract details from the brief did not survive contact with the tree, and the
+tree won. There is no "detail" wire type in `rooms.rs` to teach: since #190 this
+crate opens rooms through `/snapshot` alone and decodes the unpaged detail route
+nowhere, so `/snapshot` is the only envelope that carries the field. And
+`docs/OCEAN_ROOMS_PRODUCT.md` had no Roster section to put a status line under — it
+now has one, rather than filing roster behaviour under Transcript Rendering.
+
+Six mutations run for real against the finished tree, each alone with the tree
+restored verbatim, tabled in the new guard's header. One came back other than
+expected and is written down rather than dropped: deleting the rail's ownership
+block reds the wasm32 clippy lane too, because `agent_ownership`'s only non-test
+callers live in the view. One pre-existing guard changed, and it earned it —
+`closed_room_audit_view.rs` quoted every element of `open_room`'s success tuple, so
+it went red for a slice carrying one more field out of the same envelope, having
+broken nothing that file is about. It now scans the arm for `r.closed` instead.
+Gate green: all seven frozen commands, host suite 1257 unit tests plus 65 guards
+across 15 binaries.
+_________________________________________________________________________________ 21:20 cloud/rooms-agent-owners

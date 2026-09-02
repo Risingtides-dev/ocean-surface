@@ -1247,6 +1247,135 @@
   color: var(--err);
 }
 
+/* ── Room workspace binding ───────────────────────────────────────── */
+
+/* Sits inside the triggers sliver because it is the precondition for every
+   row above it: with no bound folder the daemon refuses each woken turn
+   before it starts, so an armed trigger over an unbound room promises a wake
+   that cannot happen. */
+.rooms-workspace__workspace-binding {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 6px;
+  margin-top: 4px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* A warning, not an error: the room is fine, its agents just cannot run yet. */
+.rooms-workspace__workspace-unbound {
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.rooms-workspace__workspace-bound {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.rooms-workspace__workspace-bound-label {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg-3);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* A path is long and has no spaces, so it scrolls rather than forcing the
+   rail wider or wrapping mid-segment. */
+.rooms-workspace__workspace-bound-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  color: var(--fg-2);
+  font-size: 11px;
+}
+
+.rooms-workspace__workspace-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.rooms-workspace__workspace-input {
+  flex: 1 1 140px;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-size: 11px;
+  outline: none;
+}
+
+.rooms-workspace__workspace-input:focus:not(:disabled) {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.rooms-workspace__workspace-bind,
+.rooms-workspace__workspace-unbind {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.rooms-workspace__workspace-bind:hover:not(:disabled),
+.rooms-workspace__workspace-unbind:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--fg);
+}
+
+.rooms-workspace__workspace-bind:disabled,
+.rooms-workspace__workspace-unbind:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.rooms-workspace__workspace-help,
+.rooms-workspace__create-workspace-help {
+  color: var(--fg-3);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.rooms-workspace__workspace-error {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--err);
+}
+
+/* The create form's half of the same binding, under the trigger checkboxes. */
+.rooms-workspace__create-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 6px;
+}
+
+.rooms-workspace__create-workspace-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg-3);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 /* ── Room summary (rail row + reading panel) ──────────────────────── */
 
 /* A fixed sliver like every section on this rail: a head, one glance line,
@@ -2256,6 +2385,40 @@
   font-size: 9px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
+}
+
+/* ── Agent ownership line ─────────────────────────────────────────── */
+
+/* Members rail, agent rows: which worker owns this agent. Sits on its own
+   line under the name for the same reason the descriptor does — a 220px
+   rail cannot hold another badge beside the kind and remove controls. The
+   presence dot inside it reuses the roster's own dot, so it drops that
+   rule's `margin-left: auto` (which is what pins the ROW's dot right). */
+.rooms-workspace__member-owner {
+  flex-basis: 100%;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding-left: 32px;
+  color: var(--fg-4);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rooms-workspace__member-owner .rooms-workspace__member-presence {
+  margin-left: 0;
+  width: 6px;
+  height: 6px;
+}
+
+.rooms-workspace__member-owner--unclaimed {
+  color: var(--warn);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 9px;
 }
 
 /* ── Member local/remote agent states ─────────────────────────────── */

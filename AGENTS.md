@@ -320,6 +320,21 @@ Web surface session UI:
   room it was minted for. No fixture in this repo may carry a real one. The
   onboarding link EMBEDS the code, so it is the same grant in a longer form and
   gets the same discipline.
+- A room's `workspace_root` is the folder its agent turns run in, resolved on
+  the DAEMON's host — not the browser's, which cannot see that filesystem, so
+  nothing here pre-validates a path and the daemon's canonicalizing
+  `400 invalid_workspace_root` is the only verdict. Unrelated to the SESSION
+  workspace root the rest of this crate means by that name. It rides the create
+  body (`key`, `name`, `trigger_policy?`, `workspace_root?`) and
+  `PATCH /v1/rooms/persistent/{key}`, where absent leaves the binding unchanged
+  and an explicit `null` unbinds — so the unbind body must NOT skip `None`, and
+  the policy and workspace PATCHes each send their own field alone rather than
+  clobbering the other's. An unbound room is not a cosmetic gap: every
+  room-bound agent turn in it is refused `503 workspace_unavailable` before the
+  agent sees the message, so the surface states that in words wherever the
+  trigger toggles render. That refusal is NOT `room_repo.rs`'s
+  `workspace_unavailable`, which is the compute lane saying Bedrock is
+  unreachable; do not share wording between them.
 - Rooms G1 is daemon-native text collaboration. LiveKit controls stay outside
   the room join, leave, roster, and transcript lifecycle until explicitly
   reintroduced behind a reviewed platform contract.

@@ -14,9 +14,10 @@ use wasm_bindgen::JsCast;
 
 use crate::room_messages;
 use crate::rooms::{
-    CreateResolution, FederatedActorType, FederatedRoomMemberProjection, FederatedRoomRole,
-    MemberPresence, OlderHistory, OutboxItemState, Room, RoomAccessProjection, RoomAccessState,
-    RoomMessage, RoomMessageKind, RoomParticipant, RoomParticipantKind, RoomReadCursorProjection,
+    create_workspace_root, room_is_unbound, CreateResolution, FederatedActorType,
+    FederatedRoomMemberProjection, FederatedRoomRole, MemberPresence, OlderHistory,
+    OutboxItemState, Room, RoomAccessProjection, RoomAccessState, RoomAgentOwner, RoomMessage,
+    RoomMessageKind, RoomParticipant, RoomParticipantKind, RoomReadCursorProjection,
     RoomTriggerPolicy, Rooms,
 };
 
@@ -325,6 +326,107 @@ fn trigger_toggle_row(
                 <span class="rooms-workspace__trigger-note">{note}</span>
             })}
         </label>
+    }
+}
+
+/// The open room's workspace binding: the unbound notice, the folder it is
+/// bound to when it has one, and the bind/unbind control.
+///
+/// This sits with the trigger rows because it is the precondition for all of
+/// them. A trigger decides WHETHER the room's agents are woken; the binding
+/// decides whether a woken turn can run at all — the daemon resolves the
+/// turn's project and `cwd` from the room's `workspace_root`, and with none
+/// stored it refuses with `workspace_unavailable` before the agent sees the
+/// message. So an unbound room can have every trigger checked and still do
+/// nothing, which is exactly the state the notice names.
+///
+/// Gated on [`trigger_policy_accepts_writes`], the same gate the rows above
+/// take, because it is the same PATCH to the same route under the same
+/// authority. Deliberately NOT gated on a locally-inferred room owner: this
+/// repo's contract is that owner authority is server-derived and never guessed
+/// from a participant projection, and the daemon's PATCH applies no owner check
+/// of its own — inventing one here would be a lock on the surface only.
+fn workspace_binding_section(rooms: Rooms, access: Option<&RoomAccessProjection>) -> impl IntoView {
+    let writable = trigger_policy_accepts_writes(access);
+    let draft = RwSignal::new(String::new());
+    // Seeded from the stored binding so the field opens showing what it will
+    // change, and a rebind is an edit rather than a retype.
+    Effect::new(move |_: Option<()>| {
+        let stored = rooms
+            .open_room
+            .get()
+            .and_then(|room| room.workspace_root)
+            .unwrap_or_default();
+        draft.set(stored);
+    });
+    let unbound = move || rooms.open_room.get().as_ref().is_some_and(room_is_unbound);
+    let bound_to = move || {
+        rooms
+            .open_room
+            .get()
+            .and_then(|room| room.workspace_root)
+            .filter(|root| !root.trim().is_empty())
+    };
+    let in_flight = move || rooms.workspace_update_in_flight.get();
+    view! {
+        <div class="rooms-workspace__workspace-binding">
+            {move || unbound().then(|| view! {
+                <div class="rooms-workspace__workspace-unbound" role="note">
+                    "No workspace folder is bound. Agents in this room cannot run \
+                     until one is — every turn is refused before it starts."
+                </div>
+            })}
+            {move || bound_to().map(|root| view! {
+                <div class="rooms-workspace__workspace-bound">
+                    <span class="rooms-workspace__workspace-bound-label">"Workspace"</span>
+                    <code class="rooms-workspace__workspace-bound-path">{root}</code>
+                </div>
+            })}
+            {move || writable.then(|| view! {
+                <div class="rooms-workspace__workspace-controls">
+                    <input
+                        class="rooms-workspace__workspace-input"
+                        type="text"
+                        aria-label="Workspace folder on the daemon host"
+                        placeholder="/absolute/path/to/project"
+                        prop:value=move || draft.get()
+                        on:input=move |ev| draft.set(event_target_value(&ev))
+                        disabled=in_flight
+                    />
+                    <button
+                        class="rooms-workspace__workspace-bind"
+                        type="button"
+                        // An empty field has nothing to bind: unbinding is the
+                        // other button, so this one never doubles as it.
+                        disabled=move || in_flight() || draft.get().trim().is_empty()
+                        on:click=move |_| {
+                            rooms.set_open_room_workspace(
+                                create_workspace_root(&draft.get_untracked()),
+                            );
+                        }
+                    >
+                        "Bind"
+                    </button>
+                    <button
+                        class="rooms-workspace__workspace-unbind"
+                        type="button"
+                        disabled=move || in_flight() || unbound()
+                        on:click=move |_| rooms.set_open_room_workspace(None)
+                    >
+                        "Unbind"
+                    </button>
+                </div>
+            })}
+            <span class="rooms-workspace__workspace-help">
+                "The folder is resolved on the machine running the daemon, not in \
+                 this browser. It must be an absolute path that already exists there."
+            </span>
+            {move || rooms.workspace_update_status.get().map(|status| view! {
+                <div class="rooms-workspace__workspace-error" role="alert">
+                    {status.message()}
+                </div>
+            })}
+        </div>
     }
 }
 
@@ -1269,6 +1371,55 @@ fn participant_removable(participant_id: &str, identity_id: &str) -> bool {
     participant_id != identity_id
 }
 
+/// What the members rail says about ONE agent row's ownership — see
+/// [`agent_ownership`] for how it is decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AgentOwnership {
+    /// A worker owns this agent. `owner` is their roster display name where the
+    /// roster still carries them and their raw participant id otherwise, which
+    /// is the only name a room can give for a worker who has left.
+    Owned { owner: String, present: bool },
+    /// No ownership row names this agent: nobody claimed it, or it was claimed
+    /// on a daemon that predates `agent_owners` and the room never recorded it.
+    /// The rail says so rather than saying nothing, because an agent with no
+    /// badge is indistinguishable from one whose badge simply did not render.
+    Unclaimed,
+}
+
+/// Map one Agent roster row to its ownership. Both lists are the Local roster's
+/// own: `owners` keys on `RoomParticipant::id` (the daemon joins the ownership
+/// row to `participants` on exactly that column), so this is a lookup in one
+/// namespace and never a guess across two.
+///
+/// `present` is the daemon's `owner_present` NARROWED by the roster the reader
+/// is looking at. The daemon computes the flag as "is `owner_id` still on this
+/// roster" at hydration; the roster then moves under the surface — a join,
+/// leave or remove replaces `Room::participants` from a route that carries no
+/// `agent_owners` at all — so a worker who left after hydration is gone from
+/// the rail while their flag beside them is one read stale. Requiring both
+/// keeps the rail self-consistent: no row is ever badged as a present owner
+/// while the rail does not show them. The other direction is left alone —
+/// a daemon that says absent is believed, because a same-id row appearing
+/// later is not evidence the original binding survived.
+fn agent_ownership(
+    owners: &[RoomAgentOwner],
+    participants: &[RoomParticipant],
+    agent_id: &str,
+) -> AgentOwnership {
+    let Some(row) = owners.iter().find(|owner| owner.agent_id == agent_id) else {
+        return AgentOwnership::Unclaimed;
+    };
+    let on_roster = participants
+        .iter()
+        .find(|participant| participant.id == row.owner_id);
+    AgentOwnership::Owned {
+        owner: on_roster
+            .map(|participant| participant.display_name.clone())
+            .unwrap_or_else(|| row.owner_id.clone()),
+        present: row.owner_present && on_roster.is_some(),
+    }
+}
+
 /// Whether a federated roster row is the caller's own membership. `None`
 /// (a local room, or a daemon that predates `self_member_id`) marks no row,
 /// so every row keeps today's remove control and bedrock's 403 stays the
@@ -2179,6 +2330,10 @@ pub fn RoomsWorkspace(
     let create_on_thread_reply = RwSignal::new(false);
     let create_on_build_failure = RwSignal::new(false);
     let create_on_ci_failure = RwSignal::new(false);
+    // The workspace folder the new room binds to, on the DAEMON's host. Empty
+    // leaves the room unbound — which is what every room this form made used
+    // to be, and an unbound room's agent turns all fail closed.
+    let create_workspace = RwSignal::new(String::new());
     let create_room = move || {
         // Prevent concurrent dispatch: if a create is already in flight,
         // ignore the keypress. The Effect clears pending_create when the
@@ -2198,6 +2353,7 @@ pub fn RoomsWorkspace(
                 create_on_build_failure.get_untracked(),
                 create_on_ci_failure.get_untracked(),
             ),
+            create_workspace_root(&create_workspace.get_untracked()),
         );
         if op_id == 0 {
             // Synchronous rejection — empty name or slug. Don't set
@@ -2236,6 +2392,9 @@ pub fn RoomsWorkspace(
                 create_on_thread_reply.set(false);
                 create_on_build_failure.set(false);
                 create_on_ci_failure.set(false);
+                // Same rule for the workspace field: it was part of this
+                // draft, and the next room chooses its own folder.
+                create_workspace.set(String::new());
                 pending_create.set(false);
             }
             CreateResolution::KeepDraft => {
@@ -3100,6 +3259,43 @@ pub fn RoomsWorkspace(
                             pending_create,
                         )}
                     </div>
+                    // The folder the room's agents will actually run in. Its
+                    // own field rather than a trigger row because it is not a
+                    // flag: without it every trigger above is armed to wake an
+                    // agent that then fails closed on the daemon with
+                    // `workspace_unavailable`. The path is resolved on the
+                    // DAEMON's host — the browser cannot see that filesystem,
+                    // so nothing here validates it and the helper text says
+                    // whose machine it means.
+                    <label class="rooms-workspace__create-workspace">
+                        <span class="rooms-workspace__create-workspace-label">
+                            "Workspace folder on the daemon host"
+                        </span>
+                        <input
+                            class="rooms-workspace__left-input"
+                            type="text"
+                            aria-label="Workspace folder on the daemon host"
+                            aria-describedby="rooms-create-workspace-help"
+                            placeholder="/absolute/path/to/project"
+                            prop:value=move || create_workspace.get()
+                            on:input=move |ev| create_workspace.set(event_target_value(&ev))
+                            on:keydown=move |ev| {
+                                if ev.key() == "Enter" {
+                                    ev.prevent_default();
+                                    create_room();
+                                }
+                            }
+                            disabled=move || pending_create.get()
+                        />
+                        <span
+                            class="rooms-workspace__create-workspace-help"
+                            id="rooms-create-workspace-help"
+                        >
+                            "An absolute path that must already exist on the machine \
+                             running the daemon. Leave it empty to create the room \
+                             unbound — its agents cannot run until a folder is bound."
+                        </span>
+                    </label>
                 </div>
 
                 // The other way into a room: a code someone else minted. A
@@ -4003,6 +4199,7 @@ pub fn RoomsWorkspace(
                                                     key=|p: &RoomParticipant| p.id.clone()
                                                     children=move |p: RoomParticipant| {
                                                         let pid = p.id.clone();
+                                                        let owner_row_id = p.id.clone();
                                                         let display = p.display_name.clone();
                                                         let kind = p.kind;
                                                         view! {
@@ -4084,6 +4281,53 @@ pub fn RoomsWorkspace(
                                                                                 </button>
                                                                             })}
                                                                         }.into_any()
+                                                                    }
+                                                                }}
+                                                                // Second line, on agent rows only: which
+                                                                // worker owns this agent, in the rail's own
+                                                                // presence-dot language, or "unclaimed" when
+                                                                // no ownership row names it. Reads BOTH
+                                                                // signals live — `agent_owners` arrives with
+                                                                // hydration while `open_room` is replaced by
+                                                                // every join/leave/remove, and the owner's
+                                                                // display name comes from the second.
+                                                                // Ungated on `closed`: a frozen room's
+                                                                // audit view is the one whose reader can no
+                                                                // longer ask anyone who owned what.
+                                                                {move || {
+                                                                    if kind != RoomParticipantKind::Agent {
+                                                                        return ().into_any();
+                                                                    }
+                                                                    let participants = rooms.open_room.get()
+                                                                        .map(|r| r.participants)
+                                                                        .unwrap_or_default();
+                                                                    match rooms.agent_owners.with(|owners| {
+                                                                        agent_ownership(owners, &participants, &owner_row_id)
+                                                                    }) {
+                                                                        AgentOwnership::Owned { owner, present } => {
+                                                                            let dot_label = if present {
+                                                                                format!("{owner} is in the room")
+                                                                            } else {
+                                                                                format!("{owner} has left the room")
+                                                                            };
+                                                                            view! {
+                                                                                <span class="rooms-workspace__member-owner">
+                                                                                    <span
+                                                                                        class="rooms-workspace__member-presence"
+                                                                                        class:rooms-workspace__member-presence--live=present
+                                                                                        class:rooms-workspace__member-presence--unavailable=!present
+                                                                                        role="img"
+                                                                                        aria-label=dot_label
+                                                                                    ></span>
+                                                                                    {format!("owned by {owner}")}
+                                                                                </span>
+                                                                            }.into_any()
+                                                                        }
+                                                                        AgentOwnership::Unclaimed => view! {
+                                                                            <span class="rooms-workspace__member-owner rooms-workspace__member-owner--unclaimed">
+                                                                                "unclaimed"
+                                                                            </span>
+                                                                        }.into_any(),
                                                                     }
                                                                 }}
                                                             </div>
@@ -4425,6 +4669,13 @@ pub fn RoomsWorkspace(
                                     </div>
                                 })
                             }}
+                            // Directly under the four triggers, because this is
+                            // the condition that makes all four inert: a room
+                            // with no bound workspace refuses every agent turn
+                            // before it starts, so a checked @mention row above
+                            // an unbound room promises a wake that cannot
+                            // happen.
+                            {workspace_binding_section(rooms, access.as_ref())}
                         </div>
                     }.into_any()
                 }}
@@ -6573,6 +6824,179 @@ mod tests {
         ];
 
         assert_eq!(roster_presence_count(&members), 2);
+    }
+
+    fn roster_row(id: &str, display_name: &str, kind: RoomParticipantKind) -> RoomParticipant {
+        RoomParticipant {
+            id: id.into(),
+            kind,
+            display_name: display_name.into(),
+        }
+    }
+
+    /// The four answers the rail can give an agent row, on one roster.
+    ///
+    /// The unclaimed arm is the one the slice exists for. Before it, an agent
+    /// nobody owns and an agent whose owner the surface never decoded rendered
+    /// identically — as a bare row — so a reader could not tell an unclaimed
+    /// worker-less agent from a rail that simply had nothing to say. It is a
+    /// distinct variant rather than an empty label for that reason.
+    #[test]
+    fn agent_ownership_names_the_owner_or_says_unclaimed() {
+        let participants = vec![
+            roster_row("alice", "Alice", RoomParticipantKind::Human),
+            roster_row("researcher", "Researcher", RoomParticipantKind::Agent),
+            roster_row("scribe", "Scribe", RoomParticipantKind::Agent),
+            roster_row("drifter", "Drifter", RoomParticipantKind::Agent),
+        ];
+        let owners = vec![
+            RoomAgentOwner {
+                agent_id: "researcher".into(),
+                owner_id: "alice".into(),
+                owner_present: true,
+            },
+            // The binding outlives the worker: `bob` is gone from the roster,
+            // and the daemon says so rather than dropping the row.
+            RoomAgentOwner {
+                agent_id: "scribe".into(),
+                owner_id: "bob".into(),
+                owner_present: false,
+            },
+        ];
+
+        assert_eq!(
+            agent_ownership(&owners, &participants, "researcher"),
+            AgentOwnership::Owned {
+                owner: "Alice".into(),
+                present: true,
+            },
+            "an owner still on the roster is named by their DISPLAY name — the \
+             participant id is a key, not something a reader recognises",
+        );
+        assert_eq!(
+            agent_ownership(&owners, &participants, "scribe"),
+            AgentOwnership::Owned {
+                owner: "bob".into(),
+                present: false,
+            },
+            "a departed owner keeps their row: the ownership happened. The raw \
+             id is the only name left once the roster no longer carries them",
+        );
+        assert_eq!(
+            agent_ownership(&owners, &participants, "drifter"),
+            AgentOwnership::Unclaimed,
+            "no ownership row names this agent, and the rail must SAY that \
+             rather than render nothing",
+        );
+        assert_eq!(
+            agent_ownership(&[], &participants, "researcher"),
+            AgentOwnership::Unclaimed,
+            "a daemon predating agent_owners sends an empty list, which reads \
+             as unclaimed for every agent — never as a present owner",
+        );
+    }
+
+    /// `owner_present` is the daemon's answer NARROWED by the roster in front
+    /// of the reader. The daemon computes it at hydration as "is `owner_id`
+    /// still on this roster"; the roster then moves under the surface, because
+    /// join/leave/remove replace `Room::participants` from routes that carry no
+    /// `agent_owners` at all. So a `true` beside a worker the rail no longer
+    /// shows is one read stale, and rendering it would badge a present owner
+    /// the reader cannot find in the rail three pixels above.
+    ///
+    /// The other direction is deliberately NOT symmetric: a daemon that says
+    /// absent stays absent even when a same-id row is back on the roster. A
+    /// participant id is reusable and a rejoin is not evidence the original
+    /// binding survived.
+    #[test]
+    fn a_present_flag_never_outlives_the_owner_leaving_the_rail() {
+        let owners = vec![RoomAgentOwner {
+            agent_id: "researcher".into(),
+            owner_id: "alice".into(),
+            owner_present: true,
+        }];
+        let with_alice = vec![
+            roster_row("alice", "Alice", RoomParticipantKind::Human),
+            roster_row("researcher", "Researcher", RoomParticipantKind::Agent),
+        ];
+        let without_alice = vec![roster_row(
+            "researcher",
+            "Researcher",
+            RoomParticipantKind::Agent,
+        )];
+
+        assert_eq!(
+            agent_ownership(&owners, &with_alice, "researcher"),
+            AgentOwnership::Owned {
+                owner: "Alice".into(),
+                present: true,
+            },
+        );
+        assert_eq!(
+            agent_ownership(&owners, &without_alice, "researcher"),
+            AgentOwnership::Owned {
+                owner: "alice".into(),
+                present: false,
+            },
+            "removed after hydration: the ownership stands, the presence does \
+             not, and the name falls back to the id the row carries",
+        );
+
+        let absent_flag = vec![RoomAgentOwner {
+            agent_id: "researcher".into(),
+            owner_id: "alice".into(),
+            owner_present: false,
+        }];
+        assert_eq!(
+            agent_ownership(&absent_flag, &with_alice, "researcher"),
+            AgentOwnership::Owned {
+                owner: "Alice".into(),
+                present: false,
+            },
+            "a rejoining id does not resurrect a presence the daemon denied",
+        );
+    }
+
+    /// Roster order is the daemon's (`ORDER BY p.position`) and the lookup must
+    /// not depend on it: two agents owned by two workers resolve to their own
+    /// owners whichever way round the rows arrive. A `find` on the wrong field
+    /// — or a positional zip of owners onto agents, which is the shortcut this
+    /// shape invites — passes with one row and swaps the owners here.
+    #[test]
+    fn two_owned_agents_do_not_borrow_each_others_owners() {
+        let participants = vec![
+            roster_row("alice", "Alice", RoomParticipantKind::Human),
+            roster_row("bob", "Bob", RoomParticipantKind::Human),
+            roster_row("researcher", "Researcher", RoomParticipantKind::Agent),
+            roster_row("scribe", "Scribe", RoomParticipantKind::Agent),
+        ];
+        let owners = vec![
+            RoomAgentOwner {
+                agent_id: "scribe".into(),
+                owner_id: "bob".into(),
+                owner_present: true,
+            },
+            RoomAgentOwner {
+                agent_id: "researcher".into(),
+                owner_id: "alice".into(),
+                owner_present: true,
+            },
+        ];
+
+        assert_eq!(
+            agent_ownership(&owners, &participants, "researcher"),
+            AgentOwnership::Owned {
+                owner: "Alice".into(),
+                present: true,
+            },
+        );
+        assert_eq!(
+            agent_ownership(&owners, &participants, "scribe"),
+            AgentOwnership::Owned {
+                owner: "Bob".into(),
+                present: true,
+            },
+        );
     }
 
     #[test]
