@@ -6388,3 +6388,46 @@ mark, mine sit above it at the density decisions and on the `<time>` line, so a
 rebase should be mechanical but is expected. Gate green: all seven frozen commands,
 1312 tests across 14 binaries, 0 failed.
 _________________________________________________________________________________ 22:35 cloud/surface-transcript-local-time
+
+time:      [23:59] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-transcript-local-time]
+type:      fix
+area:      frontend
+
+Review follow-up on the same branch, and the finding was right. Codex read the slice
+above and reported P2: `day_separator_label` and `is_grouped` took ONE offset and
+applied it to both messages, while the view derived that offset from the current row
+alone. A pair straddling a DST change has two. In New York on 2026-11-01, `04:30Z` is
+00:30 EDT and `07:30Z` is 02:30 EST — the same local morning under two different
+offsets — and resolving the pair with the later row's -300 maps the earlier one to
+Oct 31 and draws a day separator between two rows of one conversation. That
+contradicted this slice's own stated design, which reads the offset per instant
+precisely so a transcript spanning a DST change stays right; the pair comparison then
+threw that away. Both functions now take `offset_for: impl Fn(&str) -> i64` and ask
+it about each message's own timestamp, and the view passes the resolver down rather
+than a resolved value, so the compiler holds every call site.
+
+The test cost a wrong first attempt, and the reason is worth keeping. The reported
+New York example proves the separator half and CANNOT prove the grouping half: that
+fall-back sits at 02:00 local, the grouping window is five minutes, so a straddling
+pair is nowhere near a local midnight and both offsets name the same day — grouping
+reads correct there even when computed wrongly. The first version of the test
+asserted the flat offset would disagree and went red against correct code. Pinning
+`is_grouped` needs a zone that springs forward AT local midnight, Santiago's
+convention: `2026-09-06T03:58Z` is 23:58 on Sep 5 at -240 and `04:01Z` is 01:01 on
+Sep 6 at -180, genuinely two local days three minutes apart, which the current row's
+-180 collapses into one. `a_dst_change_between_two_rows_does_not_invent_a_day` covers
+both halves and keeps the wrong answer as an explicit assertion in each, so the test
+reds loudly if the resolver ever stops being per message. That asymmetry is written
+into the test rather than left for the next reader to rediscover.
+
+Measured, not argued: restoring the defect reds only the new test while
+`the_day_a_separator_marks_is_the_member_s_day` and `the_midnight_that_splits_a_
+group_is_the_member_s_own` both stay green, which is exactly why neither caught it.
+Tree restored. This entry is an append rather than a correction to the 22:35 entry
+above it, whose test count now reads one low: a non-append edit to this file lands in
+the same tail hunk the eight other open surface PRs are appending to, and union
+settles that by keeping both sides. Gate green: all seven frozen commands, 1313 tests
+across 14 binaries, 0 failed.
+_________________________________________________________________________________ 23:59 cloud/surface-transcript-local-time
