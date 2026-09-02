@@ -27,9 +27,10 @@ optional on the wire but load-bearing for the product: when set, a room-bound
 agent turn resolves its project and `cwd` from it; when absent, the daemon
 leaves the room unbound and **every agent turn in it fails closed with
 `workspace_unavailable`**. `CreateRoomBody` carries no participant identity,
-so creation does not add the current human to the roster. The surface follows
-a successful create with the ordinary participant join below before treating
-the creator as a room member.
+so creation does not add the current human to the roster. The surface opens a
+successful create, but the creator remains outside the roster until they
+explicitly select **Join room**, which invokes the ordinary participant join
+below.
 
 Status 2026-09-01: the surface's create form sends `key`, `name` and
 `trigger_policy` only (`crates/ocean-surface-ui/src/rooms.rs`, `CreateRoomBody`),
@@ -80,11 +81,13 @@ typed 400, `conflicting_transcript_cursors`). `GET /v1/rooms/persistent/{key}`
 still serves the room with its oldest page and 404s on a closed room; the
 snapshot serves closed rooms too, which is why hydration goes through it.
 
-After hydrating, the surface subscribes to the room-scoped SSE endpoint:
+After hydrating, the surface subscribes to the room-scoped SSE endpoint. Both
+cursor forms are omitted until hydration or a live frame has supplied a real
+message sequence; an empty room must not invent sequence zero:
 
 ```
-GET /v1/rooms/persistent/{key}/events?after_seq=<last_seq>
-Last-Event-ID: <last_known_sequence>
+GET /v1/rooms/persistent/{key}/events[?after_seq=<last_observed_seq>]
+[Last-Event-ID: <last_observed_seq>]
 ```
 
 Three frames arrive on this stream: `room_message` (the only frame with an

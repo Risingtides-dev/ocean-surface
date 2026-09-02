@@ -5846,3 +5846,15 @@ followed by the digest-bound authorization ceremony instead of the legacy bare
 participant POST. Docs only; no UI, daemon, deployment, or production state
 changed.
 _________________________________________________________________________________ 20:16 docs/rooms-product-contract-truth
+
+time:      [21:13] [09-01-26]
+agent:     [codex] [gpt-5]
+worktree:  docs/rooms-product-contract-truth
+type:      [bug report]
+area:      [review]
+
+Closed the second Codex review pass on the Rooms product contract. Creation now
+states that the human must explicitly select Join room, and an empty room omits
+both SSE cursor forms until a real message sequence exists. Docs only; no UI,
+daemon, deployment, or production state changed.
+_________________________________________________________________________________ 21:13 docs/rooms-product-contract-truth
