@@ -19,9 +19,33 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
-import { closeEntries, entryIdentity, main, openEntries, readEntries } from './check-ledger.mjs';
+import {
+  CODE_DIGEST,
+  CODE_REVISION,
+  closeEntries,
+  codeDigest,
+  entryIdentity,
+  main,
+  openEntries,
+  readEntries,
+} from './check-ledger.mjs';
+
+const run = promisify(execFile);
+const CHECKER = fileURLToPath(new URL('./check-ledger.mjs', import.meta.url));
+
+// The shapes the three copies of the checker have been known to take, so a
+// bump here is a bump on purpose. r1 is the pre-#103 guard both siblings
+// carried on 09-01-26; r2 is bedrock #124's stamped shape, which this copy
+// ported. A third copy in sync reads the same pair.
+const KNOWN_STAMPS = {
+  r1: 'de98a632f0df',
+  r2: '56adab136337',
+};
 
 const RULE = '_'.repeat(81);
 
@@ -266,4 +290,51 @@ test('main exits 2 when the check could not run at all', async () => {
 
 test('--help exits 0 and names the exit contract', async () => {
   assert.equal(await main(['--help']), 0);
+});
+
+// The port's claim, recomputed every run instead of asserted in a comment.
+// Any edit to an executable line moves the digest and reds this until both
+// constants are bumped deliberately; a bump to a value bedrock does not carry
+// is a fork, and the fork is then written down where a reader can see it.
+test('check-ledger.mjs carries a code stamp that still matches its own logic', async () => {
+  const source = await readFile(CHECKER, 'utf8');
+  const actual = codeDigest(source);
+  assert.equal(
+    actual,
+    CODE_DIGEST,
+    `scripts/check-ledger.mjs changed without a stamp bump: CODE_DIGEST reads \`${CODE_DIGEST}\`, its logic now digests ` +
+      `to \`${actual}\`. Bump both constants on purpose, and say in the ledger whether bedrock's copy moved with it.`,
+  );
+  assert.ok(
+    source.includes(`'${CODE_DIGEST}'`),
+    'CODE_DIGEST must sit in the file as a literal — comparing this copy against a sibling is a grep',
+  );
+  assert.equal(KNOWN_STAMPS[CODE_REVISION], CODE_DIGEST, `CODE_REVISION ${CODE_REVISION} is not a stamp this test knows`);
+});
+
+test('the digest ignores comments and the usage text, and nothing else', async () => {
+  const source = await readFile(CHECKER, 'utf8');
+  const commented = source.replace('\nimport path from', '\n// a new comment\nimport path from');
+  assert.equal(codeDigest(commented), CODE_DIGEST, 'a comment is not an edit');
+  const reworded = source.replace('check this repo\'s events.md', 'check the ledger');
+  assert.equal(codeDigest(reworded), CODE_DIGEST, 'the usage text is not an edit');
+  const edited = source.replace('const DEFAULT_RULE_WIDTH = 81;', 'const DEFAULT_RULE_WIDTH = 80;');
+  assert.notEqual(codeDigest(edited), CODE_DIGEST, 'a constant is');
+});
+
+// The bug #103 fixed, run for real: the loader realpaths import.meta.url and
+// the shell does not realpath argv[1], so a checker invoked through a symlink
+// used to compare unequal, run nothing, and exit 0 on an open ledger.
+test('the entry guard still runs the check when the script is invoked through a symlink', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'ledger-guard-'));
+  const link = path.join(dir, 'check-ledger-link.mjs');
+  await symlink(CHECKER, link);
+  const open = path.join(dir, 'open.md');
+  await writeFile(open, 'time: [10:00] [09-01-26]\nagent: [test]\n\nno rule here\n');
+  const result = await run(process.execPath, [link, open]).then(
+    (ok) => ({ code: 0, stdout: ok.stdout }),
+    (error) => ({ code: error.code, stdout: error.stdout }),
+  );
+  assert.equal(result.code, 1, `expected the open-ledger exit through the symlink, got ${result.code}: ${result.stdout}`);
+  assert.match(result.stdout, /1 of 1 entries are not closed/);
 });

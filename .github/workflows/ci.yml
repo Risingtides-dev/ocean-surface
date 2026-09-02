@@ -220,7 +220,8 @@ jobs:
   # That guard reads the merged text through the checker's own `openEntries`
   # rather than a private copy of the rule, so the two cannot drift apart on
   # what closes an entry. Node is pinned for the reason the ledger job pins it.
-  # scripts/check-ledger.test.mjs is absent on purpose: it runs in `ledger`,
+  # scripts/check-ledger.test.mjs and check-ledger-order.test.mjs are absent
+  # on purpose: they run in `ledger`,
   # next to the checker it proves.
   guards:
     name: script guards
@@ -353,3 +354,16 @@ jobs:
       # the fold.
       - name: The ledger still parses
         run: node scripts/check-ledger.mjs events.md
+
+      # The parse check reads a `time:` header only as far as the word, so five
+      # entries sat at the TOP of events.md newest-first for months while it
+      # called the file clean. This one reads the clock. Entries land in MERGE
+      # order, not clock order — two slices of one wave land whichever way
+      # their PRs merged — so the rule is a band, not a sort: an entry more
+      # than a day out of place (a prepend, a backdate) is red, a descent of
+      # hours is a ledger doing its job. Same exit codes as the parse check,
+      # and no `--fix` exists: moving an entry is a decision, made by hand.
+      - name: Test the ledger order checker
+        run: node --test scripts/check-ledger-order.test.mjs
+      - name: The ledger still grows at the end
+        run: node scripts/check-ledger-order.mjs events.md
