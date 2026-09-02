@@ -5802,3 +5802,67 @@ reds only the guard with the wasm32 clippy lane still green. Tree restored after
 each. Gate green: all seven frozen commands, host suite 1252 unit tests plus 61
 guards across 14 binaries.
 _________________________________________________________________________________ 20:39 loop/surface-load-older-affordance
+
+time:      [21:24] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/rooms-workspace-root-surface]
+type:      bug report
+area:      frontend
+
+A room this surface created could never wake an agent. The daemon has taken an
+optional `workspace_root` on `POST /v1/rooms/persistent` since OCEAN-260, and a
+room without one is unbound: `spawn_room_agent_turn` resolves a room-bound turn's
+project and `cwd` from that binding and refuses every turn `503
+workspace_unavailable` before the agent sees the message. `CreateRoomBody` carried
+`key`, `name` and `trigger_policy` only. So every room this product made was
+unbound, and every agent mention in one did nothing — with all four trigger rows
+rendering exactly as they do in a room that works.
+
+`Room` now decodes `workspace_root` (serde default, so an older daemon that omits
+it reads as no binding rather than failing the whole decode and blanking the
+panel). `CreateRoomBody` carries it, skipped when `None` because an ABSENT key is
+what the daemon reads as unbound and an always-present null would say the same
+thing while looking like a chosen value. The create form gains a text field with
+helper text naming whose filesystem the path is resolved on — the browser cannot
+see the daemon's, so nothing here pre-validates and the daemon's canonicalizing
+400 is the only verdict.
+
+Beside the trigger toggles, because that is the condition which makes all four
+inert: an unbound notice saying agents in this room cannot run until a folder is
+bound, the bound path when there is one, and Bind/Unbind. `RoomWorkspacePatchBody`
+sends `workspace_root` ALONE and deliberately does NOT skip `None` — the daemon
+leaves an absent field unchanged, so a skipped `None` would make every unbind a
+request that changes nothing and still answers 200. One field per body also means
+this PATCH and the policy PATCH cannot clobber each other's value. Generation-gated
+like the policy write; a reply landing after a room switch writes nothing.
+
+Two deviations from the brief, both because the code said otherwise. The bind
+control is gated on `trigger_policy_accepts_writes` — the same gate the rows above
+it take — and NOT on a room owner: this repo's contract is that owner authority is
+server-derived and never inferred from a participant projection, there is no
+server-derived room-owner signal at this site, and the daemon's PATCH applies no
+owner check of its own, so a local gate would be a lock on the surface only. And
+`OCEAN_ROOMS_PRODUCT.md` §1 had no dated status paragraph to replace: it was
+already written as intent, describing a create body the surface never sent. It now
+states what is true, including the fail-closed consequence and the PATCH path,
+which it never carried.
+
+Tests: serde wire-shape round-trips (create body sends the key only when set; the
+PATCH body's `None` IS an explicit null and the body is one field wide; `Room`
+decodes with and without), the `room_is_unbound` predicate reading blank the same
+as absent, `create_workspace_root` trimming, and `WorkspaceBindStatus` matching the
+daemon's frozen code EXACTLY rather than by substring — with an assertion that its
+sentence is not `room_repo.rs`'s `workspace_unavailable` wording, which is the
+COMPUTE lane saying Bedrock is unreachable and a different condition entirely. Plus
+a source guard, `tests/room_workspace_binding.rs`: nothing in the compiler holds a
+field's presence in a serialized body, so both wire structs, both control click
+sites, the create form's pass-through, and the notice's wording are pinned by scan
+over `view_source`.
+
+Gates: all seven frozen commands green — fmt --check, both clippy lanes with -D
+warnings (the wasm one caught a redundant closure on the input's `disabled`, fixed),
+both checks, the wasm test build, and the host suite at 1258 unit tests plus 65
+guards across 15 binaries. Paired with ocean-os `cloud/rooms-workspace-root-daemon`,
+which adds the PATCH field the bind control needs; create-time binding works against
+today's daemon without it.
+_________________________________________________________________________________ 21:24 cloud/rooms-workspace-root-surface
