@@ -156,9 +156,11 @@ export function readStamps(text) {
 // take the Sep 1s, and a search that kept the longer one would blame Sep 2 as
 // well as Sep 3. So each entry keeps every state that is not dominated: a
 // state is dropped only when another at the same entry is at least as long AND
-// no newer. Ties on length at the end go to the state whose newest stamp is
-// lowest, then to the later entry, so a prepended duplicate of an in-place
-// entry is the one reported.
+// no newer. Ties on length at the end go to the run that ends EARLIEST in
+// the file, then to the lower newest stamp: an append-only ledger's older
+// part is the trusted part, so between two equal runs the entries that came
+// later are the ones reported — a backdated append loses to the entry above
+// it, and a prepended copy loses to the body it copies.
 export function misplacedEntries(entries, tolerance = TOLERANCE_MINUTES) {
   const stamped = entries.filter((entry) => entry.stamp !== null);
   const n = stamped.length;
@@ -182,7 +184,7 @@ export function misplacedEntries(entries, tolerance = TOLERANCE_MINUTES) {
   let best = null;
   for (let i = 0; i < n; i++) {
     for (const s of states[i]) {
-      if (best === null || s.length > best.state.length || (s.length === best.state.length && (s.newest < best.state.newest || (s.newest === best.state.newest && i > best.i)))) {
+      if (best === null || s.length > best.state.length || (s.length === best.state.length && (i < best.i || (i === best.i && s.newest < best.state.newest)))) {
         best = { i, state: s };
       }
     }
