@@ -180,17 +180,66 @@ agent's participant id.
 
 ### Browsing Rooms
 
-The rooms panel is a flex column listing all rooms the daemon knows about:
+The rooms rail is a flex column listing rooms ONE PAGE at a time:
 
 ```
-GET /v1/rooms/persistent?limit=50&cursor=<opaque>
+GET /v1/rooms/persistent            -> { ok, rooms, read_states, attention, next_cursor, has_more }
+GET /v1/rooms/persistent?cursor=<room key>
 ```
 
-Each room card shows:
-- Room name and key
-- Participant count (human/agent breakdown)
-- Last activity timestamp
-- A join/open affordance
+The daemon has paged this route since OCEAN-250. It orders rooms
+`updated_at DESC, id ASC` and answers at most `limit` of them —
+the surface sends no `limit`, so it takes the store default of 100 —
+with `has_more` and a `next_cursor` that is the KEY of the last room on the
+page. Replaying that key as `?cursor=` returns the rooms strictly after it in
+that order. Both fields are decoded with serde defaults, so a daemon predating
+the route (which sends neither) reads as a single complete page and the rail
+behaves exactly as it did before.
+
+Each room row shows:
+- Room name, behind a `#` channel glyph
+- A compact unread count, or `@N` when the authenticated reader has unread
+  mentions, from the list's daemon-derived `attention` projection
+- Open-room selection state (`aria-selected`, roving tabindex across the rows)
+
+`attention` is sparse, ordered with and bounded to the returned room page. Each
+row carries `{room_id, latest_seq, read_seq, unread_count, mention_count}` and
+is derived by the daemon from its credential-bound local member plus durable
+transcript/read-cursor state. Surface does not parse message text to guess who
+was mentioned. Omission from a present projection is authoritative zero; an
+absent projection means an older daemon, where the rail falls back to
+`read_states` for a binary unread indicator and claims no mention knowledge.
+
+**The end of the loaded list carries a `Load more rooms` press.** It renders on
+the parked cursor and on nothing else: a rail already holding every room the
+daemon will address parks `None` and grows no control, so the row's presence is
+itself the statement that there are more rooms. The press fetches ONE page,
+appends the rooms the rail does not already list, and re-parks. Every press
+either adds rooms or removes the affordance — a page that adds nothing (which is
+what the daemon's fallback to page one produces when the cursor names a room
+that has since closed) ends the paging rather than re-offering itself.
+
+**Unread refresh polls one page, not every page.** The rail re-reads the list
+every 8 seconds to keep the unread dots honest. That poll issues exactly one
+request no matter how many pages are loaded: the daemon's order puts every room
+with new activity on the first page, so the first page is where unread changes
+are. On a rail that has paged, the fresh first page leads and the pages already
+loaded are kept behind it, minus any room the fresh page just promoted. The
+trade is that a room closed on the daemon while it sits below the fold stays on
+screen until an interactive refresh (opening the panel, creating a room,
+redeeming an invite) replaces the rail with a fresh first page.
+
+**The paging boundary is re-derived on every retaining poll, never replayed.** A
+cursor is a room KEY, and the daemon resolves its place in the order from that
+room's *current* `updated_at` — it looks the anchor row up per request. So a
+message arriving in the room the cursor names moves that room to the front of
+`updated_at DESC` and takes the boundary with it: a press replaying the old key
+would ask for the rooms behind the *newest* room, get back a page of rooms
+already on screen, and — since a page that adds nothing retires the affordance —
+strand every room past the real boundary until an interactive refresh. The rail's
+own last row is the boundary instead, and it survives exactly the event that
+moves the parked key: a room with new activity is by definition in the fresh
+first page, deduped out of the tail, and the row behind it becomes the last.
 
 `.rooms-panel__list` keeps `min-height: 0` with vertical overflow — long room
 lists scroll instead of pushing status/actions outside the viewport.

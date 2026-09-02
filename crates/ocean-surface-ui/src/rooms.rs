@@ -31,7 +31,7 @@
 //! than threading rooms state through the `Daemon` handle — so it never touches
 //! the live agent loop / session SSE code.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use futures_util::future::Either;
 use futures_util::StreamExt;
@@ -123,9 +123,9 @@ pub enum RoomParticipantKind {
 }
 
 impl RoomParticipantKind {
-    /// The author/roster chip mark — hand-drawn SVGs from `icons.rs`, same
-    /// stroke family as the rest of the surface (emoji glyphs are forbidden
-    /// in product UI; the 07-08 purge missed this path — QA-006).
+    /// The author/roster chip mark. Actor kinds use the surface's neutral SVG
+    /// family; system rows use a plain initial so product UI never represents
+    /// automation with a decorative sparkle.
     #[allow(dead_code)]
     fn icon(self) -> AnyView {
         match self {
@@ -133,7 +133,7 @@ impl RoomParticipantKind {
             RoomParticipantKind::Agent => view! { <crate::icons::Robot /> }.into_any(),
             RoomParticipantKind::Bot => view! { <crate::icons::Cog /> }.into_any(),
             RoomParticipantKind::Tool => view! { <crate::icons::Wrench /> }.into_any(),
-            RoomParticipantKind::System => view! { <crate::icons::Spark /> }.into_any(),
+            RoomParticipantKind::System => "S".into_any(),
         }
     }
 
@@ -279,6 +279,12 @@ pub struct RoomReadCursorProjection {
 pub struct RoomReadSummary {
     pub latest_seq: Option<u64>,
     pub read_seq: Option<u64>,
+    /// Daemon-derived unread count for this authenticated reader. `None`
+    /// means the daemon predates the additive attention projection.
+    pub unread_count: Option<u64>,
+    /// Daemon-derived unread mention count for this authenticated reader.
+    /// Never synthesized from transcript text on the client.
+    pub mention_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -438,6 +444,24 @@ struct RoomsListResponse {
     rooms: Vec<Room>,
     #[serde(default)]
     read_states: Vec<RoomReadStateWire>,
+    /// Sparse, page-bounded attention rows. `None` distinguishes an older
+    /// daemon from a current daemon authoritatively reporting no attention.
+    #[serde(default)]
+    attention: Option<Vec<RoomAttentionWire>>,
+    /// The room key to replay as `?cursor=` for the following page (OCEAN-250).
+    /// The daemon sends the key deliberately without `skip_serializing_if`, so
+    /// a single-page answer carries `"next_cursor": null` rather than omitting
+    /// it — but a daemon predating that route sends neither this nor
+    /// `has_more`, and `#[serde(default)]` is what keeps its body decoding
+    /// into a rail that simply never offers a second page.
+    #[serde(default)]
+    next_cursor: Option<String>,
+    /// Whether at least one room exists beyond this page. Defaults to `false`
+    /// for the same reason: silence from an older daemon must read as "this is
+    /// the whole list", which is exactly what the rail did before this field
+    /// was decoded at all.
+    #[serde(default)]
+    has_more: bool,
     #[serde(default)]
     error: Option<String>,
 }
@@ -449,6 +473,17 @@ struct RoomReadStateWire {
     latest_seq: Option<String>,
     #[serde(default)]
     read_seq: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct RoomAttentionWire {
+    room_id: String,
+    #[serde(default)]
+    latest_seq: Option<String>,
+    #[serde(default)]
+    read_seq: Option<String>,
+    unread_count: u64,
+    mention_count: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -803,6 +838,19 @@ pub struct Rooms {
     pub models: RwSignal<Vec<crate::daemon::ModelInfo>>,
     /// All persistent rooms (from `GET /v1/rooms/persistent`).
     pub list: RwSignal<Vec<Room>>,
+    /// Where the rail's NEXT page of rooms starts, or `None` when the rooms on
+    /// screen are every room the daemon will address from here (OCEAN-250).
+    /// The one condition the rail's "load more rooms" affordance renders on.
+    rooms_next_cursor: RwSignal<Option<String>>,
+    /// Whether a page-of-rooms press is still in flight, so the affordance can
+    /// say so and refuse a second one against a cursor the first has not moved.
+    rooms_more_in_flight: RwSignal<bool>,
+    /// Whether the rail holds rooms from beyond its first page. It is what the
+    /// 8-second unread poll reads to decide whether it may replace the list
+    /// outright: a rail that never paged is exactly one page and a fresh page
+    /// is the whole truth about it, while a paged rail would lose everything
+    /// below the fold on every tick.
+    rooms_paged_beyond_first: RwSignal<bool>,
     /// Whether the first `fetch_rooms` has resolved (success or failure). Starts
     /// false so the panel shows a loading placeholder instead of falsely
     /// asserting "No rooms yet" during the initial in-flight fetch.
@@ -814,6 +862,42 @@ pub struct Rooms {
     /// Monotonic ticket ensuring only the latest overlapping list request may
     /// publish list/loading/error state.
     list_request_ticket: RwSignal<u64>,
+    /// Monotonic count of SETTLED room-list fetches, bumped once per request
+    /// that was still current when it landed — success or failure, silent or
+    /// interactive. Sits beside its sibling `list_request_ticket` (one counts
+    /// requests out, one counts replies admitted) rather than at the end of
+    /// this struct, which is the anchor every other open PR appends at.
+    ///
+    /// This is the freshness `rooms_loaded` is not. That flag says "a fetch
+    /// has settled at some point ever", is never cleared, and survives a
+    /// workspace remount on this App-scope handle; `list` is replaced only on
+    /// success. So `rooms_loaded == true` is equally true of a list fetched
+    /// ten minutes ago and of an empty list left behind by a fetch that
+    /// failed. A reader that must not answer out of a stale list — the deep
+    /// link, which reports an unknown key out loud — records this counter and
+    /// waits for it to move.
+    pub list_settled: RwSignal<u64>,
+    /// A room key an `ocean://room/<key>` deep link asked the surface to open,
+    /// held until the Rooms workspace consumes it. It lives on this handle
+    /// rather than in the workspace because the deep-link listener is mounted
+    /// in `App`, above the workspace, and may fire before the workspace exists
+    /// at all — a cold launch from the OS. `None` once consumed; the workspace
+    /// clears it in the same pass that queues the open.
+    pub deep_link_room: RwSignal<Option<String>>,
+    /// Whether the Rooms workspace is actually ON SCREEN, mirrored from
+    /// `app.rs`'s `show_rooms`.
+    ///
+    /// Distinct from `open_key` on purpose, and the distinction is load
+    /// bearing: this handle is App-scope, so `open_key` and the room-scoped
+    /// tail both survive the workspace unmounting when the reader switches to
+    /// Direct messages. Anything asking "can the reader SEE this room" must
+    /// read this, not the open key.
+    pub workspace_visible: RwSignal<bool>,
+    /// Bumped to ask `app.rs` to reveal Rooms through its own reveal path —
+    /// the one that closes the competing surfaces. Set from places that are
+    /// below the reveal signals and cannot touch them directly, such as a
+    /// mention notification's click handler.
+    pub reveal_request: RwSignal<u64>,
     /// The currently selected room key, if any.
     pub open_key: RwSignal<Option<String>>,
     /// The open room's full record (roster + metadata).
@@ -1034,6 +1118,9 @@ enum RoomsFetchMode {
 struct RoomsListSuccess {
     rooms: Vec<Room>,
     read_summaries: HashMap<String, RoomReadSummary>,
+    /// The cursor this page named, already reduced by [`rooms_page_cursor`] —
+    /// `None` means the daemon said this page is the end of the list.
+    next_cursor: Option<String>,
 }
 
 impl Rooms {
@@ -1058,10 +1145,17 @@ impl Rooms {
             url: daemon.url,
             models: daemon.models,
             list: RwSignal::new(Vec::new()),
+            rooms_next_cursor: RwSignal::new(None),
+            rooms_more_in_flight: RwSignal::new(false),
+            rooms_paged_beyond_first: RwSignal::new(false),
             rooms_loaded: RwSignal::new(false),
             rooms_loading: RwSignal::new(false),
             rooms_error: RwSignal::new(None),
             list_request_ticket: RwSignal::new(0),
+            list_settled: RwSignal::new(0),
+            deep_link_room: RwSignal::new(None),
+            workspace_visible: RwSignal::new(true),
+            reveal_request: RwSignal::new(0),
             open_key: RwSignal::new(None),
             open_room: RwSignal::new(None),
             transcript: RwSignal::new(Vec::new()),
@@ -1247,40 +1341,55 @@ impl Rooms {
             self.rooms_error.set(None);
         }
         spawn_local(async move {
-            let get_url = format!("{base}/v1/rooms/persistent");
-            let result = match Request::get(&get_url).send().await {
-                Ok(resp) => match resp.json::<RoomsListResponse>().await {
-                    Ok(r) if r.ok => match read_summaries_from_wire(&r.read_states) {
-                        Ok(read_summaries) => Ok(RoomsListSuccess {
-                            rooms: r.rooms,
-                            read_summaries,
-                        }),
-                        Err(error) => Err(format!("rooms decode error: {error}")),
-                    },
-                    Ok(r) => Err(format!(
-                        "rooms list failed: {}",
-                        r.error.unwrap_or_else(|| "unknown error".into())
-                    )),
-                    Err(err) => Err(format!("rooms decode error: {err}")),
-                },
-                Err(err) => Err(format!("rooms fetch error: {err}")),
-            };
+            let get_url = rooms_list_url(&base, None);
+            let result = fetch_rooms_page(&get_url).await;
             let is_current =
                 list_request_is_current(ticket, me.list_request_ticket.get_untracked());
-            finish_rooms_fetch(&me.rooms_loaded, &me.rooms_loading, mode, is_current);
+            finish_rooms_fetch(
+                &me.rooms_loaded,
+                &me.rooms_loading,
+                &me.list_settled,
+                mode,
+                is_current,
+            );
             if !is_current {
                 return;
             }
             match result {
                 Ok(success) => {
-                    me.list.set(success.rooms.clone());
+                    // An INTERACTIVE read is a fresh start: it replaces the rail
+                    // with the daemon's first page and forgets where the last
+                    // paging session had got to. The 8-second SILENT poll is the
+                    // one that must not, because it reads ONE page and a paged
+                    // rail holds several — see `rooms_after_first_page`.
+                    let retain_paged_tail = matches!(mode, RoomsFetchMode::Silent)
+                        && me.rooms_paged_beyond_first.get_untracked();
+                    let rooms = rooms_after_first_page(
+                        &me.list.get_untracked(),
+                        success.rooms,
+                        retain_paged_tail,
+                    );
                     me.read_summaries.update(|current| {
-                        *current = merge_room_read_summaries(
-                            current,
-                            &success.rooms,
-                            &success.read_summaries,
-                        );
+                        *current =
+                            merge_room_read_summaries(current, &rooms, &success.read_summaries);
                     });
+                    // The rail's paging boundary, read off the rail itself.
+                    // Taken before `rooms` is handed to the signal.
+                    let rail_ends_at = rooms.last().map(|room| room.id.clone());
+                    me.list.set(rooms);
+                    if retain_paged_tail {
+                        // A poll that kept a paged tail keeps its POSITION in the
+                        // list, and re-derives the key that names it. Parking the
+                        // first page's cursor here would rewind paging every 8
+                        // seconds; replaying the old key is the opposite failure,
+                        // and `retained_tail_cursor` explains it.
+                        let parked = me.rooms_next_cursor.get_untracked();
+                        me.rooms_next_cursor
+                            .set(retained_tail_cursor(parked, rail_ends_at.as_deref()));
+                    } else {
+                        me.rooms_paged_beyond_first.set(false);
+                        me.rooms_next_cursor.set(success.next_cursor);
+                    }
                     me.rooms_error.set(None);
                 }
                 Err(error) => {
@@ -1290,6 +1399,86 @@ impl Rooms {
                     }
                 }
             }
+        });
+    }
+
+    /// Whether rooms exist that the rail does not list — the one condition the
+    /// left rail's "load more rooms" affordance renders on. Reactive: the first
+    /// list read publishes this signal a network round-trip after the panel
+    /// opens, so a view reading it untracked would have asked before the answer
+    /// existed.
+    pub(crate) fn more_rooms_available(&self) -> bool {
+        self.rooms_next_cursor.get().is_some()
+    }
+
+    /// Whether the operator's page-of-rooms press is still in flight, so the
+    /// affordance can say so and refuse a second one.
+    pub(crate) fn more_rooms_in_flight(&self) -> bool {
+        self.rooms_more_in_flight.get()
+    }
+
+    /// Fetch ONE more page of rooms from the parked cursor and append it.
+    ///
+    /// The request is the list read's own — same route, same decode — and the
+    /// only differences are that it carries `?cursor=` and that it grows the
+    /// rail rather than replacing it.
+    ///
+    /// Every press either adds a room or removes the affordance. That is what
+    /// [`rooms_next_page_cursor`] buys: the daemon falls back to the FIRST page
+    /// when the cursor names a room that has since closed, so a press can come
+    /// back holding nothing but rooms already on screen — and parking that
+    /// page's cursor would leave a control that is permanently pressable and
+    /// permanently inert. A press that adds nothing is instead the end of what
+    /// this cursor reaches, and an interactive refresh re-derives from page one.
+    pub(crate) fn load_more_rooms(&self) {
+        if self.rooms_more_in_flight.get_untracked() {
+            return;
+        }
+        let Some(cursor) = self.rooms_next_cursor.get_untracked() else {
+            return;
+        };
+        let base = self.base();
+        let me = *self;
+        self.rooms_more_in_flight.set(true);
+        spawn_local(async move {
+            let url = rooms_list_url(&base, Some(&cursor));
+            let result = fetch_rooms_page(&url).await;
+            // The page landed after an await, and an interactive refresh during
+            // one re-parks the rail on its own first-page cursor. Appending page
+            // N onto a rail that has gone back to page one would list rooms the
+            // operator's refresh deliberately dropped, so the read is discarded
+            // unless the rail is still parked exactly where this request read.
+            if me.rooms_next_cursor.get_untracked().as_deref() != Some(cursor.as_str()) {
+                me.rooms_more_in_flight.set(false);
+                return;
+            }
+            match result {
+                Ok(success) => {
+                    let previous = me.list.get_untracked();
+                    let rooms = append_rooms_page(&previous, success.rooms);
+                    let grew = rooms.len() > previous.len();
+                    me.read_summaries.update(|current| {
+                        *current =
+                            merge_room_read_summaries(current, &rooms, &success.read_summaries);
+                    });
+                    me.list.set(rooms);
+                    if grew {
+                        me.rooms_paged_beyond_first.set(true);
+                    }
+                    me.rooms_next_cursor
+                        .set(rooms_next_page_cursor(grew, success.next_cursor));
+                    me.rooms_error.set(None);
+                }
+                Err(error) => {
+                    // The cursor is left exactly where it was: the affordance
+                    // stays on screen and the press can simply be repeated.
+                    // Clearing it would turn one dropped request into rooms the
+                    // operator can no longer reach at all.
+                    me.status.set(error.clone());
+                    me.rooms_error.set(Some(error));
+                }
+            }
+            me.rooms_more_in_flight.set(false);
         });
     }
 
@@ -1481,6 +1670,27 @@ impl Rooms {
         }
     }
 
+    /// Record an `ocean://room/<key>` deep link. Deliberately NOT an
+    /// [`Rooms::open_room`] call: the key came from an untrusted URL and may
+    /// name a room this daemon does not have, and at launch the room list is
+    /// usually still in flight, so opening from here would either race the
+    /// list or open nothing with nothing said. The Rooms workspace validates
+    /// it against the fetched list and reports an unknown key.
+    ///
+    /// A refresh is kicked here because `rooms_loaded` is NOT freshness: it is
+    /// set by any settled fetch, successful or failed, and never cleared, so a
+    /// remounted workspace or a failed first load leaves a stale — or empty —
+    /// list looking authoritative. Answering a deep link out of that list
+    /// reports "no room named …" for a room that exists. The workspace waits
+    /// for [`Rooms::list_settled`] to advance past the value it recorded when
+    /// it queued the request, so the answer always comes from a list fetched
+    /// after the link arrived. Silent mode, so an in-flight fetch is not
+    /// duplicated — its settle advances the same counter.
+    pub fn request_deep_link_room(&self, key: String) {
+        self.deep_link_room.set(Some(key));
+        self.fetch_rooms_silent();
+    }
+
     /// Open a room: load its record + the first transcript page, bump the
     /// generation, and start the room-scoped SSE live tail (TASK-10/TASK-11).
     /// Hydration reads `/snapshot`, the route that answers a cursor, so the tail
@@ -1552,15 +1762,6 @@ impl Rooms {
             match result {
                 Ok((room, transcript, access, last_seq, closed, agent_owners)) => {
                     let resume_seq = snapshot_resume_seq(last_seq, &transcript);
-                    // Where the backward walk starts, read off the page's own
-                    // size rather than its `has_more`. A backward page is the
-                    // LAST `limit` rows that qualify, so a short one provably
-                    // reached the start of the log and a full one is the only
-                    // shape that can have rows behind it — which keeps the
-                    // decode arm above answering exactly what it always did.
-                    // The one case this costs is a room whose length is an
-                    // exact multiple of the window: it spends a single request
-                    // to be told there is nothing older.
                     let backfill_from =
                         hydration_backfill_start(&transcript, HYDRATION_TRANSCRIPT_LIMIT);
                     me.open_room.set(room);
@@ -2632,12 +2833,65 @@ impl Rooms {
                                 RoomMessageKind::ParticipantJoined
                                     | RoomMessageKind::ParticipantLeft
                             );
+                            // THE ONLY mention-notification site. This arm is
+                            // the live tail: hydration and the "load older"
+                            // backfill write the transcript by other paths and
+                            // deliberately do not come through here, because
+                            // history arriving is not someone talking to you
+                            // now. Decided before the push so the row is still
+                            // owned here, and fired only if the push actually
+                            // appended — a resumed tail can redeliver a seq
+                            // already on screen, and that must not ping twice.
+                            let reader_ids = me.reader_member_ids();
+                            let mention = mention_notification_is_due(
+                                &entry,
+                                &reader_ids,
+                                crate::app::window_focused(),
+                                me.workspace_visible.get_untracked(),
+                                &key,
+                                me.open_key.get_untracked().as_deref(),
+                            )
+                            .then(|| {
+                                (
+                                    me.room_display_name(&key),
+                                    mention_notification_body(&entry.author_id, &entry.body),
+                                )
+                            });
+                            let mut appended = false;
                             me.transcript.update(|t| {
                                 if t.iter().any(|m| m.seq == entry.seq) {
                                     return;
                                 }
+                                appended = true;
                                 t.push(entry);
                             });
+                            if let Some((title, body)) = mention.filter(|_| appended) {
+                                let click_key = key.clone();
+                                spawn_local(async move {
+                                    crate::host::notify_with_focus(&title, &body, move || {
+                                        // Focusing the window is not landing the
+                                        // reader on the room. `open_key` can
+                                        // still name this room while the Rooms
+                                        // workspace is unmounted behind Direct
+                                        // messages, in which case reopening is a
+                                        // no-op and the click would have done
+                                        // nothing visible at all. So ask for the
+                                        // reveal ALWAYS, and reopen only when the
+                                        // reader has since moved to another room.
+                                        // The reveal goes through `app.rs`, which
+                                        // owns the competing-surface closures
+                                        // (AGENTS.md 222-227); this signal cannot
+                                        // reach them from here.
+                                        me.reveal_request.update(|n| *n = n.wrapping_add(1));
+                                        if me.open_key.get_untracked().as_deref()
+                                            != Some(click_key.as_str())
+                                        {
+                                            me.open_room(click_key.clone());
+                                        }
+                                    })
+                                    .await;
+                                });
+                            }
                             update_open_summary_from_open_room(
                                 &me.read_summaries,
                                 Some(&key),
@@ -2645,6 +2899,9 @@ impl Rooms {
                                 me.access.get_untracked().as_ref(),
                                 me.open_read_cursor.get_untracked().as_ref(),
                             );
+                            if appended {
+                                increment_open_unread_attention(&me.read_summaries, &key);
+                            }
                             // Refresh the room record (roster) on join/leave frames
                             // so other clients see an accurate participant list.
                             if is_roster_change {
@@ -2688,6 +2945,48 @@ impl Rooms {
         });
     }
 
+    /// The reader's OWN member ids — the resolved local identity and, in a
+    /// federated room, the access projection's `self_member_id`. Handing this
+    /// set to the mention tokenizer asks precisely "was I named", rather than
+    /// "did anyone get named", which is what the roster set would answer.
+    /// Empty ids are dropped: an unresolved identity is not a member id, and
+    /// `@` followed by nothing must never match.
+    fn reader_member_ids(&self) -> HashSet<String> {
+        let mut ids = HashSet::new();
+        let identity = self.identity_id.get_untracked();
+        if !identity.is_empty() {
+            ids.insert(identity);
+        }
+        if let Some(self_member) = self
+            .access
+            .get_untracked()
+            .and_then(|access| access.self_member_id)
+        {
+            if !self_member.is_empty() {
+                ids.insert(self_member);
+            }
+        }
+        ids
+    }
+
+    /// A room's display name for a notification title, falling back to the key
+    /// so a title is never empty.
+    fn room_display_name(&self, key: &str) -> String {
+        self.open_room
+            .get_untracked()
+            .filter(|room| room.id == key)
+            .map(|room| room.name)
+            .or_else(|| {
+                self.list
+                    .get_untracked()
+                    .iter()
+                    .find(|room| room.id == key)
+                    .map(|room| room.name.clone())
+            })
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| key.to_string())
+    }
+
     pub fn mark_open_read_if_current(&self, candidate_read_seq: u64) {
         let Some(key) = self.open_key.get_untracked() else {
             return;
@@ -2700,6 +2999,8 @@ impl Rooms {
             .unwrap_or(RoomReadSummary {
                 latest_seq: None,
                 read_seq: None,
+                unread_count: None,
+                mention_count: None,
             });
         let durable_read_seq = self
             .open_read_cursor
@@ -2851,6 +3152,7 @@ fn accept_room_tail_frame(
 
 fn read_summaries_from_wire(
     read_states: &[RoomReadStateWire],
+    attention: Option<&[RoomAttentionWire]>,
 ) -> Result<HashMap<String, RoomReadSummary>, String> {
     let mut summaries = HashMap::with_capacity(read_states.len());
     for state in read_states {
@@ -2862,6 +3164,8 @@ fn read_summaries_from_wire(
                 RoomReadSummary {
                     latest_seq,
                     read_seq,
+                    unread_count: attention.map(|_| 0),
+                    mention_count: attention.map(|_| 0),
                 },
             )
             .is_some()
@@ -2869,7 +3173,197 @@ fn read_summaries_from_wire(
             return Err(format!("duplicate read state for room '{}'", state.room_id));
         }
     }
+    if let Some(attention) = attention {
+        let mut seen = HashSet::with_capacity(attention.len());
+        for row in attention {
+            if !seen.insert(row.room_id.as_str()) {
+                return Err(format!(
+                    "duplicate attention state for room '{}'",
+                    row.room_id
+                ));
+            }
+            if row.mention_count > row.unread_count {
+                return Err(format!(
+                    "mention count exceeds unread count for room '{}'",
+                    row.room_id
+                ));
+            }
+            let latest_seq = parse_optional_decimal_u64(row.latest_seq.as_deref())?;
+            let read_seq = parse_optional_decimal_u64(row.read_seq.as_deref())?;
+            let Some(summary) = summaries.get_mut(&row.room_id) else {
+                return Err(format!(
+                    "attention state references unknown room '{}'",
+                    row.room_id
+                ));
+            };
+            if summary.latest_seq != latest_seq || summary.read_seq != read_seq {
+                return Err(format!(
+                    "attention state disagrees with read state for room '{}'",
+                    row.room_id
+                ));
+            }
+            summary.unread_count = Some(row.unread_count);
+            summary.mention_count = Some(row.mention_count);
+        }
+    }
     Ok(summaries)
+}
+
+/// One page of `GET /v1/rooms/persistent`, decoded. Shared by the first-page
+/// read and the "load more rooms" press so the two can never drift on what a
+/// page means — the press differs from the poll only in the URL it is handed.
+async fn fetch_rooms_page(url: &str) -> Result<RoomsListSuccess, String> {
+    match Request::get(url).send().await {
+        Ok(resp) => match resp.json::<RoomsListResponse>().await {
+            Ok(r) if r.ok => match read_summaries_from_wire(&r.read_states, r.attention.as_deref())
+            {
+                Ok(read_summaries) => {
+                    let next_cursor = rooms_page_cursor(
+                        r.has_more,
+                        r.next_cursor.as_deref(),
+                        r.rooms.last().map(|room| room.id.as_str()),
+                    );
+                    Ok(RoomsListSuccess {
+                        rooms: r.rooms,
+                        read_summaries,
+                        next_cursor,
+                    })
+                }
+                Err(error) => Err(format!("rooms decode error: {error}")),
+            },
+            Ok(r) => Err(format!(
+                "rooms list failed: {}",
+                r.error.unwrap_or_else(|| "unknown error".into())
+            )),
+            Err(err) => Err(format!("rooms decode error: {err}")),
+        },
+        Err(err) => Err(format!("rooms fetch error: {err}")),
+    }
+}
+
+/// The room-list route, with the paging cursor as one query-component value.
+///
+/// A cursor is a room KEY, and a room key is operator-supplied text that has
+/// already survived one round trip through a JSON body — so it goes through the
+/// same [`encode`] every room key in this module's paths goes through, which
+/// percent-encodes everything outside RFC 3986's unreserved set and therefore
+/// cannot leak an `&` or a `=` into the query it is a value in.
+fn rooms_list_url(base: &str, cursor: Option<&str>) -> String {
+    match cursor {
+        Some(cursor) => format!("{base}/v1/rooms/persistent?cursor={}", encode(cursor)),
+        None => format!("{base}/v1/rooms/persistent"),
+    }
+}
+
+/// Where the rail's next page of rooms starts, or `None` when this page is the
+/// end of the list.
+///
+/// Two stop conditions and one fallback. `has_more` false is the daemon saying
+/// the list ran out, and it wins over any cursor beside it — a daemon that
+/// predates OCEAN-250 answers neither field, so `#[serde(default)]` gives
+/// `false` and such a rail offers no second page at all, which is precisely
+/// what it did before this function existed. `last_room_key` is the fallback
+/// for a `has_more` page naming no cursor: the daemon's cursor IS the key of
+/// the last room it served, so the page carries its own cursor in its rows and
+/// dropping the pair would strand every room behind it. An EMPTY `has_more`
+/// page has neither, and stops rather than replaying the cursor that produced
+/// it forever.
+fn rooms_page_cursor(
+    has_more: bool,
+    next_cursor: Option<&str>,
+    last_room_key: Option<&str>,
+) -> Option<String> {
+    if !has_more {
+        return None;
+    }
+    next_cursor
+        .map(str::trim)
+        .filter(|cursor| !cursor.is_empty())
+        .or(last_room_key)
+        .map(str::to_owned)
+}
+
+/// Where the NEXT press resumes after one that has already been merged.
+///
+/// [`rooms_page_cursor`]'s answer with one extra stop condition, and deriving
+/// it from that one is what stops the two drifting. `grew` is whether the page
+/// merged added a room the rail did not already list: the daemon falls back to
+/// its FIRST page when the cursor names a room that has since closed, so a
+/// press can answer with nothing but rooms already on screen, and parking that
+/// page's cursor would leave a control that is permanently pressable and
+/// permanently inert. There is no such thing here as a press that changes
+/// nothing — it either grows the rail or takes the affordance away.
+fn rooms_next_page_cursor(grew: bool, page_cursor: Option<String>) -> Option<String> {
+    if !grew {
+        return None;
+    }
+    page_cursor
+}
+
+/// Where a RETAINING poll leaves the rail's paging boundary: the position is
+/// kept, and the KEY that names it is re-derived from the rail's own last row.
+///
+/// A cursor is a room KEY, and the daemon resolves its place in the order from
+/// that room's CURRENT `updated_at` — it looks the anchor row up per request
+/// (`SELECT updated_at, id FROM rooms WHERE id = ?1`) and pages from wherever
+/// that row now sits. So the one thing a parked key cannot survive is a message
+/// arriving in the room it names: `updated_at DESC` puts that room at the FRONT,
+/// and a press replaying its key asks for the hundred rooms behind the newest
+/// one — every one of them already on screen. [`rooms_next_page_cursor`] then
+/// retires the affordance for a page that added nothing, and the rooms past the
+/// real boundary are unreachable until an interactive refresh. On a rail that
+/// polls every 8 seconds and keeps its key for the life of the paging session,
+/// that is not a race; it is the expected outcome of any activity in one room.
+///
+/// The rail's own last row is the boundary, and it is stable under exactly the
+/// event that moves the old one: a tail room with new activity is by definition
+/// in the fresh first page, deduped out of the tail by [`append_rooms_page`],
+/// and the row behind it becomes the last — which is where the loaded pages
+/// genuinely end.
+///
+/// `None` in, `None` out. A rail that had already reached the end of the list
+/// must not grow the affordance back merely because a poll ran.
+fn retained_tail_cursor(parked: Option<String>, last_listed_room: Option<&str>) -> Option<String> {
+    parked.and(last_listed_room.map(str::to_owned))
+}
+
+/// The rail after a FIRST-page read.
+///
+/// `retain_paged_tail` is set for exactly one caller: the 8-second unread poll
+/// on a rail that has been paged past its first page. That poll reads ONE page
+/// however many the operator has loaded, because the daemon orders the list
+/// `updated_at DESC` and every unread change moves its room to the top — into
+/// the page being read. Re-reading every loaded page every 8 seconds is the
+/// cost this refuses; the pages already loaded are kept behind the fresh one,
+/// minus any room the fresh page just moved to the top, so a room promoted out
+/// of the tail appears once rather than twice.
+///
+/// What the retained tail does NOT get is re-verification: a room closed on the
+/// daemon while it sits below the fold stays on screen until an interactive
+/// refresh drops it. That is the trade — one request per tick instead of one
+/// per loaded page — and it is bounded by the fact that a room the operator
+/// opens hydrates against the daemon anyway.
+fn rooms_after_first_page(
+    previous: &[Room],
+    page: Vec<Room>,
+    retain_paged_tail: bool,
+) -> Vec<Room> {
+    if !retain_paged_tail {
+        return page;
+    }
+    append_rooms_page(&page, previous.to_vec())
+}
+
+/// `current` plus every room in `page` it did not already list, in order.
+///
+/// The dedupe is not defensive tidiness: the daemon's keyset cursor falls back
+/// to the first page when the room it names has closed, so an unfiltered append
+/// would list the whole first page twice under the rooms it duplicates.
+fn append_rooms_page(current: &[Room], page: Vec<Room>) -> Vec<Room> {
+    let listed: HashSet<String> = current.iter().map(|room| room.id.clone()).collect();
+    let mut merged = current.to_vec();
+    merged.extend(page.into_iter().filter(|room| !listed.contains(&room.id)));
+    merged
 }
 
 fn parse_optional_decimal_u64(raw: Option<&str>) -> Result<Option<u64>, String> {
@@ -2979,10 +3473,37 @@ fn merged_room_read_summary(
         (None, None) => None,
         (Some(current), None) => Some(*current),
         (None, Some(incoming)) => Some(*incoming),
-        (Some(current), Some(incoming)) => Some(RoomReadSummary {
-            latest_seq: max_optional_u64(current.latest_seq, incoming.latest_seq),
-            read_seq: max_optional_u64(current.read_seq, incoming.read_seq),
-        }),
+        (Some(current), Some(incoming)) => {
+            let incoming_is_current =
+                optional_position_at_least(incoming.latest_seq, current.latest_seq)
+                    && optional_position_at_least(incoming.read_seq, current.read_seq);
+            Some(RoomReadSummary {
+                latest_seq: max_optional_u64(current.latest_seq, incoming.latest_seq),
+                read_seq: max_optional_u64(current.read_seq, incoming.read_seq),
+                // A current list page is an authoritative point-in-time
+                // attention projection, so zero replaces a previous positive
+                // count. A response that predates a live-tail or read-cursor
+                // advance cannot erase or resurrect that newer local state.
+                unread_count: if incoming_is_current {
+                    incoming.unread_count
+                } else {
+                    current.unread_count
+                },
+                mention_count: if incoming_is_current {
+                    incoming.mention_count
+                } else {
+                    current.mention_count
+                },
+            })
+        }
+    }
+}
+
+fn optional_position_at_least(incoming: Option<u64>, current: Option<u64>) -> bool {
+    match (incoming, current) {
+        (_, None) => true,
+        (Some(incoming), Some(current)) => incoming >= current,
+        (None, Some(_)) => false,
     }
 }
 
@@ -3029,16 +3550,36 @@ fn update_open_summary_from_open_room(
         existing.and_then(|summary| summary.read_seq),
     );
     summaries.update(|map| {
+        let latest_seq =
+            max_optional_u64(existing.and_then(|summary| summary.latest_seq), latest_seq);
+        let caught_up =
+            matches!((latest_seq, read_seq), (Some(latest), Some(read)) if read >= latest);
         map.insert(
             open_key.to_string(),
             RoomReadSummary {
-                latest_seq: max_optional_u64(
-                    existing.and_then(|summary| summary.latest_seq),
-                    latest_seq,
-                ),
+                latest_seq,
                 read_seq,
+                unread_count: existing
+                    .and_then(|summary| summary.unread_count)
+                    .map(|count| if caught_up { 0 } else { count }),
+                mention_count: existing
+                    .and_then(|summary| summary.mention_count)
+                    .map(|count| if caught_up { 0 } else { count }),
             },
         );
+    });
+}
+
+fn increment_open_unread_attention(
+    summaries: &RwSignal<HashMap<String, RoomReadSummary>>,
+    open_key: &str,
+) {
+    summaries.update(|map| {
+        if let Some(summary) = map.get_mut(open_key) {
+            if let Some(unread_count) = &mut summary.unread_count {
+                *unread_count = unread_count.saturating_add(1);
+            }
+        }
     });
 }
 
@@ -3046,10 +3587,57 @@ pub(crate) fn room_has_durable_unread(summary: Option<&RoomReadSummary>) -> bool
     let Some(summary) = summary else {
         return false;
     };
+    if let Some(unread_count) = summary.unread_count {
+        return unread_count > 0;
+    }
     match (summary.latest_seq, summary.read_seq) {
         (Some(latest), Some(read)) => latest > read,
         (Some(_), None) => true,
         _ => false,
+    }
+}
+
+pub(crate) fn room_has_durable_mention(summary: Option<&RoomReadSummary>) -> bool {
+    summary
+        .and_then(|summary| summary.mention_count)
+        .is_some_and(|count| count > 0)
+}
+
+pub(crate) fn room_attention_aria_label(summary: Option<&RoomReadSummary>) -> String {
+    let Some(summary) = summary else {
+        return "Unread messages".to_string();
+    };
+    match (summary.unread_count, summary.mention_count) {
+        (Some(unread), Some(mentions)) if mentions > 0 => {
+            format!("{mentions} unread mentions, {unread} unread messages")
+        }
+        (Some(unread), _) => format!("{unread} unread messages"),
+        _ => "Unread messages".to_string(),
+    }
+}
+
+pub(crate) fn room_attention_badge(summary: Option<&RoomReadSummary>) -> String {
+    let Some(summary) = summary else {
+        return String::new();
+    };
+    if room_has_durable_mention(Some(summary)) {
+        return format!(
+            "@{}",
+            compact_attention_count(summary.mention_count.unwrap_or_default())
+        );
+    }
+    summary
+        .unread_count
+        .filter(|count| *count > 0)
+        .map(compact_attention_count)
+        .unwrap_or_default()
+}
+
+fn compact_attention_count(count: u64) -> String {
+    if count > 99 {
+        "99+".to_string()
+    } else {
+        count.to_string()
     }
 }
 
@@ -3347,6 +3935,7 @@ fn should_skip_rooms_fetch(mode: RoomsFetchMode, rooms_loading: bool) -> bool {
 fn finish_rooms_fetch(
     rooms_loaded: &RwSignal<bool>,
     rooms_loading: &RwSignal<bool>,
+    list_settled: &RwSignal<u64>,
     mode: RoomsFetchMode,
     is_current: bool,
 ) {
@@ -3354,6 +3943,10 @@ fn finish_rooms_fetch(
         return;
     }
     rooms_loaded.set(true);
+    // Bumped for a failure too: a reader waiting on freshness must be released
+    // by a fetch that could not answer, or a daemon that is down leaves it
+    // pending forever. What the failure means is `rooms_error`'s job.
+    list_settled.update(|n| *n = n.wrapping_add(1));
     if matches!(mode, RoomsFetchMode::Interactive) {
         rooms_loading.set(false);
     }
@@ -3437,6 +4030,96 @@ pub(crate) fn room_request_is_current(
     expected_generation == current_generation && current_key == Some(expected_key)
 }
 
+// ── mention notifications ────────────────────────────────────────────────
+
+/// Should a room row raise an OS notification for the reader?
+///
+/// Every clause here is a reason, and three of them are about NOT notifying:
+///
+/// * `kind` — a join/leave/system row is not someone talking to you. Only a
+///   `Message` can mention.
+/// * `reader_ids.contains(author_id)` — your own message quoting your own id
+///   is the single easiest way to build a notifier that pings you constantly.
+/// * `window_focused` / `open_room` — a notification while you are looking
+///   straight at the message is noise. The second half of that disjunct is
+///   defensive: a room-scoped tail only ever carries the open room's rows, so
+///   a row whose room is not the open one is a frame from a retiring tail,
+///   and those are already dropped by the generation guard.
+///
+/// The mention test itself is `room_markdown::mentions_member`, the SAME
+/// tokenizer that paints the highlight, so what notifies is what shows.
+///
+/// What this function cannot express, and the CALL SITE must: only live-tail
+/// rows are ever passed to it. Hydration and the "load older" backfill both
+/// write the transcript through other paths, and neither calls this — history
+/// arriving is not someone talking to you now.
+///
+/// SCOPE, stated because the signature reads wider than the feature is.
+/// `row_room` and `open_room` can only ever be equal in production:
+/// `accept_room_tail_frame` drops any frame whose room is not the open one
+/// before it reaches this, and a room switch bumps the generation and retires
+/// the previous tail. Only the OPEN room has a tail at all, so **a mention in
+/// a room you do not have open does not notify**. That is a limit of where
+/// mentions can be observed, not a decision taken here. The daemon now exposes
+/// identity-scoped counts for other rooms through the bounded list `attention`
+/// projection; those counts drive the rail's `@N` badge, but deliberately do
+/// not invent notification author/body text. Standing up N SSE tails to obtain
+/// that text would contradict the Rooms Contract's one-room tail
+/// (AGENTS.md 243-250). The unequal-rooms arm remains the correct predicate if
+/// a future multiplexed live feed supplies actual rows.
+pub(crate) fn mention_notification_is_due(
+    entry: &RoomMessage,
+    reader_ids: &HashSet<String>,
+    window_focused: bool,
+    rooms_visible: bool,
+    row_room: &str,
+    open_room: Option<&str>,
+) -> bool {
+    matches!(entry.kind, RoomMessageKind::Message)
+        && !reader_ids.contains(&entry.author_id)
+        && !reader_is_looking_at(window_focused, rooms_visible, row_room, open_room)
+        && crate::room_markdown::mentions_member(&entry.body, reader_ids)
+}
+
+/// Is the reader actually looking at the room this row landed in?
+///
+/// All three conditions have to hold, and the third is the one a first draft
+/// of this got wrong. `open_key` is NOT "the room on screen": it lives on the
+/// App-scope `Rooms` handle and deliberately survives the Rooms workspace
+/// unmounting, and the room-scoped tail keeps running underneath. So when the
+/// reader switches to Direct messages, `show_rooms` goes false, the workspace
+/// is gone from the screen (`app.rs` `<Show when=show_rooms>`), and `open_key`
+/// still names the room — which read as "they are looking right at it" and
+/// suppressed every mention while the reader could not see one.
+fn reader_is_looking_at(
+    window_focused: bool,
+    rooms_visible: bool,
+    row_room: &str,
+    open_room: Option<&str>,
+) -> bool {
+    window_focused && rooms_visible && open_room == Some(row_room)
+}
+
+/// The notification body: who said it, then a one-line excerpt of what they
+/// said. Newlines and control characters are collapsed to spaces because a
+/// notification body is one line whatever the message was, and a long message
+/// is truncated on a character boundary — a byte slice would panic on the
+/// first non-ASCII body.
+pub(crate) fn mention_notification_body(author: &str, body: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    let flat = body
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace(|c: char| c.is_control(), " ");
+    if flat.chars().count() > MAX_CHARS {
+        let head: String = flat.chars().take(MAX_CHARS).collect();
+        format!("{author}: {}…", head.trim_end())
+    } else {
+        format!("{author}: {flat}")
+    }
+}
+
 /// Derive a url/key-safe slug from a room name (lowercase alnum + `-`).
 fn slugify(name: &str) -> String {
     let mut out = String::new();
@@ -3506,6 +4189,249 @@ fn identity_may_act(authoritative: bool, id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── mention notifications ────────────────────────────────────────────
+
+    fn ids(list: &[&str]) -> HashSet<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn row(kind: RoomMessageKind, author: &str, body: &str) -> RoomMessage {
+        RoomMessage {
+            seq: 7,
+            author_id: author.into(),
+            author_kind: RoomParticipantKind::Human,
+            kind,
+            body: body.into(),
+            created_at: String::new(),
+            federated: None,
+            thread_parent_seq: None,
+            attachment_id: None,
+        }
+    }
+
+    /// The whole notify/do-not-notify table. Each `false` row is a way a
+    /// mention notifier becomes noise and gets muted by its reader.
+    #[test]
+    fn a_mention_notification_is_due_only_when_every_reason_holds() {
+        let me = ids(&["bob"]);
+        let mention = row(RoomMessageKind::Message, "carol", "hey @bob look");
+
+        // Off-focus, someone else, a real mention, the open room: notify.
+        assert!(mention_notification_is_due(
+            &mention,
+            &me,
+            false,
+            true,
+            "team",
+            Some("team")
+        ));
+
+        // Looking straight at it.
+        assert!(!mention_notification_is_due(
+            &mention,
+            &me,
+            true,
+            true,
+            "team",
+            Some("team")
+        ));
+
+        // Focused, but at a DIFFERENT room: you are not looking at this
+        // message, so it notifies. The two conditions are a disjunction.
+        assert!(mention_notification_is_due(
+            &mention,
+            &me,
+            true,
+            true,
+            "team",
+            Some("other")
+        ));
+
+        // Your own message quoting your own id.
+        assert!(!mention_notification_is_due(
+            &row(RoomMessageKind::Message, "bob", "note to @bob"),
+            &me,
+            false,
+            true,
+            "team",
+            Some("team"),
+        ));
+
+        // Nobody named you.
+        assert!(!mention_notification_is_due(
+            &row(RoomMessageKind::Message, "carol", "hey @carol"),
+            &me,
+            false,
+            true,
+            "team",
+            Some("team"),
+        ));
+
+        // A join/leave/system row cannot mention, whatever it says.
+        for kind in [
+            RoomMessageKind::ParticipantJoined,
+            RoomMessageKind::ParticipantLeft,
+            RoomMessageKind::System,
+        ] {
+            assert!(
+                !mention_notification_is_due(
+                    &row(kind, "carol", "hey @bob"),
+                    &me,
+                    false,
+                    true,
+                    "team",
+                    Some("team"),
+                ),
+                "{kind:?} is not someone talking to you",
+            );
+        }
+
+        // An unresolved reader owns no ids and is named by nothing.
+        assert!(!mention_notification_is_due(
+            &mention,
+            &ids(&[]),
+            false,
+            true,
+            "team",
+            Some("team")
+        ));
+    }
+
+    /// The regression the visibility parameter exists for. `open_key` is not
+    /// "the room on screen": it lives on the App-scope handle and survives the
+    /// Rooms workspace unmounting, and the room-scoped tail keeps running
+    /// underneath. A reader who switched to Direct messages is focused, has
+    /// this room still "open", and CANNOT SEE the message — suppressing there
+    /// muted every mention for exactly the reader who needed one.
+    #[test]
+    fn a_hidden_rooms_workspace_still_notifies_the_focused_reader() {
+        let me = ids(&["bob"]);
+        let mention = row(RoomMessageKind::Message, "carol", "@bob ping");
+        assert!(mention_notification_is_due(
+            &mention,
+            &me,
+            true,
+            false,
+            "team",
+            Some("team")
+        ));
+        // Suppression survives only with all three: focused, Rooms on screen,
+        // and this room the open one.
+        assert!(!mention_notification_is_due(
+            &mention,
+            &me,
+            true,
+            true,
+            "team",
+            Some("team")
+        ));
+    }
+
+    /// "The reader is looking at this room" is a conjunction of three facts,
+    /// and dropping any one of them means they are not.
+    #[test]
+    fn looking_at_a_room_needs_focus_and_visibility_and_that_room() {
+        assert!(reader_is_looking_at(true, true, "team", Some("team")));
+        assert!(!reader_is_looking_at(false, true, "team", Some("team")));
+        assert!(!reader_is_looking_at(true, false, "team", Some("team")));
+        assert!(!reader_is_looking_at(true, true, "team", Some("other")));
+        assert!(!reader_is_looking_at(true, true, "team", None));
+    }
+
+    /// An unfocused window notifies, full stop — suppression needs all three
+    /// facts, so losing focus is on its own enough.
+    ///
+    /// The `Some("other")` and `None` rows here are NOT a claim that a mention
+    /// in another room notifies. It cannot: only the open room has a tail, so
+    /// the call site can never hand this function unequal rooms (see the SCOPE
+    /// note on `mention_notification_is_due`). They pin the predicate's own
+    /// totality, nothing about the shipped feature.
+    #[test]
+    fn an_unfocused_window_notifies_whatever_else_is_true() {
+        let me = ids(&["bob"]);
+        let mention = row(RoomMessageKind::Message, "carol", "@bob ping");
+        assert!(mention_notification_is_due(
+            &mention,
+            &me,
+            false,
+            true,
+            "team",
+            Some("team")
+        ));
+        assert!(mention_notification_is_due(
+            &mention,
+            &me,
+            false,
+            false,
+            "team",
+            Some("team")
+        ));
+        assert!(mention_notification_is_due(
+            &mention,
+            &me,
+            false,
+            true,
+            "team",
+            Some("other")
+        ));
+        assert!(mention_notification_is_due(
+            &mention, &me, false, true, "team", None
+        ));
+    }
+
+    /// The federated `self_member_id` counts as much as the local identity.
+    #[test]
+    fn either_of_the_readers_own_ids_is_enough_to_be_named() {
+        let me = ids(&["bob", "member-7"]);
+        for body in ["@bob ping", "@member-7 ping"] {
+            assert!(mention_notification_is_due(
+                &row(RoomMessageKind::Message, "carol", body),
+                &me,
+                false,
+                true,
+                "team",
+                Some("team"),
+            ));
+        }
+        // And the author check reads the same set, so neither id can ping you.
+        for author in ["bob", "member-7"] {
+            assert!(!mention_notification_is_due(
+                &row(RoomMessageKind::Message, author, "@bob @member-7"),
+                &me,
+                false,
+                true,
+                "team",
+                Some("team"),
+            ));
+        }
+    }
+
+    #[test]
+    fn the_notification_body_is_one_line_and_names_the_author() {
+        assert_eq!(
+            mention_notification_body("carol", "hey @bob look"),
+            "carol: hey @bob look",
+        );
+        // Newlines and runs of whitespace collapse: a notification body is one
+        // line whatever the message was.
+        assert_eq!(
+            mention_notification_body("carol", "line one\nline   two\t"),
+            "carol: line one line two",
+        );
+    }
+
+    /// A long body truncates on a CHARACTER boundary. A byte slice here would
+    /// panic on the first message written in anything but ASCII.
+    #[test]
+    fn a_long_body_truncates_without_splitting_a_character() {
+        let long = "é".repeat(400);
+        let out = mention_notification_body("carol", &long);
+        assert!(out.starts_with("carol: é"));
+        assert!(out.ends_with('…'));
+        // 120 excerpt characters, plus the ellipsis, plus "carol: ".
+        assert_eq!(out.chars().count(), "carol: ".len() + 120 + 1);
+    }
 
     #[test]
     fn acting_requires_the_daemon_to_have_answered_not_just_a_stored_id() {
@@ -4626,16 +5552,38 @@ mod tests {
     }
 
     /// A pre-#436 daemon ignores `before_seq` and answers a FORWARD page: the
-    /// oldest rows in the room, `prev_seq` absent, `has_more` meaning newer rows.
-    /// It must decode, and the walk it seeds must terminate rather than spin.
+    /// oldest rows in the room, `prev_seq` absent, `has_more` meaning NEWER rows
+    /// exist. Its body must decode, and the walk it seeds must terminate rather
+    /// than spin.
+    ///
+    /// What terminates it is the PAGE CAP, and nothing else. Such a daemon
+    /// answers every request the walk makes with that same forward page, so
+    /// `prev_seq` is never there to fall back from, `page_reached_back_to` is
+    /// the same row every time, and the replayed cursor cannot fall — the one
+    /// property [`backfill_walks_older_and_is_bounded_by_the_same_page_cap`]
+    /// relies on to bound the walk against a modern daemon is exactly what a
+    /// legacy one does not give it. `MAX_TRANSCRIPT_CATCHUP_PAGES` is what
+    /// stands between this and an endless loop, which is why the bound belongs
+    /// on the walk and not only on the daemon's word.
+    ///
+    /// The window is scaled down to keep the fixture readable; nothing here
+    /// turns on its size, only on the page being FULL, which is the shape
+    /// [`hydration_backfill_start`] reads as "there may be rows behind this".
     #[test]
     fn a_daemon_without_backward_paging_still_decodes_and_still_terminates() {
+        const WINDOW: usize = 4;
         let legacy: RoomSnapshotResponse = serde_json::from_value(serde_json::json!({
             "ok": true,
             "room": null,
-            "transcript": [],
+            "transcript": (0..WINDOW as u64).map(|seq| serde_json::json!({
+                "seq": seq,
+                "author_id": "member-1",
+                "author_kind": "human",
+                "kind": "message",
+                "body": format!("message {seq}"),
+            })).collect::<Vec<_>>(),
             "last_seq": 1000,
-            "next_seq": 1000,
+            "next_seq": WINDOW,
             "has_more": true,
             "access": { "state": "local" }
         }))
@@ -4645,19 +5593,53 @@ mod tests {
             "the field is additive and such a daemon omits it",
         );
 
-        // Such a daemon paints rows 0..window, so the walk seeds at row 0 and
-        // asks `before_seq=0` — which is the daemon's own terminal empty page,
-        // since nothing precedes the first message. One request, then stop.
+        // The walk seeds at the oldest row painted. On a forward page that is
+        // row 0 — the one row `before_seq` exclusivity guarantees no request
+        // can ever reach behind.
         assert_eq!(
-            transcript_backfill_cursor(1, false, None, None),
-            None,
-            "the empty page that request gets back ends the walk",
+            hydration_backfill_start(&legacy.transcript, WINDOW),
+            Some(0),
+            "a page filled to the window seeds a walk whatever direction the \
+             daemon actually served it in",
         );
-        // And the fallback cannot keep a walk alive off a page naming no cursor
-        // once the daemon says the direction is exhausted.
+
+        // And every request that walk makes is answered with that same page.
+        let mut cursor = 0u64;
+        let mut pages_read = 0usize;
+        let mut requested = Vec::new();
+        loop {
+            requested.push(room_snapshot_tail_url(
+                "",
+                "room-1",
+                cursor,
+                BACKFILL_TRANSCRIPT_PAGE_LIMIT,
+            ));
+            pages_read += 1;
+            let Some(next) = transcript_backfill_cursor(
+                pages_read,
+                legacy.has_more,
+                legacy.prev_seq,
+                first_transcript_seq(&legacy.transcript),
+            ) else {
+                break;
+            };
+            assert_eq!(
+                next, cursor,
+                "the cursor cannot fall: there is no `prev_seq`, and the \
+                 fallback is the same row on every identical page",
+            );
+            cursor = next;
+        }
         assert_eq!(
-            transcript_backfill_cursor(1, false, Some(400), Some(400)),
-            None
+            requested.len(),
+            MAX_TRANSCRIPT_CATCHUP_PAGES,
+            "the cap is the only stop condition such a daemon leaves standing",
+        );
+        assert!(
+            requested
+                .iter()
+                .all(|url| url.ends_with("/snapshot?before_seq=0&limit=200")),
+            "and every one of them asks for the same page, got {requested:?}",
         );
     }
 
@@ -5256,7 +6238,7 @@ mod tests {
                 read_seq: Some("4".into()),
             },
         ];
-        assert!(read_summaries_from_wire(&duplicate).is_err());
+        assert!(read_summaries_from_wire(&duplicate, None).is_err());
     }
 
     #[test]
@@ -5266,7 +6248,86 @@ mod tests {
             latest_seq: Some("oops".into()),
             read_seq: Some("1".into()),
         }];
-        assert!(read_summaries_from_wire(&malformed).is_err());
+        assert!(read_summaries_from_wire(&malformed, None).is_err());
+    }
+
+    #[test]
+    fn attention_projection_is_authoritative_sparse_and_identity_safe() {
+        let read_states = vec![
+            RoomReadStateWire {
+                room_id: "room-1".into(),
+                latest_seq: Some("9".into()),
+                read_seq: Some("4".into()),
+            },
+            RoomReadStateWire {
+                room_id: "room-2".into(),
+                latest_seq: Some("3".into()),
+                read_seq: Some("3".into()),
+            },
+        ];
+        let attention = vec![RoomAttentionWire {
+            room_id: "room-1".into(),
+            latest_seq: Some("9".into()),
+            read_seq: Some("4".into()),
+            unread_count: 5,
+            mention_count: 2,
+        }];
+
+        let summaries = read_summaries_from_wire(&read_states, Some(&attention)).unwrap();
+        assert_eq!(
+            summaries.get("room-1"),
+            Some(&RoomReadSummary {
+                latest_seq: Some(9),
+                read_seq: Some(4),
+                unread_count: Some(5),
+                mention_count: Some(2),
+            })
+        );
+        assert_eq!(
+            summaries.get("room-2"),
+            Some(&RoomReadSummary {
+                latest_seq: Some(3),
+                read_seq: Some(3),
+                unread_count: Some(0),
+                mention_count: Some(0),
+            }),
+            "omission from a present sparse projection is authoritative zero",
+        );
+
+        let legacy = read_summaries_from_wire(&read_states, None).unwrap();
+        assert_eq!(legacy["room-1"].unread_count, None);
+        assert_eq!(legacy["room-1"].mention_count, None);
+    }
+
+    #[test]
+    fn attention_projection_rejects_duplicates_unknown_rooms_and_disagreement() {
+        let read_states = vec![RoomReadStateWire {
+            room_id: "room-1".into(),
+            latest_seq: Some("9".into()),
+            read_seq: Some("4".into()),
+        }];
+        let valid = RoomAttentionWire {
+            room_id: "room-1".into(),
+            latest_seq: Some("9".into()),
+            read_seq: Some("4".into()),
+            unread_count: 5,
+            mention_count: 2,
+        };
+        assert!(
+            read_summaries_from_wire(&read_states, Some(&[valid.clone(), valid.clone()])).is_err()
+        );
+
+        let mut unknown = valid.clone();
+        unknown.room_id = "room-2".into();
+        assert!(read_summaries_from_wire(&read_states, Some(&[unknown])).is_err());
+
+        let mut disagreement = valid.clone();
+        disagreement.latest_seq = Some("10".into());
+        assert!(read_summaries_from_wire(&read_states, Some(&[disagreement])).is_err());
+
+        let mut impossible = valid;
+        impossible.mention_count = 6;
+        assert!(read_summaries_from_wire(&read_states, Some(&[impossible])).is_err());
     }
 
     #[test]
@@ -5419,6 +6480,8 @@ mod tests {
             RoomReadSummary {
                 latest_seq: Some(3),
                 read_seq: Some(2),
+                unread_count: None,
+                mention_count: None,
             },
         )]));
         let transcript = vec![message(7)];
@@ -5437,8 +6500,42 @@ mod tests {
             Some(&RoomReadSummary {
                 latest_seq: Some(7),
                 read_seq: Some(2),
+                unread_count: None,
+                mention_count: None,
             })
         );
+    }
+
+    #[test]
+    fn live_tail_advance_surfaces_unread_before_the_next_attention_poll() {
+        let summaries = RwSignal::new(HashMap::from([(
+            "room-1".to_string(),
+            RoomReadSummary {
+                latest_seq: Some(3),
+                read_seq: Some(3),
+                unread_count: Some(0),
+                mention_count: Some(0),
+            },
+        )]));
+        let cursor = RoomReadCursorProjection {
+            read_seq: Some(3),
+            mirrored_upstream_read_seq: None,
+        };
+
+        update_open_summary_from_open_room(
+            &summaries,
+            Some("room-1"),
+            &[message(4)],
+            Some(&access_projection(RoomAccessState::Local)),
+            Some(&cursor),
+        );
+        increment_open_unread_attention(&summaries, "room-1");
+
+        let summary = summaries.get_untracked()["room-1"];
+        assert_eq!(summary.latest_seq, Some(4));
+        assert_eq!(summary.unread_count, Some(1));
+        assert!(room_has_durable_unread(Some(&summary)));
+        assert_eq!(summary.mention_count, Some(0));
     }
 
     #[test]
@@ -5485,6 +6582,8 @@ mod tests {
             RoomReadSummary {
                 latest_seq: Some(100),
                 read_seq: Some(100),
+                unread_count: Some(0),
+                mention_count: Some(0),
             },
         )]));
         update_open_summary_from_open_room(
@@ -5499,6 +6598,8 @@ mod tests {
             Some(&RoomReadSummary {
                 latest_seq: Some(100),
                 read_seq: Some(100),
+                unread_count: Some(0),
+                mention_count: Some(0),
             })
         );
         assert!(!room_has_durable_unread(
@@ -5535,6 +6636,8 @@ mod tests {
             Some(&RoomReadSummary {
                 latest_seq: Some(110),
                 read_seq: Some(110),
+                unread_count: Some(0),
+                mention_count: Some(0),
             })
         );
         assert!(!room_has_durable_unread(
@@ -5582,13 +6685,15 @@ mod tests {
     }
 
     #[test]
-    fn merge_room_read_summaries_is_monotonic_and_removes_deleted_rooms() {
+    fn merge_room_read_summaries_is_monotonic_and_rejects_stale_attention() {
         let current = HashMap::from([
             (
                 "room-1".to_string(),
                 RoomReadSummary {
                     latest_seq: Some(9),
                     read_seq: Some(4),
+                    unread_count: Some(5),
+                    mention_count: Some(2),
                 },
             ),
             (
@@ -5596,6 +6701,8 @@ mod tests {
                 RoomReadSummary {
                     latest_seq: Some(8),
                     read_seq: Some(6),
+                    unread_count: Some(2),
+                    mention_count: Some(0),
                 },
             ),
         ]);
@@ -5604,6 +6711,8 @@ mod tests {
             RoomReadSummary {
                 latest_seq: Some(5),
                 read_seq: None,
+                unread_count: Some(3),
+                mention_count: Some(1),
             },
         )]);
         let rooms = vec![Room {
@@ -5623,9 +6732,309 @@ mod tests {
             Some(&RoomReadSummary {
                 latest_seq: Some(9),
                 read_seq: Some(4),
+                unread_count: Some(5),
+                mention_count: Some(2),
             })
         );
         assert!(!merged.contains_key("room-2"));
+
+        let current_page = HashMap::from([(
+            "room-1".to_string(),
+            RoomReadSummary {
+                latest_seq: Some(9),
+                read_seq: Some(9),
+                unread_count: Some(0),
+                mention_count: Some(0),
+            },
+        )]);
+        let cleared = merge_room_read_summaries(&merged, &rooms, &current_page);
+        assert_eq!(cleared["room-1"].read_seq, Some(9));
+        assert_eq!(cleared["room-1"].unread_count, Some(0));
+        assert_eq!(cleared["room-1"].mention_count, Some(0));
+    }
+
+    // ---- Room-list paging (OCEAN-250) ---------------------------------------
+
+    // Decoded rather than written as a literal: `Room` gains fields in other
+    // open PRs (`workspace_root` in #196), every one of them `#[serde(default)]`,
+    // and a literal here would compile against exactly one of those trees.
+    fn listed_room(id: &str) -> Room {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "name": id.to_uppercase(),
+            "participants": [],
+            "created_at": "",
+            "updated_at": "",
+        }))
+        .expect("a room with only its required fields decodes")
+    }
+
+    fn room_ids(rooms: &[Room]) -> Vec<&str> {
+        rooms.iter().map(|room| room.id.as_str()).collect()
+    }
+
+    /// Paging and attention are additive, and the rail must decode a body from
+    /// a daemon that has never heard of them. The absent case is the one that matters:
+    /// it has to read as "this is the whole list", which is what the rail
+    /// believed before it decoded these fields at all.
+    #[test]
+    fn the_list_response_decodes_both_paging_fields_and_defaults_them_absent() {
+        let paged: RoomsListResponse = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "rooms": [],
+            "read_states": [],
+            "next_cursor": "room-100",
+            "has_more": true,
+        }))
+        .expect("a paged list body should decode");
+        assert_eq!(paged.next_cursor.as_deref(), Some("room-100"));
+        assert!(paged.has_more);
+        assert_eq!(paged.attention, None);
+
+        let current: RoomsListResponse = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "rooms": [],
+            "read_states": [],
+            "attention": [],
+            "next_cursor": null,
+            "has_more": false,
+        }))
+        .expect("a current list body should decode");
+        assert_eq!(current.attention, Some(Vec::new()));
+
+        // The daemon sends the key deliberately without `skip_serializing_if`,
+        // so a final page carries an explicit null rather than omitting it.
+        let final_page: RoomsListResponse = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "rooms": [],
+            "read_states": [],
+            "next_cursor": null,
+            "has_more": false,
+        }))
+        .expect("a final-page body should decode");
+        assert_eq!(final_page.next_cursor, None);
+        assert!(!final_page.has_more);
+
+        let legacy: RoomsListResponse = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "rooms": [],
+            "read_states": [],
+        }))
+        .expect("a pre-OCEAN-250 daemon's body should still decode");
+        assert_eq!(
+            legacy.next_cursor, None,
+            "the field is additive and such a daemon omits it",
+        );
+        assert!(
+            !legacy.has_more,
+            "silence must read as the whole list, never as a second page the \
+             rail would offer and then fail to fetch",
+        );
+        assert_eq!(legacy.attention, None);
+    }
+
+    /// The paging cursor: two stop conditions and one fallback.
+    #[test]
+    fn the_list_cursor_stops_on_the_daemons_word_and_falls_back_to_the_last_row() {
+        assert_eq!(
+            rooms_page_cursor(true, Some("room-100"), Some("room-100")),
+            Some("room-100".to_string()),
+            "the ordinary page: the daemon named where the next one starts",
+        );
+        assert_eq!(
+            rooms_page_cursor(false, Some("room-100"), Some("room-100")),
+            None,
+            "`has_more` false is the daemon saying the list ran out, and it \
+             wins over any cursor sitting beside it",
+        );
+        assert_eq!(
+            rooms_page_cursor(false, None, None),
+            None,
+            "which is also what a daemon predating the route answers, by \
+             defaulting both fields",
+        );
+        assert_eq!(
+            rooms_page_cursor(true, None, Some("room-100")),
+            Some("room-100".to_string()),
+            "the daemon's cursor IS the key of the last room it served, so a \
+             page naming none still carries its own cursor in its rows",
+        );
+        assert_eq!(
+            rooms_page_cursor(true, Some("   "), Some("room-100")),
+            Some("room-100".to_string()),
+            "and a blank one is not a cursor",
+        );
+        assert_eq!(
+            rooms_page_cursor(true, None, None),
+            None,
+            "an empty `has_more` page has neither, and must stop rather than \
+             replay forever the cursor that produced it",
+        );
+    }
+
+    /// The extra stop condition a press has and a first read does not.
+    #[test]
+    fn a_page_that_adds_no_room_ends_the_paging_rather_than_re_offering_itself() {
+        assert_eq!(
+            rooms_next_page_cursor(true, Some("room-200".into())),
+            Some("room-200".to_string()),
+            "a page that grew the rail leaves the next press where it ended",
+        );
+        assert_eq!(
+            rooms_next_page_cursor(false, Some("room-100".into())),
+            None,
+            "the daemon falls back to its FIRST page when the cursor names a \
+             room that has since closed, so a press can answer with nothing but \
+             rooms already listed — parking that page's cursor would leave a \
+             control permanently pressable and permanently inert",
+        );
+        assert_eq!(rooms_next_page_cursor(true, None), None);
+    }
+
+    /// A cursor is a room key, and a room key is operator-supplied text.
+    #[test]
+    fn the_list_url_carries_the_cursor_as_one_encoded_query_value() {
+        assert_eq!(
+            rooms_list_url("http://d", None),
+            "http://d/v1/rooms/persistent",
+            "the first page asks for no cursor at all",
+        );
+        assert_eq!(
+            rooms_list_url("http://d", Some("room-100")),
+            "http://d/v1/rooms/persistent?cursor=room-100",
+        );
+        assert_eq!(
+            rooms_list_url("http://d", Some("a&limit=1000")),
+            "http://d/v1/rooms/persistent?cursor=a%26limit%3D1000",
+            "an `&` or an `=` inside the value must never become part of the \
+             query it is a value in",
+        );
+    }
+
+    /// The dedupe is what the daemon's stale-cursor fallback makes necessary.
+    #[test]
+    fn appending_a_page_never_lists_a_room_the_rail_already_has() {
+        let current = vec![listed_room("a"), listed_room("b")];
+
+        let grown = append_rooms_page(&current, vec![listed_room("c"), listed_room("d")]);
+        assert_eq!(room_ids(&grown), vec!["a", "b", "c", "d"]);
+
+        let refallen = append_rooms_page(&current, vec![listed_room("a"), listed_room("b")]);
+        assert_eq!(
+            room_ids(&refallen),
+            vec!["a", "b"],
+            "a cursor whose room has closed sends the daemon back to page one; \
+             an unfiltered append would list the whole first page twice",
+        );
+
+        let overlapping = append_rooms_page(&current, vec![listed_room("b"), listed_room("c")]);
+        assert_eq!(room_ids(&overlapping), vec!["a", "b", "c"]);
+    }
+
+    /// The 8-second unread poll reads ONE page however many the rail holds.
+    #[test]
+    fn the_unread_poll_refreshes_the_first_page_without_dropping_the_paged_tail() {
+        let previous = vec![listed_room("a"), listed_room("b"), listed_room("c")];
+
+        assert_eq!(
+            room_ids(&rooms_after_first_page(
+                &previous,
+                vec![listed_room("b"), listed_room("a")],
+                false,
+            )),
+            vec!["b", "a"],
+            "a rail that never paged IS one page, so a fresh page is the whole \
+             truth about it — including that a room has gone",
+        );
+
+        let kept =
+            rooms_after_first_page(&previous, vec![listed_room("b"), listed_room("a")], true);
+        assert_eq!(
+            room_ids(&kept),
+            vec!["b", "a", "c"],
+            "on a paged rail the fresh page leads — the daemon orders by \
+             `updated_at DESC`, so every unread change lands in it — and the \
+             pages below the fold are kept behind it rather than re-read",
+        );
+
+        let promoted = rooms_after_first_page(
+            &previous,
+            vec![listed_room("c"), listed_room("a"), listed_room("b")],
+            true,
+        );
+        assert_eq!(
+            room_ids(&promoted),
+            vec!["c", "a", "b"],
+            "a room the fresh page promoted out of the tail appears once, not \
+             twice",
+        );
+    }
+
+    /// A retaining poll keeps its POSITION in the list and re-derives the key.
+    #[test]
+    fn a_retaining_poll_re_derives_the_boundary_rather_than_replaying_its_key() {
+        assert_eq!(
+            retained_tail_cursor(Some("room-200".into()), Some("room-199")),
+            Some("room-199".to_string()),
+            "the rail's own last row is where the loaded pages end; the key the \
+             poll was holding is only where they ended when it was parked",
+        );
+        assert_eq!(
+            retained_tail_cursor(None, Some("room-199")),
+            None,
+            "a rail that had already reached the end of the list must not grow \
+             the affordance back merely because a poll ran",
+        );
+        assert_eq!(
+            retained_tail_cursor(Some("room-200".into()), None),
+            None,
+            "and an empty rail has no boundary to name",
+        );
+    }
+
+    /// The failure the re-derivation exists for, run end to end through the two
+    /// helpers that decide it.
+    ///
+    /// A cursor is a room KEY, and the daemon resolves its position from that
+    /// room's CURRENT `updated_at`. So a message in the room the cursor names
+    /// moves the boundary to the front of the list with it — and on a rail that
+    /// polls every 8 seconds and keeps its key for the life of the paging
+    /// session, that is not a race but the expected outcome of any activity in
+    /// one room.
+    #[test]
+    fn a_message_in_the_boundary_room_does_not_strand_the_pages_behind_it() {
+        // Two pages loaded of a 250-room deployment, parked on page two's last.
+        let rail: Vec<Room> = (1..=200)
+            .map(|n| listed_room(&format!("room-{n:03}")))
+            .collect();
+        let parked = Some("room-200".to_string());
+
+        // `room-200` receives a message. `updated_at DESC` puts it first, so the
+        // poll's one page opens with it and drops the page's former last row.
+        let mut fresh = vec![listed_room("room-200")];
+        fresh.extend((1..=99).map(|n| listed_room(&format!("room-{n:03}"))));
+
+        let merged = rooms_after_first_page(&rail, fresh, true);
+        assert_eq!(
+            merged.len(),
+            200,
+            "the promoted room is listed once, at the front, not twice",
+        );
+        assert_eq!(
+            merged.last().map(|room| room.id.as_str()),
+            Some("room-199"),
+            "the rail still ends where it ended — the promoted room left the \
+             tail, and the row behind it is the boundary now",
+        );
+
+        assert_eq!(
+            retained_tail_cursor(parked, merged.last().map(|room| room.id.as_str())),
+            Some("room-199".to_string()),
+            "replaying `room-200` would ask the daemon for the hundred rooms \
+             behind the NEWEST room — the first page over again — and a page \
+             that adds nothing retires the affordance, leaving rooms 201-250 \
+             unreachable until an interactive refresh",
+        );
     }
 
     #[test]
@@ -5636,23 +7045,46 @@ mod tests {
 
         let rooms_loaded = RwSignal::new(false);
         let rooms_loading = RwSignal::new(true);
+        let list_settled = RwSignal::new(0u64);
         finish_rooms_fetch(
             &rooms_loaded,
             &rooms_loading,
+            &list_settled,
             RoomsFetchMode::Interactive,
             false,
         );
         assert!(!rooms_loaded.get_untracked());
         assert!(rooms_loading.get_untracked());
+        // A superseded request settles nothing: a reader waiting on freshness
+        // must not be released by a reply that was thrown away.
+        assert_eq!(list_settled.get_untracked(), 0);
 
         finish_rooms_fetch(
             &rooms_loaded,
             &rooms_loading,
+            &list_settled,
             RoomsFetchMode::Interactive,
             true,
         );
         assert!(rooms_loaded.get_untracked());
         assert!(!rooms_loading.get_untracked());
+        assert_eq!(list_settled.get_untracked(), 1);
+    }
+
+    /// The settle counter moves for a SILENT fetch and for a FAILED one too.
+    /// A deep link waits on it, and a daemon that is down must release that
+    /// wait with a reported failure rather than leaving it pending forever.
+    #[test]
+    fn every_current_settle_advances_the_counter_whatever_it_found() {
+        let rooms_loaded = RwSignal::new(false);
+        let rooms_loading = RwSignal::new(false);
+        let list_settled = RwSignal::new(0u64);
+        for mode in [RoomsFetchMode::Silent, RoomsFetchMode::Interactive] {
+            finish_rooms_fetch(&rooms_loaded, &rooms_loading, &list_settled, mode, true);
+        }
+        assert_eq!(list_settled.get_untracked(), 2);
+        // Silent mode leaves `rooms_loading` alone; it still counts as settled.
+        assert!(rooms_loaded.get_untracked());
     }
 
     #[test]
@@ -5660,14 +7092,52 @@ mod tests {
         assert!(room_has_durable_unread(Some(&RoomReadSummary {
             latest_seq: Some(5),
             read_seq: Some(4),
+            unread_count: None,
+            mention_count: None,
         })));
         assert!(room_has_durable_unread(Some(&RoomReadSummary {
             latest_seq: Some(5),
             read_seq: None,
+            unread_count: None,
+            mention_count: None,
         })));
         assert!(!room_has_durable_unread(Some(&RoomReadSummary {
             latest_seq: Some(5),
             read_seq: Some(5),
+            unread_count: None,
+            mention_count: None,
         })));
+        assert!(
+            !room_has_durable_unread(Some(&RoomReadSummary {
+                latest_seq: Some(9),
+                read_seq: Some(4),
+                unread_count: Some(0),
+                mention_count: Some(0),
+            })),
+            "a current daemon's count is authoritative over legacy sequence inference"
+        );
+    }
+
+    #[test]
+    fn attention_badge_prefers_mentions_and_caps_large_counts() {
+        let summary = RoomReadSummary {
+            latest_seq: Some(120),
+            read_seq: Some(4),
+            unread_count: Some(116),
+            mention_count: Some(3),
+        };
+        assert!(room_has_durable_mention(Some(&summary)));
+        assert_eq!(room_attention_badge(Some(&summary)), "@3");
+        assert_eq!(
+            room_attention_aria_label(Some(&summary)),
+            "3 unread mentions, 116 unread messages"
+        );
+
+        let unread_only = RoomReadSummary {
+            mention_count: Some(0),
+            ..summary
+        };
+        assert!(!room_has_durable_mention(Some(&unread_only)));
+        assert_eq!(room_attention_badge(Some(&unread_only)), "99+");
     }
 }

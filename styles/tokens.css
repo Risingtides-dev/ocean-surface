@@ -150,6 +150,10 @@
   --floor-ink: #11131A;
 
   /* ── Borders ──────────────────────────────────────────────────── */
+  /* Scrim behind a modal or slide-over. A colour, so it lives here and not in
+     the sheet that happens to draw the overlay. */
+  --overlay: rgba(6, 6, 6, 0.72);
+
   --border-subtle: rgba(255, 255, 255, 0.06);
   --border: rgba(255, 255, 255, 0.10);
   --border-strong: rgba(255, 255, 255, 0.20);

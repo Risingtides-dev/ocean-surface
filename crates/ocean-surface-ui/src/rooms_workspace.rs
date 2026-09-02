@@ -677,16 +677,55 @@ fn ledger_mark_view(access: Option<&RoomAccessProjection>, message: &RoomMessage
 /// Extracts the shared `HH:MM` prefix for `Z`, fractional-second, and offset
 /// variants without converting timezones or localizing; invalid/non-canonical
 /// input passes through unchanged.
-/// The client's current UTC day key (`YYYY-MM-DD`), matching the daemon's
-/// ISO-8601 UTC timestamps, for humanizing day separators.
+/// The member's current day key (`YYYY-MM-DD`) in THEIR zone, for humanizing
+/// day separators to "Today" / "Yesterday".
+///
+/// `Date::to_iso_string()` is UTC and this read it, so between local midnight
+/// and UTC midnight — every evening, for every member west of Greenwich —
+/// "Today" was tomorrow's date and today's rows were labelled with a bare
+/// date. `get_full_year`/`get_month`/`get_date` are the LOCAL getters, and
+/// `get_month` is 0-based.
 fn today_day_key() -> String {
-    js_sys::Date::new_0()
-        .to_iso_string()
-        .as_string()
-        .unwrap_or_default()
-        .chars()
-        .take(10)
-        .collect()
+    let now = js_sys::Date::new_0();
+    format!(
+        "{:04}-{:02}-{:02}",
+        now.get_full_year(),
+        now.get_month() + 1,
+        now.get_date(),
+    )
+}
+
+/// Minutes to ADD to a UTC instant to reach the member's wall clock.
+///
+/// Read for the instant itself, not for "now": a transcript that spans a DST
+/// change has rows on both sides of it, and one offset for the whole list
+/// would render half of them an hour out. `getTimezoneOffset` reports
+/// `utc - local`, which is why the sign is flipped here — `room_messages`
+/// works in minutes to add.
+///
+/// `0` for a wire value the browser will not parse. That is not a guess about
+/// the zone: the pure formatter rejects the same value and the caller falls
+/// back to showing the raw wire string, so the offset is never applied to it.
+fn viewer_utc_offset_minutes(ts: &str) -> i64 {
+    let minutes = js_sys::Date::new(&wasm_bindgen::JsValue::from_str(ts)).get_timezone_offset();
+    if minutes.is_nan() {
+        0
+    } else {
+        -(minutes as i64)
+    }
+}
+
+/// The clock a member reads on a transcript row: their own wall time for the
+/// instant the daemon recorded.
+///
+/// The full RFC 3339 wire value stays on the row's `datetime`, `title` and
+/// `aria-label` — the instant is what a machine and a screen reader want, and
+/// it is unambiguous. Only the visible text is localized. A wire value the
+/// formatter will not accept passes through unchanged rather than becoming a
+/// plausible wrong time.
+fn local_clock_time(full: &str) -> String {
+    room_messages::local_clock_time(full, viewer_utc_offset_minutes(full))
+        .unwrap_or_else(|| full.to_string())
 }
 
 /// Whether to show the "No messages yet" empty state in the transcript.
@@ -1333,40 +1372,6 @@ fn thread_panel_subtitle(reply_count: usize, root_author_display: &str) -> Strin
     )
 }
 
-/// Row timestamp: show only the canonical wire clock (HH:MM) for RFC3339
-/// timestamps while preserving the full wire value for machine-readable and
-/// accessible render paths. Accepts only ASCII canonical structure at the
-/// byte positions we actually rely on, never panics on Unicode/invalid input,
-/// and returns the original string unchanged when the wire value is not the
-/// expected RFC3339 shape.
-fn canonical_wire_clock_time(full: &str) -> String {
-    let bytes = full.as_bytes();
-    let is_digit = |idx: usize| bytes.get(idx).is_some_and(|b| b.is_ascii_digit());
-
-    if bytes.len() < 16
-        || !full.is_ascii()
-        || !is_digit(0)
-        || !is_digit(1)
-        || !is_digit(2)
-        || !is_digit(3)
-        || bytes[4] != b'-'
-        || !is_digit(5)
-        || !is_digit(6)
-        || bytes[7] != b'-'
-        || !is_digit(8)
-        || !is_digit(9)
-        || bytes[10] != b'T'
-        || !is_digit(11)
-        || !is_digit(12)
-        || bytes[13] != b':'
-        || !is_digit(14)
-        || !is_digit(15)
-    {
-        return full.to_string();
-    }
-
-    full[11..16].to_string()
-}
 fn avatar_identity_class(author_id: &str) -> &'static str {
     const HUES: [&str; 5] = [
         "rooms-workspace__msg-avatar--hue0",
@@ -1780,6 +1785,143 @@ fn is_thread_open(selected_thread_root_seq: Option<u64>, root_seq: u64) -> bool 
     selected_thread_root_seq == Some(root_seq)
 }
 
+/// Where a pending room open came from.
+///
+/// The two sources are owed different things, which is the whole reason this
+/// is not a bare key. A persisted restore is a convenience: it loses every
+/// race with a user action and degrades silently when the room is gone,
+/// because nobody asked for it in this session. An `ocean://room/<key>` deep
+/// link is something a person just asked for out loud — from a message, a
+/// bookmark, another app — so it wins the race and, when the key names no
+/// room this daemon has, it has to say so rather than appear to do nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RoomOpenSource {
+    Persisted,
+    DeepLink,
+}
+
+/// A room open waiting on the fetched room list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingRoomOpen {
+    pub key: String,
+    pub source: RoomOpenSource,
+    /// For a deep link, the `Rooms::list_settled` value observed when the
+    /// request was queued: the entry resolves only once a room-list fetch has
+    /// settled AFTER that, so the answer never comes out of a stale list.
+    /// `None` for a persisted restore, which keeps its existing behaviour of
+    /// answering as soon as any list has loaded — it reports nothing, so a
+    /// stale answer costs nothing to say.
+    pub awaiting_settle: Option<u64>,
+}
+
+impl PendingRoomOpen {
+    fn persisted(key: String) -> Self {
+        Self {
+            key,
+            source: RoomOpenSource::Persisted,
+            awaiting_settle: None,
+        }
+    }
+
+    fn deep_link(key: String, settled_at: u64) -> Self {
+        Self {
+            key,
+            source: RoomOpenSource::DeepLink,
+            awaiting_settle: Some(settled_at),
+        }
+    }
+}
+
+/// May a pending open be resolved against the room list yet?
+///
+/// The two sources wait on different things, and the difference is the whole
+/// point. A persisted restore waits on `rooms_loaded` — "a list has loaded" —
+/// because it answers silently and a stale answer is free. A deep link waits
+/// for `list_settled` to move past the value it recorded, because it answers
+/// OUT LOUD: `rooms_loaded` is set by any settled fetch, success or failure,
+/// is never cleared, and lives on an App-scope handle that outlives the
+/// workspace, so it is equally true of a list fetched ten minutes ago and of
+/// an empty list left by a failed fetch. Answering "no room named X" out of
+/// either is a lie about a room that exists.
+pub(crate) fn room_open_is_ready(
+    pending: &PendingRoomOpen,
+    rooms_loaded: bool,
+    list_settled: u64,
+) -> bool {
+    match pending.awaiting_settle {
+        None => rooms_loaded,
+        // Wrapping-safe: the counter wraps at u64::MAX and `!=` is the only
+        // comparison that survives it.
+        Some(seen) => list_settled != seen,
+    }
+}
+
+/// What a pending room open resolves to once the room list has loaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RoomOpenOutcome {
+    /// Open this key.
+    Open(String),
+    /// Do nothing, and say nothing.
+    Drop,
+    /// The key names no room in the fetched list, and someone asked out loud.
+    Unknown(String),
+}
+
+/// Resolve a pending room open against live daemon state. Pure so the whole
+/// policy — including the two asymmetries between the sources — is testable
+/// without a browser.
+pub(crate) fn room_open_outcome(
+    pending: &PendingRoomOpen,
+    open_key: Option<&str>,
+    key_is_known: bool,
+) -> RoomOpenOutcome {
+    match pending.source {
+        RoomOpenSource::Persisted => {
+            // A user action that opened any room first wins, and a room that
+            // is no longer in the list degrades to nothing.
+            if open_key.is_some() || !key_is_known {
+                RoomOpenOutcome::Drop
+            } else {
+                RoomOpenOutcome::Open(pending.key.clone())
+            }
+        }
+        RoomOpenSource::DeepLink => {
+            if open_key == Some(pending.key.as_str()) {
+                // Already showing exactly what was asked for; reopening would
+                // only throw away a hydrated transcript.
+                RoomOpenOutcome::Drop
+            } else if key_is_known {
+                RoomOpenOutcome::Open(pending.key.clone())
+            } else {
+                RoomOpenOutcome::Unknown(pending.key.clone())
+            }
+        }
+    }
+}
+
+/// Left-rail status for a deep link naming a room this daemon does not have.
+///
+/// The `rooms ` prefix is load-bearing: it is what routes the line to the
+/// room-list status lane rather than the open-transcript one, and in this case
+/// there is no open transcript to put it under.
+///
+/// Only say this when a room-list fetch has actually settled successfully —
+/// see [`room_open_is_ready`]. Said out of a stale or failed-empty list, it
+/// names a room the person is looking at in another client as missing.
+pub(crate) fn unknown_deep_link_room_status(key: &str) -> String {
+    format!("rooms — no room named {key} here")
+}
+
+/// Left-rail status for a deep link whose room list could not be fetched.
+///
+/// Distinct from the unknown-key line on purpose: "this room does not exist"
+/// and "I could not find out whether it exists" are different facts, and
+/// reporting the first when the second is true sends someone hunting for a
+/// room they have.
+pub(crate) fn unreachable_deep_link_room_status(key: &str) -> String {
+    format!("rooms — could not load the room list to open {key}")
+}
+
 // ── Component ─────────────────────────────────────────────────────────
 
 /// Full-screen Slack-style rooms workspace.
@@ -1916,8 +2058,11 @@ pub fn RoomsWorkspace(
     // still be in the fetched list, the thread root must be in the
     // transcript — a stale restore silently degrades, never errors.
     let restored_view = load_view_state();
-    let pending_room_restore =
-        RwSignal::new(restored_view.as_ref().map(|(room_key, _)| room_key.clone()));
+    let pending_room_restore: RwSignal<Option<PendingRoomOpen>> = RwSignal::new(
+        restored_view
+            .as_ref()
+            .map(|(room_key, _)| PendingRoomOpen::persisted(room_key.clone())),
+    );
     let pending_thread_restore = RwSignal::new(
         restored_view.and_then(|(room_key, thread)| thread.map(|root_seq| (room_key, root_seq))),
     );
@@ -2333,26 +2478,58 @@ pub fn RoomsWorkspace(
     });
 
     // ── View-state restore + persist ──────────────────────────────────
-    // Reopen the persisted room once the fetched list confirms it still
-    // exists. One-shot: a user action that opens any room first wins.
+    // An `ocean://room/<key>` deep link joins the SAME one-shot queue the
+    // persisted restore uses, and replaces whatever is sitting in it. That is
+    // what makes an early link work: the queue already waits for the fetched
+    // room list, so a link arriving during a cold launch — while the list is
+    // still in flight, which is the normal case when the OS starts the app to
+    // handle the URL — is held rather than lost. `request_deep_link_room`
+    // sets the signal (and kicks a silent refresh); this is the only consumer,
+    // and it clears it in the same pass. The `list_settled` value recorded
+    // here is what the entry waits to move past, so its answer comes from a
+    // list fetched after the link arrived rather than from whatever the handle
+    // was carrying — see `room_open_is_ready`.
     Effect::new(move |_| {
-        let Some(want_key) = pending_room_restore.get() else {
+        let Some(key) = rooms.deep_link_room.get() else {
             return;
         };
-        if !rooms.rooms_loaded.get() {
+        rooms.deep_link_room.set(None);
+        let settled_at = rooms.list_settled.get_untracked();
+        pending_room_restore.set(Some(PendingRoomOpen::deep_link(key, settled_at)));
+    });
+
+    // Resolve the queued open once the fetched list confirms what exists.
+    // One-shot either way: a persisted restore loses to a user action and
+    // degrades silently, a deep link wins and reports an unknown key.
+    Effect::new(move |_| {
+        let Some(pending) = pending_room_restore.get() else {
+            return;
+        };
+        if !room_open_is_ready(&pending, rooms.rooms_loaded.get(), rooms.list_settled.get()) {
             return;
         }
         pending_room_restore.set(None);
-        if rooms.open_key.get_untracked().is_some() {
+        // A settle that could not answer must not be read as an answer: a
+        // deep link waited for THIS fetch, and if it failed the list it would
+        // be checked against is the stale or empty one the failure left.
+        if pending.awaiting_settle.is_some() && rooms.rooms_error.get_untracked().is_some() {
+            rooms
+                .status
+                .set(unreachable_deep_link_room_status(&pending.key));
             return;
         }
-        if rooms
+        let open_key = rooms.open_key.get_untracked();
+        let key_is_known = rooms
             .list
             .get_untracked()
             .iter()
-            .any(|room| room.id == want_key)
-        {
-            rooms.open_room(want_key);
+            .any(|room| room.id == pending.key);
+        match room_open_outcome(&pending, open_key.as_deref(), key_is_known) {
+            RoomOpenOutcome::Open(key) => rooms.open_room(key),
+            RoomOpenOutcome::Drop => {}
+            RoomOpenOutcome::Unknown(key) => {
+                rooms.status.set(unknown_deep_link_room_status(&key));
+            }
         }
     });
 
@@ -2694,7 +2871,7 @@ pub fn RoomsWorkspace(
                                                             )
                                                         }>
                                                             {if is_system {
-                                                                view! { <crate::icons::Spark /> }.into_any()
+                                                                "S".into_any()
                                                             } else {
                                                                 reply.author_id.chars().take(2).collect::<String>().to_uppercase().into_any()
                                                             }}
@@ -2708,7 +2885,7 @@ pub fn RoomsWorkspace(
                                                                     aria-label=full_ts.clone()
                                                                     title=full_ts.clone()
                                                                 >
-                                                                    {canonical_wire_clock_time(&full_ts)}
+                                                                    {local_clock_time(&full_ts)}
                                                                 </time>
                                                                 {move || ledger_mark_view(
                                                                     rooms.access.get().as_ref(),
@@ -3203,6 +3380,8 @@ pub fn RoomsWorkspace(
                                             let key_tab = key.clone();
                                             let key_sel = key.clone();
                                             let key_unread = key.clone();
+                                            let key_attention_label = key.clone();
+                                            let key_attention_badge = key.clone();
                                             let active = move || rooms.open_key.get().as_deref() == Some(&*key);
                                             let selected =
                                                 move || rooms.open_key.get().as_deref() == Some(&*key_sel);
@@ -3226,6 +3405,20 @@ pub fn RoomsWorkspace(
                                                     )
                                                 })
                                             };
+                                            let attention_label = Memo::new(move |_| {
+                                                rooms.read_summaries.with(|summaries| {
+                                                    crate::rooms::room_attention_aria_label(
+                                                        summaries.get(&key_attention_label),
+                                                    )
+                                                })
+                                            });
+                                            let attention_badge = Memo::new(move |_| {
+                                                rooms.read_summaries.with(|summaries| {
+                                                    crate::rooms::room_attention_badge(
+                                                        summaries.get(&key_attention_badge),
+                                                    )
+                                                })
+                                            });
                                             view! {
                                                 <button
                                                     class="rooms-workspace__room"
@@ -3236,6 +3429,22 @@ pub fn RoomsWorkspace(
                                                     aria-selected=move || selected().to_string()
                                                     tabindex=move || if is_tab_stop() { "0" } else { "-1" }
                                                     on:click=move |_| {
+                                                        // Ask for notification permission HERE, from
+                                                        // a real click. Browsers require transient
+                                                        // user activation for
+                                                        // `Notification.requestPermission()`, and an
+                                                        // arriving SSE frame is not that — so the
+                                                        // mention notifier's own request is refused
+                                                        // for a fresh browser user and the feature
+                                                        // could never turn on. Entering a room is
+                                                        // the honest moment to ask: it is a gesture,
+                                                        // and it is when being mentioned starts
+                                                        // being possible. Called synchronously,
+                                                        // before anything async, so the activation
+                                                        // is still live. Already-decided permissions
+                                                        // resolve without prompting, so this does
+                                                        // not nag on every open.
+                                                        crate::host::prime_notification_permission();
                                                         rooms.open_room(key2.clone());
                                                         show_left_rail.set(false);
                                                     }
@@ -3248,14 +3457,37 @@ pub fn RoomsWorkspace(
                                                         <span
                                                             class="rooms-workspace__room-unread"
                                                             role="img"
-                                                            aria-label="Unread messages"
-                                                        ></span>
+                                                            aria-label=move || attention_label.get()
+                                                        >
+                                                            {move || attention_badge.get()}
+                                                        </span>
                                                     </Show>
                                                 </button>
                                             }
                                         }
                                     />
                                 </div>
+                                // The end of the list is where "there is more of
+                                // it" has to be said, and it scrolls with the
+                                // list because it names a position in it. The
+                                // daemon pages this route at 100 rooms; without
+                                // this the rail stopped there and said nothing.
+                                {move || rooms.more_rooms_available().then(|| view! {
+                                    <button
+                                        class="rooms-workspace__load-more-rooms"
+                                        type="button"
+                                        disabled=move || rooms.more_rooms_in_flight()
+                                        on:click=move |_| {
+                                            rooms.load_more_rooms();
+                                        }
+                                    >
+                                        {move || if rooms.more_rooms_in_flight() {
+                                            "Loading more rooms…"
+                                        } else {
+                                            "Load more rooms"
+                                        }}
+                                    </button>
+                                })}
                             }.into_any()
                         }
                     }}
@@ -3638,7 +3870,15 @@ pub fn RoomsWorkspace(
                                             let media = crate::transcript_media::marker_media_view(rooms, &m);
                                             let full_ts = m.created_at.clone();
                                             let root_seq = m.seq;
-                                            let day_label = room_messages::day_separator_label(prev.as_ref(), &m)
+                                            // Every density decision below that
+                                            // turns on a DAY turns on the member's
+                                            // day, so each reads the offset in
+                                            // force at the instant of the row it
+                                            // is asking about — the resolver is
+                                            // passed down, never one row's answer
+                                            // applied to its neighbour. A pair
+                                            // straddling a DST change has two.
+                                            let day_label = room_messages::day_separator_label(prev.as_ref(), &m, viewer_utc_offset_minutes)
                                                 .map(|d| room_messages::humanize_day_label(&d, &today_day_key()));
                                             // A long silence gets a time header —
                                             // unless a day separator already marks
@@ -3648,10 +3888,10 @@ pub fn RoomsWorkspace(
                                                     .as_ref()
                                                     .map(|p| room_messages::needs_gap_header(p, &m))
                                                     .unwrap_or(false))
-                                            .then(|| canonical_wire_clock_time(&full_ts));
+                                            .then(|| local_clock_time(&full_ts));
                                             let grouped = prev
                                                 .as_ref()
-                                                .map(|p| room_messages::is_grouped(p, &m))
+                                                .map(|p| room_messages::is_grouped(p, &m, viewer_utc_offset_minutes))
                                                 .unwrap_or(false);
                                             // Cloned for the ledger mark, which
                                             // re-reads reactively: the access
@@ -3689,7 +3929,7 @@ pub fn RoomsWorkspace(
                                                         )
                                                     }>
                                                         {if is_system {
-                                                            view! { <crate::icons::Spark /> }.into_any()
+                                                            "S".into_any()
                                                         } else {
                                                             m.author_id.chars().take(2).collect::<String>().to_uppercase().into_any()
                                                         }}
@@ -3705,7 +3945,7 @@ pub fn RoomsWorkspace(
                                                                 aria-label=full_ts.clone()
                                                                 title=full_ts.clone()
                                                             >
-                                                                {canonical_wire_clock_time(&full_ts)}
+                                                                {local_clock_time(&full_ts)}
                                                             </time>
                                                             {move || ledger_mark_view(
                                                                 rooms.access.get().as_ref(),
@@ -4942,7 +5182,7 @@ pub fn RoomsWorkspace(
                                                 )
                                             }>
                                                 {if root_is_system {
-                                                    view! { <crate::icons::Spark /> }.into_any()
+                                                    "S".into_any()
                                                 } else {
                                                     root.author_id.chars().take(2).collect::<String>().to_uppercase().into_any()
                                                 }}
@@ -4956,7 +5196,7 @@ pub fn RoomsWorkspace(
                                                         aria-label=full_ts.clone()
                                                         title=full_ts.clone()
                                                     >
-                                                        {canonical_wire_clock_time(&full_ts)}
+                                                        {local_clock_time(&full_ts)}
                                                     </time>
                                                     // The enclosing closure re-runs on access
                                                     // changes, so this needs no closure of its own.
@@ -6450,6 +6690,269 @@ mod tests {
         }
     }
 
+    /// The half of this module a release build compiles. Every source scan
+    /// below runs over it, never over the whole file: this module's own
+    /// fixtures quote rail markup, and a scan reading them would find its own
+    /// literals instead of the view's.
+    fn rail_view_source() -> &'static str {
+        include_str!("rooms_workspace.rs")
+            .split_once("#[cfg(test)]")
+            .expect("this module carries its unit tests at the bottom")
+            .0
+    }
+
+    /// The ATTRIBUTE REGION of one mounted rail, anchored to the tag it names.
+    ///
+    /// The window this replaced was `markup[at..]` truncated at the first
+    /// `/>`, which is the rail's own close only for as long as every rail
+    /// self-closes. Nothing held that. A rail that grows children — the
+    /// component gains a `children` prop, the mount becomes `<Rail …>…</Rail>`
+    /// — pushes the first `/>` into the NEXT rail, and the guard then reads
+    /// the neighbour's `writes_allowed=` while reporting on the rail it names.
+    ///
+    /// Measured, not argued (the mutation is preserved as
+    /// `a_rail_that_stops_self_closing_is_read_off_its_neighbour`): giving
+    /// `RoomSummary` a `children` prop, mounting it non-self-closing, and
+    /// replacing its gate with a hardcoded `Signal::derive(move || true)` —
+    /// a rail that writes no matter what the room's access projection says —
+    /// left `each_rail_takes_the_gate_its_write_destination_earns` GREEN,
+    /// along with all 1313 tests across 14 binaries and the wasm32 clippy
+    /// lane. It read `local_store_write_gate` out of `RoomArtifacts`.
+    ///
+    /// So: `Err` rather than a guess whenever the region cannot be bounded to
+    /// the named rail. A guard that cannot see its subject must say so, not
+    /// report on its neighbour.
+    fn rail_attribute_window<'a>(view: &'a str, tag: &str) -> Result<&'a str, String> {
+        let mut from = 0usize;
+        let at = loop {
+            let rel = view[from..]
+                .find(tag)
+                .ok_or_else(|| format!("{tag} must be mounted from this file"))?;
+            let at = from + rel;
+            // `<crate::x::Foo` is a prefix of `<crate::x::FooBar` too, so only
+            // a following separator makes this the element open it names.
+            match view[at + tag.len()..].chars().next() {
+                None => break at,
+                Some(c) if c.is_whitespace() || c == '/' || c == '>' => break at,
+                Some(_) => from = at + tag.len(),
+            }
+        };
+
+        // Bound the region at the end of THIS rail's opening tag, and ask
+        // whether that tag self-closes — never whether some `/>` exists ahead.
+        //
+        // An earlier revision took the first `/>` unless a `<crate::` mount
+        // came first. Codex caught what that misses: give the rail a child and
+        // make it a self-closing HTML element — `<input … />` — and the first
+        // `/>` is the CHILD's while the next mount is absent or later, so the
+        // window is returned as if it were the rail's. If that child names the
+        // expected gate anywhere (a `disabled=` reading it, say) while the
+        // rail's own `writes_allowed` is hardcoded, every assertion downstream
+        // still passes: the same silent green this guard exists to end.
+        //
+        // A Leptos attribute value is a Rust expression and can hold `>` — a
+        // closure's `->`, a turbofish, a comparison — so the scan tracks
+        // bracket depth and string literals rather than taking the first `>`.
+        let body = &view[at + tag.len()..];
+        let mut depth = 0i32;
+        let mut in_str = false;
+        let mut escaped = false;
+        let mut end = None;
+        for (i, c) in body.char_indices() {
+            if in_str {
+                match c {
+                    '\\' if !escaped => escaped = true,
+                    '"' if !escaped => in_str = false,
+                    _ => escaped = false,
+                }
+                continue;
+            }
+            match c {
+                '"' => in_str = true,
+                '(' | '{' | '[' => depth += 1,
+                ')' | '}' | ']' => depth -= 1,
+                '>' if depth == 0 => {
+                    end = Some(i);
+                    break;
+                }
+                _ => {}
+            }
+            if depth < 0 {
+                break;
+            }
+        }
+        let Some(end) = end else {
+            return Err(format!("{tag}'s opening tag does not close in this file"));
+        };
+
+        match body[..end].trim_end().strip_suffix('/') {
+            Some(attrs) => Ok(attrs),
+            None => Err(format!(
+                "{tag} does not self-close — its opening tag ends `>`, so it \
+                 has children. A window bounded by a `/>` ahead would run \
+                 into a DESCENDANT's or a NEIGHBOUR's `writes_allowed=` and \
+                 report it as this rail's. Re-anchor this guard to the rail's \
+                 own closing tag before landing markup that gives it children."
+            )),
+        }
+    }
+
+    /// The flaw the anchored window closes, kept executable.
+    ///
+    /// Two rails. The first has children and no `/>` of its own inside them,
+    /// exactly as a Leptos mount looks once its component gains a `children`
+    /// prop; its gate is hardcoded open, which is the defect the guard exists
+    /// to catch. The second is an ordinary self-closing rail carrying the
+    /// needle the guard hunts for.
+    ///
+    /// Fake module paths on purpose: `rail_view_source` stops at
+    /// `#[cfg(test)]`, but a fixture naming a real rail would still be a
+    /// literal in this file that a future whole-file scan could read.
+    #[test]
+    fn a_rail_that_stops_self_closing_is_read_off_its_neighbour() {
+        let local = ["local_store", "_write_gate"].concat();
+        let peer = ["access_allows", "_writes"].concat();
+        let alpha = ["<crate::fixture_alpha", "::RailAlpha"].concat();
+        let beta = ["<crate::fixture_beta", "::RailBeta"].concat();
+        let markup = format!(
+            "\
+                {alpha}
+                    rooms=rooms
+                    writes_allowed=Signal::derive(move || true)
+                >
+                    <span class=\"lead\"></span>
+                </{alpha}>
+
+                {beta}
+                    rooms=rooms
+                    writes_allowed=Signal::derive(move || {{
+                        {local}(rooms.access.get().as_ref())
+                    }})
+                />",
+            alpha = alpha,
+            beta = beta,
+            local = local,
+        );
+
+        // What the window did before it was anchored: first `/>` wins. Alpha's
+        // children carry none, so the window runs through Alpha's close, on
+        // through Beta's attributes, and stops at BETA's `/>`.
+        let at = markup.find(&alpha).expect("fixture mounts alpha");
+        let naive = &markup[at..][..markup[at..].find("/>").expect("fixture closes")];
+        // All three of the guard's assertions pass over that window while
+        // Alpha's gate ignores access entirely — the silent green.
+        assert!(naive.contains("writes_allowed="));
+        assert!(
+            naive.contains(local.as_str()),
+            "the unanchored window satisfies `{local}` from the NEIGHBOUR: \
+             that is the whole defect"
+        );
+        assert!(!naive.contains(peer.as_str()));
+
+        // Anchored: refused, loudly, naming the rail.
+        let why = rail_attribute_window(&markup, &alpha)
+            .expect_err("an unanchored window must be refused, not guessed at");
+        assert!(why.contains(&alpha) && why.contains("does not self-close"));
+
+        // And an ordinary self-closing rail still reads exactly its own
+        // attributes — never a character of its neighbour's.
+        let window = rail_attribute_window(&markup, &beta).expect("beta self-closes");
+        assert!(window.contains(local.as_str()));
+        assert!(
+            !window.contains("RailAlpha") && !window.contains("move || true"),
+            "a rail's window must not reach back over its neighbour either"
+        );
+
+        // The real view has to keep satisfying the anchor, or the guard above
+        // is asserting on nothing.
+        for tag in [
+            ["<crate::room_summary", "::RoomSummary"].concat(),
+            ["<crate::room_repo", "::RoomRepo"].concat(),
+        ] {
+            assert!(
+                rail_attribute_window(rail_view_source(), &tag).is_ok(),
+                "{tag} must still be anchorable in the live view"
+            );
+        }
+    }
+
+    /// The case a `<crate::`-lookahead bound misses, found by Codex on #199.
+    ///
+    /// A rail with children whose FIRST child is a self-closing HTML element
+    /// puts a `/>` ahead of any neighbouring mount. Bounding on "the first
+    /// `/>` unless a mount comes first" therefore returns `Ok` on a window
+    /// that is not the rail's — and if the child names the wanted gate while
+    /// the rail's own is hardcoded, all three assertions pass. Asking whether
+    /// the rail's OWN opening tag self-closes is what actually decides it.
+    #[test]
+    fn a_self_closing_child_does_not_pass_for_the_rail_s_own_close() {
+        let local = ["local_store", "_write_gate"].concat();
+        let peer = ["access_allows", "_writes"].concat();
+        let gamma = ["<crate::fixture_gamma", "::RailGamma"].concat();
+        let markup = format!(
+            "\
+                {gamma}
+                    rooms=rooms
+                    writes_allowed=Signal::derive(move || true)
+                >
+                    <input
+                        class=\"lead\"
+                        disabled=Signal::derive(move || !{local}(access))
+                    />
+                </{gamma}>",
+        );
+
+        // The bound this replaced: first `/>` wins unless `<crate::` precedes
+        // it. Here neither guard fires — the `/>` is the CHILD's and there is
+        // no next mount at all — so the window came back as the rail's.
+        let at = markup.find(&gamma).expect("fixture mounts gamma");
+        let body = &markup[at + gamma.len()..];
+        let naive_end = body.find("/>").expect("the child self-closes");
+        assert!(
+            body.find("<crate::").is_none_or(|n| naive_end < n),
+            "the old bound accepted this window",
+        );
+        let naive = &body[..naive_end];
+        // And every assertion the guard makes passes over it, while the rail's
+        // own gate ignores access entirely.
+        assert!(naive.contains("writes_allowed="));
+        assert!(
+            naive.contains(local.as_str()),
+            "the wanted gate is satisfied by the CHILD: the silent green",
+        );
+        assert!(!naive.contains(peer.as_str()));
+
+        // Anchored on the rail's own opening tag: refused, and it says why.
+        let why = rail_attribute_window(&markup, &gamma)
+            .expect_err("a rail with children must be refused");
+        assert!(why.contains(&gamma) && why.contains("does not self-close"));
+    }
+
+    /// The opening tag's end is found by bracket depth, not by the first `>`,
+    /// because a Leptos attribute value is a Rust expression that can hold one.
+    #[test]
+    fn an_attribute_expression_holding_an_angle_bracket_does_not_end_the_tag() {
+        let local = ["local_store", "_write_gate"].concat();
+        let delta = ["<crate::fixture_delta", "::RailDelta"].concat();
+        let markup = format!(
+            "\
+                {delta}
+                    rooms=rooms
+                    writes_allowed=Signal::derive(move || -> bool {{
+                        {local}(rooms.access.get().as_ref())
+                    }})
+                    title=\"a > b\"
+                />",
+        );
+        let window = rail_attribute_window(&markup, &delta)
+            .expect("a closure's `->` and a quoted `>` must not end the tag");
+        assert!(
+            window.contains(local.as_str()) && window.contains("title="),
+            "the window must reach the whole attribute list, not stop at the \
+             first `>` inside an expression or a string: {window:?}",
+        );
+    }
+
     /// Which gate a rail takes is a `Signal::derive` inside the view, so no
     /// unit test of the predicates can reach it: both gates stay pure and
     /// correct, and every test above stays green while a section is wired to
@@ -6465,7 +6968,6 @@ mod tests {
     /// not writes a down link merely delays.
     #[test]
     fn each_rail_takes_the_gate_its_write_destination_earns() {
-        let markup = include_str!("rooms_workspace.rs");
         let local = ["local_store", "_write_gate"].concat();
         let peer = ["access_allows", "_writes"].concat();
 
@@ -6478,13 +6980,8 @@ mod tests {
         ];
 
         for (tag, writes_land_locally) in sections {
-            let at = markup
-                .find(&tag)
-                .unwrap_or_else(|| panic!("{tag} must be mounted from this file"));
-            let section = &markup[at..];
-            let section = &section[..section
-                .find("/>")
-                .unwrap_or_else(|| panic!("{tag} must close in this file"))];
+            let section = rail_attribute_window(rail_view_source(), &tag)
+                .unwrap_or_else(|why| panic!("{why}"));
             assert!(
                 section.contains("writes_allowed="),
                 "{tag} must carry a write gate"
@@ -6757,11 +7254,6 @@ mod tests {
     }
 
     #[test]
-    fn canonical_wire_clock_time_extracts_hhmm_from_rfc3339_z() {
-        assert_eq!(canonical_wire_clock_time("2026-07-25T03:43:12Z"), "03:43");
-    }
-
-    #[test]
     fn transcript_bottom_threshold_matches_follow_contract() {
         assert!(transcript_is_near_bottom(1000, 810, 100, 120));
         assert!(!transcript_is_near_bottom(1000, 700, 100, 120));
@@ -6812,43 +7304,6 @@ mod tests {
                 Some(&test_access(RoomAccessState::Connecting))
             ),
             None
-        );
-    }
-
-    #[test]
-    fn canonical_wire_clock_time_extracts_hhmm_from_rfc3339_fractional() {
-        assert_eq!(
-            canonical_wire_clock_time("2026-07-25T03:43:12.987Z"),
-            "03:43"
-        );
-    }
-
-    #[test]
-    fn canonical_wire_clock_time_extracts_hhmm_from_rfc3339_offset() {
-        assert_eq!(
-            canonical_wire_clock_time("2026-07-25T03:43:12+07:00"),
-            "03:43"
-        );
-    }
-
-    #[test]
-    fn canonical_wire_clock_time_passthrough_short_string() {
-        assert_eq!(canonical_wire_clock_time("abc"), "abc");
-    }
-
-    #[test]
-    fn canonical_wire_clock_time_passthrough_noncanonical_separator() {
-        assert_eq!(
-            canonical_wire_clock_time("2026-07-25 03:43:12Z"),
-            "2026-07-25 03:43:12Z"
-        );
-    }
-
-    #[test]
-    fn canonical_wire_clock_time_passthrough_unicode_without_panic() {
-        assert_eq!(
-            canonical_wire_clock_time("２０２６-07-25T03:43:12Z"),
-            "２０２６-07-25T03:43:12Z"
         );
     }
 
@@ -7114,16 +7569,96 @@ mod tests {
 
     #[test]
     fn room_timestamp_markup_preserves_full_wire_datetime_and_visible_clock() {
-        let ts = "2026-07-25T03:43:12.987+07:00";
-        let clock = canonical_wire_clock_time(ts);
+        // (Kept under its original name so this hunk stays clear of the tests
+        // other open PRs append above it; the clock it checks is now local.)
+        // The two halves of a row's time, and the reason they differ.
+        //
+        // `datetime`, `aria-label` and `title` carry the daemon's wire value
+        // VERBATIM — an unambiguous instant, which is what a machine and a
+        // screen reader want, and what keeps the row quotable across zones. The
+        // visible text is the member's own wall clock for that same instant.
+        // Localizing the attributes too would throw away the only unambiguous
+        // value on the row; localizing NEITHER is what this slice fixed.
+        let ts = "2026-07-25T03:43:12.987Z";
+        // What the view's `local_clock_time` computes once the browser
+        // supplies the offset; the wrapper needs a DOM, the arithmetic does
+        // not. -240 is America/New_York in summer.
+        let clock = room_messages::local_clock_time(ts, -240).expect("canonical wire value");
         let markup = format!(
             "<time class=\"rooms-workspace__msg-time\" datetime=\"{ts}\" aria-label=\"{ts}\" title=\"{ts}\">{clock}</time>"
         );
         assert!(markup.contains("<time"));
-        assert!(markup.contains("datetime=\"2026-07-25T03:43:12.987+07:00\""));
-        assert!(markup.contains("aria-label=\"2026-07-25T03:43:12.987+07:00\""));
-        assert!(markup.contains("title=\"2026-07-25T03:43:12.987+07:00\""));
-        assert!(markup.ends_with(">03:43</time>"));
+        assert!(markup.contains("datetime=\"2026-07-25T03:43:12.987Z\""));
+        assert!(markup.contains("aria-label=\"2026-07-25T03:43:12.987Z\""));
+        assert!(markup.contains("title=\"2026-07-25T03:43:12.987Z\""));
+        // 03:43Z is the previous evening in New York. The attributes still
+        // say 03:43Z; the member reads 23:43.
+        assert!(markup.ends_with(">23:43</time>"));
+    }
+
+    /// Which formatter a row's visible clock takes is a call inside the view,
+    /// so no unit test can reach it: `room_messages::local_clock_time` stays
+    /// pure and correct while a row prints bytes 11..16 of the wire string.
+    /// That WAS the defect — every row rendered Greenwich's hour under the
+    /// member's name — and re-introducing it is an edit that compiles and
+    /// passes every other test in this file. Read the source and assert on
+    /// it, with the needles concatenated at runtime so this test's own
+    /// literals cannot stand in for the code it scans, and over the
+    /// production half of the file only.
+    #[test]
+    fn every_transcript_row_clock_reads_the_member_s_local_formatter() {
+        // The production half only: this module's fixtures quote row markup,
+        // and a whole-file scan would find its own literals.
+        let view = include_str!("rooms_workspace.rs")
+            .split_once("#[cfg(test)]")
+            .expect("this module carries its unit tests at the bottom")
+            .0;
+        let call = ["{local_clock", "_time(&full_ts)}"].concat();
+
+        // Three rows render a clock: the main transcript row, the thread
+        // panel's reply, and the thread panel's root. All three, or one of
+        // them is quietly still on the wire's hour.
+        assert_eq!(
+            view.matches(call.as_str()).count(),
+            3,
+            "every `<time>` in the transcript must render `{call}`",
+        );
+
+        // The conversation-gap header is a clock too, and takes the same one.
+        assert!(
+            view.contains(&["then(|| local_clock", "_time(&full_ts))"].concat()),
+            "the conversation-gap header is a clock and takes the local one",
+        );
+
+        // The slicing formatter this replaced is gone rather than merely
+        // unused, and nothing renders the raw wire value as visible text.
+        assert!(
+            !view.contains(&["canonical_wire", "_clock_time"].concat()),
+            "the UTC-slicing formatter must not come back — it renders \
+             Greenwich's hour under the member's name",
+        );
+        assert!(
+            !view.contains("{full_ts}") && !view.contains("{full_ts.clone()}"),
+            "the wire value belongs on datetime/title/aria-label, never as \
+             the visible clock",
+        );
+
+        // "Today"/"Yesterday" is a day comparison, so its clock is local too.
+        // `to_iso_string` is UTC, and reading it made "Today" mean tomorrow
+        // every evening west of Greenwich.
+        let at = view
+            .find(&["fn today_day", "_key() -> String {"].concat())
+            .expect("today_day_key is a production fn");
+        let body = &view[at..][..view[at..].find("\n}").expect("fn closes")];
+        assert!(
+            !body.contains(&["to_iso", "_string"].concat()),
+            "today_day_key must read the LOCAL date getters, not the UTC ISO \
+             string",
+        );
+        assert!(
+            body.contains("get_full_year") && body.contains("get_date"),
+            "today_day_key must build its key from the local getters",
+        );
     }
 
     // ── Mention autosuggest helpers ──
@@ -7852,19 +8387,6 @@ mod tests {
     // ── Behavioral: composer draft preservation (production helper) ──
 
     #[test]
-    fn canonical_wire_clock_time_strips_redundant_date_for_rfc3339() {
-        assert_eq!(canonical_wire_clock_time("2026-06-05T12:34:56Z"), "12:34");
-        // Non-canonical inputs fall back to the full string — never lie.
-        assert_eq!(canonical_wire_clock_time(""), "");
-        assert_eq!(canonical_wire_clock_time("12:34"), "12:34");
-        assert_eq!(canonical_wire_clock_time("2026-06-05T12"), "2026-06-05T12");
-        assert_eq!(
-            canonical_wire_clock_time("2026-06-05 12:34"),
-            "2026-06-05 12:34"
-        );
-    }
-
-    #[test]
     fn avatar_identity_is_deterministic_and_bounded() {
         let a = avatar_identity_class("ada");
         assert_eq!(a, avatar_identity_class("ada"), "same id, same hue");
@@ -8481,5 +9003,138 @@ mod tests {
     #[test]
     fn option_dom_id_is_prefix_stable() {
         assert_eq!(room_option_dom_id("r1"), "rooms-opt-r1");
+    }
+
+    // ── pending room open (persisted restore vs ocean://room/<key>) ──────
+
+    fn persisted(key: &str) -> PendingRoomOpen {
+        PendingRoomOpen::persisted(key.to_string())
+    }
+
+    fn deep_link(key: &str) -> PendingRoomOpen {
+        PendingRoomOpen::deep_link(key.to_string(), 7)
+    }
+
+    /// The persisted restore's behaviour is unchanged by the deep link
+    /// joining its queue: it loses to a user action and degrades silently.
+    #[test]
+    fn a_persisted_restore_loses_every_race_and_degrades_silently() {
+        assert_eq!(
+            room_open_outcome(&persisted("team-blue"), None, true),
+            RoomOpenOutcome::Open("team-blue".into()),
+        );
+        // A user opened something first — theirs wins.
+        assert_eq!(
+            room_open_outcome(&persisted("team-blue"), Some("other"), true),
+            RoomOpenOutcome::Drop,
+        );
+        // The room is gone from the list: nothing happens, and nothing is said.
+        assert_eq!(
+            room_open_outcome(&persisted("team-blue"), None, false),
+            RoomOpenOutcome::Drop,
+        );
+        // Even its own key already open is a race it does not need to win.
+        assert_eq!(
+            room_open_outcome(&persisted("team-blue"), Some("team-blue"), true),
+            RoomOpenOutcome::Drop,
+        );
+    }
+
+    /// A deep link is a person asking out loud, so it switches away from a
+    /// room already open — and when the key names nothing, it says so instead
+    /// of appearing to do nothing.
+    #[test]
+    fn a_deep_link_wins_the_race_and_reports_an_unknown_key() {
+        assert_eq!(
+            room_open_outcome(&deep_link("team-blue"), None, true),
+            RoomOpenOutcome::Open("team-blue".into()),
+        );
+        assert_eq!(
+            room_open_outcome(&deep_link("team-blue"), Some("other"), true),
+            RoomOpenOutcome::Open("team-blue".into()),
+        );
+        assert_eq!(
+            room_open_outcome(&deep_link("team-blue"), None, false),
+            RoomOpenOutcome::Unknown("team-blue".into()),
+        );
+        assert_eq!(
+            room_open_outcome(&deep_link("team-blue"), Some("other"), false),
+            RoomOpenOutcome::Unknown("team-blue".into()),
+        );
+    }
+
+    /// Re-opening the room already on screen would throw away a hydrated
+    /// transcript to show the same thing.
+    #[test]
+    fn a_deep_link_to_the_open_room_is_a_no_op() {
+        assert_eq!(
+            room_open_outcome(&deep_link("team-blue"), Some("team-blue"), true),
+            RoomOpenOutcome::Drop,
+        );
+    }
+
+    /// A persisted restore answers as soon as any list has loaded, because it
+    /// answers silently. A deep link waits for a list fetched AFTER it was
+    /// queued, because it answers out loud.
+    #[test]
+    fn only_a_deep_link_waits_for_a_list_fetched_after_it_was_queued() {
+        // Persisted: `rooms_loaded` is the whole gate, settle count ignored.
+        assert!(!room_open_is_ready(&persisted("team-blue"), false, 0));
+        assert!(room_open_is_ready(&persisted("team-blue"), true, 0));
+        assert!(room_open_is_ready(&persisted("team-blue"), true, 99));
+
+        // Deep link queued at settle 7: `rooms_loaded` alone is not enough.
+        // This is the regression — a remounted workspace and a failed first
+        // load both leave `rooms_loaded` true over a list that cannot answer.
+        let link = deep_link("team-blue");
+        assert!(!room_open_is_ready(&link, true, 7));
+        assert!(room_open_is_ready(&link, true, 8));
+        // And it is released even if `rooms_loaded` were somehow still false:
+        // the counter only moves when a fetch settles, which sets that flag.
+        assert!(room_open_is_ready(&link, false, 8));
+    }
+
+    /// The counter wraps at `u64::MAX`; the readiness test must survive that
+    /// rather than becoming permanently true or permanently false.
+    #[test]
+    fn readiness_survives_the_settle_counter_wrapping() {
+        let link = PendingRoomOpen::deep_link("team-blue".into(), u64::MAX);
+        assert!(!room_open_is_ready(&link, true, u64::MAX));
+        assert!(room_open_is_ready(&link, true, u64::MAX.wrapping_add(1)));
+    }
+
+    /// "This room does not exist" and "I could not find out" are different
+    /// facts, and the second must never be reported as the first.
+    #[test]
+    fn an_unreachable_room_list_says_so_instead_of_denying_the_room() {
+        let unreachable = unreachable_deep_link_room_status("team-blue");
+        let unknown = unknown_deep_link_room_status("team-blue");
+        assert_ne!(unreachable, unknown);
+        assert!(
+            unreachable.starts_with("rooms "),
+            "{unreachable} must reach the room-list lane too",
+        );
+        assert!(unreachable.contains("team-blue"));
+        assert!(
+            !unreachable.contains("no room named"),
+            "{unreachable} must not deny a room it could not look up",
+        );
+    }
+
+    /// The unknown-key line must land in the room-list lane, because there is
+    /// no open transcript to put it under. `rooms ` is the prefix that lane
+    /// selects on (and the transcript lane deselects on).
+    #[test]
+    fn the_unknown_room_status_routes_to_the_room_list_lane() {
+        let status = unknown_deep_link_room_status("team-blue");
+        assert!(
+            status.starts_with("rooms "),
+            "{status} must start with the room-list lane's prefix",
+        );
+        assert!(!status.starts_with("create "));
+        assert!(
+            status.contains("team-blue"),
+            "{status} must name the key that failed, or it explains nothing",
+        );
     }
 }

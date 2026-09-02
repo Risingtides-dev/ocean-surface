@@ -54,7 +54,9 @@ Capability Matrix). The load-bearing rules:
 `run-surface.sh` requires `OCEAN_SURFACE_USER` and `OCEAN_SURFACE_PASS` for its
 default LAN/tailnet bind. For trusted localhost diagnostics only, bind
 `127.0.0.1` and set `OCEAN_SURFACE_AUTH=off`. Direct `cargo tauri dev` does not
-rebuild `dist/`; use `run-tauri.sh` whenever freshness matters.
+rebuild `dist/`; use `run-tauri.sh` whenever freshness matters (it points the
+shell at the `dist/` it just built; after another `trunk build`, Cmd+R in the
+app re-reads it without a Rust rebuild).
 
 The public proxy login contract is username/password to an HttpOnly,
 SameSite=Strict session cookie. Ordinary browsers and devices must not be
@@ -65,8 +67,21 @@ Secure attribute.
 
 Native surface direction:
 
-- Tauri 2.x shell (`crates/ocean-tauri`) loads `dist/` as `frontendDist` — the
-  same Trunk-built Leptos WASM bundle the browser PWA ships.
+- Tauri 2.x shell (`crates/ocean-tauri`) serves the SAME promoted release the
+  proxy serves the browser — `~/.config/ocean-surface/current` (override:
+  `OCEAN_SURFACE_DIST`, the proxy's variable; empty disables) — read from
+  disk at request time by `src/live_surface.rs`. The Trunk `dist/` embedded
+  at build time is only the fallback for a machine with no rail. A rail
+  promote therefore reaches the desktop without a rebuild: a hidden window
+  reloads itself, a visible one gets `surface-updated`, and Cmd+R (File ▸
+  Reload Surface) re-reads the bundle. Only changes to the shell's own Rust
+  still need `scripts/rebuild-tauri-app.sh`.
+- Shell → webview events (`daemon-status`, `menu-command`, `path-changed`,
+  `deep-link`, `surface-updated`) travel through `host.rs::tauri_listen`,
+  which registers the handler via `__TAURI_INTERNALS__.transformCallback`
+  and invokes the core `plugin:event|listen` command. Tauri 2 exposes no
+  `__TAURI_INTERNALS__.event`; a wrapper that looks one up subscribes to
+  nothing, silently.
 - Rust commands in the Tauri backend replace the GPUI crate's `rfd` (folder
   dialogs) and `notify` (path watcher) native bits.
 - Native LiveKit Rust client is a later phase behind a feature flag, not part
@@ -276,8 +291,25 @@ Web surface session UI:
   boundary. In auth-off mode, a mutation carrying Origin or Referer must name
   the exact loopback Host; reject it before credential lookup otherwise, while
   retaining headerless localhost CLI clients. Auth-off startup is refused on
-  non-loopback binds. Tauri and extension hosts remain read-only until they own
-  an equivalent privileged transport.
+  non-loopback binds. The Tauri shell now owns the equivalent privileged
+  transport this rule required: its `daemon_operator_request` command takes a
+  method and a PATH (never a URL, never a header), re-checks both against a
+  mirror of the same six-route allowlist, reads the same `operator.key` under
+  the same five-condition custody check, supplies the daemon origin itself from
+  `OCEAN_DAEMON_URL`, and returns only the daemon's status and body. Tauri 2
+  capabilities do not gate `generate_handler!` commands, so that allowlist is
+  the boundary. Dot segments are judged AFTER percent-decoding, because the
+  URL parser normalises `%2e%2e` into `..` and would otherwise carry the
+  credential to a route the allowlist approved a different string for; the
+  built URL is then re-parsed and refused unless its path still equals the
+  approved one, which makes the whole normalisation class inert. The shell
+  does not build for a non-unix target: its custody contract is POSIX, and a
+  ceremony rendered writable over a credential that cannot be read is the
+  opposite of "absence, not errors". The extension host has no shell and no proxy and REMAINS
+  read-only. On the surface side every privileged mutation leaves
+  `room_agent_authorization.rs` through one seam addressed by an
+  `AuthorityRoute` the four route builders alone construct; the credential
+  enters no host's WASM bundle.
 - Binding reads carry server-derived owner eligibility. Surface does not infer
   owner authority from a local participant projection. With no binding, a
   resolved Human already in a Local roster may see only the bootstrap
@@ -338,15 +370,32 @@ Web surface session UI:
 - Rooms G1 is daemon-native text collaboration. LiveKit controls stay outside
   the room join, leave, roster, and transcript lifecycle until explicitly
   reintroduced behind a reviewed platform contract.
-- The rooms browser is a flex column; `.rooms-panel__list` keeps
-  `min-height: 0` with vertical overflow so long room lists scroll instead of
-  pushing status/actions outside the viewport.
+- The rooms browser is the left rail of `rooms_workspace.rs`, a flex column;
+  `.rooms-workspace__left-list` keeps `min-height: 0` with vertical overflow so
+  long room lists scroll instead of pushing the create field and status line
+  outside the viewport. (It was `.rooms-panel__list` in `styles/panels.css`
+  until that never-rendered panel's CSS was deleted.)
 - Channel/thread drafts, mention state, and pending-send confirmation are
   scoped to the exact open-room generation. A room switch or close clears them
   synchronously so content and a stale `Sending…` gate cannot cross rooms.
 - An empty hydrated transcript has no resume cursor. Surface omits
   `after_seq` until it owns a real room sequence, preserving the daemon's
   zero-based first row.
+- Mention notifications are raised from the LIVE TAIL only, by the same
+  `room_markdown` tokeniser that paints the highlight, so what notifies is what
+  shows. Hydration and the load-older backfill never notify — history arriving
+  is not someone talking to you now. A notification is suppressed only when the
+  reader is demonstrably looking at that room: focused, Rooms on screen, and
+  that room open. `open_key` alone is NOT "on screen" — it and the tail both
+  outlive the workspace unmounting behind Direct messages. Consequently a
+  mention in a room you do not have OPEN does not raise an OS notification:
+  only the open room has a tail, and standing up a tail per room to change that
+  would contradict the one-room rule above. The room-list response now carries
+  a daemon-derived, identity-scoped sparse `attention` projection for every
+  selected page. Surface uses it for unopened-room unread/mention badges and
+  never scans message text or opens N `EventSource`s to synthesize attention.
+  An absent projection means an older daemon and falls back to legacy sequence
+  unread state; a present empty projection is authoritative zero.
 
 ## Agent Builder Contract
 
@@ -443,8 +492,8 @@ identity-bearing; requiring the new form would red every historical entry and
 every entry a slice in flight is writing right now. What it asserts is that each
 entry is CLOSED before the next one starts, which is what a fold destroys. **Run
 `node scripts/check-ledger.mjs events.md` on any change to `events.md`, and again
-on either side of a rebase carrying one; the two verdicts must match.** It is the
-only check that reads this file, it runs in CI on PRs and on pushes to main, and
+on either side of a rebase carrying one; the two verdicts must match.** It runs in
+CI on PRs and on pushes to main, and
 its exit codes are 0 clean / 1 an entry is open / 2 the check could not run at
 all. `--fix` closes what it finds by insertion only and writes the identity form,
 so a repair does not hand the next merge the same shared line — never in CI,
@@ -453,6 +502,17 @@ below applies to it. `scripts/events-merge-driver.test.mjs` proves a three-way
 parallel append keeps all four rules and fuses nothing, but it reproduces the
 merge in a scratch repo and never reads THIS file, so CI's `guards` job running
 it proves the driver, not the ledger.
+
+**Run `node scripts/check-ledger-order.mjs events.md` beside it.** The checker
+never reads a `time:` header past the word, so five entries sat at the top of
+this ledger newest-first for months and it called the file clean. The order
+check reads the clock and reds any entry more than a day out of merge order —
+a prepend, a backdate — while descents of hours, which is how parallel slices
+land, pass. Same exit codes, no `--fix`: moving an entry is a decision, made
+once by hand and recorded in the ledger. `scripts/check-ledger.mjs` itself is
+one of three copies (bedrock, os, surface) and carries a code stamp; its test
+recomputes the digest, so an edit that forks it from bedrock's copy is red
+until the fork is written down.
 
 Three things the identity separator does NOT buy:
 

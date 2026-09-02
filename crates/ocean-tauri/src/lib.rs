@@ -24,6 +24,10 @@ use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
+/// Live surface bundle: serve the promoted web release from disk (see the
+/// module doc for why the compiled-in dist alone left the desktop stale).
+mod live_surface;
+
 /// One surfaced filesystem change, serialized to the webview as `path-changed`.
 ///
 /// `kind` is created/modified/removed. notify surfaces a rename as a
@@ -665,6 +669,9 @@ fn ui_debug_resize(window: tauri::WebviewWindow, width: f64, height: f64) -> Res
 const DAEMON_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 /// Poll interval for the background liveness poller.
 const DAEMON_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// Consecutive failed probes required before a previously-running daemon is
+/// reported offline. One delayed loopback connect must not flicker the UI.
+const DAEMON_FAILURE_CONFIRMATIONS: u8 = 2;
 /// Default daemon URL — matches the wasm surface's `DEFAULT_DAEMON_URL` and
 /// the daemon's `OCEAN_BIND` default (`127.0.0.1:4780`). Reading
 /// `OCEAN_DAEMON_URL` keeps the shell and the wasm bundle pointed at one
@@ -706,12 +713,35 @@ fn decide_daemon_state(reachable: bool, child_alive: bool, reachable_ever: bool)
     }
 }
 
+/// Debounce only a loss of an already-running daemon. Startup failures remain
+/// immediately visible, while one transient timeout cannot turn a healthy
+/// connection into a false offline report.
+fn stabilize_daemon_reachability(
+    reachable: bool,
+    previous: DaemonState,
+    consecutive_failures: u8,
+) -> (bool, u8) {
+    if reachable {
+        return (true, 0);
+    }
+    let failures = consecutive_failures.saturating_add(1);
+    let keep_running = previous == DaemonState::Running && failures < DAEMON_FAILURE_CONFIRMATIONS;
+    (keep_running, failures)
+}
+
+#[derive(Clone, Copy)]
+struct DaemonObservation {
+    state: DaemonState,
+    revision: u64,
+}
+
 /// Payload for the `daemon-status` event and the `daemon_status` command.
-/// `pid` is omitted on the wire when the shell doesn't own the child (an
-/// external daemon it can reach but didn't spawn).
+/// `revision` makes event/snapshot ordering deterministic in the webview: an
+/// async startup snapshot can never overwrite a newer status event.
 #[derive(Clone, Serialize)]
 struct DaemonStatusDto {
     state: DaemonState,
+    revision: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pid: Option<u32>,
 }
@@ -726,12 +756,14 @@ struct DaemonSup {
     /// the daemon survives a shell crash — supervision is explicit
     /// (start/stop/restart), never `kill_on_drop`.
     child: Mutex<Option<Child>>,
-    /// Last state computed by the poller; `daemon_status` reads this so the
-    /// command stays non-blocking (the poller is the freshness mechanism).
-    last: Mutex<DaemonState>,
-    /// Set once the port has ever been reachable, so a later loss of
-    /// reachability with no owned child reads as `Unreachable` (an external
-    /// daemon that stopped) rather than `Stopped` (never started).
+    /// Last state computed by the poller plus a monotonic revision. The
+    /// revision closes the startup race between an async snapshot and events.
+    last: Mutex<DaemonObservation>,
+    /// Consecutive raw probe failures. A previously-running daemon is declared
+    /// down only after [`DAEMON_FAILURE_CONFIRMATIONS`] misses.
+    consecutive_failures: Mutex<u8>,
+    /// Set once the port has ever been reachable, so a confirmed later loss
+    /// with no owned child reads as `Unreachable` rather than `Stopped`.
     reachable_ever: Mutex<bool>,
     /// host:port parsed from the daemon URL — the probe target.
     host: String,
@@ -742,7 +774,11 @@ impl DaemonSup {
     fn new(host: String, port: u16) -> Self {
         Self {
             child: Mutex::new(None),
-            last: Mutex::new(DaemonState::Stopped),
+            last: Mutex::new(DaemonObservation {
+                state: DaemonState::Stopped,
+                revision: 0,
+            }),
+            consecutive_failures: Mutex::new(0),
             reachable_ever: Mutex::new(false),
             host,
             port,
@@ -810,29 +846,44 @@ impl DaemonSup {
     }
 
     /// Recompute liveness from a TCP probe + child state, persisting the
-    /// result as `last`. Blocking — poller-thread only.
+    /// result. A single loss after `Running` is held as healthy; a second
+    /// consecutive miss confirms the outage. Blocking — poller-thread only.
     fn probe(&self) -> DaemonState {
-        let reachable = self.reachable();
+        let raw_reachable = self.reachable();
         let alive = self.child_alive();
+        let previous = self.last.lock().state;
+        let failure_count = *self.consecutive_failures.lock();
+        let (reachable, failure_count) =
+            stabilize_daemon_reachability(raw_reachable, previous, failure_count);
+        *self.consecutive_failures.lock() = failure_count;
+
         let ever = *self.reachable_ever.lock();
         let state = decide_daemon_state(reachable, alive, ever);
-        if reachable {
+        if raw_reachable {
             *self.reachable_ever.lock() = true;
         }
         if !alive {
             // Reap a dead slot so a subsequent start() doesn't see a zombie.
             self.reap_child();
         }
-        *self.last.lock() = state;
+        let mut last = self.last.lock();
+        if state != last.state {
+            last.state = state;
+            last.revision = last.revision.saturating_add(1);
+        }
         state
     }
 
-    /// Cached snapshot for the `daemon_status` command (non-blocking). The
-    /// poller refreshes `last` every [`DAEMON_POLL_INTERVAL`].
+    /// Cached snapshot for the `daemon_status` command (non-blocking). State
+    /// and revision are captured under one lock so the DTO is self-consistent.
     fn snapshot(&self) -> DaemonStatusDto {
-        let state = *self.last.lock();
+        let observation = *self.last.lock();
         let pid = self.pid();
-        DaemonStatusDto { state, pid }
+        DaemonStatusDto {
+            state: observation.state,
+            revision: observation.revision,
+            pid,
+        }
     }
 }
 
@@ -928,13 +979,15 @@ fn spawn_daemon(bin: &str) -> Result<Child, String> {
 /// daemon binds resolves instantly.
 fn tcp_reachable(host: &str, port: u16) -> bool {
     use std::net::ToSocketAddrs;
-    let Ok(mut addrs) = (host, port).to_socket_addrs() else {
+    let Ok(addrs) = (host, port).to_socket_addrs() else {
         return false;
     };
-    let Some(addr) = addrs.next() else {
-        return false;
-    };
-    TcpStream::connect_timeout(&addr, DAEMON_PROBE_TIMEOUT).is_ok()
+    // Hostnames such as localhost can resolve to IPv6 and IPv4. Trying only
+    // the first address creates a false negative when the daemon binds the
+    // other family.
+    addrs
+        .into_iter()
+        .any(|addr| TcpStream::connect_timeout(&addr, DAEMON_PROBE_TIMEOUT).is_ok())
 }
 
 /// Background liveness poller: probe every [`DAEMON_POLL_INTERVAL`] and emit a
@@ -945,13 +998,7 @@ fn spawn_daemon_poller(app: AppHandle, daemon: Arc<DaemonSup>) {
         let prev = daemon.snapshot().state;
         let state = daemon.probe();
         if state != prev {
-            let _ = app.emit(
-                "daemon-status",
-                DaemonStatusDto {
-                    state,
-                    pid: daemon.pid(),
-                },
-            );
+            let _ = app.emit("daemon-status", daemon.snapshot());
         }
         thread::sleep(DAEMON_POLL_INTERVAL);
     });
@@ -1369,13 +1416,44 @@ mod tests {
     }
 
     #[test]
-    fn daemon_status_dto_serializes_state_lowercase_and_skips_absent_pid() {
+    fn one_failed_probe_does_not_drop_a_running_daemon() {
+        let (reachable, failures) = stabilize_daemon_reachability(false, DaemonState::Running, 0);
+        assert!(reachable);
+        assert_eq!(failures, 1);
+    }
+
+    #[test]
+    fn second_failed_probe_confirms_running_daemon_is_down() {
+        let (reachable, failures) = stabilize_daemon_reachability(false, DaemonState::Running, 1);
+        assert!(!reachable);
+        assert_eq!(failures, DAEMON_FAILURE_CONFIRMATIONS);
+    }
+
+    #[test]
+    fn successful_probe_recovers_immediately_and_resets_failures() {
+        let (reachable, failures) =
+            stabilize_daemon_reachability(true, DaemonState::Unreachable, u8::MAX);
+        assert!(reachable);
+        assert_eq!(failures, 0);
+    }
+
+    #[test]
+    fn startup_failure_is_not_debounced() {
+        let (reachable, failures) = stabilize_daemon_reachability(false, DaemonState::Stopped, 0);
+        assert!(!reachable);
+        assert_eq!(failures, 1);
+    }
+
+    #[test]
+    fn daemon_status_dto_serializes_state_revision_and_skips_absent_pid() {
         let dto = DaemonStatusDto {
             state: DaemonState::Running,
+            revision: 7,
             pid: None,
         };
         let json = serde_json::to_value(&dto).unwrap();
         assert_eq!(json["state"].as_str(), Some("running"));
+        assert_eq!(json["revision"].as_u64(), Some(7));
         // `pid` is skipped when None (the wasm side treats it as optional).
         assert!(json.get("pid").is_none());
     }
@@ -1384,6 +1462,7 @@ mod tests {
     fn daemon_status_dto_includes_pid_when_owned() {
         let dto = DaemonStatusDto {
             state: DaemonState::Starting,
+            revision: 3,
             pid: Some(4242),
         };
         let json = serde_json::to_value(&dto).unwrap();
@@ -1489,11 +1568,511 @@ mod external_url_tests {
     }
 }
 
+// ── privileged room-authority transport (spec 1.12) ──────────────────────
+//
+// The browser PWA can run the Room-agent authorization ceremony because the
+// proxy injects its mode-0600 operator key server-side on six exact daemon
+// routes; the key never enters the shared WASM bundle. The Tauri shell was
+// read-only for the same reason — it had no equivalent privileged transport.
+// It runs beside the daemon and already supervises it, so it can own one:
+// this command is that transport, and it is deliberately the same shape as
+// the proxy's forwarder.
+//
+// What this command does NOT do: take a URL, take a header, or return the
+// key. The webview names a METHOD and a PATH; the origin comes from
+// `OCEAN_DAEMON_URL` (operator-set, exactly as the daemon probe does), the
+// credential comes from disk under a custody check, and the reply carries
+// only the daemon's status and body. Tauri 2 capabilities do NOT gate
+// `generate_handler!` commands (see TASK-78 above), so the ALLOWLIST here —
+// not the ACL — is the security boundary.
+
+/// Where the room-operator credential lives, mirroring the proxy's resolution
+/// (`OCEAN_OPERATOR_KEY_FILE` → `<config dir>/operator.key`) so one machine's
+/// two surfaces read one file.
+fn room_operator_key_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("OCEAN_OPERATOR_KEY_FILE") {
+        return PathBuf::from(path);
+    }
+    ocean_config_dir().join("operator.key")
+}
+
+/// The `ocean-rs` configuration directory, resolved exactly as
+/// `ocean-surface-proxy` resolves it.
+fn ocean_config_dir() -> PathBuf {
+    if let Some(path) = std::env::var_os("OCEAN_CONFIG_DIR") {
+        return PathBuf::from(path);
+    }
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        return PathBuf::from(xdg).join("ocean-rs");
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home).join(".config").join("ocean-rs");
+    }
+    PathBuf::from(".ocean-rs")
+}
+
+/// Read the room-operator credential without weakening its custody contract.
+/// Possession of this key permits durable local execution-authority
+/// mutations, so the file must be owner-owned, single-linked, mode 0600, a
+/// regular file, and opened without following symlinks — the same five
+/// conditions `ocean-surface-proxy::read_room_operator_key` enforces. The
+/// value is returned only to the forwarder below; no error message and no
+/// command reply ever carries it.
+#[cfg(unix)]
+fn read_room_operator_key(path: &Path) -> Result<String, String> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let link = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("room operator credential unavailable: {error}"))?;
+    if link.file_type().is_symlink() || !link.is_file() {
+        return Err("room operator credential must be a regular file".to_owned());
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|error| format!("room operator credential unavailable: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("room operator credential unavailable: {error}"))?;
+    // SAFETY: `geteuid` takes no arguments, has no preconditions, and only
+    // reads the effective user id of this process.
+    let owner = unsafe { libc::geteuid() };
+    if !metadata.is_file()
+        || metadata.uid() != owner
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o777 != 0o600
+    {
+        return Err(
+            "room operator credential must be an owner-owned single-link mode-0600 regular file"
+                .to_owned(),
+        );
+    }
+    let mut key = String::new();
+    {
+        use std::io::Read as _;
+        let mut file = file;
+        file.read_to_string(&mut key)
+            .map_err(|error| format!("room operator credential unavailable: {error}"))?;
+    }
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("room operator credential is empty".to_owned());
+    }
+    if key.bytes().any(|b| !(0x20..0x7f).contains(&b)) {
+        return Err("room operator credential is not a valid header value".to_owned());
+    }
+    Ok(key.to_owned())
+}
+
+// The custody contract above is expressed in POSIX ownership, link count,
+// mode and `O_NOFOLLOW`. A non-unix host cannot satisfy it.
+//
+// The first draft of this shipped a stub returning `Err` on such a host, and
+// that was the wrong shape: `host::room_authority_mutations_for_host` reports
+// Tauri as authority-capable unconditionally, so a Windows build would have
+// rendered the full ceremony — Authorize, suspend, resume, revoke — with
+// every one of them guaranteed to fail on a credential that could not be
+// read. The platform contract's rule is "absence, not errors"
+// (AGENTS.md 30-32), and a control that is present and always fails is the
+// exact opposite.
+//
+// Refusing to build is the honest version. This shell is macOS-first and has
+// never been built for Windows, so nothing regresses today; what changes is
+// that the requirement is explicit instead of latent. A Windows shell needs
+// two things, and the compile error names both: a real custody equivalent
+// (an ACL check — POSIX mode bits have no meaning there), and a capability
+// handshake so the surface can render the ceremony ABSENT rather than
+// writable. Linux is unix and is unaffected.
+#[cfg(not(unix))]
+compile_error!(
+    "ocean-tauri's Room-agent authority forwarder has no custody implementation \
+     for this target. Its contract is POSIX (owner, link count, mode 0600, \
+     O_NOFOLLOW). Implementing it here needs an ACL-based equivalent AND a \
+     capability handshake so `room_authority_mutations_supported()` reports \
+     absence rather than a ceremony whose every action fails."
+);
+
+/// True only for the exact six daemon routes the operator credential may be
+/// attached to. A byte-for-byte mirror of the proxy's
+/// `room_agent_authority_mutation`: bootstrap, authorize, reauthorize,
+/// suspend, resume, revoke. Read-only binding inspection and package preview
+/// stay credential-free and are not reachable through this command at all.
+///
+/// `path` arrives percent-encoded from the surface (`rooms::encode` escapes
+/// `/`), so a room key or member id can never split into extra segments here.
+fn room_agent_authority_mutation(method: &str, path: &str) -> bool {
+    let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    let base = segments.len() >= 5
+        && segments[0] == "v1"
+        && segments[1] == "rooms"
+        && segments[2] == "persistent"
+        && !segments[3].is_empty()
+        && segments[4] == "agents";
+    if !base {
+        return false;
+    }
+    match method {
+        "POST" if segments.len() == 5 => true,
+        "POST" if segments.len() == 6 && segments[5] == "bootstrap" => true,
+        "POST" if segments.len() == 7 => {
+            !segments[5].is_empty() && matches!(segments[6], "reauthorize" | "suspend" | "resume")
+        }
+        "DELETE" if segments.len() == 6 => !segments[5].is_empty(),
+        _ => false,
+    }
+}
+
+/// Shape of a request path this command will forward: absolute, single-line,
+/// no query or fragment, no dot segment. The allowlist above decides WHICH
+/// route; this decides that the string is a route at all, before it is
+/// concatenated onto the daemon origin.
+fn forwardable_operator_path(path: &str) -> bool {
+    if !path.starts_with('/') || path.len() > 1024 {
+        return false;
+    }
+    if path
+        .chars()
+        .any(|c| c.is_control() || c.is_whitespace() || matches!(c, '?' | '#' | '\\'))
+    {
+        return false;
+    }
+    // Dot segments are tested on the DECODED segment, not the literal one.
+    // `%2e%2e` is not `..` to a string comparison, but it IS to the URL
+    // parser: it normalises the escape and collapses the segment, so
+    // `DELETE /v1/rooms/persistent/team/agents/%2e%2e` would pass a literal
+    // check, pass the six-route allowlist as a non-empty member id, and then
+    // carry the operator credential to `DELETE /v1/rooms/persistent/team/` —
+    // a destructive route on no allowlist. The proxy never had this hole
+    // because `has_dot_segment` runs there on axum's already-decoded capture
+    // (main.rs 2264); this mirror had copied the allowlist and not that guard.
+    !path.split('/').any(is_dot_segment)
+}
+
+/// True when a path segment IS a dot segment once percent-decoding is
+/// accounted for. Any run of dots counts, not just `.` and `..`: the URL
+/// parser only acts on those two, but a segment that is nothing but dots has
+/// no legitimate meaning here and refusing the whole shape leaves no edge to
+/// re-derive.
+fn is_dot_segment(segment: &str) -> bool {
+    let decoded = percent_decode_segment(segment);
+    !decoded.is_empty() && decoded.bytes().all(|b| b == b'.')
+}
+
+/// Percent-decode one path segment, byte-wise. Enough to answer "what does
+/// the URL parser see here"; an invalid or truncated escape is left literal,
+/// which is safe because the only question asked of the result is whether it
+/// is a run of dots. Not a general-purpose decoder and not used to build the
+/// request — the path is forwarded exactly as given.
+fn percent_decode_segment(segment: &str) -> String {
+    let bytes = segment.as_bytes();
+    let mut out = String::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 3 <= bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((((hi << 4) | lo) as u8) as char);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+/// The daemon's answer, verbatim: status plus body text. The surface decodes
+/// the body itself, exactly as it decodes the browser proxy's reply, so one
+/// ceremony reads one wire shape on both hosts.
+#[derive(Clone, Serialize)]
+struct OperatorReplyDto {
+    status: u16,
+    body: String,
+}
+
+/// Forward one Room-agent authority mutation to the supervised daemon with the
+/// operator credential attached. Errors are human-readable and credential-free.
+#[tauri::command]
+async fn daemon_operator_request(
+    method: String,
+    path: String,
+    body: Option<String>,
+) -> Result<OperatorReplyDto, String> {
+    if method != "POST" && method != "DELETE" {
+        return Err("unsupported operator request method".to_owned());
+    }
+    if !forwardable_operator_path(&path) {
+        return Err("operator request path is not a forwardable daemon route".to_owned());
+    }
+    if !room_agent_authority_mutation(&method, &path) {
+        return Err("not a room authority mutation route".to_owned());
+    }
+    let url = format!("{}{path}", daemon_url_from_env().trim_end_matches('/'));
+    // Belt and braces, and the half that matters more than the pre-check:
+    // parse the URL and require that it STILL addresses the path the
+    // allowlist just approved. Every check above reasons about a string; this
+    // one reasons about what will actually be sent. `%2e%2e` was one way a
+    // parser could rewrite a path out from under an allowlist decision, and
+    // the class is bigger than that instance — normalisation rules change,
+    // and the next one arrives as a dependency bump rather than as a diff
+    // here. Refusing on any disagreement makes the whole class inert.
+    //
+    // Ordering is deliberate: this runs BEFORE the credential is read, so a
+    // path the parser would rewrite never reaches the key at all.
+    let parsed =
+        reqwest::Url::parse(&url).map_err(|error| format!("operator request URL: {error}"))?;
+    if parsed.path() != path {
+        return Err("operator request path would not survive URL parsing".to_owned());
+    }
+    let key = read_room_operator_key(&room_operator_key_path())?;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("operator transport unavailable: {error}"))?;
+    let request = if method == "DELETE" {
+        client.delete(&url)
+    } else {
+        client.post(&url)
+    }
+    .header("content-type", "application/json")
+    .header("X-Ocean-Operator", key)
+    .body(body.unwrap_or_default());
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("daemon is unreachable: {error}"))?;
+    let status = response.status().as_u16();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("daemon reply could not be read: {error}"))?;
+    Ok(OperatorReplyDto { status, body })
+}
+
+#[cfg(test)]
+mod operator_transport_tests {
+    use super::{
+        forwardable_operator_path, is_dot_segment, read_room_operator_key,
+        room_agent_authority_mutation, room_operator_key_path,
+    };
+
+    const ROOM: &str = "/v1/rooms/persistent/team-blue/agents";
+
+    #[test]
+    fn the_allowlist_admits_exactly_the_six_ceremony_routes() {
+        // The six the proxy injects on, and nothing else.
+        assert!(room_agent_authority_mutation("POST", ROOM));
+        assert!(room_agent_authority_mutation(
+            "POST",
+            &format!("{ROOM}/bootstrap")
+        ));
+        for action in ["reauthorize", "suspend", "resume"] {
+            assert!(room_agent_authority_mutation(
+                "POST",
+                &format!("{ROOM}/agent-1/{action}")
+            ));
+        }
+        assert!(room_agent_authority_mutation(
+            "DELETE",
+            &format!("{ROOM}/agent-1")
+        ));
+    }
+
+    #[test]
+    fn the_allowlist_refuses_every_other_route_and_method() {
+        // Inspection and preview are credential-free and must stay that way.
+        assert!(!room_agent_authority_mutation("GET", ROOM));
+        assert!(!room_agent_authority_mutation(
+            "POST",
+            &format!("{ROOM}/preview/reviewer")
+        ));
+        // Neighbouring room routes the ceremony also calls, but unprivileged.
+        assert!(!room_agent_authority_mutation(
+            "POST",
+            "/v1/rooms/persistent/team-blue/members/agents"
+        ));
+        assert!(!room_agent_authority_mutation(
+            "POST",
+            "/v1/rooms/persistent/team-blue/messages"
+        ));
+        // Wrong verb on an allowlisted shape.
+        assert!(!room_agent_authority_mutation(
+            "DELETE",
+            &format!("{ROOM}/agent-1/suspend")
+        ));
+        assert!(!room_agent_authority_mutation("DELETE", ROOM));
+        // Unknown action verb, empty member, wrong prefix, too short.
+        assert!(!room_agent_authority_mutation(
+            "POST",
+            &format!("{ROOM}/agent-1/promote")
+        ));
+        assert!(!room_agent_authority_mutation(
+            "POST",
+            &format!("{ROOM}//suspend")
+        ));
+        assert!(!room_agent_authority_mutation("POST", "/v1/agents"));
+        assert!(!room_agent_authority_mutation(
+            "POST",
+            "/v1/rooms/persistent//agents"
+        ));
+        assert!(!room_agent_authority_mutation("POST", "/"));
+    }
+
+    #[test]
+    fn a_path_must_be_an_absolute_dot_free_single_line_route() {
+        assert!(forwardable_operator_path(ROOM));
+        assert!(!forwardable_operator_path("v1/rooms/persistent/x/agents"));
+        assert!(!forwardable_operator_path(
+            "/v1/rooms/persistent/x/../../agents"
+        ));
+        assert!(!forwardable_operator_path("/v1/./agents"));
+        assert!(!forwardable_operator_path("/v1/agents?x=1"));
+        assert!(!forwardable_operator_path("/v1/agents#frag"));
+        assert!(!forwardable_operator_path("/v1/agents\nHost: evil"));
+        assert!(!forwardable_operator_path("/v1/ agents"));
+        assert!(!forwardable_operator_path(&format!(
+            "/{}",
+            "a".repeat(1024)
+        )));
+    }
+
+    /// A path cannot name the origin: no scheme, no authority, ever. This is
+    /// what keeps the credential pointed at the supervised daemon.
+    /// P1 from review: `%2e%2e` is not `..` to a string comparison but IS to
+    /// the URL parser, which normalises the escape and collapses the segment.
+    /// Measured against the real parser: `/v1/rooms/persistent/team/agents/%2e%2e`
+    /// resolves to `/v1/rooms/persistent/team/`, so a literal-only check would
+    /// have carried the operator credential to a destructive route on no
+    /// allowlist.
+    #[test]
+    fn percent_encoded_dot_segments_are_refused() {
+        for hostile in [
+            "/v1/rooms/persistent/team/agents/%2e%2e",
+            "/v1/rooms/persistent/team/agents/%2E%2E",
+            "/v1/rooms/persistent/team/agents/%2e",
+            "/v1/rooms/persistent/team/agents/%2E",
+            "/v1/rooms/persistent/%2e%2e/agents",
+            "/v1/rooms/persistent/team/agents/%2e%2e%2e",
+            // Mixed literal and encoded, and a nested escape of the percent.
+            "/v1/rooms/persistent/team/agents/.%2e",
+            "/v1/rooms/persistent/team/agents/%2e.",
+        ] {
+            assert!(
+                !forwardable_operator_path(hostile),
+                "{hostile} must be refused: the URL parser reads it as a dot segment",
+            );
+        }
+        // And the feature still works. A guard that blocks the thing it
+        // protects is not a fix: an encoded room key or member id is ordinary
+        // here, because `rooms::encode` produces exactly these.
+        for ok in [
+            "/v1/rooms/persistent/team%2Fblue/agents/agent-1",
+            "/v1/rooms/persistent/team.blue/agents/agent-1",
+            "/v1/rooms/persistent/team/agents/a%2e%2eb",
+            "/v1/rooms/persistent/team/agents/review%20agent",
+        ] {
+            assert!(
+                forwardable_operator_path(ok),
+                "{ok} is a legitimate encoded route and must forward",
+            );
+        }
+    }
+
+    /// The decoder answers one question — "is this a run of dots" — and a
+    /// truncated or invalid escape must not make it answer wrongly.
+    #[test]
+    fn the_segment_decoder_survives_malformed_escapes() {
+        assert!(is_dot_segment("%2e"));
+        assert!(is_dot_segment("."));
+        assert!(!is_dot_segment(""));
+        assert!(!is_dot_segment("%2"));
+        assert!(!is_dot_segment("%"));
+        assert!(!is_dot_segment("%zz"));
+        assert!(!is_dot_segment("agent-1"));
+        assert!(!is_dot_segment("a."));
+    }
+
+    #[test]
+    fn a_path_can_never_carry_an_origin() {
+        for hostile in [
+            "http://evil.example/v1/rooms/persistent/x/agents",
+            "//evil.example/v1/rooms/persistent/x/agents",
+        ] {
+            assert!(
+                !room_agent_authority_mutation("POST", hostile),
+                "{hostile} must not be an authority mutation",
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_credential_reader_enforces_custody_and_never_follows_links() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = dir.path().join("operator.key");
+        std::fs::write(&key, "secret-value\n").unwrap();
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            read_room_operator_key(&key).expect("secure key"),
+            "secret-value"
+        );
+
+        // Group/world-readable is refused.
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(read_room_operator_key(&key).is_err());
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        // A second hard link means a second custodian.
+        let hard = dir.path().join("hardlink.key");
+        std::fs::hard_link(&key, &hard).unwrap();
+        assert!(read_room_operator_key(&key).is_err());
+        std::fs::remove_file(&hard).unwrap();
+
+        // A symlink is refused before it is opened.
+        let symlink = dir.path().join("symlink.key");
+        std::os::unix::fs::symlink(&key, &symlink).unwrap();
+        assert!(read_room_operator_key(&symlink).is_err());
+
+        // Empty is refused: an empty header is not a credential.
+        let empty = dir.path().join("empty.key");
+        std::fs::write(&empty, "   \n").unwrap();
+        std::fs::set_permissions(&empty, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(read_room_operator_key(&empty).is_err());
+
+        // A missing file is an error, never a credential-free forward.
+        assert!(read_room_operator_key(&dir.path().join("absent.key")).is_err());
+    }
+
+    #[test]
+    fn the_key_path_follows_the_proxys_resolution() {
+        // Both surfaces read one file on one machine; the env override is the
+        // seam an operator uses to move it.
+        let path = room_operator_key_path();
+        assert!(
+            path.ends_with("operator.key"),
+            "resolved key path {} must name operator.key",
+            path.display(),
+        );
+    }
+}
+
 pub fn run() {
     // Daemon probe target: parse once from `OCEAN_DAEMON_URL` so the shell
     // and the wasm bundle share one configurable origin (default 127.0.0.1:4780).
     let url = daemon_url_from_env();
     let (host, port) = parse_host_port(&url).unwrap_or_else(|| ("127.0.0.1".to_string(), 4780));
+    // Seed liveness before the webview can request its startup snapshot. The
+    // old default `Stopped` snapshot could race a newer `Running` event and
+    // leave the offline chip stuck for the lifetime of the shell.
+    let daemon = Arc::new(DaemonSup::new(host, port));
+    daemon.probe();
     tauri::Builder::default()
         // Single-instance guard (QA-005). Close-requested hides the main
         // window to the tray instead of quitting, so an "invisible" Ocean is
@@ -1520,7 +2099,7 @@ pub fn run() {
         )
         .manage(AppState {
             watchers: Default::default(),
-            daemon: Arc::new(DaemonSup::new(host, port)),
+            daemon,
             menu: Mutex::new(MenuBridge {
                 ready: false,
                 pending: Vec::new(),
@@ -1533,6 +2112,9 @@ pub fn run() {
             // boot, before the tray/menu wiring below.
             let daemon_sup = app.state::<AppState>().daemon.clone();
             spawn_daemon_poller(app.handle().clone(), daemon_sup);
+            // Notice rail promotes of the live surface bundle: reload a hidden
+            // window, tell a visible one (`surface-updated`).
+            live_surface::spawn_release_watcher(app.handle().clone());
 
             // Opt-in UI diagnostics for native acceptance runs. The script is
             // loaded only when the operator supplies an explicit path; normal
@@ -1580,6 +2162,13 @@ pub fn run() {
             }
             // System-tray icon: app icon, "Ocean" tooltip, Show / Daemon / Quit.
             let show = MenuItem::with_id(app, "show", "Show Ocean", true, None::<&str>)?;
+            let tray_reload = MenuItem::with_id(
+                app,
+                "tray-reload-surface",
+                "Reload Surface",
+                true,
+                None::<&str>,
+            )?;
             let daemon_start_item =
                 MenuItem::with_id(app, "daemon-start", "Start Daemon", true, None::<&str>)?;
             let daemon_restart_item =
@@ -1591,6 +2180,7 @@ pub fn run() {
                 app,
                 &[
                     &show,
+                    &tray_reload,
                     &sep_top,
                     &daemon_start_item,
                     &daemon_restart_item,
@@ -1604,6 +2194,7 @@ pub fn run() {
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_main_window(app),
+                    "tray-reload-surface" => live_surface::reload_surface(app),
                     "daemon-start" => tray_daemon_action(app, DaemonTrayAction::Start),
                     "daemon-restart" => tray_daemon_action(app, DaemonTrayAction::Restart),
                     "quit" => app.exit(0),
@@ -1661,13 +2252,23 @@ pub fn run() {
             // edit roles exist in the application menu.
             let cmd_new_session =
                 MenuItem::with_id(app, "new-session", "New Session", true, Some("CmdOrCtrl+N"))?;
+            // Cmd+R re-reads the surface bundle from its current source (the
+            // promoted release, or the embedded fallback) — the way to pick up a
+            // promote without relaunching. Handled natively in on_menu_event.
+            let cmd_reload = MenuItem::with_id(
+                app,
+                "reload-surface",
+                "Reload Surface",
+                true,
+                Some("CmdOrCtrl+R"),
+            )?;
             let file_sep = PredefinedMenuItem::separator(app)?;
             let close_window = PredefinedMenuItem::close_window(app, None)?;
             let file_submenu = Submenu::with_items(
                 app,
                 "File",
                 true,
-                &[&cmd_new_session, &file_sep, &close_window],
+                &[&cmd_new_session, &cmd_reload, &file_sep, &close_window],
             )?;
 
             let undo = PredefinedMenuItem::undo(app, None)?;
@@ -1811,6 +2412,12 @@ pub fn run() {
             // pre-attach are queued in `MenuBridge::pending` and replayed (in
             // arrival order) by `ui_ready` once the bundle signals readiness.
             // After that, emit immediately.
+            // Native-only: reload the surface bundle. Never forwarded to the
+            // wasm CommandRegistry — the page itself is what gets replaced.
+            if event.id.as_ref() == "reload-surface" {
+                live_surface::reload_surface(app);
+                return;
+            }
             let id = event.id.as_ref().to_string();
             let state = app.state::<AppState>();
             let mut guard = state.menu.lock();
@@ -1834,8 +2441,14 @@ pub fn run() {
             daemon_restart,
             ui_ready,
             ui_debug_resize,
-            open_external_url
+            open_external_url,
+            live_surface::surface_bundle,
+            daemon_operator_request
         ])
-        .run(tauri::generate_context!())
+        // The generated context embeds ../../dist; wrap it so the promoted
+        // release on disk is served instead whenever one is present.
+        .run(live_surface::context_with_live_assets(
+            tauri::generate_context!(),
+        ))
         .expect("error while running ocean-tauri");
 }

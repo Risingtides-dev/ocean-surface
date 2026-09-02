@@ -220,7 +220,8 @@ jobs:
   # That guard reads the merged text through the checker's own `openEntries`
   # rather than a private copy of the rule, so the two cannot drift apart on
   # what closes an entry. Node is pinned for the reason the ledger job pins it.
-  # scripts/check-ledger.test.mjs is absent on purpose: it runs in `ledger`,
+  # scripts/check-ledger.test.mjs and check-ledger-order.test.mjs are absent
+  # on purpose: they run in `ledger`,
   # next to the checker it proves.
   guards:
     name: script guards
@@ -241,11 +242,24 @@ jobs:
       - name: The events.md union merge driver keeps parallel appends apart
         run: node scripts/events-merge-driver.test.mjs
 
-      # Ordered before the deploy guard deliberately: that one invokes the
-      # auto-deploy script against this checkout, and its promote path rewrites
-      # extension/dist. The inventory guard treats either state as unbuilt, so
-      # the order is not load-bearing — it just keeps the message it prints
-      # about why the bundle went unchecked true.
+      # No order constraint between this step and the deploy guard below; the
+      # one reason there was for the current order is gone. That guard used to
+      # invoke the auto-deploy script with OCEAN_SURFACE_REPO unset, so the rail
+      # defaulted to the checkout the script lives in and its promote path
+      # `rm -rf`'d extension/dist and refilled it from a fixture bundle. This
+      # step reads no CSS in either state and calls the bundle unbuilt either
+      # way, so the order never gated a verdict — what it bought was an honest
+      # message, since going second would have had this step send a reader to
+      # scripts/build-extension.sh over a directory the job had just conjured.
+      #
+      # #184 removed the side effect rather than the order: all five of that
+      # guard's child invocations now aim at a repo stub under the tmpdir it
+      # already makes, and its closing assertion fingerprints dist/ and
+      # extension/dist either side of the run and requires them unchanged. That
+      # assertion is what keeps this paragraph true — drop the
+      # OCEAN_SURFACE_REPO override and "Deployment promotion stays atomic"
+      # goes red, in this job, before anyone rereads this comment. So these
+      # four steps may be reordered freely.
       - name: The side panel links every stylesheet the build copies
         run: node scripts/extension-inventory.test.mjs
 
@@ -353,3 +367,16 @@ jobs:
       # the fold.
       - name: The ledger still parses
         run: node scripts/check-ledger.mjs events.md
+
+      # The parse check reads a `time:` header only as far as the word, so five
+      # entries sat at the TOP of events.md newest-first for months while it
+      # called the file clean. This one reads the clock. Entries land in MERGE
+      # order, not clock order — two slices of one wave land whichever way
+      # their PRs merged — so the rule is a band, not a sort: an entry more
+      # than a day out of place (a prepend, a backdate) is red, a descent of
+      # hours is a ledger doing its job. Same exit codes as the parse check,
+      # and no `--fix` exists: moving an entry is a decision, made by hand.
+      - name: Test the ledger order checker
+        run: node --test scripts/check-ledger-order.test.mjs
+      - name: The ledger still grows at the end
+        run: node scripts/check-ledger-order.mjs events.md

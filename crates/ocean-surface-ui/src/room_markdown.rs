@@ -11,6 +11,19 @@
 //! open room's daemon-provided participant roster. Unresolved tokens stay
 //! plain text — no fabricated identity affordances.
 //!
+//! NOTIFICATION RULE: [`mentions_member`] answers "does this body mention
+//! one of these ids" by running the SAME tokenizer, so what raises an OS
+//! notification is exactly what paints highlighted on screen — a body that
+//! notifies and does not highlight (or the reverse) is a bug in one of two
+//! copies of the grammar, and there is only one. Two consequences worth
+//! naming, both of them the highlighting rules and not a separate policy:
+//! an `@id` inside backticks is code, not a mention, so it does not notify;
+//! and a trailing `.`/`-`/`_` is trimmed only until the id resolves, so
+//! `@bob.` mentions `bob` while `@bobby` does not. The rules about WHEN a
+//! mention is allowed to notify — live-tail rows only, never the member's
+//! own, only off-focus — belong to the caller in `rooms.rs`; this module
+//! only answers whether the text mentions them.
+//!
 //! Grammar (deliberately lite, single pass, no nesting):
 //! `**bold**`, `*italic*`, `` `code` ``, `[label](https://…)`,
 //! bare `https://…` autolinks, `@member-id`.
@@ -372,6 +385,23 @@ pub fn tokenize(body: &str, members: &HashSet<String>) -> Vec<MdSpan> {
     out
 }
 
+/// True when `body` mentions at least one id in `ids`, by the exact rule that
+/// paints a mention highlighted.
+///
+/// Pass the reader's OWN ids — `Rooms::identity_id` and the access
+/// projection's `self_member_id` — not the whole roster: the tokenizer
+/// resolves `@id` against whatever set it is handed, so handing it two ids
+/// asks precisely "was I named". Pure, so the predicate is table-tested on the
+/// native target without a DOM.
+pub fn mentions_member(body: &str, ids: &HashSet<String>) -> bool {
+    if ids.is_empty() {
+        return false;
+    }
+    tokenize(body, ids)
+        .iter()
+        .any(|span| matches!(span, MdSpan::Mention(_)))
+}
+
 /// Render a message body reactively against the room's member-id set.
 /// Every span becomes text nodes inside fixed elements — no HTML path.
 pub fn body_view(body: String, members: Memo<HashSet<String>>) -> impl IntoView {
@@ -409,6 +439,56 @@ mod tests {
 
     fn members(ids: &[&str]) -> HashSet<String> {
         ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The mention predicate is the notification trigger, so its table is the
+    /// table of what does and does not ping a reader. Every row is a rule the
+    /// highlighter already had — there is no second grammar.
+    #[test]
+    fn mentions_member_answers_exactly_what_the_highlighter_paints() {
+        let me = members(&["bob"]);
+        for (body, expected, why) in [
+            ("hey @bob look at this", true, "a plain mention"),
+            ("@bob", true, "a mention alone"),
+            ("@bob.", true, "trailing sentence punctuation is trimmed"),
+            ("(@bob)", true, "a bracketed mention still resolves"),
+            ("cc @bob and @carol", true, "one resolving id among several"),
+            ("hey @bobby", false, "a longer id is a different member"),
+            ("hey @carol", false, "someone else was named"),
+            (
+                "email bob@example.com",
+                false,
+                "an address is not a mention",
+            ),
+            ("`@bob`", false, "an @id inside code is code"),
+            ("no mention here", false, "no @ at all"),
+            ("@", false, "a bare @ names nobody"),
+            // The grammar is single-pass with no nesting, so the bold arm
+            // takes `@bob` as literal text and the highlighter paints no
+            // mention. The notifier agrees, because it is the same pass.
+            (
+                "**@bob**",
+                false,
+                "emphasis swallows the mention, as on screen",
+            ),
+        ] {
+            assert_eq!(mentions_member(body, &me), expected, "{body:?} — {why}",);
+        }
+    }
+
+    /// Both of the reader's ids count, and an unresolved reader is never
+    /// mentioned by anything.
+    #[test]
+    fn mentions_member_reads_every_id_the_reader_owns_and_no_others() {
+        let both = members(&["bob", "member-7"]);
+        assert!(mentions_member("ping @member-7", &both));
+        assert!(mentions_member("ping @bob", &both));
+        assert!(!mentions_member("ping @member-8", &both));
+        // An unresolved identity has no ids, so nothing can name it — not even
+        // a body that is nothing but an `@`.
+        let none = members(&[]);
+        assert!(!mentions_member("ping @bob", &none));
+        assert!(!mentions_member("@", &none));
     }
 
     #[test]

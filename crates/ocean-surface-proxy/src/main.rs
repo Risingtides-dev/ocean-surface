@@ -16,7 +16,7 @@
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 
@@ -31,7 +31,8 @@ use axum::{
     Json, Router,
 };
 use base64::Engine;
-use serde::Deserialize;
+use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tower_http::{services::ServeDir, trace::TraceLayer};
@@ -42,6 +43,10 @@ const DEFAULT_LIVEKIT_ROOM_ID: &str = "project:surface-main";
 const DEFAULT_VOICE_PROFILE: &str = "leo";
 
 const SESSION_COOKIE: &str = "ocean_session";
+/// Which BROWSER this is, so two browsers of one person can sit on two
+/// different machines. Opaque, random, and authenticating nothing on its own —
+/// the session cookie beside it says who you are; see [`selection_key`].
+const BROWSER_COOKIE: &str = "ocean_device";
 const SESSION_MAX_AGE_SECONDS: u64 = 60 * 60 * 24 * 30;
 
 const CALL_PLACE_DAEMON_PATH: &str = "/v1/calls/place";
@@ -77,6 +82,17 @@ struct AppState {
     /// (a timeout there would sever live event streams mid-session), so the
     /// split is: streams untimed by necessity, request/response bounded.
     http_json: reqwest::Client,
+    /// Device health probes get their own short-timeout client. They run on a
+    /// person waiting to pick a machine, so a sleeping laptop must answer
+    /// "unreachable" in seconds, not sit on the JSON lane's 120s budget.
+    http_probe: reqwest::Client,
+    /// Which device each signed-in session is attached to.
+    device_selections: Arc<DeviceSelections>,
+    /// Announces a selections row that just changed, so every SSE stream this
+    /// proxy is holding open on the machine being left can end instead of
+    /// outliving the switch. Carries the row key, never a device name: two
+    /// people may both be on "studio" and only one of them switched.
+    selection_changes: tokio::sync::broadcast::Sender<String>,
     voice_profile: String,
     /// Fallback upstream: used when auth is off, and as the default for a user
     /// entry that names no daemon of its own.
@@ -204,31 +220,65 @@ fn load_or_create_session_secret(path: &FsPath) -> anyhow::Result<String> {
     }
 }
 
-/// One person who may sign in, and the Ocean daemon their session drives.
+/// One machine a person can attach to: an Ocean daemon, plus the credentials
+/// that daemon minted.
+///
+/// A device is the unit a signed-in session is routed to. `daemon_url` is
+/// deliberately never published to the browser — the surface knows a device by
+/// NAME only, so a page that renders untrusted model output never learns the
+/// shape of somebody's tailnet, and nobody has to type a URL to reach their
+/// own machine.
+#[derive(Clone, Debug)]
+struct ProxyDevice {
+    name: String,
+    daemon_url: String,
+    /// The observer token file minted by THIS device's daemon, when it has one.
+    /// A token is minted by one daemon and means nothing to another, so there
+    /// is no cross-device fallback; see [`credentials_for_device`].
+    observer_token_path: Option<PathBuf>,
+    /// The mode-0600 room-operator key belonging to THIS device's daemon.
+    /// Possession is local execution authority, so the no-fallback rule here is
+    /// absolute.
+    operator_key_path: Option<PathBuf>,
+    /// The device a fresh session lands on before anyone picks one.
+    is_default: bool,
+}
+
+/// One person who may sign in, and the machines their sessions can drive.
 ///
 /// Multi-user is the whole point: a proxy that holds one daemon url and one
 /// credential can only ever show everyone the SAME Ocean. Each user carries
-/// their own upstream so a login decides *whose* sessions and instance you
+/// their own devices so a login decides *whose* sessions and instance you
 /// see, while Rooms stay shared because they federate through Bedrock rather
 /// than through this proxy.
 #[derive(Clone)]
 struct ProxyUser {
     username: String,
     password: String,
-    daemon_url: String,
+    /// Every machine this person may attach to, in roster order. NEVER empty:
+    /// an entry carrying only the legacy single `daemon_url` (or nothing at
+    /// all) is normalized on load into exactly one device named after its
+    /// daemon's host, so an existing deployment keeps working byte-for-byte
+    /// and the routing below has just one shape to reason about.
+    devices: Vec<ProxyDevice>,
     /// Derived from the shared server secret plus THIS user's credentials, so
     /// one user's cookie can never authenticate as another and rotating one
     /// person's password invalidates only their sessions.
     session_token: String,
-    /// The observer token file for this user's daemon, when they have one.
-    /// `None` on the default daemon (the process-wide path already names the
-    /// right credential) and on a remote daemon that has not been configured
-    /// for observatory access.
-    observer_token_path: Option<PathBuf>,
-    /// The room-operator key belonging to this user's daemon. A remote daemon
-    /// without an explicit path gets no credential: falling back to this
-    /// machine's key would disclose local execution authority.
-    operator_key_path: Option<PathBuf>,
+}
+
+impl ProxyUser {
+    /// Where this person lands with no selection recorded.
+    fn default_device(&self) -> Option<&ProxyDevice> {
+        self.devices
+            .iter()
+            .find(|device| device.is_default)
+            .or_else(|| self.devices.first())
+    }
+
+    fn device(&self, name: &str) -> Option<&ProxyDevice> {
+        self.devices.iter().find(|device| device.name == name)
+    }
 }
 
 impl std::fmt::Debug for ProxyUser {
@@ -236,9 +286,7 @@ impl std::fmt::Debug for ProxyUser {
         f.debug_struct("ProxyUser")
             .field("username", &self.username)
             .field("password", &"[redacted]")
-            .field("daemon_url", &self.daemon_url)
-            .field("observer_token_path", &self.observer_token_path)
-            .field("operator_key_path", &self.operator_key_path)
+            .field("devices", &self.devices)
             .field("session_token", &"[redacted]")
             .finish()
     }
@@ -246,14 +294,43 @@ impl std::fmt::Debug for ProxyUser {
 
 /// The upstream chosen for one request, injected by the auth gate and read by
 /// every proxying handler. Making it a request extension rather than shared
-/// state is what keeps two concurrent users from racing on one field.
+/// state is what keeps two concurrent users from racing on one field — and it
+/// is now the ONLY place a device's credentials are resolved, so a route
+/// cannot accidentally reach a different machine than the one whose token it
+/// carries.
 #[derive(Clone, Debug)]
-struct ResolvedDaemon(String);
+struct ResolvedDaemon {
+    /// The device name this request is attached to. Logs and typed errors name
+    /// it; the browser sees this string and never the URL.
+    device: String,
+    url: String,
+    observer_token_path: Option<PathBuf>,
+    operator_key_path: Option<PathBuf>,
+    /// The selections row this request resolved through, when it resolved
+    /// through one. A stream opened on this device ends when THIS row changes;
+    /// see [`stream_ends_on_switch`].
+    selection_key: Option<String>,
+}
 
 impl ResolvedDaemon {
     fn base(&self) -> &str {
-        self.0.trim_end_matches('/')
+        self.url.trim_end_matches('/')
     }
+}
+
+/// One device in a users-file entry.
+#[derive(Deserialize)]
+struct DeviceFileEntry {
+    name: String,
+    daemon_url: String,
+    #[serde(default)]
+    observer_token_path: Option<String>,
+    #[serde(default)]
+    operator_key_path: Option<String>,
+    /// At most one device per person may set this; absent it, the first entry
+    /// in the list is where a fresh session lands.
+    #[serde(default, rename = "default")]
+    is_default: Option<bool>,
 }
 
 /// One entry in the users file.
@@ -261,20 +338,25 @@ impl ResolvedDaemon {
 struct UserFileEntry {
     username: String,
     password: String,
-    /// Optional: falls back to OCEAN_DAEMON_URL, so a single-machine entry
-    /// needs only a username and password.
+    /// Optional legacy single machine: falls back to OCEAN_DAEMON_URL, so a
+    /// single-machine entry needs only a username and password. Normalized
+    /// into a one-device roster on load; mutually exclusive with `devices`.
     #[serde(default)]
     daemon_url: Option<String>,
     /// Optional: the observer token file for THIS user's daemon. Only needed
     /// when `daemon_url` points somewhere other than the default — a token is
     /// minted by one daemon and means nothing to another, so there is no
-    /// sensible fallback. See `observatory_upstream`.
+    /// sensible fallback. See `credentials_for_device`.
     #[serde(default)]
     observer_token_path: Option<String>,
     /// Optional mode-0600 room-operator key for this exact daemon. Required
     /// for authorization mutations when `daemon_url` is not the default.
     #[serde(default)]
     operator_key_path: Option<String>,
+    /// The machines this person can attach to. Absent (or empty) keeps the
+    /// legacy single-daemon shape above.
+    #[serde(default)]
+    devices: Vec<DeviceFileEntry>,
 }
 
 /// Where multi-user config lives. Same rule as the single-user credentials:
@@ -325,18 +407,14 @@ fn load_users(
                 path.display()
             );
         }
-        let daemon_url = entry
-            .daemon_url
-            .unwrap_or_else(|| default_daemon_url.to_string());
+        let devices = devices_for_entry(path, &entry, default_daemon_url)?;
         let session_token =
             derive_user_session_token(&entry.username, &entry.password, secret_path)?;
         users.push(ProxyUser {
             username: entry.username,
             password: entry.password,
-            daemon_url,
+            devices,
             session_token,
-            observer_token_path: entry.observer_token_path.map(PathBuf::from),
-            operator_key_path: entry.operator_key_path.map(PathBuf::from),
         });
     }
 
@@ -349,6 +427,162 @@ fn load_users(
         }
     }
     Ok(users)
+}
+
+/// Normalize one roster entry into the device list the router actually uses.
+///
+/// Three shapes go in and one comes out:
+///
+/// - nothing → one device on `OCEAN_DAEMON_URL`, named after its host;
+/// - the legacy single `daemon_url` (plus its optional credential paths) →
+///   one device on that URL, named after its host;
+/// - an explicit `devices` list → itself, validated.
+///
+/// Setting BOTH the legacy `daemon_url` and a `devices` list is refused rather
+/// than merged: which one a session lands on would be a guess, and a guess
+/// about which machine somebody's turns execute on is not a thing to ship.
+fn devices_for_entry(
+    path: &FsPath,
+    entry: &UserFileEntry,
+    default_daemon_url: &str,
+) -> anyhow::Result<Vec<ProxyDevice>> {
+    let username = entry.username.trim();
+    if entry.devices.is_empty() {
+        let daemon_url = entry
+            .daemon_url
+            .clone()
+            .unwrap_or_else(|| default_daemon_url.to_string());
+        validate_daemon_url(&daemon_url).map_err(|reason| {
+            anyhow::anyhow!("{}: user '{username}' daemon_url {reason}", path.display())
+        })?;
+        return Ok(vec![ProxyDevice {
+            name: device_name_from_url(&daemon_url),
+            daemon_url,
+            observer_token_path: entry.observer_token_path.clone().map(PathBuf::from),
+            operator_key_path: entry.operator_key_path.clone().map(PathBuf::from),
+            is_default: true,
+        }]);
+    }
+
+    if entry.daemon_url.is_some() {
+        anyhow::bail!(
+            "{}: user '{username}' sets both daemon_url and devices; move the daemon_url \
+             into the devices list",
+            path.display()
+        );
+    }
+
+    let mut devices = Vec::with_capacity(entry.devices.len());
+    let mut seen = std::collections::BTreeSet::new();
+    let mut defaults = 0_usize;
+    for device in &entry.devices {
+        let name = device.name.trim().to_string();
+        if name.is_empty() {
+            anyhow::bail!(
+                "{}: user '{username}' has a device with no name",
+                path.display()
+            );
+        }
+        // A name is an identifier the browser posts back and the operator reads
+        // in a log line; control characters in either place are a footgun.
+        if name.chars().any(|c| c.is_control()) {
+            anyhow::bail!(
+                "{}: user '{username}' device '{name}' has control characters in its name",
+                path.display()
+            );
+        }
+        if !seen.insert(name.clone()) {
+            anyhow::bail!(
+                "{}: user '{username}' has two devices named '{name}'",
+                path.display()
+            );
+        }
+        let daemon_url = device.daemon_url.trim().to_string();
+        validate_daemon_url(&daemon_url).map_err(|reason| {
+            anyhow::anyhow!(
+                "{}: user '{username}' device '{name}' daemon_url {reason}",
+                path.display()
+            )
+        })?;
+        let is_default = device.is_default.unwrap_or(false);
+        if is_default {
+            defaults += 1;
+        }
+        devices.push(ProxyDevice {
+            name,
+            daemon_url,
+            observer_token_path: device.observer_token_path.clone().map(PathBuf::from),
+            operator_key_path: device.operator_key_path.clone().map(PathBuf::from),
+            is_default,
+        });
+    }
+    if defaults > 1 {
+        anyhow::bail!(
+            "{}: user '{username}' marks {defaults} devices as default; mark at most one",
+            path.display()
+        );
+    }
+    if defaults == 0 {
+        // Roster order decides, so the list is never ambiguous.
+        devices[0].is_default = true;
+    }
+    Ok(devices)
+}
+
+/// A daemon URL must be an absolute http(s) URL with a host. This is a
+/// configuration check, not a security boundary — but a typo'd upstream is
+/// otherwise discovered as a mystery 503 at the far end of a login.
+fn validate_daemon_url(url: &str) -> Result<(), String> {
+    if url.trim() != url || url.is_empty() {
+        return Err("must not be empty or padded with whitespace".to_owned());
+    }
+    if url.chars().any(char::is_whitespace) {
+        return Err("must not contain whitespace".to_owned());
+    }
+    let rest = match url.split_once("://") {
+        Some(("http", rest)) | Some(("https", rest)) => rest,
+        _ => return Err("must start with http:// or https://".to_owned()),
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.is_empty() {
+        return Err("names no host".to_owned());
+    }
+    if url_host(url).is_empty() {
+        return Err("names no host".to_owned());
+    }
+    Ok(())
+}
+
+/// The host of a daemon URL, with userinfo and port removed and an IPv6
+/// literal's brackets preserved (`[fd7a::1]:4780` → `[fd7a::1]`).
+fn url_host(url: &str) -> String {
+    let rest = match url.split_once("://") {
+        Some((_, rest)) => rest,
+        None => url,
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let authority = match authority.rsplit_once('@') {
+        Some((_userinfo, host)) => host,
+        None => authority,
+    };
+    if let Some(end) = authority.find(']') {
+        return authority[..=end].to_string();
+    }
+    authority
+        .split_once(':')
+        .map(|(host, _port)| host)
+        .unwrap_or(authority)
+        .to_string()
+}
+
+/// The implicit name of a legacy single-daemon entry: the machine it points at.
+fn device_name_from_url(url: &str) -> String {
+    let host = url_host(url);
+    if host.is_empty() {
+        "default".to_owned()
+    } else {
+        host
+    }
 }
 
 /// Per-user session token. Same construction as the single-user form, with the
@@ -375,6 +609,239 @@ fn derive_session_token(
         digest.update(pass.as_bytes());
     }
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest.finalize()))
+}
+
+/// Where each signed-in session's device choice is remembered across restarts.
+fn device_selections_path() -> PathBuf {
+    std::env::var_os("OCEAN_SURFACE_DEVICE_SELECTIONS_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_default();
+            PathBuf::from(home).join(".config/ocean-surface/device-selections.json")
+        })
+}
+
+/// The device each signed-in session is attached to.
+///
+/// Server-side on purpose. The choice never rides in the cookie, so a browser
+/// cannot re-point its own traffic at a machine by editing one, and the cookie
+/// stays exactly as load-bearing as it was. The file is what makes the choice
+/// survive a proxy restart — the difference between "pick up where you left
+/// off" and "choose your device again after every deploy".
+///
+/// Keys are a DIGEST of the session token, never the token: this is the one
+/// piece of device state written to disk and it must not become a place bearer
+/// material accumulates. A token is derived from one person's username and
+/// password, so the map holds at most one row per roster user and cannot grow
+/// without bound.
+struct DeviceSelections {
+    path: PathBuf,
+    /// One lock, held across the read-modify-write AND the file replacement.
+    ///
+    /// Snapshotting under the lock and then persisting outside it lets two
+    /// concurrent selections serialize their memory writes and then race their
+    /// file writes, so the older snapshot can land last and the file ends up
+    /// disagreeing with memory until the next restart — at which point somebody
+    /// silently gets a machine they did not pick. Selections happen when a
+    /// person clicks; the write is a few hundred bytes; the contention is
+    /// nothing and the ordering guarantee is the whole point.
+    entries: std::sync::Mutex<std::collections::BTreeMap<String, Selection>>,
+}
+
+/// One browser's choice, with the timestamp that lets old rows be pruned.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct Selection {
+    device: String,
+    /// Unix seconds. Rows older than a session cookie's life cannot belong to
+    /// a browser that is still signed in.
+    #[serde(default)]
+    updated: u64,
+}
+
+/// The stored shape, versioned by its one key so a later format can be told
+/// apart from this one.
+#[derive(Deserialize)]
+struct DeviceSelectionsFile {
+    #[serde(default)]
+    selections: std::collections::BTreeMap<String, Selection>,
+}
+
+/// The most rows the file will ever hold, oldest evicted first.
+///
+/// One row per (person, browser) — a private window is a new browser, and a
+/// person who opens enough of them would otherwise grow this file forever.
+/// The cap is far above any real roster and the eviction is by age, so the
+/// row a live browser is using is never the one dropped.
+const MAX_DEVICE_SELECTIONS: usize = 1024;
+
+impl DeviceSelections {
+    /// Read the file if it is present, private, and parses. Anything else
+    /// starts empty with a warning: losing a remembered choice costs one click,
+    /// and refusing to boot over it would take the whole surface down.
+    fn load(path: PathBuf) -> Self {
+        let entries = match std::fs::read_to_string(&path) {
+            Ok(raw) => {
+                let private = std::fs::metadata(&path)
+                    .map(|meta| meta.mode() & 0o077 == 0)
+                    .unwrap_or(false);
+                if !private {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "device selections file is group/world readable; ignoring it"
+                    );
+                    Default::default()
+                } else {
+                    match serde_json::from_str::<DeviceSelectionsFile>(&raw) {
+                        Ok(file) => file.selections,
+                        Err(error) => {
+                            tracing::warn!(%error, path = %path.display(), "device selections file is not valid JSON; ignoring it");
+                            Default::default()
+                        }
+                    }
+                }
+            }
+            Err(_) => Default::default(),
+        };
+        Self {
+            path,
+            entries: std::sync::Mutex::new(entries),
+        }
+    }
+
+    fn selected(&self, key: &str) -> Option<String> {
+        self.entries
+            .lock()
+            .ok()
+            .and_then(|entries| entries.get(key).map(|row| row.device.clone()))
+    }
+
+    /// Record a choice and write it through, both under one lock so the file
+    /// can never disagree with memory about which choice came last.
+    ///
+    /// A failed write is logged, not returned: the in-memory choice is
+    /// authoritative for this process either way, and a full disk should not
+    /// stop somebody switching machines.
+    fn record(&self, key: &str, device: &str) {
+        let Ok(mut entries) = self.entries.lock() else {
+            tracing::warn!("device selections lock poisoned; choice not recorded");
+            return;
+        };
+        entries.insert(
+            key.to_owned(),
+            Selection {
+                device: device.to_owned(),
+                updated: unix_now(),
+            },
+        );
+        prune_selections(&mut entries);
+        if let Err(error) = self.persist(&entries) {
+            tracing::warn!(%error, path = %self.path.display(), "device selection not persisted");
+        }
+    }
+
+    /// Atomic 0600 write: a temp file in the same directory, then a rename, so
+    /// a crash mid-write cannot leave a truncated roster of choices behind.
+    ///
+    /// Called only with `entries` locked, and the temp name carries a
+    /// process-local counter as well as the pid: two writers sharing one name
+    /// can truncate each other's half-written file and rename the wrong bytes
+    /// into place.
+    fn persist(
+        &self,
+        entries: &std::collections::BTreeMap<String, Selection>,
+    ) -> anyhow::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        let body = serde_json::to_vec_pretty(&json!({ "selections": entries }))?;
+        static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let ticket = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let temp = self
+            .path
+            .with_extension(format!("tmp{}-{ticket}", std::process::id()));
+        {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&temp)
+                .with_context(|| format!("creating {}", temp.display()))?;
+            file.write_all(&body)?;
+            file.sync_all()?;
+        }
+        // `create` does not re-apply the mode to a file that already existed.
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::rename(&temp, &self.path)
+            .with_context(|| format!("replacing {}", self.path.display()))?;
+        Ok(())
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
+}
+
+/// Drop rows no live browser can still be using, then cap what is left.
+///
+/// A row older than the session cookie's own lifetime belongs to a browser
+/// whose cookie has expired, so it can never be looked up again; beyond that
+/// the newest [`MAX_DEVICE_SELECTIONS`] survive. Eviction is by age precisely
+/// so an active browser's row is never the one dropped.
+fn prune_selections(entries: &mut std::collections::BTreeMap<String, Selection>) {
+    let now = unix_now();
+    entries.retain(|_, row| now.saturating_sub(row.updated) <= SESSION_MAX_AGE_SECONDS);
+    if entries.len() <= MAX_DEVICE_SELECTIONS {
+        return;
+    }
+    let mut ages: Vec<(u64, String)> = entries
+        .iter()
+        .map(|(key, row)| (row.updated, key.clone()))
+        .collect();
+    ages.sort_unstable();
+    let excess = entries.len() - MAX_DEVICE_SELECTIONS;
+    for (_, key) in ages.into_iter().take(excess) {
+        entries.remove(&key);
+    }
+}
+
+/// The selections-file key for one browser of one person.
+///
+/// Both halves are load-bearing. The session token alone would key the row to
+/// the PERSON: this proxy derives it from their username and password so an
+/// installed PWA stays signed in across deploys, which means every browser
+/// they own presents the same token — and picking a machine on the phone would
+/// have re-pointed the desktop's next request too, which is not what "per
+/// session" means to anyone holding both devices. The browser id alone would
+/// be a bearer key to somebody else's routing: it lives in a cookie, and a
+/// cookie is a thing a browser sends. Digesting the two together gives a row
+/// that only that person, in that browser, can address — and, being a digest,
+/// one whose presence in a file is never possession of a session.
+fn selection_key(session_token: &str, browser_id: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"ocean-surface-device-selection\0");
+    digest.update(session_token.as_bytes());
+    digest.update(b"\0browser\0");
+    digest.update(browser_id.as_bytes());
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest.finalize())
+}
+
+/// A fresh opaque browser id. Random, meaningless, and authenticating nothing:
+/// the session cookie beside it is what says who this is.
+fn mint_browser_id() -> String {
+    let mut bytes = [0_u8; 16];
+    if getrandom::fill(&mut bytes).is_err() {
+        // Randomness is not optional for an identifier that partitions two
+        // browsers; without it they must share a row rather than collide on a
+        // predictable one.
+        return String::new();
+    }
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
 /// Read the daemon-minted observer token without following symlinks. The
@@ -570,7 +1037,13 @@ async fn main() -> anyhow::Result<()> {
             "multi-user mode: per-login daemon routing"
         );
         for u in &users {
-            tracing::info!(user = %u.username, daemon = %u.daemon_url, "surface user");
+            let devices = u
+                .devices
+                .iter()
+                .map(|device| device.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            tracing::info!(user = %u.username, %devices, "surface user");
         }
     }
 
@@ -596,6 +1069,13 @@ async fn main() -> anyhow::Result<()> {
             .timeout(JSON_FORWARD_TIMEOUT)
             .build()
             .expect("reqwest json client should build"),
+        http_probe: reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(DEVICE_PROBE_TIMEOUT)
+            .build()
+            .expect("reqwest probe client should build"),
+        device_selections: Arc::new(DeviceSelections::load(device_selections_path())),
+        selection_changes: tokio::sync::broadcast::channel(SELECTION_CHANGE_BACKLOG).0,
         voice_profile,
         daemon_url,
         default_livekit_room_id,
@@ -632,6 +1112,12 @@ fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
         .route("/login", get(login_page).post(login_submit))
         .route("/logout", post(logout))
         .route("/api/config", get(config))
+        // Which machines the signed-in person can attach to, and which one
+        // this session is on. Both are login-gated (`/api/` is never a public
+        // boot asset) and both stay reachable when the selected device is
+        // gone — they are how the surface recovers from that.
+        .route("/api/devices", get(devices))
+        .route("/api/devices/select", post(select_device))
         .route("/api/stt", post(stt))
         .route("/api/tts", post(tts))
         // Reverse-proxy the daemon's agent API so a remote browser (phone via
@@ -858,6 +1344,29 @@ fn has_valid_session(state: &AppState, headers: &HeaderMap) -> bool {
     constant_time_eq(provided.as_bytes(), state.session_token.as_bytes())
 }
 
+/// The browser id this request carries, if it has been given one.
+///
+/// Absent is not an error: a browser that has never asked for its devices has
+/// no selection either, and lands on the person's default machine.
+fn browser_id(headers: &HeaderMap) -> Option<&str> {
+    cookie_value(headers, BROWSER_COOKIE).filter(|value| !value.is_empty())
+}
+
+/// The Set-Cookie value that gives this browser its id. Same transport hygiene
+/// as the session cookie: HttpOnly so page scripts cannot read it, SameSite
+/// Strict, and Secure under HTTPS.
+fn browser_cookie(state: &AppState, headers: &HeaderMap, id: &str) -> String {
+    let secure = if request_is_https(headers, state.secure_cookie) {
+        "; Secure"
+    } else {
+        ""
+    };
+    format!(
+        "{BROWSER_COOKIE}={id}; Path=/; HttpOnly; SameSite=Strict; \
+         Max-Age={SESSION_MAX_AGE_SECONDS}{secure}"
+    )
+}
+
 /// Which roster user this request's session cookie belongs to.
 ///
 /// Every candidate is compared in constant time and the loop does NOT exit
@@ -873,9 +1382,6 @@ fn session_user<'a>(state: &'a AppState, headers: &HeaderMap) -> Option<&'a Prox
     found
 }
 
-/// The upstream this request should be proxied to. A signed-in roster user
-/// gets their own daemon; everything else falls back to the configured
-/// default, which is what single-operator mode has always used.
 /// The upstream the auth gate resolved for this request. Falls back to the
 /// configured default if the extension is somehow absent, which keeps a
 /// misordered layer from producing a broken URL rather than a wrong one.
@@ -883,18 +1389,132 @@ fn resolved_daemon(state: &AppState, req: &Request) -> ResolvedDaemon {
     req.extensions()
         .get::<ResolvedDaemon>()
         .cloned()
-        .unwrap_or_else(|| ResolvedDaemon(state.daemon_url.clone()))
+        .unwrap_or_else(|| fallback_daemon(state))
 }
 
-fn daemon_for(state: &AppState, headers: &HeaderMap) -> ResolvedDaemon {
-    ResolvedDaemon(
-        session_user(state, headers)
-            .map(|u| u.daemon_url.clone())
-            .unwrap_or_else(|| state.daemon_url.clone()),
+/// The process-wide default machine: single-operator mode's only device, and
+/// the upstream for anything that reaches a proxying route without a session.
+fn fallback_daemon(state: &AppState) -> ResolvedDaemon {
+    ResolvedDaemon {
+        device: device_name_from_url(&state.daemon_url),
+        url: state.daemon_url.clone(),
+        observer_token_path: Some(state.observer_token_path.clone()),
+        operator_key_path: Some(state.operator_key_path.clone()),
+        // Single-operator mode has one machine and nothing to switch to, so no
+        // stream opened here is ever torn down by a selection.
+        selection_key: None,
+    }
+}
+
+/// Which credentials a device's requests may carry.
+///
+/// The rule this preserves is older than devices and is not negotiable: a
+/// token minted by one daemon is meaningless to another, and the room-operator
+/// key is local execution authority, so neither is ever sent anywhere but the
+/// daemon that issued it. A device names its own credential files; the
+/// PROCESS-WIDE paths apply only to the device that is in fact the process
+/// default daemon. Anything else resolves to `None` and the route fails
+/// closed — no observatory beats the wrong operator's observatory.
+fn credentials_for_device(
+    state: &AppState,
+    device: &ProxyDevice,
+) -> (Option<PathBuf>, Option<PathBuf>) {
+    let is_process_default =
+        device.daemon_url.trim_end_matches('/') == state.daemon_url.trim_end_matches('/');
+    let observer = device
+        .observer_token_path
+        .clone()
+        .or_else(|| is_process_default.then(|| state.observer_token_path.clone()));
+    let operator = device
+        .operator_key_path
+        .clone()
+        .or_else(|| is_process_default.then(|| state.operator_key_path.clone()));
+    (observer, operator)
+}
+
+fn resolve_device(
+    state: &AppState,
+    device: &ProxyDevice,
+    selection_key: Option<String>,
+) -> ResolvedDaemon {
+    let (observer_token_path, operator_key_path) = credentials_for_device(state, device);
+    ResolvedDaemon {
+        device: device.name.clone(),
+        url: device.daemon_url.clone(),
+        observer_token_path,
+        operator_key_path,
+        selection_key,
+    }
+}
+
+/// What the gate could make of this request's device selection.
+enum DeviceRouting {
+    /// Attach the request to this machine.
+    Attached(ResolvedDaemon),
+    /// The session names a device this person no longer has — the roster was
+    /// edited under a live session. Fail loudly rather than quietly landing
+    /// somebody on a machine they did not choose.
+    Unknown(String),
+}
+
+/// The machine this request is attached to.
+///
+/// A signed-in roster user lands on the device their session selected, or on
+/// their default device when they have not chosen one. Everything else falls
+/// back to the process default, which is what single-operator mode has always
+/// used.
+fn device_for(state: &AppState, headers: &HeaderMap) -> DeviceRouting {
+    let Some(user) = session_user(state, headers) else {
+        return DeviceRouting::Attached(fallback_daemon(state));
+    };
+    // A browser with no id yet has made no choice yet: it lands on this
+    // person's default machine, and picking one is what gives it an id.
+    let key = browser_id(headers).map(|id| selection_key(&user.session_token, id));
+    let selected = key
+        .as_deref()
+        .and_then(|key| state.device_selections.selected(key));
+    let device = match selected {
+        Some(name) => match user.device(&name) {
+            Some(device) => device,
+            None => return DeviceRouting::Unknown(name),
+        },
+        None => match user.default_device() {
+            Some(device) => device,
+            // A roster entry always normalizes to at least one device, so this
+            // is unreachable by configuration; falling back beats panicking.
+            None => return DeviceRouting::Attached(fallback_daemon(state)),
+        },
+    };
+    DeviceRouting::Attached(resolve_device(state, device, key))
+}
+
+/// Routes that cannot be served without an upstream machine. `/api/config` and
+/// `/api/devices*` are deliberately excluded: they are how a surface whose
+/// selection went stale learns what happened and picks again.
+fn requires_device(path: &str) -> bool {
+    path.starts_with("/v1/") || path == "/api/stt" || path == "/api/tts"
+}
+
+/// The one shape the surface has to understand when a machine cannot be
+/// reached. Carries the device NAME and nothing else — never the URL, never
+/// the transport error, both of which describe the operator's network to a
+/// page that renders untrusted model output.
+fn device_unavailable(device: &str, reason: &str) -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::CONTENT_TYPE, "application/json")],
+        json!({
+            "ok": false,
+            "error": "device_unavailable",
+            "reason": reason,
+            "device": device,
+        })
+        .to_string(),
     )
+        .into_response()
 }
 
-/// Which observer token file belongs to the daemon this request resolved to.
+/// Which observer token file belongs to the machine this request resolved to.
 ///
 /// Every other proxying handler forwards the browser's own session, so routing
 /// it to the caller's daemon is the whole job. The observatory routes are the
@@ -907,48 +1527,24 @@ fn daemon_for(state: &AppState, headers: &HeaderMap) -> ResolvedDaemon {
 /// That is a credential disclosure, not a routing bug. A token is minted by
 /// one daemon and is meaningless to any other, so a mismatch cannot be
 /// papered over with a fallback: the only safe answers are the token that
-/// belongs to that daemon, or none.
+/// belongs to that daemon, or none. The resolution now happens once, in
+/// [`credentials_for_device`], so the token travels WITH the upstream it
+/// belongs to and the two cannot drift apart.
 ///
-/// `None` here means the caller's daemon has no configured credential, and the
+/// `None` here means the caller's device has no configured credential, and the
 /// route fails closed. No observatory beats the wrong operator's observatory.
-fn observatory_token_path(
-    state: &AppState,
-    headers: &HeaderMap,
-    daemon: &ResolvedDaemon,
-) -> Option<PathBuf> {
-    // The default upstream's credential is the one the process-wide path
-    // names, and single-operator mode never leaves this branch.
-    if daemon.base() == state.daemon_url.trim_end_matches('/') {
-        return Some(state.observer_token_path.clone());
-    }
-    let user = session_user(state, headers)?;
-    // Belt and braces: only answer with a roster credential when that roster
-    // entry is in fact the daemon we resolved to.
-    if user.daemon_url.trim_end_matches('/') != daemon.base() {
-        return None;
-    }
-    user.observer_token_path.clone()
+fn observatory_token_path(daemon: &ResolvedDaemon) -> Option<PathBuf> {
+    daemon.observer_token_path.clone()
 }
 
-/// Which room-operator key belongs to the daemon this request resolved to.
+/// Which room-operator key belongs to the machine this request resolved to.
 ///
 /// The key is local execution authority, so the no-fallback rule is absolute:
-/// a request routed to another user's daemon receives only that roster entry's
-/// explicitly configured key, or no key at all. The process-wide key is used
-/// solely for the process-wide default daemon.
-fn room_operator_key_path(
-    state: &AppState,
-    headers: &HeaderMap,
-    daemon: &ResolvedDaemon,
-) -> Option<PathBuf> {
-    if daemon.base() == state.daemon_url.trim_end_matches('/') {
-        return Some(state.operator_key_path.clone());
-    }
-    let user = session_user(state, headers)?;
-    if user.daemon_url.trim_end_matches('/') != daemon.base() {
-        return None;
-    }
-    user.operator_key_path.clone()
+/// a request routed to another machine receives only that device's explicitly
+/// configured key, or no key at all. The process-wide key is used solely for
+/// the process-wide default daemon.
+fn room_operator_key_path(daemon: &ResolvedDaemon) -> Option<PathBuf> {
+    daemon.operator_key_path.clone()
 }
 
 fn has_valid_basic_credentials(state: &AppState, headers: &HeaderMap) -> bool {
@@ -985,9 +1581,21 @@ async fn session_auth_gate(
         // Resolve the upstream ONCE, here, and carry it on the request. Every
         // proxying handler reads this rather than a shared field, so two people
         // using the site at the same moment cannot be routed into each other's
-        // Ocean.
-        let daemon = daemon_for(&state, req.headers());
-        req.extensions_mut().insert(daemon);
+        // Ocean — and two tabs of one person's session cannot be routed onto
+        // two different machines mid-turn.
+        match device_for(&state, req.headers()) {
+            DeviceRouting::Attached(daemon) => {
+                req.extensions_mut().insert(daemon);
+            }
+            DeviceRouting::Unknown(device) => {
+                if requires_device(req.uri().path()) {
+                    tracing::warn!(%device, "session names a device that is no longer in the roster");
+                    return device_unavailable(&device, "unknown_device");
+                }
+                // The shell, `/api/config` and `/api/devices` still load, which
+                // is how the surface finds out and offers a machine to pick.
+            }
+        }
         return next.run(req).await;
     }
 
@@ -1362,6 +1970,213 @@ fn config_payload(state: &AppState, user: Option<&ProxyUser>) -> Value {
     })
 }
 
+/// How long a device gets to answer `/health` before the picker calls it
+/// unreachable. Short on purpose: this runs while somebody waits to choose a
+/// machine, and a laptop that is asleep answers by not answering.
+const DEVICE_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The devices this request's person may attach to, in roster order.
+fn devices_for_request(state: &AppState, headers: &HeaderMap) -> Vec<ProxyDevice> {
+    match session_user(state, headers) {
+        Some(user) => user.devices.clone(),
+        // Single-operator mode has exactly one machine: the process default.
+        None => vec![ProxyDevice {
+            name: device_name_from_url(&state.daemon_url),
+            daemon_url: state.daemon_url.clone(),
+            observer_token_path: Some(state.observer_token_path.clone()),
+            operator_key_path: Some(state.operator_key_path.clone()),
+            is_default: true,
+        }],
+    }
+}
+
+/// The device name a request is currently attached to, and whether that was an
+/// explicit choice or just where this person lands by default.
+fn current_selection(state: &AppState, headers: &HeaderMap) -> (String, bool) {
+    let Some(user) = session_user(state, headers) else {
+        return (device_name_from_url(&state.daemon_url), false);
+    };
+    let selected = browser_id(headers).and_then(|id| {
+        state
+            .device_selections
+            .selected(&selection_key(&user.session_token, id))
+    });
+    match selected {
+        Some(name) => (name, true),
+        None => (
+            user.default_device()
+                .map(|device| device.name.clone())
+                .unwrap_or_default(),
+            false,
+        ),
+    }
+}
+
+/// Ask one daemon how it is. Metadata only — `ok`, and whatever version and
+/// revision it volunteers — because this answer is rendered in the browser.
+async fn probe_device(client: reqwest::Client, daemon_url: String) -> Value {
+    let url = format!("{}/health", daemon_url.trim_end_matches('/'));
+    match client.get(&url).send().await {
+        Ok(response) if response.status().is_success() => {
+            let body = response.json::<Value>().await.unwrap_or(Value::Null);
+            let field = |key: &str| {
+                body.get(key)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            json!({ "state": "ok", "version": field("version"), "rev": field("rev") })
+        }
+        Ok(response) => json!({
+            "state": "unhealthy",
+            "status": response.status().as_u16(),
+            "version": "",
+            "rev": "",
+        }),
+        // The transport error names the upstream URL; log it, never ship it.
+        Err(error) => {
+            tracing::debug!(%error, "device health probe failed");
+            json!({ "state": "unreachable", "version": "", "rev": "" })
+        }
+    }
+}
+
+/// `GET /api/devices` — the machines this person can attach to, which one they
+/// are on, and whether each one is answering right now.
+///
+/// No `daemon_url` appears in this payload by design: the browser addresses a
+/// machine by name and nothing else, so nobody types a URL and no page learns
+/// one. `selection_explicit` is false until somebody actually picks, which is
+/// what lets the surface offer the choice exactly once after a login instead
+/// of nagging on every load.
+async fn devices(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let devices = devices_for_request(&state, &headers);
+    let (selected, selection_explicit) = current_selection(&state, &headers);
+    // Give this browser an id here, before it can pick, so the choice it makes
+    // next is recorded against THIS browser and not against every browser the
+    // person has signed in from.
+    let minted = browser_id(&headers).is_none().then(mint_browser_id);
+
+    // Probe every machine at once — a roster of sleeping laptops must cost one
+    // timeout, not one per device — and index the answers so the list the
+    // person reads stays in roster order regardless of who replies first.
+    let mut health = vec![Value::Null; devices.len()];
+    let mut probes = tokio::task::JoinSet::new();
+    for (index, device) in devices.iter().enumerate() {
+        let client = state.http_probe.clone();
+        let url = device.daemon_url.clone();
+        probes.spawn(async move { (index, probe_device(client, url).await) });
+    }
+    while let Some(joined) = probes.join_next().await {
+        if let Ok((index, value)) = joined {
+            health[index] = value;
+        }
+    }
+
+    let rows: Vec<Value> = devices
+        .iter()
+        .enumerate()
+        .map(|(index, device)| {
+            json!({
+                "name": device.name,
+                "default": device.is_default,
+                "selected": device.name == selected,
+                "health": health[index].clone(),
+            })
+        })
+        .collect();
+
+    let mut response = Json(json!({
+        "ok": true,
+        "devices": rows,
+        "selected": selected,
+        "selection_explicit": selection_explicit,
+    }))
+    .into_response();
+    if let Some(id) = minted.filter(|id| !id.is_empty()) {
+        if let Ok(cookie) = browser_cookie(&state, &headers, &id).parse() {
+            response.headers_mut().insert(header::SET_COOKIE, cookie);
+        }
+    }
+    response
+}
+
+#[derive(Deserialize)]
+struct SelectDeviceBody {
+    name: String,
+}
+
+/// `POST /api/devices/select` — attach this browser to one machine.
+///
+/// The choice is recorded server-side against a digest of the session token
+/// and this browser's id, never in a cookie the browser could edit: a page
+/// cannot re-point its own traffic, one person's phone cannot re-point their
+/// desktop, and the selection survives a proxy restart so switching machines
+/// does not mean signing in again.
+///
+/// Recording it also ENDS the streams that were open on the machine being
+/// left. Without that, a tab whose SSE tail is already connected keeps
+/// receiving the old machine's events while its turns and decisions go to the
+/// new one — two machines blended into one transcript, which is the thing the
+/// session contract exists to forbid.
+async fn select_device(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<SelectDeviceBody>,
+) -> Response {
+    let name = body.name.trim().to_string();
+    let Some(user) = session_user(&state, &headers) else {
+        // Single-operator mode has one machine and no roster to select from.
+        if name == device_name_from_url(&state.daemon_url) {
+            return Json(json!({ "ok": true, "selected": name })).into_response();
+        }
+        return (
+            StatusCode::NOT_FOUND,
+            [(header::CONTENT_TYPE, "application/json")],
+            json!({ "ok": false, "error": "unknown_device", "device": name }).to_string(),
+        )
+            .into_response();
+    };
+    if user.device(&name).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            [(header::CONTENT_TYPE, "application/json")],
+            json!({ "ok": false, "error": "unknown_device", "device": name }).to_string(),
+        )
+            .into_response();
+    }
+    let (id, minted) = match browser_id(&headers) {
+        Some(id) => (id.to_string(), false),
+        None => (mint_browser_id(), true),
+    };
+    if id.is_empty() {
+        // Only reachable if the OS refused randomness. Two browsers sharing a
+        // predictable id would share a row, so refuse rather than guess.
+        tracing::error!("no OS randomness for a browser id; selection refused");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::CONTENT_TYPE, "application/json")],
+            json!({ "ok": false, "error": "selection_unavailable" }).to_string(),
+        )
+            .into_response();
+    }
+    let key = selection_key(&user.session_token, &id);
+    let username = user.username.clone();
+    state.device_selections.record(&key, &name);
+    // Every stream this browser has open on the old machine ends now. A send
+    // with no receivers is an error only in the sense that nobody was
+    // listening, which is the common case.
+    let _ = state.selection_changes.send(key);
+    tracing::info!(user = %username, device = %name, "browser attached to device");
+    let mut response = Json(json!({ "ok": true, "selected": name })).into_response();
+    if minted {
+        if let Ok(cookie) = browser_cookie(&state, &headers, &id).parse() {
+            response.headers_mut().insert(header::SET_COOKIE, cookie);
+        }
+    }
+    response
+}
+
 /// Reverse-proxy POST /v1/agent/turns to the local daemon.
 async fn proxy_turns(
     State(state): State<Arc<AppState>>,
@@ -1387,7 +2202,7 @@ async fn proxy_turns(
             )
                 .into_response()
         }
-        Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
+        Err(err) => device_unreachable(&daemon, &err),
     }
 }
 
@@ -1416,7 +2231,7 @@ async fn proxy_sessions_post(
             )
                 .into_response()
         }
-        Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
+        Err(err) => device_unreachable(&daemon, &err),
     }
 }
 
@@ -1440,7 +2255,7 @@ async fn proxy_sessions(State(state): State<Arc<AppState>>, req: Request) -> imp
             )
                 .into_response()
         }
-        Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
+        Err(err) => device_unreachable(&daemon, &err),
     }
 }
 
@@ -1478,7 +2293,7 @@ async fn proxy_get_json(state: &AppState, daemon: &ResolvedDaemon, path: &str) -
             )
                 .into_response()
         }
-        Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
+        Err(err) => device_unreachable(daemon, &err),
     }
 }
 
@@ -1508,7 +2323,7 @@ async fn proxy_post_json(
             )
                 .into_response()
         }
-        Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
+        Err(err) => device_unreachable(daemon, &err),
     }
 }
 
@@ -1623,7 +2438,7 @@ async fn proxy_fs_dirs(State(state): State<Arc<AppState>>, req: Request) -> impl
             )
                 .into_response()
         }
-        Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
+        Err(err) => device_unreachable(&daemon, &err),
     }
 }
 
@@ -1785,7 +2600,7 @@ async fn proxy_method_json(
             )
                 .into_response()
         }
-        Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
+        Err(err) => device_unreachable(daemon, &err),
     }
 }
 
@@ -1861,9 +2676,16 @@ async fn csp_report(body: Bytes) -> impl IntoResponse {
 /// auth boundary should not narrate its own topology. The detail goes to the
 /// log — where operators can actually use it — and the client gets a fixed
 /// string.
-fn daemon_unreachable_body(err: &reqwest::Error) -> &'static str {
-    tracing::warn!(error = %err, "daemon unreachable");
-    "daemon unreachable"
+/// A forward that never reached its machine.
+///
+/// Answers the same typed 503 the gate uses for a device that is not in the
+/// roster, so the surface has ONE shape to recognise: "the machine you are
+/// attached to did not answer", naming the device the person picked. The
+/// transport error is logged and never returned — it stringifies the upstream
+/// URL, which is the operator's tailnet address.
+fn device_unreachable(daemon: &ResolvedDaemon, error: &reqwest::Error) -> Response {
+    tracing::warn!(device = %daemon.device, %error, "device unreachable");
+    device_unavailable(&daemon.device, "unreachable")
 }
 
 /// Timeout for buffered JSON forwards (TASK-73). Generous enough that a slow
@@ -2044,7 +2866,7 @@ async fn proxy_longhouse(
             )
                 .into_response()
         }
-        Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
+        Err(err) => device_unreachable(&daemon, &err),
     }
 }
 
@@ -2289,7 +3111,7 @@ async fn proxy_rooms_persistent(
             .into_response();
     }
     let operator_key = if authority_mutation {
-        let Some(key_path) = room_operator_key_path(&state, req.headers(), &daemon) else {
+        let Some(key_path) = room_operator_key_path(&daemon) else {
             tracing::warn!(
                 daemon = %daemon.base(),
                 "room authorization has no credential for resolved daemon"
@@ -2331,8 +3153,8 @@ async fn proxy_rooms_persistent(
             }
         }
         return match upstream.send().await {
-            Ok(resp) => sse_stream_response(resp),
-            Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
+            Ok(resp) => sse_stream_response(resp, stream_ends_on_switch(&state, &daemon)),
+            Err(err) => device_unreachable(&daemon, &err),
         };
     }
 
@@ -2405,8 +3227,44 @@ async fn proxy_rooms_persistent(
             let bytes = resp.bytes().await.unwrap_or_default();
             (status, [(header::CONTENT_TYPE, "application/json")], bytes).into_response()
         }
-        Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
+        Err(err) => device_unreachable(&daemon, &err),
     }
+}
+
+/// How many selection changes the broadcast buffers before a slow stream
+/// misses one. A missed message only costs that stream its teardown, and the
+/// receiver treats a lag as "keep going" rather than as a switch — never as a
+/// spurious close of somebody's live transcript.
+const SELECTION_CHANGE_BACKLOG: usize = 64;
+
+/// A future that resolves when THIS request's selections row changes.
+///
+/// `None` when the request resolved through no row at all (single-operator
+/// mode, or a browser that has never picked): there is nothing that could
+/// switch under it, so its stream runs until the client or the daemon ends it,
+/// exactly as before.
+fn stream_ends_on_switch(
+    state: &AppState,
+    daemon: &ResolvedDaemon,
+) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> {
+    let key = daemon.selection_key.clone()?;
+    let mut changes = state.selection_changes.subscribe();
+    Some(Box::pin(async move {
+        loop {
+            match changes.recv().await {
+                Ok(changed) if changed == key => return,
+                Ok(_) => continue,
+                // Lagged: some change was missed. Ending the stream on that
+                // suspicion would drop a live transcript for somebody else's
+                // switch, so keep reading.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                // The sender is gone, which happens only as the process ends.
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    std::future::pending::<()>().await
+                }
+            }
+        }
+    }))
 }
 
 /// Build a streaming SSE response from an upstream reqwest `Response`, forwarding
@@ -2424,7 +3282,10 @@ async fn proxy_rooms_persistent(
 ///   - `X-Accel-Buffering: no`  → "do not buffer this stream, flush now"
 ///   - `Cache-Control: no-cache, no-transform` → don't cache, don't buffer-to-
 ///     compress (no-transform stops Cloudflare from holding the stream to gzip it)
-fn sse_stream_response(resp: reqwest::Response) -> Response {
+fn sse_stream_response(
+    resp: reqwest::Response,
+    ends_on_switch: Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>>,
+) -> Response {
     let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::OK);
     let upstream_headers = resp.headers().clone();
     let mut headers = sse_no_buffer_headers();
@@ -2439,9 +3300,15 @@ fn sse_stream_response(resp: reqwest::Response) -> Response {
         }
     }
     // Pipe the upstream byte stream into the response body unchanged so deltas
-    // arrive in real time.
+    // arrive in real time — and end it if this browser attaches to a different
+    // machine, so a tail opened on the old daemon cannot outlive the switch.
+    // The client reconnects and lands on the new machine; leaving it connected
+    // is what would blend two machines into one transcript.
     let stream = resp.bytes_stream();
-    let body = axum::body::Body::from_stream(stream);
+    let body = match ends_on_switch {
+        Some(stop) => axum::body::Body::from_stream(stream.take_until(stop)),
+        None => axum::body::Body::from_stream(stream),
+    };
     (status, headers, body).into_response()
 }
 
@@ -2487,8 +3354,8 @@ async fn proxy_control_events(
         .unwrap_or_default();
     let url = format!("{}/v1/events{q}", daemon.base());
     match state.http.get(&url).send().await {
-        Ok(resp) => sse_stream_response(resp),
-        Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
+        Ok(resp) => sse_stream_response(resp, stream_ends_on_switch(&state, &daemon)),
+        Err(err) => device_unreachable(&daemon, &err),
     }
 }
 
@@ -2536,8 +3403,8 @@ async fn proxy_events(State(state): State<Arc<AppState>>, req: Request) -> impl 
         .unwrap_or_default();
     let url = format!("{}/v1/agent/events{q}", daemon.base());
     match state.http.get(&url).send().await {
-        Ok(resp) => sse_stream_response(resp),
-        Err(err) => (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&err)).into_response(),
+        Ok(resp) => sse_stream_response(resp, stream_ends_on_switch(&state, &daemon)),
+        Err(err) => device_unreachable(&daemon, &err),
     }
 }
 
@@ -2546,7 +3413,7 @@ async fn proxy_events(State(state): State<Arc<AppState>>, req: Request) -> impl 
 /// SSE byte stream with Last-Event-ID resume preserved end to end.
 async fn proxy_observatory(State(state): State<Arc<AppState>>, req: Request) -> Response {
     let daemon = resolved_daemon(&state, &req);
-    let Some(token_path) = observatory_token_path(&state, req.headers(), &daemon) else {
+    let Some(token_path) = observatory_token_path(&daemon) else {
         tracing::warn!(
             daemon = %daemon.base(),
             "observatory has no credential for this daemon; refusing to send another daemon's token"
@@ -2599,11 +3466,11 @@ async fn proxy_observatory(State(state): State<Arc<AppState>>, req: Request) -> 
     let response = match upstream.send().await {
         Ok(response) => response,
         Err(error) => {
-            return (StatusCode::BAD_GATEWAY, daemon_unreachable_body(&error)).into_response();
+            return device_unreachable(&daemon, &error);
         }
     };
     if is_stream {
-        return sse_stream_response(response);
+        return sse_stream_response(response, stream_ends_on_switch(&state, &daemon));
     }
 
     let status =
@@ -2763,14 +3630,17 @@ async fn tts(
 mod tests {
     use super::{
         agent_daemon_path, auth_off_room_mutation_source_allowed, build_app, config_payload,
-        constant_time_eq, daemon_for, decode_segment, forward_timeout, has_dot_segment,
-        has_valid_session, is_hashed_asset, livekit_token_daemon_path, load_users,
-        observatory_token_path, percent_encode_path_segment, read_observer_token,
-        read_room_operator_key, room_agent_authority_mutation, room_operator_key_path,
-        rooms_persistent_shape, session_auth_gate, session_user, sse_no_buffer_headers,
-        validate_auth_bind, wasm_headers, AppState, ProxyUser, ResolvedDaemon,
-        RoomsPersistentShape, ATTACHMENT_UPLOAD_BODY_LIMIT, CALL_PLACE_DAEMON_PATH,
-        JSON_FORWARD_TIMEOUT, SESSION_COOKIE, WASM_CACHE_CONTROL,
+        constant_time_eq, decode_segment, device_for, device_name_from_url, fallback_daemon,
+        forward_timeout, has_dot_segment, has_valid_session, is_hashed_asset,
+        livekit_token_daemon_path, load_users, observatory_token_path, percent_encode_path_segment,
+        prune_selections, read_observer_token, read_room_operator_key,
+        room_agent_authority_mutation, room_operator_key_path, rooms_persistent_shape,
+        selection_key, session_auth_gate, session_user, sse_no_buffer_headers,
+        stream_ends_on_switch, unix_now, url_host, validate_auth_bind, validate_daemon_url,
+        wasm_headers, AppState, DeviceRouting, DeviceSelections, ProxyDevice, ProxyUser,
+        ResolvedDaemon, RoomsPersistentShape, Selection, ATTACHMENT_UPLOAD_BODY_LIMIT,
+        BROWSER_COOKIE, CALL_PLACE_DAEMON_PATH, JSON_FORWARD_TIMEOUT, MAX_DEVICE_SELECTIONS,
+        SELECTION_CHANGE_BACKLOG, SESSION_COOKIE, SESSION_MAX_AGE_SECONDS, WASM_CACHE_CONTROL,
         WORKSPACE_COMMAND_FORWARD_TIMEOUT,
     };
     use axum::http::HeaderMap;
@@ -2845,6 +3715,9 @@ mod tests {
         Arc::new(AppState {
             http: reqwest::Client::new(),
             http_json: reqwest::Client::new(),
+            http_probe: reqwest::Client::new(),
+            device_selections: no_selections(),
+            selection_changes: tokio::sync::broadcast::channel(SELECTION_CHANGE_BACKLOG).0,
             voice_profile: "leo".to_string(),
             daemon_url: "http://127.0.0.1:4780".to_string(),
             default_livekit_room_id: "project:surface-test".to_string(),
@@ -2865,14 +3738,40 @@ mod tests {
     // The property that matters: a login decides WHOSE Ocean you see. If any of
     // these regress, two teammates share one instance and the feature is a lie.
 
+    /// A person with one machine, the shape every pre-devices roster had.
     fn user(name: &str, pass: &str, daemon: &str, token: &str) -> ProxyUser {
         ProxyUser {
             username: name.to_string(),
             password: pass.to_string(),
-            daemon_url: daemon.to_string(),
+            devices: vec![device(&device_name_from_url(daemon), daemon)],
             session_token: token.to_string(),
+        }
+    }
+
+    fn device(name: &str, daemon: &str) -> ProxyDevice {
+        ProxyDevice {
+            name: name.to_string(),
+            daemon_url: daemon.to_string(),
             observer_token_path: None,
             operator_key_path: None,
+            is_default: true,
+        }
+    }
+
+    /// An empty, never-written selection store for a state that does not
+    /// exercise device switching.
+    fn no_selections() -> Arc<DeviceSelections> {
+        Arc::new(DeviceSelections::load(PathBuf::from(
+            "/nonexistent/ocean-surface-test/device-selections.json",
+        )))
+    }
+
+    /// The machine a request lands on, unwrapped. Every test here asserts on a
+    /// session that resolves; the unknown-device arm has its own tests.
+    fn attached(state: &AppState, headers: &HeaderMap) -> ResolvedDaemon {
+        match device_for(state, headers) {
+            DeviceRouting::Attached(daemon) => daemon,
+            DeviceRouting::Unknown(name) => panic!("expected an attached device, got '{name}'"),
         }
     }
 
@@ -2881,6 +3780,18 @@ mod tests {
         headers.insert(
             header::COOKIE,
             format!("{SESSION_COOKIE}={token}").parse().unwrap(),
+        );
+        headers
+    }
+
+    /// One person, in one named browser — the pair a selection is keyed on.
+    fn browser_headers(token: &str, browser: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("{SESSION_COOKIE}={token}; {BROWSER_COOKIE}={browser}")
+                .parse()
+                .unwrap(),
         );
         headers
     }
@@ -2895,24 +3806,24 @@ mod tests {
     #[test]
     fn the_default_daemon_uses_the_process_wide_observer_token() {
         let state = multi_user_state();
-        let path = observatory_token_path(
-            &state,
-            &session_headers("tok-ocean"),
-            &ResolvedDaemon("http://127.0.0.1:4780".into()),
+        let daemon = attached(&state, &session_headers("tok-ocean"));
+        assert_eq!(daemon.base(), "http://127.0.0.1:4780");
+        assert_eq!(
+            observatory_token_path(&daemon),
+            Some(state.observer_token_path.clone())
         );
-        assert_eq!(path, Some(state.observer_token_path.clone()));
     }
 
     #[test]
     fn single_operator_mode_is_untouched_by_the_credential_split() {
         // No session cookie at all: the historical path must still resolve.
         let state = auth_test_state();
-        let path = observatory_token_path(
-            &state,
-            &HeaderMap::new(),
-            &ResolvedDaemon("http://127.0.0.1:4780".into()),
+        let daemon = attached(&state, &HeaderMap::new());
+        assert_eq!(daemon.base(), "http://127.0.0.1:4780");
+        assert_eq!(
+            observatory_token_path(&daemon),
+            Some(state.observer_token_path.clone())
         );
-        assert_eq!(path, Some(state.observer_token_path.clone()));
     }
 
     #[test]
@@ -2922,40 +3833,55 @@ mod tests {
         // this one. With no token configured for him the only right answer is
         // none — the route fails closed rather than substituting.
         let state = multi_user_state();
-        let path = observatory_token_path(
-            &state,
-            &session_headers("tok-eric"),
-            &ResolvedDaemon("http://100.119.217.76:4780".into()),
+        let daemon = attached(&state, &session_headers("tok-eric"));
+        assert_eq!(daemon.base(), "http://100.119.217.76:4780");
+        assert_eq!(
+            observatory_token_path(&daemon),
+            None,
+            "must not fall back to the local credential"
         );
-        assert_eq!(path, None, "must not fall back to the local credential");
     }
 
     #[test]
     fn a_configured_roster_credential_is_used_for_that_users_daemon() {
         let mut state = multi_user_state();
         let inner = Arc::get_mut(&mut state).expect("sole owner");
-        inner.users[1].observer_token_path = Some(PathBuf::from("/eric/observer.token"));
-        let path = observatory_token_path(
-            &state,
-            &session_headers("tok-eric"),
-            &ResolvedDaemon("http://100.119.217.76:4780".into()),
+        inner.users[1].devices[0].observer_token_path = Some(PathBuf::from("/eric/observer.token"));
+        let daemon = attached(&state, &session_headers("tok-eric"));
+        assert_eq!(
+            observatory_token_path(&daemon),
+            Some(PathBuf::from("/eric/observer.token"))
         );
-        assert_eq!(path, Some(PathBuf::from("/eric/observer.token")));
     }
 
     #[test]
-    fn a_credential_is_never_answered_for_a_daemon_the_session_does_not_own() {
-        // Defence in depth: even if a resolved upstream and the session ever
-        // disagreed, one user's token must not travel to the other's daemon.
+    fn a_credential_is_never_answered_for_a_device_that_did_not_mint_it() {
+        // Defence in depth, in the shape the device roster gives it: the
+        // upstream and the credential are now resolved TOGETHER, so a session
+        // pointed at one machine while carrying another's token is no longer
+        // representable. What remains to prove is the no-substitution rule —
+        // a machine that names no credential of its own gets none, even while
+        // this process and the person's other device both hold one.
         let mut state = multi_user_state();
         let inner = Arc::get_mut(&mut state).expect("sole owner");
-        inner.users[1].observer_token_path = Some(PathBuf::from("/eric/observer.token"));
-        let path = observatory_token_path(
-            &state,
-            &session_headers("tok-eric"),
-            &ResolvedDaemon("http://10.0.0.9:4780".into()),
+        inner.users[1].devices[0].observer_token_path = Some(PathBuf::from("/eric/observer.token"));
+        inner.users[1].devices.push(ProxyDevice {
+            is_default: false,
+            ..device("studio", "http://10.0.0.9:4780")
+        });
+        let selections = tempfile::tempdir().expect("tempdir");
+        inner.device_selections = Arc::new(DeviceSelections::load(
+            selections.path().join("device-selections.json"),
+        ));
+        inner.device_selections.record(
+            &selection_key(&inner.users[1].session_token, "browser-a"),
+            "studio",
         );
-        assert_eq!(path, None);
+
+        let daemon = attached(&state, &browser_headers("tok-eric", "browser-a"));
+        assert_eq!(daemon.base(), "http://10.0.0.9:4780");
+        assert_eq!(observatory_token_path(&daemon), None);
+        assert_eq!(room_operator_key_path(&daemon), None);
     }
 
     #[test]
@@ -3014,32 +3940,20 @@ mod tests {
     fn room_operator_credentials_follow_the_resolved_daemon_without_fallback() {
         let state = multi_user_state();
         assert_eq!(
-            room_operator_key_path(
-                &state,
-                &session_headers("tok-ocean"),
-                &ResolvedDaemon("http://127.0.0.1:4780".into()),
-            ),
+            room_operator_key_path(&attached(&state, &session_headers("tok-ocean"))),
             Some(state.operator_key_path.clone()),
         );
         assert_eq!(
-            room_operator_key_path(
-                &state,
-                &session_headers("tok-eric"),
-                &ResolvedDaemon("http://100.119.217.76:4780".into()),
-            ),
+            room_operator_key_path(&attached(&state, &session_headers("tok-eric"))),
             None,
             "another daemon must never receive the process-wide key",
         );
 
         let mut configured = state;
         let inner = Arc::get_mut(&mut configured).expect("sole owner");
-        inner.users[1].operator_key_path = Some(PathBuf::from("/eric/operator.key"));
+        inner.users[1].devices[0].operator_key_path = Some(PathBuf::from("/eric/operator.key"));
         assert_eq!(
-            room_operator_key_path(
-                &configured,
-                &session_headers("tok-eric"),
-                &ResolvedDaemon("http://100.119.217.76:4780".into()),
-            ),
+            room_operator_key_path(&attached(&configured, &session_headers("tok-eric"))),
             Some(PathBuf::from("/eric/operator.key")),
         );
     }
@@ -3128,11 +4042,11 @@ mod tests {
     fn each_users_session_routes_to_their_own_daemon() {
         let state = multi_user_state();
         assert_eq!(
-            daemon_for(&state, &cookie_headers("tok-ocean")).0,
+            attached(&state, &cookie_headers("tok-ocean")).base(),
             "http://127.0.0.1:4780"
         );
         assert_eq!(
-            daemon_for(&state, &cookie_headers("tok-eric")).0,
+            attached(&state, &cookie_headers("tok-eric")).base(),
             "http://100.119.217.76:4780"
         );
     }
@@ -3142,7 +4056,10 @@ mod tests {
         let state = multi_user_state();
         let eric = session_user(&state, &cookie_headers("tok-eric")).expect("eric");
         assert_eq!(eric.username, "ecfromthedc");
-        assert_ne!(eric.daemon_url, "http://127.0.0.1:4780");
+        assert_ne!(
+            eric.default_device().expect("a device").daemon_url,
+            "http://127.0.0.1:4780"
+        );
     }
 
     #[test]
@@ -3152,7 +4069,7 @@ mod tests {
         // Falling back to the configured default is safe: the auth gate refuses
         // the request before any handler runs.
         assert_eq!(
-            daemon_for(&state, &cookie_headers("tok-forged")).0,
+            attached(&state, &cookie_headers("tok-forged")).base(),
             "http://127.0.0.1:4780"
         );
     }
@@ -3172,7 +4089,7 @@ mod tests {
         assert!(has_valid_session(&state, &cookie_headers("test-session")));
         // ...and still resolves to the one configured daemon.
         assert_eq!(
-            daemon_for(&state, &cookie_headers("test-session")).0,
+            attached(&state, &cookie_headers("test-session")).base(),
             "http://127.0.0.1:4780"
         );
     }
@@ -3200,8 +4117,14 @@ mod tests {
         let secret = dir.path().join("secret");
         let loaded = load_users("http://default:4780", &secret, &users).expect("load");
         assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded[0].daemon_url, "http://default:4780");
-        assert_eq!(loaded[1].daemon_url, "http://elsewhere:4780");
+        // The legacy single `daemon_url` becomes one device named after its
+        // host, and an entry with neither inherits the process default.
+        assert_eq!(loaded[0].devices.len(), 1);
+        assert_eq!(loaded[0].devices[0].daemon_url, "http://default:4780");
+        assert_eq!(loaded[0].devices[0].name, "default");
+        assert!(loaded[0].devices[0].is_default);
+        assert_eq!(loaded[1].devices[0].daemon_url, "http://elsewhere:4780");
+        assert_eq!(loaded[1].devices[0].name, "elsewhere");
         // Distinct credentials must yield distinct session tokens, or one login
         // would authenticate as another.
         assert_ne!(loaded[0].session_token, loaded[1].session_token);
@@ -3541,6 +4464,9 @@ mod tests {
         let state = AppState {
             http: reqwest::Client::new(),
             http_json: reqwest::Client::new(),
+            http_probe: reqwest::Client::new(),
+            device_selections: no_selections(),
+            selection_changes: tokio::sync::broadcast::channel(SELECTION_CHANGE_BACKLOG).0,
             voice_profile: "leo".to_string(),
             daemon_url: "http://127.0.0.1:4780".to_string(),
             default_livekit_room_id: "project/surface demo".to_string(),
@@ -3620,6 +4546,9 @@ mod tests {
         let state = Arc::new(AppState {
             http: reqwest::Client::new(),
             http_json: reqwest::Client::new(),
+            http_probe: reqwest::Client::new(),
+            device_selections: no_selections(),
+            selection_changes: tokio::sync::broadcast::channel(SELECTION_CHANGE_BACKLOG).0,
             voice_profile: "leo".to_string(),
             daemon_url: "http://127.0.0.1:9".to_string(),
             default_livekit_room_id: "project:surface-test".to_string(),
@@ -3703,6 +4632,9 @@ mod tests {
         let state = Arc::new(AppState {
             http: reqwest::Client::new(),
             http_json: reqwest::Client::new(),
+            http_probe: reqwest::Client::new(),
+            device_selections: no_selections(),
+            selection_changes: tokio::sync::broadcast::channel(SELECTION_CHANGE_BACKLOG).0,
             voice_profile: "leo".to_string(),
             // Closed port → the forward fails and we see the real error body.
             daemon_url: "http://127.0.0.1:9".to_string(),
@@ -3729,15 +4661,77 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await
             .expect("read body");
         let text = String::from_utf8_lossy(&body);
-        assert_eq!(text, "daemon unreachable");
+        let decoded: Value = serde_json::from_str(&text).expect("typed device error");
+        assert_eq!(decoded["error"], "device_unavailable");
+        assert_eq!(decoded["reason"], "unreachable");
+        // The device NAME is the whole payload. It is what the picker shows,
+        // and it is all the browser is allowed to learn.
+        assert_eq!(decoded["device"], "127.0.0.1");
+        // The name of a legacy single-daemon entry IS its host — that is what
+        // "named after the host" means, and it is why the ops recipe has
+        // people name their devices. Everything else about the upstream stays
+        // on this side of the boundary: no scheme, no port, no path, and none
+        // of the transport error, which is what TASK-73 actually found being
+        // echoed. The body is exactly four known keys.
         assert!(
-            !text.contains("127.0.0.1") && !text.contains(':') && !text.contains("http"),
+            !text.contains("http") && !text.contains(":9") && !text.contains('/'),
             "error body must not disclose the upstream address: {text}",
+        );
+        assert!(
+            !text.contains("refused") && !text.contains("connect"),
+            "error body must not narrate the transport failure: {text}",
+        );
+        let object = decoded.as_object().expect("object body");
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["device", "error", "ok", "reason"]);
+    }
+
+    /// The counterpart: a NAMED device never puts its address in the body at
+    /// all. This is the shape a multi-device roster actually has, and the one
+    /// the picker renders.
+    #[tokio::test]
+    async fn an_unreachable_named_device_answers_with_its_name_only() {
+        let dist = tempfile::tempdir().expect("tempdir");
+        let mut state = multi_user_state();
+        {
+            let inner = Arc::get_mut(&mut state).expect("sole owner");
+            inner.users[1].devices = vec![ProxyDevice {
+                name: "studio".to_string(),
+                // Closed port on a distinctive address we can grep the body for.
+                daemon_url: "http://100.119.217.76:9".to_string(),
+                observer_token_path: None,
+                operator_key_path: None,
+                is_default: true,
+            }];
+        }
+        let app = build_app(state, dist.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/v1/permissions")
+                    .header(header::COOKIE, format!("{SESSION_COOKIE}=tok-eric"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .expect("read body");
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("studio"), "the picker needs the name: {text}");
+        assert!(
+            !text.contains("100.119.217.76"),
+            "a device's address never reaches the browser: {text}",
         );
     }
 
@@ -3843,6 +4837,9 @@ mod tests {
         let state = Arc::new(AppState {
             http: reqwest::Client::new(),
             http_json: reqwest::Client::new(),
+            http_probe: reqwest::Client::new(),
+            device_selections: no_selections(),
+            selection_changes: tokio::sync::broadcast::channel(SELECTION_CHANGE_BACKLOG).0,
             voice_profile: "leo".to_string(),
             daemon_url: "http://127.0.0.1:9".to_string(),
             default_livekit_room_id: "project:surface-test".to_string(),
@@ -3910,7 +4907,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(
             resp.headers()
                 .get(header::CONTENT_SECURITY_POLICY)
@@ -3935,6 +4932,9 @@ mod tests {
         let state = Arc::new(AppState {
             http: reqwest::Client::new(),
             http_json: reqwest::Client::new(),
+            http_probe: reqwest::Client::new(),
+            device_selections: no_selections(),
+            selection_changes: tokio::sync::broadcast::channel(SELECTION_CHANGE_BACKLOG).0,
             voice_profile: "leo".to_string(),
             // Closed port: a request that gets past the guard fails fast as
             // 502, which is exactly how we detect a bypass.
@@ -4020,23 +5020,26 @@ mod tests {
             .unwrap();
         assert_eq!(
             resp.status(),
-            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
             "a legitimate path (incl. dots inside a segment) must still route",
         );
     }
 
     /// GET /v1/permissions must NOT fall through to ServeDir → 404 — proven
     /// against the PRODUCTION router (`build_app`), not a synthetic one:
-    /// deleting the real route flips this test's 502 into the fallback 404.
+    /// deleting the real route flips this test's 503 into the fallback 404.
     /// The mock daemon URL points at a closed port, so reaching the forward
-    /// handler yields BAD_GATEWAY — distinct from both the fallback and a
-    /// working daemon, which is exactly the routing proof.
+    /// handler yields the typed `device_unavailable` 503 — distinct from both
+    /// the fallback and a working daemon, which is exactly the routing proof.
     #[tokio::test]
     async fn permissions_snapshot_routes_through_production_router() {
         let dist = tempfile::tempdir().expect("tempdir");
         let state = Arc::new(AppState {
             http: reqwest::Client::new(),
             http_json: reqwest::Client::new(),
+            http_probe: reqwest::Client::new(),
+            device_selections: no_selections(),
+            selection_changes: tokio::sync::broadcast::channel(SELECTION_CHANGE_BACKLOG).0,
             voice_profile: "leo".to_string(),
             // Closed port: instant connection refusal, never a real daemon.
             daemon_url: "http://127.0.0.1:9".to_string(),
@@ -4066,7 +5069,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 
         // An unregistered sibling path proves the fallback is still 404, so
         // the assertion above genuinely distinguishes routed from fallthrough.
@@ -4098,6 +5101,9 @@ mod tests {
         let state = Arc::new(AppState {
             http: reqwest::Client::new(),
             http_json: reqwest::Client::new(),
+            http_probe: reqwest::Client::new(),
+            device_selections: no_selections(),
+            selection_changes: tokio::sync::broadcast::channel(SELECTION_CHANGE_BACKLOG).0,
             voice_profile: "leo".to_string(),
             // Closed port: instant connection refusal, never a real daemon.
             daemon_url: "http://127.0.0.1:9".to_string(),
@@ -4130,7 +5136,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             resp.status(),
-            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
             "POST /v1/agents must reach the forwarder, not ServeDir",
         );
 
@@ -4147,7 +5153,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 
         // Control: a POST the allowlist does not carry is refused without ever
         // reaching the forwarder. 405 (not 404) is exactly what POST
@@ -4179,6 +5185,9 @@ mod tests {
         let state = Arc::new(AppState {
             http: reqwest::Client::new(),
             http_json: reqwest::Client::new(),
+            http_probe: reqwest::Client::new(),
+            device_selections: no_selections(),
+            selection_changes: tokio::sync::broadcast::channel(SELECTION_CHANGE_BACKLOG).0,
             voice_profile: "leo".to_string(),
             // Closed port: instant connection refusal, never a real daemon.
             daemon_url: "http://127.0.0.1:9".to_string(),
@@ -4214,7 +5223,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 resp.status(),
-                StatusCode::BAD_GATEWAY,
+                StatusCode::SERVICE_UNAVAILABLE,
                 "{method} /v1/agents/{{name}} must reach the forwarder",
             );
         }
@@ -4251,6 +5260,9 @@ mod tests {
         let state = Arc::new(AppState {
             http: reqwest::Client::new(),
             http_json: reqwest::Client::new(),
+            http_probe: reqwest::Client::new(),
+            device_selections: no_selections(),
+            selection_changes: tokio::sync::broadcast::channel(SELECTION_CHANGE_BACKLOG).0,
             voice_profile: "leo".to_string(),
             // Closed port: instant connection refusal, never a real daemon.
             daemon_url: "http://127.0.0.1:9".to_string(),
@@ -4283,7 +5295,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             resp.status(),
-            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
             "PATCH /v1/rooms/persistent/{{key}} must reach the forwarder",
         );
 
@@ -5210,6 +6222,9 @@ mod tests {
         Arc::new(AppState {
             http: reqwest::Client::new(),
             http_json: reqwest::Client::new(),
+            http_probe: reqwest::Client::new(),
+            device_selections: no_selections(),
+            selection_changes: tokio::sync::broadcast::channel(SELECTION_CHANGE_BACKLOG).0,
             voice_profile: "leo".to_string(),
             daemon_url,
             default_livekit_room_id: "project:surface-test".to_string(),
@@ -5368,5 +6383,935 @@ mod tests {
             "application/json",
         );
         upstream.abort();
+    }
+
+    // ── device profiles ───────────────────────────────────────────
+    //
+    // The product rule these hold up: signing in at the public surface shows
+    // you the machines that are YOURS, landing on one shows you ITS sessions,
+    // and switching machines is a click rather than a second login. Every
+    // proxied route — JSON, the SSE tail, and the voice relay — has to move
+    // together, or a switch would leave a transcript streaming from the
+    // machine you just left.
+
+    #[test]
+    fn a_daemon_url_yields_the_host_it_names() {
+        assert_eq!(device_name_from_url("http://127.0.0.1:4780"), "127.0.0.1");
+        assert_eq!(
+            device_name_from_url("https://mac-mini.tailnet.ts.net:4780/"),
+            "mac-mini.tailnet.ts.net"
+        );
+        assert_eq!(device_name_from_url("http://[fd7a::1]:4780"), "[fd7a::1]");
+        assert_eq!(url_host("http://user:pw@studio.local:4780"), "studio.local");
+    }
+
+    #[test]
+    fn a_daemon_url_must_be_an_absolute_http_url() {
+        assert!(validate_daemon_url("http://127.0.0.1:4780").is_ok());
+        assert!(validate_daemon_url("https://mini.tailnet.ts.net:4780").is_ok());
+        for bad in [
+            "",
+            "127.0.0.1:4780",
+            "ftp://mini:4780",
+            "http://",
+            " http://mini:4780",
+            "http://mini :4780",
+        ] {
+            assert!(
+                validate_daemon_url(bad).is_err(),
+                "'{bad}' must be refused as a daemon url"
+            );
+        }
+    }
+
+    fn write_users(dir: &std::path::Path, body: &str) -> PathBuf {
+        let users = dir.join("users.json");
+        std::fs::write(&users, body).expect("write users file");
+        std::fs::set_permissions(&users, std::fs::Permissions::from_mode(0o600))
+            .expect("chmod users file");
+        users
+    }
+
+    #[test]
+    fn a_devices_list_loads_in_roster_order_with_one_default() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let users = write_users(
+            dir.path(),
+            r#"[{"username":"a","password":"p","devices":[
+                {"name":"mini","daemon_url":"http://100.64.0.1:4780",
+                 "observer_token_path":"/mini/observer.token"},
+                {"name":"studio","daemon_url":"http://100.64.0.2:4780","default":true}
+            ]}]"#,
+        );
+        let loaded =
+            load_users("http://127.0.0.1:4780", &dir.path().join("secret"), &users).expect("load");
+        let devices = &loaded[0].devices;
+        assert_eq!(
+            devices.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+            ["mini", "studio"],
+            "roster order is the order a person reads",
+        );
+        assert_eq!(
+            devices[0].observer_token_path,
+            Some(PathBuf::from("/mini/observer.token"))
+        );
+        assert!(!devices[0].is_default);
+        assert!(devices[1].is_default);
+        assert_eq!(loaded[0].default_device().expect("default").name, "studio");
+    }
+
+    #[test]
+    fn with_no_device_marked_default_roster_order_decides() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let users = write_users(
+            dir.path(),
+            r#"[{"username":"a","password":"p","devices":[
+                {"name":"mini","daemon_url":"http://100.64.0.1:4780"},
+                {"name":"studio","daemon_url":"http://100.64.0.2:4780"}
+            ]}]"#,
+        );
+        let loaded =
+            load_users("http://127.0.0.1:4780", &dir.path().join("secret"), &users).expect("load");
+        assert_eq!(loaded[0].default_device().expect("default").name, "mini");
+    }
+
+    #[test]
+    fn a_malformed_device_roster_is_refused_at_load() {
+        let cases: [(&str, &str); 5] = [
+            (
+                r#"[{"username":"a","password":"p","daemon_url":"http://x:4780","devices":[
+                    {"name":"mini","daemon_url":"http://y:4780"}]}]"#,
+                "both daemon_url and devices",
+            ),
+            (
+                r#"[{"username":"a","password":"p","devices":[
+                    {"name":"mini","daemon_url":"http://x:4780"},
+                    {"name":"mini","daemon_url":"http://y:4780"}]}]"#,
+                "two devices named",
+            ),
+            (
+                r#"[{"username":"a","password":"p","devices":[
+                    {"name":"mini","daemon_url":"http://x:4780","default":true},
+                    {"name":"studio","daemon_url":"http://y:4780","default":true}]}]"#,
+                "mark at most one",
+            ),
+            (
+                r#"[{"username":"a","password":"p","devices":[
+                    {"name":"  ","daemon_url":"http://x:4780"}]}]"#,
+                "no name",
+            ),
+            (
+                r#"[{"username":"a","password":"p","devices":[
+                    {"name":"mini","daemon_url":"mini:4780"}]}]"#,
+                "http:// or https://",
+            ),
+        ];
+        for (body, expected) in cases {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let users = write_users(dir.path(), body);
+            let error = load_users("http://127.0.0.1:4780", &dir.path().join("secret"), &users)
+                .expect_err("must refuse");
+            let text = format!("{error}");
+            assert!(
+                text.contains(expected),
+                "expected an error naming '{expected}', got: {text}"
+            );
+        }
+    }
+
+    // ── selection persistence ─────────────────────────────────────
+
+    #[test]
+    fn a_selection_outlives_the_proxy_that_recorded_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("device-selections.json");
+        let key = selection_key("tok-eric", "browser-a");
+        let before = DeviceSelections::load(path.clone());
+        before.record(&key, "studio");
+        assert_eq!(before.selected(&key).as_deref(), Some("studio"));
+
+        // A restart is a fresh load off the same file. Without this, every
+        // deploy would land everyone back on their default machine.
+        let after = DeviceSelections::load(path.clone());
+        assert_eq!(after.selected(&key).as_deref(), Some("studio"));
+        assert_eq!(
+            after.selected(&selection_key("tok-eric", "browser-b")),
+            None
+        );
+        assert_eq!(
+            after.selected(&selection_key("tok-other", "browser-a")),
+            None
+        );
+
+        let mode =
+            std::os::unix::fs::MetadataExt::mode(&std::fs::metadata(&path).expect("metadata"))
+                & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "the selections file is private, like the roster"
+        );
+
+        // A later choice replaces the earlier one rather than accumulating.
+        after.record(&key, "mini");
+        let reloaded = DeviceSelections::load(path);
+        assert_eq!(reloaded.selected(&key).as_deref(), Some("mini"));
+    }
+
+    #[test]
+    fn one_persons_two_browsers_hold_two_separate_choices() {
+        // The finding this pins: keying a selection on the session token alone
+        // keys it on the PERSON, because this proxy derives that token from
+        // their username and password so an installed PWA stays signed in.
+        // Every browser they own then shares one row, and picking a machine on
+        // the phone re-points the desktop's next request. Two browsers, two
+        // rows, and neither is the other's.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let selections = DeviceSelections::load(dir.path().join("device-selections.json"));
+        let phone = selection_key("tok-eric", "phone");
+        let desktop = selection_key("tok-eric", "desktop");
+        assert_ne!(phone, desktop);
+        selections.record(&phone, "studio");
+        selections.record(&desktop, "mini");
+        assert_eq!(selections.selected(&phone).as_deref(), Some("studio"));
+        assert_eq!(selections.selected(&desktop).as_deref(), Some("mini"));
+
+        // And a browser id is not a key on its own: the same id under another
+        // person's session addresses a different row, so a cookie lifted from
+        // one browser cannot read or re-point another person's routing.
+        assert_ne!(selection_key("tok-ocean", "phone"), phone);
+    }
+
+    #[test]
+    fn concurrent_selections_all_survive_in_the_file() {
+        // The finding this pins: snapshotting under the lock and persisting
+        // outside it let two writers race their file writes through one
+        // pid-named temp file, so a write could truncate or rename over
+        // another and the file would disagree with memory until the next
+        // restart — at which point somebody silently gets a machine they did
+        // not pick. Eight writers, eight distinct rows, all of them present.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("device-selections.json");
+        let selections = Arc::new(DeviceSelections::load(path.clone()));
+        let mut writers = Vec::new();
+        for index in 0..8 {
+            let selections = selections.clone();
+            writers.push(std::thread::spawn(move || {
+                selections.record(
+                    &selection_key("tok-eric", &format!("browser-{index}")),
+                    "studio",
+                );
+            }));
+        }
+        for writer in writers {
+            writer.join().expect("writer");
+        }
+        let reloaded = DeviceSelections::load(path);
+        for index in 0..8 {
+            assert_eq!(
+                reloaded
+                    .selected(&selection_key("tok-eric", &format!("browser-{index}")))
+                    .as_deref(),
+                Some("studio"),
+                "browser-{index}'s choice did not survive the concurrent writes"
+            );
+        }
+    }
+
+    #[test]
+    fn rows_no_live_browser_can_use_are_pruned() {
+        // One row per (person, browser) is bounded by the people, but a
+        // private window is a new browser — so without pruning this file grows
+        // for as long as the proxy runs.
+        let mut entries = std::collections::BTreeMap::new();
+        entries.insert(
+            "fresh".to_string(),
+            Selection {
+                device: "mini".into(),
+                updated: unix_now(),
+            },
+        );
+        entries.insert(
+            "expired".to_string(),
+            Selection {
+                device: "studio".into(),
+                // Older than the session cookie itself: no browser can still
+                // present a cookie that would look this row up.
+                updated: unix_now() - SESSION_MAX_AGE_SECONDS - 1,
+            },
+        );
+        prune_selections(&mut entries);
+        assert!(entries.contains_key("fresh"));
+        assert!(!entries.contains_key("expired"));
+
+        // Over the cap, the OLDEST go first, so an active browser's row is
+        // never the one dropped.
+        let mut many = std::collections::BTreeMap::new();
+        for index in 0..(MAX_DEVICE_SELECTIONS + 10) {
+            many.insert(
+                format!("key-{index:05}"),
+                Selection {
+                    device: "mini".into(),
+                    updated: unix_now() - (MAX_DEVICE_SELECTIONS + 10 - index) as u64,
+                },
+            );
+        }
+        prune_selections(&mut many);
+        assert_eq!(many.len(), MAX_DEVICE_SELECTIONS);
+        assert!(many.contains_key(&format!("key-{:05}", MAX_DEVICE_SELECTIONS + 9)));
+        assert!(!many.contains_key("key-00000"));
+    }
+
+    #[test]
+    fn the_selections_file_stores_a_digest_and_never_the_session_token() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("device-selections.json");
+        let selections = DeviceSelections::load(path.clone());
+        selections.record(
+            &selection_key("super-secret-session-token", "secret-browser-id"),
+            "studio",
+        );
+        let raw = std::fs::read_to_string(&path).expect("read selections");
+        assert!(
+            !raw.contains("super-secret-session-token") && !raw.contains("secret-browser-id"),
+            "no cookie value may be written to disk: {raw}"
+        );
+        assert!(raw.contains("studio"));
+    }
+
+    #[test]
+    fn a_group_readable_selections_file_is_ignored_rather_than_trusted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("device-selections.json");
+        let key = selection_key("tok-eric", "browser-a");
+        let selections = DeviceSelections::load(path.clone());
+        selections.record(&key, "studio");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        // Losing a remembered choice costs one click; honouring a file anyone
+        // could have written costs somebody's turns landing on a machine they
+        // did not pick.
+        let reloaded = DeviceSelections::load(path);
+        assert_eq!(reloaded.selected(&key), None);
+    }
+
+    // ── per-session routing across devices ────────────────────────
+
+    /// A stub daemon that says which machine it is on every route the surface
+    /// actually drives: buffered JSON, the SSE tail, and the voice relay.
+    async fn spawn_named_daemon(name: &'static str) -> (String, tokio::task::JoinHandle<()>) {
+        let app =
+            Router::new()
+                .route(
+                    "/health",
+                    get(move || async move {
+                        Json(json!({ "ok": true, "version": "9.9.9", "rev": name }))
+                    }),
+                )
+                .route(
+                    "/v1/permissions",
+                    get(move || async move { Json(json!({ "ok": true, "device": name })) }),
+                )
+                .route(
+                    "/v1/agent/events",
+                    get(move || async move {
+                        (
+                            [(header::CONTENT_TYPE, "text/event-stream")],
+                            format!("event: hello\ndata: {name}\n\n"),
+                        )
+                    }),
+                )
+                .route(
+                    "/v1/voice/stt",
+                    post(move || async move { Json(json!({ "ok": true, "text": name })) }),
+                );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stub daemon");
+        let addr = listener.local_addr().expect("stub addr");
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    async fn body_text(response: Response) -> String {
+        let bytes = axum::body::to_bytes(response.into_body(), 256 * 1024)
+            .await
+            .expect("read body");
+        String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    /// Ask the production router for one path as one signed-in person, in a
+    /// browser that has no id yet.
+    async fn as_user(app: &Router, token: &str, method: &str, uri: &str) -> Response {
+        request_as(app, token, None, method, uri, Body::empty()).await
+    }
+
+    /// The same, from one NAMED browser — the pair a selection is keyed on.
+    async fn as_browser(
+        app: &Router,
+        token: &str,
+        browser: &str,
+        method: &str,
+        uri: &str,
+    ) -> Response {
+        request_as(app, token, Some(browser), method, uri, Body::empty()).await
+    }
+
+    async fn request_as(
+        app: &Router,
+        token: &str,
+        browser: Option<&str>,
+        method: &str,
+        uri: &str,
+        body: Body,
+    ) -> Response {
+        let cookie = match browser {
+            Some(browser) => format!("{SESSION_COOKIE}={token}; {BROWSER_COOKIE}={browser}"),
+            None => format!("{SESSION_COOKIE}={token}"),
+        };
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header(header::COOKIE, cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(body)
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// Attach one browser to one machine through the production route.
+    async fn select(app: &Router, token: &str, browser: &str, name: &str) -> Response {
+        request_as(
+            app,
+            token,
+            Some(browser),
+            "POST",
+            "/api/devices/select",
+            Body::from(format!(r#"{{"name":"{name}"}}"#)),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn every_proxied_route_follows_the_device_this_session_selected() {
+        let dist = tempfile::tempdir().expect("tempdir");
+        let selections_dir = tempfile::tempdir().expect("tempdir");
+        let (eric_mini, a1) = spawn_named_daemon("eric-mini").await;
+        let (eric_studio, a2) = spawn_named_daemon("eric-studio").await;
+        let (ocean_mini, b1) = spawn_named_daemon("ocean-mini").await;
+        let (ocean_laptop, b2) = spawn_named_daemon("ocean-laptop").await;
+
+        let mut state = multi_user_state();
+        {
+            let inner = Arc::get_mut(&mut state).expect("sole owner");
+            inner.device_selections = Arc::new(DeviceSelections::load(
+                selections_dir.path().join("device-selections.json"),
+            ));
+            inner.users[0].devices = vec![
+                device("mini", &ocean_mini),
+                ProxyDevice {
+                    is_default: false,
+                    ..device("laptop", &ocean_laptop)
+                },
+            ];
+            inner.users[1].devices = vec![
+                device("mini", &eric_mini),
+                ProxyDevice {
+                    is_default: false,
+                    ..device("studio", &eric_studio)
+                },
+            ];
+        }
+        let selections = state.device_selections.clone();
+        let app = build_app(state, dist.path());
+
+        // With nothing chosen, each person lands on their own default machine.
+        let eric = as_browser(&app, "tok-eric", "laptop", "GET", "/v1/permissions").await;
+        assert!(body_text(eric).await.contains("eric-mini"));
+        let ocean = as_browser(&app, "tok-ocean", "desk", "GET", "/v1/permissions").await;
+        assert!(body_text(ocean).await.contains("ocean-mini"));
+
+        // Eric picks his studio. This is the whole product: one POST, no
+        // second login, no URL typed anywhere.
+        assert_eq!(
+            select(&app, "tok-eric", "laptop", "studio").await.status(),
+            StatusCode::OK
+        );
+
+        // Buffered JSON, the SSE tail, and the voice relay all move together.
+        let json = as_browser(&app, "tok-eric", "laptop", "GET", "/v1/permissions").await;
+        assert!(body_text(json).await.contains("eric-studio"));
+        let stream = as_browser(&app, "tok-eric", "laptop", "GET", "/v1/agent/events").await;
+        assert!(body_text(stream).await.contains("eric-studio"));
+        let voice = request_as(
+            &app,
+            "tok-eric",
+            Some("laptop"),
+            "POST",
+            "/api/stt",
+            Body::from(vec![0_u8, 1, 2, 3]),
+        )
+        .await;
+        assert!(body_text(voice).await.contains("eric-studio"));
+
+        // And nobody else moved. A shared proxy where one person's switch
+        // relocates another person's transcript is worse than no switching.
+        let ocean = as_browser(&app, "tok-ocean", "desk", "GET", "/v1/permissions").await;
+        assert!(body_text(ocean).await.contains("ocean-mini"));
+
+        // Nor did Eric's OTHER browser. A selection is per browser: picking a
+        // machine on the phone must not re-point the desktop he left running.
+        let phone = as_browser(&app, "tok-eric", "phone", "GET", "/v1/permissions").await;
+        assert!(
+            body_text(phone).await.contains("eric-mini"),
+            "one person's browsers hold their own selections"
+        );
+
+        // The choice was recorded server-side against a digest, so a restart
+        // keeps it (proven directly in the persistence test above).
+        assert_eq!(
+            selections
+                .selected(&selection_key("tok-eric", "laptop"))
+                .as_deref(),
+            Some("studio")
+        );
+
+        for handle in [a1, a2, b1, b2] {
+            handle.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_selection_the_roster_no_longer_has_is_a_typed_503_the_picker_survives() {
+        let dist = tempfile::tempdir().expect("tempdir");
+        let selections_dir = tempfile::tempdir().expect("tempdir");
+        let mut state = multi_user_state();
+        {
+            let inner = Arc::get_mut(&mut state).expect("sole owner");
+            inner.device_selections = Arc::new(DeviceSelections::load(
+                selections_dir.path().join("device-selections.json"),
+            ));
+            // The operator removed 'studio' from the roster while Eric's
+            // browser was still attached to it.
+            inner
+                .device_selections
+                .record(&selection_key("tok-eric", "laptop"), "studio");
+        }
+        let app = build_app(state, dist.path());
+
+        let refused = as_browser(&app, "tok-eric", "laptop", "GET", "/v1/permissions").await;
+        assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let decoded: Value =
+            serde_json::from_str(&body_text(refused).await).expect("typed device error");
+        assert_eq!(decoded["error"], "device_unavailable");
+        assert_eq!(decoded["reason"], "unknown_device");
+        assert_eq!(decoded["device"], "studio");
+
+        // The two routes that let the surface RECOVER must still answer, or a
+        // stale selection would be a locked door.
+        let config = as_browser(&app, "tok-eric", "laptop", "GET", "/api/config").await;
+        assert_eq!(config.status(), StatusCode::OK);
+        let devices = as_browser(&app, "tok-eric", "laptop", "GET", "/api/devices").await;
+        assert_eq!(devices.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn the_device_list_reports_health_and_whether_anyone_has_chosen() {
+        let dist = tempfile::tempdir().expect("tempdir");
+        let selections_dir = tempfile::tempdir().expect("tempdir");
+        let (live, running) = spawn_named_daemon("eric-mini").await;
+
+        let mut state = multi_user_state();
+        {
+            let inner = Arc::get_mut(&mut state).expect("sole owner");
+            inner.device_selections = Arc::new(DeviceSelections::load(
+                selections_dir.path().join("device-selections.json"),
+            ));
+            inner.users[1].devices = vec![
+                device("mini", &live),
+                // A closed port stands in for the laptop that is asleep.
+                ProxyDevice {
+                    is_default: false,
+                    ..device("studio", "http://127.0.0.1:9")
+                },
+            ];
+        }
+        let app = build_app(state, dist.path());
+
+        let listed = as_browser(&app, "tok-eric", "laptop", "GET", "/api/devices").await;
+        let listed: Value = serde_json::from_str(&body_text(listed).await).expect("device list");
+        assert_eq!(listed["selected"], "mini");
+        assert_eq!(
+            listed["selection_explicit"], false,
+            "nobody has chosen yet, which is what makes the picker worth showing once",
+        );
+        let rows = listed["devices"].as_array().expect("rows");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["name"], "mini");
+        assert_eq!(rows[0]["selected"], true);
+        assert_eq!(rows[0]["health"]["state"], "ok");
+        assert_eq!(rows[0]["health"]["version"], "9.9.9");
+        assert_eq!(rows[0]["health"]["rev"], "eric-mini");
+        assert_eq!(rows[1]["name"], "studio");
+        assert_eq!(rows[1]["health"]["state"], "unreachable");
+        // No address anywhere in the payload the browser reads.
+        let raw = listed.to_string();
+        assert!(
+            !raw.contains("http://"),
+            "device urls never reach the browser: {raw}"
+        );
+
+        assert_eq!(
+            select(&app, "tok-eric", "laptop", "studio").await.status(),
+            StatusCode::OK
+        );
+
+        let listed = as_browser(&app, "tok-eric", "laptop", "GET", "/api/devices").await;
+        let listed: Value = serde_json::from_str(&body_text(listed).await).expect("device list");
+        assert_eq!(listed["selected"], "studio");
+        assert_eq!(listed["selection_explicit"], true, "asked and answered");
+
+        // The OTHER browser is still unasked, and still on the default.
+        let phone = as_browser(&app, "tok-eric", "phone", "GET", "/api/devices").await;
+        let phone: Value = serde_json::from_str(&body_text(phone).await).expect("device list");
+        assert_eq!(phone["selected"], "mini");
+        assert_eq!(phone["selection_explicit"], false);
+
+        // A machine this person does not have is a 404, not a silent no-op.
+        assert_eq!(
+            select(&app, "tok-eric", "laptop", "someone-elses-mac")
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+
+        running.abort();
+    }
+
+    #[tokio::test]
+    async fn a_browser_with_no_id_is_given_one_before_it_can_choose() {
+        let dist = tempfile::tempdir().expect("tempdir");
+        let selections_dir = tempfile::tempdir().expect("tempdir");
+        let mut state = multi_user_state();
+        {
+            let inner = Arc::get_mut(&mut state).expect("sole owner");
+            inner.device_selections = Arc::new(DeviceSelections::load(
+                selections_dir.path().join("device-selections.json"),
+            ));
+            inner.users[1].devices = vec![
+                device("mini", "http://127.0.0.1:9"),
+                ProxyDevice {
+                    is_default: false,
+                    ..device("studio", "http://127.0.0.1:9")
+                },
+            ];
+        }
+        let app = build_app(state, dist.path());
+
+        // Listing devices is the first thing the surface does, and it is where
+        // a browser earns the id its choice will be recorded against. Without
+        // this, the first selection would key on nothing and land in the row
+        // every one of this person's browsers reads.
+        let listed = as_user(&app, "tok-eric", "GET", "/api/devices").await;
+        let cookie = listed
+            .headers()
+            .get(header::SET_COOKIE)
+            .expect("a browser id is issued")
+            .to_str()
+            .expect("ascii cookie")
+            .to_string();
+        assert!(cookie.starts_with(&format!("{BROWSER_COOKIE}=")));
+        assert!(
+            cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"),
+            "the browser id gets the session cookie's hygiene: {cookie}"
+        );
+        let id = cookie
+            .trim_start_matches(&format!("{BROWSER_COOKIE}="))
+            .split(';')
+            .next()
+            .expect("id")
+            .to_string();
+        assert!(id.len() >= 16, "an id has to be unguessable: {id}");
+
+        // A browser that already has one is not handed another — a new id
+        // every request would mean a selection that never survives the next.
+        let again = as_browser(&app, "tok-eric", &id, "GET", "/api/devices").await;
+        assert!(again.headers().get(header::SET_COOKIE).is_none());
+
+        // And selecting from a browser that never listed still works: it is
+        // given an id in that response instead.
+        let picked = select(&app, "tok-eric", "", "mini").await;
+        assert_eq!(picked.status(), StatusCode::OK);
+        assert!(
+            picked
+                .headers()
+                .get(header::SET_COOKIE)
+                .is_some_and(|value| value
+                    .to_str()
+                    .unwrap_or_default()
+                    .starts_with(&format!("{BROWSER_COOKIE}="))),
+            "a selection from an unknown browser mints its id",
+        );
+    }
+
+    /// A stream open on the machine being left has to END when the browser
+    /// attaches to another one.
+    ///
+    /// The finding this pins: recording a selection only affects FUTURE
+    /// requests, so a tab whose SSE tail is already connected keeps receiving
+    /// the old machine's events while its turns and decisions go to the new
+    /// one — two machines blended into one transcript, which is exactly what
+    /// the session contract forbids. The client reconnects on its own and
+    /// lands on the new machine.
+    #[tokio::test]
+    async fn a_switch_ends_the_stream_that_was_open_on_the_old_machine() {
+        // A daemon whose event stream never ends on its own, so the only thing
+        // that can end the proxied body is the switch.
+        type Frames = tokio::sync::mpsc::Receiver<Result<Bytes, std::io::Error>>;
+        async fn held_stream(
+            axum::extract::State(frames): axum::extract::State<
+                Arc<tokio::sync::Mutex<Option<Frames>>>,
+            >,
+        ) -> Response {
+            let rx = frames.lock().await.take().expect("one subscriber");
+            (
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx)),
+            )
+                .into_response()
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(4);
+        tx.send(Ok(Bytes::from_static(b"event: hello\ndata: mini\n\n")))
+            .await
+            .expect("first frame");
+        // Leaked on purpose: while a sender is alive the receiver never ends,
+        // so nothing but the teardown can close this stream.
+        std::mem::forget(tx);
+        let app = Router::new()
+            .route("/v1/agent/events", get(held_stream))
+            .with_state(Arc::new(tokio::sync::Mutex::new(Some(rx))));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stub daemon");
+        let addr = listener.local_addr().expect("stub addr");
+        let upstream = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let dist = tempfile::tempdir().expect("tempdir");
+        let selections_dir = tempfile::tempdir().expect("tempdir");
+        let mut state = multi_user_state();
+        {
+            let inner = Arc::get_mut(&mut state).expect("sole owner");
+            inner.device_selections = Arc::new(DeviceSelections::load(
+                selections_dir.path().join("device-selections.json"),
+            ));
+            inner.users[1].devices = vec![
+                device("mini", &format!("http://{addr}")),
+                ProxyDevice {
+                    is_default: false,
+                    ..device("studio", &format!("http://{addr}"))
+                },
+            ];
+        }
+        let app = build_app(state, dist.path());
+
+        let stream = as_browser(&app, "tok-eric", "laptop", "GET", "/v1/agent/events").await;
+        assert_eq!(stream.status(), StatusCode::OK);
+
+        // Switch while the tail above is still open.
+        let switcher = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                select(&app, "tok-eric", "laptop", "studio").await
+            })
+        };
+
+        // Reading to completion is the assertion: without the teardown this
+        // body never ends and the timeout fires.
+        let drained = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            axum::body::to_bytes(stream.into_body(), 64 * 1024),
+        )
+        .await;
+        let body = drained
+            .expect("the stream must end when the browser attaches elsewhere")
+            .expect("read body");
+        assert!(String::from_utf8_lossy(&body).contains("mini"));
+        assert_eq!(
+            switcher.await.expect("switch task").status(),
+            StatusCode::OK
+        );
+
+        upstream.abort();
+    }
+
+    /// The teardown is scoped to ONE selections row.
+    ///
+    /// The broadcast carries the row key, never a device name: two people can
+    /// both be sitting on a machine called "studio" and only one of them
+    /// switched. Ending both streams would drop a live transcript belonging to
+    /// somebody who did nothing.
+    #[tokio::test]
+    async fn a_switch_ends_only_the_streams_of_the_browser_that_switched() {
+        let state = auth_test_state();
+        let mine = ResolvedDaemon {
+            selection_key: Some("row-a".to_string()),
+            ..fallback_daemon(&state)
+        };
+        let theirs = ResolvedDaemon {
+            selection_key: Some("row-b".to_string()),
+            ..fallback_daemon(&state)
+        };
+        let unswitchable = fallback_daemon(&state);
+
+        let mine = stream_ends_on_switch(&state, &mine).expect("a row to watch");
+        let theirs = stream_ends_on_switch(&state, &theirs).expect("a row to watch");
+        assert!(
+            stream_ends_on_switch(&state, &unswitchable).is_none(),
+            "a request that resolved through no row has nothing that could switch under it",
+        );
+
+        state
+            .selection_changes
+            .send("row-a".to_string())
+            .expect("two subscribers");
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), mine)
+            .await
+            .expect("the switching browser's stream ends");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), theirs)
+                .await
+                .is_err(),
+            "somebody else's live stream must not end because I switched",
+        );
+    }
+
+    #[tokio::test]
+    async fn the_device_routes_are_behind_the_login_like_every_other_api() {
+        let dist = tempfile::tempdir().expect("tempdir");
+        let app = build_app(auth_test_state(), dist.path());
+        for (method, uri) in [("GET", "/api/devices"), ("POST", "/api/devices/select")] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri} must require a session"
+            );
+        }
+    }
+
+    /// Every daemon route must take its upstream from the ONE resolver.
+    ///
+    /// This is the control the compiler does not hold: a new handler that
+    /// builds its URL from `state.daemon_url` compiles, passes every other
+    /// test, and quietly pins that one route to the process default — so a
+    /// person who switched machines keeps streaming events from the one they
+    /// left. The resolver is the auth gate's `ResolvedDaemon` extension, read
+    /// either as an extractor or through `resolved_daemon`; nothing else may
+    /// name an upstream.
+    #[test]
+    fn every_daemon_route_resolves_its_upstream_through_one_resolver() {
+        let src = include_str!("main.rs");
+        let production = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half of the module");
+        let router = production
+            .split_once("fn build_app(")
+            .expect("build_app")
+            .1
+            .split_once("\n}\n")
+            .expect("end of build_app")
+            .0;
+
+        // Collect the handlers registered on every /v1/ route.
+        let mut handlers: Vec<String> = Vec::new();
+        for chunk in router.split(".route(").skip(1) {
+            let path = chunk
+                .split_once('"')
+                .and_then(|(_, rest)| rest.split_once('"'))
+                .map(|(path, _)| path)
+                .unwrap_or_default();
+            if !path.starts_with("/v1/") {
+                continue;
+            }
+            let registration = chunk.split_once(')').map(|(head, _)| head).unwrap_or(chunk);
+            for verb in ["get(", "post(", "put(", "patch(", "delete("] {
+                let mut rest = registration;
+                while let Some((_, tail)) = rest.split_once(verb) {
+                    let name: String = tail
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect();
+                    if !name.is_empty() {
+                        handlers.push(name);
+                    }
+                    rest = tail;
+                }
+            }
+        }
+        handlers.sort();
+        handlers.dedup();
+        assert!(
+            handlers.len() > 20,
+            "the scan found only {} daemon handlers; it stopped matching the router",
+            handlers.len()
+        );
+
+        for handler in &handlers {
+            let signature = format!("async fn {handler}(");
+            let body = production
+                .split_once(signature.as_str())
+                .unwrap_or_else(|| panic!("no handler named {handler}"))
+                .1;
+            // Up to the next item at column 0 — the whole function.
+            let body = body.split("\n}\n").next().unwrap_or(body);
+            assert!(
+                body.contains("Extension<ResolvedDaemon>")
+                    || body.contains("resolved_daemon(&state, &req)"),
+                "{handler} does not take its upstream from the request's resolved device",
+            );
+        }
+
+        // And nothing outside the resolver may name the process-wide upstream.
+        let allowed = [
+            "fn fallback_daemon(",
+            "fn credentials_for_device(",
+            "fn devices_for_request(",
+            "fn current_selection(",
+            "fn devices_for_entry(",
+            "fn select_device(",
+        ];
+        for (index, _) in production.match_indices("state.daemon_url") {
+            let preceding = &production[..index];
+            let owner = allowed
+                .iter()
+                .filter_map(|marker| preceding.rfind(marker).map(|at| (at, marker)))
+                .max_by_key(|(at, _)| *at);
+            let ends_before = preceding.rfind("\n}\n").unwrap_or(0);
+            assert!(
+                owner.is_some_and(|(at, _)| at > ends_before),
+                "state.daemon_url is read outside the device resolver at byte {index}",
+            );
+        }
     }
 }

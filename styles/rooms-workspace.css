@@ -391,6 +391,47 @@
   box-shadow: 0 0 6px var(--accent-soft);
 }
 
+/* The end of the rail's loaded pages. A full-width row rather than a floating
+   pill, for the same reason `.rooms-workspace__load-older` is one: it marks a
+   position IN the list and has to scroll with it. */
+.rooms-workspace__load-more-rooms {
+  appearance: none;
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 4px 0 0;
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  border-radius: 0;
+  padding: 8px 12px;
+  background: transparent;
+  color: var(--fg-3);
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__load-more-rooms:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__load-more-rooms:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* A fade and a cursor, never a removed hit area: `pointer-events: none` would
+   suppress the progress cursor along with the click. */
+.rooms-workspace__load-more-rooms:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
 .rooms-workspace__left-empty {
   padding: 32px 16px;
   color: var(--fg-3);
@@ -3137,13 +3178,35 @@
     inset: -8px;
   }
 
-  /* 16px is the iOS threshold below which focusing an input zooms the page. */
-  .rooms-workspace__left-input,
-  .rooms-workspace__composer-input,
+  /* 16px is the iOS threshold below which focusing an input zooms the page.
+     EVERY text-entry control the rooms surface renders, not a chosen few:
+     tests/mobile_composer_regressions.rs derives the list from the view
+     source and fails if one is missing, so this rule cannot drift behind the
+     markup again. `__files-input` is deliberately absent — it is
+     `type="file"`, which opens a picker rather than the keyboard.
+
+     Until the guard was repointed it named three inputs of a rooms panel
+     nothing renders, and deleting this block passed the whole suite. The
+     second half of that miss was this list: the six composer/room controls
+     were covered while the right rail's eight — invite, repo, artifacts,
+     authorization and the compute panel — sat at 11-13px and zoomed. */
+.rooms-workspace__left-input,
+.rooms-workspace__workspace-input,
+.rooms-workspace__composer-input,
   .rooms-workspace__addagent-select,
   .rooms-workspace__agentbuilder-input,
   .rooms-workspace__agentbuilder-select,
-  .rooms-workspace__agentbuilder-prompt {
+  .rooms-workspace__agentbuilder-prompt,
+  .rooms-workspace__invite-input,
+  .rooms-workspace__repo-input,
+  .rooms-workspace__artifacts-input,
+  .rooms-workspace__artifacts-select,
+  .rooms-workspace__artifacts-textarea,
+  .rooms-workspace__authority-select,
+  .rooms-workspace__compute-cmd-input,
+  .rooms-workspace__compute-port-input,
+  .rooms-workspace__compute-secret-name,
+  .rooms-workspace__compute-secret-value {
     font-size: 16px;
   }
 }
