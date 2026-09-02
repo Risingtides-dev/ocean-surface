@@ -1468,6 +1468,15 @@ pub fn App() -> impl IntoView {
     // URL belongs INSIDE bootstrap_then_connect, after url.set().
     daemon.bootstrap_then_connect();
 
+    // Which of this person's machines they are on. Same-origin, login-gated,
+    // and independent of the daemon URL, so it rides alongside boot rather
+    // than inside it. Offers the picker once when the profile has more than
+    // one machine and nobody has chosen yet; silent everywhere there is no
+    // proxy to ask (extension, Tauri), which leaves the header exactly as it
+    // was on those hosts.
+    let devices = crate::devices::DeviceState::new();
+    devices.load(true);
+
     // Daemon supervision (Tauri shell only). The shell supervises the
     // ocean-daemon process and reports liveness via `daemon-status` events;
     // we mirror it into a signal so a quiet, conditional indicator can surface
@@ -1682,6 +1691,7 @@ pub fn App() -> impl IntoView {
     // Pinned rail: StoredValue (Copy) so the root view! can hand the daemon
     // to <PinnedRail> without moving the plain clone out of the closure.
     let daemon_for_pinned = StoredValue::new(daemon.clone());
+    let daemon_for_devices = StoredValue::new(daemon.clone());
 
     // Persist the pane open/collapse state so a relaunch restores it. Runs
     // once at setup (writing the init value back — idempotent) and on every
@@ -2634,6 +2644,10 @@ pub fn App() -> impl IntoView {
                             <span class="ocean-status__text">"daemon offline"</span>
                         </div>
                     </Show>
+                    // Which machine this session is attached to. Absent until
+                    // the proxy names one, so single-device and off-proxy hosts
+                    // keep the header they have.
+                    <crate::devices::DeviceChip state=devices />
                     </div>
                     // Secondary actions live behind one overflow control:
                     // council deck, rooms, voice mute, extension tab capture.
@@ -2716,6 +2730,23 @@ pub fn App() -> impl IntoView {
                                     }
                                 >
                                     "Capture tab"
+                                </button>
+                            </Show>
+                            // Reachable from the rail as well as the header
+                            // chip, and absent until the proxy names a machine
+                            // — one more menu row is not worth it on a host
+                            // that has no devices to choose between.
+                            <Show when=move || devices.known()>
+                                <button
+                                    class="ocean-more__item"
+                                    type="button"
+                                    role="menuitem"
+                                    on:click=move |_| {
+                                        if let Some(d) = more_ref.get() { let _ = d.remove_attribute("open"); }
+                                        devices.open.set(true);
+                                    }
+                                >
+                                    "Devices"
                                 </button>
                             </Show>
                         </div>
@@ -3305,6 +3336,11 @@ pub fn App() -> impl IntoView {
 
             // ⌘K command palette — the deep-menu engine over the registry.
             <PaletteView registry=registry_for_view open=palette_open />
+
+            // Device picker. Like the palette, a self-contained overlay that
+            // consumes its own Escape rather than joining the reveal rail's
+            // close-exactly-one chain.
+            <crate::devices::DevicePicker state=devices daemon=daemon_for_devices.get_value() />
 
             // Council/quorum observability deck (OCEAN-96). Native workflow
             // stage now lives inside the surface instead of an iframe.

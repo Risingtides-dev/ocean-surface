@@ -7317,3 +7317,57 @@ ocean-surface-proxy --all-targets -- -D warnings`, which is a CI lane the seven
 frozen gates do not cover and which caught three needless borrows this slice
 shipped with.
 _________________________________________________________________________________ 08:36 cloud/surface-device-profiles
+time:      [08:08] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-device-profiles-ui]
+type:      feature-request
+area:      frontend
+
+The surface half of device profiles: a person signed in at ocean.agentsworld.org
+can now see the machines their login owns, pick one, and land in that machine's
+sessions — and switch later without signing in again. New `devices.rs` reads the
+proxy's `/api/devices`, which publishes names, health and which one you are on and
+deliberately no `daemon_url`, so nothing in this module accepts, stores or renders
+an address and no URL is ever typed in a browser. The picker is offered once after
+a login on the SERVER's account of the facts: `selection_explicit` is false until
+somebody actually picks, so a fresh login with two machines is asked and a browser
+reopened tomorrow is not — no client-side "have I asked" flag to be wrong in the
+second browser or lost with a cleared cache.
+
+A switch is one POST, then a re-attach. `Daemon::reattach_to_selected_device` drops
+everything that belonged to the machine being left — transcript, permission cards,
+session intent, the SSE tail, whose generation `connect` bumps rather than races —
+then re-fetches models, projects and sessions, because each of those catalogues is
+a list of things that are not on the new machine. The one thing that may cross is
+the remembered session id, and only if the new daemon has it: `classify_session_restore`
+answers Restore or Clear and absence is Clear, never an error, because two machines
+with different histories is the ordinary case. That classifier now runs on the boot
+path too, so restore-after-switch and restore-at-boot are one rule with one test
+rather than two implementations that agree today. `new_session` and the switch share
+`reset_session_local_state`; the split is exactly where they differ, which is that
+one forgets the persisted id and connects and the other keeps it to ask the next
+question with.
+
+Four controls, measured before pinning. Deleting the `<DeviceChip>` mount reds the
+wasm clippy lane (its props' `state` goes unread) and deleting `<DevicePicker>`
+takes `daemon_for_devices` and the whole `reattach_to_selected_device` path dead
+with it — both compiler-held, recorded not pinned. The boot `devices.load(true)`
+and the header overflow's `Devices` row are both GREEN under deletion: `load` is
+still called by `select` and `open` is still written by the chip and read by the
+picker, so nothing goes unreferenced while the feature becomes invisible and
+unreachable. Those two are pinned in `tests/unheld_device_controls.rs`, each needle
+naming its call site over `view_source`, each verified by a rename as well as a
+deletion.
+
+`app.rs` takes five small hunks and nothing else, which is the point given four open
+PRs on that file. Styles are additive in `chrome.css` (the header chip, reading like
+the status chip beside it), `panels.css` (a centered dialog, deliberately outside
+the reveal rail's close-exactly-one chain — it consumes its own Escape like the
+palette) and `compact.css` (the chip keeps its name on a phone under a hard cap;
+which machine you are driving is exactly what a small screen must not drop). No new
+stylesheet, so the three enumeration sites are untouched. A proxied route's typed
+503 now reads as a sentence naming the machine instead of a JSON decode error, and
+the picker says so about the machine you are on. Gates green: all seven frozen
+commands, 1322 host tests across 15 binaries, plus `cargo test -p
+ocean-surface-proxy` 78 passed.
+_________________________________________________________________________________ 08:08 cloud/surface-device-profiles-ui
