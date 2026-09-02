@@ -1299,15 +1299,6 @@ impl Rooms {
             match result {
                 Ok((room, transcript, access, last_seq, closed)) => {
                     let resume_seq = snapshot_resume_seq(last_seq, &transcript);
-                    // Where the backward walk starts, read off the page's own
-                    // size rather than its `has_more`. A backward page is the
-                    // LAST `limit` rows that qualify, so a short one provably
-                    // reached the start of the log and a full one is the only
-                    // shape that can have rows behind it — which keeps the
-                    // decode arm above answering exactly what it always did.
-                    // The one case this costs is a room whose length is an
-                    // exact multiple of the window: it spends a single request
-                    // to be told there is nothing older.
                     let backfill_from =
                         hydration_backfill_start(&transcript, HYDRATION_TRANSCRIPT_LIMIT);
                     me.open_room.set(room);
@@ -3806,16 +3797,38 @@ mod tests {
     }
 
     /// A pre-#436 daemon ignores `before_seq` and answers a FORWARD page: the
-    /// oldest rows in the room, `prev_seq` absent, `has_more` meaning newer rows.
-    /// It must decode, and the walk it seeds must terminate rather than spin.
+    /// oldest rows in the room, `prev_seq` absent, `has_more` meaning NEWER rows
+    /// exist. Its body must decode, and the walk it seeds must terminate rather
+    /// than spin.
+    ///
+    /// What terminates it is the PAGE CAP, and nothing else. Such a daemon
+    /// answers every request the walk makes with that same forward page, so
+    /// `prev_seq` is never there to fall back from, `page_reached_back_to` is
+    /// the same row every time, and the replayed cursor cannot fall — the one
+    /// property [`backfill_walks_older_and_is_bounded_by_the_same_page_cap`]
+    /// relies on to bound the walk against a modern daemon is exactly what a
+    /// legacy one does not give it. `MAX_TRANSCRIPT_CATCHUP_PAGES` is what
+    /// stands between this and an endless loop, which is why the bound belongs
+    /// on the walk and not only on the daemon's word.
+    ///
+    /// The window is scaled down to keep the fixture readable; nothing here
+    /// turns on its size, only on the page being FULL, which is the shape
+    /// [`hydration_backfill_start`] reads as "there may be rows behind this".
     #[test]
     fn a_daemon_without_backward_paging_still_decodes_and_still_terminates() {
+        const WINDOW: usize = 4;
         let legacy: RoomSnapshotResponse = serde_json::from_value(serde_json::json!({
             "ok": true,
             "room": null,
-            "transcript": [],
+            "transcript": (0..WINDOW as u64).map(|seq| serde_json::json!({
+                "seq": seq,
+                "author_id": "member-1",
+                "author_kind": "human",
+                "kind": "message",
+                "body": format!("message {seq}"),
+            })).collect::<Vec<_>>(),
             "last_seq": 1000,
-            "next_seq": 1000,
+            "next_seq": WINDOW,
             "has_more": true,
             "access": { "state": "local" }
         }))
@@ -3825,19 +3838,53 @@ mod tests {
             "the field is additive and such a daemon omits it",
         );
 
-        // Such a daemon paints rows 0..window, so the walk seeds at row 0 and
-        // asks `before_seq=0` — which is the daemon's own terminal empty page,
-        // since nothing precedes the first message. One request, then stop.
+        // The walk seeds at the oldest row painted. On a forward page that is
+        // row 0 — the one row `before_seq` exclusivity guarantees no request
+        // can ever reach behind.
         assert_eq!(
-            transcript_backfill_cursor(1, false, None, None),
-            None,
-            "the empty page that request gets back ends the walk",
+            hydration_backfill_start(&legacy.transcript, WINDOW),
+            Some(0),
+            "a page filled to the window seeds a walk whatever direction the \
+             daemon actually served it in",
         );
-        // And the fallback cannot keep a walk alive off a page naming no cursor
-        // once the daemon says the direction is exhausted.
+
+        // And every request that walk makes is answered with that same page.
+        let mut cursor = 0u64;
+        let mut pages_read = 0usize;
+        let mut requested = Vec::new();
+        loop {
+            requested.push(room_snapshot_tail_url(
+                "",
+                "room-1",
+                cursor,
+                BACKFILL_TRANSCRIPT_PAGE_LIMIT,
+            ));
+            pages_read += 1;
+            let Some(next) = transcript_backfill_cursor(
+                pages_read,
+                legacy.has_more,
+                legacy.prev_seq,
+                first_transcript_seq(&legacy.transcript),
+            ) else {
+                break;
+            };
+            assert_eq!(
+                next, cursor,
+                "the cursor cannot fall: there is no `prev_seq`, and the \
+                 fallback is the same row on every identical page",
+            );
+            cursor = next;
+        }
         assert_eq!(
-            transcript_backfill_cursor(1, false, Some(400), Some(400)),
-            None
+            requested.len(),
+            MAX_TRANSCRIPT_CATCHUP_PAGES,
+            "the cap is the only stop condition such a daemon leaves standing",
+        );
+        assert!(
+            requested
+                .iter()
+                .all(|url| url.ends_with("/snapshot?before_seq=0&limit=200")),
+            "and every one of them asks for the same page, got {requested:?}",
         );
     }
 
