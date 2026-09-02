@@ -1661,48 +1661,6 @@ impl Rooms {
     /// projection is the other half: it holds the composer shut and puts the
     /// reason on screen, so the audit view reads as frozen rather than as a
     /// live room that silently refuses every write.
-    /// The reader's OWN member ids — the resolved local identity and, in a
-    /// federated room, the access projection's `self_member_id`. Handing this
-    /// set to the mention tokenizer asks precisely "was I named", rather than
-    /// "did anyone get named", which is what the roster set would answer.
-    /// Empty ids are dropped: an unresolved identity is not a member id, and
-    /// `@` followed by nothing must never match.
-    fn reader_member_ids(&self) -> HashSet<String> {
-        let mut ids = HashSet::new();
-        let identity = self.identity_id.get_untracked();
-        if !identity.is_empty() {
-            ids.insert(identity);
-        }
-        if let Some(self_member) = self
-            .access
-            .get_untracked()
-            .and_then(|access| access.self_member_id)
-        {
-            if !self_member.is_empty() {
-                ids.insert(self_member);
-            }
-        }
-        ids
-    }
-
-    /// A room's display name for a notification title, falling back to the key
-    /// so a title is never empty.
-    fn room_display_name(&self, key: &str) -> String {
-        self.open_room
-            .get_untracked()
-            .filter(|room| room.id == key)
-            .map(|room| room.name)
-            .or_else(|| {
-                self.list
-                    .get_untracked()
-                    .iter()
-                    .find(|room| room.id == key)
-                    .map(|room| room.name.clone())
-            })
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| key.to_string())
-    }
-
     pub fn open_room(&self, key: String) {
         let base = self.base();
         let me = *self;
@@ -2878,6 +2836,48 @@ impl Rooms {
                 gloo_timers::future::TimeoutFuture::new(1_000).await;
             }
         });
+    }
+
+    /// The reader's OWN member ids — the resolved local identity and, in a
+    /// federated room, the access projection's `self_member_id`. Handing this
+    /// set to the mention tokenizer asks precisely "was I named", rather than
+    /// "did anyone get named", which is what the roster set would answer.
+    /// Empty ids are dropped: an unresolved identity is not a member id, and
+    /// `@` followed by nothing must never match.
+    fn reader_member_ids(&self) -> HashSet<String> {
+        let mut ids = HashSet::new();
+        let identity = self.identity_id.get_untracked();
+        if !identity.is_empty() {
+            ids.insert(identity);
+        }
+        if let Some(self_member) = self
+            .access
+            .get_untracked()
+            .and_then(|access| access.self_member_id)
+        {
+            if !self_member.is_empty() {
+                ids.insert(self_member);
+            }
+        }
+        ids
+    }
+
+    /// A room's display name for a notification title, falling back to the key
+    /// so a title is never empty.
+    fn room_display_name(&self, key: &str) -> String {
+        self.open_room
+            .get_untracked()
+            .filter(|room| room.id == key)
+            .map(|room| room.name)
+            .or_else(|| {
+                self.list
+                    .get_untracked()
+                    .iter()
+                    .find(|room| room.id == key)
+                    .map(|room| room.name.clone())
+            })
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| key.to_string())
     }
 
     pub fn mark_open_read_if_current(&self, candidate_read_seq: u64) {
