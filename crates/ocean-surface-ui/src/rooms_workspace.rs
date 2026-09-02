@@ -748,6 +748,25 @@ enum TranscriptPassAction {
     /// Content appended below a scrolled-up reader: raise the jump
     /// affordance instead of yanking them.
     RaiseJump,
+    /// An older page the operator ASKED for landed in FRONT of the painted
+    /// rows: hold the reader on the rows they were looking at, and touch
+    /// nothing else.
+    ///
+    /// Neither of the growth arms is right for a requested prepend.
+    /// `RaiseJump` would raise "↓ New messages" over rows that arrived above,
+    /// which is a lie about where they are; `PinAndQueue` would throw the
+    /// reader to the bottom of a transcript they just asked to see the top of.
+    /// And the read advance is deliberately not re-queued: the durable
+    /// candidate is the NEWEST row (or the access projection's confirmed
+    /// sequence), and a prepend moves neither.
+    ///
+    /// Only a REQUESTED prepend takes this arm, which is why the decision needs
+    /// the anchor as an input rather than reading `grew_at_front` alone. The
+    /// hydration walk prepends too — up to four more pages after the first fill
+    /// — and those pages answer nothing the reader did. Holding position
+    /// through them leaves a long room open on its oldest loaded page, which is
+    /// exactly what ocean-surface#190 fixed; they keep taking `PinAndQueue`.
+    AnchorOlder,
     /// Nothing to do. Critically, `Hold` never writes: a pass triggered by a
     /// non-transcript dependency (an access projection) while the reader is
     /// scrolled up must not mark read, must not raise the jump affordance,
@@ -755,20 +774,62 @@ enum TranscriptPassAction {
     Hold,
 }
 
+/// What one transcript pass hands the next: how many rows it saw, and the `seq`
+/// of the oldest. The pair travels together because a pass that declines to
+/// consume the first-fill state (see below) must decline to consume the other
+/// half too — carrying a fresh oldest beside a stale length would let the next
+/// pass conclude that nothing arrived in front of rows it never measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct TranscriptPassState {
+    len: usize,
+    oldest_seq: Option<u64>,
+}
+
+/// Whether this pass's rows arrived in FRONT of the ones already painted.
+///
+/// The transcript is ascending by `seq` and only ever grows at one end per
+/// write, so a fallen oldest `seq` is a prepend and nothing else. Reading the
+/// seq rather than counting rows is what makes that true: a page whose rows were
+/// all already painted prepends nothing and must read as no movement at all,
+/// which a length comparison alone cannot say.
+///
+/// A first fill answers false — there were no rows to arrive in front of — which
+/// is what keeps it on the `PinAndQueue` path that opens a room at its newest
+/// message.
+fn transcript_grew_at_front(prev_oldest_seq: Option<u64>, oldest_seq: Option<u64>) -> bool {
+    match (prev_oldest_seq, oldest_seq) {
+        (Some(previous), Some(current)) => current < previous,
+        _ => false,
+    }
+}
+
 /// `measured` is whether the transcript element exists *and* reports a real
 /// viewport; an unmeasured pass holds so the fill state stays intact for the
-/// first pass that can actually measure.
+/// first pass that can actually measure. `anchored` is whether a press parked
+/// the scroll geometry this prepend is owed against — the one thing that
+/// separates history the operator asked for from history that merely arrived.
 fn transcript_pass_action(
     len: usize,
     prev_len: usize,
     measured: bool,
     near_bottom: bool,
+    grew_at_front: bool,
+    anchored: bool,
 ) -> TranscriptPassAction {
     if len == 0 {
         return TranscriptPassAction::Reset;
     }
     if !measured {
         return TranscriptPassAction::Hold;
+    }
+    // Ahead of the at-bottom pin, because a REQUESTED prepend that lands while
+    // the reader happens to sit at the bottom is still a prepend: pinning would
+    // be harmless there but re-queueing the read advance on rows that arrived
+    // above the paint is not the claim this Effect should be making. Unasked
+    // prepends — every page of the hydration walk — fall past this and keep the
+    // pin that opens a room at its newest message.
+    if grew_at_front && anchored {
+        return TranscriptPassAction::AnchorOlder;
     }
     if prev_len == 0 || near_bottom {
         return TranscriptPassAction::PinAndQueue;
@@ -1774,8 +1835,14 @@ pub fn RoomsWorkspace(
     let new_below = RwSignal::new(false);
     let pending_read_advance = RwSignal::new(None::<ReadAdvanceRequest>);
     let refresh_handle = RwSignal::new(None::<IntervalHandle>);
-    Effect::new(move |prev: Option<usize>| {
-        let len = transcript.with(|t| t.len());
+    // `(scroll_height, scroll_top)` as the "load older" press left them, which
+    // is the one moment they can be read: the page arrives asynchronously, and
+    // whether this Effect runs before or after the `<For>` writes those rows to
+    // the DOM is not something a scanner in this crate can prove either way. A
+    // press always overwrites — the anchor belongs to the newest one.
+    let older_anchor = RwSignal::new(None::<(i32, i32)>);
+    Effect::new(move |prev: Option<TranscriptPassState>| {
+        let (len, oldest_seq) = transcript.with(|t| (t.len(), t.first().map(|m| m.seq)));
         let open_key = rooms.open_key.get();
         // Track the access projection. For a `Live` room the durable candidate
         // is `last_confirmed_global_sequence`, which routinely lands *after*
@@ -1786,8 +1853,10 @@ pub fn RoomsWorkspace(
         // (`prev_len > 0`), so it only queues through the `PinAndQueue` arm,
         // which requires a measured, genuinely at-bottom transcript.
         let access = rooms.access.get();
-        let prev_len = prev.unwrap_or(0);
+        let previous = prev.unwrap_or_default();
+        let prev_len = previous.len;
         let first_fill = prev_len == 0;
+        let grew_at_front = transcript_grew_at_front(previous.oldest_seq, oldest_seq);
         let el = list_ref.get();
         let metrics = el
             .as_ref()
@@ -1795,11 +1864,24 @@ pub fn RoomsWorkspace(
         let near_bottom = metrics.is_some_and(|(scroll_height, scroll_top, client_height)| {
             transcript_is_near_bottom(scroll_height, scroll_top, client_height, 120)
         });
-        match transcript_pass_action(len, prev_len, el.is_some(), near_bottom) {
+        // Untracked because two arms below CLEAR this signal; tracking what the
+        // pass writes would re-enter the pass. Its presence is also the only
+        // evidence a prepend was asked for — the hydration walk prepends four
+        // more pages after the first fill, and those must stay on the pin.
+        let anchor = older_anchor.get_untracked();
+        match transcript_pass_action(
+            len,
+            prev_len,
+            el.is_some(),
+            near_bottom,
+            grew_at_front,
+            anchor.is_some(),
+        ) {
             TranscriptPassAction::Reset => {
                 // Generation reset / room switch: nothing below.
                 new_below.set(false);
                 pending_read_advance.set(None);
+                older_anchor.set(None);
             }
             TranscriptPassAction::PinAndQueue => {
                 let (scroll_height, _, client_height) = metrics.unwrap_or_default();
@@ -1824,6 +1906,28 @@ pub fn RoomsWorkspace(
                 new_below.set(true);
                 pending_read_advance.set(None);
             }
+            TranscriptPassAction::AnchorOlder => {
+                // Rows landing above the viewport push everything the reader
+                // was looking at down by exactly the height they add, so the
+                // scroll position has to move by the same amount to leave the
+                // view where it was. The frame callback is the first point that
+                // can measure the growth: it runs after the DOM holds the new
+                // rows, whereas this Effect may not.
+                if let (Some(el), Some((anchored_height, anchored_top))) = (el.clone(), anchor) {
+                    request_animation_frame(move || {
+                        let grown = el.scroll_height() - anchored_height;
+                        if grown > 0 {
+                            el.set_scroll_top(anchored_top + grown);
+                        }
+                    });
+                }
+                // One anchor per press, consumed here whether or not the frame
+                // callback above was scheduled. An anchor kept past the page it
+                // was taken for would be applied to some later prepend against
+                // a height that no longer exists — and would route the walk's
+                // remaining pages here too.
+                older_anchor.set(None);
+            }
             TranscriptPassAction::Hold => {}
         }
         // Single open-none clear: this Effect already tracks `open_key`, so it
@@ -1837,11 +1941,11 @@ pub fn RoomsWorkspace(
         // hydration (see `transcript_read_hydrated`).
         let viewport_measured = metrics.is_some_and(|(_, _, client_height)| client_height > 0);
         if len == 0 {
-            0
+            TranscriptPassState::default()
         } else if viewport_measured {
-            len
+            TranscriptPassState { len, oldest_seq }
         } else {
-            prev_len
+            previous
         }
     });
 
@@ -3119,14 +3223,58 @@ pub fn RoomsWorkspace(
                                         }
                                     }
                                 >
+                                    // The edge of what is loaded. Hydration
+                                    // opens a room at its newest page and walks
+                                    // back a bounded number of pages; past that
+                                    // the oldest row on screen would otherwise
+                                    // read as the first message in the room.
+                                    // Inside the scroll container and above the
+                                    // rows on purpose — it marks a position in
+                                    // the log, so it has to sit at that
+                                    // position and scroll with it, unlike the
+                                    // jump affordance below, which is a
+                                    // viewport-fixed control.
+                                    {move || rooms.older_transcript_available().then(|| view! {
+                                        <button
+                                            type="button"
+                                            class="rooms-workspace__load-older"
+                                            disabled=move || rooms.older_transcript_in_flight()
+                                            on:click=move |_| {
+                                                // Read BEFORE the request, because
+                                                // the rows it brings back land
+                                                // above these very numbers.
+                                                if let Some(el) = list_ref.get() {
+                                                    older_anchor.set(Some((
+                                                        el.scroll_height(),
+                                                        el.scroll_top(),
+                                                    )));
+                                                }
+                                                rooms.load_older_transcript_page();
+                                            }
+                                        >
+                                            {move || if rooms.older_transcript_in_flight() {
+                                                "Loading older messages…"
+                                            } else {
+                                                "\u{2191} Load older messages"
+                                            }}
+                                        </button>
+                                    })}
                                     <For
                                         // Pair each root with its predecessor so
                                         // density decisions (grouping, gap headers,
-                                        // day separators) are derived per row. The
-                                        // transcript is append-only under one
-                                        // generation, so a cached keyed child never
-                                        // sees its predecessor change; generation
-                                        // reset rebuilds the whole list.
+                                        // day separators) are derived per row — which
+                                        // is why the predecessor is half the key. The
+                                        // transcript grows at BOTH ends: an older page
+                                        // gives the row that was oldest a predecessor
+                                        // it did not have, and `day_separator_label`
+                                        // answers `Some` unconditionally against
+                                        // `None`, so a child cached under `seq` alone
+                                        // would keep a day divider and an ungrouped
+                                        // header under a same-day row that now sits
+                                        // directly above it. Keying the pair rebuilds
+                                        // exactly that one seam row; every other row's
+                                        // predecessor is unchanged, so a tail append
+                                        // still caches the whole list.
                                         each=move || {
                                             let roots = partition_thread_messages(&rooms.transcript.get(), 0).roots;
                                             std::iter::once(None)
@@ -3134,7 +3282,9 @@ pub fn RoomsWorkspace(
                                                 .zip(roots.clone())
                                                 .collect::<Vec<_>>()
                                         }
-                                        key=|(_, m): &(Option<RoomMessage>, RoomMessage)| m.seq
+                                        key=|(prev, m): &(Option<RoomMessage>, RoomMessage)| {
+                                            (prev.as_ref().map(|p| p.seq), m.seq)
+                                        }
                                         children=move |(prev, m): (Option<RoomMessage>, RoomMessage)| {
                                             let is_system = room_messages::is_compact_system_row(&m);
                                             let media = crate::transcript_media::marker_media_view(rooms, &m);
@@ -5256,40 +5406,151 @@ mod tests {
     fn transcript_pass_action_covers_append_reset_and_unchanged_reruns() {
         // Room switch / generation reset.
         assert_eq!(
-            transcript_pass_action(0, 5, true, true),
+            transcript_pass_action(0, 5, true, true, false, false),
             TranscriptPassAction::Reset
         );
         // First fill, regardless of the measured scroll position.
         assert_eq!(
-            transcript_pass_action(5, 0, true, false),
+            transcript_pass_action(5, 0, true, false, false, false),
             TranscriptPassAction::PinAndQueue
         );
         // Access arrives after the fill, reader still at the bottom: requeue.
         assert_eq!(
-            transcript_pass_action(5, 5, true, true),
+            transcript_pass_action(5, 5, true, true, false, false),
             TranscriptPassAction::PinAndQueue
         );
         // Access arrives after the fill, reader scrolled up: hold.
         assert_eq!(
-            transcript_pass_action(5, 5, true, false),
+            transcript_pass_action(5, 5, true, false, false, false),
             TranscriptPassAction::Hold
         );
         // Append below a scrolled-up reader keeps the jump affordance.
         assert_eq!(
-            transcript_pass_action(6, 5, true, false),
+            transcript_pass_action(6, 5, true, false, false, false),
             TranscriptPassAction::RaiseJump
         );
         // Append while at the bottom pins and queues.
         assert_eq!(
-            transcript_pass_action(6, 5, true, true),
+            transcript_pass_action(6, 5, true, true, false, false),
             TranscriptPassAction::PinAndQueue
         );
         // No transcript element yet: hold, so the first-fill state survives
         // for the pass that can actually measure.
         assert_eq!(
-            transcript_pass_action(5, 0, false, true),
+            transcript_pass_action(5, 0, false, true, false, false),
             TranscriptPassAction::Hold
         );
+    }
+
+    /// A REQUESTED older page landing in front of the paint is neither of the
+    /// growth cases the two existing arms describe, and both of them are wrong
+    /// for it.
+    ///
+    /// `RaiseJump` is what a scrolled-up reader got before this arm existed —
+    /// the same `len > prev_len` a tail append produces — so pressing "load
+    /// older" raised "↓ New messages" over rows that had arrived ABOVE.
+    /// `PinAndQueue` is the other direction of the same mistake: it throws a
+    /// reader who happened to be at the bottom down to it again, having just
+    /// asked to see the top.
+    #[test]
+    fn an_older_page_anchors_instead_of_jumping_or_pinning() {
+        // Scrolled-up reader — the press's own case.
+        assert_eq!(
+            transcript_pass_action(200, 5, true, false, true, true),
+            TranscriptPassAction::AnchorOlder
+        );
+        // At the bottom, where the arm order is what decides it.
+        assert_eq!(
+            transcript_pass_action(200, 5, true, true, true, true),
+            TranscriptPassAction::AnchorOlder
+        );
+        // An unmeasured element still holds: there is nothing to anchor
+        // against, and the pass that can measure will see the same prepend
+        // because this one refuses to consume the state.
+        assert_eq!(
+            transcript_pass_action(200, 5, false, false, true, true),
+            TranscriptPassAction::Hold
+        );
+        // A room switch beats everything, prepend or not.
+        assert_eq!(
+            transcript_pass_action(0, 200, true, false, true, true),
+            TranscriptPassAction::Reset
+        );
+    }
+
+    /// The anchor is what makes a prepend a REQUEST, and a prepend without one
+    /// has to keep the behaviour ocean-surface#190 landed.
+    ///
+    /// `backfill_open_transcript` prepends up to four more pages after the
+    /// first fill, and every one of them raises `grew_at_front`. Routing those
+    /// to `AnchorOlder` reintroduces #190 through a different mechanism: that
+    /// arm holds nothing when there is no anchor to hold against, so
+    /// `scroll_top` stays where it was while rows land above it and the reader
+    /// drifts backwards by a page per walk step. `.rooms-workspace__transcript`
+    /// is a plain `overflow-y: auto` column and the Tauri host is WebKit, which
+    /// has no `overflow-anchor`, so nothing below this decision catches it.
+    ///
+    /// The knock-on is the second-order half: a hydration that ends scrolled up
+    /// makes the access projection's re-entry pass (`len == prev_len`,
+    /// `near_bottom` now false) take `Hold` instead of `PinAndQueue`, so the
+    /// read advance that re-entry exists to queue is never queued at all.
+    #[test]
+    fn an_unasked_prepend_keeps_the_pin_that_opens_a_room_at_its_newest_page() {
+        // The hydration walk's pages: at the bottom, because the first fill's
+        // pin put the reader there, and unanchored because no press parked
+        // geometry for them.
+        assert_eq!(
+            transcript_pass_action(200, 5, true, true, true, false),
+            TranscriptPassAction::PinAndQueue
+        );
+        assert_eq!(
+            transcript_pass_action(400, 200, true, true, true, false),
+            TranscriptPassAction::PinAndQueue
+        );
+        // A walk page landing after the reader scrolled away keeps the pre-#190
+        // answer too: this is not the decision that changes it.
+        assert_eq!(
+            transcript_pass_action(400, 200, true, false, true, false),
+            TranscriptPassAction::RaiseJump
+        );
+        // And a parked anchor alone decides nothing, so a press whose page has
+        // not landed yet cannot divert the appends that arrive while it flies.
+        assert_eq!(
+            transcript_pass_action(6, 5, true, true, false, true),
+            TranscriptPassAction::PinAndQueue
+        );
+        assert_eq!(
+            transcript_pass_action(6, 5, true, false, false, true),
+            TranscriptPassAction::RaiseJump
+        );
+        assert_eq!(
+            transcript_pass_action(5, 5, true, false, false, true),
+            TranscriptPassAction::Hold
+        );
+    }
+
+    /// The signal the arm above turns on. A prepend is the only write that
+    /// lowers the oldest `seq`, and reading the seq rather than the row count is
+    /// what stops a page that was entirely already painted — `prepend_transcript_page`
+    /// keeps only rows strictly older than the oldest painted — from being
+    /// mistaken for one that moved the view.
+    #[test]
+    fn only_a_fallen_oldest_seq_reads_as_a_prepend() {
+        assert!(transcript_grew_at_front(Some(4001), Some(3801)));
+        assert!(!transcript_grew_at_front(Some(4001), Some(4001)));
+        assert!(
+            !transcript_grew_at_front(Some(4001), Some(4200)),
+            "a rising oldest seq is not a prepend; nothing in this module \
+             produces one, and reading it as history arriving would anchor the \
+             reader against a page that never came",
+        );
+        assert!(
+            !transcript_grew_at_front(None, Some(4001)),
+            "the first fill has no rows to arrive in front of — it must stay on \
+             the pin path that opens a room at its newest message",
+        );
+        assert!(!transcript_grew_at_front(Some(4001), None));
+        assert!(!transcript_grew_at_front(None, None));
     }
 
     /// L2 regression, end to end through the production decision path: a
@@ -5306,7 +5567,7 @@ mod tests {
         // Fill: `Live` access with no confirmed sequence yet.
         let mut live = test_access(RoomAccessState::Live);
         assert_eq!(
-            transcript_pass_action(transcript.len(), 0, true, near_bottom),
+            transcript_pass_action(transcript.len(), 0, true, near_bottom, false, false),
             TranscriptPassAction::PinAndQueue
         );
         assert_eq!(
@@ -5325,7 +5586,14 @@ mod tests {
         // The confirmed global sequence arrives; the transcript did not change.
         live.last_confirmed_global_sequence = Some(44);
         assert_eq!(
-            transcript_pass_action(transcript.len(), transcript.len(), true, near_bottom),
+            transcript_pass_action(
+                transcript.len(),
+                transcript.len(),
+                true,
+                near_bottom,
+                false,
+                false
+            ),
             TranscriptPassAction::PinAndQueue
         );
         assert_eq!(
@@ -5348,7 +5616,14 @@ mod tests {
 
         // Same arrival while the reader is scrolled up marks nothing.
         assert_eq!(
-            transcript_pass_action(transcript.len(), transcript.len(), true, false),
+            transcript_pass_action(
+                transcript.len(),
+                transcript.len(),
+                true,
+                false,
+                false,
+                false
+            ),
             TranscriptPassAction::Hold
         );
     }
