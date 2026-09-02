@@ -31,7 +31,7 @@
 //! than threading rooms state through the `Daemon` handle — so it never touches
 //! the live agent loop / session SSE code.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use futures_util::future::Either;
 use futures_util::StreamExt;
@@ -438,6 +438,20 @@ struct RoomsListResponse {
     rooms: Vec<Room>,
     #[serde(default)]
     read_states: Vec<RoomReadStateWire>,
+    /// The room key to replay as `?cursor=` for the following page (OCEAN-250).
+    /// The daemon sends the key deliberately without `skip_serializing_if`, so
+    /// a single-page answer carries `"next_cursor": null` rather than omitting
+    /// it — but a daemon predating that route sends neither this nor
+    /// `has_more`, and `#[serde(default)]` is what keeps its body decoding
+    /// into a rail that simply never offers a second page.
+    #[serde(default)]
+    next_cursor: Option<String>,
+    /// Whether at least one room exists beyond this page. Defaults to `false`
+    /// for the same reason: silence from an older daemon must read as "this is
+    /// the whole list", which is exactly what the rail did before this field
+    /// was decoded at all.
+    #[serde(default)]
+    has_more: bool,
     #[serde(default)]
     error: Option<String>,
 }
@@ -930,6 +944,19 @@ pub struct Rooms {
     /// because the section re-renders from the record the daemon returned and
     /// the binding is then visible on its own.
     pub workspace_update_status: RwSignal<Option<WorkspaceBindStatus>>,
+    /// Where the rail's NEXT page of rooms starts, or `None` when the rooms on
+    /// screen are every room the daemon will address from here (OCEAN-250).
+    /// The one condition the rail's "load more rooms" affordance renders on.
+    rooms_next_cursor: RwSignal<Option<String>>,
+    /// Whether a page-of-rooms press is still in flight, so the affordance can
+    /// say so and refuse a second one against a cursor the first has not moved.
+    rooms_more_in_flight: RwSignal<bool>,
+    /// Whether the rail holds rooms from beyond its first page. It is what the
+    /// 8-second unread poll reads to decide whether it may replace the list
+    /// outright: a rail that never paged is exactly one page and a fresh page
+    /// is the whole truth about it, while a paged rail would lose everything
+    /// below the fold on every tick.
+    rooms_paged_beyond_first: RwSignal<bool>,
 }
 
 /// What the surface can say about a workspace-binding PATCH, decided from the
@@ -1020,6 +1047,9 @@ enum RoomsFetchMode {
 struct RoomsListSuccess {
     rooms: Vec<Room>,
     read_summaries: HashMap<String, RoomReadSummary>,
+    /// The cursor this page named, already reduced by [`rooms_page_cursor`] —
+    /// `None` means the daemon said this page is the end of the list.
+    next_cursor: Option<String>,
 }
 
 impl Rooms {
@@ -1074,6 +1104,9 @@ impl Rooms {
             policy_update_error: RwSignal::new(None),
             workspace_update_in_flight: RwSignal::new(false),
             workspace_update_status: RwSignal::new(None),
+            rooms_next_cursor: RwSignal::new(None),
+            rooms_more_in_flight: RwSignal::new(false),
+            rooms_paged_beyond_first: RwSignal::new(false),
         };
 
         // Identity is RESOLVED, not snapshotted. `Rooms::new` runs synchronously
@@ -1228,24 +1261,8 @@ impl Rooms {
             self.rooms_error.set(None);
         }
         spawn_local(async move {
-            let get_url = format!("{base}/v1/rooms/persistent");
-            let result = match Request::get(&get_url).send().await {
-                Ok(resp) => match resp.json::<RoomsListResponse>().await {
-                    Ok(r) if r.ok => match read_summaries_from_wire(&r.read_states) {
-                        Ok(read_summaries) => Ok(RoomsListSuccess {
-                            rooms: r.rooms,
-                            read_summaries,
-                        }),
-                        Err(error) => Err(format!("rooms decode error: {error}")),
-                    },
-                    Ok(r) => Err(format!(
-                        "rooms list failed: {}",
-                        r.error.unwrap_or_else(|| "unknown error".into())
-                    )),
-                    Err(err) => Err(format!("rooms decode error: {err}")),
-                },
-                Err(err) => Err(format!("rooms fetch error: {err}")),
-            };
+            let get_url = rooms_list_url(&base, None);
+            let result = fetch_rooms_page(&get_url).await;
             let is_current =
                 list_request_is_current(ticket, me.list_request_ticket.get_untracked());
             finish_rooms_fetch(&me.rooms_loaded, &me.rooms_loading, mode, is_current);
@@ -1254,14 +1271,31 @@ impl Rooms {
             }
             match result {
                 Ok(success) => {
-                    me.list.set(success.rooms.clone());
+                    // An INTERACTIVE read is a fresh start: it replaces the rail
+                    // with the daemon's first page and forgets where the last
+                    // paging session had got to. The 8-second SILENT poll is the
+                    // one that must not, because it reads ONE page and a paged
+                    // rail holds several — see `rooms_after_first_page`.
+                    let retain_paged_tail = matches!(mode, RoomsFetchMode::Silent)
+                        && me.rooms_paged_beyond_first.get_untracked();
+                    let rooms = rooms_after_first_page(
+                        &me.list.get_untracked(),
+                        success.rooms,
+                        retain_paged_tail,
+                    );
                     me.read_summaries.update(|current| {
-                        *current = merge_room_read_summaries(
-                            current,
-                            &success.rooms,
-                            &success.read_summaries,
-                        );
+                        *current =
+                            merge_room_read_summaries(current, &rooms, &success.read_summaries);
                     });
+                    me.list.set(rooms);
+                    // A poll that kept a paged tail must keep that tail's cursor
+                    // with it. Parking the FIRST page's cursor there would rewind
+                    // paging every 8 seconds, so the next press would re-serve
+                    // the pages already on screen instead of the ones behind them.
+                    if !retain_paged_tail {
+                        me.rooms_paged_beyond_first.set(false);
+                        me.rooms_next_cursor.set(success.next_cursor);
+                    }
                     me.rooms_error.set(None);
                 }
                 Err(error) => {
@@ -1271,6 +1305,86 @@ impl Rooms {
                     }
                 }
             }
+        });
+    }
+
+    /// Whether rooms exist that the rail does not list — the one condition the
+    /// left rail's "load more rooms" affordance renders on. Reactive: the first
+    /// list read publishes this signal a network round-trip after the panel
+    /// opens, so a view reading it untracked would have asked before the answer
+    /// existed.
+    pub(crate) fn more_rooms_available(&self) -> bool {
+        self.rooms_next_cursor.get().is_some()
+    }
+
+    /// Whether the operator's page-of-rooms press is still in flight, so the
+    /// affordance can say so and refuse a second one.
+    pub(crate) fn more_rooms_in_flight(&self) -> bool {
+        self.rooms_more_in_flight.get()
+    }
+
+    /// Fetch ONE more page of rooms from the parked cursor and append it.
+    ///
+    /// The request is the list read's own — same route, same decode — and the
+    /// only differences are that it carries `?cursor=` and that it grows the
+    /// rail rather than replacing it.
+    ///
+    /// Every press either adds a room or removes the affordance. That is what
+    /// [`rooms_next_page_cursor`] buys: the daemon falls back to the FIRST page
+    /// when the cursor names a room that has since closed, so a press can come
+    /// back holding nothing but rooms already on screen — and parking that
+    /// page's cursor would leave a control that is permanently pressable and
+    /// permanently inert. A press that adds nothing is instead the end of what
+    /// this cursor reaches, and an interactive refresh re-derives from page one.
+    pub(crate) fn load_more_rooms(&self) {
+        if self.rooms_more_in_flight.get_untracked() {
+            return;
+        }
+        let Some(cursor) = self.rooms_next_cursor.get_untracked() else {
+            return;
+        };
+        let base = self.base();
+        let me = *self;
+        self.rooms_more_in_flight.set(true);
+        spawn_local(async move {
+            let url = rooms_list_url(&base, Some(&cursor));
+            let result = fetch_rooms_page(&url).await;
+            // The page landed after an await, and an interactive refresh during
+            // one re-parks the rail on its own first-page cursor. Appending page
+            // N onto a rail that has gone back to page one would list rooms the
+            // operator's refresh deliberately dropped, so the read is discarded
+            // unless the rail is still parked exactly where this request read.
+            if me.rooms_next_cursor.get_untracked().as_deref() != Some(cursor.as_str()) {
+                me.rooms_more_in_flight.set(false);
+                return;
+            }
+            match result {
+                Ok(success) => {
+                    let previous = me.list.get_untracked();
+                    let rooms = append_rooms_page(&previous, success.rooms);
+                    let grew = rooms.len() > previous.len();
+                    me.read_summaries.update(|current| {
+                        *current =
+                            merge_room_read_summaries(current, &rooms, &success.read_summaries);
+                    });
+                    me.list.set(rooms);
+                    if grew {
+                        me.rooms_paged_beyond_first.set(true);
+                    }
+                    me.rooms_next_cursor
+                        .set(rooms_next_page_cursor(grew, success.next_cursor));
+                    me.rooms_error.set(None);
+                }
+                Err(error) => {
+                    // The cursor is left exactly where it was: the affordance
+                    // stays on screen and the press can simply be repeated.
+                    // Clearing it would turn one dropped request into rooms the
+                    // operator can no longer reach at all.
+                    me.status.set(error.clone());
+                    me.rooms_error.set(Some(error));
+                }
+            }
+            me.rooms_more_in_flight.set(false);
         });
     }
 
@@ -2813,6 +2927,135 @@ fn read_summaries_from_wire(
         }
     }
     Ok(summaries)
+}
+
+/// One page of `GET /v1/rooms/persistent`, decoded. Shared by the first-page
+/// read and the "load more rooms" press so the two can never drift on what a
+/// page means — the press differs from the poll only in the URL it is handed.
+async fn fetch_rooms_page(url: &str) -> Result<RoomsListSuccess, String> {
+    match Request::get(url).send().await {
+        Ok(resp) => match resp.json::<RoomsListResponse>().await {
+            Ok(r) if r.ok => match read_summaries_from_wire(&r.read_states) {
+                Ok(read_summaries) => {
+                    let next_cursor = rooms_page_cursor(
+                        r.has_more,
+                        r.next_cursor.as_deref(),
+                        r.rooms.last().map(|room| room.id.as_str()),
+                    );
+                    Ok(RoomsListSuccess {
+                        rooms: r.rooms,
+                        read_summaries,
+                        next_cursor,
+                    })
+                }
+                Err(error) => Err(format!("rooms decode error: {error}")),
+            },
+            Ok(r) => Err(format!(
+                "rooms list failed: {}",
+                r.error.unwrap_or_else(|| "unknown error".into())
+            )),
+            Err(err) => Err(format!("rooms decode error: {err}")),
+        },
+        Err(err) => Err(format!("rooms fetch error: {err}")),
+    }
+}
+
+/// The room-list route, with the paging cursor as one query-component value.
+///
+/// A cursor is a room KEY, and a room key is operator-supplied text that has
+/// already survived one round trip through a JSON body — so it goes through the
+/// same [`encode`] every room key in this module's paths goes through, which
+/// percent-encodes everything outside RFC 3986's unreserved set and therefore
+/// cannot leak an `&` or a `=` into the query it is a value in.
+fn rooms_list_url(base: &str, cursor: Option<&str>) -> String {
+    match cursor {
+        Some(cursor) => format!("{base}/v1/rooms/persistent?cursor={}", encode(cursor)),
+        None => format!("{base}/v1/rooms/persistent"),
+    }
+}
+
+/// Where the rail's next page of rooms starts, or `None` when this page is the
+/// end of the list.
+///
+/// Two stop conditions and one fallback. `has_more` false is the daemon saying
+/// the list ran out, and it wins over any cursor beside it — a daemon that
+/// predates OCEAN-250 answers neither field, so `#[serde(default)]` gives
+/// `false` and such a rail offers no second page at all, which is precisely
+/// what it did before this function existed. `last_room_key` is the fallback
+/// for a `has_more` page naming no cursor: the daemon's cursor IS the key of
+/// the last room it served, so the page carries its own cursor in its rows and
+/// dropping the pair would strand every room behind it. An EMPTY `has_more`
+/// page has neither, and stops rather than replaying the cursor that produced
+/// it forever.
+fn rooms_page_cursor(
+    has_more: bool,
+    next_cursor: Option<&str>,
+    last_room_key: Option<&str>,
+) -> Option<String> {
+    if !has_more {
+        return None;
+    }
+    next_cursor
+        .map(str::trim)
+        .filter(|cursor| !cursor.is_empty())
+        .or(last_room_key)
+        .map(str::to_owned)
+}
+
+/// Where the NEXT press resumes after one that has already been merged.
+///
+/// [`rooms_page_cursor`]'s answer with one extra stop condition, and deriving
+/// it from that one is what stops the two drifting. `grew` is whether the page
+/// merged added a room the rail did not already list: the daemon falls back to
+/// its FIRST page when the cursor names a room that has since closed, so a
+/// press can answer with nothing but rooms already on screen, and parking that
+/// page's cursor would leave a control that is permanently pressable and
+/// permanently inert. There is no such thing here as a press that changes
+/// nothing — it either grows the rail or takes the affordance away.
+fn rooms_next_page_cursor(grew: bool, page_cursor: Option<String>) -> Option<String> {
+    if !grew {
+        return None;
+    }
+    page_cursor
+}
+
+/// The rail after a FIRST-page read.
+///
+/// `retain_paged_tail` is set for exactly one caller: the 8-second unread poll
+/// on a rail that has been paged past its first page. That poll reads ONE page
+/// however many the operator has loaded, because the daemon orders the list
+/// `updated_at DESC` and every unread change moves its room to the top — into
+/// the page being read. Re-reading every loaded page every 8 seconds is the
+/// cost this refuses; the pages already loaded are kept behind the fresh one,
+/// minus any room the fresh page just moved to the top, so a room promoted out
+/// of the tail appears once rather than twice.
+///
+/// What the retained tail does NOT get is re-verification: a room closed on the
+/// daemon while it sits below the fold stays on screen until an interactive
+/// refresh drops it. That is the trade — one request per tick instead of one
+/// per loaded page — and it is bounded by the fact that a room the operator
+/// opens hydrates against the daemon anyway.
+fn rooms_after_first_page(
+    previous: &[Room],
+    page: Vec<Room>,
+    retain_paged_tail: bool,
+) -> Vec<Room> {
+    if !retain_paged_tail {
+        return page;
+    }
+    append_rooms_page(&page, previous.to_vec())
+}
+
+/// `current` plus every room in `page` it did not already list, in order.
+///
+/// The dedupe is not defensive tidiness: the daemon's keyset cursor falls back
+/// to the first page when the room it names has closed, so an unfiltered append
+/// would list the whole first page twice under the rooms it duplicates.
+fn append_rooms_page(current: &[Room], page: Vec<Room>) -> Vec<Room> {
+    let listed: HashSet<String> = current.iter().map(|room| room.id.clone()).collect();
+    let mut merged = current.to_vec();
+    merged.extend(page.into_iter().filter(|room| !listed.contains(&room.id)));
+    merged
 }
 
 fn parse_optional_decimal_u64(raw: Option<&str>) -> Result<Option<u64>, String> {
@@ -5438,6 +5681,207 @@ mod tests {
             })
         );
         assert!(!merged.contains_key("room-2"));
+    }
+
+    // ---- Room-list paging (OCEAN-250) ---------------------------------------
+
+    fn listed_room(id: &str) -> Room {
+        Room {
+            id: id.into(),
+            name: id.to_uppercase(),
+            participants: Vec::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            trigger_policy: None,
+        }
+    }
+
+    fn ids(rooms: &[Room]) -> Vec<&str> {
+        rooms.iter().map(|room| room.id.as_str()).collect()
+    }
+
+    /// Both fields are additive, and the rail must decode a body from a daemon
+    /// that has never heard of either. The absent case is the one that matters:
+    /// it has to read as "this is the whole list", which is what the rail
+    /// believed before it decoded these fields at all.
+    #[test]
+    fn the_list_response_decodes_both_paging_fields_and_defaults_them_absent() {
+        let paged: RoomsListResponse = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "rooms": [],
+            "read_states": [],
+            "next_cursor": "room-100",
+            "has_more": true,
+        }))
+        .expect("a paged list body should decode");
+        assert_eq!(paged.next_cursor.as_deref(), Some("room-100"));
+        assert!(paged.has_more);
+
+        // The daemon sends the key deliberately without `skip_serializing_if`,
+        // so a final page carries an explicit null rather than omitting it.
+        let final_page: RoomsListResponse = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "rooms": [],
+            "read_states": [],
+            "next_cursor": null,
+            "has_more": false,
+        }))
+        .expect("a final-page body should decode");
+        assert_eq!(final_page.next_cursor, None);
+        assert!(!final_page.has_more);
+
+        let legacy: RoomsListResponse = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "rooms": [],
+            "read_states": [],
+        }))
+        .expect("a pre-OCEAN-250 daemon's body should still decode");
+        assert_eq!(
+            legacy.next_cursor, None,
+            "the field is additive and such a daemon omits it",
+        );
+        assert!(
+            !legacy.has_more,
+            "silence must read as the whole list, never as a second page the \
+             rail would offer and then fail to fetch",
+        );
+    }
+
+    /// The paging cursor: two stop conditions and one fallback.
+    #[test]
+    fn the_list_cursor_stops_on_the_daemons_word_and_falls_back_to_the_last_row() {
+        assert_eq!(
+            rooms_page_cursor(true, Some("room-100"), Some("room-100")),
+            Some("room-100".to_string()),
+            "the ordinary page: the daemon named where the next one starts",
+        );
+        assert_eq!(
+            rooms_page_cursor(false, Some("room-100"), Some("room-100")),
+            None,
+            "`has_more` false is the daemon saying the list ran out, and it \
+             wins over any cursor sitting beside it",
+        );
+        assert_eq!(
+            rooms_page_cursor(false, None, None),
+            None,
+            "which is also what a daemon predating the route answers, by \
+             defaulting both fields",
+        );
+        assert_eq!(
+            rooms_page_cursor(true, None, Some("room-100")),
+            Some("room-100".to_string()),
+            "the daemon's cursor IS the key of the last room it served, so a \
+             page naming none still carries its own cursor in its rows",
+        );
+        assert_eq!(
+            rooms_page_cursor(true, Some("   "), Some("room-100")),
+            Some("room-100".to_string()),
+            "and a blank one is not a cursor",
+        );
+        assert_eq!(
+            rooms_page_cursor(true, None, None),
+            None,
+            "an empty `has_more` page has neither, and must stop rather than \
+             replay forever the cursor that produced it",
+        );
+    }
+
+    /// The extra stop condition a press has and a first read does not.
+    #[test]
+    fn a_page_that_adds_no_room_ends_the_paging_rather_than_re_offering_itself() {
+        assert_eq!(
+            rooms_next_page_cursor(true, Some("room-200".into())),
+            Some("room-200".to_string()),
+            "a page that grew the rail leaves the next press where it ended",
+        );
+        assert_eq!(
+            rooms_next_page_cursor(false, Some("room-100".into())),
+            None,
+            "the daemon falls back to its FIRST page when the cursor names a \
+             room that has since closed, so a press can answer with nothing but \
+             rooms already listed — parking that page's cursor would leave a \
+             control permanently pressable and permanently inert",
+        );
+        assert_eq!(rooms_next_page_cursor(true, None), None);
+    }
+
+    /// A cursor is a room key, and a room key is operator-supplied text.
+    #[test]
+    fn the_list_url_carries_the_cursor_as_one_encoded_query_value() {
+        assert_eq!(
+            rooms_list_url("http://d", None),
+            "http://d/v1/rooms/persistent",
+            "the first page asks for no cursor at all",
+        );
+        assert_eq!(
+            rooms_list_url("http://d", Some("room-100")),
+            "http://d/v1/rooms/persistent?cursor=room-100",
+        );
+        assert_eq!(
+            rooms_list_url("http://d", Some("a&limit=1000")),
+            "http://d/v1/rooms/persistent?cursor=a%26limit%3D1000",
+            "an `&` or an `=` inside the value must never become part of the \
+             query it is a value in",
+        );
+    }
+
+    /// The dedupe is what the daemon's stale-cursor fallback makes necessary.
+    #[test]
+    fn appending_a_page_never_lists_a_room_the_rail_already_has() {
+        let current = vec![listed_room("a"), listed_room("b")];
+
+        let grown = append_rooms_page(&current, vec![listed_room("c"), listed_room("d")]);
+        assert_eq!(ids(&grown), vec!["a", "b", "c", "d"]);
+
+        let refallen = append_rooms_page(&current, vec![listed_room("a"), listed_room("b")]);
+        assert_eq!(
+            ids(&refallen),
+            vec!["a", "b"],
+            "a cursor whose room has closed sends the daemon back to page one; \
+             an unfiltered append would list the whole first page twice",
+        );
+
+        let overlapping = append_rooms_page(&current, vec![listed_room("b"), listed_room("c")]);
+        assert_eq!(ids(&overlapping), vec!["a", "b", "c"]);
+    }
+
+    /// The 8-second unread poll reads ONE page however many the rail holds.
+    #[test]
+    fn the_unread_poll_refreshes_the_first_page_without_dropping_the_paged_tail() {
+        let previous = vec![listed_room("a"), listed_room("b"), listed_room("c")];
+
+        assert_eq!(
+            ids(&rooms_after_first_page(
+                &previous,
+                vec![listed_room("b"), listed_room("a")],
+                false,
+            )),
+            vec!["b", "a"],
+            "a rail that never paged IS one page, so a fresh page is the whole \
+             truth about it — including that a room has gone",
+        );
+
+        let kept =
+            rooms_after_first_page(&previous, vec![listed_room("b"), listed_room("a")], true);
+        assert_eq!(
+            ids(&kept),
+            vec!["b", "a", "c"],
+            "on a paged rail the fresh page leads — the daemon orders by \
+             `updated_at DESC`, so every unread change lands in it — and the \
+             pages below the fold are kept behind it rather than re-read",
+        );
+
+        let promoted = rooms_after_first_page(
+            &previous,
+            vec![listed_room("c"), listed_room("a"), listed_room("b")],
+            true,
+        );
+        assert_eq!(
+            ids(&promoted),
+            vec!["c", "a", "b"],
+            "a room the fresh page promoted out of the tail appears once, not \
+             twice",
+        );
     }
 
     #[test]

@@ -3154,6 +3154,27 @@ pub fn RoomsWorkspace(
                                         }
                                     />
                                 </div>
+                                // The end of the list is where "there is more of
+                                // it" has to be said, and it scrolls with the
+                                // list because it names a position in it. The
+                                // daemon pages this route at 100 rooms; without
+                                // this the rail stopped there and said nothing.
+                                {move || rooms.more_rooms_available().then(|| view! {
+                                    <button
+                                        class="rooms-workspace__load-more-rooms"
+                                        type="button"
+                                        disabled=move || rooms.more_rooms_in_flight()
+                                        on:click=move |_| {
+                                            rooms.load_more_rooms();
+                                        }
+                                    >
+                                        {move || if rooms.more_rooms_in_flight() {
+                                            "Loading more rooms…"
+                                        } else {
+                                            "Load more rooms"
+                                        }}
+                                    </button>
+                                })}
                             }.into_any()
                         }
                     }}
