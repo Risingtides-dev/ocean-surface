@@ -3356,15 +3356,15 @@ pub(crate) enum DeepLinkAction {
 /// `None` so the caller logs and drops it — an unknown scheme/host/shape is
 /// not an error, just not something we act on.
 ///
-/// Pure on purpose: no WASM, fully unit-testable on the native target.
-/// Accept only the shape a daemon-minted id actually takes: ASCII
-/// alphanumerics plus `-` and `_`, bounded in length. That covers both a
-/// session id (uuid or slug) and a room key, which `rooms::slugify` builds
-/// from lowercase alphanumerics and `-` — a strictly narrower set, so one
-/// predicate serves both hosts without widening either. Deliberately strict —
+/// Pure on purpose: no WASM, fully unit-testable on the native target. The two
+/// hosts get two validators, because the two ids are minted by different
+/// things — see each function for the shape it admits.
+///
+/// Accept only the shape a daemon-minted session id actually takes: ASCII
+/// alphanumerics plus `-` and `_`, bounded in length. Deliberately strict —
 /// see the call site in [`parse_deep_link`] for why an untrusted id is
 /// rejected rather than sanitized.
-fn is_valid_deep_link_id(id: &str) -> bool {
+fn is_valid_session_id(id: &str) -> bool {
     // A uuid is 36 chars; allow generous headroom for slug ids without
     // admitting an unbounded string from an untrusted source.
     const MAX: usize = 128;
@@ -3373,6 +3373,40 @@ fn is_valid_deep_link_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// A room key is NOT a session id, and reusing the session rule silently drops
+/// links to real rooms.
+///
+/// `rooms::slugify` — what THIS surface mints from a room name — produces
+/// lowercase alphanumerics and `-` with no length bound, but a daemon
+/// `RoomKey` is a bare string and a room created by a CLI or agent path can
+/// carry a `.` or run long. Either is a room that appears in the rooms list,
+/// opens on a click, and would have had its deep link silently ignored.
+///
+/// So the admitted set is the RFC 3986 unreserved characters —
+/// `ALPHA / DIGIT / "-" / "." / "_" / "~"` — which is exactly the set
+/// `rooms::encode` passes through without escaping. That is the principled
+/// line: a key this validator accepts is one the URL builder does not have to
+/// change to address. Anything outside it (a space, a `%`, a `#`, a control
+/// character) stays rejected, because admitting percent-encoding here would
+/// re-open the structure-smuggling TASK-80 closed, and a key needing an escape
+/// cannot be written in an `ocean://` URL unambiguously anyway.
+///
+/// The one carve-out `.` forces: `encode` leaves a dot VERBATIM, so a key of
+/// `.` or `..` would put a real dot segment into the daemon path this key is
+/// interpolated into. A key that is nothing but dots is refused for that
+/// reason; `a..b` is not a dot segment and is fine.
+fn is_valid_room_key(key: &str) -> bool {
+    // Generous, because a slug derived from a long room name is legitimate —
+    // but still bounded, because the string is attacker-supplied.
+    const MAX: usize = 512;
+    !key.is_empty()
+        && key.len() <= MAX
+        && !key.bytes().all(|b| b == b'.')
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~'))
 }
 
 pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
@@ -3403,12 +3437,15 @@ pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
     // format sites; rejecting here as well means a malformed id never becomes
     // an action in the first place, rather than being safely encoded and then
     // failing downstream as a confusing 404.
-    if !is_valid_deep_link_id(id) {
-        return None;
-    }
+    //
+    // The two hosts validate SEPARATELY. They are minted by different things,
+    // and a shared rule is not a simplification: applying the session charset
+    // to a room key silently drops links to real rooms (see
+    // [`is_valid_room_key`]), while widening the session rule to match the
+    // room one would loosen a boundary nothing asked to loosen.
     match host {
-        "session" => Some(DeepLinkAction::SelectSession(id.to_string())),
-        "room" => Some(DeepLinkAction::OpenRoom(id.to_string())),
+        "session" if is_valid_session_id(id) => Some(DeepLinkAction::SelectSession(id.to_string())),
+        "room" if is_valid_room_key(id) => Some(DeepLinkAction::OpenRoom(id.to_string())),
         _ => None,
     }
 }
@@ -4044,6 +4081,61 @@ mod tests {
         }
     }
 
+    /// A daemon `RoomKey` is a bare string, so a room made by a CLI or agent
+    /// path can carry a `.` or `~`, and this surface puts no length bound on a
+    /// room name (so none on the slug it derives). Every such room shows in
+    /// the rooms list and opens on a click; the session-id rule would have
+    /// dropped its link in silence. The admitted set is the RFC 3986
+    /// unreserved characters — exactly what `rooms::encode` leaves alone.
+    #[test]
+    fn deep_link_opens_room_keys_the_session_rule_would_have_dropped() {
+        for key in [
+            "team.blue",
+            "v1.2.3-release",
+            "room~archive",
+            "under_scored",
+            "a.b~c-d_1",
+        ] {
+            assert_eq!(
+                parse_deep_link(&format!("ocean://room/{key}")),
+                Some(DeepLinkAction::OpenRoom(key.into())),
+                "{key} is a real room key shape and must open",
+            );
+        }
+        // A slug from a long room name is legitimate; 128 is a session id's
+        // bound, not a room's.
+        let long = "a".repeat(200);
+        assert_eq!(
+            parse_deep_link(&format!("ocean://room/{long}")),
+            Some(DeepLinkAction::OpenRoom(long))
+        );
+        let max = "a".repeat(512);
+        assert_eq!(
+            parse_deep_link(&format!("ocean://room/{max}")),
+            Some(DeepLinkAction::OpenRoom(max))
+        );
+    }
+
+    /// Widening the room charset must not widen the SESSION one: a session id
+    /// is minted by the daemon out of a narrower set, and TASK-80's boundary
+    /// stands where it was.
+    #[test]
+    fn the_room_charset_does_not_leak_into_the_session_one() {
+        for hostile in [
+            "ocean://session/team.blue",
+            "ocean://session/room~archive",
+            "ocean://session/v1.2.3",
+        ] {
+            assert_eq!(
+                parse_deep_link(hostile),
+                None,
+                "{hostile} must stay outside the session charset",
+            );
+        }
+        let long = "a".repeat(200);
+        assert_eq!(parse_deep_link(&format!("ocean://session/{long}")), None);
+    }
+
     /// A room key reaches the surface from the same untrusted place a session
     /// id does, and drives the same kind of state change — a reveal plus a
     /// room open that resets the transcript and reconnects a tail. It gets the
@@ -4051,12 +4143,19 @@ mod tests {
     #[test]
     fn deep_link_rejects_room_keys_outside_the_charset() {
         for hostile in [
+            // Percent-encoding stays rejected: admitting it here would re-open
+            // exactly the structure-smuggling TASK-80 closed.
             "ocean://room/..%2f..%2fhealth",
-            "ocean://room/..",
             "ocean://room/%2e%2e",
+            "ocean://room/a%2fb",
+            // `encode` passes a dot through VERBATIM, so a key that is nothing
+            // but dots would put a real dot segment in the daemon path.
+            "ocean://room/.",
+            "ocean://room/..",
+            "ocean://room/...",
+            // Structure, whitespace, control characters, non-ASCII.
             "ocean://room/a b",
             "ocean://room/a:b",
-            "ocean://room/a.b",
             "ocean://room/a\nb",
             "ocean://room/café",
             "ocean://room/a/b",
@@ -4065,12 +4164,24 @@ mod tests {
         ] {
             assert_eq!(parse_deep_link(hostile), None, "{hostile} must not parse");
         }
-        let long = "a".repeat(129);
+        // Bounded, even though the bound is generous.
+        let long = "a".repeat(513);
         assert_eq!(parse_deep_link(&format!("ocean://room/{long}")), None);
-        let max = "a".repeat(128);
+        // A dot that is part of a name, not a segment, is fine.
         assert_eq!(
-            parse_deep_link(&format!("ocean://room/{max}")),
-            Some(DeepLinkAction::OpenRoom(max))
+            parse_deep_link("ocean://room/a..b"),
+            Some(DeepLinkAction::OpenRoom("a..b".into()))
+        );
+        // `#` is NOT in this list: a fragment is stripped before validation,
+        // by the same documented rule that makes `ocean://session/abc#frag`
+        // select `abc`. So `ocean://room/a#b` opens `a`, deliberately.
+        assert_eq!(
+            parse_deep_link("ocean://room/a#b"),
+            Some(DeepLinkAction::OpenRoom("a".into()))
+        );
+        assert_eq!(
+            parse_deep_link("ocean://room/team.blue?ref=tray"),
+            Some(DeepLinkAction::OpenRoom("team.blue".into()))
         );
     }
 
