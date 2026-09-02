@@ -6115,3 +6115,40 @@ removal.rs` asserts the ten removed families are absent from both stylesheets an
 unemitted from any Rust source, which is the lane's own convention for a deletion.
 Gate green: all seven frozen commands, 1314 tests across 14 binaries, 0 failed.
 _________________________________________________________________________________ 22:20 cloud/surface-panels-css-repoint
+
+time:      [00:05] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-panels-css-repoint]
+type:      fix
+area:      frontend
+
+Review follow-up, and the finding was right about the half the slice missed. Codex
+read the repointed anti-zoom guard and reported P2: the six selectors it names are
+not every field a phone member focuses. `__invite-input`, `__repo-input`, the three
+artifact editor fields, `__authority-select` and the two compute-panel inputs all
+render in the mobile right rail at 11-13px with no coarse-pointer floor, so focusing
+any of them force-zooms the page — while this very test asserted, in its own header,
+that none could. The first half of the miss was a guard pointing at dead selectors;
+the second half was that its replacement was a list someone wrote by hand.
+
+So the Rooms half of the table is no longer hand-written.
+`every_rooms_text_entry_control_is_in_the_anti_zoom_floor` walks the crate's view
+source, finds every `<input>`, `<select>` and `<textarea>`, reads the
+`rooms-workspace__*` class off each, and requires a 16px coarse floor for all of
+them. `type="file"` is excluded on purpose: it opens a picker, not the keyboard. The
+attribute region is bounded by tracking bracket depth rather than scanning to the
+first `>`, because a Leptos attribute value is a Rust expression and can hold one.
+
+The scanner earned itself on the first run. It found two controls neither the review
+nor the grep behind the first fix had named — `__compute-secret-name` and
+`__compute-secret-value`, both `type="text"` at 12px — because that grep matched only
+class names ENDING in input/select/textarea and these do not. A hand-maintained list
+would have shipped this slice claiming completeness and still missing two. Fourteen
+controls now carry the floor; the guard also asserts the scanner found at least ten,
+so a scanner that stops matching the markup reds instead of quietly passing.
+
+Three mutations: dropping one selector from the floor reds it by name, renaming a
+rendered control to a class with no floor reds it by name, and both leave the rest of
+the suite green. Tree restored after each. Gate green: all seven frozen commands,
+1315 tests across 14 binaries, 0 failed.
+_________________________________________________________________________________ 00:05 cloud/surface-panels-css-repoint
