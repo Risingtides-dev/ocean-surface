@@ -5900,3 +5900,16 @@ daemon-derived owner eligibility, and reloads the preview after registration
 before authority can be granted. Docs only; no UI, daemon, membership,
 deployment, or production state changed.
 _________________________________________________________________________________ 22:31 docs/rooms-product-contract-truth
+
+time:      [22:54] [09-01-26]
+agent:     [codex] [gpt-5]
+worktree:  docs/rooms-product-contract-truth
+type:      [bug report]
+area:      [review]
+
+Closed two current-head Codex product-contract findings. First-join onboarding
+now requires the explicit participant POST to succeed before hydration, SSE,
+composer enablement, or messaging. The room-agent API summary now names the
+DELETE revoke action alongside the existing authorization lifecycle. Docs only;
+no UI, daemon, membership, agent grant, deployment, or production state changed.
+_________________________________________________________________________________ 22:54 docs/rooms-product-contract-truth

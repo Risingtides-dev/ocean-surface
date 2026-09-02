@@ -293,12 +293,18 @@ commands need `local` or `live`.
 3. Surface opens to the default chat view.
 4. Operator opens the Rooms panel (sidebar or command palette).
 5. Surface calls `GET /v1/rooms/persistent` — populated room list renders.
-6. Operator clicks a room →
+6. Operator selects a room. If the authenticated operator is not already in
+   its roster, the surface presents an explicit **Join room** action; selecting
+   it calls `POST /v1/rooms/persistent/{key}/participants` with the operator's
+   authenticated `{ id, display_name, kind: "human" }` identity and waits for
+   success before proceeding.
+7. Surface calls
    `GET /v1/rooms/persistent/{key}/snapshot?before_seq=<u64::MAX>&limit=1000`
-   hydrates the newest transcript page and access projection.
-7. SSE subscription opens on `GET /v1/rooms/persistent/{key}/events`.
-8. Transcript renders; composer enables if access is Local/Live.
-9. Operator types a message, hits Enter → message posts, outbox renders pending,
+   to hydrate the newest transcript page, roster and access projection.
+8. SSE subscription opens on `GET /v1/rooms/persistent/{key}/events`.
+9. Transcript renders; composer enables only after membership is confirmed and
+   access is Local/Live.
+10. Operator types a message, hits Enter → message posts, outbox renders pending,
    SSE confirms, outbox resolves.
 
 ### First Join — Desktop (Tauri)
@@ -412,7 +418,7 @@ The families the surface calls:
 | Messages | `POST …/{key}/messages`, `POST …/{key}/outbox/retry` |
 | Roster | `POST …/{key}/participants`, `DELETE …/{key}/participants/{id}` |
 | Federation | `POST …/{key}/invites`, `POST /v1/rooms/persistent/invites/redeem`, `POST …/{key}/members/agents`, `DELETE …/{key}/members/{id}` |
-| Room agents | `GET/POST …/{key}/agents`, `…/agents/bootstrap`, `…/agents/preview/{pkg}`, `…/agents/{id}` (`reauthorize`, `suspend`, `resume`) |
+| Room agents | `GET/POST …/{key}/agents`, `…/agents/bootstrap`, `…/agents/preview/{pkg}`, `…/agents/{id}` (`reauthorize`, `suspend`, `resume`), `DELETE …/{key}/agents/{id}` (revoke) |
 | Artifacts and summary | `GET/POST …/{key}/artifacts[/{id}[/amend]]`, `POST …/{key}/summarize` |
 | Attachments | `GET/POST/DELETE …/{key}/attachments[/{id}]` |
 | Workspace and repo | `GET …/{key}/workspace`, `GET/POST …/{key}/workspace/{leaf}` (an allowlisted proxy to the room's Bedrock container: execs, files, ports, secrets, repo bind/clone/build/ci) |
