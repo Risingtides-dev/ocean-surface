@@ -14,11 +14,13 @@ use wasm_bindgen::JsCast;
 
 use crate::room_messages;
 use crate::rooms::{
-    create_workspace_root, room_is_unbound, CreateResolution, FederatedActorType,
-    FederatedRoomMemberProjection, FederatedRoomRole, MemberPresence, OutboxItemState, Room,
-    RoomAccessProjection, RoomAccessState, RoomAgentOwner, RoomMessage, RoomMessageKind,
-    RoomParticipant, RoomParticipantKind, RoomReadCursorProjection, RoomTriggerPolicy, Rooms,
+    CreateResolution, FederatedActorType, FederatedRoomMemberProjection, FederatedRoomRole,
+    MemberPresence, OutboxItemState, Room, RoomAccessProjection, RoomAccessState, RoomAgentOwner,
+    RoomMessage, RoomMessageKind, RoomParticipant, RoomParticipantKind, RoomReadCursorProjection,
+    RoomTriggerPolicy, Rooms,
 };
+
+use crate::rooms::{create_workspace_root, room_is_unbound};
 
 // ── Production helpers (testable directly, called from Effects) ─
 
