@@ -5842,3 +5842,16 @@ responses cannot reintroduce the removed competing transcript reader. The
 runtime comment names that live-tail resume ownership directly. No daemon,
 deployment, room, or production state changed.
 _________________________________________________________________________________ 21:24 codex/review-sweep-20260901
+
+time:  [21:56] [09-01-26]
+agent: [codex] [gpt-5]
+worktree: [codex/review-sweep-20260901]
+type:  [refactor]: Rebase reconciliation
+area:  [frontend]: Rooms older-history ownership
+
+Rebased the review sweep onto the shipped load-older implementation and removed
+the superseded automatic-prepend epoch/state from the older review patch. The
+current request-scoped scroll anchor, on-demand cursor, and predecessor-keyed
+rendering remain authoritative; the review branch no longer carries two scroll
+preservation models. No daemon, deployment, room, or production state changed.
+_________________________________________________________________________________ 21:56 codex/review-sweep-20260901

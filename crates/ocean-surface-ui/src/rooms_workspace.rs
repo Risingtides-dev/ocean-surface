@@ -854,13 +854,6 @@ fn transcript_pass_action(
     TranscriptPassAction::Hold
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct TranscriptEffectState {
-    len: usize,
-    prepend_epoch: u64,
-    scroll_height: i32,
-}
-
 /// The read position already durably applied to the open room: the furthest of
 /// the room-list summary's confirmed read and the durable cursor projection
 /// (own read plus mirrored upstream read). This mirrors the monotonic fold
@@ -5463,11 +5456,6 @@ mod tests {
         assert_eq!(
             transcript_pass_action(5, 0, false, true, false, false),
             TranscriptPassAction::Hold
-        );
-        // A backward hydration page is older history, never a new append.
-        assert_eq!(
-            transcript_pass_action(7, 5, true, false, true),
-            TranscriptPassAction::PreservePrepend
         );
     }
 

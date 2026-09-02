@@ -685,10 +685,6 @@ pub struct Rooms {
     pub open_room: RwSignal<Option<Room>>,
     /// The open room's transcript, ascending by `seq`.
     pub transcript: RwSignal<Vec<RoomMessage>>,
-    /// Increments after a backward hydration page actually prepends rows. The
-    /// workspace uses this explicit mutation direction to preserve scroll
-    /// position and avoid presenting older history as new messages.
-    pub(crate) transcript_prepend_epoch: RwSignal<u64>,
     /// The open room's resume point: the highest `seq` this client has ingested,
     /// and the module's ONE answer to where the live tail resumes. Hydration
     /// seeds it from `/snapshot`'s own cursor through [`Rooms::start_live_tail`],
@@ -816,7 +812,6 @@ impl Rooms {
             open_key: RwSignal::new(None),
             open_room: RwSignal::new(None),
             transcript: RwSignal::new(Vec::new()),
-            transcript_prepend_epoch: RwSignal::new(0),
             resume_seq: RwSignal::new(None),
             older_cursor: RwSignal::new(None),
             older_in_flight: RwSignal::new(false),
@@ -928,7 +923,6 @@ impl Rooms {
     fn reset_room_state(&self) {
         self.open_room.set(None);
         self.transcript.set(Vec::new());
-        self.transcript_prepend_epoch.set(0);
         self.resume_seq.set(None);
         // Both halves of the older-history state, cleared for the same reason
         // the transcript is: a cursor is one room's position in one room's log,
@@ -1796,14 +1790,8 @@ impl Rooms {
                     return;
                 }
                 let reached_back_to = first_transcript_seq(&page.transcript);
-                let mut prepended = 0usize;
-                me.transcript.update(|transcript| {
-                    prepended = prepend_transcript_page(transcript, page.transcript)
-                });
-                if prepended > 0 {
-                    me.transcript_prepend_epoch
-                        .update(|epoch| *epoch = epoch.saturating_add(1));
-                }
+                me.transcript
+                    .update(|transcript| prepend_transcript_page(transcript, page.transcript));
                 pages_read += 1;
                 let Some(next) = transcript_backfill_cursor(
                     pages_read,
@@ -2610,7 +2598,7 @@ fn room_snapshot_tail_url(base: &str, key: &str, before_seq: u64, limit: usize) 
 /// The page arrives ascending and entirely below the paint, so splicing the kept
 /// rows in at the front preserves the whole vector's `seq` order — which the
 /// renderer, the resume point and [`first_transcript_seq`] all depend on.
-fn prepend_transcript_page(transcript: &mut Vec<RoomMessage>, page: Vec<RoomMessage>) -> usize {
+fn prepend_transcript_page(transcript: &mut Vec<RoomMessage>, page: Vec<RoomMessage>) {
     let oldest_painted = first_transcript_seq(transcript);
     let older: Vec<RoomMessage> = page
         .into_iter()
@@ -2620,9 +2608,7 @@ fn prepend_transcript_page(transcript: &mut Vec<RoomMessage>, page: Vec<RoomMess
                 .unwrap_or(true)
         })
         .collect();
-    let count = older.len();
     transcript.splice(0..0, older);
-    count
 }
 
 /// Where the backward hydration walk STARTS, or `None` when the first paint
@@ -2665,7 +2651,7 @@ fn transcript_backfill_cursor(
     prev_seq: Option<u64>,
     page_reached_back_to: Option<u64>,
 ) -> Option<u64> {
-    if pages_read >= MAX_TRANSCRIPT_CATCHUP_PAGES {
+    if pages_read >= MAX_TRANSCRIPT_BACKFILL_PAGES {
         return None;
     }
     transcript_older_cursor(has_more, prev_seq, page_reached_back_to)
@@ -3751,7 +3737,7 @@ mod tests {
             "the walk is what keeps the rows before the tail page reachable at \
              all — `/transcript` is forward-only and cannot serve one of them"
         );
-        assert_eq!(requested.len(), MAX_TRANSCRIPT_CATCHUP_PAGES);
+        assert_eq!(requested.len(), MAX_TRANSCRIPT_BACKFILL_PAGES);
 
         // And the page that stopped it is exactly where a press resumes. The
         // walk above ends holding `has_more: true` and a cursor 200 rows below
@@ -3800,7 +3786,7 @@ mod tests {
         // the same answer, which is what makes deriving one from the other the
         // point rather than a tidy-up.
         assert_eq!(
-            transcript_backfill_cursor(MAX_TRANSCRIPT_CATCHUP_PAGES, true, Some(3001), None),
+            transcript_backfill_cursor(MAX_TRANSCRIPT_BACKFILL_PAGES, true, Some(3001), None),
             None,
         );
         assert_eq!(
@@ -3808,7 +3794,7 @@ mod tests {
             Some(3001),
             "the press has no page budget to run out of",
         );
-        for pages_read in 0..MAX_TRANSCRIPT_CATCHUP_PAGES {
+        for pages_read in 0..MAX_TRANSCRIPT_BACKFILL_PAGES {
             assert_eq!(
                 transcript_backfill_cursor(pages_read, true, Some(3001), Some(3002)),
                 transcript_older_cursor(true, Some(3001), Some(3002)),
