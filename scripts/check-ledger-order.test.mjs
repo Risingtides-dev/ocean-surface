@@ -10,6 +10,7 @@ import path from 'node:path';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 
 import {
+  DAY_FIRST_ERA_ENDS,
   TOLERANCE_MINUTES,
   describeGap,
   main,
@@ -215,4 +216,26 @@ test('main exits 2 when the check could not run at all', async () => {
   const help = await capture(() => main(['--help']));
   assert.equal(help.code, 0);
   assert.match(help.out[0], /Exit 0 when every entry is in place/);
+});
+
+
+test('a canonical month-first backdate after the day-first era is never rescued by proximity', () => {
+  const sep8 = Date.UTC(2026, 8, 8, 12, 0) / 60000;
+  assert.equal(parseStamp('time: [10:00] [08-09-26]', sep8), Date.UTC(2026, 7, 9, 10, 0) / 60000, 'August 9, a month old, not September 8');
+  const text = ledger(['12:00', '09-08-26'], ['10:00', '08-09-26']);
+  const misplaced = misplacedEntries(readStamps(text));
+  assert.deepEqual(misplaced.map((e) => e.header.replace(/\s+/g, ' ')), ['time: [10:00] [08-09-26]']);
+  assert.equal(misplaced[0].against.direction, 'older than the entry at line');
+  assert.ok(DAY_FIRST_ERA_ENDS < sep8, 'the era ends before September 2026');
+});
+
+test('inside the day-first era, a slip still reads day-first by proximity', () => {
+  const july8 = Date.UTC(2026, 6, 8, 12, 0) / 60000;
+  assert.equal(parseStamp('time: [03:50pm] [08-07-26]', july8), Date.UTC(2026, 6, 8, 15, 50) / 60000);
+});
+
+test('an equal-length run with a lower newest stamp is kept, so a valid entry is never blamed with its neighbour', () => {
+  const text = ledger(['10:00', '09-03-26'], ['10:00', '09-02-26'], ['10:00', '09-01-26'], ['11:00', '09-01-26'], ['12:00', '09-01-26']);
+  const misplaced = misplacedEntries(readStamps(text));
+  assert.deepEqual(misplaced.map((e) => e.header.replace(/\s+/g, ' ')), ['time: [10:00] [09-03-26]'], 'only Sep 3 is out of place; Sep 2 heads the run the Sep 1s can join');
 });

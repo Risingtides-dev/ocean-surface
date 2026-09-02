@@ -78,6 +78,13 @@ const HEADER = /^time:\s*\[\s*([^\]]*?)\s*\]\s*\[\s*([^\]]*?)\s*\]/;
 const TIME = /^(\d{1,2}):(\d{2})\s*(am|pm)?$/i;
 const DATE = /^(\d{1,2})-(\d{1,2})-(\d{2})$/;
 const WEEK = 7 * 24 * 60;
+// The DD-MM-YY stretch this ledger wrote runs from mid-July to 31-08-26. Past
+// that day the ledger job's MM-DD-YY is the only reading, so an ambiguous
+// date is never rescued by proximity again: a canonical month-first backdate
+// stamped after a September entry must stay a backdate, and reading it
+// day-first "because that lands nearer" is exactly the miss a check for
+// backdates cannot afford.
+export const DAY_FIRST_ERA_ENDS = Date.UTC(2026, 7, 31, 23, 59) / 60000;
 
 function minutes(year, month, day, hour, minute) {
   return Date.UTC(year, month - 1, day, hour, minute) / 60000;
@@ -116,7 +123,8 @@ export function parseStamp(header, previous = null) {
   const dayFirst = valid(b, a) ? minutes(year, b, a, time.hour, time.minute) : null;
   if (monthFirst === null) return dayFirst;
   if (dayFirst === null || a === b) return monthFirst;
-  if (previous !== null && Math.abs(monthFirst - previous) > WEEK && Math.abs(dayFirst - previous) <= WEEK) {
+  const inEra = monthFirst <= DAY_FIRST_ERA_ENDS && dayFirst <= DAY_FIRST_ERA_ENDS;
+  if (inEra && previous !== null && Math.abs(monthFirst - previous) > WEEK && Math.abs(dayFirst - previous) <= WEEK) {
     return dayFirst;
   }
   return monthFirst;
@@ -139,29 +147,48 @@ export function readStamps(text) {
 }
 
 // The longest run of stamped entries, in file order, in which no entry sits
-// more than `tolerance` below the newest entry before it in the run. Everything
-// stamped and not in that run is out of place. Ties go to the later entry, so a
-// prepended duplicate of an in-place entry is the one reported.
+// more than `tolerance` below the newest entry before it in the run.
+// Everything stamped and not in that run is out of place.
+//   One state per entry is not enough: two runs of equal length ending at the
+// same entry can carry different newest stamps, and only the lower one may be
+// able to continue. Sep 3, Sep 2, Sep 1, Sep 1, Sep 1 is the shape — the run
+// [Sep 3, Sep 2] is longer at Sep 2 than [Sep 2] alone, but only [Sep 2] can
+// take the Sep 1s, and a search that kept the longer one would blame Sep 2 as
+// well as Sep 3. So each entry keeps every state that is not dominated: a
+// state is dropped only when another at the same entry is at least as long AND
+// no newer. Ties on length at the end go to the state whose newest stamp is
+// lowest, then to the later entry, so a prepended duplicate of an in-place
+// entry is the one reported.
 export function misplacedEntries(entries, tolerance = TOLERANCE_MINUTES) {
   const stamped = entries.filter((entry) => entry.stamp !== null);
   const n = stamped.length;
-  const best = new Array(n).fill(1);
-  const prev = new Array(n).fill(-1);
-  const runMax = stamped.map((entry) => entry.stamp);
+  const states = stamped.map(() => []);
+  const keep = (i, candidate) => {
+    const list = states[i];
+    for (const s of list) if (s.length >= candidate.length && s.newest <= candidate.newest) return;
+    states[i] = list.filter((s) => !(candidate.length >= s.length && candidate.newest <= s.newest));
+    states[i].push(candidate);
+  };
   for (let i = 0; i < n; i++) {
+    const stamp = stamped[i].stamp;
+    keep(i, { length: 1, newest: stamp, prev: null });
     for (let j = 0; j < i; j++) {
-      if (stamped[i].stamp < runMax[j] - tolerance) continue;
-      if (best[j] + 1 > best[i] || (best[j] + 1 === best[i] && j > prev[i])) {
-        best[i] = best[j] + 1;
-        prev[i] = j;
-        runMax[i] = Math.max(runMax[j], stamped[i].stamp);
+      for (const s of states[j]) {
+        if (stamp < s.newest - tolerance) continue;
+        keep(i, { length: s.length + 1, newest: Math.max(s.newest, stamp), prev: { i: j, state: s } });
       }
     }
   }
-  let end = -1;
-  for (let i = 0; i < n; i++) if (end === -1 || best[i] >= best[end]) end = i;
+  let best = null;
+  for (let i = 0; i < n; i++) {
+    for (const s of states[i]) {
+      if (best === null || s.length > best.state.length || (s.length === best.state.length && (s.newest < best.state.newest || (s.newest === best.state.newest && i > best.i)))) {
+        best = { i, state: s };
+      }
+    }
+  }
   const kept = new Set();
-  for (let i = end; i !== -1; i = prev[i]) kept.add(i);
+  for (let cur = best; cur !== null; cur = cur.state.prev === null ? null : { i: cur.state.prev.i, state: cur.state.prev.state }) kept.add(cur.i);
   return stamped
     .map((entry, i) => ({ entry, i }))
     .filter(({ i }) => !kept.has(i))
