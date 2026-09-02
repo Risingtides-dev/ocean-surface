@@ -6437,16 +6437,18 @@ mod tests {
         assert_eq!(roster_presence_count(&members), 2);
     }
 
-    /// The two halves of a row's time, and the reason they differ.
-    ///
-    /// `datetime`, `aria-label` and `title` carry the daemon's wire value
-    /// VERBATIM — an unambiguous instant, which is what a machine and a
-    /// screen reader want, and what keeps the row quotable across zones. The
-    /// visible text is the member's own wall clock for that same instant.
-    /// Localizing the attributes too would throw away the only unambiguous
-    /// value on the row; localizing NEITHER is what this slice fixed.
     #[test]
-    fn room_timestamp_markup_preserves_full_wire_datetime_and_localizes_only_the_visible_clock() {
+    fn room_timestamp_markup_preserves_full_wire_datetime_and_visible_clock() {
+        // (Kept under its original name so this hunk stays clear of the tests
+        // other open PRs append above it; the clock it checks is now local.)
+        // The two halves of a row's time, and the reason they differ.
+        //
+        // `datetime`, `aria-label` and `title` carry the daemon's wire value
+        // VERBATIM — an unambiguous instant, which is what a machine and a
+        // screen reader want, and what keeps the row quotable across zones. The
+        // visible text is the member's own wall clock for that same instant.
+        // Localizing the attributes too would throw away the only unambiguous
+        // value on the row; localizing NEITHER is what this slice fixed.
         let ts = "2026-07-25T03:43:12.987Z";
         // What the view's `local_clock_time` computes once the browser
         // supplies the offset; the wrapper needs a DOM, the arithmetic does
