@@ -2010,7 +2010,7 @@ async fn proxy_turns(
             )
                 .into_response()
         }
-        Err(err) => device_unreachable(daemon, &err),
+        Err(err) => device_unreachable(&daemon, &err),
     }
 }
 
@@ -2039,7 +2039,7 @@ async fn proxy_sessions_post(
             )
                 .into_response()
         }
-        Err(err) => device_unreachable(daemon, &err),
+        Err(err) => device_unreachable(&daemon, &err),
     }
 }
 
@@ -2063,7 +2063,7 @@ async fn proxy_sessions(State(state): State<Arc<AppState>>, req: Request) -> imp
             )
                 .into_response()
         }
-        Err(err) => device_unreachable(daemon, &err),
+        Err(err) => device_unreachable(&daemon, &err),
     }
 }
 
@@ -2246,7 +2246,7 @@ async fn proxy_fs_dirs(State(state): State<Arc<AppState>>, req: Request) -> impl
             )
                 .into_response()
         }
-        Err(err) => device_unreachable(daemon, &err),
+        Err(err) => device_unreachable(&daemon, &err),
     }
 }
 
@@ -2674,7 +2674,7 @@ async fn proxy_longhouse(
             )
                 .into_response()
         }
-        Err(err) => device_unreachable(daemon, &err),
+        Err(err) => device_unreachable(&daemon, &err),
     }
 }
 
@@ -2962,7 +2962,7 @@ async fn proxy_rooms_persistent(
         }
         return match upstream.send().await {
             Ok(resp) => sse_stream_response(resp),
-            Err(err) => device_unreachable(daemon, &err),
+            Err(err) => device_unreachable(&daemon, &err),
         };
     }
 
@@ -3035,7 +3035,7 @@ async fn proxy_rooms_persistent(
             let bytes = resp.bytes().await.unwrap_or_default();
             (status, [(header::CONTENT_TYPE, "application/json")], bytes).into_response()
         }
-        Err(err) => device_unreachable(daemon, &err),
+        Err(err) => device_unreachable(&daemon, &err),
     }
 }
 
@@ -3118,7 +3118,7 @@ async fn proxy_control_events(
     let url = format!("{}/v1/events{q}", daemon.base());
     match state.http.get(&url).send().await {
         Ok(resp) => sse_stream_response(resp),
-        Err(err) => device_unreachable(daemon, &err),
+        Err(err) => device_unreachable(&daemon, &err),
     }
 }
 
@@ -3167,7 +3167,7 @@ async fn proxy_events(State(state): State<Arc<AppState>>, req: Request) -> impl 
     let url = format!("{}/v1/agent/events{q}", daemon.base());
     match state.http.get(&url).send().await {
         Ok(resp) => sse_stream_response(resp),
-        Err(err) => device_unreachable(daemon, &err),
+        Err(err) => device_unreachable(&daemon, &err),
     }
 }
 
