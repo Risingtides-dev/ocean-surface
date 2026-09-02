@@ -1390,6 +1390,20 @@ fn VoicePlannerCard(
     }
 }
 
+/// Admission rule for daemon supervision status writes. The shell stamps a
+/// monotonic `revision` on every observation; a write is admitted only when
+/// it is at least as new as what the signal already holds. This closes the
+/// startup race where the async `daemon_status()` seed resolves AFTER a
+/// fresher `daemon-status` event and would otherwise pin a stale
+/// "stopped"/"unreachable" chip until the next state change.
+/// Shared by the production wiring and unit tests.
+fn daemon_status_admit(current: &Option<DaemonStatus>, incoming: &DaemonStatus) -> bool {
+    match current {
+        None => true,
+        Some(existing) => incoming.revision >= existing.revision,
+    }
+}
+
 /// Producer decision for a preview_file_intent read.
 /// Shared by the production Effect and its unit tests.
 #[derive(Debug, PartialEq, Eq)]
@@ -1477,14 +1491,23 @@ pub fn App() -> impl IntoView {
     // so the signal stays None and the indicator never mounts.
     let daemon_shell_status = RwSignal::new(None::<DaemonStatus>);
     {
+        // Both writers pass the same revision admission rule so event/seed
+        // ordering is deterministic regardless of async completion order.
         let sig = daemon_shell_status;
-        crate::host::on_daemon_status(move |s| sig.set(Some(s)));
+        crate::host::on_daemon_status(move |s| {
+            if daemon_status_admit(&sig.get_untracked(), &s) {
+                sig.set(Some(s));
+            }
+        });
         // Seed from the current status so the indicator is correct before the
-        // first on-change event (best-effort; None off-Tauri).
+        // first on-change event (best-effort; None off-Tauri). The admission
+        // check keeps a slow seed from clobbering a newer event.
         let sig = daemon_shell_status;
         wasm_bindgen_futures::spawn_local(async move {
             if let Some(s) = crate::host::daemon_status().await {
-                sig.set(Some(s));
+                if daemon_status_admit(&sig.get_untracked(), &s) {
+                    sig.set(Some(s));
+                }
             }
         });
     }
@@ -3526,16 +3549,42 @@ pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
 mod tests {
     use super::{
         append_dictation, competing_reveal_open, composer_height_px, composer_overflow_y,
-        council_open_visibility, execute_planner_workflow, initial_planner_context,
-        island_open_visibility, parse_deep_link, planner_candidates, selected_planner_context,
-        should_submit_composer_key, topmost_reveal, window_escape_should_handle, DeepLinkAction,
-        PlannerAction, PlannerContext, PlannerWorkflowFailureStage, PlannerWorkflowOps,
-        PlannerWorkflowRequest, RevealSurface, RevealVisibility, COMPOSER_MAX_HEIGHT_PX,
-        COMPOSER_MIN_HEIGHT_PX,
+        council_open_visibility, daemon_status_admit, execute_planner_workflow,
+        initial_planner_context, island_open_visibility, parse_deep_link, planner_candidates,
+        selected_planner_context, should_submit_composer_key, topmost_reveal,
+        window_escape_should_handle, DeepLinkAction, PlannerAction, PlannerContext,
+        PlannerWorkflowFailureStage, PlannerWorkflowOps, PlannerWorkflowRequest, RevealSurface,
+        RevealVisibility, COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX,
     };
     use crate::daemon::{ProjectInfo, WorktreeInfo};
+    use crate::host::DaemonStatus;
     use futures_util::future::LocalBoxFuture;
     use futures_util::FutureExt;
+
+    fn shell_status(state: &str, revision: u64) -> DaemonStatus {
+        DaemonStatus {
+            state: state.into(),
+            revision,
+            pid: None,
+        }
+    }
+
+    #[test]
+    fn daemon_status_admission_rejects_stale_startup_snapshot() {
+        let current = Some(shell_status("running", 2));
+        assert!(!daemon_status_admit(&current, &shell_status("stopped", 1)));
+    }
+
+    #[test]
+    fn daemon_status_admission_accepts_newer_recovery_event() {
+        let current = Some(shell_status("unreachable", 4));
+        assert!(daemon_status_admit(&current, &shell_status("running", 5)));
+    }
+
+    #[test]
+    fn daemon_status_admission_accepts_initial_snapshot() {
+        assert!(daemon_status_admit(&None, &shell_status("running", 1)));
+    }
 
     fn planner_project(id: &str, root: &str, worktrees: &[&str]) -> ProjectInfo {
         ProjectInfo {

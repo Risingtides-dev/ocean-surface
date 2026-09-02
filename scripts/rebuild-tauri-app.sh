@@ -53,7 +53,10 @@ BIN="$BUNDLE/Contents/MacOS/ocean-tauri"
 [[ -x "$BIN" ]] || fail "no executable at $BIN"
 for needle in "refusing to open an executable file" "path escapes workspace root" \
               "not a room authority mutation route"; do
-  if ! strings "$BIN" 2>/dev/null | grep -qF "$needle"; then
+  # No `grep -q` here: under `pipefail` its early exit SIGPIPEs `strings` on a
+  # 17 MB binary and the pipeline reads as "guard missing" while the string is
+  # present. `grep -c` reads to EOF, so the status is the match, not the race.
+  if [[ "$(strings "$BIN" 2>/dev/null | grep -cF -- "$needle")" == "0" ]]; then
     fail "built binary is missing an expected guard ('$needle') — refusing to install."
   fi
 done

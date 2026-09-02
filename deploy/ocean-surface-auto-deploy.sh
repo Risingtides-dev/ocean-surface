@@ -15,10 +15,13 @@ MARKER="$STATE_DIR/deployed-rev"
 LOCK_DIR="$STATE_DIR/auto-deploy.lock"
 WORKTREE_ROOT="${OCEAN_SURFACE_WORKTREE_ROOT:-/private/tmp/ocean-surface-auto-deploy}"
 PROXY_LABEL="dev.risingtides.ocean-surface-proxy"
-TAURI_LABEL="dev.ocean.surface-tauri"
-TAURI_STALE_MARKER="$STATE_DIR/tauri-stale"
-# TASK-87: a RESTART picks up new web assets (frontendDist), but NOT changes to
-# the shell's own Rust code — that needs `cargo tauri build`, which this rail
+# The desktop shell (crates/ocean-tauri) serves this rail's promoted release
+# from $STATE_DIR/current at request time (live_surface.rs), so a promote
+# needs no shell restart: a hidden Ocean window reloads itself, a visible one
+# receives `surface-updated` and Cmd+R re-reads the bundle. Only the shell's
+# own Rust changes still need a rebuild — see note_tauri_rebuild_needed.
+# TASK-87: live serving covers new web assets, but NOT changes to the shell's
+# own Rust code — that needs `cargo tauri build`, which this rail
 # deliberately does not run (it must never rebuild over a running app, and a
 # release bundle build is minutes long). When the shell's source changes we
 # therefore record a distinct marker: staleness that a restart CANNOT clear.
@@ -59,9 +62,14 @@ restart_proxy() {
   launchctl kickstart -k "$DOMAIN/$PROXY_LABEL"
 }
 
-# Restart Tauri only if it is not currently running — never kill an active
-# operator session. When Tauri IS running, leave a staleness marker so the
-# next Tauri start (or a future surface-side check) can act on it.
+# The desktop shell reads the promoted release live; no restart is owed for a
+# web-only promote. Say so in the log so a reader does not go looking for a
+# launchd job that was never there.
+note_tauri_live_surface() {
+  local revision="${1:-}"
+  echo "TAURI: no restart needed — the shell serves $STATE_DIR/current live ($revision)"
+}
+
 # TASK-87: record when the shell's own source changed since the last deploy, so
 # an owed `cargo tauri build` is VISIBLE instead of silent. Compares the
 # previously deployed revision against the new one; on the first deploy (no
@@ -71,26 +79,13 @@ note_tauri_rebuild_needed() {
   [[ -n "$prev" ]] || return 0
   [[ "$prev" == "$revision" ]] && return 0
   # Only ask for a rebuild when the shell's own sources moved. Frontend-only
-  # changes are covered by the dist sync + restart above.
+  # changes reach the shell through live serving of $STATE_DIR/current.
   local changed
   changed="$(git -C "$REPO" diff --name-only "$prev" "$revision" -- crates/ocean-tauri 2>/dev/null || true)"
   if [[ -n "$changed" ]]; then
     printf '%s\n' "$revision" > "$TAURI_REBUILD_MARKER"
     echo "TAURI: crates/ocean-tauri changed ($prev -> $revision) — REBUILD REQUIRED"
     echo "TAURI: a restart will NOT pick this up; run scripts/rebuild-tauri-app.sh"
-  fi
-}
-
-maybe_restart_tauri() {
-  [[ "${OCEAN_SURFACE_NO_RESTART:-0}" == "1" ]] && return 0
-  local pid revision="${1:-}"
-  pid="$(launchctl list "$TAURI_LABEL" 2>/dev/null | awk 'NR>1{print $1}' || true)"
-  if [[ -z "$pid" || "$pid" == "-" ]]; then
-    launchctl kickstart -k "$DOMAIN/$TAURI_LABEL" || true
-    rm -f "$TAURI_STALE_MARKER"
-  else
-    printf '%s\n' "$revision" > "$TAURI_STALE_MARKER"
-    echo "TAURI: running as pid $pid — staleness marker set, restart deferred"
   fi
 }
 
@@ -182,7 +177,7 @@ promote_bundle() {
   validate_bundle "$repo_dist"
   rebuild_extension "$source"
   note_tauri_rebuild_needed "$previous_revision" "$revision"
-  maybe_restart_tauri "$revision"
+  note_tauri_live_surface "$revision"
 
   echo "DEPLOYED: $revision -> $CURRENT_LINK"
 }
