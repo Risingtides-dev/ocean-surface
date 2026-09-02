@@ -261,16 +261,19 @@ It supports:
 
 ### Federated Rooms
 
-Shipped. A room becomes federated when its owner mints an invite
+Shipped when the daemon has federation configured. With that configuration, a
+room becomes federated when its owner mints an invite
 (`POST /v1/rooms/persistent/{key}/invites`, which also registers the room with
 the Bedrock federation control plane) and another daemon redeems it
-(`POST /v1/rooms/persistent/invites/redeem`). The bridge keeps a durable cursor
-on Bedrock's room stream; the access projection moves through `connecting`,
-`live` and `recovering` as it does. Federated outbox items render outside the
-confirmed transcript; pending items are informational and only failed items
-expose retry. Summaries, artifacts and attachments write to this daemon's
-store only and stay writable through `connecting` and `recovering`; the
-composer, invites and repo commands need `local` or `live`.
+(`POST /v1/rooms/persistent/invites/redeem`). Without federation configuration,
+invite minting answers `503 federation_unavailable` and the room remains Local;
+the failed request does not convert it. The bridge keeps a durable cursor on
+Bedrock's room stream; the access projection moves through `connecting`, `live`
+and `recovering` as it does. Federated outbox items render outside the confirmed
+transcript; pending items are informational and only failed items expose retry.
+Summaries, artifacts and attachments write to this daemon's store only and stay
+writable through `connecting` and `recovering`; the composer, invites and repo
+commands need `local` or `live`.
 
 ---
 
@@ -301,10 +304,12 @@ streams directly to the daemon without a proxy intermediary.
 Two paths exist. Inside one daemon, the operator tells the other human the
 room key and they join via the rail's "Join room" input (`POST
 /v1/rooms/persistent/{key}/participants` with `{ id, display_name, kind }`).
-Across daemons, the owner mints an invite and shares its `onboard_url`; the
-other daemon redeems it and the room federates. Bedrock-side operator rooms
-(public discovery and operator-targeted invites) are landing in ocean-bedrock
-(#117) and have no surface yet.
+Across daemons, when federation is configured, the owner mints an invite and
+shares its `onboard_url`; the other daemon redeems it and the room federates.
+Without that configuration the mint is a `503 federation_unavailable` and no
+cross-daemon invitation exists. Bedrock-side operator rooms (public discovery
+and operator-targeted invites) are landing in ocean-bedrock (#117) and have no
+surface yet.
 
 ---
 
@@ -312,8 +317,12 @@ other daemon redeems it and the room federates. Bedrock-side operator rooms
 
 ### Porting an Existing Agent
 
-An agent package already registered with the daemon (visible in
-`GET /v1/agents`) can be authorized for a room:
+This mutating flow is available only through the authenticated browser PWA
+proxy. Tauri and the extension render the authorization state read-only because
+`authority_mutations_supported_on_this_host` is false on those hosts; they do
+not receive or relay the authority credential. In the browser PWA, an agent
+package already registered with the daemon (visible in `GET /v1/agents`) can be
+authorized for a room:
 
 1. Human opens the room-agent authorization panel and selects the package.
 2. In a Local room with no binding, the surface calls
@@ -396,4 +405,4 @@ The families the surface calls:
 | Artifacts and summary | `GET/POST …/{key}/artifacts[/{id}[/amend]]`, `POST …/{key}/summarize` |
 | Attachments | `GET/POST/DELETE …/{key}/attachments[/{id}]` |
 | Workspace and repo | `GET …/{key}/workspace`, `GET/POST …/{key}/workspace/{leaf}` (an allowlisted proxy to the room's Bedrock container: execs, files, ports, secrets, repo bind/clone/build/ci) |
-| Identity catalog | `GET /v1/agents`, `GET/PUT/DELETE /v1/agents/{name}` |
+| Identity catalog | `GET/POST /v1/agents`, `GET/PUT/DELETE /v1/agents/{name}` |

@@ -5853,8 +5853,11 @@ worktree:  docs/rooms-product-contract-truth
 type:      [bug report]
 area:      [review]
 
-Closed the second Codex review pass on the Rooms product contract. Creation now
+Closed the final Codex review pass on the Rooms product contract. Creation now
 states that the human must explicitly select Join room, and an empty room omits
-both SSE cursor forms until a real message sequence exists. Docs only; no UI,
-daemon, deployment, or production state changed.
+both SSE cursor forms until a real message sequence exists. Agent authorization
+is scoped to the authenticated browser PWA proxy, Tauri and extension are
+read-only, invite minting is conditional on configured federation, and the API
+summary includes agent-package creation. Docs only; no UI, daemon, deployment,
+or production state changed.
 _________________________________________________________________________________ 21:13 docs/rooms-product-contract-truth
