@@ -7007,3 +7007,96 @@ restored. macOS recipe in the PR; no live check ran here. Gate green: all seven
 frozen commands, 1329 host assertions across 14 binaries, plus ocean-tauri fmt,
 `clippy --all-targets -D warnings` and 34 tests.
 _________________________________________________________________________________ 05:09 cloud/surface-desktop-parity-deeplink
+time:      [07:01] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-desktop-parity]
+type:      bug-report
+area:      frontend
+
+Review found a real escape past the allowlist the desktop operator forwarder
+exists to be, and it is worth the ledger because the lesson is about mirroring.
+`%2e%2e` is not `..` to a string comparison but it IS to the URL parser, which
+normalises the escape and collapses the segment. Measured against `url` 2.x
+rather than argued: `/v1/rooms/persistent/team/agents/%2e%2e` resolves to
+`/v1/rooms/persistent/team/`, while `%2F` is left alone. So a `DELETE` on that
+path passed the literal dot-segment check, passed the six-route allowlist as a
+non-empty member id, and would have carried the mode-0600 operator credential
+to a destructive route on no allowlist at all. The proxy never had this hole:
+`has_dot_segment` runs there on axum's already-DECODED wildcard capture, before
+the allowlist. This command mirrored the allowlist and not that guard, which is
+the shape of the mistake — a mirror copied at the layer that was visible and
+not at the layer that mattered, where the proxy's decode had already happened
+for free. Closed twice over on purpose. Segments are decoded before the dot
+test, and any run of dots is refused rather than just `.` and `..`, because
+refusing the whole shape leaves no edge to re-derive. Then the built URL is
+re-parsed and the request refused unless its path still equals the one the
+allowlist approved, BEFORE the credential is read — so a path the parser would
+rewrite never reaches the key. That second check is the one that matters
+beyond this instance: it makes the whole normalisation class inert, and the
+next such rule arrives as a dependency bump rather than as a diff in this file.
+The second finding was a shape error rather than a hole: a stub returning `Err`
+off unix meant a Windows build would render Authorize, suspend, resume and
+revoke over a credential that could never be read, every action guaranteed to
+fail, which is precisely the inverse of the platform contract's absence-not-
+errors rule. Hiding the controls needs the bundle to know the shell's OS and a
+synchronous render-time predicate cannot learn it without machinery this lane
+could not exercise, so the crate now refuses to build for a non-unix target
+with a compile error naming what such a build needs — an ACL custody
+equivalent and a capability handshake. Linux is unix; nothing that has ever
+been built regresses. `crates/ocean-tauri` is ungated by CI, so the surface's
+own guard now scans the shell for both dot-segment holds and all four custody
+conditions: that scan is the only place this repo's gate sees any of it. The
+mutation was run — restoring the literal-only check reds the new test alone,
+with the other seven transport tests green — and the new tests also pin that
+legitimate encoded routes still forward, because a guard that blocks the thing
+it protects is not a fix. Gate green: all seven frozen commands, 1319 host
+assertions, plus ocean-tauri fmt, `clippy --all-targets -D warnings` and 36
+tests.
+_________________________________________________________________________________ 07:01 cloud/surface-desktop-parity
+
+time:      [07:01] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-desktop-parity-deeplink]
+type:      bug-report
+area:      frontend
+
+Two review findings on the room deep link, both real, both about trusting a
+name for something it does not mean. The first: a room key was being validated
+by the SESSION id rule. A daemon `RoomKey` deserializes from a bare string,
+`create_room` derives its key with `slugify` which has no length bound, and
+`encode` passes `-`, `.`, `_` and `~` through unescaped — so a room made by a
+CLI or agent path with a dot in its key, or one with a long name, shows in the
+rooms list and opens on a click while its deep link was dropped in silence.
+Room keys now get their own validator admitting the RFC 3986 unreserved set,
+which is exactly what `encode` leaves alone: a key it accepts is one the URL
+builder does not have to change to address, and that is the line worth
+drawing rather than an ad-hoc "also allow dots". Percent-encoding stays
+rejected, because admitting it re-opens the structure smuggling TASK-80
+closed; and a key that is nothing but dots is refused, because `encode` leaves
+a dot VERBATIM and `..` would become a real path segment in the daemon URL —
+the same reason the session rule excluded dots in the first place, which is
+why this is a new validator rather than a loosened one. The session rule is
+untouched and a test pins that the widening did not leak into it. The second:
+`rooms_loaded` is not freshness. `finish_rooms_fetch` sets it on any settled
+request, success or failure; nothing ever clears it; `list` is replaced only
+on success; and it lives on the App-scope handle that outlives the workspace.
+So `rooms_loaded == true` is equally true of a list fetched ten minutes ago
+and of an empty list a failed fetch left behind, and a deep link answering out
+of either reports "no room named X" for a room that exists — worse than saying
+nothing, because it sends someone hunting. A new `list_settled` counter is
+bumped once per request that was still current when it landed, failures
+included: a reader waiting on freshness has to be released by a fetch that
+could not answer, or a daemon that is down leaves it pending forever. The link
+records the counter when queued and waits for it to move, so its answer always
+comes from a list fetched after the link arrived. That forced one more
+distinction the finding implied but did not state: releasing on a FAILED
+settle would answer out of exactly the list that could not be refreshed, so
+that case now says it could not load the room list rather than denying the
+room. The persisted restore is deliberately unchanged — it answers silently,
+so a stale answer costs nothing, and that asymmetry between the two sources is
+now stated in the predicate and pinned. Both reproduced red before fixing.
+`list_settled` sits beside its sibling `list_request_ticket` rather than at the
+end of `Rooms`, following the anchor discipline the relocation commit on this
+branch established. Gate green: all seven frozen commands, 1335 host
+assertions across 14 binaries, plus ocean-tauri fmt, clippy and 36 tests.
+_________________________________________________________________________________ 07:01 cloud/surface-desktop-parity-deeplink
