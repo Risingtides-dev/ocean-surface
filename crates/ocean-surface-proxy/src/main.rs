@@ -2101,7 +2101,7 @@ async fn proxy_get_json(state: &AppState, daemon: &ResolvedDaemon, path: &str) -
             )
                 .into_response()
         }
-        Err(err) => device_unreachable(&daemon, &err),
+        Err(err) => device_unreachable(daemon, &err),
     }
 }
 
@@ -2131,7 +2131,7 @@ async fn proxy_post_json(
             )
                 .into_response()
         }
-        Err(err) => device_unreachable(&daemon, &err),
+        Err(err) => device_unreachable(daemon, &err),
     }
 }
 
@@ -2408,7 +2408,7 @@ async fn proxy_method_json(
             )
                 .into_response()
         }
-        Err(err) => device_unreachable(&daemon, &err),
+        Err(err) => device_unreachable(daemon, &err),
     }
 }
 
