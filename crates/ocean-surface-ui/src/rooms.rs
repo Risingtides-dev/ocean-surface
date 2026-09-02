@@ -922,6 +922,20 @@ pub struct Rooms {
     /// is what left a long room's oldest painted row reading as the first
     /// message in it. Read through [`Rooms::older_transcript_available`].
     older_cursor: RwSignal<Option<u64>>,
+    /// Whether a backward read has ANSWERED for this room — the second half of
+    /// the affordance's state, and the whole reason it can say something rather
+    /// than disappear.
+    ///
+    /// `older_cursor` alone cannot: `None` is FOUR situations at once — no room
+    /// open, hydration still walking, a page that provably reached the start of
+    /// the log, and a walk that never ran. The first two must render nothing and
+    /// the third must say the beginning has been reached, and telling them apart
+    /// is exactly what "the oldest row on screen is the first message in this
+    /// room" needs before it may be claimed. Set wherever a backward page has
+    /// been read to completion, or where the first paint provably held the whole
+    /// log; cleared with the cursor on the way out of a room. See
+    /// [`older_history_state`], which is where the two are combined.
+    older_settled: RwSignal<bool>,
     /// Whether an on-demand older page is in flight, so a second press cannot
     /// fire a second request against a cursor the first has not yet moved —
     /// which would prepend the same page twice were `prepend_transcript_page`
@@ -1147,6 +1161,7 @@ impl Rooms {
             transcript: RwSignal::new(Vec::new()),
             resume_seq: RwSignal::new(None),
             older_cursor: RwSignal::new(None),
+            older_settled: RwSignal::new(false),
             older_in_flight: RwSignal::new(false),
             status: RwSignal::new(String::new()),
             generation: RwSignal::new(0),
@@ -1266,6 +1281,10 @@ impl Rooms {
         // completion re-checks `room_is_current` and writes nothing, so nothing
         // else will ever lower the flag.
         self.older_cursor.set(None);
+        // Cleared with the cursor, and for the stronger reason: left standing,
+        // the next room opened would claim its first painted row is the start
+        // of the log for as long as its own hydration takes to answer.
+        self.older_settled.set(false);
         self.older_in_flight.set(false);
         self.access.set(None);
         self.closed.set(false);
@@ -1766,8 +1785,19 @@ impl Rooms {
                     // Unconditional on closedness, unlike the tail below: a
                     // soft-closed room is the one that needs this most, being
                     // the one with no tail to bring it anything else.
-                    if let Some(before_seq) = backfill_from {
-                        me.backfill_open_transcript(&key, generation_id, before_seq);
+                    match backfill_from {
+                        Some(before_seq) => {
+                            me.backfill_open_transcript(&key, generation_id, before_seq)
+                        }
+                        // A first page shorter than the window provably reached
+                        // the start of the log — `hydration_backfill_start` says
+                        // so at length — so nothing is walking and nothing ever
+                        // will. That is a SETTLED answer, and the only one that
+                        // arrives without a second request: without it, every
+                        // short room would render the affordance's "no room
+                        // open / still loading" state forever, which is exactly
+                        // the silence this slice exists to remove.
+                        None => me.older_settled.set(true),
                     }
                     // Not started rather than started-and-stopped: `/events`
                     // 404s a closed room and the loop below treats every
@@ -2387,26 +2417,31 @@ impl Rooms {
     /// parked in [`Rooms::older_cursor`] now, and
     /// [`Rooms::load_older_transcript_page`] replays one page from there per
     /// press. History past the budget is a press away rather than gone, and a
-    /// room whose walk provably reached the start of the log parks `None` and
-    /// grows no affordance at all.
+    /// room whose walk provably reached the start of the log parks `None` —
+    /// which [`older_history_state`] now reads as `ReachedBeginning` rather than
+    /// as nothing, so the top of the transcript says which of the two edges it
+    /// is instead of going quiet either way.
     ///
-    /// The second stands, and is the harder one to design for: a row INSIDE the
-    /// window can render nowhere at all. `rooms_workspace` builds the main list
-    /// from `partition_thread_messages(&transcript, 0)`, whose
-    /// `roots` keep only rows carrying no `thread_parent_seq`; a reply
-    /// whose ROOT fell outside the window is dropped from that list, and
-    /// `thread_root_for` cannot find the missing root either, so no thread pane
-    /// opens on it. A reply at seq 2500 to a root at seq 800 is invisible with
-    /// nothing implying it exists. The unbounded catch-up this replaced could
-    /// not leave that standing — the root arrived eventually — so it is new, and
-    /// it is the reason the follow-on is more than a scroll trigger.
+    /// The second is closed too, and it was the harder one: a row INSIDE the
+    /// window could render nowhere at all. `rooms_workspace` built the main list
+    /// from `partition_thread_messages(&transcript, 0)`, whose `roots` keep only
+    /// rows carrying no `thread_parent_seq`; a reply whose ROOT fell outside the
+    /// window was dropped from that list, and `thread_root_for` could not find
+    /// the missing root either, so no thread pane opened on it. A reply at seq
+    /// 2500 to a root at seq 800 was invisible with nothing implying it existed.
+    /// The unbounded catch-up this replaced could not leave that standing — the
+    /// root arrived eventually — so it arrived with the tail anchor.
     ///
-    /// What closes it is an answer for the orphaned reply — either fetching a
-    /// root the window missed or rendering the reply where the operator can see
-    /// it — and pressing "load older" enough times is not that answer: it walks
-    /// back a page at a time and cannot jump to one named root. Until then a
-    /// very long LIVE room trades unbounded eventual history for a correct first
-    /// paint plus a way back, and a very long SOFT-CLOSED room comes out
+    /// Pressing "load older" was never the answer to it: the walk goes back a
+    /// page at a time and cannot jump to one named root. The answer is
+    /// `main_transcript_rows`, which keeps such a reply in the MAIN list at its
+    /// own position in time, under a note saying its root is not loaded. The
+    /// press then stops being the fix and becomes what it always was — the way
+    /// to bring the root in, at which point the reply rejoins its thread and
+    /// leaves that list on its own.
+    ///
+    /// So a very long LIVE room trades unbounded eventual history for a correct
+    /// first paint plus a way back, and a very long SOFT-CLOSED room comes out
     /// strictly ahead: it opens no tail at all, so its newest rows were never
     /// merely late, they were unreachable.
     ///
@@ -2463,8 +2498,9 @@ impl Rooms {
                     // cursor it stops holding is the only route left to the rows
                     // behind it. Parked unconditionally: the same call answers
                     // `None` when the daemon said the log ran out, which is the
-                    // room that must NOT grow an affordance.
-                    me.older_cursor.set(transcript_older_cursor(
+                    // room that must NOT grow an affordance — and, since this
+                    // page ANSWERED, the room that may say so out loud.
+                    me.settle_older_cursor(transcript_older_cursor(
                         page.has_more,
                         page.prev_seq,
                         reached_back_to,
@@ -2534,13 +2570,34 @@ impl Rooms {
         }
     }
 
-    /// Whether older history exists that nothing on screen reaches — the one
-    /// condition the workspace's "load older" affordance renders on. Reactive:
-    /// the hydration walk publishes this signal several page-loads after the
-    /// first paint, so a view reading it untracked would have asked before the
-    /// answer existed.
-    pub(crate) fn older_transcript_available(&self) -> bool {
-        self.older_cursor.get().is_some()
+    /// Publish what a COMPLETED backward page answered: where an on-demand read
+    /// resumes, and — inseparably — that a read has answered at all.
+    ///
+    /// One method rather than two `set` calls at each site, because the two
+    /// facts are one fact and splitting them is the failure this whole area
+    /// keeps producing. A cursor written without the flag leaves a room that
+    /// provably reached the start of its log rendering the "still loading"
+    /// silence forever, which is #190's symptom with a fresh coat on it; the
+    /// flag written without the cursor claims a beginning that a press could
+    /// still walk past. Neither is reachable from here.
+    ///
+    /// Deliberately NOT used by [`Rooms::park_older_cursor`], which exists for
+    /// the opposite case: a request that never answered parks the page it was
+    /// reading and settles nothing, because a flaky network is not evidence
+    /// about the shape of the log.
+    fn settle_older_cursor(&self, cursor: Option<u64>) {
+        self.older_cursor.set(cursor);
+        self.older_settled.set(true);
+    }
+
+    /// What the workspace's older-history affordance renders — see
+    /// [`OlderHistory`] and [`older_history_state`].
+    ///
+    /// Reactive on BOTH halves: the hydration walk publishes them several
+    /// page-loads after the first paint, so a view reading either untracked
+    /// would have asked before the answer existed.
+    pub(crate) fn older_history(&self) -> OlderHistory {
+        older_history_state(self.older_cursor.get(), self.older_settled.get())
     }
 
     /// Whether the operator's older-history press is still in flight, so the
@@ -2592,7 +2649,7 @@ impl Rooms {
                 let reached_back_to = first_transcript_seq(&page.transcript);
                 me.transcript
                     .update(|transcript| prepend_transcript_page(transcript, page.transcript));
-                me.older_cursor.set(transcript_older_cursor(
+                me.settle_older_cursor(transcript_older_cursor(
                     page.has_more,
                     page.prev_seq,
                     reached_back_to,
@@ -3788,6 +3845,41 @@ fn transcript_older_cursor(
         return None;
     }
     prev_seq.or(page_reached_back_to)
+}
+
+/// What the transcript can say about the history ABOVE its oldest painted row.
+///
+/// Three states because the honest answer has three, and the affordance that
+/// renders it must not collapse them: a room still hydrating has not earned the
+/// claim that its oldest row is the first message in it, and a room that
+/// provably reached the start of its log has earned exactly that and should say
+/// so rather than silently stop offering a button.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OlderHistory {
+    /// No room open, or no backward read has answered yet. Claim nothing.
+    Unknown,
+    /// Older rows exist and nothing on screen reaches them.
+    Available,
+    /// A page provably reached the start of the log: the oldest painted row IS
+    /// the first message in this room.
+    ReachedBeginning,
+}
+
+/// Combine the parked cursor with whether a backward read has answered.
+///
+/// A cursor dominates: it is only ever written from a page the daemon served or
+/// from a request that dropped mid-flight, and either way rows behind the paint
+/// are known to exist. `None` is the ambiguous half, and the flag is the whole
+/// question — the same `None` means "reached the start of the log" after a page
+/// has answered and "we have not asked yet" before one has. Rendering the
+/// second as the first is how a room three seconds into hydration would tell an
+/// operator its first painted row is the beginning of the room.
+pub(crate) fn older_history_state(cursor: Option<u64>, settled: bool) -> OlderHistory {
+    match (cursor, settled) {
+        (Some(_), _) => OlderHistory::Available,
+        (None, true) => OlderHistory::ReachedBeginning,
+        (None, false) => OlderHistory::Unknown,
+    }
 }
 
 /// Where a catch-up read continues after the page it just ingested, or `None`
@@ -5661,6 +5753,102 @@ mod tests {
                 transcript_older_cursor(false, Some(3001), Some(3002)),
             );
         }
+    }
+
+    /// The affordance's three states, and the one that did not exist before
+    /// this slice.
+    ///
+    /// `older_cursor` alone answers two questions with one `None`: "a page
+    /// reached the start of the log" and "nothing has asked yet". #192 rendered
+    /// both as no affordance at all, so a room that provably held its whole
+    /// history looked exactly like a room three seconds into hydration — and
+    /// the claim an operator actually wanted, that the oldest row on screen IS
+    /// the first message in the room, was the one thing the transcript could
+    /// not make.
+    #[test]
+    fn the_older_history_state_separates_reached_the_start_from_not_asked_yet() {
+        assert_eq!(
+            older_history_state(None, false),
+            OlderHistory::Unknown,
+            "before a backward read answers, the transcript knows nothing about \
+             what is above it and must claim nothing",
+        );
+        assert_eq!(
+            older_history_state(None, true),
+            OlderHistory::ReachedBeginning,
+            "a page that answered with no cursor reached the start of the log, \
+             and that is the whole claim: this row IS the first message",
+        );
+        assert_eq!(
+            older_history_state(Some(3801), true),
+            OlderHistory::Available,
+        );
+        assert_eq!(
+            older_history_state(Some(3801), false),
+            OlderHistory::Available,
+            "a cursor DOMINATES the flag. It is written from a page the daemon \
+             served or from a request that dropped mid-flight, and either way \
+             rows behind the paint are known to exist — a dropped request is \
+             the case with no settled read behind it, and the press it offers \
+             is exactly the retry that room needs",
+        );
+    }
+
+    /// The states are exclusive by construction, on every input pair. The shape
+    /// this replaced — two independent booleans a view reads in sequence —
+    /// admits `available && reached_beginning`, which renders a "load older"
+    /// button above "beginning of the room".
+    #[test]
+    fn no_pair_of_inputs_produces_two_states_at_once() {
+        for cursor in [None, Some(0u64), Some(3801)] {
+            for settled in [false, true] {
+                let state = older_history_state(cursor, settled);
+                assert_eq!(
+                    state == OlderHistory::Available,
+                    cursor.is_some(),
+                    "Available is exactly a parked cursor, for {cursor:?}/{settled}",
+                );
+                assert_eq!(
+                    state == OlderHistory::ReachedBeginning,
+                    cursor.is_none() && settled,
+                    "ReachedBeginning is exactly an answered read with no \
+                     cursor, for {cursor:?}/{settled}",
+                );
+            }
+        }
+    }
+
+    /// The two halves of the transcript's older edge are one rule, walked end
+    /// to end: what the daemon says about a page becomes what the affordance
+    /// renders, with no state in between that can disagree.
+    #[test]
+    fn a_daemons_page_answer_reaches_the_affordance_state() {
+        let settled_state = |has_more, prev_seq, reached_back_to| {
+            older_history_state(
+                transcript_older_cursor(has_more, prev_seq, reached_back_to),
+                true,
+            )
+        };
+
+        assert_eq!(
+            settled_state(false, Some(400), Some(400)),
+            OlderHistory::ReachedBeginning,
+            "`has_more` false on a BACKWARD page means no older rows exist — \
+             the room whose oldest painted row is genuinely its first message",
+        );
+        assert_eq!(
+            settled_state(true, Some(3801), Some(3802)),
+            OlderHistory::Available,
+        );
+        assert_eq!(
+            settled_state(true, None, None),
+            OlderHistory::ReachedBeginning,
+            "a `has_more` page naming no cursor and serving no rows leaves \
+             nothing to replay, so there is no press to offer. Saying the \
+             beginning is reached overstates it by one page and is still the \
+             better of the two: the alternative is the silence that reads as \
+             `still loading` forever",
+        );
     }
 
     /// Ingest: a backward page lands in FRONT of the paint, keeps the vector

@@ -205,9 +205,15 @@ fn the_backward_walk_runs_on_every_open_and_pages_on_the_daemons_cursor() {
          either strands rows behind it or spends a request per open to be told \
          there is nothing there",
     );
+    // The `Some` arm only. This was an `if let` until the affordance grew a
+    // third state and the `None` arm gained a body of its own (a short first
+    // page is a SETTLED answer — it provably held the whole log — and the
+    // affordance has to be able to say so instead of rendering the same silence
+    // as a room still hydrating). Quoting the whole `if let` made this red for
+    // that slice while the walk it guards was untouched.
     assert!(
         rooms.contains(
-            "ifletSome(before_seq)=backfill_from{me.backfill_open_transcript(&key,generation_id,before_seq);}"
+            "matchbackfill_from{Some(before_seq)=>{me.backfill_open_transcript(&key,generation_id,before_seq)}"
         ),
         "`open_room` must start the backward walk from the page it just \
          painted — anchoring the first paint at the tail is what makes every \

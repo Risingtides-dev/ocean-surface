@@ -304,6 +304,28 @@ reader is at/near the bottom. Scrolled-up history reading is never yanked; a
 zero-height sticky `↓ latest` affordance returns and re-pins. Session switches
 always re-pin to the latest message.
 
+**Older history is askable, and the edge is marked (2026-09-02).** Hydration
+opens a room at its NEWEST page and walks back a bounded 1000 + 5×200 rows
+through `GET /v1/rooms/persistent/{key}/snapshot?before_seq=…`. Past that
+budget an `↑ Load older messages` control at the top of the scroll container
+fetches one more backward page per press, disabled while a page is in flight,
+replaying the same cursor the walk parks. When a page provably reaches the start
+of the log the control is replaced by a `Beginning of the room` line, so the top
+of the transcript always says which of the two it is. A room still hydrating
+says neither — the three states are distinct on purpose, because the silence
+that used to stand for "no older history" was the same silence that stood for
+"nothing has asked yet".
+
+**A reply whose root is not loaded renders inline.** The main list keeps every
+non-reply plus every reply whose root is absent from the loaded rows, so a reply
+at seq 2500 to a root at seq 800 appears at its own position in time carrying a
+note — `Reply to an older message — load older messages to see it`, or `Reply to
+a message no longer in this room` once the log's start has been read. Before
+this it rendered NOWHERE: the main list dropped it for carrying a
+`thread_parent_seq`, and no thread pane could open on a root the window never
+fetched. The same rule covers a reply whose parent is itself a reply, which no
+thread pane can open on either.
+
 ### Composer
 
 The message composer is enabled only for `Local` and `Live` access projections.
