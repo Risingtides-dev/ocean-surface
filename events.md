@@ -886,7 +886,7 @@ ________________________________________________________________________________
 time:      [7:37pm] [07-01-26]
 agent:     [claude] [fable 5]
 worktree:  [main]
-type:      [review]
+type:      [bug report]
 area:      [infra]
 
 Lane G1 leak-closure prep for the Basic-auth credential removed at HEAD by
@@ -5831,3 +5831,18 @@ sections as current. Docs only; no code, no CSS, no test
 changed — the 57 orphaned `.rooms-*` rules in `styles/panels.css` and the
 `app.rs` test pinning them are a separate cleanup slice.
 _________________________________________________________________________________ 20:07 docs/rooms-product-contract-truth
+
+time:      [20:16] [01-09-26]
+agent:     [codex] [gpt-5]
+worktree:  docs/rooms-product-contract-truth
+type:      [review]
+area:      [docs]
+
+Addressed the five Codex findings on the Rooms product contract. Creation now
+documents the separate human join, onboarding hydrates through `/snapshot`,
+room turns remain wholly daemon-owned, obsolete Future headings and invite
+claims are gone, and both agent workflows use bootstrap or federated membership
+followed by the digest-bound authorization ceremony instead of the legacy bare
+participant POST. Docs only; no UI, daemon, deployment, or production state
+changed.
+_________________________________________________________________________________ 20:16 docs/rooms-product-contract-truth

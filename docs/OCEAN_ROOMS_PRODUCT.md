@@ -26,8 +26,10 @@ is optional and stored verbatim (see Agent Wake Policy). `workspace_root` is
 optional on the wire but load-bearing for the product: when set, a room-bound
 agent turn resolves its project and `cwd` from it; when absent, the daemon
 leaves the room unbound and **every agent turn in it fails closed with
-`workspace_unavailable`**. The creating human is automatically added as a
-`RoomParticipant { kind: Human }`.
+`workspace_unavailable`**. `CreateRoomBody` carries no participant identity,
+so creation does not add the current human to the roster. The surface follows
+a successful create with the ordinary participant join below before treating
+the creator as a room member.
 
 Status 2026-09-01: the surface's create form sends `key`, `name` and
 `trigger_policy` only (`crates/ocean-surface-ui/src/rooms.rs`, `CreateRoomBody`),
@@ -48,8 +50,10 @@ The daemon adds the participant to the roster and broadcasts a `room_access`
 event to all connected SSE subscribers, which replaces the surface's access
 projection behind the room-generation guard.
 
-Until invite/redeem routes exist, room membership is open — any surface that
-knows the room key can join. This is acceptable for G1 (trusted team use).
+On one daemon, a human who knows the room key can use this local join path.
+Across daemons, the owner mints an invite and the joining daemon redeems it;
+the invite/redeem flow establishes the federated membership and access
+projection rather than calling this participant route directly.
 
 ### 3. Opening a Room
 
@@ -129,14 +133,21 @@ Participants can be removed via `DELETE /v1/rooms/persistent/{key}/participants/
 ### Binding an Agent to a Room
 
 Agents are selected from the daemon-owned `/v1/agents` identity catalog — never
-created as free-text. To add an agent to a room:
+created as free-text. A roster row alone is not execution authority. The
+surface resolves the selected package through
+`GET /v1/rooms/persistent/{key}/agents/preview/{package}` and submits the
+operator-reviewed activation, context, memory and capability decision through
+`POST /v1/rooms/persistent/{key}/agents`.
 
-```
-POST /v1/rooms/persistent/{key}/participants
-{ "id": "builder", "kind": "agent", "display_name": "Builder" }
-```
-
-The daemon validates that `id` resolves to a known agent identity.
+For the first agent in a Local room, the operator-authenticated
+`POST /v1/rooms/persistent/{key}/agents/bootstrap` atomically establishes the
+server-derived owner/agent membership needed for that review; it does not
+authorize the package by itself. In a federated room,
+`POST /v1/rooms/persistent/{key}/members/agents` first registers the
+non-authorizing membership projection, after which the same preview and
+authorization ceremony applies. Reauthorization uses
+`POST /v1/rooms/persistent/{key}/agents/{member}/reauthorize` with a fresh
+decision id.
 
 ### Agent Wake Policy
 
@@ -245,8 +256,6 @@ It supports:
 - Send on Enter, newline on Shift+Enter
 - Pending outbox state with retry on failure
 
-### Federated Rooms (Future)
-
 ### Federated Rooms
 
 Shipped. A room becomes federated when its owner mints an invite
@@ -271,8 +280,9 @@ composer, invites and repo commands need `local` or `live`.
 3. Surface opens to the default chat view.
 4. Operator opens the Rooms panel (sidebar or command palette).
 5. Surface calls `GET /v1/rooms/persistent` — populated room list renders.
-6. Operator clicks a room → `GET /v1/rooms/persistent/{key}` hydrates the room
-   with access projection and transcript.
+6. Operator clicks a room →
+   `GET /v1/rooms/persistent/{key}/snapshot?before_seq=<u64::MAX>&limit=1000`
+   hydrates the newest transcript page and access projection.
 7. SSE subscription opens on `GET /v1/rooms/persistent/{key}/events`.
 8. Transcript renders; composer enables if access is Local/Live.
 9. Operator types a message, hits Enter → message posts, outbox renders pending,
@@ -282,8 +292,6 @@ composer, invites and repo commands need `local` or `live`.
 
 Same flow, but the Tauri shell loads the identical `dist/` bundle. Room SSE
 streams directly to the daemon without a proxy intermediary.
-
-### Inviting Another Human (Future — G2+)
 
 ### Inviting Another Human
 
@@ -301,16 +309,24 @@ other daemon redeems it and the room federates. Bedrock-side operator rooms
 
 ### Porting an Existing Agent
 
-An agent identity already registered with the daemon (visible in
-`GET /v1/agents`) can be added to any room:
+An agent package already registered with the daemon (visible in
+`GET /v1/agents`) can be authorized for a room:
 
-1. Human opens the room's participant roster.
-2. Human selects "Add participant" → agent picker renders daemon identities.
-3. Human selects the agent → `POST /v1/rooms/persistent/{key}/participants`
-   with `kind: "agent"`.
-4. Daemon validates the agent identity, adds it to the roster, broadcasts
-   `room_access`.
-5. Agent appears in the roster and mention autocomplete.
+1. Human opens the room-agent authorization panel and selects the package.
+2. In a Local room with no binding, the surface calls
+   `POST /v1/rooms/persistent/{key}/agents/bootstrap`; in a federated room it
+   calls `POST /v1/rooms/persistent/{key}/members/agents` to establish only
+   the non-authorizing roster membership.
+3. The surface loads
+   `GET /v1/rooms/persistent/{key}/agents/preview/{package}` and displays the
+   daemon-derived package digest, owner eligibility, requested/grantable
+   capabilities, activation, context and memory choices.
+4. Human confirms one exact decision; the surface posts it to
+   `POST /v1/rooms/persistent/{key}/agents` with the daemon-derived owner and
+   member ids plus a decision id.
+5. Only the returned Active binding gives mentions execution authority. The
+   agent then appears in the roster and mention autocomplete; suspend, resume,
+   reauthorize and revoke operate on that durable binding.
 
 ### Configuring Agent Wake Behavior
 
@@ -334,12 +350,11 @@ An agent identity already registered with the daemon (visible in
 
 Room-bound agent sessions carry the `room_key` in their turn context. The daemon
 persists these sessions under the room's store namespace so transcript history
-includes agent turns. The surface does not need to manage agent session lifecycle
-beyond posting turns — the daemon owns session creation, wake, and teardown.
+includes agent turns. The surface does not post room turns or manage their
+session lifecycle: trigger evaluation, room-bound turn creation, wake and
+teardown are daemon-owned.
 
 ---
-
-## What Rooms Are NOT (G1)
 
 ## What Rooms Are NOT
 
