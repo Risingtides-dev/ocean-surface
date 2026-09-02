@@ -3823,11 +3823,22 @@ mod tests {
         assert!(!window_escape_should_handle("Enter", false));
     }
 
+    /// The room-list flex child must be able to shrink and scroll, or a long
+    /// list pushes the create field and status line out of the viewport.
+    ///
+    /// This guard used to read the never-rendered rooms panel's list selector
+    /// out of styles/panels.css. Nothing emitted that panel's classes: the
+    /// shipped rooms browser is the left rail in `rooms_workspace.rs`, which
+    /// renders `.rooms-workspace__left-list`. So the assert held a dead rule in
+    /// place while the live one was unguarded. Re-pointed rather than deleted
+    /// with the dead CSS — the invariant is still real, only its selector
+    /// moved. (The needles this scan must not contain live in
+    /// tests/dead_selector_removal.rs, which asserts their absence.)
     #[test]
     fn rooms_list_flex_child_can_shrink_and_scroll() {
-        let css = include_str!("../../../styles/panels.css");
+        let css = include_str!("../../../styles/rooms-workspace.css");
         let start = css
-            .find(".rooms-panel__list {")
+            .find(".rooms-workspace__left-list {")
             .expect("rooms list production selector");
         let block = &css[start..start + css[start..].find('}').expect("selector closes")];
         assert!(block.contains("min-height: 0;"));

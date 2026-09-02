@@ -338,9 +338,11 @@ Web surface session UI:
 - Rooms G1 is daemon-native text collaboration. LiveKit controls stay outside
   the room join, leave, roster, and transcript lifecycle until explicitly
   reintroduced behind a reviewed platform contract.
-- The rooms browser is a flex column; `.rooms-panel__list` keeps
-  `min-height: 0` with vertical overflow so long room lists scroll instead of
-  pushing status/actions outside the viewport.
+- The rooms browser is the left rail of `rooms_workspace.rs`, a flex column;
+  `.rooms-workspace__left-list` keeps `min-height: 0` with vertical overflow so
+  long room lists scroll instead of pushing the create field and status line
+  outside the viewport. (It was `.rooms-panel__list` in `styles/panels.css`
+  until that never-rendered panel's CSS was deleted.)
 - Channel/thread drafts, mention state, and pending-send confirmation are
   scoped to the exact open-room generation. A room switch or close clears them
   synchronously so content and a stale `Sending…` gate cannot cross rooms.

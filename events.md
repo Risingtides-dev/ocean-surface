@@ -6066,3 +6066,52 @@ and the dispatcher's refusal.
 Gates: all seven frozen commands green, 1335 unit tests plus guards across 16
 binaries, ledger check PASS.
 _________________________________________________________________________________ 00:08 cloud/rooms-workspace-root-surface
+time:      [22:20] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-panels-css-repoint]
+type:      fix
+area:      frontend
+
+Re-pointed the iOS anti-zoom guard at the fields a phone member can actually focus,
+then deleted the rooms panel CSS it had been holding up. `tests/mobile_composer_
+regressions.rs` asserted the 16px floor on `.rooms-panel__create-input`,
+`.rooms-composer__input` and `.rooms-addagent__input` — three classes with zero
+emitters anywhere in `src/`, `index.html` or the extension wrapper. The floor a
+member's thumb meets lives in `styles/rooms-workspace.css` on `__left-input`,
+`__composer-input`, `__addagent-select` and the three `__agentbuilder-*` controls,
+and nothing asserted it. Measured before touching anything: on origin/main, deleting
+that live rule outright leaves all seven frozen gates green and 1313 tests passing
+across 14 binaries. Below 16px iOS Safari force-zooms the page on input focus, so
+the room name field, the composer and the agent builder would each have started
+shifting the layout under the reader with the suite still reporting clean. The guard
+now names those six; dropping the rule to 13px reds it with "found 13px", deleting
+the block reds it with the missing-floor panic, and the tree was restored after each.
+
+Only then the deletion. `styles/panels.css` carried about 110 `.rooms-*` selector
+occurrences — shell, overlay, head, list, create form, policy details, roster chips,
+message rows, outbox, mention hint, composer, status — for a right slide-over the
+Leptos surface never renders; `rooms_workspace.rs` is the shipped rooms UI and
+styles itself `.rooms-workspace__*` throughout. Every selector was grepped across
+the whole crate, both proxy and UI, `index.html`, the extension and every stylesheet
+before removal. The grep turned up one thing the slice had not counted: nine
+`.room-stage .rooms-*` re-scales in `styles/call.css` re-scaling base rules that
+were about to stop existing. Those went too, since they are the same dead family;
+`.room-stage__*` is a separate question and was left alone. Where a `:is(...)` list
+mixed dead rooms members with live sessions ones, only the rooms members came out
+and the group collapsed to the survivor — `.sessions-overlay`, `.sessions-panel__
+close`, `.sessions-panel__list` and `.sessions-create__input` are asserted present
+so the deletion could not over-reach.
+
+The `app.rs` guard that asserted on `.rooms-panel__list {` is what made this worth
+doing rather than tidy: it pinned a dead rule in place, so the panel's CSS could not
+be removed without a red gate while the live rail list it describes went unguarded.
+Re-pointed rather than deleted — the invariant (a flex child that can shrink and
+scroll, or a long list pushes the create field and status line off screen) is still
+real, it just belongs to `.rooms-workspace__left-list`. That is a deliberate
+departure from the slice as filed, which said to delete it; deleting would have
+traded one dead assertion for no assertion. `AGENTS.md` named the old selector in the
+Rooms Contract and now names the live one. A new case in `tests/dead_selector_
+removal.rs` asserts the ten removed families are absent from both stylesheets and
+unemitted from any Rust source, which is the lane's own convention for a deletion.
+Gate green: all seven frozen commands, 1314 tests across 14 binaries, 0 failed.
+_________________________________________________________________________________ 22:20 cloud/surface-panels-css-repoint
