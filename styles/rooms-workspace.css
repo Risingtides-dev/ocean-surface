@@ -2985,6 +2985,46 @@
   }
 }
 
+/* ── "Load older" affordance ────────────────────────────────────────
+   The opposite end from the jump affordance below, and deliberately the
+   opposite weight. That one is a floating accent pill because it
+   interrupts; this one is a full-width row inside the scroll container
+   marking where the loaded transcript starts, so it reads as the top
+   edge of the log rather than as a control laid over it. Shown only
+   while the daemon says older rows exist beyond what hydration walked
+   back to. */
+.rooms-workspace__load-older {
+  display: block;
+  width: 100%;
+  margin: 0 0 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  padding: 7px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-2);
+  background: var(--bg-2);
+  cursor: pointer;
+  transition:
+    color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__load-older:hover:not(:disabled) {
+  color: var(--fg);
+  background: var(--bg-hover);
+}
+
+.rooms-workspace__load-older:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.rooms-workspace__load-older:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
 /* ── "New messages" jump affordance ─────────────────────────────────
    Shown only when appends arrive while the reader is scrolled up.
    Client scroll state — not read-cursor unread semantics. */

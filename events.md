@@ -5685,3 +5685,70 @@ inside the gate, the call wrapped in a gate of its own, `prev_seq` dropped, and 
 seed measured against 200 instead of the window hydration asked for. Gate green,
 all seven frozen commands, host suite 1302 passing across 13 binaries.
 _________________________________________________________________________________ 11:14 loop/surface-hydrates-room-at-tail
+
+time:      [20:13] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-load-older-affordance]
+type:      feature-request
+area:      frontend
+
+A long room's older history is now a press away instead of gone. #190 anchored
+hydration at the newest page and walked back 5x200 rows; past that budget the walk
+`return`ed and dropped the page's `prev_seq` and `has_more` at that instant, so the
+oldest row painted read as the first message in the room with nothing saying
+otherwise. `backfill_open_transcript` now parks that cursor in a new `older_cursor`
+signal wherever it stops — including on a dropped request, where the page it was
+reading is still there and a flaky network should not be allowed to end a room's
+history in silence — and `load_older_transcript_page` replays one page from it per
+press, reusing `room_snapshot_tail_url`, `prepend_transcript_page` and the same
+`room_is_current` re-check the walk makes before every page. The stop rule is a new
+`transcript_older_cursor`, and `transcript_backfill_cursor` was rewritten to
+delegate to it: the walk is that answer plus the page cap, so a walk that stopped
+because the log ran out and a press that finds nothing older are the same fact
+rather than two functions that agree today. A room whose walk provably reached the
+start parks `None` and grows no control at all.
+
+Scope was wider than the backlog said and the brief was right about why: the
+backlog scoped this to rooms_workspace.rs + CSS, but the walk is a private method
+on `Rooms` and the discarded cursor is unreachable from the view. rooms.rs was
+needed and was in the brief's scope. Nothing outside the four scoped files changed.
+
+The hard half was not the fetch. Prepending rows to a scrolled container pushes
+everything the reader was looking at down by the height of what arrived, and the
+existing transcript Effect read that growth as an append: `len > prev_len` with the
+reader scrolled up is the `RaiseJump` arm, so pressing "load older" raised
+"New messages" over rows that had landed ABOVE. That was already latent before this
+slice — any hydration-walk page arriving after the reader scrolled up hit it — and
+the affordance would have made it routine. `transcript_pass_action` grew a
+`grew_at_front` argument and an `AnchorOlder` arm; the signal is a fallen oldest
+`seq` across passes, not a row count, so a page that was entirely already painted
+(`prepend_transcript_page` keeps only rows strictly older than the paint) reads as
+no movement rather than as history arriving. The Effect's carried state became a
+`TranscriptPassState { len, oldest_seq }` so both halves travel together.
+
+The anchor itself is captured by the PRESS, not by the arm. This Effect cannot know
+whether it runs before or after the `<For>` writes the new rows to the DOM, so
+measuring inside the arm would read whichever it happened to be and compute a delta
+of zero half the time; the press records `(scroll_height, scroll_top)` before the
+request and a frame callback restores `scroll_top + grown` after. CSS scroll
+anchoring was considered and rejected: `overflow-anchor` is default-on in Chromium
+and Firefox and absent in WebKit, which is the Tauri host.
+
+Ten mutations run against the finished tree, and one came back other than expected.
+Deleting the button's `on:click` was assumed to leave every lane but the new guard
+green — a control wired to nothing — and it does not: `load_older_transcript_page`
+loses its only caller and the wasm32 clippy lane fails with "method
+`load_older_transcript_page` is never used". Written into the guard's header rather
+than dropped, because the assumption is the interesting part. The two rows that
+matter most both hold: parking `None` where the walk stops, and forcing
+`grew_at_front` to `false`, each leave all 1251 unit tests green and red only
+`tests/room_load_older_affordance.rs`.
+
+Explicitly not grown into: the second defect #190 documents, a reply whose ROOT
+fell outside the window rendering nowhere at all. Pressing "load older" enough
+times is not an answer to it — the walk goes back a page at a time and cannot jump
+to one named root — so the doc comment on `backfill_open_transcript` was rewritten
+to say the first defect is closed and the second stands, rather than left claiming
+both. Gate green: all seven frozen commands, host suite 1251 unit tests plus 60
+guards across 14 binaries.
+_________________________________________________________________________________ 20:13 loop/surface-load-older-affordance
