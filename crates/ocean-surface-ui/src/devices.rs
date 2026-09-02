@@ -32,6 +32,21 @@ use serde::Deserialize;
 use wasm_bindgen::JsCast;
 
 use crate::daemon::Daemon;
+use crate::rooms::Rooms;
+
+/// Everything a device switch has to re-attach.
+///
+/// The daemon owns the transcript, the streams and the catalogues; `Rooms`
+/// owns the open room, which is a SEPARATE state with its own generation and
+/// its own tail. A G1 room is daemon-native and local to the machine that
+/// holds it, so after a switch the open room is either gone or — worse — a
+/// different room that happens to share the key, and its transcript, roster,
+/// access projection and drafts all describe the machine we left.
+#[derive(Clone)]
+pub struct Attachments {
+    pub daemon: Daemon,
+    pub rooms: Rooms,
+}
 
 /// One machine, as the proxy describes it. Deliberately no `daemon_url`: see
 /// rule 1 above.
@@ -163,6 +178,27 @@ pub fn switched_underneath(was: &str, now: &str) -> bool {
     !was.trim().is_empty() && !now.trim().is_empty() && was != now
 }
 
+/// Should the surface show device chrome at all?
+///
+/// A single-device deployment — every single-operator install, and every
+/// roster entry that never listed devices — gets a name back from
+/// `/api/devices` too, so "we learned a name" is not the same question as
+/// "there is a choice". Chrome whose only action is to reselect the machine
+/// you are already on is control density for its own sake.
+pub fn device_chrome_visible(selected: &str, devices: usize) -> bool {
+    !selected.trim().is_empty() && devices > 1
+}
+
+/// May a reply that has just come back still write what it was sent to write?
+///
+/// Used twice over, for the same reason in two shapes: a device listing that
+/// started before a switch, and a session restore that started before somebody
+/// began a different session. Both are answers to a question nobody is asking
+/// any more, and both would otherwise win the last write.
+pub fn claim_is_current(claimed: u64, current: u64) -> bool {
+    claimed == current
+}
+
 /// One line under a device's name. Health is the only reason to hesitate over
 /// a machine, so it is stated plainly rather than as a coloured dot alone.
 pub fn health_label(health: &DeviceHealth) -> String {
@@ -245,6 +281,15 @@ pub struct DeviceState {
     pub open: RwSignal<bool>,
     /// Whether this page has already offered the choice unprompted.
     offered: RwSignal<bool>,
+    /// Monotonic ticket for everything that writes `selected`.
+    ///
+    /// `GET /api/devices` snapshots the selection before it probes each
+    /// machine's health, so a listing that started before a switch can land
+    /// after it carrying the OLD name — overwriting the choice that just
+    /// succeeded, showing the wrong machine in the header indefinitely, and
+    /// (through the focus re-check) firing a re-attach that clears the
+    /// transcript the switch just restored. Only the newest claimant writes.
+    generation: RwSignal<u64>,
 }
 
 impl Default for DeviceState {
@@ -261,13 +306,20 @@ impl DeviceState {
             phase: RwSignal::new(PickerPhase::Idle),
             open: RwSignal::new(false),
             offered: RwSignal::new(false),
+            generation: RwSignal::new(0),
         }
     }
 
-    /// True once the proxy has named a machine — the condition for showing any
-    /// device chrome at all.
-    pub fn known(&self) -> bool {
-        !self.selected.get().trim().is_empty()
+    /// Is there a choice to show chrome for?
+    ///
+    /// A single-device deployment — which is every single-operator install and
+    /// every roster entry that never listed devices — gets a name back from
+    /// `/api/devices` too. Rendering the chip and the menu row off `known()`
+    /// therefore gave those installs permanent chrome whose only action is to
+    /// reselect the machine they are already on. Control density is a design
+    /// defect; the header shows a device when there is another one to go to.
+    pub fn has_choice(&self) -> bool {
+        device_chrome_visible(&self.selected.get(), self.devices.get().len())
     }
 
     /// Ask the proxy which machines this login has, and offer the choice once
@@ -280,7 +332,7 @@ impl DeviceState {
         self.refresh(None, auto_offer);
     }
 
-    /// Re-read the list, and — when `daemon` is given — re-attach if the proxy
+    /// Re-read the list, and — when `attach` is given — re-attach if the proxy
     /// says this browser is now on a different machine than this tab thinks.
     ///
     /// The case this exists for is two tabs. A selection is per browser, so
@@ -291,23 +343,31 @@ impl DeviceState {
     /// same blend, one layer up. Nothing pushes the change here, so the check
     /// runs when the tab is looked at again, which is the moment a stale
     /// transcript would otherwise be read as current.
-    pub fn refresh(self, daemon: Option<Daemon>, auto_offer: bool) {
+    pub fn refresh(self, attach: Option<Attachments>, auto_offer: bool) {
         if crate::daemon::running_as_extension() {
             return;
         }
+        let claimed = self.claim();
         self.phase.set(PickerPhase::Loading);
         spawn_local(async move {
             match fetch_devices().await {
                 Ok(list) => {
+                    // The proxy snapshots `selected` before probing health, so
+                    // this answer can be older than a switch that has already
+                    // happened. Only the newest claimant writes.
+                    if !self.still_current(claimed) {
+                        log::debug!("device listing superseded before it landed");
+                        return;
+                    }
                     let was = self.selected.get_untracked();
                     self.selected.set(list.selected.clone());
                     let count = list.devices.len();
                     self.devices.set(list.devices);
                     self.phase.set(PickerPhase::Ready);
-                    if let Some(daemon) = daemon {
+                    if let Some(attach) = attach {
                         if switched_underneath(&was, &list.selected) {
                             log::info!("this browser is now on '{}'; re-attaching", list.selected);
-                            daemon.reattach_to_selected_device();
+                            reattach(&attach);
                         }
                     }
                     if auto_offer
@@ -325,15 +385,28 @@ impl DeviceState {
                     // Never chrome, never a toast: a host with no proxy is not
                     // a broken surface.
                     log::debug!("device list unavailable: {error}");
-                    self.phase.set(PickerPhase::Idle);
+                    if self.still_current(claimed) {
+                        self.phase.set(PickerPhase::Idle);
+                    }
                 }
             }
         });
     }
 
+    /// Take the next ticket. Everything that writes `selected` holds one.
+    fn claim(self) -> u64 {
+        let next = self.generation.get_untracked().wrapping_add(1);
+        self.generation.set(next);
+        next
+    }
+
+    fn still_current(self, claimed: u64) -> bool {
+        claim_is_current(claimed, self.generation.get_untracked())
+    }
+
     /// Re-check which machine this browser is on whenever the tab is looked at
     /// again. Registered once, at app scope.
-    pub fn recheck_on_focus(self, daemon: Daemon) {
+    pub fn recheck_on_focus(self, attach: Attachments) {
         if crate::daemon::running_as_extension() {
             return;
         }
@@ -341,7 +414,7 @@ impl DeviceState {
             return;
         };
         let handler = wasm_bindgen::closure::Closure::<dyn FnMut()>::new(move || {
-            self.refresh(Some(daemon.clone()), false);
+            self.refresh(Some(attach.clone()), false);
         });
         if window
             .add_event_listener_with_callback("focus", handler.as_ref().unchecked_ref())
@@ -352,9 +425,9 @@ impl DeviceState {
         }
     }
 
-    /// Attach this session to `name`, then re-attach every stream and catalogue
-    /// to the machine it now points at.
-    pub fn select(self, daemon: Daemon, name: String) {
+    /// Attach this session to `name`, then re-attach everything to the machine
+    /// it now points at.
+    pub fn select(self, attach: Attachments, name: String) {
         if !switch_needed(&self.selected.get_untracked(), &name) {
             self.open.set(false);
             return;
@@ -363,27 +436,48 @@ impl DeviceState {
             return;
         }
         self.phase.set(PickerPhase::Switching(name.clone()));
+        let claimed = self.claim();
         spawn_local(async move {
             match post_selection(&name).await {
                 Ok(()) => {
+                    // A listing that started before this POST is stale now, and
+                    // this claim is what retires it.
+                    if !self.still_current(claimed) {
+                        log::debug!("a newer device intent superseded this switch");
+                        return;
+                    }
                     self.selected.set(name.clone());
                     self.open.set(false);
                     self.phase.set(PickerPhase::Ready);
-                    // Everything the old machine was answering — the event
-                    // stream, the transcript, models, projects, sessions —
-                    // belongs to the old machine.
-                    daemon.reattach_to_selected_device();
+                    reattach(&attach);
                     // Re-read health and `selected` from the proxy, which is
                     // the authority on both.
-                    self.load(false);
+                    self.refresh(None, false);
                 }
                 Err(error) => {
                     log::warn!("device selection failed: {error}");
-                    self.phase.set(PickerPhase::Failed(error));
+                    if self.still_current(claimed) {
+                        self.phase.set(PickerPhase::Failed(error));
+                    }
                 }
             }
         });
     }
+}
+
+/// Everything that belonged to the machine being left.
+///
+/// The daemon's half is its own: streams, transcript, catalogues. The room is
+/// separate state with a separate generation and a separate tail, and closing
+/// it is synchronous on purpose — the rooms contract says opening and closing
+/// share one reset path so transcript, access and tail state cannot leak
+/// across room identity, and a machine switch is the widest identity change
+/// there is. Re-listing afterwards shows the new machine's rooms, which are
+/// the only rooms now reachable.
+fn reattach(attach: &Attachments) {
+    attach.rooms.close_room();
+    attach.rooms.fetch_rooms();
+    attach.daemon.reattach_to_selected_device();
 }
 
 async fn fetch_devices() -> Result<DeviceListResponse, String> {
@@ -424,7 +518,7 @@ async fn post_selection(name: &str) -> Result<(), String> {
 #[component]
 pub fn DeviceChip(state: DeviceState) -> impl IntoView {
     view! {
-        <Show when=move || state.known()>
+        <Show when=move || state.has_choice()>
             <button
                 class="ocean-device-chip"
                 type="button"
@@ -445,8 +539,22 @@ pub fn DeviceChip(state: DeviceState) -> impl IntoView {
 /// and the slash popover, and unlike the reveal rail, whose z-ordered
 /// close-exactly-one chain this deliberately stays out of.
 #[component]
-pub fn DevicePicker(state: DeviceState, daemon: Daemon) -> impl IntoView {
-    let daemon_for_rows = daemon.clone();
+pub fn DevicePicker(state: DeviceState, attach: Attachments) -> impl IntoView {
+    let attach_for_rows = attach.clone();
+    let panel: NodeRef<leptos::html::Div> = NodeRef::new();
+    // Focus the dialog when it opens, which is both the a11y contract for a
+    // modal and what makes the Escape handler below reachable: a `keydown` on
+    // this element only sees events from it and its descendants, and opening
+    // the picker otherwise leaves focus on the header chip or the menu row.
+    // Without this the first Escape sails past to the window rail and closes a
+    // reveal UNDERNEATH the open picker.
+    Effect::new(move |_| {
+        if state.open.get() {
+            if let Some(element) = panel.get() {
+                let _ = element.focus();
+            }
+        }
+    });
     view! {
         <div
             class="devices-overlay"
@@ -455,6 +563,7 @@ pub fn DevicePicker(state: DeviceState, daemon: Daemon) -> impl IntoView {
         >
             <div
                 class="devices-panel"
+                node_ref=panel
                 role="dialog"
                 aria-modal="true"
                 aria-label="Choose a device"
@@ -500,7 +609,7 @@ pub fn DevicePicker(state: DeviceState, daemon: Daemon) -> impl IntoView {
                         let:row
                     >
                         {
-                            let daemon = daemon_for_rows.clone();
+                            let attach = attach_for_rows.clone();
                             let name = row.name.clone();
                             let switching = {
                                 let name = name.clone();
@@ -514,7 +623,7 @@ pub fn DevicePicker(state: DeviceState, daemon: Daemon) -> impl IntoView {
                                         data-health=health_state(&row.health)
                                         aria-current=move || row.selected.to_string()
                                         disabled=switching
-                                        on:click=move |_| state.select(daemon.clone(), name.clone())
+                                        on:click=move |_| state.select(attach.clone(), name.clone())
                                     >
                                         <span class="devices-panel__dot"></span>
                                         <span class="devices-panel__name">
@@ -619,6 +728,31 @@ mod tests {
         // selection): not a machine, so not a switch.
         assert!(!switched_underneath("mini", ""));
         assert!(!switched_underneath("mini", "mini"));
+    }
+
+    #[test]
+    fn device_chrome_appears_only_when_there_is_somewhere_to_go() {
+        // The shape that made this wrong: a single-operator install answers
+        // /api/devices with one named machine, so "we know a name" was true
+        // and every such deployment grew a header chip and a menu row whose
+        // only action was to reselect the machine it was already on.
+        assert!(!device_chrome_visible("mini", 1));
+        assert!(device_chrome_visible("mini", 2));
+        // Nothing learned yet, and the off-proxy hosts that never will.
+        assert!(!device_chrome_visible("", 0));
+        assert!(!device_chrome_visible("", 2));
+        assert!(!device_chrome_visible("   ", 2));
+    }
+
+    #[test]
+    fn an_answer_to_a_question_nobody_is_asking_any_more_does_not_write() {
+        assert!(claim_is_current(7, 7));
+        assert!(!claim_is_current(6, 7));
+        // A listing that started two switches ago is not "close enough".
+        assert!(!claim_is_current(5, 7));
+        // The ticket wraps rather than saturating, so the comparison has to
+        // hold across the boundary too.
+        assert!(claim_is_current(u64::MAX.wrapping_add(1), 0));
     }
 
     #[test]

@@ -7395,3 +7395,67 @@ Measured like the others and RED — deleting the one call site takes
 pinned. Gates green: all seven frozen commands, 1323 host tests across 15
 binaries, plus the proxy crate's 84 and its own clippy lane.
 _________________________________________________________________________________ 08:44 cloud/surface-device-profiles-ui
+
+time:      [09:20] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-device-profiles-ui]
+type:      review
+area:      frontend
+
+Eight findings from the Codex review on #210, all verified before being fixed, and
+the pattern across them is one thing said eight ways: a device switch is a wider
+identity change than the code treated it as, and every piece of state that belongs
+to a machine has to be retired with it.
+
+The open ROOM was not. `Rooms` is separate state with its own generation and its
+own tail, and a G1 room is daemon-native — local to the machine holding it — so
+after a switch the open room was either gone or, worse, a different room sharing
+the key, while its transcript, roster, access projection and drafts still described
+the machine we left. A switch now closes the room synchronously and re-lists, which
+is the same one reset path the rooms contract already requires of open and close.
+Nothing held that call — `close_room` is still called by the rooms UI and
+`attach.rooms` by the very next line — so it is pinned, mutation-checked by both a
+deletion and a rename.
+
+The CWD was not, and this is the one that could have run an agent somewhere
+nobody asked for. When the remembered session does not exist on the new machine
+there is no projection to inherit a workspace from, so `cwd` and `project` stayed
+as the old machine's; the next prompt lazily creates a session with them. On a
+machine with a different layout that either fails or — worse — resolves to an
+unrelated directory that happens to share the path. The cleared arm now falls back
+to the same projectless Chat root `begin_chat_session` uses, and the new machine's
+own projects arrive with its catalogue. The restored arm already adopts the
+session's own root through the projection commit, so it is left alone.
+
+The model and project CATALOGUES were not: neither fetch had a generation, so an
+old machine's reply could win the last write and leave the picker offering choices
+the attached daemon does not own — and `fetch_projects` additionally CLEARS a
+selection its list lacks, which a late reply would have done to a valid one. Both
+now capture a `device_epoch` before their await and drop a reply that outlived a
+switch. The device listing had the same hole in the other direction: `/api/devices`
+snapshots `selected` BEFORE probing health, so a focus-triggered listing that
+started before a switch could land after it, overwrite the new selection, leave the
+header naming the wrong machine indefinitely, and fire a re-attach that clears the
+transcript the switch had just restored. Everything that writes `selected` now
+holds a ticket.
+
+And the SESSION RESTORE was not guarded against the person: a session-detail fetch
+is a round trip with a live composer throughout it, so whoever starts a session in
+that window owns the focus — while the restore, landing later, either yanked it
+back or cleared the id that new session had just persisted. It now carries the
+intent generation it started under and answers Superseded rather than acting.
+`claim_is_current` is that rule, shared with the listing ticket because it is the
+same rule twice.
+
+Two smaller ones, both real: opening the picker never moved focus into it, so a
+`keydown` bound to the panel never saw the first Escape — it sailed past to the
+window rail and closed a reveal UNDERNEATH the open picker. The dialog now takes
+focus when it opens, which is both the fix and the a11y contract. And `known()` was
+true for any successful listing including a single-device one, so every
+single-operator install grew a permanent header chip and a menu row whose only
+action was to reselect the machine it was already on; visibility is now
+`device_chrome_visible`, which asks whether there is anywhere to go. The overlay's
+`rgba(6, 6, 6, 0.72)` moved to `--overlay` in tokens.css, taking the two
+pre-existing literals in panels.css with it. Gates green: all seven frozen commands,
+1326 host tests across 15 binaries, the proxy crate's 84, and both clippy lanes.
+_________________________________________________________________________________ 09:20 cloud/surface-device-profiles-ui
