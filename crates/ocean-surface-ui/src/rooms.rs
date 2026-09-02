@@ -713,6 +713,13 @@ pub struct Rooms {
     /// Monotonic ticket ensuring only the latest overlapping list request may
     /// publish list/loading/error state.
     list_request_ticket: RwSignal<u64>,
+    /// A room key an `ocean://room/<key>` deep link asked the surface to open,
+    /// held until the Rooms workspace consumes it. It lives on this handle
+    /// rather than in the workspace because the deep-link listener is mounted
+    /// in `App`, above the workspace, and may fire before the workspace exists
+    /// at all — a cold launch from the OS. `None` once consumed; the workspace
+    /// clears it in the same pass that queues the open.
+    pub deep_link_room: RwSignal<Option<String>>,
     /// The currently selected room key, if any.
     pub open_key: RwSignal<Option<String>>,
     /// The open room's full record (roster + metadata).
@@ -804,13 +811,6 @@ pub struct Rooms {
     /// untouched, so nothing re-renders — which is why the error must be
     /// visible: the box alone would overstate what was stored.
     pub policy_update_error: RwSignal<Option<String>>,
-    /// A room key an `ocean://room/<key>` deep link asked the surface to open,
-    /// held until the Rooms workspace consumes it. It lives on this handle
-    /// rather than in the workspace because the deep-link listener is mounted
-    /// in `App`, above the workspace, and may fire before the workspace exists
-    /// at all — a cold launch from the OS. `None` once consumed; the workspace
-    /// clears it in the same pass that queues the open.
-    pub deep_link_room: RwSignal<Option<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -851,6 +851,7 @@ impl Rooms {
             rooms_loading: RwSignal::new(false),
             rooms_error: RwSignal::new(None),
             list_request_ticket: RwSignal::new(0),
+            deep_link_room: RwSignal::new(None),
             open_key: RwSignal::new(None),
             open_room: RwSignal::new(None),
             transcript: RwSignal::new(Vec::new()),
@@ -874,7 +875,6 @@ impl Rooms {
             create_op: RwSignal::new((0, None)),
             policy_update_in_flight: RwSignal::new(false),
             policy_update_error: RwSignal::new(None),
-            deep_link_room: RwSignal::new(None),
         };
 
         // Identity is RESOLVED, not snapshotted. `Rooms::new` runs synchronously
@@ -1243,32 +1243,6 @@ impl Rooms {
         }
     }
 
-    /// Open a room: load its record + the first transcript page, bump the
-    /// generation, and start the room-scoped SSE live tail (TASK-10/TASK-11).
-    /// Hydration reads `/snapshot`, the route that answers a cursor, so the tail
-    /// resumes from the sequence the daemon says it served rather than one
-    /// re-derived from the rows on screen. This never was a "full transcript",
-    /// and which END of the log it is one page OF is the whole question: the
-    /// read now asks backward ([`room_snapshot_url`]), so a room past 1000 rows
-    /// opens on its NEWEST page and [`Rooms::backfill_open_transcript`] walks
-    /// older from there. Paging forward from the start instead meant opening on
-    /// message #1 of a 12 000-row room and reaching the rows the operator came
-    /// for only once the SSE tail's replay had dragged the eleven thousand
-    /// between them through the stream — and in a soft-closed room, which opens
-    /// no tail, not reaching them at all.
-    ///
-    /// `/snapshot` also falls through to the soft-closed audit view, so a room
-    /// that used to fail to open now hydrates. The tail underneath it cannot:
-    /// `/events` and `POST /messages` both 404 a closed room. The body now says
-    /// which view answered ([`RoomSnapshotResponse::closed`]), and this is the
-    /// one place that acts on it — a closed room opens NO `EventSource` at all.
-    /// The gate has to live at this call site because
-    /// [`Rooms::start_live_tail`] is an unconditional reconnect loop with no
-    /// stop condition in it; a tail started against a corpse retries until the
-    /// generation bumps. Publishing [`Rooms::closed`] beside the access
-    /// projection is the other half: it holds the composer shut and puts the
-    /// reason on screen, so the audit view reads as frozen rather than as a
-    /// live room that silently refuses every write.
     /// The reader's OWN member ids — the resolved local identity and, in a
     /// federated room, the access projection's `self_member_id`. Handing this
     /// set to the mention tokenizer asks precisely "was I named", rather than
@@ -1321,6 +1295,32 @@ impl Rooms {
         self.deep_link_room.set(Some(key));
     }
 
+    /// Open a room: load its record + the first transcript page, bump the
+    /// generation, and start the room-scoped SSE live tail (TASK-10/TASK-11).
+    /// Hydration reads `/snapshot`, the route that answers a cursor, so the tail
+    /// resumes from the sequence the daemon says it served rather than one
+    /// re-derived from the rows on screen. This never was a "full transcript",
+    /// and which END of the log it is one page OF is the whole question: the
+    /// read now asks backward ([`room_snapshot_url`]), so a room past 1000 rows
+    /// opens on its NEWEST page and [`Rooms::backfill_open_transcript`] walks
+    /// older from there. Paging forward from the start instead meant opening on
+    /// message #1 of a 12 000-row room and reaching the rows the operator came
+    /// for only once the SSE tail's replay had dragged the eleven thousand
+    /// between them through the stream — and in a soft-closed room, which opens
+    /// no tail, not reaching them at all.
+    ///
+    /// `/snapshot` also falls through to the soft-closed audit view, so a room
+    /// that used to fail to open now hydrates. The tail underneath it cannot:
+    /// `/events` and `POST /messages` both 404 a closed room. The body now says
+    /// which view answered ([`RoomSnapshotResponse::closed`]), and this is the
+    /// one place that acts on it — a closed room opens NO `EventSource` at all.
+    /// The gate has to live at this call site because
+    /// [`Rooms::start_live_tail`] is an unconditional reconnect loop with no
+    /// stop condition in it; a tail started against a corpse retries until the
+    /// generation bumps. Publishing [`Rooms::closed`] beside the access
+    /// projection is the other half: it holds the composer shut and puts the
+    /// reason on screen, so the audit view reads as frozen rather than as a
+    /// live room that silently refuses every write.
     pub fn open_room(&self, key: String) {
         let base = self.base();
         let me = *self;
