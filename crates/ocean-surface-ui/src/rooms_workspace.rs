@@ -1220,11 +1220,18 @@ enum AgentOwnership {
     /// roster still carries them and their raw participant id otherwise, which
     /// is the only name a room can give for a worker who has left.
     Owned { owner: String, present: bool },
-    /// No ownership row names this agent: nobody claimed it, or it was claimed
-    /// on a daemon that predates `agent_owners` and the room never recorded it.
-    /// The rail says so rather than saying nothing, because an agent with no
-    /// badge is indistinguishable from one whose badge simply did not render.
+    /// The daemon answered, and no ownership row names this agent: nobody has
+    /// claimed it. The rail says so rather than saying nothing, because an
+    /// agent with no badge is indistinguishable from one whose badge simply did
+    /// not render.
     Unclaimed,
+    /// The surface has no answer to give — hydration has not landed, a binding
+    /// mutation has just invalidated what it held, or the daemon predates
+    /// `agent_owners` and cannot project ownership it may well hold. Renders
+    /// NOTHING. Saying `unclaimed` here would be a claim about the room made
+    /// entirely out of the surface's own ignorance, and on a pre-field daemon
+    /// it would be that claim about every agent in every room.
+    Unknown,
 }
 
 /// Map one Agent roster row to its ownership. Both lists are the Local roster's
@@ -1243,10 +1250,16 @@ enum AgentOwnership {
 /// a daemon that says absent is believed, because a same-id row appearing
 /// later is not evidence the original binding survived.
 fn agent_ownership(
-    owners: &[RoomAgentOwner],
+    owners: Option<&[RoomAgentOwner]>,
     participants: &[RoomParticipant],
     agent_id: &str,
 ) -> AgentOwnership {
+    // No answer at all is its own state and never `Unclaimed`: the caller
+    // holding `None` has not been told anything about this room's ownership,
+    // and absence of an answer is not an answer of absence.
+    let Some(owners) = owners else {
+        return AgentOwnership::Unknown;
+    };
     let Some(row) = owners.iter().find(|owner| owner.agent_id == agent_id) else {
         return AgentOwnership::Unclaimed;
     };
@@ -4050,7 +4063,7 @@ pub fn RoomsWorkspace(
                                                                         .map(|r| r.participants)
                                                                         .unwrap_or_default();
                                                                     match rooms.agent_owners.with(|owners| {
-                                                                        agent_ownership(owners, &participants, &owner_row_id)
+                                                                        agent_ownership(owners.as_deref(), &participants, &owner_row_id)
                                                                     }) {
                                                                         AgentOwnership::Owned { owner, present } => {
                                                                             let dot_label = if present {
@@ -4076,6 +4089,11 @@ pub fn RoomsWorkspace(
                                                                                 "unclaimed"
                                                                             </span>
                                                                         }.into_any(),
+                                                                        // Nothing, and that is the point: the
+                                                                        // surface has not been told who owns
+                                                                        // this agent, which is not the same as
+                                                                        // being told nobody does.
+                                                                        AgentOwnership::Unknown => ().into_any(),
                                                                     }
                                                                 }}
                                                             </div>
@@ -6605,7 +6623,7 @@ mod tests {
         ];
 
         assert_eq!(
-            agent_ownership(&owners, &participants, "researcher"),
+            agent_ownership(Some(&owners), &participants, "researcher"),
             AgentOwnership::Owned {
                 owner: "Alice".into(),
                 present: true,
@@ -6614,7 +6632,7 @@ mod tests {
              participant id is a key, not something a reader recognises",
         );
         assert_eq!(
-            agent_ownership(&owners, &participants, "scribe"),
+            agent_ownership(Some(&owners), &participants, "scribe"),
             AgentOwnership::Owned {
                 owner: "bob".into(),
                 present: false,
@@ -6623,16 +6641,51 @@ mod tests {
              id is the only name left once the roster no longer carries them",
         );
         assert_eq!(
-            agent_ownership(&owners, &participants, "drifter"),
+            agent_ownership(Some(&owners), &participants, "drifter"),
             AgentOwnership::Unclaimed,
             "no ownership row names this agent, and the rail must SAY that \
              rather than render nothing",
         );
         assert_eq!(
-            agent_ownership(&[], &participants, "researcher"),
+            agent_ownership(Some(&[]), &participants, "researcher"),
             AgentOwnership::Unclaimed,
-            "a daemon predating agent_owners sends an empty list, which reads \
-             as unclaimed for every agent — never as a present owner",
+            "an AUTHORITATIVE empty list is the daemon saying nobody owns \
+             anything in this room, which is unclaimed for every agent in it — \
+             never a present owner",
+        );
+    }
+
+    /// No answer is its own state, and the rail renders NOTHING for it.
+    ///
+    /// Codex found this on #195: a bare `Vec` with `#[serde(default)]` makes a
+    /// daemon predating ocean-os#437 — which omits the key and may hold durable
+    /// ownership rows it simply cannot project — indistinguishable from a
+    /// current daemon answering `[]`. Every agent in every room on such a
+    /// daemon would wear an `unclaimed` badge the surface has no evidence for.
+    /// It is the same provenance rule the older-history edge draws between
+    /// `ReachedBeginning` and `Unknown`: an absent answer is not a negative one.
+    ///
+    /// `None` also covers the window a binding mutation opens — the refresh
+    /// invalidates before it asks, so a refresh that never answers degrades to
+    /// silence rather than to a stale claim.
+    #[test]
+    fn no_answer_renders_nothing_and_is_never_unclaimed() {
+        let participants = vec![
+            roster_row("alice", "Alice", RoomParticipantKind::Human),
+            roster_row("researcher", "Researcher", RoomParticipantKind::Agent),
+        ];
+
+        assert_eq!(
+            agent_ownership(None, &participants, "researcher"),
+            AgentOwnership::Unknown,
+            "a daemon that said nothing about ownership has not said that \
+             nobody owns this agent",
+        );
+        assert_ne!(
+            agent_ownership(None, &participants, "researcher"),
+            agent_ownership(Some(&[]), &participants, "researcher"),
+            "no answer and an authoritative empty answer must not be the same \
+             value — collapsing them is the defect this test exists for",
         );
     }
 
@@ -6666,14 +6719,14 @@ mod tests {
         )];
 
         assert_eq!(
-            agent_ownership(&owners, &with_alice, "researcher"),
+            agent_ownership(Some(&owners), &with_alice, "researcher"),
             AgentOwnership::Owned {
                 owner: "Alice".into(),
                 present: true,
             },
         );
         assert_eq!(
-            agent_ownership(&owners, &without_alice, "researcher"),
+            agent_ownership(Some(&owners), &without_alice, "researcher"),
             AgentOwnership::Owned {
                 owner: "alice".into(),
                 present: false,
@@ -6688,7 +6741,7 @@ mod tests {
             owner_present: false,
         }];
         assert_eq!(
-            agent_ownership(&absent_flag, &with_alice, "researcher"),
+            agent_ownership(Some(&absent_flag), &with_alice, "researcher"),
             AgentOwnership::Owned {
                 owner: "Alice".into(),
                 present: false,
@@ -6724,14 +6777,14 @@ mod tests {
         ];
 
         assert_eq!(
-            agent_ownership(&owners, &participants, "researcher"),
+            agent_ownership(Some(&owners), &participants, "researcher"),
             AgentOwnership::Owned {
                 owner: "Alice".into(),
                 present: true,
             },
         );
         assert_eq!(
-            agent_ownership(&owners, &participants, "scribe"),
+            agent_ownership(Some(&owners), &participants, "scribe"),
             AgentOwnership::Owned {
                 owner: "Bob".into(),
                 present: true,

@@ -179,16 +179,34 @@ type, a presence dot, and a `yours` chip on agents the caller owns.
 says which worker owns it — `owned by <name>`, with the rail's own presence dot
 for whether that worker is still in the room — or `unclaimed` when no ownership
 row names it. The rows come from `agent_owners` on
-`GET /v1/rooms/persistent/{key}/snapshot` (ocean-os#437), decoded with a serde
-default so a daemon that predates the field still opens rooms. A closed room's
+`GET /v1/rooms/persistent/{key}/snapshot` (ocean-os#437), decoded as an optional
+array with a serde default so a daemon that predates the field still opens rooms
+AND stays distinguishable from one that answers an empty list. A closed room's
 audit view shows the same ownership, because closing retains the roster and the
 ownership rows and the snapshot IS that audit view — a frozen room still says
 who owned what and whether they were present when it froze.
 
-Two limits are deliberate. Presence is the daemon's `owner_present` narrowed by
-the roster on screen: join, leave and remove replace the room record from routes
-that carry no `agent_owners`, so a worker who left after hydration is never
-badged present while the rail no longer shows them. And the FEDERATED rail
+`unclaimed` is only ever said on the daemon's authority. An `agent_owners` array
+that is present but empty is the daemon answering that nobody owns anything
+here; an ABSENT array — a daemon predating ocean-os#437, which may hold durable
+ownership rows it cannot project — is no answer at all, and the rail renders no
+ownership line rather than badging every agent in every room. The same silence
+covers the moment after a binding mutation, before the re-read lands.
+
+Ownership is re-read after the mutations that change it. The daemon's store
+inserts an ownership row as part of creating an agent participant, so a
+first-agent bootstrap or an authorization leaves the room owned in the database
+and stale on screen; both now trigger a roster-only re-read
+(`/snapshot?before_seq=0&limit=1`, which the contract defines as a terminal
+empty page while the daemon still resolves `agent_owners` from the room's own
+lock). It invalidates before it asks, so a re-read that never answers degrades
+to silence rather than to a stale claim, and it costs no transcript — the
+operator's loaded history is not thrown away to learn who owns an agent.
+
+Two further limits are deliberate. Presence is the daemon's `owner_present`
+narrowed by the roster on screen: join, leave and remove replace the room record
+from routes that carry no `agent_owners`, so a worker who left after hydration is
+never badged present while the rail no longer shows them. And the FEDERATED rail
 renders no ownership at all — the daemon joins ownership rows to local
 `participants` ids, while a federated row's `member_id` is a bedrock-minted
 binding id in a different namespace, so matching one against the other would
