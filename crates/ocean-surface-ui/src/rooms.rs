@@ -713,6 +713,21 @@ pub struct Rooms {
     /// Monotonic ticket ensuring only the latest overlapping list request may
     /// publish list/loading/error state.
     list_request_ticket: RwSignal<u64>,
+    /// Monotonic count of SETTLED room-list fetches, bumped once per request
+    /// that was still current when it landed — success or failure, silent or
+    /// interactive. Sits beside its sibling `list_request_ticket` (one counts
+    /// requests out, one counts replies admitted) rather than at the end of
+    /// this struct, which is the anchor every other open PR appends at.
+    ///
+    /// This is the freshness `rooms_loaded` is not. That flag says "a fetch
+    /// has settled at some point ever", is never cleared, and survives a
+    /// workspace remount on this App-scope handle; `list` is replaced only on
+    /// success. So `rooms_loaded == true` is equally true of a list fetched
+    /// ten minutes ago and of an empty list left behind by a fetch that
+    /// failed. A reader that must not answer out of a stale list — the deep
+    /// link, which reports an unknown key out loud — records this counter and
+    /// waits for it to move.
+    pub list_settled: RwSignal<u64>,
     /// A room key an `ocean://room/<key>` deep link asked the surface to open,
     /// held until the Rooms workspace consumes it. It lives on this handle
     /// rather than in the workspace because the deep-link listener is mounted
@@ -851,6 +866,7 @@ impl Rooms {
             rooms_loading: RwSignal::new(false),
             rooms_error: RwSignal::new(None),
             list_request_ticket: RwSignal::new(0),
+            list_settled: RwSignal::new(0),
             deep_link_room: RwSignal::new(None),
             open_key: RwSignal::new(None),
             open_room: RwSignal::new(None),
@@ -1040,7 +1056,13 @@ impl Rooms {
             };
             let is_current =
                 list_request_is_current(ticket, me.list_request_ticket.get_untracked());
-            finish_rooms_fetch(&me.rooms_loaded, &me.rooms_loading, mode, is_current);
+            finish_rooms_fetch(
+                &me.rooms_loaded,
+                &me.rooms_loading,
+                &me.list_settled,
+                mode,
+                is_current,
+            );
             if !is_current {
                 return;
             }
@@ -1249,8 +1271,19 @@ impl Rooms {
     /// usually still in flight, so opening from here would either race the
     /// list or open nothing with nothing said. The Rooms workspace validates
     /// it against the fetched list and reports an unknown key.
+    ///
+    /// A refresh is kicked here because `rooms_loaded` is NOT freshness: it is
+    /// set by any settled fetch, successful or failed, and never cleared, so a
+    /// remounted workspace or a failed first load leaves a stale — or empty —
+    /// list looking authoritative. Answering a deep link out of that list
+    /// reports "no room named …" for a room that exists. The workspace waits
+    /// for [`Rooms::list_settled`] to advance past the value it recorded when
+    /// it queued the request, so the answer always comes from a list fetched
+    /// after the link arrived. Silent mode, so an in-flight fetch is not
+    /// duplicated — its settle advances the same counter.
     pub fn request_deep_link_room(&self, key: String) {
         self.deep_link_room.set(Some(key));
+        self.fetch_rooms_silent();
     }
 
     /// Open a room: load its record + the first transcript page, bump the
@@ -2871,6 +2904,7 @@ fn should_skip_rooms_fetch(mode: RoomsFetchMode, rooms_loading: bool) -> bool {
 fn finish_rooms_fetch(
     rooms_loaded: &RwSignal<bool>,
     rooms_loading: &RwSignal<bool>,
+    list_settled: &RwSignal<u64>,
     mode: RoomsFetchMode,
     is_current: bool,
 ) {
@@ -2878,6 +2912,10 @@ fn finish_rooms_fetch(
         return;
     }
     rooms_loaded.set(true);
+    // Bumped for a failure too: a reader waiting on freshness must be released
+    // by a fetch that could not answer, or a daemon that is down leaves it
+    // pending forever. What the failure means is `rooms_error`'s job.
+    list_settled.update(|n| *n = n.wrapping_add(1));
     if matches!(mode, RoomsFetchMode::Interactive) {
         rooms_loading.set(false);
     }
@@ -4737,23 +4775,46 @@ mod tests {
 
         let rooms_loaded = RwSignal::new(false);
         let rooms_loading = RwSignal::new(true);
+        let list_settled = RwSignal::new(0u64);
         finish_rooms_fetch(
             &rooms_loaded,
             &rooms_loading,
+            &list_settled,
             RoomsFetchMode::Interactive,
             false,
         );
         assert!(!rooms_loaded.get_untracked());
         assert!(rooms_loading.get_untracked());
+        // A superseded request settles nothing: a reader waiting on freshness
+        // must not be released by a reply that was thrown away.
+        assert_eq!(list_settled.get_untracked(), 0);
 
         finish_rooms_fetch(
             &rooms_loaded,
             &rooms_loading,
+            &list_settled,
             RoomsFetchMode::Interactive,
             true,
         );
         assert!(rooms_loaded.get_untracked());
         assert!(!rooms_loading.get_untracked());
+        assert_eq!(list_settled.get_untracked(), 1);
+    }
+
+    /// The settle counter moves for a SILENT fetch and for a FAILED one too.
+    /// A deep link waits on it, and a daemon that is down must release that
+    /// wait with a reported failure rather than leaving it pending forever.
+    #[test]
+    fn every_current_settle_advances_the_counter_whatever_it_found() {
+        let rooms_loaded = RwSignal::new(false);
+        let rooms_loading = RwSignal::new(false);
+        let list_settled = RwSignal::new(0u64);
+        for mode in [RoomsFetchMode::Silent, RoomsFetchMode::Interactive] {
+            finish_rooms_fetch(&rooms_loaded, &rooms_loading, &list_settled, mode, true);
+        }
+        assert_eq!(list_settled.get_untracked(), 2);
+        // Silent mode leaves `rooms_loading` alone; it still counts as settled.
+        assert!(rooms_loaded.get_untracked());
     }
 
     #[test]
