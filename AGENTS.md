@@ -276,8 +276,18 @@ Web surface session UI:
   boundary. In auth-off mode, a mutation carrying Origin or Referer must name
   the exact loopback Host; reject it before credential lookup otherwise, while
   retaining headerless localhost CLI clients. Auth-off startup is refused on
-  non-loopback binds. Tauri and extension hosts remain read-only until they own
-  an equivalent privileged transport.
+  non-loopback binds. The Tauri shell now owns the equivalent privileged
+  transport this rule required: its `daemon_operator_request` command takes a
+  method and a PATH (never a URL, never a header), re-checks both against a
+  mirror of the same six-route allowlist, reads the same `operator.key` under
+  the same five-condition custody check, supplies the daemon origin itself from
+  `OCEAN_DAEMON_URL`, and returns only the daemon's status and body. Tauri 2
+  capabilities do not gate `generate_handler!` commands, so that allowlist is
+  the boundary. The extension host has no shell and no proxy and REMAINS
+  read-only. On the surface side every privileged mutation leaves
+  `room_agent_authorization.rs` through one seam addressed by an
+  `AuthorityRoute` the four route builders alone construct; the credential
+  enters no host's WASM bundle.
 - Binding reads carry server-derived owner eligibility. Surface does not infer
   owner authority from a local participant projection. With no binding, a
   resolved Human already in a Local roster may see only the bootstrap
