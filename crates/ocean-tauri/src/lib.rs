@@ -1587,12 +1587,33 @@ fn read_room_operator_key(path: &Path) -> Result<String, String> {
     Ok(key.to_owned())
 }
 
-/// The custody contract is expressed in POSIX ownership, link count and mode.
-/// A host without those cannot satisfy it, so it does not get the credential.
+// The custody contract above is expressed in POSIX ownership, link count,
+// mode and `O_NOFOLLOW`. A non-unix host cannot satisfy it.
+//
+// The first draft of this shipped a stub returning `Err` on such a host, and
+// that was the wrong shape: `host::room_authority_mutations_for_host` reports
+// Tauri as authority-capable unconditionally, so a Windows build would have
+// rendered the full ceremony — Authorize, suspend, resume, revoke — with
+// every one of them guaranteed to fail on a credential that could not be
+// read. The platform contract's rule is "absence, not errors"
+// (AGENTS.md 30-32), and a control that is present and always fails is the
+// exact opposite.
+//
+// Refusing to build is the honest version. This shell is macOS-first and has
+// never been built for Windows, so nothing regresses today; what changes is
+// that the requirement is explicit instead of latent. A Windows shell needs
+// two things, and the compile error names both: a real custody equivalent
+// (an ACL check — POSIX mode bits have no meaning there), and a capability
+// handshake so the surface can render the ceremony ABSENT rather than
+// writable. Linux is unix and is unaffected.
 #[cfg(not(unix))]
-fn read_room_operator_key(_path: &Path) -> Result<String, String> {
-    Err("room operator credential custody is enforced on unix hosts only".to_owned())
-}
+compile_error!(
+    "ocean-tauri's Room-agent authority forwarder has no custody implementation \
+     for this target. Its contract is POSIX (owner, link count, mode 0600, \
+     O_NOFOLLOW). Implementing it here needs an ACL-based equivalent AND a \
+     capability handshake so `room_authority_mutations_supported()` reports \
+     absence rather than a ceremony whose every action fails."
+);
 
 /// True only for the exact six daemon routes the operator credential may be
 /// attached to. A byte-for-byte mirror of the proxy's
@@ -1638,9 +1659,51 @@ fn forwardable_operator_path(path: &str) -> bool {
     {
         return false;
     }
-    !path
-        .split('/')
-        .any(|segment| segment == "." || segment == "..")
+    // Dot segments are tested on the DECODED segment, not the literal one.
+    // `%2e%2e` is not `..` to a string comparison, but it IS to the URL
+    // parser: it normalises the escape and collapses the segment, so
+    // `DELETE /v1/rooms/persistent/team/agents/%2e%2e` would pass a literal
+    // check, pass the six-route allowlist as a non-empty member id, and then
+    // carry the operator credential to `DELETE /v1/rooms/persistent/team/` —
+    // a destructive route on no allowlist. The proxy never had this hole
+    // because `has_dot_segment` runs there on axum's already-decoded capture
+    // (main.rs 2264); this mirror had copied the allowlist and not that guard.
+    !path.split('/').any(is_dot_segment)
+}
+
+/// True when a path segment IS a dot segment once percent-decoding is
+/// accounted for. Any run of dots counts, not just `.` and `..`: the URL
+/// parser only acts on those two, but a segment that is nothing but dots has
+/// no legitimate meaning here and refusing the whole shape leaves no edge to
+/// re-derive.
+fn is_dot_segment(segment: &str) -> bool {
+    let decoded = percent_decode_segment(segment);
+    !decoded.is_empty() && decoded.bytes().all(|b| b == b'.')
+}
+
+/// Percent-decode one path segment, byte-wise. Enough to answer "what does
+/// the URL parser see here"; an invalid or truncated escape is left literal,
+/// which is safe because the only question asked of the result is whether it
+/// is a run of dots. Not a general-purpose decoder and not used to build the
+/// request — the path is forwarded exactly as given.
+fn percent_decode_segment(segment: &str) -> String {
+    let bytes = segment.as_bytes();
+    let mut out = String::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 3 <= bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((((hi << 4) | lo) as u8) as char);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
 }
 
 /// The daemon's answer, verbatim: status plus body text. The surface decodes
@@ -1669,8 +1732,24 @@ async fn daemon_operator_request(
     if !room_agent_authority_mutation(&method, &path) {
         return Err("not a room authority mutation route".to_owned());
     }
-    let key = read_room_operator_key(&room_operator_key_path())?;
     let url = format!("{}{path}", daemon_url_from_env().trim_end_matches('/'));
+    // Belt and braces, and the half that matters more than the pre-check:
+    // parse the URL and require that it STILL addresses the path the
+    // allowlist just approved. Every check above reasons about a string; this
+    // one reasons about what will actually be sent. `%2e%2e` was one way a
+    // parser could rewrite a path out from under an allowlist decision, and
+    // the class is bigger than that instance — normalisation rules change,
+    // and the next one arrives as a dependency bump rather than as a diff
+    // here. Refusing on any disagreement makes the whole class inert.
+    //
+    // Ordering is deliberate: this runs BEFORE the credential is read, so a
+    // path the parser would rewrite never reaches the key at all.
+    let parsed =
+        reqwest::Url::parse(&url).map_err(|error| format!("operator request URL: {error}"))?;
+    if parsed.path() != path {
+        return Err("operator request path would not survive URL parsing".to_owned());
+    }
+    let key = read_room_operator_key(&room_operator_key_path())?;
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(30))
@@ -1699,8 +1778,8 @@ async fn daemon_operator_request(
 #[cfg(test)]
 mod operator_transport_tests {
     use super::{
-        forwardable_operator_path, read_room_operator_key, room_agent_authority_mutation,
-        room_operator_key_path,
+        forwardable_operator_path, is_dot_segment, read_room_operator_key,
+        room_agent_authority_mutation, room_operator_key_path,
     };
 
     const ROOM: &str = "/v1/rooms/persistent/team-blue/agents";
@@ -1785,6 +1864,60 @@ mod operator_transport_tests {
 
     /// A path cannot name the origin: no scheme, no authority, ever. This is
     /// what keeps the credential pointed at the supervised daemon.
+    /// P1 from review: `%2e%2e` is not `..` to a string comparison but IS to
+    /// the URL parser, which normalises the escape and collapses the segment.
+    /// Measured against the real parser: `/v1/rooms/persistent/team/agents/%2e%2e`
+    /// resolves to `/v1/rooms/persistent/team/`, so a literal-only check would
+    /// have carried the operator credential to a destructive route on no
+    /// allowlist.
+    #[test]
+    fn percent_encoded_dot_segments_are_refused() {
+        for hostile in [
+            "/v1/rooms/persistent/team/agents/%2e%2e",
+            "/v1/rooms/persistent/team/agents/%2E%2E",
+            "/v1/rooms/persistent/team/agents/%2e",
+            "/v1/rooms/persistent/team/agents/%2E",
+            "/v1/rooms/persistent/%2e%2e/agents",
+            "/v1/rooms/persistent/team/agents/%2e%2e%2e",
+            // Mixed literal and encoded, and a nested escape of the percent.
+            "/v1/rooms/persistent/team/agents/.%2e",
+            "/v1/rooms/persistent/team/agents/%2e.",
+        ] {
+            assert!(
+                !forwardable_operator_path(hostile),
+                "{hostile} must be refused: the URL parser reads it as a dot segment",
+            );
+        }
+        // And the feature still works. A guard that blocks the thing it
+        // protects is not a fix: an encoded room key or member id is ordinary
+        // here, because `rooms::encode` produces exactly these.
+        for ok in [
+            "/v1/rooms/persistent/team%2Fblue/agents/agent-1",
+            "/v1/rooms/persistent/team.blue/agents/agent-1",
+            "/v1/rooms/persistent/team/agents/a%2e%2eb",
+            "/v1/rooms/persistent/team/agents/review%20agent",
+        ] {
+            assert!(
+                forwardable_operator_path(ok),
+                "{ok} is a legitimate encoded route and must forward",
+            );
+        }
+    }
+
+    /// The decoder answers one question — "is this a run of dots" — and a
+    /// truncated or invalid escape must not make it answer wrongly.
+    #[test]
+    fn the_segment_decoder_survives_malformed_escapes() {
+        assert!(is_dot_segment("%2e"));
+        assert!(is_dot_segment("."));
+        assert!(!is_dot_segment(""));
+        assert!(!is_dot_segment("%2"));
+        assert!(!is_dot_segment("%"));
+        assert!(!is_dot_segment("%zz"));
+        assert!(!is_dot_segment("agent-1"));
+        assert!(!is_dot_segment("a."));
+    }
+
     #[test]
     fn a_path_can_never_carry_an_origin() {
         for hostile in [
