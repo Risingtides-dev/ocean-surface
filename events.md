@@ -5802,3 +5802,114 @@ reds only the guard with the wasm32 clippy lane still green. Tree restored after
 each. Gate green: all seven frozen commands, host suite 1252 unit tests plus 61
 guards across 14 binaries.
 _________________________________________________________________________________ 20:39 loop/surface-load-older-affordance
+time:      [20:07] [09-01-26]
+agent:     [claude] [fable 5.1]
+worktree:  [docs/rooms-product-contract-truth]
+type:      docs
+area:      docs
+
+Corrected `docs/OCEAN_ROOMS_PRODUCT.md` to the wire shapes the daemon and this
+crate actually speak, verified at ocean-surface d58a145 and ocean-os 616293e:
+access states are `local|connecting|live|recovering|revoked` (no `Remote`);
+a message is `{author_id, author_kind, body, thread_parent_seq}` on a
+`deny_unknown_fields` struct (no `content`, no `mention_ids`; mentions are
+`@id` in the body); hydration goes through `/snapshot?before_seq&limit`, not
+`GET /{key}`; the stream carries `room_read_cursor` as a third frame; there
+is no `room_key` on `/v1/agent/turns` — turns are convened by trigger
+evaluation and fail closed with `workspace_unavailable` when the room has no
+`workspace_root`; the trigger policy carries `on_build_failure` and
+`on_ci_failure`; invites, redeem, federation, attachments and artifacts are
+shipped, so "Future" and three "NOT" claims were history. Where the product
+intent stands and the code lags (workspace_root never sent, list pagination
+undecoded, UTC timestamps, no load-older affordance, refusals not rendered),
+the doc now says so with a dated status line pointing at the rooms definition
+of done. `AGENTS.md` stops binding the dead `.rooms-panel__list` selector and
+names the live rooms workspace instead. `handoff.md` gained a dated pointer
+at the top saying the July snapshot predates every rooms feature and where
+rooms state now lives, so a cold agent stops reading its dirty-cluster
+sections as current. Docs only; no code, no CSS, no test
+changed — the 57 orphaned `.rooms-*` rules in `styles/panels.css` and the
+`app.rs` test pinning them are a separate cleanup slice.
+_________________________________________________________________________________ 20:07 docs/rooms-product-contract-truth
+
+time:      [20:16] [01-09-26]
+agent:     [codex] [gpt-5]
+worktree:  docs/rooms-product-contract-truth
+type:      [review]
+area:      [docs]
+
+Addressed the five Codex findings on the Rooms product contract. Creation now
+documents the separate human join, onboarding hydrates through `/snapshot`,
+room turns remain wholly daemon-owned, obsolete Future headings and invite
+claims are gone, and both agent workflows use bootstrap or federated membership
+followed by the digest-bound authorization ceremony instead of the legacy bare
+participant POST. Docs only; no UI, daemon, deployment, or production state
+changed.
+_________________________________________________________________________________ 20:16 docs/rooms-product-contract-truth
+
+time:      [21:13] [09-01-26]
+agent:     [codex] [gpt-5]
+worktree:  docs/rooms-product-contract-truth
+type:      [bug report]
+area:      [review]
+
+Closed the final Codex review pass on the Rooms product contract. Creation now
+states that the human must explicitly select Join room, and an empty room omits
+both SSE cursor forms until a real message sequence exists. Agent authorization
+is scoped to the authenticated browser PWA proxy, Tauri and extension are
+read-only, invite minting is conditional on configured federation, and the API
+summary includes agent-package creation. Docs only; no UI, daemon, deployment,
+or production state changed.
+_________________________________________________________________________________ 21:13 docs/rooms-product-contract-truth
+
+time:      [21:57] [09-01-26]
+agent:     [codex] [gpt-5]
+worktree:  docs/rooms-product-contract-truth
+type:      [bug report]
+area:      [review]
+
+Closed the next Codex review pass on the Rooms product contract. Local access
+is no longer conflated with roster membership; successful invite minting is
+named as the irreversible federation transition and redemption only attaches
+the peer; invite handoff uses onboard_url when present and the raw redeemable
+code otherwise. Docs only; no UI, daemon, deployment, or production state
+changed.
+_________________________________________________________________________________ 21:57 docs/rooms-product-contract-truth
+
+time:      [22:16] [09-01-26]
+agent:     [codex] [gpt-5]
+worktree:  docs/rooms-product-contract-truth
+type:      [bug report]
+area:      [review]
+
+Closed the latest Codex contract findings. The append-only July ledger entry is
+restored byte-for-byte, and the Surface route summary no longer advertises the
+daemon-owned agent invoke action as browser-proxy capability. Docs only; no UI,
+daemon, deployment, or production state changed.
+_________________________________________________________________________________ 22:16 docs/rooms-product-contract-truth
+
+time:      [22:31] [09-01-26]
+agent:     [codex] [gpt-5]
+worktree:  docs/rooms-product-contract-truth
+type:      [bug report]
+area:      [review]
+
+Closed the current-head federated onboarding-order finding. The product
+contract now loads the package preview before membership registration, requires
+daemon-derived owner eligibility, and reloads the preview after registration
+before authority can be granted. Docs only; no UI, daemon, membership,
+deployment, or production state changed.
+_________________________________________________________________________________ 22:31 docs/rooms-product-contract-truth
+
+time:      [22:54] [09-01-26]
+agent:     [codex] [gpt-5]
+worktree:  docs/rooms-product-contract-truth
+type:      [bug report]
+area:      [review]
+
+Closed two current-head Codex product-contract findings. First-join onboarding
+now requires the explicit participant POST to succeed before hydration, SSE,
+composer enablement, or messaging. The room-agent API summary now names the
+DELETE revoke action alongside the existing authorization lifecycle. Docs only;
+no UI, daemon, membership, agent grant, deployment, or production state changed.
+_________________________________________________________________________________ 22:54 docs/rooms-product-contract-truth

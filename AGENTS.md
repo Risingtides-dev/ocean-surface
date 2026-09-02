@@ -323,9 +323,12 @@ Web surface session UI:
 - Rooms G1 is daemon-native text collaboration. LiveKit controls stay outside
   the room join, leave, roster, and transcript lifecycle until explicitly
   reintroduced behind a reviewed platform contract.
-- The rooms browser is a flex column; `.rooms-panel__list` keeps
-  `min-height: 0` with vertical overflow so long room lists scroll instead of
-  pushing status/actions outside the viewport.
+- The rooms rail scrolls inside its own column (`min-height: 0`, vertical
+  overflow) so long room lists never push status or actions outside the
+  viewport. The legacy `.rooms-panel__*` markup no longer renders; the live
+  rooms surface is `crates/ocean-surface-ui/src/rooms_workspace.rs` and
+  `styles/rooms-workspace.css`, and any selector bound here must have a Rust
+  emitter.
 - Channel/thread drafts, mention state, and pending-send confirmation are
   scoped to the exact open-room generation. A room switch or close clears them
   synchronously so content and a stale `Sending…` gate cannot cross rooms.
