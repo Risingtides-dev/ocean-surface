@@ -4956,15 +4956,18 @@ mod tests {
 
     // ---- Room-list paging (OCEAN-250) ---------------------------------------
 
+    // Decoded rather than written as a literal: `Room` gains fields in other
+    // open PRs (`workspace_root` in #196), every one of them `#[serde(default)]`,
+    // and a literal here would compile against exactly one of those trees.
     fn listed_room(id: &str) -> Room {
-        Room {
-            id: id.into(),
-            name: id.to_uppercase(),
-            participants: Vec::new(),
-            created_at: String::new(),
-            updated_at: String::new(),
-            trigger_policy: None,
-        }
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "name": id.to_uppercase(),
+            "participants": [],
+            "created_at": "",
+            "updated_at": "",
+        }))
+        .expect("a room with only its required fields decodes")
     }
 
     fn ids(rooms: &[Room]) -> Vec<&str> {
