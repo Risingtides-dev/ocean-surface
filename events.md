@@ -73,6 +73,11 @@ checker with no `CODE_DIGEST` is the earlier, unstamped port, identified only by
 the constants above; `scripts/check-ledger.test.mjs` recomputes the digest every
 run and reds when the logic changes without a stamp bump, so "is this the checker
 the block means" is one grep for `CODE_DIGEST`, or `--digest` against the file.
+A digest that is neither `56adab136337` nor absent is a revision this block has not
+been checked against: bedrock #127 took bedrock's copy to r3, which changes what
+CLOSES an entry, and r3 is ported to neither this repo nor ocean-os. Everything
+above about headers, rules and the identity form describes r2. Re-read the checker
+before trusting this block against any other stamp.
 Exit codes are 0 clean, 1 an entry is open, 2 the check could not run at all — an
 unreadable path, or a ledger holding no entries. Run both checks on any change to
 this file, and again on either side of a rebase carrying one; the verdicts must
@@ -5938,8 +5943,22 @@ verdict is byte-for-byte the baseline's: 287 entries, every one closed, exit 0,
 identical to origin/main before the block, and `git diff` is 82 lines of pure
 insertion with nothing removed, so the first entry is untouched. The block says all
 of this and tells the next editor to read the count and not just the code.
-scripts/check-ledger-order.mjs does not exist on this tree and could not be run;
-origin/main is 4ab7a71 (#192) and the #194 that was supposed to have added it, along
-with the r2 CODE_REVISION/CODE_DIGEST stamps, is not in this repo. Gate green on the
-final tree, all seven frozen commands.
+Two corrections to this entry as first written, both mine. It said the #194 that
+brings the r2 stamps and the order sibling "is not in this repo": wrong, and wrong in
+the way that matters. #194 is OPEN, on cloud/surface-check-ledger. It is unmerged, so
+this branch's base at 4ab7a71 (#192) carries neither scripts/check-ledger-order.mjs
+nor a CODE_REVISION stamp and neither could be run from here — but "not landed yet"
+and "does not exist" are different claims and only the first was ever true. The
+sentence read as a correction of the card when the card was right. Second, the block
+above no longer documents main's unstamped port at all: it describes the tree #194
+leaves, because the card's merge order lands #194 first, which is knowledge this
+branch's first run did not have. That rewrite is 0ca70f7's, not this run's, and it is
+the right call — a block that opens an append-only ledger should describe the tree it
+will actually sit in, not the one it was drafted against. What this run added on top
+is one caveat the revision question needs: a digest that is neither 56adab136337 nor
+absent is a revision the block has not been checked against, because bedrock #127
+took bedrock's copy to r3 and r3 changes what CLOSES an entry. r3 is ported to
+neither this repo nor ocean-os, so everything the block says about headers, rules and
+the identity form describes r2 and should be re-read against any other stamp. Gate
+green on the final tree, all seven frozen commands.
 _________________________________________________________________________________ 23:28 cloud/surface-events-schema-block
