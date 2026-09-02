@@ -181,8 +181,8 @@ A person's entry in the proxy roster (`~/.config/ocean-surface/users.json`,
 0600) may list **devices**: the machines whose Ocean daemons that login can
 attach to. Sign in once, pick a device, and you are in that machine's sessions
 — switching machines later is a click, not a second login. The choice is kept
-server-side and survives a proxy restart, so a browser reopened tomorrow lands
-where you left it. Setup, the tailnet boundary this depends on, and
+server-side, per browser, and survives a proxy restart, so a browser reopened
+tomorrow lands where you left it while your other devices keep their own. Setup, the tailnet boundary this depends on, and
 `ops/add-device.sh` are in [`ops/README.md`](ops/README.md).
 
 | Route | Answers |
