@@ -443,7 +443,9 @@ on either side of a rebase carrying one; the two verdicts must match.** It is th
 only check that reads this file, it runs in CI on PRs and on pushes to main, and
 its exit codes are 0 clean / 1 an entry is open / 2 the check could not run at
 all. `--fix` closes what it finds by insertion only and writes the identity form,
-so a repair does not hand the next merge the same shared line — never in CI,
+or a bare rule when a historical header has no valid 24-hour clock, so a repair
+always parses as closed on its own next check. A repair does not hand the next
+merge the same shared line — never in CI,
 because that is a non-append edit to a file under `merge=union` and the last cost
 below applies to it. `scripts/events-merge-driver.test.mjs` proves a three-way
 parallel append keeps all four rules and fuses nothing, but it reproduces the

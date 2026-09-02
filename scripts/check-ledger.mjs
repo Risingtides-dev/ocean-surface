@@ -82,7 +82,7 @@ const RULE_BAR = /^_+/;
 // appends are by definition on two different branches. An entry with no
 // worktree was written on the main checkout, where there is one writer and
 // nothing to race, so its time alone is enough.
-const HEADER_TIME = /\[(\d{1,2}:\d{2})\]/;
+const HEADER_TIME = /\[((?:[01]?\d|2[0-3]):[0-5]\d)\]/;
 const WORKTREE_FIELD = /^worktree:[ \t]*(\S+)/;
 
 // Only the fallback for a ledger with no rule left to copy: the width a repair
@@ -144,7 +144,11 @@ export function openEntries(text) {
 export function entryIdentity(lines) {
   const parts = [];
   const time = lines[0]?.match(HEADER_TIME);
-  if (time) parts.push(time[1]);
+  // The separator grammar validates its clock. A malformed historical header
+  // therefore falls back to a bare rule instead of emitting an identity that
+  // --fix reports as repaired but the next check immediately rejects.
+  if (!time) return '';
+  parts.push(time[1]);
   const worktree = lines.map((line) => line.match(WORKTREE_FIELD)).find(Boolean);
   if (worktree) parts.push(worktree[1]);
   return parts.join(' ');

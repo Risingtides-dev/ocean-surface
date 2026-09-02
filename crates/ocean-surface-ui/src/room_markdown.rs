@@ -183,10 +183,7 @@ fn trim_autolink_tail(candidate: &str) -> &str {
         }
     }
     let mut end = candidate.len();
-    loop {
-        let Some(last) = candidate[..end].chars().next_back() else {
-            break;
-        };
+    while let Some(last) = candidate[..end].chars().next_back() {
         if matches!(last, '.' | ',' | ';' | ':' | '!' | '?') {
             end -= last.len_utf8();
             continue;

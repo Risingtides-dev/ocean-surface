@@ -5855,3 +5855,16 @@ current request-scoped scroll anchor, on-demand cursor, and predecessor-keyed
 rendering remain authoritative; the review branch no longer carries two scroll
 preservation models. No daemon, deployment, room, or production state changed.
 _________________________________________________________________________________ 21:56 codex/review-sweep-20260901
+
+time:  [22:16] [09-01-26]
+agent: [codex] [gpt-5]
+worktree: [codex/review-sweep-20260901]
+type:  [bug report]: Codex and CI follow-up
+area:  [testing]: Ledger repair grammar and wasm clippy
+
+Closed the current-head Codex finding by validating repair clocks with the same
+grammar as identity separators and falling back to a bare rule for malformed
+historical timestamps. Added a repair-round-trip regression. Rewrote the
+Markdown tail trim as the equivalent while-let loop required by the GitHub wasm
+clippy lane. No daemon, room, deployment, or production state changed.
+_________________________________________________________________________________ 22:16 codex/review-sweep-20260901

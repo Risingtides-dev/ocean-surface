@@ -147,6 +147,17 @@ test('a repair written from a one-digit ledger hour parses as closed on the next
   assert.equal(openEntries(text).length, 0);
 });
 
+test('a malformed clock repairs with a bare rule that the next run accepts', () => {
+  for (const clock of ['24:00', '99:99', '09:60']) {
+    const folded = entry(clock, 'Historical malformed clock.', 'loop/legacy-clock').join('\n');
+    const { text, closed } = closeEntries(folded);
+    assert.equal(closed.length, 1, clock);
+    assert.equal(entryIdentity(entry(clock, 'Historical malformed clock.', 'loop/legacy-clock')), '');
+    assert.equal(openEntries(text).length, 0, clock);
+    assert.equal(rules(text).at(-1), RULE, clock);
+  }
+});
+
 test('closeEntries repairs the fold without deleting a line, and the rerun is clean', () => {
   const { text, closed } = closeEntries(FOLDED);
   assert.equal(closed.length, 1);
