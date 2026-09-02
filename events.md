@@ -6913,3 +6913,50 @@ binaries, plus ocean-tauri's own fmt, `clippy --all-targets -D warnings` and 34
 tests (6 new) — the crate is ungated by CI but does build headless once
 `libgtk-3-dev` and `libwebkit2gtk-4.1-dev` are installed.
 _________________________________________________________________________________ 04:58 cloud/surface-desktop-parity
+
+time:      [07:01] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-desktop-parity]
+type:      bug-report
+area:      frontend
+
+Review found a real escape past the allowlist the desktop operator forwarder
+exists to be, and it is worth the ledger because the lesson is about mirroring.
+`%2e%2e` is not `..` to a string comparison but it IS to the URL parser, which
+normalises the escape and collapses the segment. Measured against `url` 2.x
+rather than argued: `/v1/rooms/persistent/team/agents/%2e%2e` resolves to
+`/v1/rooms/persistent/team/`, while `%2F` is left alone. So a `DELETE` on that
+path passed the literal dot-segment check, passed the six-route allowlist as a
+non-empty member id, and would have carried the mode-0600 operator credential
+to a destructive route on no allowlist at all. The proxy never had this hole:
+`has_dot_segment` runs there on axum's already-DECODED wildcard capture, before
+the allowlist. This command mirrored the allowlist and not that guard, which is
+the shape of the mistake — a mirror copied at the layer that was visible and
+not at the layer that mattered, where the proxy's decode had already happened
+for free. Closed twice over on purpose. Segments are decoded before the dot
+test, and any run of dots is refused rather than just `.` and `..`, because
+refusing the whole shape leaves no edge to re-derive. Then the built URL is
+re-parsed and the request refused unless its path still equals the one the
+allowlist approved, BEFORE the credential is read — so a path the parser would
+rewrite never reaches the key. That second check is the one that matters
+beyond this instance: it makes the whole normalisation class inert, and the
+next such rule arrives as a dependency bump rather than as a diff in this file.
+The second finding was a shape error rather than a hole: a stub returning `Err`
+off unix meant a Windows build would render Authorize, suspend, resume and
+revoke over a credential that could never be read, every action guaranteed to
+fail, which is precisely the inverse of the platform contract's absence-not-
+errors rule. Hiding the controls needs the bundle to know the shell's OS and a
+synchronous render-time predicate cannot learn it without machinery this lane
+could not exercise, so the crate now refuses to build for a non-unix target
+with a compile error naming what such a build needs — an ACL custody
+equivalent and a capability handshake. Linux is unix; nothing that has ever
+been built regresses. `crates/ocean-tauri` is ungated by CI, so the surface's
+own guard now scans the shell for both dot-segment holds and all four custody
+conditions: that scan is the only place this repo's gate sees any of it. The
+mutation was run — restoring the literal-only check reds the new test alone,
+with the other seven transport tests green — and the new tests also pin that
+legitimate encoded routes still forward, because a guard that blocks the thing
+it protects is not a fix. Gate green: all seven frozen commands, 1319 host
+assertions, plus ocean-tauri fmt, `clippy --all-targets -D warnings` and 36
+tests.
+_________________________________________________________________________________ 07:01 cloud/surface-desktop-parity
