@@ -149,8 +149,8 @@ test('the band is measured against the newest entry so far, not the neighbour', 
   const misplaced = misplacedEntries(readStamps(text));
   assert.deepEqual(
     misplaced.map((e) => e.header.replace(/\s+/g, ' ')),
-    ['time: [08:00] [08-31-26]', 'time: [05:00] [08-31-26]'],
-    'each descent is under a day from its neighbour, and the last two are over a day from the top',
+    ['time: [09:00] [09-01-26]'],
+    'each descent is under a day from its neighbour, but the last two are over a day from the top; moving the top entry alone frees the six below, and the smallest set of moves wins',
   );
 });
 
@@ -199,7 +199,7 @@ test('main exits 0 on an in-place ledger, 1 on a misplaced entry, and says which
   const red = await capture(() => main([bad]));
   assert.equal(red.code, 1);
   assert.match(red.out[0], /1 of 3 entries sit more than a day out of order, 1 header not parsed and skipped$/);
-  assert.match(red.out[1], /line {5}1 {2}time: {6}\[10:00\] \[09-01-26\] {2}31 days newer than the entry at line 15$/);
+  assert.match(red.out[1], /line {4}15 {2}time: {6}\[10:00\] \[08-01-26\] {2}31 days older than the entry at line 1$/, 'between two equal runs the later entry is the one reported');
   assert.match(red.out[2], /grows at the END/);
 });
 
