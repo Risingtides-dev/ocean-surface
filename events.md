@@ -7153,3 +7153,51 @@ handler is attached unconditionally and is simply never called where it is not
 delivered. Gate green: all seven frozen commands, 1339 host assertions across 15
 binaries, plus ocean-tauri fmt, `clippy --all-targets -D warnings` and 34 tests.
 _________________________________________________________________________________ 05:20 cloud/surface-desktop-parity-mentions
+time:      [07:02] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-desktop-parity-mentions]
+type:      bug-report
+area:      frontend
+
+Four review findings on mention notifications; three fixed, one answered as a
+limitation and deliberately left open. The one that mattered most silenced the
+feature for exactly the reader it exists for: `open_key` is not "the room on
+screen". It lives on the App-scope `Rooms` handle and survives the Rooms
+workspace unmounting behind Direct messages, and the room-scoped tail keeps
+running underneath, so a focused reader who switched to Direct messages had
+this room still "open" while seeing none of it — and `window_focused &&
+open_room == Some(row_room)` read that as looking straight at the message and
+suppressed every mention. Suppression is now its own named predicate over a
+conjunction of three facts, focused AND Rooms on screen AND that room open,
+with a test per way of dropping one; visibility reaches the tail through one
+Effect mirroring `show_rooms` onto the handle, and a guard pins that mirror,
+because without it the parameter is silently always true and the fix
+evaporates. The notification's click had the same root cause: with the reader
+behind Direct messages the room already IS `open_key`, so a
+reopen-if-different check was the whole handler and the click navigated
+nowhere. It now asks for the reveal unconditionally and reopens only if the
+reader moved on, routed through `app.rs` because revealing a peer surface has
+to close the competing ones and `rooms.rs` sits below those signals — a guard
+forbids it writing them, naming the WRITE rather than the word, since the
+module has to discuss `show_rooms` in prose to explain why the open key is not
+visibility. Third: browsers gate `Notification.requestPermission()` on
+transient user activation and an arriving SSE frame is not that, so a fresh
+browser user could never be granted permission and the feature could never
+turn on — already true of the turn-complete notifier this sits beside, which
+this slice merely made visible. The request now happens synchronously from the
+room-open click, a real gesture and the moment being mentioned starts being
+possible, with no new chrome added for it. The fourth is not fixed and should
+not be: a mention in a room you do not have OPEN does not notify, because only
+the open room has a tail and `accept_room_tail_frame` drops every other room's
+frames before the notifier sees them. The suggested remedy was a background
+feed per room, which is an `EventSource` per room and contradicts the Rooms
+Contract's one-room tail in as many words — a connection-count and lifecycle
+change to the room model, decided by a review comment on a notification slice.
+So it is recorded instead: in the predicate's docs, in the Rooms Contract, and
+in an open thread carrying the proposal that the daemon already knows who a
+message mentions and one per-identity frame would close it at one connection.
+The unreachable arm is kept because it is the correct answer if that ever
+lands, and a test name implying it was live behaviour was corrected. Gate
+green: all seven frozen commands, 1348 host assertions across 15 binaries,
+plus ocean-tauri fmt, clippy and 36 tests.
+_________________________________________________________________________________ 07:02 cloud/surface-desktop-parity-mentions
