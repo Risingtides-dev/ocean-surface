@@ -391,6 +391,47 @@
   box-shadow: 0 0 6px var(--accent-soft);
 }
 
+/* The end of the rail's loaded pages. A full-width row rather than a floating
+   pill, for the same reason `.rooms-workspace__load-older` is one: it marks a
+   position IN the list and has to scroll with it. */
+.rooms-workspace__load-more-rooms {
+  appearance: none;
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 4px 0 0;
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  border-radius: 0;
+  padding: 8px 12px;
+  background: transparent;
+  color: var(--fg-3);
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__load-more-rooms:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__load-more-rooms:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* A fade and a cursor, never a removed hit area: `pointer-events: none` would
+   suppress the progress cursor along with the click. */
+.rooms-workspace__load-more-rooms:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
 .rooms-workspace__left-empty {
   padding: 32px 16px;
   color: var(--fg-3);

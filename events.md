@@ -5802,3 +5802,63 @@ reds only the guard with the wasm32 clippy lane still green. Tree restored after
 each. Gate green: all seven frozen commands, host suite 1252 unit tests plus 61
 guards across 14 binaries.
 _________________________________________________________________________________ 20:39 loop/surface-load-older-affordance
+
+time:      [22:12] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-room-list-paging]
+type:      feature
+area:      frontend
+
+The rooms rail stopped at a hundred rooms and said nothing about it. `GET
+/v1/rooms/persistent` has been paged since OCEAN-250 — `?limit=&cursor=` in,
+`next_cursor` and `has_more` out, cursor being the KEY of the last room on the
+page, order `updated_at DESC, id ASC`, store default a hundred — and the
+surface's `RoomsListResponse` decoded `ok`, `rooms`, `read_states` and `error`,
+so the page boundary arrived as an ordinary complete list. A member with more
+rooms than that could not reach them and, worse, could not tell they existed:
+the rail ended, and an ending rail is exactly what a whole list looks like. Both
+fields now decode with serde defaults, which is what keeps a daemon predating
+that route reading as one complete page rather than as a second page the rail
+would offer and then fail to fetch. The end of the loaded list grows a `Load
+more rooms` press that renders on the parked cursor and on nothing else, so its
+presence IS the statement that there is more; it fetches one page, appends the
+rooms the rail does not already list, and re-parks. Every press either adds
+rooms or takes the affordance away — the daemon falls back to its first page
+when the cursor names a room that has since closed, so a press can come back
+holding nothing new, and parking that page's cursor would leave a control
+permanently pressable and permanently inert.
+
+The eight-second unread poll was the harder half. It re-reads the list to keep
+the unread dots honest, and paging gave it two bad options: re-read every loaded
+page every eight seconds, or read the first page and silently delete everything
+below the fold while the member is looking at it. It reads ONE page, and keeps
+the pages it did not read behind it. That is sound rather than merely cheap
+because of the daemon's own ordering: `updated_at DESC` puts every room with new
+activity on the first page, which is the page being read, so nothing an unread
+refresh exists to notice can hide in the retained tail. The tail's cursor is
+retained with it, or the poll would rewind paging on every tick and the next
+press would re-serve rooms already on screen. What the trade costs is
+re-verification: a room closed on the daemon while it sits below the fold stays
+listed until an interactive read replaces the rail with a fresh first page.
+Written into `docs/OCEAN_ROOMS_PRODUCT.md`, whose Browsing Rooms section had
+been describing a `?limit=50&cursor=<opaque>` request the surface has never
+sent and "all rooms the daemon knows about".
+
+Anchors re-derived rather than trusted: the backlog's line numbers predate #192
+and four open PRs into these two files, and every one of them had moved.
+`RoomsListResponse` was at 386, not 386-395; the list fetch at 994-1060, not
+975-1050; the rail render at 2837-2960, not 1912-1928. The three `next_cursor`
+hits already in the crate are `daemon.rs` on agent SESSIONS and were left alone.
+`tests/room_list_paging_affordance.rs` pins the consumer half, and its seven
+mutations were run for real: five are its own catch with both clippy lanes and
+all 1258 unit tests green under them, including the two that matter most —
+`retain_paged_tail` forced to `false`, and the cursor park unguarded — because
+the pure helpers' unit tests own those rules and never their wiring. Two came
+back compiler-held through `-D warnings` and are recorded in the file as
+findings with a shelf life, since both holds are the accident of a helper having
+exactly one caller. Gate green: all seven frozen commands, 1258 unit tests and
+66 guards across 15 binaries. Expect a rebase against #195, #196 and #197 in
+`rooms.rs` around `reset_room_state`, where all three land hunks within thirty
+lines of this one's; the rail render at 2837 and the stylesheet's rail block are
+untouched by all three.
+_________________________________________________________________________________ 22:12 cloud/surface-room-list-paging

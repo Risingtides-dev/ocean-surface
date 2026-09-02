@@ -153,17 +153,45 @@ agent's participant id.
 
 ### Browsing Rooms
 
-The rooms panel is a flex column listing all rooms the daemon knows about:
+The rooms rail is a flex column listing rooms ONE PAGE at a time:
 
 ```
-GET /v1/rooms/persistent?limit=50&cursor=<opaque>
+GET /v1/rooms/persistent            -> { ok, rooms, read_states, next_cursor, has_more }
+GET /v1/rooms/persistent?cursor=<room key>
 ```
 
-Each room card shows:
-- Room name and key
-- Participant count (human/agent breakdown)
-- Last activity timestamp
-- A join/open affordance
+The daemon has paged this route since OCEAN-250. It orders rooms
+`updated_at DESC, id ASC` and answers at most `limit` of them —
+the surface sends no `limit`, so it takes the store default of 100 —
+with `has_more` and a `next_cursor` that is the KEY of the last room on the
+page. Replaying that key as `?cursor=` returns the rooms strictly after it in
+that order. Both fields are decoded with serde defaults, so a daemon predating
+the route (which sends neither) reads as a single complete page and the rail
+behaves exactly as it did before.
+
+Each room row shows:
+- Room name, behind a `#` channel glyph
+- An unread dot, from the list's own `read_states`
+- Open-room selection state (`aria-selected`, roving tabindex across the rows)
+
+**The end of the loaded list carries a `Load more rooms` press.** It renders on
+the parked cursor and on nothing else: a rail already holding every room the
+daemon will address parks `None` and grows no control, so the row's presence is
+itself the statement that there are more rooms. The press fetches ONE page,
+appends the rooms the rail does not already list, and re-parks. Every press
+either adds rooms or removes the affordance — a page that adds nothing (which is
+what the daemon's fallback to page one produces when the cursor names a room
+that has since closed) ends the paging rather than re-offering itself.
+
+**Unread refresh polls one page, not every page.** The rail re-reads the list
+every 8 seconds to keep the unread dots honest. That poll issues exactly one
+request no matter how many pages are loaded: the daemon's order puts every room
+with new activity on the first page, so the first page is where unread changes
+are. On a rail that has paged, the fresh first page leads and the pages already
+loaded are kept behind it, minus any room the fresh page just promoted. The
+trade is that a room closed on the daemon while it sits below the fold stays on
+screen until an interactive refresh (opening the panel, creating a room,
+redeeming an invite) replaces the rail with a fresh first page.
 
 `.rooms-panel__list` keeps `min-height: 0` with vertical overflow — long room
 lists scroll instead of pushing status/actions outside the viewport.
