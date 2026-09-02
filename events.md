@@ -1,3 +1,91 @@
+# Ocean Surface ledger — entry schema
+
+This block is not an entry, and it is the one non-append edit this file accepts.
+`scripts/check-ledger.mjs` finds entries by line anchors — `/^time:/` opens one,
+`/^_{5,}(?:[ \t].*)?$/` closes one — so every sample line below is indented two
+spaces and matches neither. The first real entry begins under it, untouched.
+
+That indentation is load-bearing, and the exit code alone will not tell you so.
+Measured on this ledger: un-indent the whole template and the checker still exits
+0 while the entry count goes from 287 to 288 — the sample rule quietly closes the
+phantom entry the sample header opened. Un-indent only the header and it exits 1,
+naming line 14. So after any edit to this block, read the COUNT, not just the code.
+
+An entry is appended at EOF and never edited afterwards. `.github/workflows/ci.yml`
+(job `ledger`) asks for it in these words: "time [HH:MM] [MM-DD-YY] (24-hour),
+agent, worktree (branch when not on main), type, area, then one plain-prose
+paragraph on what changed and why."
+
+```text
+  time:      [HH:MM] [MM-DD-YY]        24-hour clock, America/New_York
+  agent:     [claude] [opus 5]
+  worktree:  [branch-name]             omit only on the main checkout
+  type:      infra                     bug-report | feature-request | refactor |
+                                       review | testing | infra | merge
+  area:      frontend                  frontend | backend | infra | workflow
+
+  One plain-prose paragraph on what changed and why. Prose, not bullets.
+
+  _______________________________________________________ HH:MM branch-name
+```
+
+**The closing rule is the load-bearing line.** An entry is CLOSED when a rule
+appears between its `time:` header and the next one; that is the only thing the
+checker asserts. Write the identity form — this ledger's underscore run is 81
+wide, then a space, then the entry's own `HH:MM` and its `worktree:` when it has
+one:
+
+```text
+  _________________________________________________________________________________ 23:15 cloud/my-slice
+```
+
+`.gitattributes` gives this file `merge=union`, and union emits a line both sides
+added exactly once. While every entry closed with the same bare rule, two parallel
+appends shared that one line, xdiff anchored each append before it, and one rule
+came out for two entries — the second entry's `time:` header landed directly under
+the first's prose and the two FUSED, with no conflict and nothing a merge check
+could see (#181 onto #180). An identity-bearing rule cannot be shared, so there is
+nothing left to fold.
+
+Three things it does not buy, all of them rulings rather than gaps:
+
+- It saves an entry's TAIL, not its HEAD. Two appends written in the same minute
+  open with identical `time:` and `agent:` lines and union folds those too, so the
+  second entry can arrive headerless while its rule survives — and the checker
+  reads the survivor as one closed entry and exits 0. Eyeball the head of a merged
+  entry when two slices share a minute.
+- An entry owns its rule, not the blank line after it. A blank line cannot be given
+  an identity. A merged append landing its header flush against the previous rule
+  is cosmetic; close it up by hand, never make the check red for it.
+- Union only fails safe for append/append. A NON-append change — a correction, a
+  redaction, a repaired separator, this block — lands in the same tail hunk a
+  concurrent append touches and union settles it by keeping both sides, silently
+  restoring the line the change removed. Any merge carrying one must be eyeballed.
+
+**Which checker this documents.** `scripts/check-ledger.mjs` on this tree: the port
+of ocean-bedrock's checker (bedrock's PR #62 for the checker, #98 for the identity
+separator), by way of the identical ocean-os copy, whose header declares every
+executable line byte-identical to bedrock's. This copy carries NO revision or digest
+stamp, so identify it by the constants above rather than by a number, and re-read it
+before trusting this block: a later bedrock revision that changes what closes an
+entry is not here until someone ports it. Exit codes are 0 clean, 1 an entry is open,
+2 the check could not run at all — an unreadable path, or a ledger holding no
+entries. Run it on any change to this file, and again on either side of a rebase
+carrying one; the two verdicts must match:
+
+```sh
+node scripts/check-ledger.mjs events.md      # --fix closes open entries by identity
+```
+
+What it deliberately does NOT check: separator uniqueness (the ~276 entries written
+before the identity convention all close with a bare rule and stay valid forever),
+rule width (81 is this ledger's convention, not an assertion), rule-lines-against-
+entry-count, and ORDER. Nothing in this repo checks that entries run in wall-clock
+order, and they do not: union emits the current branch's lines before the merged
+branch's, so merged entries interleave rather than sort. That is cosmetic — every
+entry carries its own `time:` field. AGENTS.md, "Repository Ledger", is the long
+form of everything above.
+
 time:      [01:06] [09-01-26]
 agent:     [claude] [opus 5]
 worktree:  [loop/surface-sibling-rails-inherit-the-composer-gate-unexamined]
@@ -5802,3 +5890,48 @@ reds only the guard with the wasm32 clippy lane still green. Tree restored after
 each. Gate green: all seven frozen commands, host suite 1252 unit tests plus 61
 guards across 14 binaries.
 _________________________________________________________________________________ 20:39 loop/surface-load-older-affordance
+
+time:      [23:28] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-events-schema-block]
+type:      infra
+area:      infra
+
+Gave events.md the schema block it never had. The file opened mid-entry on a bare
+`time:` line, so its entry contract lived only in AGENTS.md's "Repository Ledger"
+section and in the failure text of the `ledger` job — nothing a reader who opened
+the ledger itself would find. The block now sits above the first entry and states
+the contract as THIS repo's checker enforces it today: the five header fields in
+the words ci.yml asks for them ("time [HH:MM] [MM-DD-YY] (24-hour), agent, worktree
+(branch when not on main), type, area, then one plain-prose paragraph on what
+changed and why"), the closing rule in its identity form — 81 underscores, a space,
+the entry's own HH:MM and worktree — and the union-merge caveat with the three
+rulings it does not buy: it saves an entry's tail and not its head, an entry owns
+its rule and not the blank line after it, and union only fails safe for
+append/append. The identification of the checker is deliberately not a number.
+scripts/check-ledger.mjs here carries NO revision or digest stamp; it is the port of
+ocean-bedrock's (bedrock's PR #62 for the checker, #98 for the identity separator)
+whose own header declares every executable line byte-identical to bedrock's, so the
+block names the constants — `/^time:/`, `/^_{5,}(?:[ \t].*)?$/`, exit 0/1/2 — and
+tells the reader to re-read the file rather than trust a revision that is not
+stamped anywhere. It also records what the checker does not check: separator
+uniqueness, rule width, rule-lines-against-entry-count, and ORDER. There is no
+order checker in this repo, and merged entries genuinely do not sort — union emits
+the current branch's lines before the merged branch's — which AGENTS.md already
+rules cosmetic because every entry carries its own time field. Prepending is the one
+non-append edit this file accepts, and it is safe only because neither of the
+checker's line anchors reaches the block: every sample line in the fenced template
+is indented two spaces. That indent was measured, not assumed, and the measurement
+found something worth writing down. Un-indent the whole template and the checker
+still exits 0 while the entry count rises from 287 to 288, because the sample rule
+closes the phantom entry the sample header opened — a silent miscount the exit code
+cannot see. Un-indent only the header and it exits 1 naming line 14. As written the
+verdict is byte-for-byte the baseline's: 287 entries, every one closed, exit 0,
+identical to origin/main before the block, and `git diff` is 82 lines of pure
+insertion with nothing removed, so the first entry is untouched. The block says all
+of this and tells the next editor to read the count and not just the code.
+scripts/check-ledger-order.mjs does not exist on this tree and could not be run;
+origin/main is 4ab7a71 (#192) and the #194 that was supposed to have added it, along
+with the r2 CODE_REVISION/CODE_DIGEST stamps, is not in this repo. Gate green on the
+final tree, all seven frozen commands.
+_________________________________________________________________________________ 23:28 cloud/surface-events-schema-block
