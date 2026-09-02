@@ -335,14 +335,16 @@ authorized for a room:
 
 1. Human opens the room-agent authorization panel and selects the package.
 2. In a Local room with no binding, the surface calls
-   `POST /v1/rooms/persistent/{key}/agents/bootstrap`; in a federated room it
-   calls `POST /v1/rooms/persistent/{key}/members/agents` to establish only
-   the non-authorizing roster membership.
-3. The surface loads
-   `GET /v1/rooms/persistent/{key}/agents/preview/{package}` and displays the
-   daemon-derived package digest, owner eligibility, requested/grantable
-   capabilities, activation, context and memory choices.
-4. Human confirms one exact decision; the surface posts it to
+   `POST /v1/rooms/persistent/{key}/agents/bootstrap`; otherwise it first loads
+   `GET /v1/rooms/persistent/{key}/agents/preview/{package}`.
+3. In a federated room, only a loaded preview with daemon-derived
+   `owner_eligible=true` exposes registration. The surface then calls
+   `POST /v1/rooms/persistent/{key}/members/agents` to establish only the
+   non-authorizing roster membership and reloads the package preview so the
+   new server-derived member id is authoritative.
+4. The resulting preview displays the daemon-derived package digest, owner
+   eligibility, requested/grantable capabilities, activation, context and
+   memory choices. Human confirms one exact decision; the surface posts it to
    `POST /v1/rooms/persistent/{key}/agents` with the daemon-derived owner and
    member ids plus a decision id.
 5. Only the returned Active binding gives mentions execution authority. The
