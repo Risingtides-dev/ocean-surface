@@ -35,9 +35,19 @@
 //! | `color: var(--fg)` changed to `var(--fg-2)` | RED | **RED** `got \`color:var(--fg-2);\`` |
 //! | the guarded rule deleted outright | RED | **RED** `no rule for \`…:not(:has(input:disabled))\`` |
 //! | `:not(:has(input:disabled))` dropped from the prelude | RED | **RED** at the unguarded-`:hover` assert |
+//! | `color` → `background-color`, same value | RED | **RED** `got \`background-color:var(--fg);\`` |
 //!
 //! So the loosened grip costs nothing: every way of removing or changing the
 //! protected declaration still reds, and only the false positive is gone.
+//!
+//! That last row is why the assert splits on `;` instead of asking `contains`
+//! for `"color:var(--fg);"`. A substring test is satisfied by
+//! `background-color:var(--fg);` and `border-color:var(--fg);` — both of which
+//! leave the row's TEXT exactly as dim as it was, so the guard would have gone
+//! green on the one change it exists to catch. Measured both ways on the same
+//! mutated sheet: the substring form passed, the split form reds with the body
+//! in the message. Caught in review on this PR, not by the mutation set above,
+//! which is the honest note to leave — a row this table did not think to try.
 
 fn rooms_workspace_css() -> String {
     let path = concat!(
@@ -92,8 +102,14 @@ fn a_dead_trigger_row_does_not_brighten_on_hover() {
         &normalized,
         ".rooms-workspace__trigger:hover:not(:has(input:disabled))",
     );
+    // Split on `;` rather than `contains`: the body is whitespace-stripped, so
+    // each piece IS one declaration and `==` gets the boundary for free.
+    // `contains("color:var(--fg);")` would have been satisfied by
+    // `background-color:var(--fg);` or `border-color:var(--fg);` — either of
+    // which leaves the row's TEXT exactly as dim as it was, which is the thing
+    // this test is about.
     assert!(
-        body.contains("color:var(--fg);"),
+        body.split(';').any(|decl| decl == "color:var(--fg)"),
         "a live trigger row still has to brighten on hover, got `{body}`",
     );
 }
