@@ -34,7 +34,7 @@
 //!
 //! ## Measured, not assumed
 //!
-//! Six mutations applied for real against this tree, each ALONE, with this file
+//! Ten mutations applied for real against this tree, each ALONE, with this file
 //! and `cargo test -p ocean-surface-ui` both executed and the tree restored
 //! verbatim in between. The right-hand column is the one that matters.
 //!
@@ -59,6 +59,34 @@
 //! belt-and-braces against a wholesale deletion; what they uniquely catch is a
 //! block that still calls the predicate and renders the wrong thing — which is
 //! what the sixth row measures.
+//!
+//! ## The four Codex rounds added
+//!
+//! Codex review on #195 found two real defects, both in what this slice added,
+//! and the mutations for their fixes are these:
+//!
+//! | mutation                                                            | result |
+//! |----------------------------------------------------------------------|--------|
+//! | `agent_owners` back to a bare `Vec` (provenance collapsed)            | DOES NOT COMPILE — see below |
+//! | `refresh_agent_owners` drops its `set(None)` invalidation             | RED here, alone |
+//! | ONE of the two binding mutations stops refreshing                     | RED here, alone — the COUNT catches it; either site alone hides the other |
+//! | the `Unknown` arm rendered as `unclaimed`                             | RED here, alone — but only after this file was fixed, see below |
+//!
+//! **The first is compiler-held, and that is a finding rather than a gap.**
+//! `Option<Vec<_>>` → `Vec<_>` fails to build: the rail's call site passes
+//! `owners.as_deref()` and the signal's type no longer matches. Recorded per
+//! `AGENTS.md`'s rule for measured-compiler-held controls — the needle on the
+//! decode is kept anyway, because the hold lives in a call site a future slice
+//! could rewrite while leaving the wire type collapsed.
+//!
+//! **The fourth is the one worth reading.** Rendering `unclaimed` from the
+//! `Unknown` arm left this file GREEN on its first measurement — the arm needle
+//! this header claims had failed to apply, and a bare `contains` on the
+//! unclaimed markup is satisfied by whichever arm emits it. The mutation is the
+//! only reason that was caught: the assertion is now a COUNT of exactly one
+//! unclaimed render plus a needle on the `Unknown` arm itself, and the mutation
+//! was re-run against the fixed file and comes back RED. A guard written and
+//! not mutated is a guard that has not been measured.
 
 mod common;
 
@@ -71,12 +99,16 @@ fn the_snapshots_agent_owners_reach_the_open_room_call_site() {
     let rooms = without_whitespace(&view_source("rooms.rs"));
 
     assert!(
-        rooms.contains("#[serde(default)]agent_owners:Vec<RoomAgentOwner>,"),
-        "`agent_owners` must decode with `#[serde(default)]`: the ecosystem \
-         contract rules the field additive, so a daemon predating ocean-os#437 \
-         sends no key at all. Without the default that body is a decode error, \
-         and `open_room` reports decode errors as a failed open — every room on \
-         such a daemon refusing to load over a field the open path never needs",
+        rooms.contains("#[serde(default)]agent_owners:Option<Vec<RoomAgentOwner>>,"),
+        "`agent_owners` must decode with `#[serde(default)]` AND as an \
+         `Option`. The default is the compatibility half: the contract rules \
+         the field additive, so a daemon predating ocean-os#437 sends no key, \
+         and without it that body is a decode error `open_room` reports as a \
+         failed open — every room on such a daemon refusing to load over a \
+         field the open path never needs. The `Option` is the TRUTH half: on a \
+         bare `Vec` the default collapses that silent daemon into a current one \
+         answering `[]`, and the rail then badges every agent in every room \
+         `unclaimed` on evidence it does not have",
     );
 
     let hydration_arm = rooms
@@ -98,11 +130,75 @@ fn the_snapshots_agent_owners_reach_the_open_room_call_site() {
          src` answering exactly what it answered before this slice",
     );
     assert!(
-        rooms.contains("self.agent_owners.set(Vec::new());"),
-        "`reset_room_state` must clear it. Both `open_room` and `close_room` \
-         call that, so this is what stops one room's ownership from outliving \
-         it into the next room opened — where a same-named agent would wear \
-         the previous room's owner and the rail has no way to tell",
+        rooms.contains("self.agent_owners.set(None);"),
+        "`reset_room_state` must clear it, and to `None` rather than an empty \
+         list. Both `open_room` and `close_room` call that, so this is what \
+         stops one room's ownership from outliving it into the next room \
+         opened — where a same-named agent would wear the previous room's \
+         owner and the rail has no way to tell. `None` because between rooms \
+         the surface has NO answer; an empty list would say the next room's \
+         agents are unclaimed before it has read anything about them",
+    );
+}
+
+/// Hydration is not the only thing that changes who owns what, and until this
+/// it was the only thing that could tell the rail.
+///
+/// Codex found it on #195: the daemon's store INSERTS a `room_agent_owners` row
+/// as part of creating an agent participant, so a first-agent bootstrap leaves
+/// the room owned in the database and `unclaimed` on screen — the exact state
+/// this slice exists to remove, arriving through the one door that bypasses
+/// hydration. `bootstrap_local_package` replaces only `rooms.open_room`, and an
+/// authorization updates only its own bindings list; neither is anything the
+/// members rail reads.
+#[test]
+fn a_binding_mutation_re_reads_who_owns_what() {
+    let rooms = without_whitespace(&view_source("rooms.rs"));
+    let authorization = without_whitespace(&view_source("room_agent_authorization.rs"));
+
+    assert!(
+        rooms.contains("pub(crate)fnrefresh_agent_owners(&self){"),
+        "the ownership refresh needs a `pub(crate)` door: the mutations that \
+         invalidate it live in `room_agent_authorization.rs`",
+    );
+
+    let refresh = rooms
+        .split_once("pub(crate)fnrefresh_agent_owners(&self){")
+        .and_then(|(_, rest)| rest.split_once("me.agent_owners.set(page.agent_owners);"))
+        .map(|(body, _)| body)
+        .expect("`refresh_agent_owners` reads a page and publishes its owners");
+
+    assert!(
+        refresh.contains("self.agent_owners.set(None);"),
+        "it must INVALIDATE before it asks. The mutation has already made what \
+         the rail holds wrong, and `None` renders no ownership rather than a \
+         stale claim — so a refresh that never answers degrades to silence \
+         instead of to a lie",
+    );
+    assert!(
+        refresh.contains("leturl=room_snapshot_tail_url(&base,&key,OWNERSHIP_ONLY_CURSOR,1);"),
+        "and it must ask for the ROSTER facts and no transcript. \
+         `before_seq = 0` is the contract's terminal empty page while the \
+         daemon resolves `agent_owners` from the room's own lock regardless — \
+         re-hydrating here would throw away every older page the operator \
+         pressed for",
+    );
+    assert!(
+        refresh.contains("if!me.room_is_current(generation_id,&key){return;}"),
+        "the response lands after an await, so a room switched during one must \
+         not have the previous room's ownership written into it",
+    );
+
+    assert_eq!(
+        authorization
+            .matches("rooms.refresh_agent_owners();")
+            .count(),
+        2,
+        "BOTH binding mutations must re-read: the first-agent bootstrap, which \
+         creates the agent participant and its ownership row together, and the \
+         authorization, which can do the same. Counted rather than merely \
+         present — one correct call site hides the other's absence, and the \
+         agent left showing `unclaimed` is the one the operator just claimed",
     );
 }
 
@@ -148,7 +244,7 @@ fn the_members_rail_renders_the_owner_and_names_the_unclaimed() {
 
     assert!(
         workspace.contains(
-            "matchrooms.agent_owners.with(|owners|{agent_ownership(owners,&participants,&owner_row_id)}){"
+            "matchrooms.agent_owners.with(|owners|{agent_ownership(owners.as_deref(),&participants,&owner_row_id)}){"
         ),
         "the rail must ASK the predicate, at the row it is rendering — a rail \
          that decodes ownership and renders none is the state this slice \
@@ -179,6 +275,28 @@ fn the_members_rail_renders_the_owner_and_names_the_unclaimed() {
         "an agent nobody owns must SAY so. Rendering nothing there is \
          indistinguishable from a rail that had nothing to say, which is \
          exactly what a member saw before this slice",
+    );
+    // COUNTED, and this is the assertion that was missing on the first pass:
+    // a bare `contains` on the unclaimed markup stays green when the UNKNOWN
+    // arm is the thing rendering it. Measured — that mutation came back green
+    // against this file until the count and the arm needle below were added.
+    assert_eq!(
+        workspace
+            .matches(
+                "<spanclass=\"rooms-workspace__member-ownerrooms-workspace__member-owner--unclaimed\">\"unclaimed\"</span>"
+            )
+            .count(),
+        1,
+        "exactly ONE arm may render `unclaimed`. A second is the Unknown arm \
+         wearing the Unclaimed arm's clothes, which is the whole defect: on a \
+         daemon predating ocean-os#437 that badges every agent in every room",
+    );
+    assert!(
+        workspace.contains("AgentOwnership::Unknown=>().into_any(),"),
+        "no answer must render NOTHING. `Unclaimed` there would be a claim \
+         about the room made out of the surface's own ignorance — on a daemon \
+         predating ocean-os#437 it would be that claim about every agent in \
+         every room, which is what Codex found on #195",
     );
     assert!(
         workspace.contains("class:rooms-workspace__member-presence--live=present")

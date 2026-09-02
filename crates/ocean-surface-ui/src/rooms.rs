@@ -77,6 +77,16 @@ const HYDRATION_TRANSCRIPT_LIMIT: usize = 1000;
 /// read the wrong end of the log.
 const HYDRATION_TAIL_CURSOR: u64 = u64::MAX;
 
+/// The OTHER end of that cursor, for a read that wants the room's roster facts
+/// and none of its transcript. The contract defines `before_seq = 0` as a
+/// terminal empty page — nothing precedes the first message — while the daemon
+/// resolves `agent_owners`, `access` and `closed` from the room's own lock
+/// regardless of which page it serves. So this is how
+/// [`Rooms::refresh_agent_owners`] asks "who owns what now" for one request and
+/// zero rows, instead of re-hydrating and discarding the operator's loaded
+/// history to learn it.
+const OWNERSHIP_ONLY_CURSOR: u64 = 0;
+
 /// Pages one catch-up read of `/transcript` will walk before it stops asking,
 /// and the same bound on the backward hydration walk. The route serves 200 rows
 /// a page, so five is the same 1000 rows a fresh open paints
@@ -546,16 +556,29 @@ struct RoomSnapshotResponse {
     /// reach. This crate opens no other room read, which is why `/snapshot` is
     /// the only envelope in this file that decodes it.
     ///
-    /// `#[serde(default)]` because the contract rules the field additive: a
-    /// daemon predating ocean-os#437 says nothing and an empty list is exactly
-    /// what "no local ownership recorded" means, which is also what every room
-    /// that predates the feature reports from a current daemon.
+    /// `Option`, not a bare `Vec`, because the two ways this arrives empty are
+    /// not the same fact and the rail renders them differently.
+    ///
+    /// `Some([])` is a current daemon saying, authoritatively, that no agent in
+    /// this room has a recorded owner — every agent is genuinely unclaimed.
+    /// `None` is a daemon predating ocean-os#437 saying NOTHING: it may hold
+    /// durable ownership rows it simply cannot project. Collapsing the second
+    /// into the first — which `#[serde(default)]` on a `Vec` does — makes the
+    /// rail label every agent in every room `unclaimed` on such a daemon, which
+    /// is a confident claim the surface has no evidence for. It is the same
+    /// provenance distinction the older-history edge draws between "reached the
+    /// start of the log" and "nothing has asked yet", and for the same reason:
+    /// an absent answer is not a negative one.
+    ///
+    /// The default keeps the compatibility half — an absent key must not fail
+    /// the decode, or every room on a pre-field daemon refuses to open over a
+    /// field the open path never needs.
     ///
     /// A soft-closed room reports it unchanged — closing retains the roster and
     /// the ownership rows — so the audit view says who owned what and whether
     /// they were still present when it froze.
     #[serde(default)]
-    agent_owners: Vec<RoomAgentOwner>,
+    agent_owners: Option<Vec<RoomAgentOwner>>,
     #[serde(default)]
     error: Option<String>,
 }
@@ -863,13 +886,20 @@ pub struct Rooms {
     /// every send, and [`Rooms::retry_outbox`] refuses on it too.
     pub closed: RwSignal<bool>,
     /// Which worker owns which Agent participant in the open room, in roster
-    /// order, from `/snapshot`'s `agent_owners`. Empty means loading, no open
-    /// room, no owned agents, or a daemon predating the field — all four read
-    /// the same way in the rail, which renders every agent it cannot match as
-    /// unclaimed. Published by [`Rooms::open_room`] unconditionally on
-    /// `closed`, because a frozen room is the one whose ownership a reader can
-    /// no longer ask anyone about.
-    pub agent_owners: RwSignal<Vec<RoomAgentOwner>>,
+    /// order, from `/snapshot`'s `agent_owners`.
+    ///
+    /// `None` means the surface has no answer: no room open, hydration still in
+    /// flight, a daemon that predates ocean-os#437, or a binding mutation that
+    /// has just invalidated what we held. `Some(rows)` is the daemon's answer,
+    /// and `Some([])` within it is an authoritative "nobody owns anything here".
+    /// The rail renders `None` as no ownership line at all rather than as
+    /// `unclaimed`, because an absent answer is not a negative one.
+    ///
+    /// Published by [`Rooms::open_room`] unconditionally on `closed`, because a
+    /// frozen room is the one whose ownership a reader can no longer ask anyone
+    /// about, and republished by [`Rooms::refresh_agent_owners`] after a
+    /// binding mutation moves the rows underneath it.
+    pub agent_owners: RwSignal<Option<Vec<RoomAgentOwner>>>,
     /// Per-room durable unread summary from the daemon room list.
     pub read_summaries: RwSignal<HashMap<String, RoomReadSummary>>,
     /// Durable read cursor for the currently open room.
@@ -1034,7 +1064,7 @@ impl Rooms {
             agents_loaded: RwSignal::new(false),
             access: RwSignal::new(None),
             closed: RwSignal::new(false),
-            agent_owners: RwSignal::new(Vec::new()),
+            agent_owners: RwSignal::new(None),
             read_summaries: RwSignal::new(HashMap::new()),
             open_read_cursor: RwSignal::new(None),
             read_cursor_in_flight: RwSignal::new(None),
@@ -1147,8 +1177,10 @@ impl Rooms {
         self.closed.set(false);
         // Ownership is one room's roster fact. Left standing, the previous
         // room's rows would badge same-named agents in the next room opened,
-        // and the rail has no other way to tell they are stale.
-        self.agent_owners.set(Vec::new());
+        // and the rail has no other way to tell they are stale. `None` rather
+        // than an empty list: between rooms the surface has no answer, and an
+        // empty list is the daemon's answer that nobody owns anything.
+        self.agent_owners.set(None);
         self.open_read_cursor.set(None);
         self.read_cursor_in_flight.set(None);
         self.last_sent_read_cursor.set(None);
@@ -2239,6 +2271,53 @@ impl Rooms {
                     return;
                 };
                 cursor = next;
+            }
+        });
+    }
+
+    /// Re-read who owns which agent, after something changed who does.
+    ///
+    /// Hydration is the only other writer, so without this a binding mutation
+    /// leaves the rail showing the ownership picture from whenever the room was
+    /// opened. That is not a cosmetic lag: the daemon's store INSERTS a
+    /// `room_agent_owners` row as part of creating an agent participant, so the
+    /// agent a first-agent bootstrap just created is owned in the database and
+    /// `unclaimed` on screen until the room is closed and reopened — the state
+    /// this whole slice exists to remove, arriving through the one door that
+    /// bypasses hydration.
+    ///
+    /// The read is `/snapshot` at `before_seq = 0`, which the contract defines
+    /// as a terminal empty page: nothing precedes the first message. The daemon
+    /// resolves `agent_owners` from the roster's own lock regardless of which
+    /// page it serves, so this costs one request and no transcript at all.
+    /// Deliberately NOT a re-hydration — replacing the transcript here would
+    /// throw away every older page the operator has pressed for.
+    ///
+    /// Invalidates before it asks. A mutation has already made what we hold
+    /// wrong, and `None` renders no ownership rather than a stale claim, so a
+    /// refresh that never answers degrades to silence instead of to a lie.
+    pub(crate) fn refresh_agent_owners(&self) {
+        let Some(key) = self.open_key.get_untracked() else {
+            return;
+        };
+        let generation_id = self.generation_snapshot();
+        let base = self.base();
+        let me = *self;
+        self.agent_owners.set(None);
+        spawn_local(async move {
+            let url = room_snapshot_tail_url(&base, &key, OWNERSHIP_ONLY_CURSOR, 1);
+            let page = match Request::get(&url).send().await {
+                Ok(response) => response.json::<RoomSnapshotResponse>().await.ok(),
+                Err(_) => None,
+            };
+            // After an await like everything else here: a room switched during
+            // the read must not have the previous room's ownership written into
+            // it, and `reset_room_state` has already cleared this signal.
+            if !me.room_is_current(generation_id, &key) {
+                return;
+            }
+            if let Some(page) = page.filter(|page| page.ok) {
+                me.agent_owners.set(page.agent_owners);
             }
         });
     }
@@ -4129,17 +4208,19 @@ mod tests {
         );
     }
 
-    /// `agent_owners` decodes off `/snapshot` in ROSTER ORDER, and an envelope
-    /// without it decodes to an empty list rather than failing.
+    /// `agent_owners` decodes off `/snapshot` in ROSTER ORDER, and the two ways
+    /// it arrives empty stay TOLD APART.
     ///
-    /// The absent case is the whole compatibility story, and it is not
-    /// hypothetical in one direction only: a daemon predating ocean-os#437
-    /// omits the key entirely, and a CURRENT daemon omits nothing but answers
-    /// `[]` for every room that never recorded an ownership row — which is
-    /// every room created before the feature. Both must read as "no ownership
-    /// recorded". Without `#[serde(default)]` the first is a decode error,
-    /// which `open_room` reports as "room decode error" — every room on such a
-    /// daemon failing to open, over a field nothing in the open path needs.
+    /// `Some([])` is a current daemon answering that no agent in this room has
+    /// a recorded owner. `None` is a daemon predating ocean-os#437 saying
+    /// nothing at all — it may hold durable ownership rows it cannot project.
+    /// A bare `Vec` with `#[serde(default)]` collapses the second into the
+    /// first, and the rail then labels every agent in every room `unclaimed` on
+    /// such a daemon: a confident claim made entirely out of the surface's own
+    /// ignorance. Codex caught exactly this on #195.
+    ///
+    /// The absent case must still DECODE either way, or every room on such a
+    /// daemon refuses to open over a field the open path never needs.
     ///
     /// Order is asserted because the daemon promises it (`ORDER BY p.position`,
     /// the roster's own column) and the rail spends it: the rail walks
@@ -4147,7 +4228,7 @@ mod tests {
     /// invisible in the rail and visible the day anything renders the list
     /// whole.
     #[test]
-    fn snapshot_agent_owners_decode_in_roster_order_and_default_empty() {
+    fn snapshot_agent_owners_keep_absent_apart_from_authoritatively_empty() {
         let with_owners: RoomSnapshotResponse = serde_json::from_value(serde_json::json!({
             "ok": true,
             "room": null,
@@ -4162,7 +4243,7 @@ mod tests {
 
         assert_eq!(
             with_owners.agent_owners,
-            vec![
+            Some(vec![
                 RoomAgentOwner {
                     agent_id: "researcher".into(),
                     owner_id: "alice".into(),
@@ -4173,7 +4254,7 @@ mod tests {
                     owner_id: "bob".into(),
                     owner_present: false,
                 },
-            ],
+            ]),
             "both rows decode, in the roster order the daemon served them",
         );
 
@@ -4187,10 +4268,11 @@ mod tests {
             "a snapshot with no agent_owners key must still decode — a daemon \
              predating ocean-os#437 omits it and the room must still open",
         );
-        assert!(
-            without.agent_owners.is_empty(),
-            "an absent key is no recorded ownership, which is what the rail \
-             renders as unclaimed",
+        assert_eq!(
+            without.agent_owners, None,
+            "an absent key is NO ANSWER, and must not read as the daemon \
+             answering that nobody owns anything — that reads as `unclaimed` on \
+             every agent row the rail paints",
         );
 
         let empty: RoomSnapshotResponse = serde_json::from_value(serde_json::json!({
@@ -4201,7 +4283,37 @@ mod tests {
             "agent_owners": [],
         }))
         .expect("an explicit empty list is a room with no owned agents");
-        assert!(empty.agent_owners.is_empty());
+        assert_eq!(
+            empty.agent_owners,
+            Some(Vec::new()),
+            "an explicit `[]` IS an answer: this daemon knows, and the answer \
+             is that every agent here is unclaimed",
+        );
+    }
+
+    /// The ownership-only read asks for the room's roster facts and none of its
+    /// transcript. `before_seq = 0` is the contract's terminal empty page —
+    /// nothing precedes the first message — while the daemon resolves
+    /// `agent_owners` from the room's own lock whichever page it serves.
+    ///
+    /// The pairing with `limit=1` is deliberate belt-and-braces: the cursor
+    /// already guarantees no rows, and the limit means a daemon that ever
+    /// reinterpreted the cursor cannot answer this with a thousand messages.
+    #[test]
+    fn the_ownership_only_read_asks_for_no_transcript_at_all() {
+        assert_eq!(OWNERSHIP_ONLY_CURSOR, 0);
+        assert_eq!(
+            room_snapshot_tail_url(
+                "http://127.0.0.1:7777",
+                "ocean-surface",
+                OWNERSHIP_ONLY_CURSOR,
+                1
+            ),
+            "http://127.0.0.1:7777/v1/rooms/persistent/ocean-surface/snapshot\
+             ?before_seq=0&limit=1",
+            "one request, zero rows — re-hydrating to learn who owns an agent \
+             would throw away every older page the operator pressed for",
+        );
     }
 
     /// One `agent_owners` row survives a round trip through the wire shape the

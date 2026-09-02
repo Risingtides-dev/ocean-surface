@@ -717,6 +717,13 @@ impl RoomAgentAuthorizationState {
                 Ok((record, preview)) => {
                     rooms.open_room.set(Some(record));
                     rooms.fetch_rooms_silent();
+                    // The daemon's store inserts a `room_agent_owners` row as
+                    // part of creating this agent participant, so the room's
+                    // ownership just changed and the rail's copy of it is from
+                    // hydration. Without this the agent that was just
+                    // bootstrapped renders `unclaimed` until the room is closed
+                    // and reopened.
+                    rooms.refresh_agent_owners();
                     me.owner_eligible.set(true);
                     me.preview.set(Some(preview));
                     me.notice.set(Some(Notice {
@@ -1054,6 +1061,11 @@ impl RoomAgentAuthorizationState {
                 Ok(binding) => {
                     upsert_binding(&me.bindings, binding);
                     me.reset_form();
+                    // Same reason as the bootstrap above: an authorization can
+                    // establish the agent participant, and the ownership row
+                    // lands with it. `upsert_binding` updates this component's
+                    // own list and nothing the members rail reads.
+                    rooms.refresh_agent_owners();
                     me.notice.set(Some(Notice {
                         state: NoticeState::Active,
                         message: "Room agent authorization is active".to_owned(),
