@@ -141,6 +141,23 @@ fn the_native_shell_carries_the_privileged_transport() {
         "the shell must read the operator credential under its own custody check",
     );
     let dense = without_whitespace(&shell);
+    // Dot segments must be judged on the DECODED segment. `%2e%2e` is not
+    // `..` to a string comparison but is to the URL parser, which collapses
+    // the segment and would carry the credential to a route the allowlist
+    // never approved. Two independent holds, because this is the boundary:
+    // the decode-aware pre-check, and a post-parse equality check that makes
+    // the whole normalisation class inert rather than just this instance.
+    // `crates/ocean-tauri` is ungated by CI, so this scan is the only place
+    // the repo's own gate sees either of them.
+    assert!(
+        dense.contains("fnis_dot_segment(") && dense.contains(".any(is_dot_segment)"),
+        "the shell must test dot segments after percent-decoding them",
+    );
+    assert!(
+        dense.contains("ifparsed.path()!=path{"),
+        "the shell must refuse a path that does not survive URL parsing, so a \
+         future normalisation rule cannot rewrite an allowlisted route",
+    );
     assert!(
         dense.contains("metadata.mode()&0o777!=0o600")
             && dense.contains("metadata.nlink()!=1")
