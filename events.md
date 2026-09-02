@@ -5829,12 +5829,31 @@ before, green after — and every genuine regression still reds: removing
 `var(--fg-2)` gives `got \`color:var(--fg-2);\``, deleting the rule outright panics in
 `rule_body` with ``no rule for `.rooms-workspace__trigger:hover:not(:has(input:disabled))` ``,
 and dropping `:not(:has(input:disabled))` from the prelude still reds at the
-unguarded-`:hover` assertion, which is untouched. The `;` inside the needle is what
-keeps the value exact — `color:var(--fg);` does not match `color:var(--fg-2);` — so
-the loosening costs no strictness on the property, only on the rule's length. The
-table is in the module header. Note for whoever files the precedent: ocean-surface
-#198, cited as the sibling guard-grip fix to read first, is not in this repo;
-origin/main is 4ab7a71 (#192). Gate green on the final tree, all seven frozen
+unguarded-`:hover` assertion, which is untouched. The table is in the module header.
+
+Two corrections after review, both to claims this entry made in its first form. The
+first was a real hole and Codex found it: the assertion was
+`body.contains("color:var(--fg);")`, and this entry said the trailing `;` kept the
+value exact so the loosening cost no strictness on the property. It did not. A
+substring test is equally satisfied by `background-color:var(--fg);` and
+`border-color:var(--fg);`, either of which leaves the row's TEXT as dim as it was —
+the one change this guard exists to catch. Measured both ways on the same mutated
+sheet: with `color` swapped for `background-color`, the substring form passed 2/2
+while the row no longer brightens, and the assert now splits the body on `;` and
+compares one declaration for equality, which reds with ``got
+`background-color:var(--fg);` ``. The body is whitespace-stripped, so each piece IS
+one declaration and `==` gets the boundary for free. Six mutations now, all re-run
+against the final form: baseline and the added-declaration case green, value-changed,
+declaration-removed, rule-deleted, prelude-unguarded and colour-property-swapped all
+red. The sixth row came from review rather than from the mutation set, which is worth
+recording as such — it is the row the table did not think to try. The second
+correction: this entry said ocean-surface #198 "is not in this repo". Wrong. #198 is
+OPEN, on cloud/surface-panels-css-repoint — unmerged, not absent, and the card was
+right to cite it. Having now read it, it confirms this slice rather than changing it:
+same shape (a guard gripping something dead, re-pointed to the live property, proved
+by mutation, recorded), and it states the rule this slice followed — deleting the
+assertion "would have traded one dead assertion for no assertion". No file overlap
+between the two branches. Gate green on the final tree, all seven frozen
 commands: fmt, both clippy lanes at `-D warnings`, both checks, the wasm32 --no-run
 build of all 14 test binaries, and the host suite at 1313 passing across those 14 —
 1252 unit tests plus 61 guards, 0 failed.
