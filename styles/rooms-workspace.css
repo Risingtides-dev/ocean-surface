@@ -3025,6 +3025,29 @@
   opacity: 0.6;
 }
 
+/* The other end of the same fact: a room whose backward walk provably reached
+   the start of its log. Sits exactly where the button would, so the edge of
+   the transcript is marked either way and never by silence — quiet, because
+   this is a boundary and not an action. */
+.rooms-workspace__transcript-start {
+  margin: 0 0 8px;
+  padding: 7px 12px;
+  color: var(--fg-4);
+  font-size: 11px;
+  text-align: center;
+  letter-spacing: 0.04em;
+}
+
+/* A reply whose root is not loaded, sitting in the main column because the
+   thread pane it belongs to cannot be opened. The note says so above the body
+   it annotates. */
+.rooms-workspace__msg-orphan {
+  margin: 0 0 3px;
+  color: var(--fg-4);
+  font-size: 11px;
+  font-style: italic;
+}
+
 /* ── "New messages" jump affordance ─────────────────────────────────
    Shown only when appends arrive while the reader is scrolled up.
    Client scroll state — not read-cursor unread semantics. */

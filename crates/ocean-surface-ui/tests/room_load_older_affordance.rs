@@ -69,11 +69,15 @@ fn the_walk_parks_the_cursor_it_used_to_drop() {
 
     assert!(
         walk.contains(
-            "me.older_cursor.set(transcript_older_cursor(page.has_more,page.prev_seq,reached_back_to,));"
+            "me.settle_older_cursor(transcript_older_cursor(page.has_more,page.prev_seq,reached_back_to,));"
         ),
         "where the backward walk stops it must park the page's own cursor — \
          `has_more` and `prev_seq` are dropped at that instant otherwise, and \
-         they are the only route left to the rows behind the paint",
+         they are the only route left to the rows behind the paint. Through \
+         `settle_older_cursor`, not a bare `older_cursor.set`: the cursor and \
+         the fact that a read ANSWERED are one fact, and a `None` parked \
+         without the second is indistinguishable from a room that has not \
+         asked yet — which renders as silence rather than as a beginning",
     );
     assert!(
         walk.contains("me.park_older_cursor(generation_id,&key,Some(cursor));"),
@@ -139,10 +143,12 @@ fn the_on_demand_page_is_the_walks_request_with_the_walks_guards() {
     );
     assert!(
         body.contains(
-            "me.older_cursor.set(transcript_older_cursor(page.has_more,page.prev_seq,reached_back_to,));"
+            "me.settle_older_cursor(transcript_older_cursor(page.has_more,page.prev_seq,reached_back_to,));"
         ),
         "each press must leave the cursor the page it just read named, so the \
-         next press continues rather than re-serving the same rows",
+         next press continues rather than re-serving the same rows — and \
+         through the same settle as the walk, so the press that reaches the \
+         start of the log says so instead of silently stopping",
     );
     assert!(
         body.contains("me.older_in_flight.set(false);"),
@@ -181,10 +187,13 @@ fn the_affordance_renders_at_the_top_and_fires_the_read() {
     let workspace = without_whitespace(&view_source("rooms_workspace.rs"));
 
     assert!(
-        workspace.contains("{move||rooms.older_transcript_available().then(||view!{"),
+        workspace.contains("{move||matchrooms.older_history(){OlderHistory::Available=>view!{"),
         "the affordance renders on the parked cursor and on nothing else — a \
          room whose walk reached the start of the log parks `None` and must \
-         grow no control at all",
+         grow no control at all. It is a THREE-state match rather than the \
+         boolean this file first pinned: `None` also means `nothing has asked \
+         yet`, and collapsing the two rendered a room that provably holds its \
+         whole history exactly like one still hydrating",
     );
     assert!(
         workspace.contains("class=\"rooms-workspace__load-older\""),
@@ -211,8 +220,8 @@ fn the_affordance_renders_at_the_top_and_fires_the_read() {
         .find("class=\"rooms-workspace__load-older\"")
         .expect("the load-older affordance");
     let rows = workspace
-        .find("each=move||{letroots=partition_thread_messages(&rooms.transcript.get(),0).roots;")
-        .expect("the `<For>` over the transcript roots");
+        .find("each=move||{letroots=main_transcript_rows(&rooms.transcript.get());")
+        .expect("the `<For>` over the transcript rows");
     assert!(
         transcript_open < affordance && affordance < rows,
         "the affordance sits inside `.rooms-workspace__transcript` and ahead of \

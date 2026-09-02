@@ -5802,3 +5802,73 @@ reds only the guard with the wasm32 clippy lane still green. Tree restored after
 each. Gate green: all seven frozen commands, host suite 1252 unit tests plus 61
 guards across 14 binaries.
 _________________________________________________________________________________ 20:39 loop/surface-load-older-affordance
+
+time:      [21:46] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/rooms-load-older]
+type:      feature
+area:      frontend
+
+Finish-line item 1.5, the two gaps #192 left. The brief was written against
+d58a145 and #192 landed one commit later, so most of item 1.5 — the parked cursor,
+the one-page read, the control, the scroll anchor — was already on main when this
+started. What was not is what this is.
+
+A room that reached the beginning could not SAY so. The affordance rendered on
+`older_cursor.is_some()`, so `None` rendered nothing — and `None` is four
+situations: no room open, hydration still walking, a page that provably reached the
+start of the log, and a walk that never ran. A room holding its whole history
+looked exactly like a room three seconds into hydration, and the one claim an
+operator wanted (this row IS the first message in this room) was the one the
+transcript could not make. `OlderHistory` is three states now over
+`older_cursor` plus a new `older_settled`, combined by `older_history_state`: a
+cursor dominates, `None + settled` is the beginning, `None + unsettled` claims
+nothing. Both halves are written by one `settle_older_cursor`, because they are one
+fact and splitting them is the failure this area keeps producing — a cursor without
+the flag is the old silence through the back door, the flag without the cursor
+claims a beginning a press could walk past. `park_older_cursor` deliberately does
+NOT settle: a request that never answered is not evidence about the shape of the
+log. The third writer is `open_room`'s short-page arm, which is the only settle
+that arrives without a request at all — `hydration_backfill_start` returning `None`
+means the first page provably held the whole log, so without it every room that
+fits in one page renders the hydrating silence permanently.
+
+The orphaned reply is the one #192 explicitly declined, and it was right to: the
+walk goes back a page at a time and cannot jump to one named root, so pressing
+"load older" is not an answer. The answer is that the reply stops being dropped.
+`main_transcript_rows` keeps every non-reply PLUS every reply whose root is not
+loaded, in the transcript's own ascending order, so a reply at seq 2500 to a root
+at seq 800 lands at its own position in time rather than at the window's edge —
+it is a real message that really was sent then. It carries a note saying its root
+is not loaded, worded on `older_history()`: while older history remains the note
+points at the press, and once the log's start has been read it stops promising a
+button that cannot help. The press then becomes what it always was — the way to
+bring the root in, at which point the reply rejoins its thread and leaves the main
+list on its own. The rule is `thread_root_for`'s, which also covers a reply whose
+parent is itself a reply: no pane opens on that either, and matching on `seq` alone
+would call it threaded and drop it straight back off the screen. Both the `<For>`
+and the empty-state check read the same list, or a room hydrated into the middle of
+a long thread paints rows under "No messages yet".
+
+Seven mutations run for real, each alone with the tree restored verbatim, tabled in
+the new guard's header. Two came back other than expected and are written down: the
+settle's flag half reds only this file with every unit test green (the pure
+decider's tests own the rule and never its wiring), and deleting the orphan note
+reds the wasm32 clippy lane because `orphaned_reply_note` loses its only non-test
+caller.
+
+Three pre-existing guard needles updated, all for shapes this slice genuinely
+changed and none for convenience. `room_hydration_resume.rs` quoted the whole
+`if let Some(before_seq) = backfill_from`, which grew a `None` arm; it now names the
+`Some` arm, which is what it was guarding. `room_load_older_affordance.rs` named the
+bare `older_cursor.set` at two call sites (now `settle_older_cursor`), the boolean
+render condition (now the three-state match), and the roots-only `each=` list — its
+message in each case is unchanged and extended to say why. Both files were re-run
+and are green.
+
+One thing the brief asked for that the tree did not have: there was no dated status
+line under Transcript Rendering saying the member cannot ask for older history, so
+nothing was replaced. Two new ones were added instead — one for the askable edge and
+its three states, one for the inline orphaned reply. Gate green: all seven frozen
+commands, host suite 1260 unit tests plus 65 guards across 15 binaries.
+_________________________________________________________________________________ 21:46 cloud/rooms-load-older
