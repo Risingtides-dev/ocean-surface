@@ -40,6 +40,14 @@
 // week-long gap does not. A header that parses as neither is skipped and
 // counted, never red: this check owns order, not format.
 //
+// ONE COPY, AND DELIBERATELY UNSTAMPED. scripts/check-ledger.mjs exists in
+// three repos and carries a CODE_DIGEST because three copies drift; this file
+// exists in ocean-surface only, so there is nothing for a digest to hold
+// equal and a stamp here would be a claim about copies that do not exist.
+// The day a sibling repo ports it, stamp both in the same PR — the fork that
+// went unnoticed for eleven waves one file over is the reason this sentence
+// is here rather than left for that reader to work out.
+//
 // NO --fix. Moving an entry is a decision about where history goes, and the
 // one time it was done (the five above, into the slots their stamps name) it
 // was done by hand and recorded in the ledger itself.
