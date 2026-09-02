@@ -113,9 +113,14 @@ A person's roster entry in `~/.config/ocean-surface/users.json` may carry a
 list of **devices**: the machines whose Ocean daemons that login can attach to.
 Signing in at `https://ocean.agentsworld.org` and picking a device lands the
 browser in that machine's sessions; switching devices is a click, not a second
-login. The choice is recorded server-side against a digest of the session
-cookie in `~/.config/ocean-surface/device-selections.json` (0600, written
-atomically), so it survives a proxy restart and a deploy.
+login. The choice is recorded server-side in
+`~/.config/ocean-surface/device-selections.json` (0600, written atomically), so
+it survives a proxy restart and a deploy — keyed by a digest of the session
+cookie **and** an opaque per-browser id (the `ocean_device` cookie), so one
+person's phone and desktop hold their own choices instead of re-pointing each
+other. Selecting also ends any event stream still open on the machine being
+left, so a tab that was already connected reconnects onto the new one rather
+than blending two machines into one transcript.
 
 ```json
 [

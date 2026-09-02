@@ -74,8 +74,18 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$USERNAME" ] || die "username must not be empty"
-[ -n "$DEVICE_NAME" ] || die "device name must not be empty"
 [ -f "$USERS_FILE" ] || die "no roster at $USERS_FILE"
+
+# Normalize the name the way the PROXY will when it loads this file, before
+# anything is written. Without this, `--name 'mini '` passes a raw duplicate
+# check here, collides with the existing `mini` after the proxy trims it, and
+# the surface refuses to start on the restart this script tells you to do; a
+# whitespace-only name does the same by trimming to empty.
+DEVICE_NAME="$(printf '%s' "$DEVICE_NAME" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+[ -n "$DEVICE_NAME" ] || die "device name must not be empty or only whitespace"
+case "$DEVICE_NAME" in
+  *[[:cntrl:]]*) die "device name must not contain control characters" ;;
+esac
 
 command -v python3 >/dev/null 2>&1 || die "python3 is required to edit JSON safely"
 
@@ -98,26 +108,49 @@ esac
 # and names under *.ts.net; loopback is the daemon's own default. Anything else
 # means the daemon is listening somewhere its lack of auth is not covered by a
 # tailnet ACL, which is the one thing this recipe must not do quietly.
-HOST="${DAEMON_URL#*://}"
-HOST="${HOST%%/*}"
-HOST="${HOST##*@}"
-case "$HOST" in
-  \[*\]*) HOST="${HOST%%]*}]" ;;
-  *:*) HOST="${HOST%%:*}" ;;
-esac
-tailnet=0
-case "$HOST" in
-  localhost | 127.* | '[::1]') tailnet=1 ;;
-  *.ts.net) tailnet=1 ;;
-  100.*)
-    second="${HOST#100.}"
-    second="${second%%.*}"
-    if [ "$second" -ge 64 ] 2>/dev/null && [ "$second" -le 127 ] 2>/dev/null; then
-      tailnet=1
-    fi
-    ;;
-esac
-if [ "$tailnet" -ne 1 ] && [ "$ALLOW_PUBLIC" -ne 1 ]; then
+#
+# The classification is done in python against a PARSED host, not by shell glob
+# on the string. A prefix match is not an address check: `100.64.0.1.example.com`
+# starts with `100.` and `127.example.com` starts with `127.`, and both are
+# names a public DNS server can resolve to anywhere at all — so a glob would
+# have waved through exactly the deployment this guard exists to stop.
+HOST="$(python3 - "$DAEMON_URL" <<'PY'
+import sys, urllib.parse
+try:
+    host = urllib.parse.urlsplit(sys.argv[1]).hostname or ""
+except ValueError:
+    host = ""
+print(host)
+PY
+)"
+[ -n "$HOST" ] || die "daemon_url names no host: '$DAEMON_URL'"
+
+TAILNET="$(python3 - "$HOST" <<'PY'
+import ipaddress, sys
+
+host = sys.argv[1].strip().lower()
+
+def verdict(host):
+    if host in ("localhost", "::1"):
+        return True
+    # A literal address is classified by RANGE, and only once it parses as one.
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        if address.is_loopback:
+            return True
+        # Tailscale's CGNAT range, 100.64.0.0/10.
+        return address in ipaddress.ip_network("100.64.0.0/10")
+    # A MagicDNS name, and it must have a label of its own in front of the
+    # suffix — ".ts.net" alone is not a host.
+    return host.endswith(".ts.net") and len(host) > len(".ts.net")
+
+print("yes" if verdict(host) else "no")
+PY
+)"
+if [ "$TAILNET" != "yes" ] && [ "$ALLOW_PUBLIC" -ne 1 ]; then
   die "'$HOST' is not a tailnet address (100.64/10, *.ts.net, or loopback).
 The Ocean daemon has no auth of its own — whoever can reach it can drive it.
 Bind it to the machine's tailnet address, or pass --allow-public if you have
@@ -185,7 +218,9 @@ if not devices:
         devices.append(legacy_device)
     entry["devices"] = devices
 
-if any(d.get("name") == name for d in devices):
+# Compare the way the proxy will, on trimmed names: an entry already written
+# as "mini " must collide with "mini" here rather than at the next restart.
+if any((d.get("name") or "").strip() == name for d in devices):
     sys.exit("add-device: '%s' already has a device named '%s'" % (username, name))
 
 device = {"name": name, "daemon_url": url}

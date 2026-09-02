@@ -31,7 +31,8 @@ use axum::{
     Json, Router,
 };
 use base64::Engine;
-use serde::Deserialize;
+use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tower_http::{services::ServeDir, trace::TraceLayer};
@@ -42,6 +43,10 @@ const DEFAULT_LIVEKIT_ROOM_ID: &str = "project:surface-main";
 const DEFAULT_VOICE_PROFILE: &str = "leo";
 
 const SESSION_COOKIE: &str = "ocean_session";
+/// Which BROWSER this is, so two browsers of one person can sit on two
+/// different machines. Opaque, random, and authenticating nothing on its own —
+/// the session cookie beside it says who you are; see [`selection_key`].
+const BROWSER_COOKIE: &str = "ocean_device";
 const SESSION_MAX_AGE_SECONDS: u64 = 60 * 60 * 24 * 30;
 
 const CALL_PLACE_DAEMON_PATH: &str = "/v1/calls/place";
@@ -83,6 +88,11 @@ struct AppState {
     http_probe: reqwest::Client,
     /// Which device each signed-in session is attached to.
     device_selections: Arc<DeviceSelections>,
+    /// Announces a selections row that just changed, so every SSE stream this
+    /// proxy is holding open on the machine being left can end instead of
+    /// outliving the switch. Carries the row key, never a device name: two
+    /// people may both be on "studio" and only one of them switched.
+    selection_changes: tokio::sync::broadcast::Sender<String>,
     voice_profile: String,
     /// Fallback upstream: used when auth is off, and as the default for a user
     /// entry that names no daemon of its own.
@@ -296,6 +306,10 @@ struct ResolvedDaemon {
     url: String,
     observer_token_path: Option<PathBuf>,
     operator_key_path: Option<PathBuf>,
+    /// The selections row this request resolved through, when it resolved
+    /// through one. A stream opened on this device ends when THIS row changes;
+    /// see [`stream_ends_on_switch`].
+    selection_key: Option<String>,
 }
 
 impl ResolvedDaemon {
@@ -622,7 +636,26 @@ fn device_selections_path() -> PathBuf {
 /// without bound.
 struct DeviceSelections {
     path: PathBuf,
-    entries: std::sync::Mutex<std::collections::BTreeMap<String, String>>,
+    /// One lock, held across the read-modify-write AND the file replacement.
+    ///
+    /// Snapshotting under the lock and then persisting outside it lets two
+    /// concurrent selections serialize their memory writes and then race their
+    /// file writes, so the older snapshot can land last and the file ends up
+    /// disagreeing with memory until the next restart — at which point somebody
+    /// silently gets a machine they did not pick. Selections happen when a
+    /// person clicks; the write is a few hundred bytes; the contention is
+    /// nothing and the ordering guarantee is the whole point.
+    entries: std::sync::Mutex<std::collections::BTreeMap<String, Selection>>,
+}
+
+/// One browser's choice, with the timestamp that lets old rows be pruned.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct Selection {
+    device: String,
+    /// Unix seconds. Rows older than a session cookie's life cannot belong to
+    /// a browser that is still signed in.
+    #[serde(default)]
+    updated: u64,
 }
 
 /// The stored shape, versioned by its one key so a later format can be told
@@ -630,8 +663,16 @@ struct DeviceSelections {
 #[derive(Deserialize)]
 struct DeviceSelectionsFile {
     #[serde(default)]
-    selections: std::collections::BTreeMap<String, String>,
+    selections: std::collections::BTreeMap<String, Selection>,
 }
+
+/// The most rows the file will ever hold, oldest evicted first.
+///
+/// One row per (person, browser) — a private window is a new browser, and a
+/// person who opens enough of them would otherwise grow this file forever.
+/// The cap is far above any real roster and the eviction is by age, so the
+/// row a live browser is using is never the one dropped.
+const MAX_DEVICE_SELECTIONS: usize = 1024;
 
 impl DeviceSelections {
     /// Read the file if it is present, private, and parses. Anything else
@@ -671,37 +712,54 @@ impl DeviceSelections {
         self.entries
             .lock()
             .ok()
-            .and_then(|entries| entries.get(key).cloned())
+            .and_then(|entries| entries.get(key).map(|row| row.device.clone()))
     }
 
-    /// Record a choice and write it through. A failed write is logged, not
-    /// returned: the in-memory choice is authoritative for this process either
-    /// way, and a full disk should not stop somebody switching machines.
+    /// Record a choice and write it through, both under one lock so the file
+    /// can never disagree with memory about which choice came last.
+    ///
+    /// A failed write is logged, not returned: the in-memory choice is
+    /// authoritative for this process either way, and a full disk should not
+    /// stop somebody switching machines.
     fn record(&self, key: &str, device: &str) {
-        let snapshot = {
-            let Ok(mut entries) = self.entries.lock() else {
-                tracing::warn!("device selections lock poisoned; choice not recorded");
-                return;
-            };
-            entries.insert(key.to_owned(), device.to_owned());
-            entries.clone()
+        let Ok(mut entries) = self.entries.lock() else {
+            tracing::warn!("device selections lock poisoned; choice not recorded");
+            return;
         };
-        if let Err(error) = self.persist(&snapshot) {
+        entries.insert(
+            key.to_owned(),
+            Selection {
+                device: device.to_owned(),
+                updated: unix_now(),
+            },
+        );
+        prune_selections(&mut entries);
+        if let Err(error) = self.persist(&entries) {
             tracing::warn!(%error, path = %self.path.display(), "device selection not persisted");
         }
     }
 
     /// Atomic 0600 write: a temp file in the same directory, then a rename, so
     /// a crash mid-write cannot leave a truncated roster of choices behind.
-    fn persist(&self, entries: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
+    ///
+    /// Called only with `entries` locked, and the temp name carries a
+    /// process-local counter as well as the pid: two writers sharing one name
+    /// can truncate each other's half-written file and rename the wrong bytes
+    /// into place.
+    fn persist(
+        &self,
+        entries: &std::collections::BTreeMap<String, Selection>,
+    ) -> anyhow::Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
         let body = serde_json::to_vec_pretty(&json!({ "selections": entries }))?;
+        static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let ticket = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let temp = self
             .path
-            .with_extension(format!("tmp{}", std::process::id()));
+            .with_extension(format!("tmp{}-{ticket}", std::process::id()));
         {
             let mut file = OpenOptions::new()
                 .write(true)
@@ -722,13 +780,68 @@ impl DeviceSelections {
     }
 }
 
-/// The selections-file key for one session token. A digest, so possession of
-/// the file is never possession of a session.
-fn selection_key(session_token: &str) -> String {
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
+}
+
+/// Drop rows no live browser can still be using, then cap what is left.
+///
+/// A row older than the session cookie's own lifetime belongs to a browser
+/// whose cookie has expired, so it can never be looked up again; beyond that
+/// the newest [`MAX_DEVICE_SELECTIONS`] survive. Eviction is by age precisely
+/// so an active browser's row is never the one dropped.
+fn prune_selections(entries: &mut std::collections::BTreeMap<String, Selection>) {
+    let now = unix_now();
+    entries.retain(|_, row| now.saturating_sub(row.updated) <= SESSION_MAX_AGE_SECONDS);
+    if entries.len() <= MAX_DEVICE_SELECTIONS {
+        return;
+    }
+    let mut ages: Vec<(u64, String)> = entries
+        .iter()
+        .map(|(key, row)| (row.updated, key.clone()))
+        .collect();
+    ages.sort_unstable();
+    let excess = entries.len() - MAX_DEVICE_SELECTIONS;
+    for (_, key) in ages.into_iter().take(excess) {
+        entries.remove(&key);
+    }
+}
+
+/// The selections-file key for one browser of one person.
+///
+/// Both halves are load-bearing. The session token alone would key the row to
+/// the PERSON: this proxy derives it from their username and password so an
+/// installed PWA stays signed in across deploys, which means every browser
+/// they own presents the same token — and picking a machine on the phone would
+/// have re-pointed the desktop's next request too, which is not what "per
+/// session" means to anyone holding both devices. The browser id alone would
+/// be a bearer key to somebody else's routing: it lives in a cookie, and a
+/// cookie is a thing a browser sends. Digesting the two together gives a row
+/// that only that person, in that browser, can address — and, being a digest,
+/// one whose presence in a file is never possession of a session.
+fn selection_key(session_token: &str, browser_id: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(b"ocean-surface-device-selection\0");
     digest.update(session_token.as_bytes());
+    digest.update(b"\0browser\0");
+    digest.update(browser_id.as_bytes());
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest.finalize())
+}
+
+/// A fresh opaque browser id. Random, meaningless, and authenticating nothing:
+/// the session cookie beside it is what says who this is.
+fn mint_browser_id() -> String {
+    let mut bytes = [0_u8; 16];
+    if getrandom::fill(&mut bytes).is_err() {
+        // Randomness is not optional for an identifier that partitions two
+        // browsers; without it they must share a row rather than collide on a
+        // predictable one.
+        return String::new();
+    }
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
 /// Read the daemon-minted observer token without following symlinks. The
@@ -962,6 +1075,7 @@ async fn main() -> anyhow::Result<()> {
             .build()
             .expect("reqwest probe client should build"),
         device_selections: Arc::new(DeviceSelections::load(device_selections_path())),
+        selection_changes: tokio::sync::broadcast::channel(SELECTION_CHANGE_BACKLOG).0,
         voice_profile,
         daemon_url,
         default_livekit_room_id,
@@ -1230,6 +1344,29 @@ fn has_valid_session(state: &AppState, headers: &HeaderMap) -> bool {
     constant_time_eq(provided.as_bytes(), state.session_token.as_bytes())
 }
 
+/// The browser id this request carries, if it has been given one.
+///
+/// Absent is not an error: a browser that has never asked for its devices has
+/// no selection either, and lands on the person's default machine.
+fn browser_id(headers: &HeaderMap) -> Option<&str> {
+    cookie_value(headers, BROWSER_COOKIE).filter(|value| !value.is_empty())
+}
+
+/// The Set-Cookie value that gives this browser its id. Same transport hygiene
+/// as the session cookie: HttpOnly so page scripts cannot read it, SameSite
+/// Strict, and Secure under HTTPS.
+fn browser_cookie(state: &AppState, headers: &HeaderMap, id: &str) -> String {
+    let secure = if request_is_https(headers, state.secure_cookie) {
+        "; Secure"
+    } else {
+        ""
+    };
+    format!(
+        "{BROWSER_COOKIE}={id}; Path=/; HttpOnly; SameSite=Strict; \
+         Max-Age={SESSION_MAX_AGE_SECONDS}{secure}"
+    )
+}
+
 /// Which roster user this request's session cookie belongs to.
 ///
 /// Every candidate is compared in constant time and the loop does NOT exit
@@ -1263,6 +1400,9 @@ fn fallback_daemon(state: &AppState) -> ResolvedDaemon {
         url: state.daemon_url.clone(),
         observer_token_path: Some(state.observer_token_path.clone()),
         operator_key_path: Some(state.operator_key_path.clone()),
+        // Single-operator mode has one machine and nothing to switch to, so no
+        // stream opened here is ever torn down by a selection.
+        selection_key: None,
     }
 }
 
@@ -1292,13 +1432,18 @@ fn credentials_for_device(
     (observer, operator)
 }
 
-fn resolve_device(state: &AppState, device: &ProxyDevice) -> ResolvedDaemon {
+fn resolve_device(
+    state: &AppState,
+    device: &ProxyDevice,
+    selection_key: Option<String>,
+) -> ResolvedDaemon {
     let (observer_token_path, operator_key_path) = credentials_for_device(state, device);
     ResolvedDaemon {
         device: device.name.clone(),
         url: device.daemon_url.clone(),
         observer_token_path,
         operator_key_path,
+        selection_key,
     }
 }
 
@@ -1322,9 +1467,12 @@ fn device_for(state: &AppState, headers: &HeaderMap) -> DeviceRouting {
     let Some(user) = session_user(state, headers) else {
         return DeviceRouting::Attached(fallback_daemon(state));
     };
-    let selected = state
-        .device_selections
-        .selected(&selection_key(&user.session_token));
+    // A browser with no id yet has made no choice yet: it lands on this
+    // person's default machine, and picking one is what gives it an id.
+    let key = browser_id(headers).map(|id| selection_key(&user.session_token, id));
+    let selected = key
+        .as_deref()
+        .and_then(|key| state.device_selections.selected(key));
     let device = match selected {
         Some(name) => match user.device(&name) {
             Some(device) => device,
@@ -1337,7 +1485,7 @@ fn device_for(state: &AppState, headers: &HeaderMap) -> DeviceRouting {
             None => return DeviceRouting::Attached(fallback_daemon(state)),
         },
     };
-    DeviceRouting::Attached(resolve_device(state, device))
+    DeviceRouting::Attached(resolve_device(state, device, key))
 }
 
 /// Routes that cannot be served without an upstream machine. `/api/config` and
@@ -1848,10 +1996,12 @@ fn current_selection(state: &AppState, headers: &HeaderMap) -> (String, bool) {
     let Some(user) = session_user(state, headers) else {
         return (device_name_from_url(&state.daemon_url), false);
     };
-    match state
-        .device_selections
-        .selected(&selection_key(&user.session_token))
-    {
+    let selected = browser_id(headers).and_then(|id| {
+        state
+            .device_selections
+            .selected(&selection_key(&user.session_token, id))
+    });
+    match selected {
         Some(name) => (name, true),
         None => (
             user.default_device()
@@ -1902,6 +2052,10 @@ async fn probe_device(client: reqwest::Client, daemon_url: String) -> Value {
 async fn devices(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let devices = devices_for_request(&state, &headers);
     let (selected, selection_explicit) = current_selection(&state, &headers);
+    // Give this browser an id here, before it can pick, so the choice it makes
+    // next is recorded against THIS browser and not against every browser the
+    // person has signed in from.
+    let minted = browser_id(&headers).is_none().then(mint_browser_id);
 
     // Probe every machine at once — a roster of sleeping laptops must cost one
     // timeout, not one per device — and index the answers so the list the
@@ -1932,13 +2086,19 @@ async fn devices(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Resp
         })
         .collect();
 
-    Json(json!({
+    let mut response = Json(json!({
         "ok": true,
         "devices": rows,
         "selected": selected,
         "selection_explicit": selection_explicit,
     }))
-    .into_response()
+    .into_response();
+    if let Some(id) = minted.filter(|id| !id.is_empty()) {
+        if let Ok(cookie) = browser_cookie(&state, &headers, &id).parse() {
+            response.headers_mut().insert(header::SET_COOKIE, cookie);
+        }
+    }
+    response
 }
 
 #[derive(Deserialize)]
@@ -1946,12 +2106,19 @@ struct SelectDeviceBody {
     name: String,
 }
 
-/// `POST /api/devices/select` — attach this session to one machine.
+/// `POST /api/devices/select` — attach this browser to one machine.
 ///
-/// The choice is recorded server-side against a digest of the session token,
-/// never in the cookie: a browser cannot re-point its own traffic, and the
-/// selection survives a proxy restart so switching machines does not mean
-/// signing in again.
+/// The choice is recorded server-side against a digest of the session token
+/// and this browser's id, never in a cookie the browser could edit: a page
+/// cannot re-point its own traffic, one person's phone cannot re-point their
+/// desktop, and the selection survives a proxy restart so switching machines
+/// does not mean signing in again.
+///
+/// Recording it also ENDS the streams that were open on the machine being
+/// left. Without that, a tab whose SSE tail is already connected keeps
+/// receiving the old machine's events while its turns and decisions go to the
+/// new one — two machines blended into one transcript, which is the thing the
+/// session contract exists to forbid.
 async fn select_device(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1978,11 +2145,36 @@ async fn select_device(
         )
             .into_response();
     }
-    let key = selection_key(&user.session_token);
+    let (id, minted) = match browser_id(&headers) {
+        Some(id) => (id.to_string(), false),
+        None => (mint_browser_id(), true),
+    };
+    if id.is_empty() {
+        // Only reachable if the OS refused randomness. Two browsers sharing a
+        // predictable id would share a row, so refuse rather than guess.
+        tracing::error!("no OS randomness for a browser id; selection refused");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::CONTENT_TYPE, "application/json")],
+            json!({ "ok": false, "error": "selection_unavailable" }).to_string(),
+        )
+            .into_response();
+    }
+    let key = selection_key(&user.session_token, &id);
     let username = user.username.clone();
     state.device_selections.record(&key, &name);
-    tracing::info!(user = %username, device = %name, "session attached to device");
-    Json(json!({ "ok": true, "selected": name })).into_response()
+    // Every stream this browser has open on the old machine ends now. A send
+    // with no receivers is an error only in the sense that nobody was
+    // listening, which is the common case.
+    let _ = state.selection_changes.send(key);
+    tracing::info!(user = %username, device = %name, "browser attached to device");
+    let mut response = Json(json!({ "ok": true, "selected": name })).into_response();
+    if minted {
+        if let Ok(cookie) = browser_cookie(&state, &headers, &id).parse() {
+            response.headers_mut().insert(header::SET_COOKIE, cookie);
+        }
+    }
+    response
 }
 
 /// Reverse-proxy POST /v1/agent/turns to the local daemon.
@@ -2961,7 +3153,7 @@ async fn proxy_rooms_persistent(
             }
         }
         return match upstream.send().await {
-            Ok(resp) => sse_stream_response(resp),
+            Ok(resp) => sse_stream_response(resp, stream_ends_on_switch(&state, &daemon)),
             Err(err) => device_unreachable(&daemon, &err),
         };
     }
@@ -3039,6 +3231,42 @@ async fn proxy_rooms_persistent(
     }
 }
 
+/// How many selection changes the broadcast buffers before a slow stream
+/// misses one. A missed message only costs that stream its teardown, and the
+/// receiver treats a lag as "keep going" rather than as a switch — never as a
+/// spurious close of somebody's live transcript.
+const SELECTION_CHANGE_BACKLOG: usize = 64;
+
+/// A future that resolves when THIS request's selections row changes.
+///
+/// `None` when the request resolved through no row at all (single-operator
+/// mode, or a browser that has never picked): there is nothing that could
+/// switch under it, so its stream runs until the client or the daemon ends it,
+/// exactly as before.
+fn stream_ends_on_switch(
+    state: &AppState,
+    daemon: &ResolvedDaemon,
+) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> {
+    let key = daemon.selection_key.clone()?;
+    let mut changes = state.selection_changes.subscribe();
+    Some(Box::pin(async move {
+        loop {
+            match changes.recv().await {
+                Ok(changed) if changed == key => return,
+                Ok(_) => continue,
+                // Lagged: some change was missed. Ending the stream on that
+                // suspicion would drop a live transcript for somebody else's
+                // switch, so keep reading.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                // The sender is gone, which happens only as the process ends.
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    std::future::pending::<()>().await
+                }
+            }
+        }
+    }))
+}
+
 /// Build a streaming SSE response from an upstream reqwest `Response`, forwarding
 /// the status + the upstream `text/event-stream` body **immediately** (header
 /// flush happens as soon as this response is returned — before any body byte) and
@@ -3054,7 +3282,10 @@ async fn proxy_rooms_persistent(
 ///   - `X-Accel-Buffering: no`  → "do not buffer this stream, flush now"
 ///   - `Cache-Control: no-cache, no-transform` → don't cache, don't buffer-to-
 ///     compress (no-transform stops Cloudflare from holding the stream to gzip it)
-fn sse_stream_response(resp: reqwest::Response) -> Response {
+fn sse_stream_response(
+    resp: reqwest::Response,
+    ends_on_switch: Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>>,
+) -> Response {
     let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::OK);
     let upstream_headers = resp.headers().clone();
     let mut headers = sse_no_buffer_headers();
@@ -3069,9 +3300,15 @@ fn sse_stream_response(resp: reqwest::Response) -> Response {
         }
     }
     // Pipe the upstream byte stream into the response body unchanged so deltas
-    // arrive in real time.
+    // arrive in real time — and end it if this browser attaches to a different
+    // machine, so a tail opened on the old daemon cannot outlive the switch.
+    // The client reconnects and lands on the new machine; leaving it connected
+    // is what would blend two machines into one transcript.
     let stream = resp.bytes_stream();
-    let body = axum::body::Body::from_stream(stream);
+    let body = match ends_on_switch {
+        Some(stop) => axum::body::Body::from_stream(stream.take_until(stop)),
+        None => axum::body::Body::from_stream(stream),
+    };
     (status, headers, body).into_response()
 }
 
@@ -3117,7 +3354,7 @@ async fn proxy_control_events(
         .unwrap_or_default();
     let url = format!("{}/v1/events{q}", daemon.base());
     match state.http.get(&url).send().await {
-        Ok(resp) => sse_stream_response(resp),
+        Ok(resp) => sse_stream_response(resp, stream_ends_on_switch(&state, &daemon)),
         Err(err) => device_unreachable(&daemon, &err),
     }
 }
@@ -3166,7 +3403,7 @@ async fn proxy_events(State(state): State<Arc<AppState>>, req: Request) -> impl 
         .unwrap_or_default();
     let url = format!("{}/v1/agent/events{q}", daemon.base());
     match state.http.get(&url).send().await {
-        Ok(resp) => sse_stream_response(resp),
+        Ok(resp) => sse_stream_response(resp, stream_ends_on_switch(&state, &daemon)),
         Err(err) => device_unreachable(&daemon, &err),
     }
 }
@@ -3233,7 +3470,7 @@ async fn proxy_observatory(State(state): State<Arc<AppState>>, req: Request) -> 
         }
     };
     if is_stream {
-        return sse_stream_response(response);
+        return sse_stream_response(response, stream_ends_on_switch(&state, &daemon));
     }
 
     let status =
@@ -3393,15 +3630,17 @@ async fn tts(
 mod tests {
     use super::{
         agent_daemon_path, auth_off_room_mutation_source_allowed, build_app, config_payload,
-        constant_time_eq, decode_segment, device_for, device_name_from_url, forward_timeout,
-        has_dot_segment, has_valid_session, is_hashed_asset, livekit_token_daemon_path, load_users,
-        observatory_token_path, percent_encode_path_segment, read_observer_token,
-        read_room_operator_key, room_agent_authority_mutation, room_operator_key_path,
-        rooms_persistent_shape, selection_key, session_auth_gate, session_user,
-        sse_no_buffer_headers, url_host, validate_auth_bind, validate_daemon_url, wasm_headers,
-        AppState, DeviceRouting, DeviceSelections, ProxyDevice, ProxyUser, ResolvedDaemon,
-        RoomsPersistentShape, ATTACHMENT_UPLOAD_BODY_LIMIT, CALL_PLACE_DAEMON_PATH,
-        JSON_FORWARD_TIMEOUT, SESSION_COOKIE, WASM_CACHE_CONTROL,
+        constant_time_eq, decode_segment, device_for, device_name_from_url, fallback_daemon,
+        forward_timeout, has_dot_segment, has_valid_session, is_hashed_asset,
+        livekit_token_daemon_path, load_users, observatory_token_path, percent_encode_path_segment,
+        prune_selections, read_observer_token, read_room_operator_key,
+        room_agent_authority_mutation, room_operator_key_path, rooms_persistent_shape,
+        selection_key, session_auth_gate, session_user, sse_no_buffer_headers,
+        stream_ends_on_switch, unix_now, url_host, validate_auth_bind, validate_daemon_url,
+        wasm_headers, AppState, DeviceRouting, DeviceSelections, ProxyDevice, ProxyUser,
+        ResolvedDaemon, RoomsPersistentShape, Selection, ATTACHMENT_UPLOAD_BODY_LIMIT,
+        BROWSER_COOKIE, CALL_PLACE_DAEMON_PATH, JSON_FORWARD_TIMEOUT, MAX_DEVICE_SELECTIONS,
+        SELECTION_CHANGE_BACKLOG, SESSION_COOKIE, SESSION_MAX_AGE_SECONDS, WASM_CACHE_CONTROL,
         WORKSPACE_COMMAND_FORWARD_TIMEOUT,
     };
     use axum::http::HeaderMap;
@@ -3478,6 +3717,7 @@ mod tests {
             http_json: reqwest::Client::new(),
             http_probe: reqwest::Client::new(),
             device_selections: no_selections(),
+            selection_changes: tokio::sync::broadcast::channel(SELECTION_CHANGE_BACKLOG).0,
             voice_profile: "leo".to_string(),
             daemon_url: "http://127.0.0.1:4780".to_string(),
             default_livekit_room_id: "project:surface-test".to_string(),
@@ -3540,6 +3780,18 @@ mod tests {
         headers.insert(
             header::COOKIE,
             format!("{SESSION_COOKIE}={token}").parse().unwrap(),
+        );
+        headers
+    }
+
+    /// One person, in one named browser — the pair a selection is keyed on.
+    fn browser_headers(token: &str, browser: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("{SESSION_COOKIE}={token}; {BROWSER_COOKIE}={browser}")
+                .parse()
+                .unwrap(),
         );
         headers
     }
@@ -3621,11 +3873,12 @@ mod tests {
         inner.device_selections = Arc::new(DeviceSelections::load(
             selections.path().join("device-selections.json"),
         ));
-        inner
-            .device_selections
-            .record(&selection_key(&inner.users[1].session_token), "studio");
+        inner.device_selections.record(
+            &selection_key(&inner.users[1].session_token, "browser-a"),
+            "studio",
+        );
 
-        let daemon = attached(&state, &session_headers("tok-eric"));
+        let daemon = attached(&state, &browser_headers("tok-eric", "browser-a"));
         assert_eq!(daemon.base(), "http://10.0.0.9:4780");
         assert_eq!(observatory_token_path(&daemon), None);
         assert_eq!(room_operator_key_path(&daemon), None);
@@ -4213,6 +4466,7 @@ mod tests {
             http_json: reqwest::Client::new(),
             http_probe: reqwest::Client::new(),
             device_selections: no_selections(),
+            selection_changes: tokio::sync::broadcast::channel(SELECTION_CHANGE_BACKLOG).0,
             voice_profile: "leo".to_string(),
             daemon_url: "http://127.0.0.1:4780".to_string(),
             default_livekit_room_id: "project/surface demo".to_string(),
@@ -4294,6 +4548,7 @@ mod tests {
             http_json: reqwest::Client::new(),
             http_probe: reqwest::Client::new(),
             device_selections: no_selections(),
+            selection_changes: tokio::sync::broadcast::channel(SELECTION_CHANGE_BACKLOG).0,
             voice_profile: "leo".to_string(),
             daemon_url: "http://127.0.0.1:9".to_string(),
             default_livekit_room_id: "project:surface-test".to_string(),
@@ -4379,6 +4634,7 @@ mod tests {
             http_json: reqwest::Client::new(),
             http_probe: reqwest::Client::new(),
             device_selections: no_selections(),
+            selection_changes: tokio::sync::broadcast::channel(SELECTION_CHANGE_BACKLOG).0,
             voice_profile: "leo".to_string(),
             // Closed port → the forward fails and we see the real error body.
             daemon_url: "http://127.0.0.1:9".to_string(),
@@ -4583,6 +4839,7 @@ mod tests {
             http_json: reqwest::Client::new(),
             http_probe: reqwest::Client::new(),
             device_selections: no_selections(),
+            selection_changes: tokio::sync::broadcast::channel(SELECTION_CHANGE_BACKLOG).0,
             voice_profile: "leo".to_string(),
             daemon_url: "http://127.0.0.1:9".to_string(),
             default_livekit_room_id: "project:surface-test".to_string(),
@@ -4677,6 +4934,7 @@ mod tests {
             http_json: reqwest::Client::new(),
             http_probe: reqwest::Client::new(),
             device_selections: no_selections(),
+            selection_changes: tokio::sync::broadcast::channel(SELECTION_CHANGE_BACKLOG).0,
             voice_profile: "leo".to_string(),
             // Closed port: a request that gets past the guard fails fast as
             // 502, which is exactly how we detect a bypass.
@@ -4781,6 +5039,7 @@ mod tests {
             http_json: reqwest::Client::new(),
             http_probe: reqwest::Client::new(),
             device_selections: no_selections(),
+            selection_changes: tokio::sync::broadcast::channel(SELECTION_CHANGE_BACKLOG).0,
             voice_profile: "leo".to_string(),
             // Closed port: instant connection refusal, never a real daemon.
             daemon_url: "http://127.0.0.1:9".to_string(),
@@ -4844,6 +5103,7 @@ mod tests {
             http_json: reqwest::Client::new(),
             http_probe: reqwest::Client::new(),
             device_selections: no_selections(),
+            selection_changes: tokio::sync::broadcast::channel(SELECTION_CHANGE_BACKLOG).0,
             voice_profile: "leo".to_string(),
             // Closed port: instant connection refusal, never a real daemon.
             daemon_url: "http://127.0.0.1:9".to_string(),
@@ -4927,6 +5187,7 @@ mod tests {
             http_json: reqwest::Client::new(),
             http_probe: reqwest::Client::new(),
             device_selections: no_selections(),
+            selection_changes: tokio::sync::broadcast::channel(SELECTION_CHANGE_BACKLOG).0,
             voice_profile: "leo".to_string(),
             // Closed port: instant connection refusal, never a real daemon.
             daemon_url: "http://127.0.0.1:9".to_string(),
@@ -5001,6 +5262,7 @@ mod tests {
             http_json: reqwest::Client::new(),
             http_probe: reqwest::Client::new(),
             device_selections: no_selections(),
+            selection_changes: tokio::sync::broadcast::channel(SELECTION_CHANGE_BACKLOG).0,
             voice_profile: "leo".to_string(),
             // Closed port: instant connection refusal, never a real daemon.
             daemon_url: "http://127.0.0.1:9".to_string(),
@@ -5962,6 +6224,7 @@ mod tests {
             http_json: reqwest::Client::new(),
             http_probe: reqwest::Client::new(),
             device_selections: no_selections(),
+            selection_changes: tokio::sync::broadcast::channel(SELECTION_CHANGE_BACKLOG).0,
             voice_profile: "leo".to_string(),
             daemon_url,
             default_livekit_room_id: "project:surface-test".to_string(),
@@ -6262,21 +6525,23 @@ mod tests {
     fn a_selection_outlives_the_proxy_that_recorded_it() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("device-selections.json");
+        let key = selection_key("tok-eric", "browser-a");
         let before = DeviceSelections::load(path.clone());
-        before.record(&selection_key("tok-eric"), "studio");
-        assert_eq!(
-            before.selected(&selection_key("tok-eric")).as_deref(),
-            Some("studio")
-        );
+        before.record(&key, "studio");
+        assert_eq!(before.selected(&key).as_deref(), Some("studio"));
 
         // A restart is a fresh load off the same file. Without this, every
         // deploy would land everyone back on their default machine.
         let after = DeviceSelections::load(path.clone());
+        assert_eq!(after.selected(&key).as_deref(), Some("studio"));
         assert_eq!(
-            after.selected(&selection_key("tok-eric")).as_deref(),
-            Some("studio")
+            after.selected(&selection_key("tok-eric", "browser-b")),
+            None
         );
-        assert_eq!(after.selected(&selection_key("tok-someone-else")), None);
+        assert_eq!(
+            after.selected(&selection_key("tok-other", "browser-a")),
+            None
+        );
 
         let mode =
             std::os::unix::fs::MetadataExt::mode(&std::fs::metadata(&path).expect("metadata"))
@@ -6287,12 +6552,113 @@ mod tests {
         );
 
         // A later choice replaces the earlier one rather than accumulating.
-        after.record(&selection_key("tok-eric"), "mini");
+        after.record(&key, "mini");
         let reloaded = DeviceSelections::load(path);
-        assert_eq!(
-            reloaded.selected(&selection_key("tok-eric")).as_deref(),
-            Some("mini")
+        assert_eq!(reloaded.selected(&key).as_deref(), Some("mini"));
+    }
+
+    #[test]
+    fn one_persons_two_browsers_hold_two_separate_choices() {
+        // The finding this pins: keying a selection on the session token alone
+        // keys it on the PERSON, because this proxy derives that token from
+        // their username and password so an installed PWA stays signed in.
+        // Every browser they own then shares one row, and picking a machine on
+        // the phone re-points the desktop's next request. Two browsers, two
+        // rows, and neither is the other's.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let selections = DeviceSelections::load(dir.path().join("device-selections.json"));
+        let phone = selection_key("tok-eric", "phone");
+        let desktop = selection_key("tok-eric", "desktop");
+        assert_ne!(phone, desktop);
+        selections.record(&phone, "studio");
+        selections.record(&desktop, "mini");
+        assert_eq!(selections.selected(&phone).as_deref(), Some("studio"));
+        assert_eq!(selections.selected(&desktop).as_deref(), Some("mini"));
+
+        // And a browser id is not a key on its own: the same id under another
+        // person's session addresses a different row, so a cookie lifted from
+        // one browser cannot read or re-point another person's routing.
+        assert_ne!(selection_key("tok-ocean", "phone"), phone);
+    }
+
+    #[test]
+    fn concurrent_selections_all_survive_in_the_file() {
+        // The finding this pins: snapshotting under the lock and persisting
+        // outside it let two writers race their file writes through one
+        // pid-named temp file, so a write could truncate or rename over
+        // another and the file would disagree with memory until the next
+        // restart — at which point somebody silently gets a machine they did
+        // not pick. Eight writers, eight distinct rows, all of them present.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("device-selections.json");
+        let selections = Arc::new(DeviceSelections::load(path.clone()));
+        let mut writers = Vec::new();
+        for index in 0..8 {
+            let selections = selections.clone();
+            writers.push(std::thread::spawn(move || {
+                selections.record(
+                    &selection_key("tok-eric", &format!("browser-{index}")),
+                    "studio",
+                );
+            }));
+        }
+        for writer in writers {
+            writer.join().expect("writer");
+        }
+        let reloaded = DeviceSelections::load(path);
+        for index in 0..8 {
+            assert_eq!(
+                reloaded
+                    .selected(&selection_key("tok-eric", &format!("browser-{index}")))
+                    .as_deref(),
+                Some("studio"),
+                "browser-{index}'s choice did not survive the concurrent writes"
+            );
+        }
+    }
+
+    #[test]
+    fn rows_no_live_browser_can_use_are_pruned() {
+        // One row per (person, browser) is bounded by the people, but a
+        // private window is a new browser — so without pruning this file grows
+        // for as long as the proxy runs.
+        let mut entries = std::collections::BTreeMap::new();
+        entries.insert(
+            "fresh".to_string(),
+            Selection {
+                device: "mini".into(),
+                updated: unix_now(),
+            },
         );
+        entries.insert(
+            "expired".to_string(),
+            Selection {
+                device: "studio".into(),
+                // Older than the session cookie itself: no browser can still
+                // present a cookie that would look this row up.
+                updated: unix_now() - SESSION_MAX_AGE_SECONDS - 1,
+            },
+        );
+        prune_selections(&mut entries);
+        assert!(entries.contains_key("fresh"));
+        assert!(!entries.contains_key("expired"));
+
+        // Over the cap, the OLDEST go first, so an active browser's row is
+        // never the one dropped.
+        let mut many = std::collections::BTreeMap::new();
+        for index in 0..(MAX_DEVICE_SELECTIONS + 10) {
+            many.insert(
+                format!("key-{index:05}"),
+                Selection {
+                    device: "mini".into(),
+                    updated: unix_now() - (MAX_DEVICE_SELECTIONS + 10 - index) as u64,
+                },
+            );
+        }
+        prune_selections(&mut many);
+        assert_eq!(many.len(), MAX_DEVICE_SELECTIONS);
+        assert!(many.contains_key(&format!("key-{:05}", MAX_DEVICE_SELECTIONS + 9)));
+        assert!(!many.contains_key("key-00000"));
     }
 
     #[test]
@@ -6300,11 +6666,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("device-selections.json");
         let selections = DeviceSelections::load(path.clone());
-        selections.record(&selection_key("super-secret-session-token"), "studio");
+        selections.record(
+            &selection_key("super-secret-session-token", "secret-browser-id"),
+            "studio",
+        );
         let raw = std::fs::read_to_string(&path).expect("read selections");
         assert!(
-            !raw.contains("super-secret-session-token"),
-            "a cookie value must never be written to disk: {raw}"
+            !raw.contains("super-secret-session-token") && !raw.contains("secret-browser-id"),
+            "no cookie value may be written to disk: {raw}"
         );
         assert!(raw.contains("studio"));
     }
@@ -6313,15 +6682,16 @@ mod tests {
     fn a_group_readable_selections_file_is_ignored_rather_than_trusted() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("device-selections.json");
+        let key = selection_key("tok-eric", "browser-a");
         let selections = DeviceSelections::load(path.clone());
-        selections.record(&selection_key("tok-eric"), "studio");
+        selections.record(&key, "studio");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
 
         // Losing a remembered choice costs one click; honouring a file anyone
         // could have written costs somebody's turns landing on a machine they
         // did not pick.
         let reloaded = DeviceSelections::load(path);
-        assert_eq!(reloaded.selected(&selection_key("tok-eric")), None);
+        assert_eq!(reloaded.selected(&key), None);
     }
 
     // ── per-session routing across devices ────────────────────────
@@ -6371,19 +6741,60 @@ mod tests {
         String::from_utf8_lossy(&bytes).to_string()
     }
 
-    /// Ask the production router for one path as one signed-in person.
+    /// Ask the production router for one path as one signed-in person, in a
+    /// browser that has no id yet.
     async fn as_user(app: &Router, token: &str, method: &str, uri: &str) -> Response {
+        request_as(app, token, None, method, uri, Body::empty()).await
+    }
+
+    /// The same, from one NAMED browser — the pair a selection is keyed on.
+    async fn as_browser(
+        app: &Router,
+        token: &str,
+        browser: &str,
+        method: &str,
+        uri: &str,
+    ) -> Response {
+        request_as(app, token, Some(browser), method, uri, Body::empty()).await
+    }
+
+    async fn request_as(
+        app: &Router,
+        token: &str,
+        browser: Option<&str>,
+        method: &str,
+        uri: &str,
+        body: Body,
+    ) -> Response {
+        let cookie = match browser {
+            Some(browser) => format!("{SESSION_COOKIE}={token}; {BROWSER_COOKIE}={browser}"),
+            None => format!("{SESSION_COOKIE}={token}"),
+        };
         app.clone()
             .oneshot(
                 Request::builder()
                     .method(method)
                     .uri(uri)
-                    .header(header::COOKIE, format!("{SESSION_COOKIE}={token}"))
-                    .body(Body::empty())
+                    .header(header::COOKIE, cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(body)
                     .unwrap(),
             )
             .await
             .unwrap()
+    }
+
+    /// Attach one browser to one machine through the production route.
+    async fn select(app: &Router, token: &str, browser: &str, name: &str) -> Response {
+        request_as(
+            app,
+            token,
+            Some(browser),
+            "POST",
+            "/api/devices/select",
+            Body::from(format!(r#"{{"name":"{name}"}}"#)),
+        )
+        .await
     }
 
     #[tokio::test]
@@ -6420,56 +6831,53 @@ mod tests {
         let app = build_app(state, dist.path());
 
         // With nothing chosen, each person lands on their own default machine.
-        let eric = as_user(&app, "tok-eric", "GET", "/v1/permissions").await;
+        let eric = as_browser(&app, "tok-eric", "laptop", "GET", "/v1/permissions").await;
         assert!(body_text(eric).await.contains("eric-mini"));
-        let ocean = as_user(&app, "tok-ocean", "GET", "/v1/permissions").await;
+        let ocean = as_browser(&app, "tok-ocean", "desk", "GET", "/v1/permissions").await;
         assert!(body_text(ocean).await.contains("ocean-mini"));
 
         // Eric picks his studio. This is the whole product: one POST, no
         // second login, no URL typed anywhere.
-        let picked = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/devices/select")
-                    .header(header::COOKIE, format!("{SESSION_COOKIE}=tok-eric"))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"name":"studio"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(picked.status(), StatusCode::OK);
+        assert_eq!(
+            select(&app, "tok-eric", "laptop", "studio").await.status(),
+            StatusCode::OK
+        );
 
         // Buffered JSON, the SSE tail, and the voice relay all move together.
-        let json = as_user(&app, "tok-eric", "GET", "/v1/permissions").await;
+        let json = as_browser(&app, "tok-eric", "laptop", "GET", "/v1/permissions").await;
         assert!(body_text(json).await.contains("eric-studio"));
-        let stream = as_user(&app, "tok-eric", "GET", "/v1/agent/events").await;
+        let stream = as_browser(&app, "tok-eric", "laptop", "GET", "/v1/agent/events").await;
         assert!(body_text(stream).await.contains("eric-studio"));
-        let voice = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/stt")
-                    .header(header::COOKIE, format!("{SESSION_COOKIE}=tok-eric"))
-                    .body(Body::from(vec![0_u8, 1, 2, 3]))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let voice = request_as(
+            &app,
+            "tok-eric",
+            Some("laptop"),
+            "POST",
+            "/api/stt",
+            Body::from(vec![0_u8, 1, 2, 3]),
+        )
+        .await;
         assert!(body_text(voice).await.contains("eric-studio"));
 
         // And nobody else moved. A shared proxy where one person's switch
         // relocates another person's transcript is worse than no switching.
-        let ocean = as_user(&app, "tok-ocean", "GET", "/v1/permissions").await;
+        let ocean = as_browser(&app, "tok-ocean", "desk", "GET", "/v1/permissions").await;
         assert!(body_text(ocean).await.contains("ocean-mini"));
+
+        // Nor did Eric's OTHER browser. A selection is per browser: picking a
+        // machine on the phone must not re-point the desktop he left running.
+        let phone = as_browser(&app, "tok-eric", "phone", "GET", "/v1/permissions").await;
+        assert!(
+            body_text(phone).await.contains("eric-mini"),
+            "one person's browsers hold their own selections"
+        );
 
         // The choice was recorded server-side against a digest, so a restart
         // keeps it (proven directly in the persistence test above).
         assert_eq!(
-            selections.selected(&selection_key("tok-eric")).as_deref(),
+            selections
+                .selected(&selection_key("tok-eric", "laptop"))
+                .as_deref(),
             Some("studio")
         );
 
@@ -6489,14 +6897,14 @@ mod tests {
                 selections_dir.path().join("device-selections.json"),
             ));
             // The operator removed 'studio' from the roster while Eric's
-            // session was still attached to it.
+            // browser was still attached to it.
             inner
                 .device_selections
-                .record(&selection_key("tok-eric"), "studio");
+                .record(&selection_key("tok-eric", "laptop"), "studio");
         }
         let app = build_app(state, dist.path());
 
-        let refused = as_user(&app, "tok-eric", "GET", "/v1/permissions").await;
+        let refused = as_browser(&app, "tok-eric", "laptop", "GET", "/v1/permissions").await;
         assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
         let decoded: Value =
             serde_json::from_str(&body_text(refused).await).expect("typed device error");
@@ -6506,9 +6914,9 @@ mod tests {
 
         // The two routes that let the surface RECOVER must still answer, or a
         // stale selection would be a locked door.
-        let config = as_user(&app, "tok-eric", "GET", "/api/config").await;
+        let config = as_browser(&app, "tok-eric", "laptop", "GET", "/api/config").await;
         assert_eq!(config.status(), StatusCode::OK);
-        let devices = as_user(&app, "tok-eric", "GET", "/api/devices").await;
+        let devices = as_browser(&app, "tok-eric", "laptop", "GET", "/api/devices").await;
         assert_eq!(devices.status(), StatusCode::OK);
     }
 
@@ -6535,10 +6943,8 @@ mod tests {
         }
         let app = build_app(state, dist.path());
 
-        let listed: Value = serde_json::from_str(
-            &body_text(as_user(&app, "tok-eric", "GET", "/api/devices").await).await,
-        )
-        .expect("device list");
+        let listed = as_browser(&app, "tok-eric", "laptop", "GET", "/api/devices").await;
+        let listed: Value = serde_json::from_str(&body_text(listed).await).expect("device list");
         assert_eq!(listed["selected"], "mini");
         assert_eq!(
             listed["selection_explicit"], false,
@@ -6560,45 +6966,233 @@ mod tests {
             "device urls never reach the browser: {raw}"
         );
 
-        let picked = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/devices/select")
-                    .header(header::COOKIE, format!("{SESSION_COOKIE}=tok-eric"))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"name":"studio"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(picked.status(), StatusCode::OK);
+        assert_eq!(
+            select(&app, "tok-eric", "laptop", "studio").await.status(),
+            StatusCode::OK
+        );
 
-        let listed: Value = serde_json::from_str(
-            &body_text(as_user(&app, "tok-eric", "GET", "/api/devices").await).await,
-        )
-        .expect("device list");
+        let listed = as_browser(&app, "tok-eric", "laptop", "GET", "/api/devices").await;
+        let listed: Value = serde_json::from_str(&body_text(listed).await).expect("device list");
         assert_eq!(listed["selected"], "studio");
         assert_eq!(listed["selection_explicit"], true, "asked and answered");
 
+        // The OTHER browser is still unasked, and still on the default.
+        let phone = as_browser(&app, "tok-eric", "phone", "GET", "/api/devices").await;
+        let phone: Value = serde_json::from_str(&body_text(phone).await).expect("device list");
+        assert_eq!(phone["selected"], "mini");
+        assert_eq!(phone["selection_explicit"], false);
+
         // A machine this person does not have is a 404, not a silent no-op.
-        let bogus = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/devices/select")
-                    .header(header::COOKIE, format!("{SESSION_COOKIE}=tok-eric"))
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"name":"someone-elses-mac"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(bogus.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            select(&app, "tok-eric", "laptop", "someone-elses-mac")
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
 
         running.abort();
+    }
+
+    #[tokio::test]
+    async fn a_browser_with_no_id_is_given_one_before_it_can_choose() {
+        let dist = tempfile::tempdir().expect("tempdir");
+        let selections_dir = tempfile::tempdir().expect("tempdir");
+        let mut state = multi_user_state();
+        {
+            let inner = Arc::get_mut(&mut state).expect("sole owner");
+            inner.device_selections = Arc::new(DeviceSelections::load(
+                selections_dir.path().join("device-selections.json"),
+            ));
+            inner.users[1].devices = vec![
+                device("mini", "http://127.0.0.1:9"),
+                ProxyDevice {
+                    is_default: false,
+                    ..device("studio", "http://127.0.0.1:9")
+                },
+            ];
+        }
+        let app = build_app(state, dist.path());
+
+        // Listing devices is the first thing the surface does, and it is where
+        // a browser earns the id its choice will be recorded against. Without
+        // this, the first selection would key on nothing and land in the row
+        // every one of this person's browsers reads.
+        let listed = as_user(&app, "tok-eric", "GET", "/api/devices").await;
+        let cookie = listed
+            .headers()
+            .get(header::SET_COOKIE)
+            .expect("a browser id is issued")
+            .to_str()
+            .expect("ascii cookie")
+            .to_string();
+        assert!(cookie.starts_with(&format!("{BROWSER_COOKIE}=")));
+        assert!(
+            cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"),
+            "the browser id gets the session cookie's hygiene: {cookie}"
+        );
+        let id = cookie
+            .trim_start_matches(&format!("{BROWSER_COOKIE}="))
+            .split(';')
+            .next()
+            .expect("id")
+            .to_string();
+        assert!(id.len() >= 16, "an id has to be unguessable: {id}");
+
+        // A browser that already has one is not handed another — a new id
+        // every request would mean a selection that never survives the next.
+        let again = as_browser(&app, "tok-eric", &id, "GET", "/api/devices").await;
+        assert!(again.headers().get(header::SET_COOKIE).is_none());
+
+        // And selecting from a browser that never listed still works: it is
+        // given an id in that response instead.
+        let picked = select(&app, "tok-eric", "", "mini").await;
+        assert_eq!(picked.status(), StatusCode::OK);
+        assert!(
+            picked
+                .headers()
+                .get(header::SET_COOKIE)
+                .is_some_and(|value| value
+                    .to_str()
+                    .unwrap_or_default()
+                    .starts_with(&format!("{BROWSER_COOKIE}="))),
+            "a selection from an unknown browser mints its id",
+        );
+    }
+
+    /// A stream open on the machine being left has to END when the browser
+    /// attaches to another one.
+    ///
+    /// The finding this pins: recording a selection only affects FUTURE
+    /// requests, so a tab whose SSE tail is already connected keeps receiving
+    /// the old machine's events while its turns and decisions go to the new
+    /// one — two machines blended into one transcript, which is exactly what
+    /// the session contract forbids. The client reconnects on its own and
+    /// lands on the new machine.
+    #[tokio::test]
+    async fn a_switch_ends_the_stream_that_was_open_on_the_old_machine() {
+        // A daemon whose event stream never ends on its own, so the only thing
+        // that can end the proxied body is the switch.
+        type Frames = tokio::sync::mpsc::Receiver<Result<Bytes, std::io::Error>>;
+        async fn held_stream(
+            axum::extract::State(frames): axum::extract::State<
+                Arc<tokio::sync::Mutex<Option<Frames>>>,
+            >,
+        ) -> Response {
+            let rx = frames.lock().await.take().expect("one subscriber");
+            (
+                [(header::CONTENT_TYPE, "text/event-stream")],
+                Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx)),
+            )
+                .into_response()
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(4);
+        tx.send(Ok(Bytes::from_static(b"event: hello\ndata: mini\n\n")))
+            .await
+            .expect("first frame");
+        // Leaked on purpose: while a sender is alive the receiver never ends,
+        // so nothing but the teardown can close this stream.
+        std::mem::forget(tx);
+        let app = Router::new()
+            .route("/v1/agent/events", get(held_stream))
+            .with_state(Arc::new(tokio::sync::Mutex::new(Some(rx))));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stub daemon");
+        let addr = listener.local_addr().expect("stub addr");
+        let upstream = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let dist = tempfile::tempdir().expect("tempdir");
+        let selections_dir = tempfile::tempdir().expect("tempdir");
+        let mut state = multi_user_state();
+        {
+            let inner = Arc::get_mut(&mut state).expect("sole owner");
+            inner.device_selections = Arc::new(DeviceSelections::load(
+                selections_dir.path().join("device-selections.json"),
+            ));
+            inner.users[1].devices = vec![
+                device("mini", &format!("http://{addr}")),
+                ProxyDevice {
+                    is_default: false,
+                    ..device("studio", &format!("http://{addr}"))
+                },
+            ];
+        }
+        let app = build_app(state, dist.path());
+
+        let stream = as_browser(&app, "tok-eric", "laptop", "GET", "/v1/agent/events").await;
+        assert_eq!(stream.status(), StatusCode::OK);
+
+        // Switch while the tail above is still open.
+        let switcher = {
+            let app = app.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                select(&app, "tok-eric", "laptop", "studio").await
+            })
+        };
+
+        // Reading to completion is the assertion: without the teardown this
+        // body never ends and the timeout fires.
+        let drained = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            axum::body::to_bytes(stream.into_body(), 64 * 1024),
+        )
+        .await;
+        let body = drained
+            .expect("the stream must end when the browser attaches elsewhere")
+            .expect("read body");
+        assert!(String::from_utf8_lossy(&body).contains("mini"));
+        assert_eq!(
+            switcher.await.expect("switch task").status(),
+            StatusCode::OK
+        );
+
+        upstream.abort();
+    }
+
+    /// The teardown is scoped to ONE selections row.
+    ///
+    /// The broadcast carries the row key, never a device name: two people can
+    /// both be sitting on a machine called "studio" and only one of them
+    /// switched. Ending both streams would drop a live transcript belonging to
+    /// somebody who did nothing.
+    #[tokio::test]
+    async fn a_switch_ends_only_the_streams_of_the_browser_that_switched() {
+        let state = auth_test_state();
+        let mine = ResolvedDaemon {
+            selection_key: Some("row-a".to_string()),
+            ..fallback_daemon(&state)
+        };
+        let theirs = ResolvedDaemon {
+            selection_key: Some("row-b".to_string()),
+            ..fallback_daemon(&state)
+        };
+        let unswitchable = fallback_daemon(&state);
+
+        let mine = stream_ends_on_switch(&state, &mine).expect("a row to watch");
+        let theirs = stream_ends_on_switch(&state, &theirs).expect("a row to watch");
+        assert!(
+            stream_ends_on_switch(&state, &unswitchable).is_none(),
+            "a request that resolved through no row has nothing that could switch under it",
+        );
+
+        state
+            .selection_changes
+            .send("row-a".to_string())
+            .expect("two subscribers");
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), mine)
+            .await
+            .expect("the switching browser's stream ends");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), theirs)
+                .await
+                .is_err(),
+            "somebody else's live stream must not end because I switched",
+        );
     }
 
     #[tokio::test]
