@@ -295,6 +295,18 @@
   margin-top: 6px;
 }
 
+.rooms-workspace__create-trigger-disclosure {
+  margin-top: 6px;
+  color: var(--fg-3);
+  font-size: 11px;
+}
+
+.rooms-workspace__create-trigger-disclosure > summary {
+  width: max-content;
+  cursor: pointer;
+  user-select: none;
+}
+
 .rooms-workspace__trigger {
   display: inline-flex;
   align-items: center;
@@ -1197,24 +1209,21 @@
 }
 
 /* ── Room triggers (rail section) ─────────────────────────────────── */
-/* A fixed sliver like every section on this rail: a head and one row per
-   exposed wake flag. Renders in every access state; a flag whose event
-   cannot reach this kind of room is disabled and wears a `__trigger-note`
-   saying which kind it needs. Shares `__trigger` rows with the create form. */
+/* A compact native disclosure: trigger policy remains one click away without
+   permanently spending four rows of the narrow rail. Renders in every access
+   state; a flag whose event cannot reach this kind of room is disabled and
+   wears a `__trigger-note` saying which kind it needs. */
 
 .rooms-workspace__triggers {
   flex: 0 0 auto;
-  display: flex;
-  flex-direction: column;
   padding: 8px 12px 6px;
   border-top: 1px solid var(--border-subtle);
 }
 
 .rooms-workspace__triggers-head {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
+  cursor: pointer;
   padding-bottom: 6px;
+  user-select: none;
 }
 
 .rooms-workspace__triggers-title {
@@ -4099,10 +4108,9 @@ a.rooms-workspace__repo-check-line:hover {
 
 /* ── The ports the room serves on ──────────────────────────
    The port, the preview URL it answers on, when it was exposed, and the
-   verb that takes it down — with the expose form under the list. The URL
-   is an anchor only when it cleared the room link allowlist; an un-linked
-   one styles identically on purpose, since the difference the operator
-   cares about is what the URL SAYS. */
+   verb that takes it down — with the expose form under the list. A URL that
+   cleared the room link allowlist is visibly underlined so its click affordance
+   survives touch and keyboard use instead of appearing only on hover. */
 .rooms-workspace__compute-ports-title {
   margin-top: 14px;
   padding-bottom: 4px;
@@ -4149,7 +4157,12 @@ a.rooms-workspace__repo-check-line:hover {
   font-family: var(--mono);
   font-size: 12px;
   color: var(--fg-3);
-  text-decoration: none;
+}
+
+a.rooms-workspace__compute-ports-row-url {
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
 }
 
 a.rooms-workspace__compute-ports-row-url:hover {

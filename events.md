@@ -5802,3 +5802,69 @@ reds only the guard with the wasm32 clippy lane still green. Tree restored after
 each. Gate green: all seven frozen commands, host suite 1252 unit tests plus 61
 guards across 14 binaries.
 _________________________________________________________________________________ 20:39 loop/surface-load-older-affordance
+time:  [20:52] [01-09-26]
+agent: [codex] [gpt-5]
+worktree: [codex/review-sweep-20260901]
+type:  [issues]: Codex review follow-up sweep
+area:  [frontend]: Rooms stream ownership and compact interaction fixes
+
+Addressed the recent Codex review findings on current main: mutation responses no
+longer launch competing transcript reads; backward hydration preserves viewport
+position and predecessor-keyed grouping; summary runs require local or live
+access; trigger controls use native disclosures; port links retain a visible
+affordance; Markdown link parsing is linear and Unicode-safe; extension inventory
+and ledger separators fail closed on malformed built state. The full Surface UI
+binary suite passed 1245 tests, and the focused Node guard suite passed 19 tests.
+_________________________________________________________________________________ 20:52 codex/review-sweep-20260901
+
+time:  [21:20] [09-01-26]
+agent: [codex] [gpt-5]
+worktree: [codex/review-sweep-20260901]
+type:  [bug report]: Codex review follow-up sweep
+area:  [frontend]: Trusted link affordance and ledger repair
+
+Closed the fresh Codex review findings on the current-main sweep. Only trusted
+allowlisted preview anchors carry the persistent underline; rejected URLs remain
+plain spans. Ledger repair now accepts and re-parses the documented one-digit
+hour form, with a repair-round-trip regression. No runtime, deployment, or
+production state changed.
+_________________________________________________________________________________ 21:20 codex/review-sweep-20260901
+
+time:  [21:24] [09-01-26]
+agent: [codex] [gpt-5]
+worktree: [codex/review-sweep-20260901]
+type:  [bug report]: Review-sweep verification repair
+area:  [testing]: Sole forward transcript ownership
+
+Updated the mutation-tested hydration wiring guard to the architecture the
+sweep now enforces: the SSE tail is the sole forward-ingest owner, and mutation
+responses cannot reintroduce the removed competing transcript reader. The
+runtime comment names that live-tail resume ownership directly. No daemon,
+deployment, room, or production state changed.
+_________________________________________________________________________________ 21:24 codex/review-sweep-20260901
+
+time:  [21:56] [09-01-26]
+agent: [codex] [gpt-5]
+worktree: [codex/review-sweep-20260901]
+type:  [refactor]: Rebase reconciliation
+area:  [frontend]: Rooms older-history ownership
+
+Rebased the review sweep onto the shipped load-older implementation and removed
+the superseded automatic-prepend epoch/state from the older review patch. The
+current request-scoped scroll anchor, on-demand cursor, and predecessor-keyed
+rendering remain authoritative; the review branch no longer carries two scroll
+preservation models. No daemon, deployment, room, or production state changed.
+_________________________________________________________________________________ 21:56 codex/review-sweep-20260901
+
+time:  [22:16] [09-01-26]
+agent: [codex] [gpt-5]
+worktree: [codex/review-sweep-20260901]
+type:  [bug report]: Codex and CI follow-up
+area:  [testing]: Ledger repair grammar and wasm clippy
+
+Closed the current-head Codex finding by validating repair clocks with the same
+grammar as identity separators and falling back to a bare rule for malformed
+historical timestamps. Added a repair-round-trip regression. Rewrote the
+Markdown tail trim as the equivalent while-let loop required by the GitHub wasm
+clippy lane. No daemon, room, deployment, or production state changed.
+_________________________________________________________________________________ 22:16 codex/review-sweep-20260901

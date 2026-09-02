@@ -452,8 +452,8 @@ pub(crate) fn composer_writes_allowed(
 /// this write reach a peer?", which is the right question for the composer and
 /// for anything that mints or drives federation: a message that never leaves is
 /// a lie about what was said. Most of what the right rail writes is not that
-/// kind of write. The trigger policy, a summarize run, an artifact and an
-/// attachment all land through the daemon's own store handle and announce
+/// kind of write. The trigger policy, an artifact and an attachment all land
+/// through the daemon's own store handle and announce
 /// themselves on the local event stream; ocean-os enqueues none of them to the
 /// federation outbox — a federated room's summary is documented local-only, the
 /// artifact routes write through `with_rooms` and publish a local wake, and the
@@ -479,6 +479,20 @@ fn local_store_write_gate(access: Option<&RoomAccessProjection>) -> bool {
             | RoomAccessState::Recovering,
         ) => true,
         Some(RoomAccessState::Revoked) | None => false,
+    }
+}
+
+/// Summary generation invokes the room's agent turn machinery before it
+/// persists the resulting artifact. A federated room therefore needs a live
+/// peer link even though the final artifact is local: allowing the control
+/// during `Connecting` or `Recovering` presents a write the turn cannot finish.
+fn summary_write_gate(access: Option<&RoomAccessProjection>) -> bool {
+    match access.map(|projection| projection.state) {
+        Some(RoomAccessState::Local | RoomAccessState::Live) => true,
+        Some(
+            RoomAccessState::Connecting | RoomAccessState::Recovering | RoomAccessState::Revoked,
+        )
+        | None => false,
     }
 }
 
@@ -3013,36 +3027,39 @@ pub fn RoomsWorkspace(
                     // only kind this form makes — is held and says which kind
                     // it needs, so the form cannot arm on day one exactly the
                     // flag the right rail will grey out on day one.
-                    <div
-                        class="rooms-workspace__create-triggers"
-                        role="group"
-                        aria-label="Auto-wake triggers for the new room"
-                    >
-                        {create_trigger_row(
-                            TriggerToggle::Mention,
-                            "@mention",
-                            create_on_mention,
-                            pending_create,
-                        )}
-                        {create_trigger_row(
-                            TriggerToggle::ThreadReply,
-                            "thread reply",
-                            create_on_thread_reply,
-                            pending_create,
-                        )}
-                        {create_trigger_row(
-                            TriggerToggle::BuildFailure,
-                            "build failure",
-                            create_on_build_failure,
-                            pending_create,
-                        )}
-                        {create_trigger_row(
-                            TriggerToggle::CiFailure,
-                            "CI failure",
-                            create_on_ci_failure,
-                            pending_create,
-                        )}
-                    </div>
+                    <details class="rooms-workspace__create-trigger-disclosure">
+                        <summary>"Triggers"</summary>
+                        <div
+                            class="rooms-workspace__create-triggers"
+                            role="group"
+                            aria-label="Auto-wake triggers for the new room"
+                        >
+                            {create_trigger_row(
+                                TriggerToggle::Mention,
+                                "@mention",
+                                create_on_mention,
+                                pending_create,
+                            )}
+                            {create_trigger_row(
+                                TriggerToggle::ThreadReply,
+                                "thread reply",
+                                create_on_thread_reply,
+                                pending_create,
+                            )}
+                            {create_trigger_row(
+                                TriggerToggle::BuildFailure,
+                                "build failure",
+                                create_on_build_failure,
+                                pending_create,
+                            )}
+                            {create_trigger_row(
+                                TriggerToggle::CiFailure,
+                                "CI failure",
+                                create_on_ci_failure,
+                                pending_create,
+                            )}
+                        </div>
+                    </details>
                 </div>
 
                 // The other way into a room: a code someone else minted. A
@@ -4277,50 +4294,50 @@ pub fn RoomsWorkspace(
                         policy.as_ref().map(pick).unwrap_or(false)
                     };
                     view! {
-                        <div
+                        <details
                             class="rooms-workspace__triggers"
-                            role="group"
-                            aria-label="Agent wake triggers"
                         >
-                            <div class="rooms-workspace__triggers-head">
+                            <summary class="rooms-workspace__triggers-head">
                                 <span class="rooms-workspace__triggers-title">"Triggers"</span>
+                            </summary>
+                            <div role="group" aria-label="Agent wake triggers">
+                                {trigger_toggle_row(
+                                    rooms,
+                                    TriggerToggle::Mention,
+                                    "@mention",
+                                    flag(|p| p.on_mention),
+                                    access.as_ref(),
+                                )}
+                                {trigger_toggle_row(
+                                    rooms,
+                                    TriggerToggle::ThreadReply,
+                                    "thread reply",
+                                    flag(|p| p.on_thread_reply),
+                                    access.as_ref(),
+                                )}
+                                {trigger_toggle_row(
+                                    rooms,
+                                    TriggerToggle::BuildFailure,
+                                    "build failure",
+                                    flag(|p| p.on_build_failure),
+                                    access.as_ref(),
+                                )}
+                                {trigger_toggle_row(
+                                    rooms,
+                                    TriggerToggle::CiFailure,
+                                    "CI failure",
+                                    flag(|p| p.on_ci_failure),
+                                    access.as_ref(),
+                                )}
+                                {move || {
+                                    rooms.policy_update_error.get().map(|error| view! {
+                                        <div class="rooms-workspace__triggers-error" role="alert">
+                                            {format!("trigger update failed: {error}")}
+                                        </div>
+                                    })
+                                }}
                             </div>
-                            {trigger_toggle_row(
-                                rooms,
-                                TriggerToggle::Mention,
-                                "@mention",
-                                flag(|p| p.on_mention),
-                                access.as_ref(),
-                            )}
-                            {trigger_toggle_row(
-                                rooms,
-                                TriggerToggle::ThreadReply,
-                                "thread reply",
-                                flag(|p| p.on_thread_reply),
-                                access.as_ref(),
-                            )}
-                            {trigger_toggle_row(
-                                rooms,
-                                TriggerToggle::BuildFailure,
-                                "build failure",
-                                flag(|p| p.on_build_failure),
-                                access.as_ref(),
-                            )}
-                            {trigger_toggle_row(
-                                rooms,
-                                TriggerToggle::CiFailure,
-                                "CI failure",
-                                flag(|p| p.on_ci_failure),
-                                access.as_ref(),
-                            )}
-                            {move || {
-                                rooms.policy_update_error.get().map(|error| view! {
-                                    <div class="rooms-workspace__triggers-error" role="alert">
-                                        {format!("trigger update failed: {error}")}
-                                    </div>
-                                })
-                            }}
-                        </div>
+                        </details>
                     }.into_any()
                 }}
 
@@ -4330,14 +4347,14 @@ pub fn RoomsWorkspace(
                 // change, and this section owns a run's in-flight state.
                 // A run reads this room's own transcript and amends the one
                 // `room-summary` artifact in this daemon's store — ocean-os
-                // documents a federated room's summary as local-only and never
-                // enqueues it — so the rail takes the local-store gate and
-                // stays usable while the link is coming back.
+                // documents the final summary artifact as local-only, but the
+                // run itself invokes room agents. That turn needs the same live
+                // federation admission as the composer.
                 <crate::room_summary::RoomSummary
                     rooms=rooms
                     state=summary
                     writes_allowed=Signal::derive(move || {
-                        local_store_write_gate(rooms.access.get().as_ref())
+                        summary_write_gate(rooms.access.get().as_ref())
                     })
                     members=member_ids
                 />
@@ -5990,6 +6007,7 @@ mod tests {
         // nothing is known about the room yet, and a control that flips to
         // disabled once the projection lands is worse than one that waits.
         assert!(!local_store_write_gate(None));
+        assert!(!summary_write_gate(None));
         assert!(!access_allows_writes(None));
 
         let cases = [
@@ -6012,6 +6030,11 @@ mod tests {
                 diverges,
                 "{state:?}"
             );
+            assert_eq!(
+                summary_write_gate(Some(&access)),
+                matches!(state, RoomAccessState::Local | RoomAccessState::Live),
+                "summary runs need local authority or a live federated turn"
+            );
         }
     }
 
@@ -6022,27 +6045,46 @@ mod tests {
     /// trigger section's guard does, with the needles concatenated at runtime
     /// so this test's own literals cannot stand in for the code it scans.
     ///
-    /// The ruling is per rail, so the table states it once. Summary, artifacts
-    /// and attachments all write through the daemon's own store handle with no
-    /// outbox row on any path, and take the local gate. Invite mints
-    /// federation and repo drives a Bedrock container, so both keep the
-    /// composer's — a code nobody can redeem and a build nothing can run are
-    /// not writes a down link merely delays.
+    /// The ruling is per rail, so the table states it once. Artifacts and
+    /// attachments take the local gate. Summary generation invokes agents and
+    /// takes its stricter named gate. Invite mints federation and repo drives a
+    /// Bedrock container, so both keep the composer's.
     #[test]
     fn each_rail_takes_the_gate_its_write_destination_earns() {
         let markup = include_str!("rooms_workspace.rs");
         let local = ["local_store", "_write_gate"].concat();
+        let summary = ["summary", "_write_gate"].concat();
         let peer = ["access_allows", "_writes"].concat();
 
         let sections = [
-            (["<crate::room_summary", "::RoomSummary"].concat(), true),
-            (["<crate::room_artifacts", "::RoomArtifacts"].concat(), true),
-            (["<crate::attachments", "::RoomAttachments"].concat(), true),
-            (["<crate::room_invite", "::RoomInvite"].concat(), false),
-            (["<crate::room_repo", "::RoomRepo"].concat(), false),
+            (
+                ["<crate::room_summary", "::RoomSummary"].concat(),
+                &summary,
+                [&local, &peer],
+            ),
+            (
+                ["<crate::room_artifacts", "::RoomArtifacts"].concat(),
+                &local,
+                [&summary, &peer],
+            ),
+            (
+                ["<crate::attachments", "::RoomAttachments"].concat(),
+                &local,
+                [&summary, &peer],
+            ),
+            (
+                ["<crate::room_invite", "::RoomInvite"].concat(),
+                &peer,
+                [&summary, &local],
+            ),
+            (
+                ["<crate::room_repo", "::RoomRepo"].concat(),
+                &peer,
+                [&summary, &local],
+            ),
         ];
 
-        for (tag, writes_land_locally) in sections {
+        for (tag, wanted, refused) in sections {
             let at = markup
                 .find(&tag)
                 .unwrap_or_else(|| panic!("{tag} must be mounted from this file"));
@@ -6055,20 +6097,16 @@ mod tests {
                 "{tag} must carry a write gate"
             );
 
-            let (wanted, refused) = if writes_land_locally {
-                (&local, &peer)
-            } else {
-                (&peer, &local)
-            };
             assert!(
                 section.contains(wanted.as_str()),
                 "{tag} must take `{wanted}`"
             );
-            assert!(
-                !section.contains(refused.as_str()),
-                "{tag} must not take `{refused}` — which gate a rail takes IS \
-                 its ruling on whether its write has to reach a peer"
-            );
+            for refused in refused {
+                assert!(
+                    !section.contains(refused.as_str()),
+                    "{tag} must not take `{refused}` — each rail has one authority gate"
+                );
+            }
         }
     }
 

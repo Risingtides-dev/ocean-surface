@@ -169,20 +169,39 @@ fn autolink_boundary(prev: Option<char>) -> bool {
 /// bracket in its href; `<` and `>` need no entry because the terminator scan
 /// already stops on them.
 fn trim_autolink_tail(candidate: &str) -> &str {
-    let mut url = candidate;
-    loop {
-        url = url.trim_end_matches(['.', ',', ';', ':', '!', '?']);
-        let (closer, opener) = match url.chars().last() {
-            Some(')') => (')', '('),
-            Some(']') => (']', '['),
-            Some('}') => ('}', '{'),
-            _ => return url,
-        };
-        if url.matches(closer).count() <= url.matches(opener).count() {
-            return url;
+    let mut opens = [0usize; 3];
+    let mut closes = [0usize; 3];
+    for ch in candidate.chars() {
+        match ch {
+            '(' => opens[0] += 1,
+            '[' => opens[1] += 1,
+            '{' => opens[2] += 1,
+            ')' => closes[0] += 1,
+            ']' => closes[1] += 1,
+            '}' => closes[2] += 1,
+            _ => {}
         }
-        url = &url[..url.len() - 1];
     }
+    let mut end = candidate.len();
+    while let Some(last) = candidate[..end].chars().next_back() {
+        if matches!(last, '.' | ',' | ';' | ':' | '!' | '?') {
+            end -= last.len_utf8();
+            continue;
+        }
+        let pair = match last {
+            ')' => Some(0),
+            ']' => Some(1),
+            '}' => Some(2),
+            _ => None,
+        };
+        if let Some(pair) = pair.filter(|&pair| closes[pair] > opens[pair]) {
+            closes[pair] -= 1;
+            end -= last.len_utf8();
+            continue;
+        }
+        break;
+    }
+    &candidate[..end]
 }
 
 /// Byte offset of the `)` that closes `[label](href)`: the first one that is
@@ -204,16 +223,17 @@ fn trim_autolink_tail(candidate: &str) -> &str {
 /// gate so the whole `[…](…)` renders as one literal run.
 fn balanced_href_end(raw: &str) -> Option<usize> {
     let mut depth = 0usize;
-    for (offset, byte) in raw.bytes().enumerate() {
-        match byte {
-            b'(' => depth += 1,
-            b')' => {
+    for (offset, ch) in raw.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
                 if depth == 0 {
                     return Some(offset);
                 }
                 depth -= 1;
             }
-            b' ' => return None,
+            ' ' => return None,
+            c if c.is_whitespace() && !matches!(c, '\t' | '\n' | '\r') => return None,
             _ => {}
         }
     }

@@ -244,7 +244,11 @@ Web surface session UI:
   `GET /v1/rooms/persistent/{key}/events` with sequence resume. Subscribe to
   both `room_message` and `room_access` immediately: messages alone advance the
   room sequence cursor; access projections replace state without a sequence.
-  Do not restore transcript polling or consume the global agent-event stream.
+  Do not restore transcript polling after mutations or consume the global
+  agent-event stream. Backward hydration explicitly marks successful prepends;
+  the workspace preserves the reader's viewport by the added scroll-height and
+  never raises `New messages` for older rows. A root row's keyed identity
+  includes its predecessor because prepending can change day/gap grouping.
 - Decoded room-tail frames mutate state only after one shared generation+room
   admission check. Opening and closing a room share one synchronous reset path
   so stale transcript, access, and tail state cannot leak across room identity.
@@ -290,6 +294,13 @@ Web surface session UI:
 - Local rosters and mention ids come from `Room.participants`; every non-Local
   roster and mention id comes only from the safe access member projection.
   Composer writes are enabled only for `Local` and `Live` access.
+- Summary generation is enabled only for `Local` and `Live` access because it
+  invokes agent turns before storing the local artifact. Trigger-policy,
+  artifact, and attachment writes may use the local-store gate while a
+  federation link is connecting or recovering.
+- Trigger-policy controls use compact native disclosures in both the room-create
+  form and right rail. Keep them one click away without permanently spending
+  the narrow rails on four low-frequency rows.
 - Federated outbox items render outside the confirmed transcript. Pending items
   are informational; only failed items expose the daemon retry action, and the
   returned access projection applies immediately behind the room-generation
@@ -432,7 +443,9 @@ on either side of a rebase carrying one; the two verdicts must match.** It is th
 only check that reads this file, it runs in CI on PRs and on pushes to main, and
 its exit codes are 0 clean / 1 an entry is open / 2 the check could not run at
 all. `--fix` closes what it finds by insertion only and writes the identity form,
-so a repair does not hand the next merge the same shared line — never in CI,
+or a bare rule when a historical header has no valid 24-hour clock, so a repair
+always parses as closed on its own next check. A repair does not hand the next
+merge the same shared line — never in CI,
 because that is a non-append edit to a file under `merge=union` and the last cost
 below applies to it. `scripts/events-merge-driver.test.mjs` proves a three-way
 parallel append keeps all four rules and fuses nothing, but it reproduces the
