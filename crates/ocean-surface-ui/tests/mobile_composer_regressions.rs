@@ -152,14 +152,36 @@ fn touch_focused_fields_carry_the_16px_anti_zoom_floor() {
     // Every field a phone user actually focuses, mapped to the stylesheet that
     // co-locates its coarse-pointer floor. Each must reach >= 16px so focusing
     // it never triggers the iOS zoom-and-shift (TASK-41).
+    //
+    // The three Rooms entries here used to name `.rooms-panel__create-input`,
+    // `.rooms-composer__input` and `.rooms-addagent__input` in panels.css.
+    // Those classes are emitted by nothing: the shipped Rooms surface is
+    // `rooms_workspace.rs`, which renders `.rooms-workspace__*`. So the guard
+    // was pinning a floor under fields no phone user can focus, while the
+    // fields they DO focus — the room-name/redeem input, the composer, the
+    // add-agent select and the three agent-builder controls — carried their
+    // floor in styles/rooms-workspace.css with nothing asserting it. Deleting
+    // that live rule passed every gate. These six are the live set.
     let fields: &[(&str, &str)] = &[
         ("compact.css", ".ocean-composer__input"),
         ("island.css", ".island-search__input"),
         ("island.css", ".island-recall__input"),
         ("panels.css", ".sessions-create__input"),
-        ("panels.css", ".rooms-panel__create-input"),
-        ("panels.css", ".rooms-composer__input"),
-        ("panels.css", ".rooms-addagent__input"),
+        ("rooms-workspace.css", ".rooms-workspace__left-input"),
+        ("rooms-workspace.css", ".rooms-workspace__composer-input"),
+        ("rooms-workspace.css", ".rooms-workspace__addagent-select"),
+        (
+            "rooms-workspace.css",
+            ".rooms-workspace__agentbuilder-input",
+        ),
+        (
+            "rooms-workspace.css",
+            ".rooms-workspace__agentbuilder-select",
+        ),
+        (
+            "rooms-workspace.css",
+            ".rooms-workspace__agentbuilder-prompt",
+        ),
         ("deck.css", ".palette-input"),
     ];
     for (file, selector) in fields {

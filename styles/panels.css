@@ -1,9 +1,8 @@
 /* ═══════════════════════════════════════════════════════════════════
-   Shared slide-over overlay pattern
+   Sessions slide-over overlay
    ═══════════════════════════════════════════════════════════════════ */
 
-.sessions-overlay,
-.rooms-overlay {
+.sessions-overlay {
   position: fixed;
   inset: 0;
   z-index: 100;
@@ -17,14 +16,12 @@
   transition: opacity 280ms var(--ease);
 }
 
-.sessions-overlay--open,
-.rooms-overlay--open {
+.sessions-overlay--open {
   opacity: 1;
   pointer-events: auto;
 }
 
-.sessions-panel,
-.rooms-panel {
+.sessions-panel {
   width: min(380px, 92vw);
   height: 100dvh;
   display: flex;
@@ -35,9 +32,9 @@
   animation: sessions-slide-in 280ms var(--ease) both;
 }
 
-/* Sessions is a LEFT slide-over (the session sidebar — smaths' call); rooms
-   stays a right slide-over. Both share the full-height drawer base above; only
-   the dock edge (flex-start vs flex-end) and slide direction differ. */
+/* Sessions is a LEFT slide-over (the session sidebar — smaths' call). The
+   drawer base above is the shared right-docked pattern; these two rules flip
+   the dock edge and the slide direction. */
 .sessions-overlay {
   justify-content: flex-start;
 }
@@ -53,7 +50,7 @@
 }
 
 /* Left slide-over: emerge from the left screen edge (mirror of the right-docked
-   sessions-slide-in used by the rooms panel). */
+   sessions-slide-in the drawer base declares). */
 @keyframes sessions-slide-in-left {
   from {
     transform: translateX(-24px);
@@ -76,13 +73,11 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .sessions-overlay,
-  .rooms-overlay {
+  .sessions-overlay {
     transition: none;
   }
 
-  .sessions-panel,
-  .rooms-panel {
+  .sessions-panel {
     animation: none;
   }
 }
@@ -91,7 +86,7 @@
    Shared controls, fields, and scroll treatments
    ═══════════════════════════════════════════════════════════════════ */
 
-:is(.sessions-panel__close, .rooms-panel__close) {
+.sessions-panel__close {
   appearance: none;
   display: inline-grid;
   place-items: center;
@@ -110,7 +105,7 @@
   transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
 }
 
-:is(.sessions-panel__close, .rooms-panel__close):hover {
+.sessions-panel__close:hover {
   background: var(--bg-elevated);
   color: var(--fg);
 }
@@ -119,63 +114,35 @@
    The pseudo-element sits behind content and captures taps, leaving focus rings
    and hover states fully intact. */
 @media (pointer: coarse) {
-  :is(.sessions-panel__close, .rooms-panel__close) {
+  .sessions-panel__close {
     position: relative;
   }
-  :is(.sessions-panel__close, .rooms-panel__close)::after {
+  .sessions-panel__close::after {
     content: '';
     position: absolute;
     inset: -8px; /* 28px + 16px = 44px */
   }
 }
 
-:is(.sessions-panel__close, .rooms-panel__close, .sessions-panel__new-btn, .sessions-item,
-   .rooms-panel__create-input, .rooms-panel__create-btn, .rooms-policy__row input[type="checkbox"],
-   .rooms-policy__cron, .rooms-item, .room-stage__join, .room-stage__leave, .room-stage__back,
-   .room-stage__addagent-toggle, .rooms-addagent__input,
-   .rooms-mention-hint__chip, .rooms-composer__input, .rooms-composer__send):focus-visible {
+:is(.sessions-panel__close, .sessions-panel__new-btn, .sessions-item,
+   .room-stage__join, .room-stage__leave, .room-stage__back,
+   .room-stage__addagent-toggle):focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
 }
 
-:is(.sessions-panel__close, .rooms-panel__close, .sessions-panel__new-btn, .sessions-item,
-   .rooms-panel__create-btn, .rooms-item, .room-stage__join, .room-stage__leave, .room-stage__back,
-   .room-stage__addagent-toggle,
-   .rooms-mention-hint__chip, .rooms-composer__send):active {
+:is(.sessions-panel__close, .sessions-panel__new-btn, .sessions-item,
+   .room-stage__join, .room-stage__leave, .room-stage__back,
+   .room-stage__addagent-toggle):active {
   transform: scale(0.985);
 }
 
-:is(.sessions-panel__close, .rooms-panel__close, .sessions-panel__new-btn, .sessions-item,
-   .rooms-panel__create-input, .rooms-panel__create-btn, .rooms-policy__row input[type="checkbox"],
-   .rooms-policy__cron, .rooms-item, .room-stage__join, .room-stage__leave, .rooms-addagent__input,
-   .rooms-mention-hint__chip, .rooms-composer__input, .rooms-composer__send,
+:is(.sessions-panel__close, .sessions-panel__new-btn, .sessions-item,
+   .room-stage__join, .room-stage__leave,
    .sessions-create__cancel):disabled {
   opacity: 0.45;
   cursor: not-allowed;
   pointer-events: none;
-}
-
-.rooms-panel__create-btn,
-.rooms-composer__send {
-  appearance: none;
-  height: var(--ctl-h);
-  padding: 0 16px;
-  border: 0;
-  border-radius: var(--radius);
-  background: var(--accent);
-  color: var(--fg-on-accent);
-  font-family: var(--font);
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1;
-  white-space: nowrap;
-  cursor: pointer;
-  transition: filter var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease);
-}
-
-.rooms-panel__create-btn:hover:not(:disabled),
-.rooms-composer__send:hover:not(:disabled) {
-  filter: brightness(1.12);
 }
 
 .room-stage__join {
@@ -222,7 +189,7 @@
   border-color: var(--border-strong);
 }
 
-:is(.rooms-panel__create-input, .rooms-policy__cron, .rooms-addagent__input, .sessions-create__input, .rooms-composer__input) {
+.sessions-create__input {
   min-width: 0;
   height: var(--ctl-h);
   padding: 0 12px;
@@ -236,51 +203,46 @@
   transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease);
 }
 
-.rooms-policy__cron {
-  font-family: var(--mono);
-  font-size: 12px;
-}
-
-:is(.rooms-panel__create-input, .rooms-policy__cron, .rooms-addagent__input, .sessions-create__input, .rooms-composer__input)::placeholder {
+.sessions-create__input::placeholder {
   color: var(--fg-3);
 }
 
-/* Anti-zoom (TASK-41): session-create and the rooms create/composer/add-agent/
-   cron fields all compute to 12-13px, which force-zooms iOS Safari on focus.
-   Lift only the mobile (coarse-pointer) size to the 16px floor; desktop is
-   untouched. Placed after the cron override so it wins the cascade. Mirrors the
-   composer floor in styles/compact.css. */
+/* Anti-zoom (TASK-41): the session-create field computes to 13px, which
+   force-zooms iOS Safari on focus. Lift only the mobile (coarse-pointer) size
+   to the 16px floor; desktop is untouched. Mirrors the composer floor in
+   styles/compact.css and the Rooms floor in styles/rooms-workspace.css.
+   Pinned by tests/mobile_composer_regressions.rs. */
 @media (pointer: coarse) {
-  :is(.rooms-panel__create-input, .rooms-policy__cron, .rooms-addagent__input, .sessions-create__input, .rooms-composer__input) {
+  .sessions-create__input {
     font-size: 16px;
   }
 }
 
-:is(.rooms-panel__create-input, .rooms-policy__cron, .rooms-addagent__input, .sessions-create__input, .rooms-composer__input):hover:not(:disabled) {
+.sessions-create__input:hover:not(:disabled) {
   border-color: var(--border-strong);
 }
 
-:is(.rooms-panel__create-input, .rooms-policy__cron, .rooms-addagent__input, .sessions-create__input, .rooms-composer__input):focus:not(:disabled) {
+.sessions-create__input:focus:not(:disabled) {
   outline: none;
   border-color: var(--accent);
   box-shadow: var(--focus-ring);
 }
 
-:is(.sessions-panel__list, .rooms-panel__list, .room-stage__transcript) {
+:is(.sessions-panel__list, .room-stage__transcript) {
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
 }
 
-:is(.sessions-panel__list, .rooms-panel__list, .room-stage__transcript)::-webkit-scrollbar {
+:is(.sessions-panel__list, .room-stage__transcript)::-webkit-scrollbar {
   width: 8px;
 }
 
-:is(.sessions-panel__list, .rooms-panel__list, .room-stage__transcript)::-webkit-scrollbar-thumb {
+:is(.sessions-panel__list, .room-stage__transcript)::-webkit-scrollbar-thumb {
   border-radius: var(--radius-pill);
   background: rgba(255, 255, 255, 0.12);
 }
 
-:is(.sessions-panel__list, .rooms-panel__list, .room-stage__transcript)::-webkit-scrollbar-thumb:hover {
+:is(.sessions-panel__list, .room-stage__transcript)::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.22);
 }
 
@@ -871,587 +833,6 @@
   line-height: 1.55;
   text-align: center;
 }
-
-/* ═══════════════════════════════════════════════════════════════════
-   Rooms panel shell and create policy
-   ═══════════════════════════════════════════════════════════════════ */
-
-.rooms-panel__head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 16px 16px 12px;
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.rooms-panel__title {
-  min-width: 0;
-  margin: 0;
-  overflow: hidden;
-  color: var(--fg);
-  font-size: 15px;
-  font-weight: 600;
-  line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.rooms-panel__create {
-  display: flex;
-  gap: 8px;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.rooms-panel__create-input {
-  flex: 1 1 auto;
-}
-
-.rooms-panel__list {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 8px;
-}
-
-.rooms-panel__empty {
-  margin: 24px 16px;
-  padding: 16px;
-  border-radius: var(--radius-lg);
-  background: var(--bg-elevated);
-  color: var(--fg-3);
-  font-size: 13px;
-  line-height: 1.55;
-  text-align: center;
-}
-
-/* TASK-104: distinct from __empty — shown only while the first room fetch is
-   in flight, so the panel never lies "No rooms yet" before it has an answer. */
-.rooms-panel__loading {
-  margin: 24px 16px;
-  padding: 16px;
-  color: var(--fg-3);
-  font-size: 13px;
-  text-align: center;
-  opacity: 0.75;
-  animation: rooms-loading-pulse 1.4s var(--ease) infinite;
-}
-
-@keyframes rooms-loading-pulse {
-  0%,
-  100% {
-    opacity: 0.4;
-  }
-  50% {
-    opacity: 0.85;
-  }
-}
-
-/* TASK-102: the response policy is a create-time concern, so it's a collapsed
-   <details> disclosure — the room list is the primary content of the panel and
-   should sit right under the create input, not below a 150px always-open form. */
-.rooms-policy {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px 16px 12px;
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.rooms-policy > .rooms-policy__row {
-  /* When collapsed, only the <summary> shows; rows appear on open. */
-  margin-top: 2px;
-}
-
-.rooms-policy__summary {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  list-style: none;
-  cursor: pointer;
-  user-select: none;
-  color: var(--fg-3);
-}
-
-.rooms-policy__summary::-webkit-details-marker {
-  display: none;
-}
-
-/* Disclosure caret, rotates when open. */
-.rooms-policy__summary::before {
-  content: "";
-  flex: 0 0 auto;
-  width: 5px;
-  height: 5px;
-  margin-right: 2px;
-  border-right: 1.5px solid var(--fg-3);
-  border-bottom: 1.5px solid var(--fg-3);
-  transform: rotate(-45deg);
-  transition: transform var(--dur-fast) var(--ease);
-}
-
-.rooms-policy[open] .rooms-policy__summary::before {
-  transform: rotate(45deg);
-}
-
-.rooms-policy__summary-label {
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1.2;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.rooms-policy__summary-hint {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--fg-3);
-  font-size: 11px;
-  font-weight: 400;
-  letter-spacing: 0;
-  text-transform: none;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  opacity: 0.7;
-}
-
-.rooms-policy__row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--fg-2);
-  font-size: 13px;
-  line-height: 1.45;
-  cursor: pointer;
-  transition: color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease);
-}
-
-.rooms-policy__row:not(.rooms-policy__row--cron):hover {
-  color: var(--fg);
-}
-
-.rooms-policy__row:not(.rooms-policy__row--cron):active {
-  transform: scale(0.985);
-}
-
-.rooms-policy__row:has(input[type="checkbox"]:disabled) {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.rooms-policy__row input[type="checkbox"] {
-  width: 14px;
-  height: 14px;
-  margin: 0;
-  accent-color: var(--accent);
-  cursor: pointer;
-}
-
-.rooms-policy__hint {
-  color: var(--fg-3);
-  font-size: 11px;
-  line-height: 1.45;
-}
-
-/* coarse-pointer: ensure policy rows + checkbox have 44px touch targets.
-   The label wraps the checkbox so the whole row is tappable; we extend
-   vertical padding without adding visible chrome. */
-@media (pointer: coarse) {
-  .rooms-policy__row {
-    padding-block: 12px; /* ~19px content + 24px padding = ~43px */
-  }
-}
-
-.rooms-policy__row--cron {
-  flex-wrap: wrap;
-  align-items: center;
-  cursor: default;
-}
-
-.rooms-policy__cron {
-  flex: 1 1 150px;
-}
-
-/* ═══════════════════════════════════════════════════════════════════
-   Rooms list and room detail
-   ═══════════════════════════════════════════════════════════════════ */
-
-.rooms-item {
-  appearance: none;
-  display: block;
-  width: 100%;
-  margin: 0;
-  padding: 10px 12px;
-  border: 1px solid transparent;
-  border-radius: var(--radius);
-  background: transparent;
-  color: inherit;
-  text-align: left;
-  font-family: var(--font);
-  cursor: pointer;
-  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease);
-}
-
-.rooms-item + .rooms-item {
-  margin-top: 4px;
-}
-
-.rooms-item:hover:not(:disabled) {
-  background: var(--bg-hover);
-  border-color: var(--border-subtle);
-}
-
-.rooms-item__name {
-  margin-bottom: 5px;
-  overflow: hidden;
-  color: var(--fg);
-  font-size: 13px;
-  font-weight: 500;
-  line-height: 1.4;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.rooms-item__meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  color: var(--fg-3);
-  font-size: 11px;
-  line-height: 1.35;
-}
-
-.rooms-item__count,
-.rooms-item__time {
-  display: inline-flex;
-  align-items: center;
-  min-height: 20px;
-  padding: 0 8px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elevated);
-  color: var(--fg-3);
-  font-family: var(--mono);
-  font-size: 11px;
-  line-height: 1;
-}
-
-.rooms-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  max-width: 168px;
-  min-height: 24px;
-  padding: 0 10px;
-  overflow: hidden;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elevated);
-  color: var(--fg-2);
-  font-size: 12px;
-  line-height: 1;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.rooms-chip__glyph {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  color: var(--fg-3);
-  font-size: 11px;
-}
-
-/* Only the display name shrinks and ellipsizes; glyph/kind/presence/remote
-   markers stay fixed so they are never clipped by a long participant name. */
-.rooms-chip__name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.rooms-chip__kind {
-  flex: 0 0 auto;
-  color: var(--fg-3);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.rooms-chip--agent {
-  border-color: var(--border-strong);
-  background: var(--accent-soft);
-  color: var(--fg);
-}
-
-.rooms-chip--agent :is(.rooms-chip__glyph, .rooms-chip__kind) {
-  color: var(--accent);
-}
-
-.rooms-chip--federated {
-  padding-left: 8px;
-}
-
-.rooms-chip--local {
-  border-color: var(--border-strong);
-  background: var(--accent-soft);
-  color: var(--fg);
-}
-
-.rooms-chip--local .rooms-chip__glyph {
-  color: var(--accent);
-}
-
-.rooms-chip__presence {
-  flex: 0 0 auto;
-  width: 6px;
-  height: 6px;
-  border-radius: var(--radius-pill);
-  background: var(--fg-4);
-}
-
-.rooms-chip__presence--live {
-  background: var(--ok);
-}
-
-.rooms-chip__presence--unavailable {
-  background: var(--fg-4);
-}
-
-.rooms-chip__remote {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  color: var(--fg-3);
-}
-
-.rooms-chip__remote svg {
-  width: 12px;
-  height: 12px;
-}
-
-.rooms-addagent {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.rooms-addagent__input {
-  flex: 1 1 150px;
-}
-
-.rooms-policy-summary {
-  margin: 10px 16px 0;
-  padding: 10px 12px;
-  border-radius: var(--radius);
-  background: var(--bg-elevated);
-  color: var(--fg-3);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.rooms-msg {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.rooms-msg__author {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--fg);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1.3;
-}
-
-.rooms-msg__glyph {
-  display: inline-flex;
-  align-items: center;
-  color: var(--fg-3);
-  font-size: 11px;
-}
-
-.rooms-msg__body {
-  color: var(--fg-2);
-  font-size: 13px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.rooms-msg--system :is(.rooms-msg__author, .rooms-msg__glyph, .rooms-msg__body) {
-  color: var(--fg-3);
-}
-
-.rooms-msg--system .rooms-msg__body {
-  font-size: 12px;
-  font-style: italic;
-}
-
-.rooms-outbox {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.rooms-outbox__item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 32px;
-  padding: 5px 7px 5px 9px;
-  border-left: 2px solid transparent;
-  border-radius: var(--radius-sm);
-  background: var(--bg-elevated);
-  color: var(--fg-3);
-  font-size: 11px;
-  line-height: 1.3;
-}
-
-.rooms-outbox__item--failed {
-  border-left-color: var(--warn);
-  background: var(--warn-soft);
-}
-
-.rooms-outbox__event {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--fg-2);
-  font-family: var(--mono);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.rooms-outbox__state {
-  flex: 0 0 auto;
-  color: var(--fg-4);
-  text-transform: lowercase;
-}
-
-.rooms-outbox__item--failed .rooms-outbox__state {
-  color: var(--warn);
-}
-
-.rooms-outbox__retry {
-  appearance: none;
-  display: inline-grid;
-  flex: 0 0 auto;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--warn);
-  cursor: pointer;
-  transition: background var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
-}
-
-.rooms-outbox__retry:hover {
-  background: var(--bg-hover);
-}
-
-.rooms-outbox__retry:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-}
-
-.rooms-outbox__retry:active {
-  transform: scale(0.985);
-}
-
-.rooms-outbox__retry svg {
-  width: 14px;
-  height: 14px;
-}
-
-/* coarse-pointer: extend outbox retry from 26px to 44×44 via invisible pseudo. */
-@media (pointer: coarse) {
-  .rooms-outbox__retry {
-    position: relative;
-  }
-  .rooms-outbox__retry::after {
-    content: '';
-    position: absolute;
-    inset: -9px; /* 26px + 18px = 44px */
-  }
-}
-
-/* ═══════════════════════════════════════════════════════════════════
-   Rooms mention helper, composer, and status
-   ═══════════════════════════════════════════════════════════════════ */
-
-.rooms-mention-hint {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 16px 0;
-}
-
-.rooms-mention-hint__label {
-  color: var(--fg-3);
-  font-size: 11px;
-  line-height: 1.3;
-}
-
-.rooms-mention-hint__chip {
-  appearance: none;
-  min-height: 24px;
-  padding: 0 9px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-family: var(--mono);
-  font-size: 11px;
-  line-height: 1;
-  cursor: pointer;
-  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease);
-}
-
-.rooms-mention-hint__chip:hover:not(:disabled) {
-  border-color: var(--border-strong);
-  background: var(--bg-hover);
-}
-
-.rooms-composer {
-  display: flex;
-  gap: 8px;
-  padding: 12px 16px;
-  border-top: 1px solid var(--border-subtle);
-}
-
-.rooms-composer__input {
-  flex: 1 1 auto;
-}
-
-.rooms-composer__send {
-  flex: 0 0 auto;
-}
-
-.rooms-panel__status {
-  padding: 8px 16px 12px;
-  border-top: 1px solid var(--border-subtle);
-  color: var(--fg-3);
-  font-family: var(--mono);
-  font-size: 11px;
-  line-height: 1.4;
-}
-
 
 .sessions-create__reveal {
   display: block;

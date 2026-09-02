@@ -2974,7 +2974,11 @@
     inset: -8px;
   }
 
-  /* 16px is the iOS threshold below which focusing an input zooms the page. */
+  /* 16px is the iOS threshold below which focusing an input zooms the page.
+     These six are every field a phone member focuses in a room, and they are
+     the live floor: tests/mobile_composer_regressions.rs pins this rule.
+     Until it did, the guard named three inputs of a rooms panel nothing
+     renders, and deleting this block passed the whole suite. */
   .rooms-workspace__left-input,
   .rooms-workspace__composer-input,
   .rooms-workspace__addagent-select,
