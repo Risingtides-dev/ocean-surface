@@ -414,6 +414,18 @@ pub struct Room {
     /// Optional auto-convene trigger policy. `None` = no automatic triggers.
     #[serde(default)]
     pub trigger_policy: Option<RoomTriggerPolicy>,
+    /// The workspace folder on the DAEMON's host this room is bound to, if any.
+    ///
+    /// Nothing to do with the SESSION workspace root every other module in this
+    /// crate means by that name — this one is the room's own, and it is what a
+    /// room-bound agent turn resolves its project and `cwd` from. `None` is an
+    /// unbound room, where every agent turn fails closed on the daemon with
+    /// `workspace_unavailable`, so the mention that was supposed to wake an
+    /// agent does nothing at all. `#[serde(default)]` because a daemon
+    /// predating the field simply omits it, and an omitted binding reads the
+    /// same as no binding.
+    #[serde(default)]
+    pub workspace_root: Option<String>,
 }
 
 // ---- Response envelopes (the daemon's `json!({ "ok": .., .. })` shapes) ------
@@ -624,6 +636,29 @@ struct CreateRoomBody<'a> {
     /// (no triggers) applies; otherwise the daemon stores it verbatim.
     #[serde(skip_serializing_if = "Option::is_none")]
     trigger_policy: Option<RoomTriggerPolicy>,
+    /// The workspace folder on the daemon's host to bind the new room to.
+    /// Skipped when `None` — an omitted binding is what the daemon reads as
+    /// "unbound", and sending an explicit `null` would mean the same thing
+    /// while looking like a value the operator chose.
+    ///
+    /// Until this field existed the surface sent `key`, `name` and
+    /// `trigger_policy` only, so EVERY room this form made was unbound and
+    /// every agent mention in it did nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace_root: Option<&'a str>,
+}
+
+/// `PATCH /v1/rooms/persistent/{key}` carrying the workspace binding alone.
+///
+/// Deliberately NOT `skip_serializing_if`: an explicit `null` is how the
+/// daemon is told to UNBIND, and an omitted field means "leave it alone", so
+/// skipping `None` here would make the unbind control a no-op that reported
+/// success. The mirror of [`RoomPolicyPatchBody`], which sends the policy
+/// alone for the same reason — one field per body, so neither control can
+/// clobber the other's value.
+#[derive(Debug, Clone, Serialize)]
+struct RoomWorkspacePatchBody<'a> {
+    workspace_root: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -885,6 +920,81 @@ pub struct Rooms {
     /// untouched, so nothing re-renders — which is why the error must be
     /// visible: the box alone would overstate what was stored.
     pub policy_update_error: RwSignal<Option<String>>,
+    /// Whether a workspace-binding PATCH on the open room is in flight. Its own
+    /// flag rather than a share of `policy_update_in_flight`: the two send
+    /// disjoint bodies to the same route, so holding one control while the
+    /// other is mid-flight would be a hold with nothing behind it.
+    pub workspace_update_in_flight: RwSignal<bool>,
+    /// Typed outcome of the last workspace-binding PATCH, shown inline beside
+    /// the control. `None` is "nothing to report" — a success clears it,
+    /// because the section re-renders from the record the daemon returned and
+    /// the binding is then visible on its own.
+    pub workspace_update_status: RwSignal<Option<WorkspaceBindStatus>>,
+}
+
+/// What the surface can say about a workspace-binding PATCH, decided from the
+/// daemon's reply rather than from the path the operator typed.
+///
+/// The surface never pre-validates the path: the folder has to exist on the
+/// machine running the DAEMON, which a browser cannot see, so any local check
+/// would be guessing about a filesystem it has no access to. The daemon
+/// canonicalizes and answers, and this is the reading of that answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceBindStatus {
+    /// The daemon's `400 invalid_workspace_root`: not an absolute path, or not
+    /// an existing directory on the daemon's host.
+    InvalidPath,
+    /// Anything else that went wrong — transport, decode, an unrecognised
+    /// daemon error — carried verbatim so a new daemon refusal is readable
+    /// here before this surface learns to name it.
+    Failed(String),
+}
+
+impl WorkspaceBindStatus {
+    /// The sentence shown beside the control.
+    ///
+    /// Deliberately NOT the `workspace_unavailable` wording `room_repo.rs`
+    /// uses: that is the COMPUTE lane saying Bedrock is unreachable, a
+    /// different condition with a different fix. This one is about a path on
+    /// the daemon's own host.
+    pub fn message(&self) -> String {
+        match self {
+            Self::InvalidPath => "that folder is not an absolute path, or does not exist on the machine running the daemon".to_string(),
+            Self::Failed(error) => format!("workspace update failed: {error}"),
+        }
+    }
+
+    /// Read a failed PATCH's daemon `error` string into a typed status. The
+    /// daemon's refusal body is the frozen `{"ok": false, "error":
+    /// "invalid_workspace_root"}`, so the exact code is what this matches —
+    /// never a substring of prose, which would retag an unrelated message that
+    /// happened to quote it.
+    pub fn from_daemon_error(error: &str) -> Self {
+        if error.trim() == "invalid_workspace_root" {
+            Self::InvalidPath
+        } else {
+            Self::Failed(error.to_string())
+        }
+    }
+}
+
+/// Is this room unbound — no workspace folder on the daemon's host, so every
+/// agent turn in it fails closed before it starts?
+///
+/// A pure predicate over the decoded record, so the notice and the control's
+/// wording cannot drift apart, and so the rule is testable without a browser.
+pub fn room_is_unbound(room: &Room) -> bool {
+    room.workspace_root
+        .as_deref()
+        .is_none_or(|root| root.trim().is_empty())
+}
+
+/// The value a create form's workspace field should send: the trimmed path, or
+/// `None` when the operator left it empty. Empty means "leave the room
+/// unbound", which is exactly what the field being absent from the body says.
+pub fn create_workspace_root(draft: &str) -> Option<String> {
+    let trimmed = draft.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -949,6 +1059,8 @@ impl Rooms {
             create_op: RwSignal::new((0, None)),
             policy_update_in_flight: RwSignal::new(false),
             policy_update_error: RwSignal::new(None),
+            workspace_update_in_flight: RwSignal::new(false),
+            workspace_update_status: RwSignal::new(None),
         };
 
         // Identity is RESOLVED, not snapshotted. `Rooms::new` runs synchronously
@@ -1063,6 +1175,9 @@ impl Rooms {
         // In-flight stays as-is — the completion clears it itself — but a
         // previous room's PATCH failure must not read as this room's.
         self.policy_update_error.set(None);
+        // Same rule for the binding control: a rejected path belongs to the
+        // room it was typed into, and nowhere else.
+        self.workspace_update_status.set(None);
     }
 
     /// Whether the current identity is joined according to the room's explicit
@@ -1198,7 +1313,17 @@ impl Rooms {
     ///
     /// Callers should gate dispatch on `pending_create` to prevent concurrent
     /// attempts — the closure in `rooms_workspace.rs` does this.
-    pub fn create_room(&self, name: String, policy: Option<RoomTriggerPolicy>) -> u64 {
+    ///
+    /// `workspace_root` is the folder on the DAEMON's host the new room binds
+    /// to. `None` (an empty field) leaves the room unbound, which is what every
+    /// room this form made used to be — and an unbound room's agent turns all
+    /// fail closed with `workspace_unavailable`, so a mention wakes nothing.
+    pub fn create_room(
+        &self,
+        name: String,
+        policy: Option<RoomTriggerPolicy>,
+        workspace_root: Option<String>,
+    ) -> u64 {
         let name = name.trim().to_string();
         if name.is_empty() {
             return 0;
@@ -1225,6 +1350,7 @@ impl Rooms {
                 key: &key,
                 name: &name,
                 trigger_policy: policy,
+                workspace_root: workspace_root.as_deref(),
             };
             let post_url = format!("{base}/v1/rooms/persistent");
             let res = Request::post(&post_url)
@@ -1507,6 +1633,83 @@ impl Rooms {
                     }
                 }
                 Err(error) => me.policy_update_error.set(Some(error)),
+            }
+        });
+    }
+
+    /// Bind or unbind the open room's workspace folder
+    /// (`PATCH /v1/rooms/persistent/{key}` carrying `workspace_root` alone).
+    ///
+    /// `Some(path)` binds — the path must be absolute and must exist on the
+    /// machine running the DAEMON, which is the only host that can see it, so
+    /// the daemon canonicalizes and refuses; this surface never pre-validates.
+    /// `None` sends an explicit `null` and unbinds, putting the room back to
+    /// the state where its agent turns fail closed.
+    ///
+    /// The body carries `workspace_root` alone, so this can never disturb the
+    /// stored trigger policy — the daemon leaves an ABSENT field unchanged,
+    /// which is the same reason `update_open_room_policy` may send its field
+    /// alone without clearing the binding.
+    ///
+    /// Generation-gated exactly like the policy PATCH: a reply that lands after
+    /// the operator switched rooms writes nothing.
+    ///
+    /// Requires an `ocean-os` daemon carrying `workspace_root` on
+    /// `RoomUpdateRequest`. An older daemon rejects the unknown field
+    /// (`deny_unknown_fields`) with a typed 400, which surfaces here as a
+    /// [`WorkspaceBindStatus::Failed`] naming what it said rather than a
+    /// silent no-op.
+    pub fn set_open_room_workspace(&self, workspace_root: Option<String>) {
+        if self.workspace_update_in_flight.get_untracked() {
+            return;
+        }
+        let Some(key) = self.open_key.get_untracked() else {
+            return;
+        };
+        let base = self.base();
+        let me = *self;
+        let generation_id = self.generation.get_untracked();
+        self.workspace_update_in_flight.set(true);
+        self.workspace_update_status.set(None);
+        spawn_local(async move {
+            let patch_url = format!("{base}/v1/rooms/persistent/{}", encode(&key));
+            let body = RoomWorkspacePatchBody {
+                workspace_root: workspace_root.as_deref(),
+            };
+            let result = match Request::patch(&patch_url)
+                .header("content-type", "application/json")
+                .json(&body)
+            {
+                Ok(req) => match req.send().await {
+                    Ok(resp) => match resp.json::<RoomMutateResponse>().await {
+                        Ok(r) if r.ok => Ok(r.room),
+                        Ok(r) => Err(WorkspaceBindStatus::from_daemon_error(
+                            r.error.as_deref().unwrap_or("unknown error"),
+                        )),
+                        Err(err) => Err(WorkspaceBindStatus::Failed(format!("decode: {err}"))),
+                    },
+                    Err(err) => Err(WorkspaceBindStatus::Failed(format!("patch: {err}"))),
+                },
+                Err(err) => Err(WorkspaceBindStatus::Failed(format!("encode: {err}"))),
+            };
+            me.workspace_update_in_flight.set(false);
+            if !me.room_is_current(generation_id, &key) {
+                return;
+            }
+            match result {
+                Ok(room) => {
+                    if let Some(room) = room {
+                        // Merge into the list too, so the binding survives a
+                        // list-driven re-render without a refetch.
+                        me.list.update(|rooms| {
+                            if let Some(entry) = rooms.iter_mut().find(|r| r.id == room.id) {
+                                *entry = room.clone();
+                            }
+                        });
+                        me.open_room.set(Some(room));
+                    }
+                }
+                Err(status) => me.workspace_update_status.set(Some(status)),
             }
         });
     }
@@ -3311,6 +3514,7 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
             trigger_policy: None,
+            workspace_root: None,
         }
     }
 
@@ -3396,6 +3600,157 @@ mod tests {
                     "on_ci_failure": false
                 }
             })
+        );
+    }
+
+    /// The create body carries `workspace_root` ONLY when the operator filled
+    /// the field in. Absent is what the daemon reads as "unbound", so an
+    /// always-present `"workspace_root": null` would say the same thing while
+    /// looking like a chosen value — and, more importantly, the field being
+    /// absent from this body for the whole life of the surface is the defect
+    /// this test exists to keep fixed.
+    #[test]
+    fn create_body_sends_workspace_root_only_when_one_was_given() {
+        let bound = serde_json::to_value(CreateRoomBody {
+            key: "ocean-surface-map-fix",
+            name: "Map fix",
+            trigger_policy: None,
+            workspace_root: Some("/dev/ocean-surface"),
+        })
+        .expect("body should encode");
+        assert_eq!(
+            bound,
+            serde_json::json!({
+                "key": "ocean-surface-map-fix",
+                "name": "Map fix",
+                "workspace_root": "/dev/ocean-surface"
+            })
+        );
+
+        let unbound = serde_json::to_value(CreateRoomBody {
+            key: "ocean-surface-map-fix",
+            name: "Map fix",
+            trigger_policy: None,
+            workspace_root: None,
+        })
+        .expect("body should encode");
+        assert_eq!(
+            unbound,
+            serde_json::json!({"key": "ocean-surface-map-fix", "name": "Map fix"}),
+            "an absent binding must be an absent KEY, not an explicit null"
+        );
+    }
+
+    /// The unbind body, by contrast, MUST carry an explicit null: the daemon
+    /// leaves an absent field unchanged, so a skipped `None` here would make
+    /// the unbind control a request that changes nothing and reports success.
+    #[test]
+    fn workspace_patch_body_sends_an_explicit_null_to_unbind() {
+        assert_eq!(
+            serde_json::to_value(RoomWorkspacePatchBody {
+                workspace_root: Some("/dev/ocean-surface"),
+            })
+            .expect("body should encode"),
+            serde_json::json!({"workspace_root": "/dev/ocean-surface"})
+        );
+        assert_eq!(
+            serde_json::to_value(RoomWorkspacePatchBody {
+                workspace_root: None
+            })
+            .expect("body should encode"),
+            serde_json::json!({ "workspace_root": null }),
+            "unbind is an explicit null; an omitted key means 'leave it alone'"
+        );
+        // And it carries the binding ALONE, so it can never clobber the stored
+        // trigger policy the other control owns.
+        let body = serde_json::to_value(RoomWorkspacePatchBody {
+            workspace_root: None,
+        })
+        .expect("body should encode");
+        assert_eq!(
+            body.as_object().expect("object").len(),
+            1,
+            "the workspace PATCH must send one field only"
+        );
+    }
+
+    /// A daemon that predates the field omits it, and an omitted binding must
+    /// read as no binding rather than failing the whole decode — this panel
+    /// would otherwise go blank against an older daemon.
+    #[test]
+    fn room_decodes_with_and_without_a_workspace_root() {
+        let base = serde_json::json!({"id": "r1", "name": "Room One"});
+        let unbound: Room = serde_json::from_value(base.clone()).expect("decodes without the key");
+        assert_eq!(unbound.workspace_root, None);
+
+        let mut with_root = base;
+        with_root["workspace_root"] = serde_json::json!("/dev/ocean-os");
+        let bound: Room = serde_json::from_value(with_root).expect("decodes with the key");
+        assert_eq!(bound.workspace_root.as_deref(), Some("/dev/ocean-os"));
+    }
+
+    /// The predicate the unbound notice renders from. Whitespace counts as
+    /// unbound: the daemon treats a blank value as no binding, so a room
+    /// carrying one would otherwise render as bound while its agent turns all
+    /// fail closed.
+    #[test]
+    fn room_is_unbound_reads_absent_and_blank_the_same_way() {
+        let room = |root: Option<&str>| Room {
+            id: "r1".into(),
+            name: "Room One".into(),
+            participants: Vec::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            trigger_policy: None,
+            workspace_root: root.map(str::to_string),
+        };
+        assert!(room_is_unbound(&room(None)));
+        assert!(room_is_unbound(&room(Some(""))));
+        assert!(room_is_unbound(&room(Some("   "))));
+        assert!(!room_is_unbound(&room(Some("/dev/ocean-os"))));
+    }
+
+    /// An empty create field means "leave it unbound"; a filled one is sent
+    /// trimmed, because a trailing space is never part of the path the
+    /// operator meant and the daemon would refuse it.
+    #[test]
+    fn create_workspace_root_trims_and_treats_empty_as_unbound() {
+        assert_eq!(create_workspace_root(""), None);
+        assert_eq!(create_workspace_root("   "), None);
+        assert_eq!(
+            create_workspace_root("  /dev/ocean-os  "),
+            Some("/dev/ocean-os".to_string())
+        );
+    }
+
+    /// The daemon's frozen refusal code becomes the one typed status; anything
+    /// else is carried verbatim rather than mislabelled as a bad path. Matched
+    /// on the EXACT code, never a substring, so an unrelated message quoting it
+    /// cannot be retagged.
+    #[test]
+    fn workspace_bind_status_reads_the_daemons_frozen_refusal_code() {
+        assert_eq!(
+            WorkspaceBindStatus::from_daemon_error("invalid_workspace_root"),
+            WorkspaceBindStatus::InvalidPath
+        );
+        assert_eq!(
+            WorkspaceBindStatus::from_daemon_error("  invalid_workspace_root  "),
+            WorkspaceBindStatus::InvalidPath
+        );
+        assert_eq!(
+            WorkspaceBindStatus::from_daemon_error("unknown room"),
+            WorkspaceBindStatus::Failed("unknown room".to_string())
+        );
+
+        // The sentence names the daemon's host, and is NOT the compute lane's
+        // `workspace_unavailable` wording in `room_repo.rs` — that one means
+        // Bedrock is unreachable, which is a different condition entirely.
+        let message = WorkspaceBindStatus::InvalidPath.message();
+        assert!(message.contains("absolute path"), "{message}");
+        assert!(message.contains("running the daemon"), "{message}");
+        assert!(
+            !message.contains("workspace_unavailable"),
+            "the compute lane's refusal must not be reused here: {message}"
         );
     }
 
@@ -4992,6 +5347,7 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
             trigger_policy: None,
+            workspace_root: None,
         }];
 
         let merged = merge_room_read_summaries(&current, &rooms, &incoming);
