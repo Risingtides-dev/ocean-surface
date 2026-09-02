@@ -29,6 +29,7 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Deserialize;
+use wasm_bindgen::JsCast;
 
 use crate::daemon::Daemon;
 
@@ -152,6 +153,16 @@ pub fn classify_session_restore(ok: bool, has_session: bool) -> SessionRestore {
     }
 }
 
+/// Did this browser move to another machine while this tab was not looking?
+///
+/// Only a change between two NAMED machines counts. Learning a name for the
+/// first time (`was` empty) is this tab's own boot, not a switch, and an empty
+/// answer from the proxy is an unreadable reply rather than a machine — either
+/// one would tear down a healthy transcript to arrive back where it started.
+pub fn switched_underneath(was: &str, now: &str) -> bool {
+    !was.trim().is_empty() && !now.trim().is_empty() && was != now
+}
+
 /// One line under a device's name. Health is the only reason to hesitate over
 /// a machine, so it is stated plainly rather than as a coloured dot alone.
 pub fn health_label(health: &DeviceHealth) -> String {
@@ -266,6 +277,21 @@ impl DeviceState {
     /// front of them, so this route does not exist there and its absence must
     /// leave the surface exactly as it was.
     pub fn load(self, auto_offer: bool) {
+        self.refresh(None, auto_offer);
+    }
+
+    /// Re-read the list, and — when `daemon` is given — re-attach if the proxy
+    /// says this browser is now on a different machine than this tab thinks.
+    ///
+    /// The case this exists for is two tabs. A selection is per browser, so
+    /// switching in one tab moves the other tab's traffic too: the proxy ends
+    /// its open stream (it must, or the tab would keep tailing the machine it
+    /// left) and the tab reconnects onto the new one — while still showing the
+    /// transcript it had already rendered from the old machine. That is the
+    /// same blend, one layer up. Nothing pushes the change here, so the check
+    /// runs when the tab is looked at again, which is the moment a stale
+    /// transcript would otherwise be read as current.
+    pub fn refresh(self, daemon: Option<Daemon>, auto_offer: bool) {
         if crate::daemon::running_as_extension() {
             return;
         }
@@ -273,10 +299,17 @@ impl DeviceState {
         spawn_local(async move {
             match fetch_devices().await {
                 Ok(list) => {
+                    let was = self.selected.get_untracked();
                     self.selected.set(list.selected.clone());
                     let count = list.devices.len();
                     self.devices.set(list.devices);
                     self.phase.set(PickerPhase::Ready);
+                    if let Some(daemon) = daemon {
+                        if switched_underneath(&was, &list.selected) {
+                            log::info!("this browser is now on '{}'; re-attaching", list.selected);
+                            daemon.reattach_to_selected_device();
+                        }
+                    }
                     if auto_offer
                         && should_offer_picker(
                             count,
@@ -296,6 +329,27 @@ impl DeviceState {
                 }
             }
         });
+    }
+
+    /// Re-check which machine this browser is on whenever the tab is looked at
+    /// again. Registered once, at app scope.
+    pub fn recheck_on_focus(self, daemon: Daemon) {
+        if crate::daemon::running_as_extension() {
+            return;
+        }
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let handler = wasm_bindgen::closure::Closure::<dyn FnMut()>::new(move || {
+            self.refresh(Some(daemon.clone()), false);
+        });
+        if window
+            .add_event_listener_with_callback("focus", handler.as_ref().unchecked_ref())
+            .is_ok()
+        {
+            // Lives as long as the page does, which is the listener's life too.
+            handler.forget();
+        }
     }
 
     /// Attach this session to `name`, then re-attach every stream and catalogue
@@ -550,6 +604,21 @@ mod tests {
             classify_session_restore(false, false),
             SessionRestore::Clear
         );
+    }
+
+    #[test]
+    fn a_tab_re_attaches_only_when_the_machine_under_it_really_changed() {
+        // Another tab switched while this one was in the background: the proxy
+        // ended its stream, it reconnected onto the new machine, and the
+        // transcript on screen is the old machine's. That is a re-attach.
+        assert!(switched_underneath("mini", "studio"));
+        // This tab's own boot — it had no name yet. Re-attaching here would
+        // clear a transcript that was just restored.
+        assert!(!switched_underneath("", "studio"));
+        // The proxy answered without a name (an older build, a stale
+        // selection): not a machine, so not a switch.
+        assert!(!switched_underneath("mini", ""));
+        assert!(!switched_underneath("mini", "mini"));
     }
 
     #[test]

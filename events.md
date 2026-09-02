@@ -5973,3 +5973,27 @@ ocean-surface-proxy --all-targets -- -D warnings`, which is a CI lane the seven
 frozen gates do not cover and which caught three needless borrows this slice
 shipped with.
 _________________________________________________________________________________ 08:36 cloud/surface-device-profiles
+
+time:      [08:44] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-device-profiles-ui]
+type:      review
+area:      frontend
+
+The surface half of the review round. Making a selection per BROWSER rather than
+per person, and having the proxy end the streams open on the machine being left,
+closes the blend at the transport layer and leaves exactly one layer of it above:
+a background tab whose stream was ended reconnects onto the NEW machine while
+still showing the transcript it had already rendered from the old one. Nothing
+pushes that change to the tab, so `recheck_on_focus` asks `/api/devices` again
+when the tab is looked at — the moment a stale transcript would otherwise be read
+as current — and re-attaches when the answer names a different machine.
+`switched_underneath` is the pure decider and its test says why the two empty
+cases are not switches: an empty `was` is this tab's own boot, and an empty answer
+from the proxy is an unreadable reply rather than a machine, and re-attaching on
+either would tear down a healthy transcript to arrive back where it started.
+Measured like the others and RED — deleting the one call site takes
+`recheck_on_focus` dead — so it is recorded in the guard file's table rather than
+pinned. Gates green: all seven frozen commands, 1323 host tests across 15
+binaries, plus the proxy crate's 84 and its own clippy lane.
+_________________________________________________________________________________ 08:44 cloud/surface-device-profiles-ui
