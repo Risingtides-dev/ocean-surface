@@ -122,6 +122,7 @@ test('arbitrary prose after the bar is not an identity separator', () => {
 });
 
 test("entryIdentity is the entry's own minute and the branch it was written on", () => {
+  assert.equal(entryIdentity(entry('9:04', 'On a slice branch.', 'loop/short-clock')), '9:04 loop/short-clock');
   assert.equal(entryIdentity(entry('23:52', 'On a slice branch.', 'loop/my-slice')), '23:52 loop/my-slice');
   assert.equal(entryIdentity(entry('23:52', 'On the main checkout.', null)), '23:52');
   // Read off the entry's own lines and nothing else, so a repair is
@@ -136,6 +137,14 @@ test("entryIdentity is the entry's own minute and the branch it was written on",
     '09:15 loop/first',
     'the first worktree field wins, so a quoted one later in the prose cannot displace it',
   );
+});
+
+test('a repair written from a one-digit ledger hour parses as closed on the next run', () => {
+  const folded = entry('9:04', 'One-digit hours remain valid ledger identity.', 'loop/short-clock').join('\n');
+  const { text, closed } = closeEntries(folded);
+  assert.equal(closed.length, 1);
+  assert.match(text, new RegExp(`${RULE} 9:04 loop/short-clock`));
+  assert.equal(openEntries(text).length, 0);
 });
 
 test('closeEntries repairs the fold without deleting a line, and the rerun is clean', () => {

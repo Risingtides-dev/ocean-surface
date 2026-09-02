@@ -5816,3 +5816,29 @@ affordance; Markdown link parsing is linear and Unicode-safe; extension inventor
 and ledger separators fail closed on malformed built state. The full Surface UI
 binary suite passed 1245 tests, and the focused Node guard suite passed 19 tests.
 _________________________________________________________________________________ 20:52 codex/review-sweep-20260901
+
+time:  [21:20] [09-01-26]
+agent: [codex] [gpt-5]
+worktree: [codex/review-sweep-20260901]
+type:  [bug report]: Codex review follow-up sweep
+area:  [frontend]: Trusted link affordance and ledger repair
+
+Closed the fresh Codex review findings on the current-main sweep. Only trusted
+allowlisted preview anchors carry the persistent underline; rejected URLs remain
+plain spans. Ledger repair now accepts and re-parses the documented one-digit
+hour form, with a repair-round-trip regression. No runtime, deployment, or
+production state changed.
+_________________________________________________________________________________ 21:20 codex/review-sweep-20260901
+
+time:  [21:24] [09-01-26]
+agent: [codex] [gpt-5]
+worktree: [codex/review-sweep-20260901]
+type:  [bug report]: Review-sweep verification repair
+area:  [testing]: Sole forward transcript ownership
+
+Updated the mutation-tested hydration wiring guard to the architecture the
+sweep now enforces: the SSE tail is the sole forward-ingest owner, and mutation
+responses cannot reintroduce the removed competing transcript reader. The
+runtime comment names that live-tail resume ownership directly. No daemon,
+deployment, room, or production state changed.
+_________________________________________________________________________________ 21:24 codex/review-sweep-20260901

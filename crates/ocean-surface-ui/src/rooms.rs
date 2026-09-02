@@ -690,7 +690,7 @@ pub struct Rooms {
     /// position and avoid presenting older history as new messages.
     pub(crate) transcript_prepend_epoch: RwSignal<u64>,
     /// The open room's resume point: the highest `seq` this client has ingested,
-    /// and the module's ONE answer to where a catch-up read starts. Hydration
+    /// and the module's ONE answer to where the live tail resumes. Hydration
     /// seeds it from `/snapshot`'s own cursor through [`Rooms::start_live_tail`],
     /// and the SSE tail alone advances it as it ingests. Mutation responses
     /// never poll `/transcript`; the live tail remains the sole forward stream.
