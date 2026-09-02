@@ -7420,3 +7420,19 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+time:      [21:02] [09-01-26]
+agent:     [ocean] [pm]
+worktree:  [pm/revert-surface-190-192]
+type:      [rollback]
+area:      [frontend]
+
+Rolled back #192 and #190 together before the auto-promoted paging slice could
+activate against the daemon cursor contract. #192's own preserved ledger says the
+second #190 defect still stands: a retained reply renders nowhere when its thread
+root predates the loaded window. Shipping a Load older control does not make that
+reply discoverable and cannot substitute for a real-thread root projection. The
+rollback also preserves #192's refinement evidence and keeps #188/#189 intact.
+
+No daemon deploy and no migration. Publication remains release-owner authority;
+gates are recorded before handoff.
+_________________________________________________________________________________ 21:02 pm/revert-surface-190-192

@@ -15,11 +15,6 @@
 //! re-deriving its own cursor from the painted rows for another wave, one line
 //! below a doc comment declaring the opposite, and every gate stayed green.
 //!
-//! The backward hydration walk is pinned here too, for the same reason and by
-//! the same lever: it is wiring in the same function, its rules live in pure
-//! helpers that unit tests already own, and the one thing no helper can say is
-//! whether `open_room` still calls them — or still calls them on every open.
-//!
 //! `EventSource` and `spawn_local` are browser-only and `Rooms::new` takes a
 //! live `Daemon`, so no test in this crate can start the tail and read the URL
 //! it opens. Scanning the source is the lever that is left — the one
@@ -30,7 +25,7 @@
 //!
 //! ## Measured, not assumed
 //!
-//! Twelve mutations run for real against this tree, each with the gate actually
+//! Five mutations run for real against this tree, each with the gate actually
 //! executed:
 //!
 //! | mutation                                                            | result |
@@ -43,10 +38,6 @@
 //! | one catch-up call site's cursor → `last_transcript_seq(&me.transcript…)` | RED — the prohibition, and the counted call sites at 3 against 4 |
 //! | the catch-up walk's `page.next_seq` argument → `None`                | RED here; `rooms.rs`'s unit tests stay green, they own the rule and never its wiring |
 //! | the tail's `advanced_resume_seq(*seq, entry.seq)` → `Some(entry.seq)` | RED — the tail must advance the shared resume like everything else |
-//! | `me.backfill_open_transcript(..)` moved inside `if !closed`         | RED — and green on all seven gates without this file |
-//! | the backward walk's `page.prev_seq` argument → `None`               | RED here; otherwise only `dead_code` on the field catches it |
-//! | that same call wrapped in a `if !closed` of its OWN                 | RED — the count below is what makes "outside" mean outside |
-//! | the walk's seed window `HYDRATION_TRANSCRIPT_LIMIT` → `200`         | RED — a walk seeded against a window hydration did not ask for |
 //!
 //! The rename row is the cost of a literal chain and is deliberate: a local can
 //! be renamed freely as long as the needle moves with it, and the assert
@@ -176,67 +167,5 @@ fn open_room_hydrates_through_the_snapshot_helper() {
         "`open_room` must hydrate through `room_snapshot_url`, the one place the \
          route and its explicit `limit` are asserted (`rooms.rs`: \
          `hydration_reads_snapshot_at_the_stores_full_page`)",
-    );
-}
-
-/// The BACKWARD walk's wiring, and one rule the forward walk does not need: it
-/// runs on EVERY open, outside the gate that decides whether a tail starts.
-///
-/// Mutation run: `me.backfill_open_transcript(..)` moved inside `if !closed`.
-/// That un-fixes the one case this slice calls genuinely unreachable — a
-/// soft-closed room past the window opens no `EventSource`, so the walk is the
-/// only thing that can ever bring it a row it did not hydrate with — and it
-/// passed `fmt`, both clippy lanes and every one of the 1301 tests standing in
-/// the tree before this test existed, because each unit test covering this walk
-/// is a pure-helper test. Second mutation: the walk's `page.prev_seq` argument
-/// dropped. That one is caught today, but only by `dead_code` on the struct
-/// field, and the first slice to add a second reader of `prev_seq` deletes that
-/// catch without touching this walk.
-#[test]
-fn the_backward_walk_runs_on_every_open_and_pages_on_the_daemons_cursor() {
-    let rooms = without_whitespace(&view_source("rooms.rs"));
-
-    assert!(
-        rooms.contains(
-            "letbackfill_from=hydration_backfill_start(&transcript,HYDRATION_TRANSCRIPT_LIMIT);"
-        ),
-        "the walk's start must be measured against the window hydration \
-         actually asked for; measuring a 1000-row page against any other number \
-         either strands rows behind it or spends a request per open to be told \
-         there is nothing there",
-    );
-    assert!(
-        rooms.contains(
-            "ifletSome(before_seq)=backfill_from{me.backfill_open_transcript(&key,generation_id,before_seq);}"
-        ),
-        "`open_room` must start the backward walk from the page it just \
-         painted — anchoring the first paint at the tail is what makes every \
-         row before it unreachable by any other read in this module",
-    );
-    // The two needles below are what make the one above mean OUTSIDE the
-    // closedness gate rather than merely present. `contains` alone stays green
-    // with the call moved inside the gate, which is the mutation.
-    assert_eq!(
-        rooms.matches("if!closed").count(),
-        1,
-        "the snapshot's `closed` may gate ONE thing, the live tail. A second \
-         gate is how the backward walk silently stops running for the room that \
-         needs it most: the soft-closed one, which has no tail to bring it \
-         anything else. If you have just added a legitimate second gate, say \
-         here which of the two it is",
-    );
-    assert!(
-        rooms.contains("if!closed{me.start_live_tail(key,generation_id,resume_seq);}"),
-        "that one gate holds the tail and nothing else — anything else moved \
-         inside it stops running on a soft-closed room, which is a frozen audit \
-         view that still has to paint",
-    );
-    assert!(
-        rooms.contains(
-            "transcript_backfill_cursor(pages_read,page.has_more,page.prev_seq,reached_back_to"
-        ),
-        "the walk must continue on the cursor the PAGE named: `prev_seq` is the \
-         daemon's own `before_seq` for the next page, and the mirror of the \
-         forward walk's `next_seq`",
     );
 }
