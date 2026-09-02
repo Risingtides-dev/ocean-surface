@@ -5942,3 +5942,50 @@ it protects is not a fix. Gate green: all seven frozen commands, 1319 host
 assertions, plus ocean-tauri fmt, `clippy --all-targets -D warnings` and 36
 tests.
 _________________________________________________________________________________ 07:01 cloud/surface-desktop-parity
+
+time:      [07:01] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-desktop-parity-deeplink]
+type:      bug-report
+area:      frontend
+
+Two review findings on the room deep link, both real, both about trusting a
+name for something it does not mean. The first: a room key was being validated
+by the SESSION id rule. A daemon `RoomKey` deserializes from a bare string,
+`create_room` derives its key with `slugify` which has no length bound, and
+`encode` passes `-`, `.`, `_` and `~` through unescaped — so a room made by a
+CLI or agent path with a dot in its key, or one with a long name, shows in the
+rooms list and opens on a click while its deep link was dropped in silence.
+Room keys now get their own validator admitting the RFC 3986 unreserved set,
+which is exactly what `encode` leaves alone: a key it accepts is one the URL
+builder does not have to change to address, and that is the line worth
+drawing rather than an ad-hoc "also allow dots". Percent-encoding stays
+rejected, because admitting it re-opens the structure smuggling TASK-80
+closed; and a key that is nothing but dots is refused, because `encode` leaves
+a dot VERBATIM and `..` would become a real path segment in the daemon URL —
+the same reason the session rule excluded dots in the first place, which is
+why this is a new validator rather than a loosened one. The session rule is
+untouched and a test pins that the widening did not leak into it. The second:
+`rooms_loaded` is not freshness. `finish_rooms_fetch` sets it on any settled
+request, success or failure; nothing ever clears it; `list` is replaced only
+on success; and it lives on the App-scope handle that outlives the workspace.
+So `rooms_loaded == true` is equally true of a list fetched ten minutes ago
+and of an empty list a failed fetch left behind, and a deep link answering out
+of either reports "no room named X" for a room that exists — worse than saying
+nothing, because it sends someone hunting. A new `list_settled` counter is
+bumped once per request that was still current when it landed, failures
+included: a reader waiting on freshness has to be released by a fetch that
+could not answer, or a daemon that is down leaves it pending forever. The link
+records the counter when queued and waits for it to move, so its answer always
+comes from a list fetched after the link arrived. That forced one more
+distinction the finding implied but did not state: releasing on a FAILED
+settle would answer out of exactly the list that could not be refreshed, so
+that case now says it could not load the room list rather than denying the
+room. The persisted restore is deliberately unchanged — it answers silently,
+so a stale answer costs nothing, and that asymmetry between the two sources is
+now stated in the predicate and pinned. Both reproduced red before fixing.
+`list_settled` sits beside its sibling `list_request_ticket` rather than at the
+end of `Rooms`, following the anchor discipline the relocation commit on this
+branch established. Gate green: all seven frozen commands, 1335 host
+assertions across 14 binaries, plus ocean-tauri fmt, clippy and 36 tests.
+_________________________________________________________________________________ 07:01 cloud/surface-desktop-parity-deeplink
