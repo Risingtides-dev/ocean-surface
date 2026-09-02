@@ -304,6 +304,32 @@ pub struct RoomAccessProjection {
     pub outbox: Vec<RoomOutboxItem>,
 }
 
+/// Which WORKER owns which Agent participant in one room, from the daemon's
+/// `agent_owners` array (ocean-os#437). Both ids are LOCAL participant ids: the
+/// store joins the ownership row to `participants` on `agent_id` and answers
+/// `owner_present` as "is `owner_id` still on that same roster", ordered by
+/// roster position. That namespace is the reason this projection lands on the
+/// Local roster branch and not the federated one — a federated row's
+/// `member_id` is a bedrock-minted binding id from a different table.
+///
+/// `owner_present` is a field rather than a filter because the binding OUTLIVES
+/// the worker: anyone may remove a participant, so an owner can leave while the
+/// ownership really did happen and the agent really is unclaimed now. Dropping
+/// the row would deny the first; reporting the row alone would assert a live
+/// claim the room cannot prove.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomAgentOwner {
+    /// The owned Agent participant's id, as it appears in `Room::participants`.
+    pub agent_id: String,
+    /// The owning Human participant's id, in that same roster.
+    pub owner_id: String,
+    /// Whether that Human is still on the roster. `#[serde(default)]` is this
+    /// module's idiom for every field of an additive projection; the daemon has
+    /// answered it since the projection existed.
+    #[serde(default)]
+    pub owner_present: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RoomAccessState {
@@ -513,6 +539,23 @@ struct RoomSnapshotResponse {
     /// daemon serves.
     #[serde(default)]
     closed: bool,
+    /// Which worker owns which Agent participant in this room — see
+    /// [`RoomAgentOwner`]. The contract puts it on BOTH room detail and this
+    /// snapshot for the same reason `closed` rides here: hydration goes through
+    /// `/snapshot`, so a field only room detail serves is a field no client can
+    /// reach. This crate opens no other room read, which is why `/snapshot` is
+    /// the only envelope in this file that decodes it.
+    ///
+    /// `#[serde(default)]` because the contract rules the field additive: a
+    /// daemon predating ocean-os#437 says nothing and an empty list is exactly
+    /// what "no local ownership recorded" means, which is also what every room
+    /// that predates the feature reports from a current daemon.
+    ///
+    /// A soft-closed room reports it unchanged — closing retains the roster and
+    /// the ownership rows — so the audit view says who owned what and whether
+    /// they were still present when it froze.
+    #[serde(default)]
+    agent_owners: Vec<RoomAgentOwner>,
     #[serde(default)]
     error: Option<String>,
 }
@@ -819,6 +862,14 @@ pub struct Rooms {
     /// ([`crate::rooms_workspace::composer_writes_allowed`]) reads it to hold
     /// every send, and [`Rooms::retry_outbox`] refuses on it too.
     pub closed: RwSignal<bool>,
+    /// Which worker owns which Agent participant in the open room, in roster
+    /// order, from `/snapshot`'s `agent_owners`. Empty means loading, no open
+    /// room, no owned agents, or a daemon predating the field — all four read
+    /// the same way in the rail, which renders every agent it cannot match as
+    /// unclaimed. Published by [`Rooms::open_room`] unconditionally on
+    /// `closed`, because a frozen room is the one whose ownership a reader can
+    /// no longer ask anyone about.
+    pub agent_owners: RwSignal<Vec<RoomAgentOwner>>,
     /// Per-room durable unread summary from the daemon room list.
     pub read_summaries: RwSignal<HashMap<String, RoomReadSummary>>,
     /// Durable read cursor for the currently open room.
@@ -970,6 +1021,7 @@ impl Rooms {
             agents_loaded: RwSignal::new(false),
             access: RwSignal::new(None),
             closed: RwSignal::new(false),
+            agent_owners: RwSignal::new(Vec::new()),
             read_summaries: RwSignal::new(HashMap::new()),
             open_read_cursor: RwSignal::new(None),
             read_cursor_in_flight: RwSignal::new(None),
@@ -1080,6 +1132,10 @@ impl Rooms {
         self.older_in_flight.set(false);
         self.access.set(None);
         self.closed.set(false);
+        // Ownership is one room's roster fact. Left standing, the previous
+        // room's rows would badge same-named agents in the next room opened,
+        // and the rail has no other way to tell they are stale.
+        self.agent_owners.set(Vec::new());
         self.open_read_cursor.set(None);
         self.read_cursor_in_flight.set(None);
         self.last_sent_read_cursor.set(None);
@@ -1400,7 +1456,14 @@ impl Rooms {
             let get_url = room_snapshot_url(&base, &key);
             let result = match Request::get(&get_url).send().await {
                 Ok(resp) if resp.ok() => match resp.json::<RoomSnapshotResponse>().await {
-                    Ok(r) if r.ok => Ok((r.room, r.transcript, r.access, r.last_seq, r.closed)),
+                    Ok(r) if r.ok => Ok((
+                        r.room,
+                        r.transcript,
+                        r.access,
+                        r.last_seq,
+                        r.closed,
+                        r.agent_owners,
+                    )),
                     Ok(r) => Err(format!(
                         "room load failed: {}",
                         r.error.unwrap_or_else(|| "unknown error".into())
@@ -1423,7 +1486,7 @@ impl Rooms {
                 return;
             }
             match result {
-                Ok((room, transcript, access, last_seq, closed)) => {
+                Ok((room, transcript, access, last_seq, closed, agent_owners)) => {
                     let resume_seq = snapshot_resume_seq(last_seq, &transcript);
                     // Where the backward walk starts, read off the page's own
                     // size rather than its `has_more`. A backward page is the
@@ -1440,6 +1503,11 @@ impl Rooms {
                     me.transcript.set(transcript.clone());
                     me.access.set(Some(access.clone()));
                     me.closed.set(closed);
+                    // Before the `closed` branch below and outside it: the
+                    // snapshot IS the audit view, so a frozen room carries this
+                    // exactly as a live one does, and it is the frozen room
+                    // whose reader has nobody left to ask.
+                    me.agent_owners.set(agent_owners);
                     update_open_summary_from_open_room(
                         &me.read_summaries,
                         me.open_key.get_untracked().as_deref(),
@@ -3980,6 +4048,121 @@ mod tests {
             body(Some(true)).closed,
             "`true` is the soft-closed audit view — the flag `open_room` gates \
              the live tail on and the composer refuses every send on",
+        );
+    }
+
+    /// `agent_owners` decodes off `/snapshot` in ROSTER ORDER, and an envelope
+    /// without it decodes to an empty list rather than failing.
+    ///
+    /// The absent case is the whole compatibility story, and it is not
+    /// hypothetical in one direction only: a daemon predating ocean-os#437
+    /// omits the key entirely, and a CURRENT daemon omits nothing but answers
+    /// `[]` for every room that never recorded an ownership row — which is
+    /// every room created before the feature. Both must read as "no ownership
+    /// recorded". Without `#[serde(default)]` the first is a decode error,
+    /// which `open_room` reports as "room decode error" — every room on such a
+    /// daemon failing to open, over a field nothing in the open path needs.
+    ///
+    /// Order is asserted because the daemon promises it (`ORDER BY p.position`,
+    /// the roster's own column) and the rail spends it: the rail walks
+    /// `participants` and looks each row up, so a reordering here would be
+    /// invisible in the rail and visible the day anything renders the list
+    /// whole.
+    #[test]
+    fn snapshot_agent_owners_decode_in_roster_order_and_default_empty() {
+        let with_owners: RoomSnapshotResponse = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "room": null,
+            "transcript": [],
+            "access": { "state": "local" },
+            "agent_owners": [
+                { "agent_id": "researcher", "owner_id": "alice", "owner_present": true },
+                { "agent_id": "scribe", "owner_id": "bob", "owner_present": false },
+            ],
+        }))
+        .expect("a snapshot carrying agent_owners should decode");
+
+        assert_eq!(
+            with_owners.agent_owners,
+            vec![
+                RoomAgentOwner {
+                    agent_id: "researcher".into(),
+                    owner_id: "alice".into(),
+                    owner_present: true,
+                },
+                RoomAgentOwner {
+                    agent_id: "scribe".into(),
+                    owner_id: "bob".into(),
+                    owner_present: false,
+                },
+            ],
+            "both rows decode, in the roster order the daemon served them",
+        );
+
+        let without: RoomSnapshotResponse = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "room": null,
+            "transcript": [],
+            "access": { "state": "local" },
+        }))
+        .expect(
+            "a snapshot with no agent_owners key must still decode — a daemon \
+             predating ocean-os#437 omits it and the room must still open",
+        );
+        assert!(
+            without.agent_owners.is_empty(),
+            "an absent key is no recorded ownership, which is what the rail \
+             renders as unclaimed",
+        );
+
+        let empty: RoomSnapshotResponse = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "room": null,
+            "transcript": [],
+            "access": { "state": "local" },
+            "agent_owners": [],
+        }))
+        .expect("an explicit empty list is a room with no owned agents");
+        assert!(empty.agent_owners.is_empty());
+    }
+
+    /// One `agent_owners` row survives a round trip through the wire shape the
+    /// contract names, field for field, and `owner_present` is not lost to a
+    /// rename or a type change. `owner_present` is the one field a reader
+    /// cannot re-derive — it is the daemon's answer to whether the owning
+    /// worker is still on the roster, and the whole reason ownership is
+    /// reported as a row instead of filtered down to live claims.
+    #[test]
+    fn an_agent_owner_row_round_trips_field_for_field() {
+        let row = RoomAgentOwner {
+            agent_id: "researcher".into(),
+            owner_id: "alice".into(),
+            owner_present: true,
+        };
+        let wire = serde_json::to_value(&row).expect("row should serialize");
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "agent_id": "researcher",
+                "owner_id": "alice",
+                "owner_present": true,
+            }),
+            "the wire shape is the contract's, not serde's guess at it",
+        );
+        assert_eq!(
+            serde_json::from_value::<RoomAgentOwner>(wire).expect("row should decode"),
+            row,
+        );
+
+        let absent_flag: RoomAgentOwner = serde_json::from_value(serde_json::json!({
+            "agent_id": "scribe",
+            "owner_id": "bob",
+        }))
+        .expect("a row missing owner_present decodes rather than failing the page");
+        assert!(
+            !absent_flag.owner_present,
+            "unstated presence is not a claim of presence: the rail must not \
+             assert a worker is here on a field the room never answered",
         );
     }
 
