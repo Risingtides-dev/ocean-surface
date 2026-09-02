@@ -1,5 +1,12 @@
 # Ocean Surface — fresh-session handoff
 
+**Rooms, as of 2026-09-01:** this snapshot predates every rooms feature. For
+the rooms surface read `docs/OCEAN_ROOMS_PRODUCT.md` (each section carries a
+dated status line where the code lags the contract) and the cross-repo finish
+line at `ocean-os/docs/specs/2026-09-01-ocean-rooms-definition-of-done.md`.
+The dirty-cluster and worktree sections below describe July checkouts and are
+not current state; derive it from the commands under "Start here".
+
 **Snapshot:** 2026-07-15, after the daemon-owned permission workflow, corrected
 Dynamic Island, daemon Recall, locally reactive `interactive_plot`, and the
 transcript/composer pending-state repair.

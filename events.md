@@ -5824,7 +5824,10 @@ intent stands and the code lags (workspace_root never sent, list pagination
 undecoded, UTC timestamps, no load-older affordance, refusals not rendered),
 the doc now says so with a dated status line pointing at the rooms definition
 of done. `AGENTS.md` stops binding the dead `.rooms-panel__list` selector and
-names the live rooms workspace instead. Docs only; no code, no CSS, no test
+names the live rooms workspace instead. `handoff.md` gained a dated pointer
+at the top saying the July snapshot predates every rooms feature and where
+rooms state now lives, so a cold agent stops reading its dirty-cluster
+sections as current. Docs only; no code, no CSS, no test
 changed — the 57 orphaned `.rooms-*` rules in `styles/panels.css` and the
 `app.rs` test pinning them are a separate cleanup slice.
 _________________________________________________________________________________ 20:07 docs/rooms-product-contract-truth
