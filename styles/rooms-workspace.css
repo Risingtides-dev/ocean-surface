@@ -2258,6 +2258,40 @@
   letter-spacing: 0.06em;
 }
 
+/* ── Agent ownership line ─────────────────────────────────────────── */
+
+/* Members rail, agent rows: which worker owns this agent. Sits on its own
+   line under the name for the same reason the descriptor does — a 220px
+   rail cannot hold another badge beside the kind and remove controls. The
+   presence dot inside it reuses the roster's own dot, so it drops that
+   rule's `margin-left: auto` (which is what pins the ROW's dot right). */
+.rooms-workspace__member-owner {
+  flex-basis: 100%;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding-left: 32px;
+  color: var(--fg-4);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rooms-workspace__member-owner .rooms-workspace__member-presence {
+  margin-left: 0;
+  width: 6px;
+  height: 6px;
+}
+
+.rooms-workspace__member-owner--unclaimed {
+  color: var(--warn);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 9px;
+}
+
 /* ── Member local/remote agent states ─────────────────────────────── */
 
 .rooms-workspace__member--local-agent .rooms-workspace__member-name {

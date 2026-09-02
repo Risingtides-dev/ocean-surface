@@ -168,6 +168,32 @@ Each room card shows:
 `.rooms-panel__list` keeps `min-height: 0` with vertical overflow — long room
 lists scroll instead of pushing status/actions outside the viewport.
 
+### Roster
+
+The members rail lists the open room's participants: avatar, display name, and
+a kind badge, with a two-step confirm behind every remove. A federated room's
+rail is the access projection's safe member list instead, carrying role, actor
+type, a presence dot, and a `yours` chip on agents the caller owns.
+
+**Agent ownership renders (2026-09-02).** Each agent row in the LOCAL roster
+says which worker owns it — `owned by <name>`, with the rail's own presence dot
+for whether that worker is still in the room — or `unclaimed` when no ownership
+row names it. The rows come from `agent_owners` on
+`GET /v1/rooms/persistent/{key}/snapshot` (ocean-os#437), decoded with a serde
+default so a daemon that predates the field still opens rooms. A closed room's
+audit view shows the same ownership, because closing retains the roster and the
+ownership rows and the snapshot IS that audit view — a frozen room still says
+who owned what and whether they were present when it froze.
+
+Two limits are deliberate. Presence is the daemon's `owner_present` narrowed by
+the roster on screen: join, leave and remove replace the room record from routes
+that carry no `agent_owners`, so a worker who left after hydration is never
+badged present while the rail no longer shows them. And the FEDERATED rail
+renders no ownership at all — the daemon joins ownership rows to local
+`participants` ids, while a federated row's `member_id` is a bedrock-minted
+binding id in a different namespace, so matching one against the other would
+mark every federated agent unclaimed rather than say nothing.
+
 ### Transcript Rendering
 
 Messages render as a scrolling transcript with:
