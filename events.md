@@ -5861,3 +5861,17 @@ read-only, invite minting is conditional on configured federation, and the API
 summary includes agent-package creation. Docs only; no UI, daemon, deployment,
 or production state changed.
 _________________________________________________________________________________ 21:13 docs/rooms-product-contract-truth
+
+time:      [21:57] [09-01-26]
+agent:     [codex] [gpt-5]
+worktree:  docs/rooms-product-contract-truth
+type:      [bug report]
+area:      [review]
+
+Closed the next Codex review pass on the Rooms product contract. Local access
+is no longer conflated with roster membership; successful invite minting is
+named as the irreversible federation transition and redemption only attaches
+the peer; invite handoff uses onboard_url when present and the raw redeemable
+code otherwise. Docs only; no UI, daemon, deployment, or production state
+changed.
+_________________________________________________________________________________ 21:57 docs/rooms-product-contract-truth

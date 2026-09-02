@@ -66,9 +66,13 @@ GET /v1/rooms/persistent/{key}/snapshot?before_seq=<u64::MAX>&limit=1000
 
 The response carries the `Room` entity, the roster, `agent_owners`, one page of
 transcript, the paging cursors (`last_seq`, `next_seq`, `prev_seq`, `has_more`),
-`closed`, and a `RoomAccessProjection` whose `state` is one of:
+`closed`, and a `RoomAccessProjection` whose `state` is one of. Access state is
+separate from roster membership; `Room.participants` is authoritative for
+whether the current human has explicitly joined:
 
-- `local` — the room lives on this daemon and the operator is a participant.
+- `local` — the room lives on this daemon and does not require a federation
+  bridge. A newly created room can already be `local` before its creator selects
+  **Join room**.
 - `connecting` — the room is federated and the bridge has not reached the
   remote stream yet.
 - `live` — the federated stream is caught up.
@@ -262,10 +266,13 @@ It supports:
 ### Federated Rooms
 
 Shipped when the daemon has federation configured. With that configuration, a
-room becomes federated when its owner mints an invite
-(`POST /v1/rooms/persistent/{key}/invites`, which also registers the room with
-the Bedrock federation control plane) and another daemon redeems it
-(`POST /v1/rooms/persistent/invites/redeem`). Without federation configuration,
+successful owner invite mint (`POST /v1/rooms/persistent/{key}/invites`) is the
+irreversible transition: it registers the Local room with the Bedrock
+federation control plane, installs its credential, and leaves the room
+federated even if no peer ever redeems the invite. Redemption
+(`POST /v1/rooms/persistent/invites/redeem`) attaches the other daemon; it is
+not the point at which the source room becomes federated. The UI must therefore
+show the arming warning before mint. Without federation configuration,
 invite minting answers `503 federation_unavailable` and the room remains Local;
 the failed request does not convert it. The bridge keeps a durable cursor on
 Bedrock's room stream; the access projection moves through `connecting`, `live`
@@ -304,8 +311,10 @@ streams directly to the daemon without a proxy intermediary.
 Two paths exist. Inside one daemon, the operator tells the other human the
 room key and they join via the rail's "Join room" input (`POST
 /v1/rooms/persistent/{key}/participants` with `{ id, display_name, kind }`).
-Across daemons, when federation is configured, the owner mints an invite and
-shares its `onboard_url`; the other daemon redeems it and the room federates.
+Across daemons, when federation is configured, the owner mints an invite. That
+successful mint permanently federates the source room. The owner shares
+`onboard_url` when the response provides one, or the raw redeemable invite code
+when it does not; the other daemon redeems that handoff to attach itself.
 Without that configuration the mint is a `503 federation_unavailable` and no
 cross-daemon invitation exists. Bedrock-side operator rooms (public discovery
 and operator-targeted invites) are landing in ocean-bedrock (#117) and have no
