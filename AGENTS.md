@@ -283,7 +283,14 @@ Web surface session UI:
   the same five-condition custody check, supplies the daemon origin itself from
   `OCEAN_DAEMON_URL`, and returns only the daemon's status and body. Tauri 2
   capabilities do not gate `generate_handler!` commands, so that allowlist is
-  the boundary. The extension host has no shell and no proxy and REMAINS
+  the boundary. Dot segments are judged AFTER percent-decoding, because the
+  URL parser normalises `%2e%2e` into `..` and would otherwise carry the
+  credential to a route the allowlist approved a different string for; the
+  built URL is then re-parsed and refused unless its path still equals the
+  approved one, which makes the whole normalisation class inert. The shell
+  does not build for a non-unix target: its custody contract is POSIX, and a
+  ceremony rendered writable over a credential that cannot be read is the
+  opposite of "absence, not errors". The extension host has no shell and no proxy and REMAINS
   read-only. On the surface side every privileged mutation leaves
   `room_agent_authorization.rs` through one seam addressed by an
   `AuthorityRoute` the four route builders alone construct; the credential
