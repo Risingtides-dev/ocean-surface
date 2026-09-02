@@ -4090,12 +4090,34 @@ mod tests {
         assert!(!reader_is_looking_at(true, true, "team", None));
     }
 
-    /// The row whose room is not the open room DOES notify while the window is
-    /// unfocused — the two conditions are a disjunction, not a conjunction.
+    /// An unfocused window notifies, full stop — suppression needs all three
+    /// facts, so losing focus is on its own enough.
+    ///
+    /// The `Some("other")` and `None` rows here are NOT a claim that a mention
+    /// in another room notifies. It cannot: only the open room has a tail, so
+    /// the call site can never hand this function unequal rooms (see the SCOPE
+    /// note on `mention_notification_is_due`). They pin the predicate's own
+    /// totality, nothing about the shipped feature.
     #[test]
-    fn an_unfocused_window_notifies_regardless_of_which_room_is_open() {
+    fn an_unfocused_window_notifies_whatever_else_is_true() {
         let me = ids(&["bob"]);
         let mention = row(RoomMessageKind::Message, "carol", "@bob ping");
+        assert!(mention_notification_is_due(
+            &mention,
+            &me,
+            false,
+            true,
+            "team",
+            Some("team")
+        ));
+        assert!(mention_notification_is_due(
+            &mention,
+            &me,
+            false,
+            false,
+            "team",
+            Some("team")
+        ));
         assert!(mention_notification_is_due(
             &mention,
             &me,
