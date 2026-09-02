@@ -123,9 +123,9 @@ pub enum RoomParticipantKind {
 }
 
 impl RoomParticipantKind {
-    /// The author/roster chip mark — hand-drawn SVGs from `icons.rs`, same
-    /// stroke family as the rest of the surface (emoji glyphs are forbidden
-    /// in product UI; the 07-08 purge missed this path — QA-006).
+    /// The author/roster chip mark. Actor kinds use the surface's neutral SVG
+    /// family; system rows use a plain initial so product UI never represents
+    /// automation with a decorative sparkle.
     #[allow(dead_code)]
     fn icon(self) -> AnyView {
         match self {
@@ -133,7 +133,7 @@ impl RoomParticipantKind {
             RoomParticipantKind::Agent => view! { <crate::icons::Robot /> }.into_any(),
             RoomParticipantKind::Bot => view! { <crate::icons::Cog /> }.into_any(),
             RoomParticipantKind::Tool => view! { <crate::icons::Wrench /> }.into_any(),
-            RoomParticipantKind::System => view! { <crate::icons::Spark /> }.into_any(),
+            RoomParticipantKind::System => "S".into_any(),
         }
     }
 
@@ -279,6 +279,12 @@ pub struct RoomReadCursorProjection {
 pub struct RoomReadSummary {
     pub latest_seq: Option<u64>,
     pub read_seq: Option<u64>,
+    /// Daemon-derived unread count for this authenticated reader. `None`
+    /// means the daemon predates the additive attention projection.
+    pub unread_count: Option<u64>,
+    /// Daemon-derived unread mention count for this authenticated reader.
+    /// Never synthesized from transcript text on the client.
+    pub mention_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -438,6 +444,10 @@ struct RoomsListResponse {
     rooms: Vec<Room>,
     #[serde(default)]
     read_states: Vec<RoomReadStateWire>,
+    /// Sparse, page-bounded attention rows. `None` distinguishes an older
+    /// daemon from a current daemon authoritatively reporting no attention.
+    #[serde(default)]
+    attention: Option<Vec<RoomAttentionWire>>,
     /// The room key to replay as `?cursor=` for the following page (OCEAN-250).
     /// The daemon sends the key deliberately without `skip_serializing_if`, so
     /// a single-page answer carries `"next_cursor": null` rather than omitting
@@ -463,6 +473,17 @@ struct RoomReadStateWire {
     latest_seq: Option<String>,
     #[serde(default)]
     read_seq: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct RoomAttentionWire {
+    room_id: String,
+    #[serde(default)]
+    latest_seq: Option<String>,
+    #[serde(default)]
+    read_seq: Option<String>,
+    unread_count: u64,
+    mention_count: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2821,6 +2842,9 @@ impl Rooms {
                                 me.access.get_untracked().as_ref(),
                                 me.open_read_cursor.get_untracked().as_ref(),
                             );
+                            if appended {
+                                increment_open_unread_attention(&me.read_summaries, &key);
+                            }
                             // Refresh the room record (roster) on join/leave frames
                             // so other clients see an accurate participant list.
                             if is_roster_change {
@@ -2918,6 +2942,8 @@ impl Rooms {
             .unwrap_or(RoomReadSummary {
                 latest_seq: None,
                 read_seq: None,
+                unread_count: None,
+                mention_count: None,
             });
         let durable_read_seq = self
             .open_read_cursor
@@ -3069,6 +3095,7 @@ fn accept_room_tail_frame(
 
 fn read_summaries_from_wire(
     read_states: &[RoomReadStateWire],
+    attention: Option<&[RoomAttentionWire]>,
 ) -> Result<HashMap<String, RoomReadSummary>, String> {
     let mut summaries = HashMap::with_capacity(read_states.len());
     for state in read_states {
@@ -3080,11 +3107,46 @@ fn read_summaries_from_wire(
                 RoomReadSummary {
                     latest_seq,
                     read_seq,
+                    unread_count: attention.map(|_| 0),
+                    mention_count: attention.map(|_| 0),
                 },
             )
             .is_some()
         {
             return Err(format!("duplicate read state for room '{}'", state.room_id));
+        }
+    }
+    if let Some(attention) = attention {
+        let mut seen = HashSet::with_capacity(attention.len());
+        for row in attention {
+            if !seen.insert(row.room_id.as_str()) {
+                return Err(format!(
+                    "duplicate attention state for room '{}'",
+                    row.room_id
+                ));
+            }
+            if row.mention_count > row.unread_count {
+                return Err(format!(
+                    "mention count exceeds unread count for room '{}'",
+                    row.room_id
+                ));
+            }
+            let latest_seq = parse_optional_decimal_u64(row.latest_seq.as_deref())?;
+            let read_seq = parse_optional_decimal_u64(row.read_seq.as_deref())?;
+            let Some(summary) = summaries.get_mut(&row.room_id) else {
+                return Err(format!(
+                    "attention state references unknown room '{}'",
+                    row.room_id
+                ));
+            };
+            if summary.latest_seq != latest_seq || summary.read_seq != read_seq {
+                return Err(format!(
+                    "attention state disagrees with read state for room '{}'",
+                    row.room_id
+                ));
+            }
+            summary.unread_count = Some(row.unread_count);
+            summary.mention_count = Some(row.mention_count);
         }
     }
     Ok(summaries)
@@ -3096,7 +3158,8 @@ fn read_summaries_from_wire(
 async fn fetch_rooms_page(url: &str) -> Result<RoomsListSuccess, String> {
     match Request::get(url).send().await {
         Ok(resp) => match resp.json::<RoomsListResponse>().await {
-            Ok(r) if r.ok => match read_summaries_from_wire(&r.read_states) {
+            Ok(r) if r.ok => match read_summaries_from_wire(&r.read_states, r.attention.as_deref())
+            {
                 Ok(read_summaries) => {
                     let next_cursor = rooms_page_cursor(
                         r.has_more,
@@ -3353,10 +3416,37 @@ fn merged_room_read_summary(
         (None, None) => None,
         (Some(current), None) => Some(*current),
         (None, Some(incoming)) => Some(*incoming),
-        (Some(current), Some(incoming)) => Some(RoomReadSummary {
-            latest_seq: max_optional_u64(current.latest_seq, incoming.latest_seq),
-            read_seq: max_optional_u64(current.read_seq, incoming.read_seq),
-        }),
+        (Some(current), Some(incoming)) => {
+            let incoming_is_current =
+                optional_position_at_least(incoming.latest_seq, current.latest_seq)
+                    && optional_position_at_least(incoming.read_seq, current.read_seq);
+            Some(RoomReadSummary {
+                latest_seq: max_optional_u64(current.latest_seq, incoming.latest_seq),
+                read_seq: max_optional_u64(current.read_seq, incoming.read_seq),
+                // A current list page is an authoritative point-in-time
+                // attention projection, so zero replaces a previous positive
+                // count. A response that predates a live-tail or read-cursor
+                // advance cannot erase or resurrect that newer local state.
+                unread_count: if incoming_is_current {
+                    incoming.unread_count
+                } else {
+                    current.unread_count
+                },
+                mention_count: if incoming_is_current {
+                    incoming.mention_count
+                } else {
+                    current.mention_count
+                },
+            })
+        }
+    }
+}
+
+fn optional_position_at_least(incoming: Option<u64>, current: Option<u64>) -> bool {
+    match (incoming, current) {
+        (_, None) => true,
+        (Some(incoming), Some(current)) => incoming >= current,
+        (None, Some(_)) => false,
     }
 }
 
@@ -3403,16 +3493,36 @@ fn update_open_summary_from_open_room(
         existing.and_then(|summary| summary.read_seq),
     );
     summaries.update(|map| {
+        let latest_seq =
+            max_optional_u64(existing.and_then(|summary| summary.latest_seq), latest_seq);
+        let caught_up =
+            matches!((latest_seq, read_seq), (Some(latest), Some(read)) if read >= latest);
         map.insert(
             open_key.to_string(),
             RoomReadSummary {
-                latest_seq: max_optional_u64(
-                    existing.and_then(|summary| summary.latest_seq),
-                    latest_seq,
-                ),
+                latest_seq,
                 read_seq,
+                unread_count: existing
+                    .and_then(|summary| summary.unread_count)
+                    .map(|count| if caught_up { 0 } else { count }),
+                mention_count: existing
+                    .and_then(|summary| summary.mention_count)
+                    .map(|count| if caught_up { 0 } else { count }),
             },
         );
+    });
+}
+
+fn increment_open_unread_attention(
+    summaries: &RwSignal<HashMap<String, RoomReadSummary>>,
+    open_key: &str,
+) {
+    summaries.update(|map| {
+        if let Some(summary) = map.get_mut(open_key) {
+            if let Some(unread_count) = &mut summary.unread_count {
+                *unread_count = unread_count.saturating_add(1);
+            }
+        }
     });
 }
 
@@ -3420,10 +3530,57 @@ pub(crate) fn room_has_durable_unread(summary: Option<&RoomReadSummary>) -> bool
     let Some(summary) = summary else {
         return false;
     };
+    if let Some(unread_count) = summary.unread_count {
+        return unread_count > 0;
+    }
     match (summary.latest_seq, summary.read_seq) {
         (Some(latest), Some(read)) => latest > read,
         (Some(_), None) => true,
         _ => false,
+    }
+}
+
+pub(crate) fn room_has_durable_mention(summary: Option<&RoomReadSummary>) -> bool {
+    summary
+        .and_then(|summary| summary.mention_count)
+        .is_some_and(|count| count > 0)
+}
+
+pub(crate) fn room_attention_aria_label(summary: Option<&RoomReadSummary>) -> String {
+    let Some(summary) = summary else {
+        return "Unread messages".to_string();
+    };
+    match (summary.unread_count, summary.mention_count) {
+        (Some(unread), Some(mentions)) if mentions > 0 => {
+            format!("{mentions} unread mentions, {unread} unread messages")
+        }
+        (Some(unread), _) => format!("{unread} unread messages"),
+        _ => "Unread messages".to_string(),
+    }
+}
+
+pub(crate) fn room_attention_badge(summary: Option<&RoomReadSummary>) -> String {
+    let Some(summary) = summary else {
+        return String::new();
+    };
+    if room_has_durable_mention(Some(summary)) {
+        return format!(
+            "@{}",
+            compact_attention_count(summary.mention_count.unwrap_or_default())
+        );
+    }
+    summary
+        .unread_count
+        .filter(|count| *count > 0)
+        .map(compact_attention_count)
+        .unwrap_or_default()
+}
+
+fn compact_attention_count(count: u64) -> String {
+    if count > 99 {
+        "99+".to_string()
+    } else {
+        count.to_string()
     }
 }
 
@@ -3811,13 +3968,13 @@ pub(crate) fn room_request_is_current(
 /// before it reaches this, and a room switch bumps the generation and retires
 /// the previous tail. Only the OPEN room has a tail at all, so **a mention in
 /// a room you do not have open does not notify**. That is a limit of where
-/// mentions can be observed, not a decision taken here: notifying for other
-/// rooms needs a feed that does not exist — either a daemon-side mention
-/// signal or one multiplexed room stream — and standing up N SSE tails to
-/// synthesise it would contradict the Rooms Contract's one-room tail
-/// (AGENTS.md 243-250). The unequal-rooms arm is kept because it is the
-/// correct answer if such a feed ever lands, and because a predicate that
-/// silently assumes its inputs cannot differ is a worse thing to inherit.
+/// mentions can be observed, not a decision taken here. The daemon now exposes
+/// identity-scoped counts for other rooms through the bounded list `attention`
+/// projection; those counts drive the rail's `@N` badge, but deliberately do
+/// not invent notification author/body text. Standing up N SSE tails to obtain
+/// that text would contradict the Rooms Contract's one-room tail
+/// (AGENTS.md 243-250). The unequal-rooms arm remains the correct predicate if
+/// a future multiplexed live feed supplies actual rows.
 pub(crate) fn mention_notification_is_due(
     entry: &RoomMessage,
     reader_ids: &HashSet<String>,
@@ -5893,7 +6050,7 @@ mod tests {
                 read_seq: Some("4".into()),
             },
         ];
-        assert!(read_summaries_from_wire(&duplicate).is_err());
+        assert!(read_summaries_from_wire(&duplicate, None).is_err());
     }
 
     #[test]
@@ -5903,7 +6060,86 @@ mod tests {
             latest_seq: Some("oops".into()),
             read_seq: Some("1".into()),
         }];
-        assert!(read_summaries_from_wire(&malformed).is_err());
+        assert!(read_summaries_from_wire(&malformed, None).is_err());
+    }
+
+    #[test]
+    fn attention_projection_is_authoritative_sparse_and_identity_safe() {
+        let read_states = vec![
+            RoomReadStateWire {
+                room_id: "room-1".into(),
+                latest_seq: Some("9".into()),
+                read_seq: Some("4".into()),
+            },
+            RoomReadStateWire {
+                room_id: "room-2".into(),
+                latest_seq: Some("3".into()),
+                read_seq: Some("3".into()),
+            },
+        ];
+        let attention = vec![RoomAttentionWire {
+            room_id: "room-1".into(),
+            latest_seq: Some("9".into()),
+            read_seq: Some("4".into()),
+            unread_count: 5,
+            mention_count: 2,
+        }];
+
+        let summaries = read_summaries_from_wire(&read_states, Some(&attention)).unwrap();
+        assert_eq!(
+            summaries.get("room-1"),
+            Some(&RoomReadSummary {
+                latest_seq: Some(9),
+                read_seq: Some(4),
+                unread_count: Some(5),
+                mention_count: Some(2),
+            })
+        );
+        assert_eq!(
+            summaries.get("room-2"),
+            Some(&RoomReadSummary {
+                latest_seq: Some(3),
+                read_seq: Some(3),
+                unread_count: Some(0),
+                mention_count: Some(0),
+            }),
+            "omission from a present sparse projection is authoritative zero",
+        );
+
+        let legacy = read_summaries_from_wire(&read_states, None).unwrap();
+        assert_eq!(legacy["room-1"].unread_count, None);
+        assert_eq!(legacy["room-1"].mention_count, None);
+    }
+
+    #[test]
+    fn attention_projection_rejects_duplicates_unknown_rooms_and_disagreement() {
+        let read_states = vec![RoomReadStateWire {
+            room_id: "room-1".into(),
+            latest_seq: Some("9".into()),
+            read_seq: Some("4".into()),
+        }];
+        let valid = RoomAttentionWire {
+            room_id: "room-1".into(),
+            latest_seq: Some("9".into()),
+            read_seq: Some("4".into()),
+            unread_count: 5,
+            mention_count: 2,
+        };
+        assert!(
+            read_summaries_from_wire(&read_states, Some(&[valid.clone(), valid.clone()])).is_err()
+        );
+
+        let mut unknown = valid.clone();
+        unknown.room_id = "room-2".into();
+        assert!(read_summaries_from_wire(&read_states, Some(&[unknown])).is_err());
+
+        let mut disagreement = valid.clone();
+        disagreement.latest_seq = Some("10".into());
+        assert!(read_summaries_from_wire(&read_states, Some(&[disagreement])).is_err());
+
+        let mut impossible = valid;
+        impossible.mention_count = 6;
+        assert!(read_summaries_from_wire(&read_states, Some(&[impossible])).is_err());
     }
 
     #[test]
@@ -6056,6 +6292,8 @@ mod tests {
             RoomReadSummary {
                 latest_seq: Some(3),
                 read_seq: Some(2),
+                unread_count: None,
+                mention_count: None,
             },
         )]));
         let transcript = vec![message(7)];
@@ -6074,8 +6312,42 @@ mod tests {
             Some(&RoomReadSummary {
                 latest_seq: Some(7),
                 read_seq: Some(2),
+                unread_count: None,
+                mention_count: None,
             })
         );
+    }
+
+    #[test]
+    fn live_tail_advance_surfaces_unread_before_the_next_attention_poll() {
+        let summaries = RwSignal::new(HashMap::from([(
+            "room-1".to_string(),
+            RoomReadSummary {
+                latest_seq: Some(3),
+                read_seq: Some(3),
+                unread_count: Some(0),
+                mention_count: Some(0),
+            },
+        )]));
+        let cursor = RoomReadCursorProjection {
+            read_seq: Some(3),
+            mirrored_upstream_read_seq: None,
+        };
+
+        update_open_summary_from_open_room(
+            &summaries,
+            Some("room-1"),
+            &[message(4)],
+            Some(&access_projection(RoomAccessState::Local)),
+            Some(&cursor),
+        );
+        increment_open_unread_attention(&summaries, "room-1");
+
+        let summary = summaries.get_untracked()["room-1"];
+        assert_eq!(summary.latest_seq, Some(4));
+        assert_eq!(summary.unread_count, Some(1));
+        assert!(room_has_durable_unread(Some(&summary)));
+        assert_eq!(summary.mention_count, Some(0));
     }
 
     #[test]
@@ -6122,6 +6394,8 @@ mod tests {
             RoomReadSummary {
                 latest_seq: Some(100),
                 read_seq: Some(100),
+                unread_count: Some(0),
+                mention_count: Some(0),
             },
         )]));
         update_open_summary_from_open_room(
@@ -6136,6 +6410,8 @@ mod tests {
             Some(&RoomReadSummary {
                 latest_seq: Some(100),
                 read_seq: Some(100),
+                unread_count: Some(0),
+                mention_count: Some(0),
             })
         );
         assert!(!room_has_durable_unread(
@@ -6172,6 +6448,8 @@ mod tests {
             Some(&RoomReadSummary {
                 latest_seq: Some(110),
                 read_seq: Some(110),
+                unread_count: Some(0),
+                mention_count: Some(0),
             })
         );
         assert!(!room_has_durable_unread(
@@ -6219,13 +6497,15 @@ mod tests {
     }
 
     #[test]
-    fn merge_room_read_summaries_is_monotonic_and_removes_deleted_rooms() {
+    fn merge_room_read_summaries_is_monotonic_and_rejects_stale_attention() {
         let current = HashMap::from([
             (
                 "room-1".to_string(),
                 RoomReadSummary {
                     latest_seq: Some(9),
                     read_seq: Some(4),
+                    unread_count: Some(5),
+                    mention_count: Some(2),
                 },
             ),
             (
@@ -6233,6 +6513,8 @@ mod tests {
                 RoomReadSummary {
                     latest_seq: Some(8),
                     read_seq: Some(6),
+                    unread_count: Some(2),
+                    mention_count: Some(0),
                 },
             ),
         ]);
@@ -6241,6 +6523,8 @@ mod tests {
             RoomReadSummary {
                 latest_seq: Some(5),
                 read_seq: None,
+                unread_count: Some(3),
+                mention_count: Some(1),
             },
         )]);
         let rooms = vec![Room {
@@ -6260,9 +6544,25 @@ mod tests {
             Some(&RoomReadSummary {
                 latest_seq: Some(9),
                 read_seq: Some(4),
+                unread_count: Some(5),
+                mention_count: Some(2),
             })
         );
         assert!(!merged.contains_key("room-2"));
+
+        let current_page = HashMap::from([(
+            "room-1".to_string(),
+            RoomReadSummary {
+                latest_seq: Some(9),
+                read_seq: Some(9),
+                unread_count: Some(0),
+                mention_count: Some(0),
+            },
+        )]);
+        let cleared = merge_room_read_summaries(&merged, &rooms, &current_page);
+        assert_eq!(cleared["room-1"].read_seq, Some(9));
+        assert_eq!(cleared["room-1"].unread_count, Some(0));
+        assert_eq!(cleared["room-1"].mention_count, Some(0));
     }
 
     // ---- Room-list paging (OCEAN-250) ---------------------------------------
@@ -6281,12 +6581,12 @@ mod tests {
         .expect("a room with only its required fields decodes")
     }
 
-    fn ids(rooms: &[Room]) -> Vec<&str> {
+    fn room_ids(rooms: &[Room]) -> Vec<&str> {
         rooms.iter().map(|room| room.id.as_str()).collect()
     }
 
-    /// Both fields are additive, and the rail must decode a body from a daemon
-    /// that has never heard of either. The absent case is the one that matters:
+    /// Paging and attention are additive, and the rail must decode a body from
+    /// a daemon that has never heard of them. The absent case is the one that matters:
     /// it has to read as "this is the whole list", which is what the rail
     /// believed before it decoded these fields at all.
     #[test]
@@ -6301,6 +6601,18 @@ mod tests {
         .expect("a paged list body should decode");
         assert_eq!(paged.next_cursor.as_deref(), Some("room-100"));
         assert!(paged.has_more);
+        assert_eq!(paged.attention, None);
+
+        let current: RoomsListResponse = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "rooms": [],
+            "read_states": [],
+            "attention": [],
+            "next_cursor": null,
+            "has_more": false,
+        }))
+        .expect("a current list body should decode");
+        assert_eq!(current.attention, Some(Vec::new()));
 
         // The daemon sends the key deliberately without `skip_serializing_if`,
         // so a final page carries an explicit null rather than omitting it.
@@ -6330,6 +6642,7 @@ mod tests {
             "silence must read as the whole list, never as a second page the \
              rail would offer and then fail to fetch",
         );
+        assert_eq!(legacy.attention, None);
     }
 
     /// The paging cursor: two stop conditions and one fallback.
@@ -6416,18 +6729,18 @@ mod tests {
         let current = vec![listed_room("a"), listed_room("b")];
 
         let grown = append_rooms_page(&current, vec![listed_room("c"), listed_room("d")]);
-        assert_eq!(ids(&grown), vec!["a", "b", "c", "d"]);
+        assert_eq!(room_ids(&grown), vec!["a", "b", "c", "d"]);
 
         let refallen = append_rooms_page(&current, vec![listed_room("a"), listed_room("b")]);
         assert_eq!(
-            ids(&refallen),
+            room_ids(&refallen),
             vec!["a", "b"],
             "a cursor whose room has closed sends the daemon back to page one; \
              an unfiltered append would list the whole first page twice",
         );
 
         let overlapping = append_rooms_page(&current, vec![listed_room("b"), listed_room("c")]);
-        assert_eq!(ids(&overlapping), vec!["a", "b", "c"]);
+        assert_eq!(room_ids(&overlapping), vec!["a", "b", "c"]);
     }
 
     /// The 8-second unread poll reads ONE page however many the rail holds.
@@ -6436,7 +6749,7 @@ mod tests {
         let previous = vec![listed_room("a"), listed_room("b"), listed_room("c")];
 
         assert_eq!(
-            ids(&rooms_after_first_page(
+            room_ids(&rooms_after_first_page(
                 &previous,
                 vec![listed_room("b"), listed_room("a")],
                 false,
@@ -6449,7 +6762,7 @@ mod tests {
         let kept =
             rooms_after_first_page(&previous, vec![listed_room("b"), listed_room("a")], true);
         assert_eq!(
-            ids(&kept),
+            room_ids(&kept),
             vec!["b", "a", "c"],
             "on a paged rail the fresh page leads — the daemon orders by \
              `updated_at DESC`, so every unread change lands in it — and the \
@@ -6462,7 +6775,7 @@ mod tests {
             true,
         );
         assert_eq!(
-            ids(&promoted),
+            room_ids(&promoted),
             vec!["c", "a", "b"],
             "a room the fresh page promoted out of the tail appears once, not \
              twice",
@@ -6591,14 +6904,52 @@ mod tests {
         assert!(room_has_durable_unread(Some(&RoomReadSummary {
             latest_seq: Some(5),
             read_seq: Some(4),
+            unread_count: None,
+            mention_count: None,
         })));
         assert!(room_has_durable_unread(Some(&RoomReadSummary {
             latest_seq: Some(5),
             read_seq: None,
+            unread_count: None,
+            mention_count: None,
         })));
         assert!(!room_has_durable_unread(Some(&RoomReadSummary {
             latest_seq: Some(5),
             read_seq: Some(5),
+            unread_count: None,
+            mention_count: None,
         })));
+        assert!(
+            !room_has_durable_unread(Some(&RoomReadSummary {
+                latest_seq: Some(9),
+                read_seq: Some(4),
+                unread_count: Some(0),
+                mention_count: Some(0),
+            })),
+            "a current daemon's count is authoritative over legacy sequence inference"
+        );
+    }
+
+    #[test]
+    fn attention_badge_prefers_mentions_and_caps_large_counts() {
+        let summary = RoomReadSummary {
+            latest_seq: Some(120),
+            read_seq: Some(4),
+            unread_count: Some(116),
+            mention_count: Some(3),
+        };
+        assert!(room_has_durable_mention(Some(&summary)));
+        assert_eq!(room_attention_badge(Some(&summary)), "@3");
+        assert_eq!(
+            room_attention_aria_label(Some(&summary)),
+            "3 unread mentions, 116 unread messages"
+        );
+
+        let unread_only = RoomReadSummary {
+            mention_count: Some(0),
+            ..summary
+        };
+        assert!(!room_has_durable_mention(Some(&unread_only)));
+        assert_eq!(room_attention_badge(Some(&unread_only)), "99+");
     }
 }

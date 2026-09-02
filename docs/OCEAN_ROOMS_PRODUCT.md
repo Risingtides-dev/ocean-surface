@@ -183,7 +183,7 @@ agent's participant id.
 The rooms rail is a flex column listing rooms ONE PAGE at a time:
 
 ```
-GET /v1/rooms/persistent            -> { ok, rooms, read_states, next_cursor, has_more }
+GET /v1/rooms/persistent            -> { ok, rooms, read_states, attention, next_cursor, has_more }
 GET /v1/rooms/persistent?cursor=<room key>
 ```
 
@@ -198,8 +198,17 @@ behaves exactly as it did before.
 
 Each room row shows:
 - Room name, behind a `#` channel glyph
-- An unread dot, from the list's own `read_states`
+- A compact unread count, or `@N` when the authenticated reader has unread
+  mentions, from the list's daemon-derived `attention` projection
 - Open-room selection state (`aria-selected`, roving tabindex across the rows)
+
+`attention` is sparse, ordered with and bounded to the returned room page. Each
+row carries `{room_id, latest_seq, read_seq, unread_count, mention_count}` and
+is derived by the daemon from its credential-bound local member plus durable
+transcript/read-cursor state. Surface does not parse message text to guess who
+was mentioned. Omission from a present projection is authoritative zero; an
+absent projection means an older daemon, where the rail falls back to
+`read_states` for a binary unread indicator and claims no mention knowledge.
 
 **The end of the loaded list carries a `Load more rooms` press.** It renders on
 the parked cursor and on nothing else: a rail already holding every room the

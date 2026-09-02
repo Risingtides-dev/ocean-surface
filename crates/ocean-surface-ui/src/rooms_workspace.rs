@@ -2769,7 +2769,7 @@ pub fn RoomsWorkspace(
                                                             )
                                                         }>
                                                             {if is_system {
-                                                                view! { <crate::icons::Spark /> }.into_any()
+                                                                "S".into_any()
                                                             } else {
                                                                 reply.author_id.chars().take(2).collect::<String>().to_uppercase().into_any()
                                                             }}
@@ -3278,6 +3278,8 @@ pub fn RoomsWorkspace(
                                             let key_tab = key.clone();
                                             let key_sel = key.clone();
                                             let key_unread = key.clone();
+                                            let key_attention_label = key.clone();
+                                            let key_attention_badge = key.clone();
                                             let active = move || rooms.open_key.get().as_deref() == Some(&*key);
                                             let selected =
                                                 move || rooms.open_key.get().as_deref() == Some(&*key_sel);
@@ -3301,6 +3303,20 @@ pub fn RoomsWorkspace(
                                                     )
                                                 })
                                             };
+                                            let attention_label = Memo::new(move |_| {
+                                                rooms.read_summaries.with(|summaries| {
+                                                    crate::rooms::room_attention_aria_label(
+                                                        summaries.get(&key_attention_label),
+                                                    )
+                                                })
+                                            });
+                                            let attention_badge = Memo::new(move |_| {
+                                                rooms.read_summaries.with(|summaries| {
+                                                    crate::rooms::room_attention_badge(
+                                                        summaries.get(&key_attention_badge),
+                                                    )
+                                                })
+                                            });
                                             view! {
                                                 <button
                                                     class="rooms-workspace__room"
@@ -3339,8 +3355,10 @@ pub fn RoomsWorkspace(
                                                         <span
                                                             class="rooms-workspace__room-unread"
                                                             role="img"
-                                                            aria-label="Unread messages"
-                                                        ></span>
+                                                            aria-label=move || attention_label.get()
+                                                        >
+                                                            {move || attention_badge.get()}
+                                                        </span>
                                                     </Show>
                                                 </button>
                                             }
@@ -3778,7 +3796,7 @@ pub fn RoomsWorkspace(
                                                         )
                                                     }>
                                                         {if is_system {
-                                                            view! { <crate::icons::Spark /> }.into_any()
+                                                            "S".into_any()
                                                         } else {
                                                             m.author_id.chars().take(2).collect::<String>().to_uppercase().into_any()
                                                         }}
@@ -5015,7 +5033,7 @@ pub fn RoomsWorkspace(
                                                 )
                                             }>
                                                 {if root_is_system {
-                                                    view! { <crate::icons::Spark /> }.into_any()
+                                                    "S".into_any()
                                                 } else {
                                                     root.author_id.chars().take(2).collect::<String>().to_uppercase().into_any()
                                                 }}

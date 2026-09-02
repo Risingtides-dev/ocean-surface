@@ -3190,8 +3190,9 @@
      second half of that miss was this list: the six composer/room controls
      were covered while the right rail's eight — invite, repo, artifacts,
      authorization and the compute panel — sat at 11-13px and zoomed. */
-  .rooms-workspace__left-input,
-  .rooms-workspace__composer-input,
+.rooms-workspace__left-input,
+.rooms-workspace__workspace-input,
+.rooms-workspace__composer-input,
   .rooms-workspace__addagent-select,
   .rooms-workspace__agentbuilder-input,
   .rooms-workspace__agentbuilder-select,

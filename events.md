@@ -105,126 +105,6 @@ neighbours is the ledger doing its job and passes, while an entry more than a da
 out of place — a prepend, a backdate — is red. AGENTS.md, "Repository Ledger", is
 the long form of everything above.
 
-time:      [01:06] [09-01-26]
-agent:     [claude] [opus 5]
-worktree:  [loop/surface-sibling-rails-inherit-the-composer-gate-unexamined]
-type:      review
-area:      frontend
-
-Extended #163's ruling to the four rail sections that still inherited the
-composer's write gate without anyone having asked whether their write needs a
-peer, and made each of the five state its answer. Summary, artifacts and
-attachments all write to THIS daemon's store and nothing else — verified at
-ocean-os origin/main cd73312f rather than taken on trust: `crates/ocean-daemon/AGENTS.md`
-states a federated room's summary is local-only and never enqueued to the
-outbox, `room_create_artifact`/`room_amend_artifact` write through `with_rooms`
-and then `publish_room_wake` with no outbox row on either path, and
-`room_attachments.rs` contains no reference to the outbox at all (nor does
-`room_federation.rs` mirror artifacts or attachments). So all three now take a
-shared `local_store_write_gate` and stay writable through `Connecting` and
-`Recovering`, which is the whole user-visible change: startup and reconnect no
-longer grey out a summarize run, an artifact edit or an upload that would land
-regardless. Invite and repo keep `access_allows_writes` and gained the sentence
-saying why — a mint registers the room with the federation control plane, and
-every repo command is executed by a Bedrock container, so a down link is not a
-delay there but a write that cannot happen. `access_allows_writes` itself is
-untouched, still `Local|Live`, still the composer's; `trigger_policy_accepts_writes`
-keeps its name and #163's argument and now delegates to the shared gate rather
-than carrying a second copy of the same match. `Revoked` and unknown access stay
-held everywhere, exhaustively matched with no wildcard so a new access state must
-be ruled on. Three tests: the per-state table for the new gate stated as a
-difference from the composer's, a source guard pinning WHICH gate each of the
-five sections takes (the gate is a `Signal::derive` in the view, so no predicate
-test can reach it), and a guard that the three moved rails no longer carry the
-now-false doc line about never disagreeing with the composer and instead name the
-gate they do take. All three verified failing against the old wiring, in both
-directions, before landing. Two module headers the guard's needle does not reach
-were swept by hand for the same reason — `room_summary.rs` said the control is
-"gated exactly as the composer is" and `attachments.rs` said "the same two
-conditions the composer is", both now false — as were the three inline comments
-whose "the composer gates on access here" reads as a claim about WHICH gate this
-control takes. Frozen gate green: fmt, wasm32 clippy `-D warnings`,
-`RUSTFLAGS="-D warnings"` wasm32 check forced against a touched source, proxy
-check, wasm32 test no-run, native 1236/1236 — plus both `--all-targets` clippy
-lanes, which the frozen list does not cover and this diff adds test code to.
-_________________________________________________________________________________
-
-time:      [23:14] [08-30-26]
-agent:     [claude] [opus 5]
-worktree:  [loop/surface-trigger-rail-writable-nonterminal]
-type:      review
-area:      frontend
-
-Ruled that the wake-trigger rail stays WRITABLE while a room is `Connecting`
-or `Recovering`, and made the code say so. Since #160 the rail took
-`access_allows_writes` — true only for `Local`/`Live` — so all three trigger
-rows went read-only on both non-terminal access states. Nothing asks for that:
-the daemon's `room_update` (ocean-os origin/main, persistent_rooms.rs:654) has
-no access check at all, and both readers of the policy — the local post path
-and the federation bridge's ingest — read it back from THIS daemon's store, so
-the PATCH lands whatever the link is doing. The cost was the sharpest one
-available: a room stuck `Recovering` while every mention woke an agent gave the
-operator no way to turn `on_mention` off. `Revoked` and unknown access stay
-held — the daemon would take those writes too, but configuring a room you have
-been removed from cannot mean anything, and unknown may yet resolve to
-`Revoked`. Implemented as a rail-local `trigger_policy_accepts_writes` matched
-exhaustively over the access states (a new state must be ruled on, not inherit
-"writable"); the shared `access_allows_writes` is untouched and still gates the
-composer, join/leave, invites and ~10 other call sites. Split the old
-`a_room_that_blocks_writes_holds_every_trigger_row` into a `Revoked` test and a
-`Connecting`/`Recovering` test, and added one pinning the divergence between
-the two gates as a difference. `on_thread_reply` stays held-with-note on the
-federated states for its own pre-existing reason (the bridge can never build
-that event). Verified both new tests fail against the old gate before landing.
-Frozen gate green: fmt, wasm32 clippy `-D warnings`, `RUSTFLAGS="-D warnings"`
-wasm32 check forced against a touched source, proxy check, wasm32 test no-run,
-native 1183/1183.
-_________________________________________________________________________________
-
-time:      [09:45am] [08-06-26]
-agent:     [ocean] [rooms-pm]
-worktree:  [feat/rooms-slack-workspace]
-type:      bugfix
-area:      frontend
-
-Aligned the Rooms Surface with ocean-os PR #366's unified JS-safe read-cursor
-wire: PATCH and room-scoped SSE now strictly decode `{room_id, read_seq}` with
-decimal strings, validate room identity, preserve Local/Live projection meaning,
-and fail closed on malformed payloads. Added >2^53, null, wrong-room, and malformed
-regressions. Grouped message timestamps now remain visible on touch/non-hover
-surfaces. Frozen gates passed: fmt/diff, wasm UI and proxy checks, strict wasm
-clippy, wasm test no-run, and native UI 787/787 plus auxiliary suites. Independent
-follow-up review was CLEAR.
-_________________________________________________________________________________
-
-time:      [01:15pm] [07-19-26]
-agent:     [claude] [ocean TUI]
-worktree:  [main]
-type:      bugfix
-area:      frontend
-
-Mobile focus-zoom fix: iOS Safari auto-zooms any focused control whose
-computed font-size is below 16px; the composer input was 14px
-(composer.css:512) with no compact override, so tapping the prompt box
-zoomed the viewport. Added a `@media (pointer: coarse)` 16px floor for
-`.ocean-composer__input` in styles/compact.css — keyed on pointer
-coarseness (iPads zoom too), not the 720px breakpoint. Shell already uses
-100dvh so keyboard resize was fine. CSS-only. Committed 98c8a59, pushed.
-_________________________________________________________________________________
-
-time:      [11:52pm] [07-18-26]
-agent:     [ocean] [ocean-prs gate-authority]
-worktree:  [main]
-type:      integration
-area:      frontend
-
-Lane D: file preview intent — resolve, fetch, render (Tauri + web). 7 files,
-+1239/-53, 14 production seam tests (3 file-scope helpers shared by Effects),
-462 passed. Frozen gates: fmt, clippy wasm32 -D warnings, check wasm32,
-check proxy, test wasm32 --no-run, test native. Patch-id f2087203bb18cc5c.
-8 review rounds (v1→v8) with independent codex re-trace. Committed 4b932aa.
-_________________________________________________________________________________
-
 time:      [11:25pm] [06-26-26]
 agent:     [codex] [gpt-5]
 worktree:  [main]
@@ -7459,3 +7339,39 @@ action was to reselect the machine it was already on; visibility is now
 pre-existing literals in panels.css with it. Gates green: all seven frozen commands,
 1326 host tests across 15 binaries, the proxy crate's 84, and both clippy lanes.
 _________________________________________________________________________________ 09:20 cloud/surface-device-profiles-ui
+time:      [15:30] [09-02-26]
+agent:     [codex] [gpt-5.6-sol]
+worktree:  codex/integrate-cloud-rooms-194-210
+type:      feature-request
+area:      frontend
+
+Integrated the frozen Ocean Cloud Rooms surface slices from PRs #194 through
+#210 onto the current main line, resolving their shared Rooms and device-state
+touchpoints without changing the source branches. The room list now consumes
+the daemon's additive, identity-scoped attention projection: sparse counts are
+validated against the matching read state, unopened rooms show a compact unread
+count or @mention count, present empty attention clears stale badges, and older
+daemons retain the sequence-based unread fallback without claiming mention
+knowledge. A live open-room tail raises unread immediately while the next
+bounded attention poll remains authoritative. Focused attention tests passed;
+the full release gate set remains pending on this integration head.
+_________________________________________________________________________________ 15:30 codex/integrate-cloud-rooms-194-210
+time:      [15:50] [09-02-26]
+agent:     [codex] [gpt-5.6-sol]
+worktree:  codex/integrate-cloud-rooms-194-210
+type:      testing
+area:      frontend
+
+Closed the integration release gates and the visual QA pass. The merged ledger
+had reintroduced duplicate copies of five historical entries above the schema
+header's chronological body; removed only those duplicate prologue copies while
+preserving their existing correctly placed originals, leaving 317 closed and
+order-valid entries. The Rooms list attention contract, monotonic merge, live-tail
+update, coarse-pointer text floor, proxy routing, WASM target, and native host
+suites are green: 1317 UI tests, 84 proxy tests, both strict UI clippy lanes,
+proxy clippy, Trunk release output, and standalone Tauri check/clippy. Headed
+browser QA on the branch bundle opened the durable Ocean Release Room against the
+local daemon. That pass also found the remaining decorative Spark glyph on system
+rows; the four Rooms render paths now use a plain neutral S initial, with a fresh
+release bundle proving the icon is gone.
+_________________________________________________________________________________ 15:50 codex/integrate-cloud-rooms-194-210

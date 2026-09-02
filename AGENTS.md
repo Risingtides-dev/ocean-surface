@@ -373,10 +373,14 @@ Web surface session UI:
   reader is demonstrably looking at that room: focused, Rooms on screen, and
   that room open. `open_key` alone is NOT "on screen" — it and the tail both
   outlive the workspace unmounting behind Direct messages. Consequently a
-  mention in a room you do not have OPEN does not notify: only the open room
-  has a tail, and standing up a tail per room to change that would contradict
-  the one-room rule above. Closing that gap needs a daemon-side mention signal
-  or one multiplexed stream, not N `EventSource`s.
+  mention in a room you do not have OPEN does not raise an OS notification:
+  only the open room has a tail, and standing up a tail per room to change that
+  would contradict the one-room rule above. The room-list response now carries
+  a daemon-derived, identity-scoped sparse `attention` projection for every
+  selected page. Surface uses it for unopened-room unread/mention badges and
+  never scans message text or opens N `EventSource`s to synthesize attention.
+  An absent projection means an older daemon and falls back to legacy sequence
+  unread state; a present empty projection is authoritative zero.
 
 ## Agent Builder Contract
 
