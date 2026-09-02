@@ -665,6 +665,9 @@ fn ui_debug_resize(window: tauri::WebviewWindow, width: f64, height: f64) -> Res
 const DAEMON_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 /// Poll interval for the background liveness poller.
 const DAEMON_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// Consecutive failed probes required before a previously-running daemon is
+/// reported offline. One delayed loopback connect must not flicker the UI.
+const DAEMON_FAILURE_CONFIRMATIONS: u8 = 2;
 /// Default daemon URL — matches the wasm surface's `DEFAULT_DAEMON_URL` and
 /// the daemon's `OCEAN_BIND` default (`127.0.0.1:4780`). Reading
 /// `OCEAN_DAEMON_URL` keeps the shell and the wasm bundle pointed at one
@@ -706,12 +709,35 @@ fn decide_daemon_state(reachable: bool, child_alive: bool, reachable_ever: bool)
     }
 }
 
+/// Debounce only a loss of an already-running daemon. Startup failures remain
+/// immediately visible, while one transient timeout cannot turn a healthy
+/// connection into a false offline report.
+fn stabilize_daemon_reachability(
+    reachable: bool,
+    previous: DaemonState,
+    consecutive_failures: u8,
+) -> (bool, u8) {
+    if reachable {
+        return (true, 0);
+    }
+    let failures = consecutive_failures.saturating_add(1);
+    let keep_running = previous == DaemonState::Running && failures < DAEMON_FAILURE_CONFIRMATIONS;
+    (keep_running, failures)
+}
+
+#[derive(Clone, Copy)]
+struct DaemonObservation {
+    state: DaemonState,
+    revision: u64,
+}
+
 /// Payload for the `daemon-status` event and the `daemon_status` command.
-/// `pid` is omitted on the wire when the shell doesn't own the child (an
-/// external daemon it can reach but didn't spawn).
+/// `revision` makes event/snapshot ordering deterministic in the webview: an
+/// async startup snapshot can never overwrite a newer status event.
 #[derive(Clone, Serialize)]
 struct DaemonStatusDto {
     state: DaemonState,
+    revision: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pid: Option<u32>,
 }
@@ -726,12 +752,14 @@ struct DaemonSup {
     /// the daemon survives a shell crash — supervision is explicit
     /// (start/stop/restart), never `kill_on_drop`.
     child: Mutex<Option<Child>>,
-    /// Last state computed by the poller; `daemon_status` reads this so the
-    /// command stays non-blocking (the poller is the freshness mechanism).
-    last: Mutex<DaemonState>,
-    /// Set once the port has ever been reachable, so a later loss of
-    /// reachability with no owned child reads as `Unreachable` (an external
-    /// daemon that stopped) rather than `Stopped` (never started).
+    /// Last state computed by the poller plus a monotonic revision. The
+    /// revision closes the startup race between an async snapshot and events.
+    last: Mutex<DaemonObservation>,
+    /// Consecutive raw probe failures. A previously-running daemon is declared
+    /// down only after [`DAEMON_FAILURE_CONFIRMATIONS`] misses.
+    consecutive_failures: Mutex<u8>,
+    /// Set once the port has ever been reachable, so a confirmed later loss
+    /// with no owned child reads as `Unreachable` rather than `Stopped`.
     reachable_ever: Mutex<bool>,
     /// host:port parsed from the daemon URL — the probe target.
     host: String,
@@ -742,7 +770,11 @@ impl DaemonSup {
     fn new(host: String, port: u16) -> Self {
         Self {
             child: Mutex::new(None),
-            last: Mutex::new(DaemonState::Stopped),
+            last: Mutex::new(DaemonObservation {
+                state: DaemonState::Stopped,
+                revision: 0,
+            }),
+            consecutive_failures: Mutex::new(0),
             reachable_ever: Mutex::new(false),
             host,
             port,
@@ -810,29 +842,44 @@ impl DaemonSup {
     }
 
     /// Recompute liveness from a TCP probe + child state, persisting the
-    /// result as `last`. Blocking — poller-thread only.
+    /// result. A single loss after `Running` is held as healthy; a second
+    /// consecutive miss confirms the outage. Blocking — poller-thread only.
     fn probe(&self) -> DaemonState {
-        let reachable = self.reachable();
+        let raw_reachable = self.reachable();
         let alive = self.child_alive();
+        let previous = self.last.lock().state;
+        let failure_count = *self.consecutive_failures.lock();
+        let (reachable, failure_count) =
+            stabilize_daemon_reachability(raw_reachable, previous, failure_count);
+        *self.consecutive_failures.lock() = failure_count;
+
         let ever = *self.reachable_ever.lock();
         let state = decide_daemon_state(reachable, alive, ever);
-        if reachable {
+        if raw_reachable {
             *self.reachable_ever.lock() = true;
         }
         if !alive {
             // Reap a dead slot so a subsequent start() doesn't see a zombie.
             self.reap_child();
         }
-        *self.last.lock() = state;
+        let mut last = self.last.lock();
+        if state != last.state {
+            last.state = state;
+            last.revision = last.revision.saturating_add(1);
+        }
         state
     }
 
-    /// Cached snapshot for the `daemon_status` command (non-blocking). The
-    /// poller refreshes `last` every [`DAEMON_POLL_INTERVAL`].
+    /// Cached snapshot for the `daemon_status` command (non-blocking). State
+    /// and revision are captured under one lock so the DTO is self-consistent.
     fn snapshot(&self) -> DaemonStatusDto {
-        let state = *self.last.lock();
+        let observation = *self.last.lock();
         let pid = self.pid();
-        DaemonStatusDto { state, pid }
+        DaemonStatusDto {
+            state: observation.state,
+            revision: observation.revision,
+            pid,
+        }
     }
 }
 
@@ -928,13 +975,15 @@ fn spawn_daemon(bin: &str) -> Result<Child, String> {
 /// daemon binds resolves instantly.
 fn tcp_reachable(host: &str, port: u16) -> bool {
     use std::net::ToSocketAddrs;
-    let Ok(mut addrs) = (host, port).to_socket_addrs() else {
+    let Ok(addrs) = (host, port).to_socket_addrs() else {
         return false;
     };
-    let Some(addr) = addrs.next() else {
-        return false;
-    };
-    TcpStream::connect_timeout(&addr, DAEMON_PROBE_TIMEOUT).is_ok()
+    // Hostnames such as localhost can resolve to IPv6 and IPv4. Trying only
+    // the first address creates a false negative when the daemon binds the
+    // other family.
+    addrs
+        .into_iter()
+        .any(|addr| TcpStream::connect_timeout(&addr, DAEMON_PROBE_TIMEOUT).is_ok())
 }
 
 /// Background liveness poller: probe every [`DAEMON_POLL_INTERVAL`] and emit a
@@ -945,13 +994,7 @@ fn spawn_daemon_poller(app: AppHandle, daemon: Arc<DaemonSup>) {
         let prev = daemon.snapshot().state;
         let state = daemon.probe();
         if state != prev {
-            let _ = app.emit(
-                "daemon-status",
-                DaemonStatusDto {
-                    state,
-                    pid: daemon.pid(),
-                },
-            );
+            let _ = app.emit("daemon-status", daemon.snapshot());
         }
         thread::sleep(DAEMON_POLL_INTERVAL);
     });
@@ -1369,13 +1412,44 @@ mod tests {
     }
 
     #[test]
-    fn daemon_status_dto_serializes_state_lowercase_and_skips_absent_pid() {
+    fn one_failed_probe_does_not_drop_a_running_daemon() {
+        let (reachable, failures) = stabilize_daemon_reachability(false, DaemonState::Running, 0);
+        assert!(reachable);
+        assert_eq!(failures, 1);
+    }
+
+    #[test]
+    fn second_failed_probe_confirms_running_daemon_is_down() {
+        let (reachable, failures) = stabilize_daemon_reachability(false, DaemonState::Running, 1);
+        assert!(!reachable);
+        assert_eq!(failures, DAEMON_FAILURE_CONFIRMATIONS);
+    }
+
+    #[test]
+    fn successful_probe_recovers_immediately_and_resets_failures() {
+        let (reachable, failures) =
+            stabilize_daemon_reachability(true, DaemonState::Unreachable, u8::MAX);
+        assert!(reachable);
+        assert_eq!(failures, 0);
+    }
+
+    #[test]
+    fn startup_failure_is_not_debounced() {
+        let (reachable, failures) = stabilize_daemon_reachability(false, DaemonState::Stopped, 0);
+        assert!(!reachable);
+        assert_eq!(failures, 1);
+    }
+
+    #[test]
+    fn daemon_status_dto_serializes_state_revision_and_skips_absent_pid() {
         let dto = DaemonStatusDto {
             state: DaemonState::Running,
+            revision: 7,
             pid: None,
         };
         let json = serde_json::to_value(&dto).unwrap();
         assert_eq!(json["state"].as_str(), Some("running"));
+        assert_eq!(json["revision"].as_u64(), Some(7));
         // `pid` is skipped when None (the wasm side treats it as optional).
         assert!(json.get("pid").is_none());
     }
@@ -1384,6 +1458,7 @@ mod tests {
     fn daemon_status_dto_includes_pid_when_owned() {
         let dto = DaemonStatusDto {
             state: DaemonState::Starting,
+            revision: 3,
             pid: Some(4242),
         };
         let json = serde_json::to_value(&dto).unwrap();
@@ -1989,6 +2064,11 @@ pub fn run() {
     // and the wasm bundle share one configurable origin (default 127.0.0.1:4780).
     let url = daemon_url_from_env();
     let (host, port) = parse_host_port(&url).unwrap_or_else(|| ("127.0.0.1".to_string(), 4780));
+    // Seed liveness before the webview can request its startup snapshot. The
+    // old default `Stopped` snapshot could race a newer `Running` event and
+    // leave the offline chip stuck for the lifetime of the shell.
+    let daemon = Arc::new(DaemonSup::new(host, port));
+    daemon.probe();
     tauri::Builder::default()
         // Single-instance guard (QA-005). Close-requested hides the main
         // window to the tray instead of quitting, so an "invisible" Ocean is
@@ -2015,7 +2095,7 @@ pub fn run() {
         )
         .manage(AppState {
             watchers: Default::default(),
-            daemon: Arc::new(DaemonSup::new(host, port)),
+            daemon,
             menu: Mutex::new(MenuBridge {
                 ready: false,
                 pending: Vec::new(),

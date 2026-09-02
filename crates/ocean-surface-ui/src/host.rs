@@ -622,11 +622,15 @@ pub async fn set_badge(count: Option<i64>) {
 
 /// Shell-reported daemon supervision state, mirroring the Tauri side's
 /// `DaemonStatusDto`. `state` is one of `running` | `stopped` | `starting` |
-/// `unreachable`; `pid` is the spawned child's pid when the shell owns the
-/// process, else `None` (an external daemon it can reach but didn't start).
+/// `unreachable`; `revision` is the shell's monotonic observation counter
+/// (used to drop stale snapshots that lose a race against newer events);
+/// `pid` is the spawned child's pid when the shell owns the process, else
+/// `None` (an external daemon it can reach but didn't start).
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct DaemonStatus {
     pub state: String,
+    #[serde(default)]
+    pub revision: u64,
     #[serde(default)]
     pub pid: Option<u32>,
 }
