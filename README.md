@@ -175,6 +175,29 @@ xAI key.
 
 `GET /api/config` reports `has_auth`; the UI fetches it on boot so no URL or credential is ever typed in the browser.
 
+## Devices — your machines, one login
+
+A person's entry in the proxy roster (`~/.config/ocean-surface/users.json`,
+0600) may list **devices**: the machines whose Ocean daemons that login can
+attach to. Sign in once, pick a device, and you are in that machine's sessions
+— switching machines later is a click, not a second login. The choice is kept
+server-side and survives a proxy restart, so a browser reopened tomorrow lands
+where you left it. Setup, the tailnet boundary this depends on, and
+`ops/add-device.sh` are in [`ops/README.md`](ops/README.md).
+
+| Route | Answers |
+|---|---|
+| `GET /api/config` | boot payload: `has_auth`, `user_id`, LiveKit/maps defaults |
+| `GET /api/devices` | `{ devices: [{ name, default, selected, health }], selected, selection_explicit }` — `health.state` is `ok` (with `version`/`rev`), `unhealthy`, or `unreachable`, probed live with a short timeout. `selection_explicit` is false until someone actually picks, which is how the surface offers the choice once after a login instead of on every load. |
+| `POST /api/devices/select` | `{ name }` → `{ ok, selected }`; a name that is not on your roster is a 404 |
+
+Both device routes are behind the login, like every other `/api/` route. The
+payload names devices and never their `daemon_url`: nobody types a URL in a
+browser and no page learns your tailnet addresses. A request routed to a device
+that is unreachable — or to one the roster no longer has — answers `503
+{"error":"device_unavailable","reason":…,"device":…}`, which is what the picker
+shows.
+
 ## Roadmap
 
 - Done: web/PWA chat, SSE transcript, model picker, session picker, proxy,

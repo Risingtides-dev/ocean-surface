@@ -7201,3 +7201,61 @@ lands, and a test name implying it was live behaviour was corrected. Gate
 green: all seven frozen commands, 1348 host assertions across 15 binaries,
 plus ocean-tauri fmt, clippy and 36 tests.
 _________________________________________________________________________________ 07:02 cloud/surface-desktop-parity-mentions
+time:      [07:47] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-device-profiles]
+type:      feature-request
+area:      backend
+
+Signing in at ocean.agentsworld.org now reaches whichever of your own machines you
+mean, instead of the one machine your roster entry was pinned to. The proxy already
+had a multi-user roster where each entry named exactly one `daemon_url`, so a login
+decided WHOSE Ocean you saw but never WHICH; a person with a mini and a studio had
+one profile and one of their two daemons. A user entry may now carry `devices`: a
+list of `{ name, daemon_url, observer_token_path?, operator_key_path?, default? }`,
+validated on load for unique non-empty names, absolute http(s) URLs, and at most
+one default (with roster order electing one when nobody marks it). The legacy
+single `daemon_url` still loads and normalizes into one device named after its
+host, so every existing deployment keeps working byte-for-byte; setting both on one
+entry is refused rather than merged, because guessing which machine somebody's
+turns execute on is not a thing to ship.
+
+Selection is per session and server-side. `GET /api/devices` answers the roster
+with a live `/health` probe per device (ok with version/rev, unhealthy, or
+unreachable, all probed concurrently on a 3s client so a roster of sleeping laptops
+costs one timeout) plus `selected` and `selection_explicit` — the second is what
+lets the surface offer the picker once after a login rather than nagging on every
+load. `POST /api/devices/select {name}` records the choice against a SHA-256 digest
+of the session token in a 0600 `device-selections.json`, written atomically and
+re-read at boot, so a switch survives a deploy and never rides in the cookie. No
+`daemon_url` appears in either payload: the browser addresses a machine by name
+only, so nobody types a URL and no page renders a tailnet address.
+
+Routing moved wholesale rather than per-route. The auth gate already resolved one
+`ResolvedDaemon` per request and every proxying handler read it, so the change was
+to make that resolution answer the session's SELECTED device and to carry the
+device's observer token and operator key ON the resolution — the credential now
+travels with the upstream it belongs to and the two cannot drift apart. The
+no-fallback custody rule is unchanged and now per-device: the process-wide token
+and key apply only to the device that is in fact the process default, and a machine
+naming no credential of its own gets none. `every_daemon_route_resolves_its_upstream_through_one_resolver`
+is the guard the compiler does not hold: a new handler that builds a URL from
+`state.daemon_url` compiles and passes everything else while quietly pinning one
+route to the old machine. Both of its arms were mutation-checked for real. A
+forward that cannot reach its machine, and a selection the roster no longer has,
+both answer one typed 503 `device_unavailable` naming the device — replacing the
+opaque 502 `daemon unreachable`, whose test now proves the stronger property that a
+NAMED device's address never appears in a body at all. `/api/config` and
+`/api/devices` deliberately keep answering under a stale selection, or a removed
+device would be a locked door.
+
+ops/README.md carries the device recipe and says the quiet part out loud: the
+daemon has no auth of its own, so binding it to a machine's tailnet address (never
+0.0.0.0) trades loopback trust for the tailnet ACL, and that ACL is then the entire
+boundary. `ops/add-device.sh` appends a device atomically with 0600 preserved,
+folds a legacy `daemon_url` into an explicit device on the way, and refuses a
+non-tailnet URL unless `--allow-public` is passed in as many words. This is one
+person reaching their OWN daemons; cross-person rooms still federate through
+Bedrock and no daemon accepts another person's connection. Gates green: all seven
+frozen commands plus `cargo test -p ocean-surface-proxy`, 78 passed.
+_________________________________________________________________________________ 07:47 cloud/surface-device-profiles
