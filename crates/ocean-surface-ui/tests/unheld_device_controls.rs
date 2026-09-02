@@ -14,13 +14,16 @@
 //! | `app.rs` header overflow's `Devices` row | GREEN — pinned |
 //! | `app.rs` `<DeviceChip>` mount | RED — compiler-held |
 //! | `app.rs` `<DevicePicker>` mount | RED — compiler-held |
+//! | `app.rs` `devices.recheck_on_focus(..)` | RED — compiler-held |
 //!
 //! The two held ones announce themselves loudly, which is why they are
 //! recorded rather than pinned: deleting the chip's mount leaves
 //! `DeviceChip`'s generated props struct with a never-read `state` field, and
 //! deleting the picker's mount takes `daemon_for_devices` unused AND
 //! `Daemon::reattach_to_selected_device` — the entire re-attach path — dead
-//! with it. Both are `error:` under `-D warnings`.
+//! with it. The focus re-check has one call site and nothing else calls
+//! `recheck_on_focus`, so deleting it is a `never used` error too. All three
+//! are `error:` under `-D warnings`.
 //!
 //! The two silent ones are silent for the shape this lane keeps finding: they
 //! are the only *entry* to machinery that stays fully referenced without them.

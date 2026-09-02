@@ -1476,6 +1476,11 @@ pub fn App() -> impl IntoView {
     // was on those hosts.
     let devices = crate::devices::DeviceState::new();
     devices.load(true);
+    // A selection is per browser, so another tab can move this one. The proxy
+    // ends this tab's stream when that happens and it reconnects onto the new
+    // machine; this is what stops it from showing the OLD machine's transcript
+    // above the new machine's events.
+    devices.recheck_on_focus(daemon.clone());
 
     // Daemon supervision (Tauri shell only). The shell supervises the
     // ocean-daemon process and reports liveness via `daemon-status` events;
