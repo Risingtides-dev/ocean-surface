@@ -366,6 +366,17 @@ Web surface session UI:
 - An empty hydrated transcript has no resume cursor. Surface omits
   `after_seq` until it owns a real room sequence, preserving the daemon's
   zero-based first row.
+- Mention notifications are raised from the LIVE TAIL only, by the same
+  `room_markdown` tokeniser that paints the highlight, so what notifies is what
+  shows. Hydration and the load-older backfill never notify — history arriving
+  is not someone talking to you now. A notification is suppressed only when the
+  reader is demonstrably looking at that room: focused, Rooms on screen, and
+  that room open. `open_key` alone is NOT "on screen" — it and the tail both
+  outlive the workspace unmounting behind Direct messages. Consequently a
+  mention in a room you do not have OPEN does not notify: only the open room
+  has a tail, and standing up a tail per room to change that would contradict
+  the one-room rule above. Closing that gap needs a daemon-side mention signal
+  or one multiplexed stream, not N `EventSource`s.
 
 ## Agent Builder Contract
 

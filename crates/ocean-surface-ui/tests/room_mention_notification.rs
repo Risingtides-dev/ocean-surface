@@ -56,6 +56,24 @@ fn only_the_live_tail_asks_whether_a_row_notifies() {
          host notifier",
     );
 
+    // Visibility, not just the open key. `open_key` outlives the Rooms
+    // workspace unmounting behind Direct messages and the tail keeps running,
+    // so reading it alone suppressed every mention for a reader who could not
+    // see the room. The tail must hand the predicate what is ON SCREEN.
+    assert!(
+        arm.contains("me.workspace_visible.get_untracked()"),
+        "the tail must pass Rooms' on-screen state, not just the open key",
+    );
+    // The click has to reveal Rooms, and unconditionally: when the reader is
+    // behind Direct messages the room is already `open_key`, so a
+    // reopen-if-different check alone navigates nowhere and the click does
+    // nothing visible.
+    assert!(
+        arm.contains("me.reveal_request"),
+        "the notification's click must ask app.rs to reveal Rooms, which owns \
+         the competing-surface closures",
+    );
+
     // The dedupe gate. A resumed tail redelivers a seq already on screen, and
     // a notification per redelivery is how a reconnect becomes a burst.
     assert!(
@@ -92,6 +110,39 @@ fn the_notifier_asks_about_the_reader_and_not_the_roster() {
         ids.contains("self.identity_id.get_untracked()") && ids.contains("self_member_id"),
         "the reader's ids are the local identity AND the access projection's \
          self member id",
+    );
+}
+
+/// The reveal request is honoured by `app.rs`, and only there. Setting
+/// `show_rooms` from the notification's click site would skip the
+/// competing-surface closures the reveal lifecycle requires (AGENTS.md
+/// 222-227), and the signal exists precisely because `rooms.rs` sits below
+/// those signals and cannot reach them.
+#[test]
+fn the_reveal_request_is_answered_by_the_app_that_owns_the_reveals() {
+    let app = view_source("app.rs");
+    let dense = without_whitespace(&app);
+    assert!(
+        dense.contains("rooms.reveal_request.get()"),
+        "app.rs must observe the reveal request",
+    );
+    assert!(
+        dense.contains("show_sessions.set(false);show_rooms.set(true);"),
+        "answering it must close the competing surface and reveal Rooms — the \
+         same pair the ocean://room deep link takes",
+    );
+    assert!(
+        dense.contains("rooms.workspace_visible.set(show_rooms.get())"),
+        "app.rs must mirror Rooms' on-screen state onto the handle; the tail \
+         has no other way to learn it",
+    );
+    // Names the WRITE, not the word: `rooms.rs` documents `show_rooms` in
+    // prose (it has to, to explain why `open_key` is not visibility), and a
+    // bare-literal ban would fail on the explanation rather than on a reach.
+    assert!(
+        !without_whitespace(&view_source("rooms.rs")).contains("show_rooms.set("),
+        "rooms.rs must not write the reveal signals directly; it is below them \
+         and would skip the competing-surface closures",
     );
 }
 

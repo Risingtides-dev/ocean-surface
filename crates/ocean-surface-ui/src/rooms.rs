@@ -863,6 +863,20 @@ pub struct Rooms {
     /// at all — a cold launch from the OS. `None` once consumed; the workspace
     /// clears it in the same pass that queues the open.
     pub deep_link_room: RwSignal<Option<String>>,
+    /// Whether the Rooms workspace is actually ON SCREEN, mirrored from
+    /// `app.rs`'s `show_rooms`.
+    ///
+    /// Distinct from `open_key` on purpose, and the distinction is load
+    /// bearing: this handle is App-scope, so `open_key` and the room-scoped
+    /// tail both survive the workspace unmounting when the reader switches to
+    /// Direct messages. Anything asking "can the reader SEE this room" must
+    /// read this, not the open key.
+    pub workspace_visible: RwSignal<bool>,
+    /// Bumped to ask `app.rs` to reveal Rooms through its own reveal path —
+    /// the one that closes the competing surfaces. Set from places that are
+    /// below the reveal signals and cannot touch them directly, such as a
+    /// mention notification's click handler.
+    pub reveal_request: RwSignal<u64>,
     /// The currently selected room key, if any.
     pub open_key: RwSignal<Option<String>>,
     /// The open room's full record (roster + metadata).
@@ -1105,6 +1119,8 @@ impl Rooms {
             list_request_ticket: RwSignal::new(0),
             list_settled: RwSignal::new(0),
             deep_link_room: RwSignal::new(None),
+            workspace_visible: RwSignal::new(true),
+            reveal_request: RwSignal::new(0),
             open_key: RwSignal::new(None),
             open_room: RwSignal::new(None),
             transcript: RwSignal::new(Vec::new()),
@@ -2753,6 +2769,7 @@ impl Rooms {
                                 &entry,
                                 &reader_ids,
                                 crate::app::window_focused(),
+                                me.workspace_visible.get_untracked(),
                                 &key,
                                 me.open_key.get_untracked().as_deref(),
                             )
@@ -2774,11 +2791,20 @@ impl Rooms {
                                 let click_key = key.clone();
                                 spawn_local(async move {
                                     crate::host::notify_with_focus(&title, &body, move || {
-                                        // By construction the row's room IS the
-                                        // open room, so the window focus the
-                                        // handler already performed is the whole
-                                        // job; this covers the case where the
-                                        // reader moved on before clicking.
+                                        // Focusing the window is not landing the
+                                        // reader on the room. `open_key` can
+                                        // still name this room while the Rooms
+                                        // workspace is unmounted behind Direct
+                                        // messages, in which case reopening is a
+                                        // no-op and the click would have done
+                                        // nothing visible at all. So ask for the
+                                        // reveal ALWAYS, and reopen only when the
+                                        // reader has since moved to another room.
+                                        // The reveal goes through `app.rs`, which
+                                        // owns the competing-surface closures
+                                        // (AGENTS.md 222-227); this signal cannot
+                                        // reach them from here.
+                                        me.reveal_request.update(|n| *n = n.wrapping_add(1));
                                         if me.open_key.get_untracked().as_deref()
                                             != Some(click_key.as_str())
                                         {
@@ -3778,17 +3804,51 @@ pub(crate) fn room_request_is_current(
 /// rows are ever passed to it. Hydration and the "load older" backfill both
 /// write the transcript through other paths, and neither calls this — history
 /// arriving is not someone talking to you now.
+///
+/// SCOPE, stated because the signature reads wider than the feature is.
+/// `row_room` and `open_room` can only ever be equal in production:
+/// `accept_room_tail_frame` drops any frame whose room is not the open one
+/// before it reaches this, and a room switch bumps the generation and retires
+/// the previous tail. Only the OPEN room has a tail at all, so **a mention in
+/// a room you do not have open does not notify**. That is a limit of where
+/// mentions can be observed, not a decision taken here: notifying for other
+/// rooms needs a feed that does not exist — either a daemon-side mention
+/// signal or one multiplexed room stream — and standing up N SSE tails to
+/// synthesise it would contradict the Rooms Contract's one-room tail
+/// (AGENTS.md 243-250). The unequal-rooms arm is kept because it is the
+/// correct answer if such a feed ever lands, and because a predicate that
+/// silently assumes its inputs cannot differ is a worse thing to inherit.
 pub(crate) fn mention_notification_is_due(
     entry: &RoomMessage,
     reader_ids: &HashSet<String>,
     window_focused: bool,
+    rooms_visible: bool,
     row_room: &str,
     open_room: Option<&str>,
 ) -> bool {
     matches!(entry.kind, RoomMessageKind::Message)
         && !reader_ids.contains(&entry.author_id)
-        && (!window_focused || open_room != Some(row_room))
+        && !reader_is_looking_at(window_focused, rooms_visible, row_room, open_room)
         && crate::room_markdown::mentions_member(&entry.body, reader_ids)
+}
+
+/// Is the reader actually looking at the room this row landed in?
+///
+/// All three conditions have to hold, and the third is the one a first draft
+/// of this got wrong. `open_key` is NOT "the room on screen": it lives on the
+/// App-scope `Rooms` handle and deliberately survives the Rooms workspace
+/// unmounting, and the room-scoped tail keeps running underneath. So when the
+/// reader switches to Direct messages, `show_rooms` goes false, the workspace
+/// is gone from the screen (`app.rs` `<Show when=show_rooms>`), and `open_key`
+/// still names the room — which read as "they are looking right at it" and
+/// suppressed every mention while the reader could not see one.
+fn reader_is_looking_at(
+    window_focused: bool,
+    rooms_visible: bool,
+    row_room: &str,
+    open_room: Option<&str>,
+) -> bool {
+    window_focused && rooms_visible && open_room == Some(row_room)
 }
 
 /// The notification body: who said it, then a one-line excerpt of what they
@@ -3913,6 +3973,7 @@ mod tests {
             &mention,
             &me,
             false,
+            true,
             "team",
             Some("team")
         ));
@@ -3921,6 +3982,7 @@ mod tests {
         assert!(!mention_notification_is_due(
             &mention,
             &me,
+            true,
             true,
             "team",
             Some("team")
@@ -3932,6 +3994,7 @@ mod tests {
             &mention,
             &me,
             true,
+            true,
             "team",
             Some("other")
         ));
@@ -3941,6 +4004,7 @@ mod tests {
             &row(RoomMessageKind::Message, "bob", "note to @bob"),
             &me,
             false,
+            true,
             "team",
             Some("team"),
         ));
@@ -3950,6 +4014,7 @@ mod tests {
             &row(RoomMessageKind::Message, "carol", "hey @carol"),
             &me,
             false,
+            true,
             "team",
             Some("team"),
         ));
@@ -3965,6 +4030,7 @@ mod tests {
                     &row(kind, "carol", "hey @bob"),
                     &me,
                     false,
+                    true,
                     "team",
                     Some("team"),
                 ),
@@ -3977,9 +4043,51 @@ mod tests {
             &mention,
             &ids(&[]),
             false,
+            true,
             "team",
             Some("team")
         ));
+    }
+
+    /// The regression the visibility parameter exists for. `open_key` is not
+    /// "the room on screen": it lives on the App-scope handle and survives the
+    /// Rooms workspace unmounting, and the room-scoped tail keeps running
+    /// underneath. A reader who switched to Direct messages is focused, has
+    /// this room still "open", and CANNOT SEE the message — suppressing there
+    /// muted every mention for exactly the reader who needed one.
+    #[test]
+    fn a_hidden_rooms_workspace_still_notifies_the_focused_reader() {
+        let me = ids(&["bob"]);
+        let mention = row(RoomMessageKind::Message, "carol", "@bob ping");
+        assert!(mention_notification_is_due(
+            &mention,
+            &me,
+            true,
+            false,
+            "team",
+            Some("team")
+        ));
+        // Suppression survives only with all three: focused, Rooms on screen,
+        // and this room the open one.
+        assert!(!mention_notification_is_due(
+            &mention,
+            &me,
+            true,
+            true,
+            "team",
+            Some("team")
+        ));
+    }
+
+    /// "The reader is looking at this room" is a conjunction of three facts,
+    /// and dropping any one of them means they are not.
+    #[test]
+    fn looking_at_a_room_needs_focus_and_visibility_and_that_room() {
+        assert!(reader_is_looking_at(true, true, "team", Some("team")));
+        assert!(!reader_is_looking_at(false, true, "team", Some("team")));
+        assert!(!reader_is_looking_at(true, false, "team", Some("team")));
+        assert!(!reader_is_looking_at(true, true, "team", Some("other")));
+        assert!(!reader_is_looking_at(true, true, "team", None));
     }
 
     /// The row whose room is not the open room DOES notify while the window is
@@ -3992,11 +4100,12 @@ mod tests {
             &mention,
             &me,
             false,
+            true,
             "team",
             Some("other")
         ));
         assert!(mention_notification_is_due(
-            &mention, &me, false, "team", None
+            &mention, &me, false, true, "team", None
         ));
     }
 
@@ -4009,6 +4118,7 @@ mod tests {
                 &row(RoomMessageKind::Message, "carol", body),
                 &me,
                 false,
+                true,
                 "team",
                 Some("team"),
             ));
@@ -4019,6 +4129,7 @@ mod tests {
                 &row(RoomMessageKind::Message, author, "@bob @member-7"),
                 &me,
                 false,
+                true,
                 "team",
                 Some("team"),
             ));
