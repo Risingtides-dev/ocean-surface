@@ -553,10 +553,7 @@ struct RoomSnapshotResponse {
     /// `next_seq` instead and leaves this null — and `None` once a page reaches
     /// the start of the transcript. Read by
     /// [`Rooms::backfill_open_transcript`] through
-    /// [`transcript_backfill_cursor`], and by
-    /// [`Rooms::load_older_transcript_page`] through
-    /// [`transcript_older_cursor`] — the same cursor, once the walk's page cap
-    /// has handed the decision to the operator.
+    /// [`transcript_backfill_cursor`].
     #[serde(default)]
     prev_seq: Option<u64>,
     /// Whether more rows exist in the direction THIS page paged — older rows,
@@ -913,20 +910,6 @@ pub struct Rooms {
     /// Monotonic: see [`advanced_resume_seq`] for why a lagging ingest may never
     /// lower it.
     resume_seq: RwSignal<Option<u64>>,
-    /// Where an on-demand older read resumes, and the whole reason the workspace
-    /// can offer one. `Some` means the daemon said older rows exist and nothing
-    /// on screen reaches them; `None` means a page provably reached the start of
-    /// the log, or no room is open. Written wherever
-    /// [`Rooms::backfill_open_transcript`] stops — a walk that hits its page cap
-    /// used to drop the page's `prev_seq` and `has_more` at that instant, which
-    /// is what left a long room's oldest painted row reading as the first
-    /// message in it. Read through [`Rooms::older_transcript_available`].
-    older_cursor: RwSignal<Option<u64>>,
-    /// Whether an on-demand older page is in flight, so a second press cannot
-    /// fire a second request against a cursor the first has not yet moved —
-    /// which would prepend the same page twice were `prepend_transcript_page`
-    /// not strict about it, and spends a request regardless.
-    older_in_flight: RwSignal<bool>,
     /// Free-form status line (errors, in-flight notices).
     pub status: RwSignal<String>,
     /// Monotonic generation: bumped when the open room changes so a stale
@@ -1146,8 +1129,6 @@ impl Rooms {
             open_room: RwSignal::new(None),
             transcript: RwSignal::new(Vec::new()),
             resume_seq: RwSignal::new(None),
-            older_cursor: RwSignal::new(None),
-            older_in_flight: RwSignal::new(false),
             status: RwSignal::new(String::new()),
             generation: RwSignal::new(0),
             identity_id: RwSignal::new(identity.id),
@@ -1260,13 +1241,6 @@ impl Rooms {
         self.open_room.set(None);
         self.transcript.set(Vec::new());
         self.resume_seq.set(None);
-        // Both halves of the older-history state, cleared for the same reason
-        // the transcript is: a cursor is one room's position in one room's log,
-        // and an in-flight press outlives the room it was made in — its
-        // completion re-checks `room_is_current` and writes nothing, so nothing
-        // else will ever lower the flag.
-        self.older_cursor.set(None);
-        self.older_in_flight.set(false);
         self.access.set(None);
         self.closed.set(false);
         // Ownership is one room's roster fact. Left standing, the previous
@@ -2377,23 +2351,18 @@ impl Rooms {
     /// to read. It runs once per open rather than on every mutation, which is
     /// why it can afford to run at all.
     ///
-    /// Beyond that budget a long room's older history is not on screen, where
-    /// before it arrived eventually — a deliberate trade that cost two things.
+    /// Beyond that budget a long room's older history is genuinely not on
+    /// screen, where before it arrived eventually — a deliberate trade, and the
+    /// half this slice does not close. It costs two things, and the second is
+    /// the harder one to design for.
     ///
-    /// The first is closed. Rows older than the window used to be absent with
-    /// nothing on screen saying so, because the last page's `has_more` and
-    /// `prev_seq` were dropped at the instant the walk returned, leaving the
-    /// oldest row painted reading as the first message in the room. They are
-    /// parked in [`Rooms::older_cursor`] now, and
-    /// [`Rooms::load_older_transcript_page`] replays one page from there per
-    /// press. History past the budget is a press away rather than gone, and a
-    /// room whose walk provably reached the start of the log parks `None` and
-    /// grows no affordance at all.
+    /// Rows older than the window are absent, and nothing on screen says so. The
+    /// last page's `has_more` is dropped here, so the oldest row painted reads
+    /// as the first message in the room.
     ///
-    /// The second stands, and is the harder one to design for: a row INSIDE the
-    /// window can render nowhere at all. `rooms_workspace` builds the main list
-    /// from `partition_thread_messages(&transcript, 0)`, whose
-    /// `roots` keep only rows carrying no `thread_parent_seq`; a reply
+    /// And a row INSIDE the window can render nowhere at all. `rooms_workspace`
+    /// builds the main list from `partition_thread_messages(&transcript, 0)`,
+    /// whose `roots` keep only rows carrying no `thread_parent_seq`; a reply
     /// whose ROOT fell outside the window is dropped from that list, and
     /// `thread_root_for` cannot find the missing root either, so no thread pane
     /// opens on it. A reply at seq 2500 to a root at seq 800 is invisible with
@@ -2401,14 +2370,15 @@ impl Rooms {
     /// not leave that standing — the root arrived eventually — so it is new, and
     /// it is the reason the follow-on is more than a scroll trigger.
     ///
-    /// What closes it is an answer for the orphaned reply — either fetching a
-    /// root the window missed or rendering the reply where the operator can see
-    /// it — and pressing "load older" enough times is not that answer: it walks
-    /// back a page at a time and cannot jump to one named root. Until then a
+    /// What closes both is a "load older" affordance in `rooms_workspace.rs`
+    /// replaying [`RoomSnapshotResponse::prev_seq`] on demand — the walk below
+    /// is already that request and only its trigger is missing — plus an answer
+    /// for the orphaned reply, which is either fetching a root the window
+    /// missed or rendering the reply where the operator can see it. Until then a
     /// very long LIVE room trades unbounded eventual history for a correct first
-    /// paint plus a way back, and a very long SOFT-CLOSED room comes out
-    /// strictly ahead: it opens no tail at all, so its newest rows were never
-    /// merely late, they were unreachable.
+    /// paint, and a very long SOFT-CLOSED room comes out strictly ahead: it
+    /// opens no tail at all, so today its newest rows are not late, they are
+    /// unreachable.
     ///
     /// Never touches [`Rooms::resume_seq`]. That is the FORWARD position the
     /// live tail resumes from, older rows say nothing about it, and moving it
@@ -2430,23 +2400,13 @@ impl Rooms {
                 }
                 let url =
                     room_snapshot_tail_url(&base, &key, cursor, BACKFILL_TRANSCRIPT_PAGE_LIMIT);
-                // A request that never answered leaves the page it was reading
-                // exactly where it was, so the cursor is parked rather than
-                // dropped: a dropped one ends the room's history at whatever a
-                // flaky network happened to deliver, and says so to nobody.
                 let Ok(response) = Request::get(&url).send().await else {
-                    me.park_older_cursor(generation_id, &key, Some(cursor));
                     return;
                 };
                 let Ok(page) = response.json::<RoomSnapshotResponse>().await else {
-                    me.park_older_cursor(generation_id, &key, Some(cursor));
                     return;
                 };
-                if !me.room_is_current(generation_id, &key) {
-                    return;
-                }
-                if !page.ok {
-                    me.older_cursor.set(Some(cursor));
+                if !page.ok || !me.room_is_current(generation_id, &key) {
                     return;
                 }
                 let reached_back_to = first_transcript_seq(&page.transcript);
@@ -2459,16 +2419,6 @@ impl Rooms {
                     page.prev_seq,
                     reached_back_to,
                 ) else {
-                    // The page cap is where this stops on a long room, and the
-                    // cursor it stops holding is the only route left to the rows
-                    // behind it. Parked unconditionally: the same call answers
-                    // `None` when the daemon said the log ran out, which is the
-                    // room that must NOT grow an affordance.
-                    me.older_cursor.set(transcript_older_cursor(
-                        page.has_more,
-                        page.prev_seq,
-                        reached_back_to,
-                    ));
                     return;
                 };
                 cursor = next;
@@ -2520,85 +2470,6 @@ impl Rooms {
             if let Some(page) = page.filter(|page| page.ok) {
                 me.agent_owners.set(page.agent_owners);
             }
-        });
-    }
-
-    /// Park where an on-demand older read should resume, if the room this walk
-    /// belongs to is still the open one. Guarded because a walk's failure lands
-    /// after an await like everything else here, and writing a retired room's
-    /// cursor would offer the operator older history belonging to a room they
-    /// have already left.
-    fn park_older_cursor(&self, generation_id: u64, key: &str, cursor: Option<u64>) {
-        if self.room_is_current(generation_id, key) {
-            self.older_cursor.set(cursor);
-        }
-    }
-
-    /// Whether older history exists that nothing on screen reaches — the one
-    /// condition the workspace's "load older" affordance renders on. Reactive:
-    /// the hydration walk publishes this signal several page-loads after the
-    /// first paint, so a view reading it untracked would have asked before the
-    /// answer existed.
-    pub(crate) fn older_transcript_available(&self) -> bool {
-        self.older_cursor.get().is_some()
-    }
-
-    /// Whether the operator's older-history press is still in flight, so the
-    /// affordance can say so and refuse a second one.
-    pub(crate) fn older_transcript_in_flight(&self) -> bool {
-        self.older_in_flight.get()
-    }
-
-    /// Fetch ONE page older than the parked cursor and prepend it.
-    ///
-    /// The request is the hydration walk's own — same route, same page size,
-    /// same `room_is_current` re-check before anything is written — and the only
-    /// difference is what ends it. The walk stops at
-    /// [`MAX_TRANSCRIPT_CATCHUP_PAGES`] because it runs unasked on every open;
-    /// this runs once per press, so the cursor it leaves behind is
-    /// [`transcript_older_cursor`]'s answer and the operator decides whether to
-    /// ask again.
-    ///
-    /// A failed read leaves the cursor untouched on purpose: the affordance
-    /// stays on screen and the press can simply be repeated. Clearing it would
-    /// turn one dropped request into permanently unreachable history.
-    pub(crate) fn load_older_transcript_page(&self) {
-        if self.older_in_flight.get_untracked() {
-            return;
-        }
-        let Some(cursor) = self.older_cursor.get_untracked() else {
-            return;
-        };
-        let Some(key) = self.open_key.get_untracked() else {
-            return;
-        };
-        let generation_id = self.generation_snapshot();
-        let base = self.base();
-        let me = *self;
-        self.older_in_flight.set(true);
-        spawn_local(async move {
-            let url = room_snapshot_tail_url(&base, &key, cursor, BACKFILL_TRANSCRIPT_PAGE_LIMIT);
-            let page = match Request::get(&url).send().await {
-                Ok(response) => response.json::<RoomSnapshotResponse>().await.ok(),
-                Err(_) => None,
-            };
-            // Nothing below this line may write into a room the operator has
-            // left — `reset_room_state` has already cleared both signals, and
-            // lowering the flag here would lower the NEXT room's.
-            if !me.room_is_current(generation_id, &key) {
-                return;
-            }
-            if let Some(page) = page.filter(|page| page.ok) {
-                let reached_back_to = first_transcript_seq(&page.transcript);
-                me.transcript
-                    .update(|transcript| prepend_transcript_page(transcript, page.transcript));
-                me.older_cursor.set(transcript_older_cursor(
-                    page.has_more,
-                    page.prev_seq,
-                    reached_back_to,
-                ));
-            }
-            me.older_in_flight.set(false);
         });
     }
 
@@ -3763,28 +3634,7 @@ fn transcript_backfill_cursor(
     prev_seq: Option<u64>,
     page_reached_back_to: Option<u64>,
 ) -> Option<u64> {
-    if pages_read >= MAX_TRANSCRIPT_CATCHUP_PAGES {
-        return None;
-    }
-    transcript_older_cursor(has_more, prev_seq, page_reached_back_to)
-}
-
-/// Where an ON-DEMAND older read resumes, or `None` once a page has provably
-/// reached the start of the log.
-///
-/// The same cursor [`transcript_backfill_cursor`] answers, minus the page cap —
-/// which is the whole difference between the two callers. The hydration walk is
-/// bounded because it runs unasked on every open; a press is one page the
-/// operator asked for, so only the daemon's own `has_more` may end it. Deriving
-/// the bounded answer FROM this one is what stops the two drifting: a walk that
-/// stopped because the log ran out and a press that finds nothing older are then
-/// the same fact rather than two functions that happen to agree today.
-fn transcript_older_cursor(
-    has_more: bool,
-    prev_seq: Option<u64>,
-    page_reached_back_to: Option<u64>,
-) -> Option<u64> {
-    if !has_more {
+    if pages_read >= MAX_TRANSCRIPT_CATCHUP_PAGES || !has_more {
         return None;
     }
     prev_seq.or(page_reached_back_to)
@@ -5595,72 +5445,6 @@ mod tests {
              all — `/transcript` is forward-only and cannot serve one of them"
         );
         assert_eq!(requested.len(), MAX_TRANSCRIPT_CATCHUP_PAGES);
-
-        // And the page that stopped it is exactly where a press resumes. The
-        // walk above ends holding `has_more: true` and a cursor 200 rows below
-        // its last request; dropping that pair at this instant is what left the
-        // oldest painted row reading as the first message in the room.
-        assert_eq!(
-            transcript_older_cursor(
-                true,
-                Some(cursor - BACKFILL_TRANSCRIPT_PAGE_LIMIT as u64),
-                None
-            ),
-            Some(3001),
-            "the cursor the page cap stops on is the only route left to the \
-             rows behind it",
-        );
-    }
-
-    /// The two cursors are one rule with one extra stop condition, and the
-    /// difference is deliberate: the walk is capped because it runs unasked on
-    /// every open, a press is one page the operator asked for. What neither may
-    /// do is claim there is older history when the daemon said there is not.
-    #[test]
-    fn the_on_demand_cursor_is_the_walks_without_the_page_cap() {
-        // `has_more` false is the start of the log, from either caller. This is
-        // the room that must grow no affordance at all.
-        assert_eq!(transcript_older_cursor(false, Some(400), Some(400)), None);
-        assert_eq!(transcript_older_cursor(false, None, None), None);
-
-        // With rows behind it, the daemon's own `prev_seq` wins and the page's
-        // lowest row is the fallback for a page that names none — the same
-        // precedence the walk uses, because it is the same call.
-        assert_eq!(
-            transcript_older_cursor(true, Some(3801), Some(3802)),
-            Some(3801)
-        );
-        assert_eq!(transcript_older_cursor(true, None, Some(3802)), Some(3802));
-        assert_eq!(
-            transcript_older_cursor(true, None, None),
-            None,
-            "a `has_more` page naming no cursor and serving no rows leaves \
-             nothing to replay; offering a press that cannot move is worse than \
-             offering none",
-        );
-
-        // Past the cap the walk stops and the press does not. Below it they are
-        // the same answer, which is what makes deriving one from the other the
-        // point rather than a tidy-up.
-        assert_eq!(
-            transcript_backfill_cursor(MAX_TRANSCRIPT_CATCHUP_PAGES, true, Some(3001), None),
-            None,
-        );
-        assert_eq!(
-            transcript_older_cursor(true, Some(3001), None),
-            Some(3001),
-            "the press has no page budget to run out of",
-        );
-        for pages_read in 0..MAX_TRANSCRIPT_CATCHUP_PAGES {
-            assert_eq!(
-                transcript_backfill_cursor(pages_read, true, Some(3001), Some(3002)),
-                transcript_older_cursor(true, Some(3001), Some(3002)),
-            );
-            assert_eq!(
-                transcript_backfill_cursor(pages_read, false, Some(3001), Some(3002)),
-                transcript_older_cursor(false, Some(3001), Some(3002)),
-            );
-        }
     }
 
     /// Ingest: a backward page lands in FRONT of the paint, keeps the vector
