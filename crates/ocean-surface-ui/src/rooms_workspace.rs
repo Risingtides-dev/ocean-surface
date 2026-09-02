@@ -6348,21 +6348,61 @@ mod tests {
             }
         };
 
-        let rest = &view[at..];
-        let body = &rest[tag.len()..];
-        let closes_at = body.find("/>");
-        // Any other component mount opening before this one closes means the
-        // window has left the rail it names. That is what a rail which stopped
-        // self-closing looks like from in here.
-        let next_mount = body.find("<crate::");
-        match (closes_at, next_mount) {
-            (Some(end), next) if next.is_none_or(|n| end < n) => Ok(&body[..end]),
-            _ => Err(format!(
-                "{tag} does not self-close before the next component mount. A \
-                 window ending at the first `/>` would read that NEIGHBOUR's \
-                 `writes_allowed=` and report it as this rail's. Re-anchor \
-                 this guard to the rail's own closing tag before landing \
-                 markup that gives it children."
+        // Bound the region at the end of THIS rail's opening tag, and ask
+        // whether that tag self-closes — never whether some `/>` exists ahead.
+        //
+        // An earlier revision took the first `/>` unless a `<crate::` mount
+        // came first. Codex caught what that misses: give the rail a child and
+        // make it a self-closing HTML element — `<input … />` — and the first
+        // `/>` is the CHILD's while the next mount is absent or later, so the
+        // window is returned as if it were the rail's. If that child names the
+        // expected gate anywhere (a `disabled=` reading it, say) while the
+        // rail's own `writes_allowed` is hardcoded, every assertion downstream
+        // still passes: the same silent green this guard exists to end.
+        //
+        // A Leptos attribute value is a Rust expression and can hold `>` — a
+        // closure's `->`, a turbofish, a comparison — so the scan tracks
+        // bracket depth and string literals rather than taking the first `>`.
+        let body = &view[at + tag.len()..];
+        let mut depth = 0i32;
+        let mut in_str = false;
+        let mut escaped = false;
+        let mut end = None;
+        for (i, c) in body.char_indices() {
+            if in_str {
+                match c {
+                    '\\' if !escaped => escaped = true,
+                    '"' if !escaped => in_str = false,
+                    _ => escaped = false,
+                }
+                continue;
+            }
+            match c {
+                '"' => in_str = true,
+                '(' | '{' | '[' => depth += 1,
+                ')' | '}' | ']' => depth -= 1,
+                '>' if depth == 0 => {
+                    end = Some(i);
+                    break;
+                }
+                _ => {}
+            }
+            if depth < 0 {
+                break;
+            }
+        }
+        let Some(end) = end else {
+            return Err(format!("{tag}'s opening tag does not close in this file"));
+        };
+
+        match body[..end].trim_end().strip_suffix('/') {
+            Some(attrs) => Ok(attrs),
+            None => Err(format!(
+                "{tag} does not self-close — its opening tag ends `>`, so it \
+                 has children. A window bounded by a `/>` ahead would run \
+                 into a DESCENDANT's or a NEIGHBOUR's `writes_allowed=` and \
+                 report it as this rail's. Re-anchor this guard to the rail's \
+                 own closing tag before landing markup that gives it children."
             )),
         }
     }
@@ -6444,6 +6484,83 @@ mod tests {
                 "{tag} must still be anchorable in the live view"
             );
         }
+    }
+
+    /// The case a `<crate::`-lookahead bound misses, found by Codex on #199.
+    ///
+    /// A rail with children whose FIRST child is a self-closing HTML element
+    /// puts a `/>` ahead of any neighbouring mount. Bounding on "the first
+    /// `/>` unless a mount comes first" therefore returns `Ok` on a window
+    /// that is not the rail's — and if the child names the wanted gate while
+    /// the rail's own is hardcoded, all three assertions pass. Asking whether
+    /// the rail's OWN opening tag self-closes is what actually decides it.
+    #[test]
+    fn a_self_closing_child_does_not_pass_for_the_rail_s_own_close() {
+        let local = ["local_store", "_write_gate"].concat();
+        let peer = ["access_allows", "_writes"].concat();
+        let gamma = ["<crate::fixture_gamma", "::RailGamma"].concat();
+        let markup = format!(
+            "\
+                {gamma}
+                    rooms=rooms
+                    writes_allowed=Signal::derive(move || true)
+                >
+                    <input
+                        class=\"lead\"
+                        disabled=Signal::derive(move || !{local}(access))
+                    />
+                </{gamma}>",
+        );
+
+        // The bound this replaced: first `/>` wins unless `<crate::` precedes
+        // it. Here neither guard fires — the `/>` is the CHILD's and there is
+        // no next mount at all — so the window came back as the rail's.
+        let at = markup.find(&gamma).expect("fixture mounts gamma");
+        let body = &markup[at + gamma.len()..];
+        let naive_end = body.find("/>").expect("the child self-closes");
+        assert!(
+            body.find("<crate::").is_none_or(|n| naive_end < n),
+            "the old bound accepted this window",
+        );
+        let naive = &body[..naive_end];
+        // And every assertion the guard makes passes over it, while the rail's
+        // own gate ignores access entirely.
+        assert!(naive.contains("writes_allowed="));
+        assert!(
+            naive.contains(local.as_str()),
+            "the wanted gate is satisfied by the CHILD: the silent green",
+        );
+        assert!(!naive.contains(peer.as_str()));
+
+        // Anchored on the rail's own opening tag: refused, and it says why.
+        let why = rail_attribute_window(&markup, &gamma)
+            .expect_err("a rail with children must be refused");
+        assert!(why.contains(&gamma) && why.contains("does not self-close"));
+    }
+
+    /// The opening tag's end is found by bracket depth, not by the first `>`,
+    /// because a Leptos attribute value is a Rust expression that can hold one.
+    #[test]
+    fn an_attribute_expression_holding_an_angle_bracket_does_not_end_the_tag() {
+        let local = ["local_store", "_write_gate"].concat();
+        let delta = ["<crate::fixture_delta", "::RailDelta"].concat();
+        let markup = format!(
+            "\
+                {delta}
+                    rooms=rooms
+                    writes_allowed=Signal::derive(move || -> bool {{
+                        {local}(rooms.access.get().as_ref())
+                    }})
+                    title=\"a > b\"
+                />",
+        );
+        let window = rail_attribute_window(&markup, &delta)
+            .expect("a closure's `->` and a quoted `>` must not end the tag");
+        assert!(
+            window.contains(local.as_str()) && window.contains("title="),
+            "the window must reach the whole attribute list, not stop at the \
+             first `>` inside an expression or a string: {window:?}",
+        );
     }
 
     /// Which gate a rail takes is a `Signal::derive` inside the view, so no

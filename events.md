@@ -6195,3 +6195,41 @@ not asserting on nothing. Re-running the same source mutation against the fixed
 guard reds it with the rail named in the message. Tree restored after each run.
 Gate green: all seven frozen commands, 1314 tests across 14 binaries, 0 failed.
 _________________________________________________________________________________ 22:25 cloud/surface-rail-gate-guard
+
+time:      [00:09] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-rail-gate-guard]
+type:      fix
+area:      frontend
+
+Review follow-up, and the finding lands on the fix rather than on the original
+defect. Codex read the anchored rail-gate window and reported P2: bounding at "the
+first `/>` unless a `<crate::` mount comes first" still accepts a window that is not
+the rail's. Give a rail children and make the FIRST child a self-closing HTML element
+— `<input … />` — and that `/>` arrives before any neighbouring mount, so the
+lookahead never fires and the window comes back as if it were the rail's own. If the
+child names the wanted gate anywhere, a `disabled=` reading it for instance, while
+the rail's `writes_allowed` is hardcoded, all three assertions pass. The same silent
+green, one layer further in. The lookahead was answering the wrong question: whether
+a neighbour interrupts, rather than whether this rail closes.
+
+It now asks the rail's own opening tag. Scan forward to the first `>` at bracket
+depth zero, outside string literals, and require the character before it to be `/`.
+A Leptos attribute value is a Rust expression that can hold a `>` — a closure's `->`,
+a turbofish, a comparison, a quoted one — so depth and quote tracking are what make
+"the end of the opening tag" a real position rather than a guess; that is pinned by
+its own test with a `-> bool` closure and a `title="a > b"` in the same mount.
+
+Measured on the real tree, both directions, which is the part worth keeping. The
+mutation is now Codex's exact shape: `RoomSummary` given a `children` prop, its gate
+replaced with a hardcoded `Signal::derive(move || true)`, and its first child an
+`<input />` whose `disabled=` names `local_store_write_gate`. Against the shipped
+bound the guard reds and names the rail. Against the previous revision's bound —
+spliced back in with the mutation still in place — `each_rail_takes_the_gate_its_
+write_destination_earns` reports ok. A rail that writes regardless of the room's
+access projection, and the gate that rules on exactly that says nothing. Tree
+restored after each run. The fixture keeps both shapes permanently: the neighbour
+read and the self-closing-child read, each with the wrong answer asserted so the
+window cannot quietly go back to accepting either. Gate green: all seven frozen
+commands, 1316 tests across 14 binaries, 0 failed.
+_________________________________________________________________________________ 00:09 cloud/surface-rail-gate-guard
