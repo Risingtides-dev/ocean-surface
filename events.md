@@ -7259,3 +7259,61 @@ person reaching their OWN daemons; cross-person rooms still federate through
 Bedrock and no daemon accepts another person's connection. Gates green: all seven
 frozen commands plus `cargo test -p ocean-surface-proxy`, 78 passed.
 _________________________________________________________________________________ 07:47 cloud/surface-device-profiles
+
+time:      [08:36] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-device-profiles]
+type:      review
+area:      backend
+
+Five findings from the Codex review on #209, all verified against the code before
+being fixed, and two of them change the contract this slice shipped an hour ago.
+
+Recording a selection only affected FUTURE requests, so a tab whose SSE tail was
+already connected kept receiving the old machine's events while its turns and
+decisions went to the new one — two machines blended into one transcript, which is
+what the session contract exists to forbid. Selecting now broadcasts the selections
+row it changed, and every proxied stream opened through that row ends; the client
+reconnects and lands on the new machine. The broadcast carries the ROW and never a
+device name, because two people can both be sitting on a machine called "studio"
+and only one of them switched, and a lagged receiver keeps streaming rather than
+guessing it missed its own switch — ending a live transcript on a suspicion is
+worse than a stream that outlives one switch. Both halves are pinned: a held-open
+stub daemon whose proxied body must end within a timeout (mutation-checked by
+returning None from the resolver, which reds it), and a unit test that one row's
+change leaves another row's future pending.
+
+The selection was keyed on the PERSON, not the browser. This proxy derives a
+session token from username and password so an installed PWA stays signed in
+across deploys — which means every browser one person owns presents the same
+token, and picking a machine on the phone re-pointed the desktop's next request.
+The key is now a digest of the session token AND an opaque per-browser id in a new
+HttpOnly `ocean_device` cookie, minted when a browser first lists its devices.
+Neither half alone would do: the token is shared across browsers, and a cookie is
+a thing a browser sends, so an id alone would be a bearer key to somebody else's
+routing. The auth cookie was left exactly as it was, because it is load-bearing
+for staying signed in.
+
+`ops/add-device.sh` accepted a public host that merely LOOKED like a tailnet one:
+`100.64.0.1.example.com` matched the `100.` glob and `127.example.com` matched
+`127.`, so both walked past the --allow-public acknowledgement standing in front
+of a daemon with no auth. A prefix match is not an address check; the host is now
+parsed and classified as a literal address by range, with `*.ts.net` requiring a
+label of its own. The same script also wrote names the proxy would then refuse — a
+whitespace-only name trims to empty at startup, and `mini ` evades a raw duplicate
+check to collide after trimming — either way leaving a surface that will not boot
+after the restart the script tells you to run. Names are now normalized the way
+the proxy normalizes them, before anything is written.
+
+Last, concurrent selections raced their file writes: the snapshot was taken under
+the lock and persisted outside it through a temp file named only for the pid, so
+two writers could rename over each other and leave the file disagreeing with
+memory until the next restart, at which point somebody silently gets a machine
+they did not pick. The lock now spans the whole read-modify-write and the rename,
+temp names carry a per-process counter, and rows gained a timestamp so the file
+can be pruned by age and cap — one row per (person, browser), and a private window
+is a new browser. Proxy tests 78 -> 84. Gates green including `cargo clippy -p
+ocean-surface-proxy --all-targets -- -D warnings`, which is a CI lane the seven
+frozen gates do not cover and which caught three needless borrows this slice
+shipped with.
+_________________________________________________________________________________ 08:36 cloud/surface-device-profiles
