@@ -53,6 +53,22 @@
 //! | the `ReachedBeginning` arm replaced with `().into_any()`               | RED here, alone — the affordance is back to two states wearing three states' clothes |
 //! | the `<For>`'s list back to `partition_thread_messages(…, 0).roots`     | RED here (two of this file's tests), and `room_load_older_affordance.rs`, whose position anchor names the same list — the orphan disappears again |
 //! | the empty state's list back to `partition_thread_messages(…, 0).roots` | RED here, alone — "No messages yet" over visible rows |
+//! ## The Codex round added
+//!
+//! Codex review on #197 found the orphan filter was O(n²): `reply_is_orphaned`
+//! scanned the whole transcript through `thread_root_for`, once per reply, on a
+//! list rebuilt per transcript update and read twice per build. In the rooms
+//! this slice exists for — multi-thousand-row transcripts paged backward
+//! several times — one SSE append could have cost tens of millions of
+//! comparisons on the UI thread. The roots are indexed once now, and the note's
+//! per-row check is O(1). Three more mutations, run the same way:
+//!
+//! | mutation                                                              | result |
+//! |------------------------------------------------------------------------|--------|
+//! | the list drops the index and re-scans per reply                         | RED here, alone |
+//! | the note's row check back to the scanning predicate                     | RED here, alone |
+//! | `loaded_root_seqs` admits replies as roots                              | RED in TWO `rooms_workspace.rs` unit tests, not here — the index's rule is a pure function and its own tests own it, which is the right place for it |
+//!
 //! | the orphan note's block deleted                                        | RED here — but so is the wasm lane: `orphaned_reply_note` loses its only non-test caller and `cargo clippy --target wasm32-unknown-unknown -- -D warnings` fails with `unused variable: orphan_row` and `function orphaned_reply_note is never used`. Kept for the message, not the coverage |
 
 mod common;
@@ -159,6 +175,13 @@ fn the_older_edge_renders_all_three_of_its_states() {
 fn an_orphaned_reply_reaches_the_main_list_and_says_why() {
     let workspace = without_whitespace(&view_source("rooms_workspace.rs"));
 
+    assert!(
+        workspace.contains("letroots=loaded_root_seqs(transcript);"),
+        "the list must INDEX the loaded roots once. Asking `reply_is_orphaned` \
+         per reply against the raw transcript scans it every time, which is \
+         O(n²) on a list rebuilt per transcript update and read twice per \
+         build — in exactly the multi-thousand-row rooms this slice exists for",
+    );
     assert_eq!(
         workspace
             .matches("main_transcript_rows(&rooms.transcript.get())")
@@ -177,10 +200,13 @@ fn an_orphaned_reply_reaches_the_main_list_and_says_why() {
     );
 
     assert!(
-        workspace.contains("reply_is_orphaned(&transcript,&orphan_row).then("),
-        "the row must ask whether it is an orphan, reactively: the press that \
-         brings the root in makes this an ordinary reply again, at which point \
-         the row leaves the list entirely",
+        workspace.contains("main_list_row_is_orphan(&orphan_row).then("),
+        "the row must ask whether it is an orphan before it annotates itself. \
+         It asks the O(1) form, not the scanning one: within the main list a \
+         reply is there ONLY because its root is missing, so carrying a parent \
+         at all is the whole test. The scanning `reply_is_orphaned` once per \
+         rendered row is the same O(n²) the list build stopped paying, and \
+         Codex caught it on #197",
     );
     assert!(
         workspace.contains(

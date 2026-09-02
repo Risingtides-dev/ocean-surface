@@ -6107,3 +6107,47 @@ and the dispatcher's refusal.
 Gates: all seven frozen commands green, 1335 unit tests plus guards across 16
 binaries, ledger check PASS.
 _________________________________________________________________________________ 00:08 cloud/rooms-workspace-root-surface
+
+time:      [00:29] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/rooms-load-older]
+type:      review
+area:      frontend
+
+Codex reviewed #197 at the stacked head, so its four findings span three slices.
+Exactly one is this slice's and unaddressed; it is fixed here.
+
+The orphan filter was O(n²). `main_transcript_rows` asked `reply_is_orphaned` per
+reply and that helper scanned the whole transcript through `thread_root_for`, on a
+list rebuilt on every transcript update and read twice per build — once by the
+`<For>`, once by the empty-state check. The note's per-row check was the same shape
+again inside the row closure. In the rooms this slice exists FOR — multi-thousand-row
+transcripts that have been paged backward several times — one SSE append could have
+cost tens of millions of comparisons on the UI thread. The feature that makes long
+rooms readable would have been the thing that froze them.
+
+`loaded_root_seqs` indexes the roots once and `reply_is_orphaned` takes that set
+rather than the transcript, so the list build is one pass plus a hash lookup per
+reply. The note's check is `main_list_row_is_orphan`, which is O(1) because within
+the main list a reply is present ONLY when its root is missing — carrying a parent
+at all is the whole test. That is true by construction, and a construction can
+change, so `every_row_the_main_list_paints_agrees_with_the_scanning_predicate`
+compares the cheap check against the real rule on every row of a fixture carrying
+all four shapes. `the_root_index_holds_roots_and_never_replies` pins the index to
+`thread_root_for`'s rule, because admitting a reply's seq as a root would stop a
+reply-to-a-reply reading as an orphan and vanish it from both the main list and the
+thread pane — the original defect restored by an optimisation.
+
+The other three findings are not this slice's, and are not being pulled into it. The
+concurrent-PATCH P1 and the workspace-draft reset are #196's; the P1 is already
+fixed by 26b0d95, which this branch carries through the stack. The ownership-refresh
+P2 is #195's and was fixed in f448df9 — Codex was reading 22ccbb3, which predates
+both. Widening this PR to re-fix a neighbour's code in its own slice would make the
+stack harder to land, not easier.
+
+Three mutations run for real. Two red this file alone. The third — the index
+admitting replies as roots — reds two unit tests and NOT the guard, which is the
+right place for it: the index's rule is a pure function and its own tests own it.
+Gate green: all seven frozen commands, host suite 1276 unit tests plus guards
+across 17 binaries.
+_________________________________________________________________________________ 00:29 cloud/rooms-load-older

@@ -9,6 +9,8 @@
 //! web+Tauri collaboration surface in [`crate::app`]; the legacy
 //! RoomStage/RoomsPanel components in rooms.rs are deleted.
 
+use std::collections::HashSet;
+
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
@@ -1047,11 +1049,16 @@ fn partition_thread_messages(transcript: &[RoomMessage], root_seq: u64) -> Threa
 /// out of the hydration window, or a parent that is itself a reply — leaves the
 /// thread pane with nothing to open on, so both must reach the main list rather
 /// than one of them.
-fn reply_is_orphaned(transcript: &[RoomMessage], message: &RoomMessage) -> bool {
-    let Some(parent) = message.thread_parent_seq else {
-        return false;
-    };
-    thread_root_for(transcript, Some(parent)).is_none()
+///
+/// Takes the roots already INDEXED rather than the transcript, so asking it per
+/// row is a hash lookup instead of a scan. It used to take `&[RoomMessage]` and
+/// call `thread_root_for`, which made the one caller that asks per row O(n²);
+/// see [`main_transcript_rows`].
+fn reply_is_orphaned(loaded_roots: &HashSet<u64>, message: &RoomMessage) -> bool {
+    match message.thread_parent_seq {
+        None => false,
+        Some(parent) => !loaded_roots.contains(&parent),
+    }
 }
 
 /// The rows the MAIN transcript list paints: every non-reply, plus every reply
@@ -1070,14 +1077,50 @@ fn reply_is_orphaned(transcript: &[RoomMessage], message: &RoomMessage) -> bool 
 /// walks it once and keeps what it keeps. An orphan therefore lands at its own
 /// position in time rather than at the top — it is a real message that really
 /// was sent then, not an annotation on the window's edge.
+///
+/// The loaded roots are indexed ONCE rather than re-scanned per reply. The
+/// straightforward spelling — `reply_is_orphaned` per row, which walks the whole
+/// transcript through `thread_root_for` — is O(n²), and this list is rebuilt on
+/// every transcript update and read twice per build. Codex caught it on #197:
+/// in the rooms this slice exists for, a multi-thousand-row transcript that has
+/// been paged backward several times, one SSE append would have cost tens of
+/// millions of comparisons on the UI thread. The set makes it one pass to build
+/// and one hash lookup per reply.
 fn main_transcript_rows(transcript: &[RoomMessage]) -> Vec<RoomMessage> {
+    let roots = loaded_root_seqs(transcript);
     transcript
         .iter()
-        .filter(|message| {
-            message.thread_parent_seq.is_none() || reply_is_orphaned(transcript, message)
-        })
+        .filter(|message| message.thread_parent_seq.is_none() || reply_is_orphaned(&roots, message))
         .cloned()
         .collect()
+}
+
+/// Every `seq` in `transcript` that a thread could open on: a row present AND
+/// carrying no `thread_parent_seq` of its own. Exactly [`thread_root_for`]'s
+/// rule, hoisted out of the per-row loop, so a reply-to-a-reply stays orphaned
+/// here for the same reason it is there.
+fn loaded_root_seqs(transcript: &[RoomMessage]) -> HashSet<u64> {
+    transcript
+        .iter()
+        .filter(|message| message.thread_parent_seq.is_none())
+        .map(|message| message.seq)
+        .collect()
+}
+
+/// Whether a row the MAIN list is already painting is there because its root is
+/// missing — in O(1), for the note the row renders.
+///
+/// `main_transcript_rows` admits a reply only when no loaded root answers its
+/// `thread_parent_seq`, so WITHIN that list carrying a parent at all is exactly
+/// what being an orphan means. The per-row alternative is `reply_is_orphaned`,
+/// which scans the transcript, and calling it once per rendered row is the same
+/// O(n²) the list build just stopped paying.
+///
+/// The invariant this leans on is pinned by
+/// `every_row_the_main_list_paints_agrees_with_the_scanning_predicate`, because
+/// it is true by construction and a construction can change.
+fn main_list_row_is_orphan(message: &RoomMessage) -> bool {
+    message.thread_parent_seq.is_some()
 }
 
 /// What an orphaned reply's note says, which turns on whether the root is
@@ -3670,8 +3713,7 @@ pub fn RoomsWorkspace(
                                                             )}
                                                         </div>
                                                         {move || {
-                                                            let transcript = rooms.transcript.get();
-                                                            reply_is_orphaned(&transcript, &orphan_row).then(|| {
+                                                            main_list_row_is_orphan(&orphan_row).then(|| {
                                                                 view! {
                                                                     <p class="rooms-workspace__msg-orphan" role="note">
                                                                         {orphaned_reply_note(rooms.older_history())}
@@ -7577,10 +7619,11 @@ mod tests {
             "the orphan joins the main list at its own position in time, and \
              the reply whose root IS loaded stays in its thread where it belongs",
         );
-        assert!(reply_is_orphaned(&hydrated, &hydrated[1]));
-        assert!(!reply_is_orphaned(&hydrated, &hydrated[3]));
+        let roots = loaded_root_seqs(&hydrated);
+        assert!(reply_is_orphaned(&roots, &hydrated[1]));
+        assert!(!reply_is_orphaned(&roots, &hydrated[3]));
         assert!(
-            !reply_is_orphaned(&hydrated, &hydrated[0]),
+            !reply_is_orphaned(&roots, &hydrated[0]),
             "a row that is not a reply at all is never orphaned",
         );
     }
@@ -7594,7 +7637,7 @@ mod tests {
         let without_root = vec![reply.clone()];
         let with_root = vec![test_msg(800, "the root", None), reply.clone()];
 
-        assert!(reply_is_orphaned(&without_root, &reply));
+        assert!(reply_is_orphaned(&loaded_root_seqs(&without_root), &reply));
         assert_eq!(
             main_transcript_rows(&without_root)
                 .iter()
@@ -7603,7 +7646,7 @@ mod tests {
             vec![2500],
         );
 
-        assert!(!reply_is_orphaned(&with_root, &reply));
+        assert!(!reply_is_orphaned(&loaded_root_seqs(&with_root), &reply));
         assert_eq!(
             main_transcript_rows(&with_root)
                 .iter()
@@ -7628,8 +7671,9 @@ mod tests {
             test_msg(12, "reply to the reply", Some(11)),
         ];
 
-        assert!(!reply_is_orphaned(&transcript, &transcript[1]));
-        assert!(reply_is_orphaned(&transcript, &transcript[2]));
+        let roots = loaded_root_seqs(&transcript);
+        assert!(!reply_is_orphaned(&roots, &transcript[1]));
+        assert!(reply_is_orphaned(&roots, &transcript[2]));
         assert_eq!(
             main_transcript_rows(&transcript)
                 .iter()
@@ -7659,6 +7703,66 @@ mod tests {
             "no orphans, no difference — the list this replaced is the same \
              list whenever every root is on screen",
         );
+    }
+
+    /// The O(1) row check and the scanning rule must agree on EVERY row the main
+    /// list paints — that equivalence is what makes the cheap one safe.
+    ///
+    /// `main_list_row_is_orphan` is true by construction: the list admits a
+    /// reply only when no loaded root answers its parent, so within the list
+    /// "carries a parent" and "is an orphan" are the same thing. A construction
+    /// can change, and if it ever admits a reply for some other reason the
+    /// cheap check silently starts annotating rows that are not orphans. This
+    /// test is what makes that change loud.
+    ///
+    /// The fixture deliberately mixes all four shapes: a plain root, a reply
+    /// whose root is loaded (never in the list at all), an orphan, and a
+    /// reply-to-a-reply (an orphan by `thread_root_for`'s rule).
+    #[test]
+    fn every_row_the_main_list_paints_agrees_with_the_scanning_predicate() {
+        let transcript = vec![
+            test_msg(800, "root, loaded", None),
+            test_msg(2400, "root, loaded", None),
+            test_msg(2401, "reply to a loaded root", Some(2400)),
+            test_msg(2500, "reply to a root nobody loaded", Some(42)),
+            test_msg(2600, "reply to the reply", Some(2401)),
+        ];
+        let roots = loaded_root_seqs(&transcript);
+
+        for row in main_transcript_rows(&transcript) {
+            assert_eq!(
+                main_list_row_is_orphan(&row),
+                reply_is_orphaned(&roots, &row),
+                "row {} disagrees: the O(1) check the view uses and the rule \
+                 the list is built from must answer identically for every row \
+                 the list contains",
+                row.seq,
+            );
+        }
+    }
+
+    /// The index is exactly [`thread_root_for`]'s rule, hoisted: a row present
+    /// AND carrying no parent of its own. A reply's `seq` must never enter it,
+    /// or a reply-to-a-reply stops reading as an orphan and vanishes from both
+    /// the main list and the thread pane — the original defect, restored by an
+    /// optimisation.
+    #[test]
+    fn the_root_index_holds_roots_and_never_replies() {
+        let transcript = vec![
+            test_msg(10, "root", None),
+            test_msg(11, "reply", Some(10)),
+            test_msg(12, "reply to the reply", Some(11)),
+        ];
+
+        let roots = loaded_root_seqs(&transcript);
+        assert!(roots.contains(&10));
+        assert!(
+            !roots.contains(&11),
+            "11 is a reply: `thread_root_for` would not open a pane on it, so \
+             it is not a root here either",
+        );
+        assert!(!roots.contains(&12));
+        assert_eq!(roots.len(), 1);
     }
 
     /// What the note promises depends on whether the root is reachable. While
