@@ -5802,3 +5802,42 @@ reds only the guard with the wasm32 clippy lane still green. Tree restored after
 each. Gate green: all seven frozen commands, host suite 1252 unit tests plus 61
 guards across 14 binaries.
 _________________________________________________________________________________ 20:39 loop/surface-load-older-affordance
+
+time:      [23:15] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-guards-ordering-comment]
+type:      infra
+area:      infra
+
+The `guards` job in .github/workflows/ci.yml justified the order of its four steps
+by a side effect that #184 deleted. The comment above "The side panel links every
+stylesheet the build copies" said the deploy guard below it "invokes the auto-deploy
+script against this checkout, and its promote path rewrites extension/dist" — true
+when it was written, because four of the five child invocations in
+scripts/surface-auto-deploy.test.mjs passed OCEAN_SURFACE_STATE_DIR without
+OCEAN_SURFACE_REPO and the rail then defaulted to the checkout the script lives in.
+#184 pointed all five at a repo stub under the tmpdir the test already makes and
+added a closing assertion that fingerprints dist/ and extension/dist either side of
+the run and requires them unchanged; its own message said the ci.yml comment still
+justified a step order by this side effect and left that repair for a change that
+could read the landed fix. Re-derived rather than taken on trust: all five
+invocations carry OCEAN_SURFACE_REPO: repoStub at lines 53, 64, 75, 86 and 99, the
+buildTrees() deepEqual sits at line 143, and the guard is green here at 24
+assertions. The comment now records what the side effect was, that the order never
+gated a verdict — this step reads no CSS in either state and calls the bundle
+unbuilt either way, so what the order bought was an honest message rather than a
+correct one — and that #184 removed the side effect instead of the order, leaving
+the four steps reorderable. It names the assertion as its own pin, and that pin was
+measured: dropping OCEAN_SURFACE_REPO from the first --promote invocation reds
+"Deployment promotion stays atomic" with `running this guard must leave the
+checkout's dist/ and extension/dist untouched`, actual against an expected of
+[null, null], exit 1; restored and green again after. One stale sibling claim is
+deliberately left alone as out of this slice's scope: scripts/extension-inventory.test.mjs
+still says a CSS-less bundle "was written by the auto-deploy script's
+rebuild_extension instead — which scripts/surface-auto-deploy.test.mjs triggers
+against this very checkout", which #184 made false in the same way. Comment-only
+change; the seven frozen gates were run on the final tree regardless and are green:
+fmt, both clippy lanes at `-D warnings`, both checks, the wasm32 --no-run build of
+all 14 test binaries, and the host suite at 1313 passing across those 14 — 1252 unit
+tests plus 61 guards, 0 failed.
+_________________________________________________________________________________ 23:15 cloud/surface-guards-ordering-comment
