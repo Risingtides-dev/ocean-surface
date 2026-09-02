@@ -512,6 +512,39 @@ pub async fn notify(title: &str, body: &str) {
     let _ = Notification::new_with_options(title, &options);
 }
 
+/// Ask for notification permission NOW, from a caller that has transient user
+/// activation, and drop the answer.
+///
+/// [`notify`] and [`notify_with_focus`] both request permission on their first
+/// call, and for a fresh browser user that request is refused: browsers gate
+/// `Notification.requestPermission()` on a user gesture, and both of those
+/// functions are entered from an arriving event — a finished turn, an SSE
+/// frame — never from a click. The permission then stays `default` forever and
+/// no notification is ever shown, silently.
+///
+/// This is the gesture-side half. Call it synchronously from inside a click
+/// handler, before any `await` or `spawn_local`, so the activation is still
+/// live. A permission that is already granted or denied resolves without
+/// prompting, so calling it on every click does not nag.
+///
+/// No-op where the host exposes no `window.Notification`. On the Tauri shell
+/// the plugin's polyfill answers from the OS, where activation is not a
+/// concern; this call is harmless there.
+pub fn prime_notification_permission() {
+    let Some(win) = web_sys::window() else { return };
+    if !Reflect::has(&win, &JsValue::from_str("Notification")).unwrap_or(false) {
+        return;
+    }
+    if Notification::permission() != NotificationPermission::Default {
+        return;
+    }
+    // The promise is deliberately dropped: the answer is read back through
+    // `Notification::permission()` when a notification is actually shown, and
+    // awaiting here would need an async caller — which is exactly the thing
+    // that loses the activation.
+    let _ = Notification::request_permission();
+}
+
 /// Show a desktop notification whose click brings the surface forward.
 ///
 /// Same permission handling and same silent degradation as [`notify`] — this

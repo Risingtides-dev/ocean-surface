@@ -2113,6 +2113,29 @@ pub fn App() -> impl IntoView {
         });
     });
 
+    // Rooms visibility, mirrored onto the Rooms handle. The handle is
+    // App-scope, so `open_key` and the room-scoped tail both outlive the
+    // workspace unmounting when the reader switches to Direct messages —
+    // which means the tail cannot tell "this room is on screen" from "this
+    // room is still selected behind another surface". The mention notifier
+    // needs the first, and this is where the first is known.
+    Effect::new(move |_| {
+        rooms.workspace_visible.set(show_rooms.get());
+    });
+
+    // Reveal Rooms on request from below the reveal signals — a mention
+    // notification's click handler is the caller. Routed through here rather
+    // than by setting `show_rooms` at the call site, because revealing a peer
+    // surface has to close the competing ones (AGENTS.md 222-227) and this is
+    // where those live. Skips the initial 0 so a mount reveals nothing.
+    Effect::new(move |_| {
+        if rooms.reveal_request.get() == 0 {
+            return;
+        }
+        show_sessions.set(false);
+        show_rooms.set(true);
+    });
+
     // WKWebView occasionally loses the native responder-chain handoff for Copy.
     // Mirror the browser's selected text into the ClipboardEvent payload itself;
     // this path is synchronous, permission-free, and works in Tauri and the PWA.

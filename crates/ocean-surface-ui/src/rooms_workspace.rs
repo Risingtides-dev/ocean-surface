@@ -3118,6 +3118,22 @@ pub fn RoomsWorkspace(
                                                     aria-selected=move || selected().to_string()
                                                     tabindex=move || if is_tab_stop() { "0" } else { "-1" }
                                                     on:click=move |_| {
+                                                        // Ask for notification permission HERE, from
+                                                        // a real click. Browsers require transient
+                                                        // user activation for
+                                                        // `Notification.requestPermission()`, and an
+                                                        // arriving SSE frame is not that — so the
+                                                        // mention notifier's own request is refused
+                                                        // for a fresh browser user and the feature
+                                                        // could never turn on. Entering a room is
+                                                        // the honest moment to ask: it is a gesture,
+                                                        // and it is when being mentioned starts
+                                                        // being possible. Called synchronously,
+                                                        // before anything async, so the activation
+                                                        // is still live. Already-decided permissions
+                                                        // resolve without prompting, so this does
+                                                        // not nag on every open.
+                                                        crate::host::prime_notification_permission();
                                                         rooms.open_room(key2.clone());
                                                         show_left_rail.set(false);
                                                     }
