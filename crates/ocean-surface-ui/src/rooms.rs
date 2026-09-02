@@ -957,6 +957,13 @@ pub struct Rooms {
     /// because the section re-renders from the record the daemon returned and
     /// the binding is then visible on its own.
     pub workspace_update_status: RwSignal<Option<WorkspaceBindStatus>>,
+    /// A room key an `ocean://room/<key>` deep link asked the surface to open,
+    /// held until the Rooms workspace consumes it. It lives on this handle
+    /// rather than in the workspace because the deep-link listener is mounted
+    /// in `App`, above the workspace, and may fire before the workspace exists
+    /// at all — a cold launch from the OS. `None` once consumed; the workspace
+    /// clears it in the same pass that queues the open.
+    pub deep_link_room: RwSignal<Option<String>>,
 }
 
 /// What the surface can say about a workspace-binding PATCH, decided from the
@@ -1107,6 +1114,7 @@ impl Rooms {
             policy_update_error: RwSignal::new(None),
             workspace_update_in_flight: RwSignal::new(false),
             workspace_update_status: RwSignal::new(None),
+            deep_link_room: RwSignal::new(None),
         };
 
         // Identity is RESOLVED, not snapshotted. `Rooms::new` runs synchronously
@@ -1610,6 +1618,16 @@ impl Rooms {
     /// projection is the other half: it holds the composer shut and puts the
     /// reason on screen, so the audit view reads as frozen rather than as a
     /// live room that silently refuses every write.
+    /// Record an `ocean://room/<key>` deep link. Deliberately NOT an
+    /// [`Rooms::open_room`] call: the key came from an untrusted URL and may
+    /// name a room this daemon does not have, and at launch the room list is
+    /// usually still in flight, so opening from here would either race the
+    /// list or open nothing with nothing said. The Rooms workspace validates
+    /// it against the fetched list and reports an unknown key.
+    pub fn request_deep_link_room(&self, key: String) {
+        self.deep_link_room.set(Some(key));
+    }
+
     pub fn open_room(&self, key: String) {
         let base = self.base();
         let me = *self;

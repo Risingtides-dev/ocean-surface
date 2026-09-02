@@ -2074,21 +2074,36 @@ pub fn App() -> impl IntoView {
 
     // Deep links (ocean://...): the Tauri shell brings the window forward and
     // emits `deep-link` with the raw URL when the OS asks Ocean to open one.
-    // Parse it into an action — v1 understands only `ocean://session/<id>`,
-    // which reuses the exact path a SessionsPanel row click takes
-    // (`Daemon::switch_session`): clear state, set the id, hydrate the
-    // persisted transcript, reconnect the SSE tail. Title is fetched from the
-    // GET /v1/sessions/<id> snapshot inside switch_session, so an empty title
-    // here is overwritten once that returns. Unknown/unparseable URLs are
-    // logged and dropped. No-op off the Tauri shell; the effect reads nothing
-    // reactive, so it registers the listener once at mount (mirrors
-    // on_menu_command above).
+    // Parse it into an action. `ocean://session/<id>` reuses the exact path a
+    // SessionsPanel row click takes (`Daemon::switch_session`): clear state,
+    // set the id, hydrate the persisted transcript, reconnect the SSE tail.
+    // Title is fetched from the GET /v1/sessions/<id> snapshot inside
+    // switch_session, so an empty title here is overwritten once that returns.
+    //
+    // `ocean://room/<key>` reveals Rooms and hands the key to the workspace's
+    // one-shot restore path rather than opening the room from here. That path
+    // already waits for the fetched room list before it acts, which is what
+    // makes an EARLY link — one that arrives while the list is still in
+    // flight, the common case for a cold launch from the OS — open the room
+    // anyway instead of silently missing. Revealing Rooms and closing Sessions
+    // is all the reveal discipline this needs: the mutual-exclusion Effect
+    // above closes the Island for any sibling opened directly, which is the
+    // "future deep link" its comment names.
+    //
+    // Unknown/unparseable URLs are logged and dropped. No-op off the Tauri
+    // shell; the effect reads nothing reactive, so it registers the listener
+    // once at mount (mirrors on_menu_command above).
     let daemon_for_deeplink = daemon.clone();
     Effect::new(move |_| {
         let daemon = daemon_for_deeplink.clone();
         crate::host::on_deep_link(move |raw| match parse_deep_link(&raw) {
             Some(DeepLinkAction::SelectSession(id)) => {
                 daemon.switch_session(id, String::new());
+            }
+            Some(DeepLinkAction::OpenRoom(key)) => {
+                show_sessions.set(false);
+                show_rooms.set(true);
+                rooms.request_deep_link_room(key);
             }
             None => log::info!("ignoring unparseable ocean:// deep link: {raw}"),
         });
@@ -3323,28 +3338,33 @@ fn fmt_tokens(n: u64) -> String {
 /// What a parsed `ocean://` deep link asks the surface to do.
 ///
 /// The Tauri shell forwards each opened URL (host.rs `on_deep_link`); the
-/// surface decides what it means. v1 supports only session selection.
+/// surface decides what it means.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum DeepLinkAction {
     /// `ocean://session/<id>` — switch to the session with this id.
     SelectSession(String),
+    /// `ocean://room/<key>` — reveal Rooms and open this room.
+    OpenRoom(String),
 }
 
 /// Parse an `ocean://` deep-link URL into a [`DeepLinkAction`].
 ///
-/// The single supported shape is `ocean://session/<id>`, mapping to
-/// [`DeepLinkAction::SelectSession`]. The host must be exactly `session` and
-/// the path exactly one non-empty segment (the session id); a trailing query
+/// Two supported shapes, each host exactly one non-empty path segment:
+/// `ocean://session/<id>` → [`DeepLinkAction::SelectSession`], and
+/// `ocean://room/<key>` → [`DeepLinkAction::OpenRoom`]. A trailing query
 /// (`?…`) or fragment ("#…") is allowed and ignored. Anything else returns
 /// `None` so the caller logs and drops it — an unknown scheme/host/shape is
-/// not an error, just not something v1 acts on.
+/// not an error, just not something we act on.
 ///
 /// Pure on purpose: no WASM, fully unit-testable on the native target.
-/// Accept only the shape a daemon-minted session id actually takes: ASCII
-/// alphanumerics plus `-` and `_` (covers both UUIDs and slug ids), bounded in
-/// length. Deliberately strict — see the call site in [`parse_deep_link`] for
-/// why an untrusted id is rejected rather than sanitized.
-fn is_valid_session_id(id: &str) -> bool {
+/// Accept only the shape a daemon-minted id actually takes: ASCII
+/// alphanumerics plus `-` and `_`, bounded in length. That covers both a
+/// session id (uuid or slug) and a room key, which `rooms::slugify` builds
+/// from lowercase alphanumerics and `-` — a strictly narrower set, so one
+/// predicate serves both hosts without widening either. Deliberately strict —
+/// see the call site in [`parse_deep_link`] for why an untrusted id is
+/// rejected rather than sanitized.
+fn is_valid_deep_link_id(id: &str) -> bool {
     // A uuid is 36 chars; allow generous headroom for slug ids without
     // admitting an unbounded string from an untrusted source.
     const MAX: usize = 128;
@@ -3359,10 +3379,11 @@ pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
     // Drop any query ("?…") / fragment ("#…") so `ocean://session/abc?ref=x`
     // resolves to the same action as the bare URL.
     let path = raw.split(['?', '#']).next().unwrap_or("");
-    let rest = path.strip_prefix("ocean://session/")?;
-    // The id is everything after the prefix. Reject an empty id and a
-    // multi-segment path (`ocean://session/a/b`) — a session id is atomic.
-    if rest.is_empty() || rest.contains('/') {
+    let rest = path.strip_prefix("ocean://")?;
+    let (host, id) = rest.split_once('/')?;
+    // The id is everything after the host. Reject an empty id and a
+    // multi-segment path (`ocean://session/a/b`) — both ids are atomic.
+    if id.is_empty() || id.contains('/') {
         return None;
     }
     // TASK-80: charset-validate the id before it becomes an action.
@@ -3371,10 +3392,10 @@ pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
     // navigate to `ocean://…`, and macOS scheme prompts are per-browser and
     // commonly suppressed after the first accept. So this string arrives from
     // an untrusted source and then drives a real state change — foregrounding
-    // the app and switching the operator's active session, which clears state
-    // and reconnects the SSE tail.
+    // the app and switching the operator's active session, or revealing Rooms
+    // and opening one, either of which clears state and reconnects a tail.
     //
-    // A session id is a daemon-minted opaque token (uuid or slug), so the
+    // A session id and a room key are both daemon-minted opaque tokens, so the
     // legitimate charset is narrow. Anything outside it is either a mistake or
     // an attempt to smuggle structure — percent-encodings (`%2f`), dot
     // segments, control characters, whitespace — into a value that is later
@@ -3382,10 +3403,14 @@ pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
     // format sites; rejecting here as well means a malformed id never becomes
     // an action in the first place, rather than being safely encoded and then
     // failing downstream as a confusing 404.
-    if !is_valid_session_id(rest) {
+    if !is_valid_deep_link_id(id) {
         return None;
     }
-    Some(DeepLinkAction::SelectSession(rest.to_string()))
+    match host {
+        "session" => Some(DeepLinkAction::SelectSession(id.to_string())),
+        "room" => Some(DeepLinkAction::OpenRoom(id.to_string())),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -3999,6 +4024,68 @@ mod tests {
             Some(DeepLinkAction::SelectSession(
                 "11111111-2222-4333-8444-555555555555".into()
             ))
+        );
+    }
+
+    #[test]
+    fn deep_link_opens_a_room() {
+        assert_eq!(
+            parse_deep_link("ocean://room/team-blue"),
+            Some(DeepLinkAction::OpenRoom("team-blue".into()))
+        );
+        // `rooms::slugify` builds keys from lowercase alphanumerics and `-`,
+        // so every key it can mint parses.
+        for key in ["a", "room-1", "a-very-long-room-name-2", "abc123"] {
+            assert_eq!(
+                parse_deep_link(&format!("ocean://room/{key}")),
+                Some(DeepLinkAction::OpenRoom(key.into())),
+                "{key} is a shape slugify can mint and must open",
+            );
+        }
+    }
+
+    /// A room key reaches the surface from the same untrusted place a session
+    /// id does, and drives the same kind of state change — a reveal plus a
+    /// room open that resets the transcript and reconnects a tail. It gets the
+    /// same charset and length rule, not a looser one.
+    #[test]
+    fn deep_link_rejects_room_keys_outside_the_charset() {
+        for hostile in [
+            "ocean://room/..%2f..%2fhealth",
+            "ocean://room/..",
+            "ocean://room/%2e%2e",
+            "ocean://room/a b",
+            "ocean://room/a:b",
+            "ocean://room/a.b",
+            "ocean://room/a\nb",
+            "ocean://room/café",
+            "ocean://room/a/b",
+            "ocean://room/",
+            "ocean://room",
+        ] {
+            assert_eq!(parse_deep_link(hostile), None, "{hostile} must not parse");
+        }
+        let long = "a".repeat(129);
+        assert_eq!(parse_deep_link(&format!("ocean://room/{long}")), None);
+        let max = "a".repeat(128);
+        assert_eq!(
+            parse_deep_link(&format!("ocean://room/{max}")),
+            Some(DeepLinkAction::OpenRoom(max))
+        );
+    }
+
+    /// Adding a second host must not turn the host into a wildcard: only the
+    /// two named ones resolve, and `session` still means session.
+    #[test]
+    fn deep_link_hosts_stay_an_allowlist_of_two() {
+        assert_eq!(parse_deep_link("ocean://rooms/team-blue"), None);
+        assert_eq!(parse_deep_link("ocean://roo/team-blue"), None);
+        assert_eq!(parse_deep_link("ocean://Room/team-blue"), None);
+        assert_eq!(parse_deep_link("ocean://project/team-blue"), None);
+        assert_eq!(parse_deep_link("ocean:///team-blue"), None);
+        assert_eq!(
+            parse_deep_link("ocean://session/team-blue"),
+            Some(DeepLinkAction::SelectSession("team-blue".into()))
         );
     }
 

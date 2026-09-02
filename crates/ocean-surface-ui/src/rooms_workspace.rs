@@ -1683,6 +1683,96 @@ fn is_thread_open(selected_thread_root_seq: Option<u64>, root_seq: u64) -> bool 
     selected_thread_root_seq == Some(root_seq)
 }
 
+/// Where a pending room open came from.
+///
+/// The two sources are owed different things, which is the whole reason this
+/// is not a bare key. A persisted restore is a convenience: it loses every
+/// race with a user action and degrades silently when the room is gone,
+/// because nobody asked for it in this session. An `ocean://room/<key>` deep
+/// link is something a person just asked for out loud — from a message, a
+/// bookmark, another app — so it wins the race and, when the key names no
+/// room this daemon has, it has to say so rather than appear to do nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RoomOpenSource {
+    Persisted,
+    DeepLink,
+}
+
+/// A room open waiting on the fetched room list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingRoomOpen {
+    pub key: String,
+    pub source: RoomOpenSource,
+}
+
+impl PendingRoomOpen {
+    fn persisted(key: String) -> Self {
+        Self {
+            key,
+            source: RoomOpenSource::Persisted,
+        }
+    }
+
+    fn deep_link(key: String) -> Self {
+        Self {
+            key,
+            source: RoomOpenSource::DeepLink,
+        }
+    }
+}
+
+/// What a pending room open resolves to once the room list has loaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RoomOpenOutcome {
+    /// Open this key.
+    Open(String),
+    /// Do nothing, and say nothing.
+    Drop,
+    /// The key names no room in the fetched list, and someone asked out loud.
+    Unknown(String),
+}
+
+/// Resolve a pending room open against live daemon state. Pure so the whole
+/// policy — including the two asymmetries between the sources — is testable
+/// without a browser.
+pub(crate) fn room_open_outcome(
+    pending: &PendingRoomOpen,
+    open_key: Option<&str>,
+    key_is_known: bool,
+) -> RoomOpenOutcome {
+    match pending.source {
+        RoomOpenSource::Persisted => {
+            // A user action that opened any room first wins, and a room that
+            // is no longer in the list degrades to nothing.
+            if open_key.is_some() || !key_is_known {
+                RoomOpenOutcome::Drop
+            } else {
+                RoomOpenOutcome::Open(pending.key.clone())
+            }
+        }
+        RoomOpenSource::DeepLink => {
+            if open_key == Some(pending.key.as_str()) {
+                // Already showing exactly what was asked for; reopening would
+                // only throw away a hydrated transcript.
+                RoomOpenOutcome::Drop
+            } else if key_is_known {
+                RoomOpenOutcome::Open(pending.key.clone())
+            } else {
+                RoomOpenOutcome::Unknown(pending.key.clone())
+            }
+        }
+    }
+}
+
+/// Left-rail status for a deep link naming a room this daemon does not have.
+///
+/// The `rooms ` prefix is load-bearing: it is what routes the line to the
+/// room-list status lane rather than the open-transcript one, and in this case
+/// there is no open transcript to put it under.
+pub(crate) fn unknown_deep_link_room_status(key: &str) -> String {
+    format!("rooms — no room named {key} here")
+}
+
 // ── Component ─────────────────────────────────────────────────────────
 
 /// Full-screen Slack-style rooms workspace.
@@ -1819,8 +1909,11 @@ pub fn RoomsWorkspace(
     // still be in the fetched list, the thread root must be in the
     // transcript — a stale restore silently degrades, never errors.
     let restored_view = load_view_state();
-    let pending_room_restore =
-        RwSignal::new(restored_view.as_ref().map(|(room_key, _)| room_key.clone()));
+    let pending_room_restore: RwSignal<Option<PendingRoomOpen>> = RwSignal::new(
+        restored_view
+            .as_ref()
+            .map(|(room_key, _)| PendingRoomOpen::persisted(room_key.clone())),
+    );
     let pending_thread_restore = RwSignal::new(
         restored_view.and_then(|(room_key, thread)| thread.map(|root_seq| (room_key, root_seq))),
     );
@@ -2236,26 +2329,45 @@ pub fn RoomsWorkspace(
     });
 
     // ── View-state restore + persist ──────────────────────────────────
-    // Reopen the persisted room once the fetched list confirms it still
-    // exists. One-shot: a user action that opens any room first wins.
+    // An `ocean://room/<key>` deep link joins the SAME one-shot queue the
+    // persisted restore uses, and replaces whatever is sitting in it. That is
+    // what makes an early link work: the queue already waits for the fetched
+    // room list, so a link arriving during a cold launch — while the list is
+    // still in flight, which is the normal case when the OS starts the app to
+    // handle the URL — is held rather than lost. `request_deep_link_room`
+    // sets the signal; this is the only consumer, and it clears it in the
+    // same pass.
     Effect::new(move |_| {
-        let Some(want_key) = pending_room_restore.get() else {
+        let Some(key) = rooms.deep_link_room.get() else {
+            return;
+        };
+        rooms.deep_link_room.set(None);
+        pending_room_restore.set(Some(PendingRoomOpen::deep_link(key)));
+    });
+
+    // Resolve the queued open once the fetched list confirms what exists.
+    // One-shot either way: a persisted restore loses to a user action and
+    // degrades silently, a deep link wins and reports an unknown key.
+    Effect::new(move |_| {
+        let Some(pending) = pending_room_restore.get() else {
             return;
         };
         if !rooms.rooms_loaded.get() {
             return;
         }
         pending_room_restore.set(None);
-        if rooms.open_key.get_untracked().is_some() {
-            return;
-        }
-        if rooms
+        let open_key = rooms.open_key.get_untracked();
+        let key_is_known = rooms
             .list
             .get_untracked()
             .iter()
-            .any(|room| room.id == want_key)
-        {
-            rooms.open_room(want_key);
+            .any(|room| room.id == pending.key);
+        match room_open_outcome(&pending, open_key.as_deref(), key_is_known) {
+            RoomOpenOutcome::Open(key) => rooms.open_room(key),
+            RoomOpenOutcome::Drop => {}
+            RoomOpenOutcome::Unknown(key) => {
+                rooms.status.set(unknown_deep_link_room_status(&key));
+            }
         }
     });
 
@@ -8449,5 +8561,90 @@ mod tests {
     #[test]
     fn option_dom_id_is_prefix_stable() {
         assert_eq!(room_option_dom_id("r1"), "rooms-opt-r1");
+    }
+
+    // ── pending room open (persisted restore vs ocean://room/<key>) ──────
+
+    fn persisted(key: &str) -> PendingRoomOpen {
+        PendingRoomOpen::persisted(key.to_string())
+    }
+
+    fn deep_link(key: &str) -> PendingRoomOpen {
+        PendingRoomOpen::deep_link(key.to_string())
+    }
+
+    /// The persisted restore's behaviour is unchanged by the deep link
+    /// joining its queue: it loses to a user action and degrades silently.
+    #[test]
+    fn a_persisted_restore_loses_every_race_and_degrades_silently() {
+        assert_eq!(
+            room_open_outcome(&persisted("team-blue"), None, true),
+            RoomOpenOutcome::Open("team-blue".into()),
+        );
+        // A user opened something first — theirs wins.
+        assert_eq!(
+            room_open_outcome(&persisted("team-blue"), Some("other"), true),
+            RoomOpenOutcome::Drop,
+        );
+        // The room is gone from the list: nothing happens, and nothing is said.
+        assert_eq!(
+            room_open_outcome(&persisted("team-blue"), None, false),
+            RoomOpenOutcome::Drop,
+        );
+        // Even its own key already open is a race it does not need to win.
+        assert_eq!(
+            room_open_outcome(&persisted("team-blue"), Some("team-blue"), true),
+            RoomOpenOutcome::Drop,
+        );
+    }
+
+    /// A deep link is a person asking out loud, so it switches away from a
+    /// room already open — and when the key names nothing, it says so instead
+    /// of appearing to do nothing.
+    #[test]
+    fn a_deep_link_wins_the_race_and_reports_an_unknown_key() {
+        assert_eq!(
+            room_open_outcome(&deep_link("team-blue"), None, true),
+            RoomOpenOutcome::Open("team-blue".into()),
+        );
+        assert_eq!(
+            room_open_outcome(&deep_link("team-blue"), Some("other"), true),
+            RoomOpenOutcome::Open("team-blue".into()),
+        );
+        assert_eq!(
+            room_open_outcome(&deep_link("team-blue"), None, false),
+            RoomOpenOutcome::Unknown("team-blue".into()),
+        );
+        assert_eq!(
+            room_open_outcome(&deep_link("team-blue"), Some("other"), false),
+            RoomOpenOutcome::Unknown("team-blue".into()),
+        );
+    }
+
+    /// Re-opening the room already on screen would throw away a hydrated
+    /// transcript to show the same thing.
+    #[test]
+    fn a_deep_link_to_the_open_room_is_a_no_op() {
+        assert_eq!(
+            room_open_outcome(&deep_link("team-blue"), Some("team-blue"), true),
+            RoomOpenOutcome::Drop,
+        );
+    }
+
+    /// The unknown-key line must land in the room-list lane, because there is
+    /// no open transcript to put it under. `rooms ` is the prefix that lane
+    /// selects on (and the transcript lane deselects on).
+    #[test]
+    fn the_unknown_room_status_routes_to_the_room_list_lane() {
+        let status = unknown_deep_link_room_status("team-blue");
+        assert!(
+            status.starts_with("rooms "),
+            "{status} must start with the room-list lane's prefix",
+        );
+        assert!(!status.starts_with("create "));
+        assert!(
+            status.contains("team-blue"),
+            "{status} must name the key that failed, or it explains nothing",
+        );
     }
 }

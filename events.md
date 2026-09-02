@@ -6960,3 +6960,50 @@ it protects is not a fix. Gate green: all seven frozen commands, 1319 host
 assertions, plus ocean-tauri fmt, `clippy --all-targets -D warnings` and 36
 tests.
 _________________________________________________________________________________ 07:01 cloud/surface-desktop-parity
+time:      [05:09] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-desktop-parity-deeplink]
+type:      feature-request
+area:      frontend
+
+`ocean://room/<key>` now opens a room in the desktop app, alongside the
+`ocean://session/<id>` link that has worked since TASK-80. `parse_deep_link`
+stops stripping one hard-coded prefix and splits host from id instead, so the
+host became an allowlist of exactly two rather than a wildcard — a test says so,
+because `ocean://rooms/x` and `ocean://Room/x` failing is the whole difference
+between adding a shape and opening the parser. The id keeps the SAME charset and
+length rule the session id has: a room key is minted by `slugify` from lowercase
+alphanumerics and `-`, which is strictly narrower than the existing alnum plus
+`-`/`_`, so one predicate serves both hosts without widening either, and a deep
+link is attacker-triggerable either way. Routing does NOT open the room from
+`app.rs`. The key goes onto the `Rooms` handle and the workspace's one-shot
+restore queue consumes it, which is what makes an EARLY link work: that queue
+already waits for the fetched room list, and a cold launch — the OS starting the
+app expressly to handle the URL — is precisely when the list is still in flight,
+so opening from the listener would race it or open nothing while saying nothing.
+Joining the persisted restore's queue meant the queue had to learn where an entry
+came from, because the two sources are owed different things: a persisted restore
+is a convenience that loses to a user action and degrades silently when its room
+is gone, while a deep link is a person asking out loud, so it switches away from
+a room already open and, when the key names nothing this daemon has, puts a line
+in the room-list status lane instead of appearing to do nothing. That whole
+policy is one pure `room_open_outcome` with a table test over both sources times
+open/not-open times known/unknown, including the case worth its own name: a link
+to the room already on screen is a no-op, because reopening would throw away a
+hydrated transcript to show the same thing. The `rooms ` prefix on the unknown-key
+line is load-bearing and pinned — it is what selects the left-rail lane, and there
+is no open transcript to put the line under. Revealing Rooms and closing Sessions
+is all the reveal discipline needed: the mutual-exclusion Effect in `app.rs` closes
+the Island for any sibling opened directly, and its comment already named "a future
+deep link" as the case. Three files in `crates/ocean-tauri` decide whether a URL
+ever ARRIVES and none of them is compiled by this crate, so
+`tests/desktop_deep_link_registration.rs` scans all three — the `ocean` scheme in
+`tauri.conf.json`, `deep-link:default` on the `main` window, and the shell's
+`on_open_url` re-emitting each URL as `deep-link` while bringing the hidden window
+forward. Deleting any one leaves every gate green and the feature silently dead in
+a way indistinguishable from a mistyped link; both JSON guards were measured RED
+under their mutation (permission dropped, scheme renamed to `oceanx`) and the tree
+restored. macOS recipe in the PR; no live check ran here. Gate green: all seven
+frozen commands, 1329 host assertions across 14 binaries, plus ocean-tauri fmt,
+`clippy --all-targets -D warnings` and 34 tests.
+_________________________________________________________________________________ 05:09 cloud/surface-desktop-parity-deeplink
