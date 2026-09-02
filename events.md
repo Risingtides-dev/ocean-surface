@@ -5896,3 +5896,56 @@ restored. macOS recipe in the PR; no live check ran here. Gate green: all seven
 frozen commands, 1329 host assertions across 14 binaries, plus ocean-tauri fmt,
 `clippy --all-targets -D warnings` and 34 tests.
 _________________________________________________________________________________ 05:09 cloud/surface-desktop-parity-deeplink
+
+time:      [05:20] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-desktop-parity-mentions]
+type:      feature-request
+area:      frontend
+
+Being named in a room now reaches you when you are not looking at it. Nothing
+detected a mention before: `room_markdown` tokenised `@id` for HIGHLIGHTING
+only, and `host::notify` — which already reaches macOS through the notification
+plugin's `window.Notification` polyfill — had exactly one caller, the
+turn-complete effect. The predicate is deliberately not a second scan:
+`mentions_member` runs the SAME tokeniser the renderer runs, handed the reader's
+own ids rather than the roster, so it answers "was I named" by the rule that
+paints the highlight. One grammar, so what notifies is what shows — including
+the two consequences the table test states out loud, that an `@id` inside
+backticks is code and does not notify, and that `**@bob**` does not either,
+because the grammar is single-pass with no nesting and the bold arm swallows it.
+Both were measured, not assumed; the second corrected a test row written from
+intuition. WHEN a mention may notify is a separate pure function, and three of
+its four clauses exist to NOT notify: a join/leave/system row is not someone
+talking to you, your own message quoting your own id is the easiest way to build
+a notifier that pings you constantly, and a notification while you are looking
+straight at the message is noise. That last one is a disjunction, not a
+conjunction — focused at a DIFFERENT room still notifies — which the table
+states in its own test because reading it the other way is the natural mistake.
+The fourth clause is where it is asked, and no function can hold that: the
+transcript is written from three places, and only the room-scoped SSE tail is
+someone talking to you now. Hydration and #192's load-older backfill walk write
+it too, and a call moved or added there leaves every gate green while opening a
+long room replays months of old mentions as one notification per row — loud for
+the reader, silent for CI, which is the shape a scanner exists for.
+`tests/room_mention_notification.rs` slices the tail's `Message` arm out of
+`view_source` and requires the ask, the host call and the dedupe gate inside it,
+and requires the whole module to hold exactly one call. Three mutations run
+against the finished tree and all three RED: the `.filter(|_| appended)` dedupe
+dropped (a resumed tail redelivers a seq already on screen, and one ping per
+redelivery is how a reconnect becomes a burst), a second call site added
+elsewhere in `Rooms`, and `self_member_id` dropped from the reader's id set —
+that last one is why the guard reads the builder's body rather than trusting the
+call, since dropping either half silently stops notifying a whole class of
+member. Title is the room's display name (falling back to its key, so a title is
+never empty), body is the author plus a one-line excerpt truncated on a
+CHARACTER boundary, which a test pins with a body of 400 `é` because a byte
+slice would have panicked on the first message not written in ASCII. Click
+focuses the window and, if the reader moved on first, reopens that room;
+`notify_with_focus` is additive beside the frozen `notify` and says in its own
+doc that whether the Tauri plugin routes an OS activation back into the webview
+is the plugin's business and not something this bundle can detect, so the
+handler is attached unconditionally and is simply never called where it is not
+delivered. Gate green: all seven frozen commands, 1339 host assertions across 15
+binaries, plus ocean-tauri fmt, `clippy --all-targets -D warnings` and 34 tests.
+_________________________________________________________________________________ 05:20 cloud/surface-desktop-parity-mentions

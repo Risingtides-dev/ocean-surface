@@ -31,7 +31,7 @@
 //! than threading rooms state through the `Daemon` handle — so it never touches
 //! the live agent loop / session SSE code.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use futures_util::future::Either;
 use futures_util::StreamExt;
@@ -1269,6 +1269,48 @@ impl Rooms {
     /// projection is the other half: it holds the composer shut and puts the
     /// reason on screen, so the audit view reads as frozen rather than as a
     /// live room that silently refuses every write.
+    /// The reader's OWN member ids — the resolved local identity and, in a
+    /// federated room, the access projection's `self_member_id`. Handing this
+    /// set to the mention tokenizer asks precisely "was I named", rather than
+    /// "did anyone get named", which is what the roster set would answer.
+    /// Empty ids are dropped: an unresolved identity is not a member id, and
+    /// `@` followed by nothing must never match.
+    fn reader_member_ids(&self) -> HashSet<String> {
+        let mut ids = HashSet::new();
+        let identity = self.identity_id.get_untracked();
+        if !identity.is_empty() {
+            ids.insert(identity);
+        }
+        if let Some(self_member) = self
+            .access
+            .get_untracked()
+            .and_then(|access| access.self_member_id)
+        {
+            if !self_member.is_empty() {
+                ids.insert(self_member);
+            }
+        }
+        ids
+    }
+
+    /// A room's display name for a notification title, falling back to the key
+    /// so a title is never empty.
+    fn room_display_name(&self, key: &str) -> String {
+        self.open_room
+            .get_untracked()
+            .filter(|room| room.id == key)
+            .map(|room| room.name)
+            .or_else(|| {
+                self.list
+                    .get_untracked()
+                    .iter()
+                    .find(|room| room.id == key)
+                    .map(|room| room.name.clone())
+            })
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| key.to_string())
+    }
+
     /// Record an `ocean://room/<key>` deep link. Deliberately NOT an
     /// [`Rooms::open_room`] call: the key came from an untrusted URL and may
     /// name a room this daemon does not have, and at launch the room list is
@@ -2191,12 +2233,55 @@ impl Rooms {
                                 RoomMessageKind::ParticipantJoined
                                     | RoomMessageKind::ParticipantLeft
                             );
+                            // THE ONLY mention-notification site. This arm is
+                            // the live tail: hydration and the "load older"
+                            // backfill write the transcript by other paths and
+                            // deliberately do not come through here, because
+                            // history arriving is not someone talking to you
+                            // now. Decided before the push so the row is still
+                            // owned here, and fired only if the push actually
+                            // appended — a resumed tail can redeliver a seq
+                            // already on screen, and that must not ping twice.
+                            let reader_ids = me.reader_member_ids();
+                            let mention = mention_notification_is_due(
+                                &entry,
+                                &reader_ids,
+                                crate::app::window_focused(),
+                                &key,
+                                me.open_key.get_untracked().as_deref(),
+                            )
+                            .then(|| {
+                                (
+                                    me.room_display_name(&key),
+                                    mention_notification_body(&entry.author_id, &entry.body),
+                                )
+                            });
+                            let mut appended = false;
                             me.transcript.update(|t| {
                                 if t.iter().any(|m| m.seq == entry.seq) {
                                     return;
                                 }
+                                appended = true;
                                 t.push(entry);
                             });
+                            if let Some((title, body)) = mention.filter(|_| appended) {
+                                let click_key = key.clone();
+                                spawn_local(async move {
+                                    crate::host::notify_with_focus(&title, &body, move || {
+                                        // By construction the row's room IS the
+                                        // open room, so the window focus the
+                                        // handler already performed is the whole
+                                        // job; this covers the case where the
+                                        // reader moved on before clicking.
+                                        if me.open_key.get_untracked().as_deref()
+                                            != Some(click_key.as_str())
+                                        {
+                                            me.open_room(click_key.clone());
+                                        }
+                                    })
+                                    .await;
+                                });
+                            }
                             update_open_summary_from_open_room(
                                 &me.read_summaries,
                                 Some(&key),
@@ -2961,6 +3046,62 @@ pub(crate) fn room_request_is_current(
     expected_generation == current_generation && current_key == Some(expected_key)
 }
 
+// ── mention notifications ────────────────────────────────────────────────
+
+/// Should a room row raise an OS notification for the reader?
+///
+/// Every clause here is a reason, and three of them are about NOT notifying:
+///
+/// * `kind` — a join/leave/system row is not someone talking to you. Only a
+///   `Message` can mention.
+/// * `reader_ids.contains(author_id)` — your own message quoting your own id
+///   is the single easiest way to build a notifier that pings you constantly.
+/// * `window_focused` / `open_room` — a notification while you are looking
+///   straight at the message is noise. The second half of that disjunct is
+///   defensive: a room-scoped tail only ever carries the open room's rows, so
+///   a row whose room is not the open one is a frame from a retiring tail,
+///   and those are already dropped by the generation guard.
+///
+/// The mention test itself is `room_markdown::mentions_member`, the SAME
+/// tokenizer that paints the highlight, so what notifies is what shows.
+///
+/// What this function cannot express, and the CALL SITE must: only live-tail
+/// rows are ever passed to it. Hydration and the "load older" backfill both
+/// write the transcript through other paths, and neither calls this — history
+/// arriving is not someone talking to you now.
+pub(crate) fn mention_notification_is_due(
+    entry: &RoomMessage,
+    reader_ids: &HashSet<String>,
+    window_focused: bool,
+    row_room: &str,
+    open_room: Option<&str>,
+) -> bool {
+    matches!(entry.kind, RoomMessageKind::Message)
+        && !reader_ids.contains(&entry.author_id)
+        && (!window_focused || open_room != Some(row_room))
+        && crate::room_markdown::mentions_member(&entry.body, reader_ids)
+}
+
+/// The notification body: who said it, then a one-line excerpt of what they
+/// said. Newlines and control characters are collapsed to spaces because a
+/// notification body is one line whatever the message was, and a long message
+/// is truncated on a character boundary — a byte slice would panic on the
+/// first non-ASCII body.
+pub(crate) fn mention_notification_body(author: &str, body: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    let flat = body
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace(|c: char| c.is_control(), " ");
+    if flat.chars().count() > MAX_CHARS {
+        let head: String = flat.chars().take(MAX_CHARS).collect();
+        format!("{author}: {}…", head.trim_end())
+    } else {
+        format!("{author}: {flat}")
+    }
+}
+
 /// Derive a url/key-safe slug from a room name (lowercase alnum + `-`).
 fn slugify(name: &str) -> String {
     let mut out = String::new();
@@ -3030,6 +3171,176 @@ fn identity_may_act(authoritative: bool, id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── mention notifications ────────────────────────────────────────────
+
+    fn ids(list: &[&str]) -> HashSet<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn row(kind: RoomMessageKind, author: &str, body: &str) -> RoomMessage {
+        RoomMessage {
+            seq: 7,
+            author_id: author.into(),
+            author_kind: RoomParticipantKind::Human,
+            kind,
+            body: body.into(),
+            created_at: String::new(),
+            federated: None,
+            thread_parent_seq: None,
+            attachment_id: None,
+        }
+    }
+
+    /// The whole notify/do-not-notify table. Each `false` row is a way a
+    /// mention notifier becomes noise and gets muted by its reader.
+    #[test]
+    fn a_mention_notification_is_due_only_when_every_reason_holds() {
+        let me = ids(&["bob"]);
+        let mention = row(RoomMessageKind::Message, "carol", "hey @bob look");
+
+        // Off-focus, someone else, a real mention, the open room: notify.
+        assert!(mention_notification_is_due(
+            &mention,
+            &me,
+            false,
+            "team",
+            Some("team")
+        ));
+
+        // Looking straight at it.
+        assert!(!mention_notification_is_due(
+            &mention,
+            &me,
+            true,
+            "team",
+            Some("team")
+        ));
+
+        // Focused, but at a DIFFERENT room: you are not looking at this
+        // message, so it notifies. The two conditions are a disjunction.
+        assert!(mention_notification_is_due(
+            &mention,
+            &me,
+            true,
+            "team",
+            Some("other")
+        ));
+
+        // Your own message quoting your own id.
+        assert!(!mention_notification_is_due(
+            &row(RoomMessageKind::Message, "bob", "note to @bob"),
+            &me,
+            false,
+            "team",
+            Some("team"),
+        ));
+
+        // Nobody named you.
+        assert!(!mention_notification_is_due(
+            &row(RoomMessageKind::Message, "carol", "hey @carol"),
+            &me,
+            false,
+            "team",
+            Some("team"),
+        ));
+
+        // A join/leave/system row cannot mention, whatever it says.
+        for kind in [
+            RoomMessageKind::ParticipantJoined,
+            RoomMessageKind::ParticipantLeft,
+            RoomMessageKind::System,
+        ] {
+            assert!(
+                !mention_notification_is_due(
+                    &row(kind, "carol", "hey @bob"),
+                    &me,
+                    false,
+                    "team",
+                    Some("team"),
+                ),
+                "{kind:?} is not someone talking to you",
+            );
+        }
+
+        // An unresolved reader owns no ids and is named by nothing.
+        assert!(!mention_notification_is_due(
+            &mention,
+            &ids(&[]),
+            false,
+            "team",
+            Some("team")
+        ));
+    }
+
+    /// The row whose room is not the open room DOES notify while the window is
+    /// unfocused — the two conditions are a disjunction, not a conjunction.
+    #[test]
+    fn an_unfocused_window_notifies_regardless_of_which_room_is_open() {
+        let me = ids(&["bob"]);
+        let mention = row(RoomMessageKind::Message, "carol", "@bob ping");
+        assert!(mention_notification_is_due(
+            &mention,
+            &me,
+            false,
+            "team",
+            Some("other")
+        ));
+        assert!(mention_notification_is_due(
+            &mention, &me, false, "team", None
+        ));
+    }
+
+    /// The federated `self_member_id` counts as much as the local identity.
+    #[test]
+    fn either_of_the_readers_own_ids_is_enough_to_be_named() {
+        let me = ids(&["bob", "member-7"]);
+        for body in ["@bob ping", "@member-7 ping"] {
+            assert!(mention_notification_is_due(
+                &row(RoomMessageKind::Message, "carol", body),
+                &me,
+                false,
+                "team",
+                Some("team"),
+            ));
+        }
+        // And the author check reads the same set, so neither id can ping you.
+        for author in ["bob", "member-7"] {
+            assert!(!mention_notification_is_due(
+                &row(RoomMessageKind::Message, author, "@bob @member-7"),
+                &me,
+                false,
+                "team",
+                Some("team"),
+            ));
+        }
+    }
+
+    #[test]
+    fn the_notification_body_is_one_line_and_names_the_author() {
+        assert_eq!(
+            mention_notification_body("carol", "hey @bob look"),
+            "carol: hey @bob look",
+        );
+        // Newlines and runs of whitespace collapse: a notification body is one
+        // line whatever the message was.
+        assert_eq!(
+            mention_notification_body("carol", "line one\nline   two\t"),
+            "carol: line one line two",
+        );
+    }
+
+    /// A long body truncates on a CHARACTER boundary. A byte slice here would
+    /// panic on the first message written in anything but ASCII.
+    #[test]
+    fn a_long_body_truncates_without_splitting_a_character() {
+        let long = "é".repeat(400);
+        let out = mention_notification_body("carol", &long);
+        assert!(out.starts_with("carol: é"));
+        assert!(out.ends_with('…'));
+        // 120 excerpt characters, plus the ellipsis, plus "carol: ".
+        assert_eq!(out.chars().count(), "carol: ".len() + 120 + 1);
+    }
 
     #[test]
     fn acting_requires_the_daemon_to_have_answered_not_just_a_stored_id() {
