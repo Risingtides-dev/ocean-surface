@@ -48,13 +48,11 @@ if (!buildScript.includes("cp dist/*.css \"$DIST/\"")) {
 // because nobody built first teaches people to ignore it, which is worse than
 // the gap. Unbuilt, it says so and leaves the two source claims standing.
 //
-// No CSS at all counts as unbuilt rather than as drift. build-extension.sh
-// copies the stylesheets under `set -e`, so it cannot leave the directory
-// CSS-less; a bundle in that state was written by the auto-deploy script's
-// rebuild_extension instead — which scripts/surface-auto-deploy.test.mjs
-// triggers against this very checkout — and reporting that as a drifted
-// inventory sends the reader to the wrong file entirely.
+// Only an absent directory is unbuilt. Once extension/dist exists it is a
+// bundle claim, and a CSS-less bundle is a broken deploy even if another build
+// path created the directory and copied only WASM/JS.
 let copied = [];
+let built = true;
 try {
   copied = readdirSync(resolve(here, "../extension/dist"), { withFileTypes: true })
     .filter((entry) => entry.isFile() && entry.name.endsWith(".css"))
@@ -62,14 +60,18 @@ try {
     .sort();
 } catch (err) {
   if (err.code !== "ENOENT") throw err;
+  built = false;
 }
 
-if (!copied.length) {
+if (!built) {
   console.log(
     `SOURCE CLAIMS PASS: sidepanel.html links ${expected.length} stylesheets in order and build-extension.sh still copies them — ` +
       `extension/dist holds no built bundle, so its inventory went unchecked (run scripts/build-extension.sh to check it)`,
   );
 } else {
+  if (!copied.length) {
+    throw new Error("extension/dist exists but contains no CSS bundle");
+  }
   const missing = expected.filter((name) => !copied.includes(name));
   if (missing.length) {
     throw new Error(`extension/dist missing expected css: ${missing.join(", ")}`);

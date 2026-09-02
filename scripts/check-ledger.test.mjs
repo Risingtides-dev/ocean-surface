@@ -116,6 +116,11 @@ test('a rule closes its entry whether it is bare or carries an identity', () => 
   assert.equal(openEntries(runOn).length, 1, 'underscores run on into text are prose, not a separator');
 });
 
+test('arbitrary prose after the bar is not an identity separator', () => {
+  const malformed = [...entry('10:00', 'First.'), `${RULE} not-an-identity`, ''].join('\n');
+  assert.equal(openEntries(malformed).length, 1);
+});
+
 test("entryIdentity is the entry's own minute and the branch it was written on", () => {
   assert.equal(entryIdentity(entry('23:52', 'On a slice branch.', 'loop/my-slice')), '23:52 loop/my-slice');
   assert.equal(entryIdentity(entry('23:52', 'On the main checkout.', null)), '23:52');

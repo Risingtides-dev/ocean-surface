@@ -5802,3 +5802,17 @@ reds only the guard with the wasm32 clippy lane still green. Tree restored after
 each. Gate green: all seven frozen commands, host suite 1252 unit tests plus 61
 guards across 14 binaries.
 _________________________________________________________________________________ 20:39 loop/surface-load-older-affordance
+time:  [20:52] [01-09-26]
+agent: [codex] [gpt-5]
+worktree: [codex/review-sweep-20260901]
+type:  [issues]: Codex review follow-up sweep
+area:  [frontend]: Rooms stream ownership and compact interaction fixes
+
+Addressed the recent Codex review findings on current main: mutation responses no
+longer launch competing transcript reads; backward hydration preserves viewport
+position and predecessor-keyed grouping; summary runs require local or live
+access; trigger controls use native disclosures; port links retain a visible
+affordance; Markdown link parsing is linear and Unicode-safe; extension inventory
+and ledger separators fail closed on malformed built state. The full Surface UI
+binary suite passed 1245 tests, and the focused Node guard suite passed 19 tests.
+_________________________________________________________________________________ 20:52 codex/review-sweep-20260901
