@@ -62,29 +62,37 @@ Three things it does not buy, all of them rulings rather than gaps:
   concurrent append touches and union settles it by keeping both sides, silently
   restoring the line the change removed. Any merge carrying one must be eyeballed.
 
-**Which checker this documents.** `scripts/check-ledger.mjs` on this tree: the port
-of ocean-bedrock's checker (bedrock's PR #62 for the checker, #98 for the identity
-separator), by way of the identical ocean-os copy, whose header declares every
-executable line byte-identical to bedrock's. This copy carries NO revision or digest
-stamp, so identify it by the constants above rather than by a number, and re-read it
-before trusting this block: a later bedrock revision that changes what closes an
-entry is not here until someone ports it. Exit codes are 0 clean, 1 an entry is open,
-2 the check could not run at all — an unreadable path, or a ledger holding no
-entries. Run it on any change to this file, and again on either side of a rebase
-carrying one; the two verdicts must match:
+**Which checker this documents.** `scripts/check-ledger.mjs` at revision r2:
+`CODE_REVISION = 'r2'`, `CODE_DIGEST = '56adab136337'`. That is ocean-bedrock's
+checker (bedrock #62 for the checker, #98 for the identity separator, #103 for the
+entry guard that compares real paths, #124 for the stamp), ported here by
+ocean-surface #194, which also moved the five entries this ledger once carried
+newest-first at its top into the slots their stamps name and added the order
+sibling below. This block lands after #194 and describes that tree. A copy of the
+checker with no `CODE_DIGEST` is the earlier, unstamped port, identified only by
+the constants above; `scripts/check-ledger.test.mjs` recomputes the digest every
+run and reds when the logic changes without a stamp bump, so "is this the checker
+the block means" is one grep for `CODE_DIGEST`, or `--digest` against the file.
+Exit codes are 0 clean, 1 an entry is open, 2 the check could not run at all — an
+unreadable path, or a ledger holding no entries. Run both checks on any change to
+this file, and again on either side of a rebase carrying one; the verdicts must
+match:
 
 ```sh
-node scripts/check-ledger.mjs events.md      # --fix closes open entries by identity
+node scripts/check-ledger.mjs events.md         # --fix closes open entries by identity
+node scripts/check-ledger-order.mjs events.md   # order, described below
 ```
 
-What it deliberately does NOT check: separator uniqueness (the ~276 entries written
-before the identity convention all close with a bare rule and stay valid forever),
-rule width (81 is this ledger's convention, not an assertion), rule-lines-against-
-entry-count, and ORDER. Nothing in this repo checks that entries run in wall-clock
-order, and they do not: union emits the current branch's lines before the merged
-branch's, so merged entries interleave rather than sort. That is cosmetic — every
-entry carries its own `time:` field. AGENTS.md, "Repository Ledger", is the long
-form of everything above.
+What the parse check deliberately does NOT check: separator uniqueness (the ~278
+entries written before the identity convention all close with a bare rule and stay
+valid forever), rule width (81 is this ledger's convention, not an assertion), and
+rule-lines-against-entry-count. ORDER is checked by the sibling
+`scripts/check-ledger-order.mjs`, never by this file, and it is a band rather than a
+sort: entries land in MERGE order, not clock order (union emits the current
+branch's lines before the merged branch's), so a descent of hours between
+neighbours is the ledger doing its job and passes, while an entry more than a day
+out of place — a prepend, a backdate — is red. AGENTS.md, "Repository Ledger", is
+the long form of everything above.
 
 time:      [01:06] [09-01-26]
 agent:     [claude] [opus 5]
