@@ -54,7 +54,9 @@ Capability Matrix). The load-bearing rules:
 `run-surface.sh` requires `OCEAN_SURFACE_USER` and `OCEAN_SURFACE_PASS` for its
 default LAN/tailnet bind. For trusted localhost diagnostics only, bind
 `127.0.0.1` and set `OCEAN_SURFACE_AUTH=off`. Direct `cargo tauri dev` does not
-rebuild `dist/`; use `run-tauri.sh` whenever freshness matters.
+rebuild `dist/`; use `run-tauri.sh` whenever freshness matters (it points the
+shell at the `dist/` it just built; after another `trunk build`, Cmd+R in the
+app re-reads it without a Rust rebuild).
 
 The public proxy login contract is username/password to an HttpOnly,
 SameSite=Strict session cookie. Ordinary browsers and devices must not be
@@ -65,8 +67,21 @@ Secure attribute.
 
 Native surface direction:
 
-- Tauri 2.x shell (`crates/ocean-tauri`) loads `dist/` as `frontendDist` — the
-  same Trunk-built Leptos WASM bundle the browser PWA ships.
+- Tauri 2.x shell (`crates/ocean-tauri`) serves the SAME promoted release the
+  proxy serves the browser — `~/.config/ocean-surface/current` (override:
+  `OCEAN_SURFACE_DIST`, the proxy's variable; empty disables) — read from
+  disk at request time by `src/live_surface.rs`. The Trunk `dist/` embedded
+  at build time is only the fallback for a machine with no rail. A rail
+  promote therefore reaches the desktop without a rebuild: a hidden window
+  reloads itself, a visible one gets `surface-updated`, and Cmd+R (File ▸
+  Reload Surface) re-reads the bundle. Only changes to the shell's own Rust
+  still need `scripts/rebuild-tauri-app.sh`.
+- Shell → webview events (`daemon-status`, `menu-command`, `path-changed`,
+  `deep-link`, `surface-updated`) travel through `host.rs::tauri_listen`,
+  which registers the handler via `__TAURI_INTERNALS__.transformCallback`
+  and invokes the core `plugin:event|listen` command. Tauri 2 exposes no
+  `__TAURI_INTERNALS__.event`; a wrapper that looks one up subscribes to
+  nothing, silently.
 - Rust commands in the Tauri backend replace the GPUI crate's `rfd` (folder
   dialogs) and `notify` (path watcher) native bits.
 - Native LiveKit Rust client is a later phase behind a feature flag, not part

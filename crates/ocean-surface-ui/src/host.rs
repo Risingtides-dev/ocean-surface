@@ -736,33 +736,44 @@ async fn tauri_invoke(cmd: &str, args: &JsValue) -> Result<JsValue, JsValue> {
     JsFuture::from(Promise::from(result)).await
 }
 
-/// Low-level: subscribe to a Tauri shell event via
-/// `__TAURI_INTERNALS__.event.listen(event_name, handler)`.  `handler`
-/// receives the **payload** field of the Tauri event object (the
-/// `{ event, id, payload }` wrapper is stripped).  The returned `UnlistenFn`
-/// is leaked so the subscription lives for the lifetime of the app.
+/// Low-level: subscribe to a Tauri shell event.
+///
+/// Tauri 2 exposes NO `event` object on `__TAURI_INTERNALS__`. The only
+/// JS-side event API is the `@tauri-apps/api` bundle (`window.__TAURI__`,
+/// absent unless `withGlobalTauri` is on), and what that bundle does under
+/// the hood is exactly what we do here: register the handler as an IPC
+/// callback through `transformCallback`, then invoke the core
+/// `plugin:event|listen` command with `{ event, target: { kind: "Any" },
+/// handler }` (gated by the `core:event:default` capability the shell
+/// grants). The shell's `Emitter::emit` then delivers `{ event, id, payload }`
+/// to the callback; `handler` receives the **payload** field (the wrapper is
+/// stripped). The subscription is leaked so it lives for the lifetime of the
+/// page.
+///
+/// History: the first version looked up `__TAURI_INTERNALS__.event.listen`,
+/// found nothing, and returned silently — so `daemon-status`, `menu-command`,
+/// `path-changed` and `deep-link` never reached the bundle on the desktop
+/// (the "daemon offline" chip froze at its boot-time seed, native menu
+/// commands were dropped). A rejected `listen` is logged now, never swallowed.
 async fn tauri_listen<F>(event_name: &str, handler: F)
 where
     F: Fn(JsValue) + 'static,
 {
-    let window = match web_sys::window() {
-        Some(w) => w,
-        None => return,
+    let Some(window) = web_sys::window() else {
+        return;
     };
-    let internals = match Reflect::get(&window, &JsValue::from_str("__TAURI_INTERNALS__")) {
-        Ok(i) => i,
-        Err(_) => return,
+    let Ok(internals) = Reflect::get(&window, &JsValue::from_str("__TAURI_INTERNALS__")) else {
+        return;
     };
-    let event_obj = match Reflect::get(&internals, &JsValue::from_str("event")) {
-        Ok(e) => e,
-        Err(_) => return,
+    let Ok(transform) = Reflect::get(&internals, &JsValue::from_str("transformCallback")) else {
+        log::warn!(
+            "host: __TAURI_INTERNALS__.transformCallback missing; '{event_name}' not subscribed"
+        );
+        return;
     };
-    let listen: Function = match Reflect::get(&event_obj, &JsValue::from_str("listen")) {
-        Ok(f) => match f.dyn_into() {
-            Ok(f) => f,
-            Err(_) => return,
-        },
-        Err(_) => return,
+    let Ok(transform) = transform.dyn_into::<Function>() else {
+        log::warn!("host: transformCallback is not a function; '{event_name}' not subscribed");
+        return;
     };
 
     let closure = Closure::wrap(Box::new(move |raw: JsValue| {
@@ -772,14 +783,35 @@ where
         }
     }) as Box<dyn Fn(JsValue)>);
 
-    let call_args = Array::new();
-    call_args.push(&JsValue::from_str(event_name));
-    call_args.push(closure.as_ref().unchecked_ref());
+    // `transformCallback(cb, once = false)` registers the closure in the IPC
+    // callback table and returns its numeric id — the `handler` the listen
+    // command expects.
+    let transform_args = Array::new();
+    transform_args.push(closure.as_ref().unchecked_ref());
+    transform_args.push(&JsValue::FALSE);
+    let Ok(handler_id) = Reflect::apply(&transform, &internals, &transform_args) else {
+        log::warn!("host: transformCallback threw; '{event_name}' not subscribed");
+        return;
+    };
 
-    if let Ok(promise) = Reflect::apply(&listen, &event_obj, &call_args) {
-        if JsFuture::from(Promise::from(promise)).await.is_ok() {
-            closure.forget(); // subscription lives forever
-        }
+    let target = Object::new();
+    let _ = Reflect::set(
+        &target,
+        &JsValue::from_str("kind"),
+        &JsValue::from_str("Any"),
+    );
+    let args = Object::new();
+    let _ = Reflect::set(
+        &args,
+        &JsValue::from_str("event"),
+        &JsValue::from_str(event_name),
+    );
+    let _ = Reflect::set(&args, &JsValue::from_str("target"), &target);
+    let _ = Reflect::set(&args, &JsValue::from_str("handler"), &handler_id);
+
+    match tauri_invoke("plugin:event|listen", &args).await {
+        Ok(_) => closure.forget(), // subscription lives forever
+        Err(err) => log::warn!("host: listen('{event_name}') rejected by the shell: {err:?}"),
     }
 }
 

@@ -7375,3 +7375,48 @@ local daemon. That pass also found the remaining decorative Spark glyph on syste
 rows; the four Rooms render paths now use a plain neutral S initial, with a fresh
 release bundle proving the icon is gone.
 _________________________________________________________________________________ 15:50 codex/integrate-cloud-rooms-194-210
+time:      [17:45] [09-02-26]
+agent:     [claude] [fable 5.1]
+worktree:  fix/desktop-live-sync
+type:      bug-report
+area:      frontend
+
+smaths reported the desktop app "buggy as hell — the daemon never connects,
+not synced with the web app". Looked before fixing: the running Ocean.app was a
+build from 08-03 (main was 09-02) showing "daemon offline", an empty model
+picker and an unanswered turn, with no webview connection to :4780 at all,
+while the daemon answered curl and CORS-allowed tauri://localhost. Two real
+defects, both desktop-only. (1) host.rs subscribed to shell events through
+__TAURI_INTERNALS__.event.listen, which Tauri 2 does not expose — every
+shell→webview event (daemon-status, menu-command, path-changed, deep-link) was
+silently never delivered, so the offline chip froze at its boot seed and native
+menu commands vanished; tauri_listen now registers the handler via
+transformCallback and invokes the core plugin:event|listen command, logging a
+rejection instead of swallowing it. (2) generate_context!() embeds dist/ at
+compile time, so the installed app carried whatever dist the last manual
+cargo tauri build saw while the rail promoted main to the browser within
+minutes — the "not synced" half. New crates/ocean-tauri/src/live_surface.rs
+wraps the generated context's assets so the promoted release
+(~/.config/ocean-surface/current; OCEAN_SURFACE_DIST overrides, empty disables)
+is served from disk per request, path-checked, never mixed with the embedded
+fallback; a watcher reloads a hidden window on promote and emits
+surface-updated to a visible one; File ▸ Reload Surface (Cmd+R) and a tray
+item re-read the bundle; surface_bundle reports live/embedded + revision.
+run-tauri.sh points dev at the dist it just built; the rail's phantom "restart
+Tauri" step (a launchd label that never existed) is now a log line, its TASK-87
+rebuild marker stays. Carries the sibling fix/daemon-status-stability commit
+(revisioned snapshots, debounce, probe every resolved address, pre-probe).
+Verified LIVE on the fresh bundle with an injected diagnostic overlay,
+screenshotted: daemon fetches 200, /v1/events EventSource opens, daemon_status
+running, plugin:event|listen accepted, Commands ▸ Toggle Sessions arrived as
+menu-command and opened the panel, a touched index.html produced
+surface-updated within one poll. Gates: ocean-tauri 48 tests + clippy -D
+warnings + fmt; ocean-surface-ui 1320 lib tests + integration suites (one
+source-assertion test pins daemon_operator_request as the last registered
+command, so surface_bundle registers before it) + wasm clippy -D warnings +
+fmt; rail guard 24 assertions. Not fixed here: the machine's data volume was
+at 100% (≈92 GB of cargo target dirs under /private/tmp agent lanes); every
+build failed with ENOSPC until space drifted back, and pruning other lanes'
+caches was declined by the auto-mode classifier — that is smaths' call.
+
+_________________________________________________________________________________ 17:45 fix/desktop-live-sync

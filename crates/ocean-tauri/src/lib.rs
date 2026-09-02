@@ -24,6 +24,10 @@ use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
+/// Live surface bundle: serve the promoted web release from disk (see the
+/// module doc for why the compiled-in dist alone left the desktop stale).
+mod live_surface;
+
 /// One surfaced filesystem change, serialized to the webview as `path-changed`.
 ///
 /// `kind` is created/modified/removed. notify surfaces a rename as a
@@ -2108,6 +2112,9 @@ pub fn run() {
             // boot, before the tray/menu wiring below.
             let daemon_sup = app.state::<AppState>().daemon.clone();
             spawn_daemon_poller(app.handle().clone(), daemon_sup);
+            // Notice rail promotes of the live surface bundle: reload a hidden
+            // window, tell a visible one (`surface-updated`).
+            live_surface::spawn_release_watcher(app.handle().clone());
 
             // Opt-in UI diagnostics for native acceptance runs. The script is
             // loaded only when the operator supplies an explicit path; normal
@@ -2155,6 +2162,13 @@ pub fn run() {
             }
             // System-tray icon: app icon, "Ocean" tooltip, Show / Daemon / Quit.
             let show = MenuItem::with_id(app, "show", "Show Ocean", true, None::<&str>)?;
+            let tray_reload = MenuItem::with_id(
+                app,
+                "tray-reload-surface",
+                "Reload Surface",
+                true,
+                None::<&str>,
+            )?;
             let daemon_start_item =
                 MenuItem::with_id(app, "daemon-start", "Start Daemon", true, None::<&str>)?;
             let daemon_restart_item =
@@ -2166,6 +2180,7 @@ pub fn run() {
                 app,
                 &[
                     &show,
+                    &tray_reload,
                     &sep_top,
                     &daemon_start_item,
                     &daemon_restart_item,
@@ -2179,6 +2194,7 @@ pub fn run() {
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_main_window(app),
+                    "tray-reload-surface" => live_surface::reload_surface(app),
                     "daemon-start" => tray_daemon_action(app, DaemonTrayAction::Start),
                     "daemon-restart" => tray_daemon_action(app, DaemonTrayAction::Restart),
                     "quit" => app.exit(0),
@@ -2236,13 +2252,23 @@ pub fn run() {
             // edit roles exist in the application menu.
             let cmd_new_session =
                 MenuItem::with_id(app, "new-session", "New Session", true, Some("CmdOrCtrl+N"))?;
+            // Cmd+R re-reads the surface bundle from its current source (the
+            // promoted release, or the embedded fallback) — the way to pick up a
+            // promote without relaunching. Handled natively in on_menu_event.
+            let cmd_reload = MenuItem::with_id(
+                app,
+                "reload-surface",
+                "Reload Surface",
+                true,
+                Some("CmdOrCtrl+R"),
+            )?;
             let file_sep = PredefinedMenuItem::separator(app)?;
             let close_window = PredefinedMenuItem::close_window(app, None)?;
             let file_submenu = Submenu::with_items(
                 app,
                 "File",
                 true,
-                &[&cmd_new_session, &file_sep, &close_window],
+                &[&cmd_new_session, &cmd_reload, &file_sep, &close_window],
             )?;
 
             let undo = PredefinedMenuItem::undo(app, None)?;
@@ -2386,6 +2412,12 @@ pub fn run() {
             // pre-attach are queued in `MenuBridge::pending` and replayed (in
             // arrival order) by `ui_ready` once the bundle signals readiness.
             // After that, emit immediately.
+            // Native-only: reload the surface bundle. Never forwarded to the
+            // wasm CommandRegistry — the page itself is what gets replaced.
+            if event.id.as_ref() == "reload-surface" {
+                live_surface::reload_surface(app);
+                return;
+            }
             let id = event.id.as_ref().to_string();
             let state = app.state::<AppState>();
             let mut guard = state.menu.lock();
@@ -2410,8 +2442,13 @@ pub fn run() {
             ui_ready,
             ui_debug_resize,
             open_external_url,
+            live_surface::surface_bundle,
             daemon_operator_request
         ])
-        .run(tauri::generate_context!())
+        // The generated context embeds ../../dist; wrap it so the promoted
+        // release on disk is served instead whenever one is present.
+        .run(live_surface::context_with_live_assets(
+            tauri::generate_context!(),
+        ))
         .expect("error while running ocean-tauri");
 }
