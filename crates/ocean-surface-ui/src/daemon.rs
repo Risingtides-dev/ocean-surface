@@ -4002,6 +4002,13 @@ impl Daemon {
                 .send()
                 .await
                 .map_err(|e| format!("fetch: {e}"))?;
+            // The proxy answers a typed 503 when the machine this session is
+            // attached to cannot serve it. Decoding that body as a session page
+            // yields "expected value" and hides which machine is down — read it
+            // as the sentence it is (`crate::devices::device_unavailable_error`).
+            if resp.status() == 503 {
+                return Err(crate::devices::device_unavailable_error(resp).await);
+            }
             let r: SessionsResponse = resp.json().await.map_err(|e| format!("decode: {e}"))?;
             if !r.ok {
                 return Err("sessions fetch not ok".into());
@@ -5111,6 +5118,22 @@ impl Daemon {
     }
 
     pub fn new_session(&self) {
+        self.reset_session_local_state();
+        clear_persisted_session();
+        self.connect();
+    }
+
+    /// Drop every scrap of state that belonged to the session we are leaving,
+    /// WITHOUT opening a stream and without forgetting the persisted session
+    /// id.
+    ///
+    /// Two callers, and the split is exactly where they differ. [`new_session`]
+    /// forgets the id (a fresh cockpit intent has no past) and connects.
+    /// [`reattach_to_selected_device`] keeps the id, because whether the
+    /// machine we just moved to has that session is the next question it asks
+    /// — and it opens its stream through the restore path or `connect`, never
+    /// both.
+    fn reset_session_local_state(&self) {
         self.stop_sync_poll();
         self.turns.set(Vec::new());
         self.streaming.set(false);
@@ -5126,18 +5149,59 @@ impl Daemon {
         self.retire_permission_state();
         self.active_decision_token.set(None);
         self.session_id.set(None);
-        clear_persisted_session();
         // A New Session is a fresh cockpit intent. Bump the intent generation so
         // a still-in-flight fresh-session create — even one that also left the
         // active session `None` — is retired and cannot adopt over this intent
-        // (TASK-43, finding 1).
+        // (TASK-43, finding 1). A device switch needs the same retirement, for
+        // the same reason and more so: the in-flight create it retires was
+        // aimed at a different machine.
         self.bump_session_intent();
         self.awaiting_session_adoption.set(false);
         self.session_title.set(String::new());
         self.status.set("new session".into());
         self.status_detail.set(None);
         self.reset_token_stats();
-        self.connect();
+    }
+
+    /// Follow the surface onto the machine this session was just attached to.
+    ///
+    /// The proxy has already recorded the choice, so every request from here
+    /// on lands on the new daemon; what has to happen client-side is that
+    /// nothing from the old one is left standing. The SSE stream, the
+    /// transcript, the model catalogue, the project catalogue and the session
+    /// list all belong to the machine we left — `connect` bumps the stream
+    /// generation, which retires the old tail rather than racing it.
+    ///
+    /// The one thing that may cross is the remembered session id, and only if
+    /// the new machine actually has it: `restore_session_or_clear` reopens it
+    /// when it does and forgets it when it does not
+    /// ([`crate::devices::classify_session_restore`]). A session that is not
+    /// on this machine is the ordinary case of two machines with different
+    /// histories — never an error put in front of the person.
+    pub fn reattach_to_selected_device(&self) {
+        let daemon = self.clone();
+        spawn_local(async move {
+            // Read the remembered id BEFORE the reset, which is what makes the
+            // reset safe to share with `new_session`.
+            let persisted = load_persisted_session();
+            daemon.reset_session_local_state();
+            daemon.status.set("switching device".into());
+            let restored = match should_restore_session(
+                persisted.as_deref(),
+                daemon.session_id.get_untracked().as_deref(),
+            ) {
+                Some(id) => restore_session_or_clear(&daemon, id).await,
+                None => false,
+            };
+            if !restored {
+                daemon.connect();
+            }
+            // The catalogues are per-machine too: a model, project or session
+            // list from the old daemon is a list of things that are not here.
+            daemon.fetch_models();
+            daemon.fetch_projects();
+            daemon.fetch_sessions();
+        });
     }
 
     /// Select project `id`, pin the working directory to the explicit section
@@ -8024,16 +8088,23 @@ async fn restore_session_or_clear(daemon: &Daemon, id: &str) -> bool {
     );
     match Request::get(&get_url).send().await {
         Ok(resp) => match resp.json::<SessionDetailResponse>().await {
-            Ok(r) if r.ok => {
-                if let Some(detail) = r.session {
-                    daemon.switch_session(detail.id, detail.title);
-                    return true;
+            // One rule, two callers: boot restores the session this browser
+            // remembers, and a device switch asks the same question of the
+            // machine it just moved to. Absence is `Clear`, never an error
+            // (`crate::devices::classify_session_restore`).
+            Ok(r) => {
+                if crate::devices::classify_session_restore(r.ok, r.session.is_some())
+                    == crate::devices::SessionRestore::Restore
+                {
+                    if let Some(detail) = r.session {
+                        daemon.switch_session(detail.id, detail.title);
+                        return true;
+                    }
                 }
             }
             Err(err) => {
                 log::error!("session restore decode error: {err}");
             }
-            _ => {}
         },
         Err(err) => {
             log::error!("session restore fetch error: {err}");
