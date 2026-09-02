@@ -1,3 +1,211 @@
+# Ocean Surface ledger — entry schema
+
+This block is not an entry, and it is the one non-append edit this file accepts.
+`scripts/check-ledger.mjs` finds entries by line anchors — `/^time:/` opens one,
+`/^_{5,}(?:[ \t].*)?$/` closes one — so every sample line below is indented two
+spaces and matches neither. The first real entry begins under it, untouched.
+
+That indentation is load-bearing, and the exit code alone will not tell you so.
+Measured on this ledger: un-indent the whole template and the checker still exits
+0 while the entry count goes from 287 to 288 — the sample rule quietly closes the
+phantom entry the sample header opened. Un-indent only the header and it exits 1,
+naming line 14. So after any edit to this block, read the COUNT, not just the code.
+
+An entry is appended at EOF and never edited afterwards. `.github/workflows/ci.yml`
+(job `ledger`) asks for it in these words: "time [HH:MM] [MM-DD-YY] (24-hour),
+agent, worktree (branch when not on main), type, area, then one plain-prose
+paragraph on what changed and why."
+
+```text
+  time:      [HH:MM] [MM-DD-YY]        24-hour clock, America/New_York
+  agent:     [claude] [opus 5]
+  worktree:  [branch-name]             omit only on the main checkout
+  type:      infra                     bug-report | feature-request | refactor |
+                                       review | testing | infra | merge
+  area:      frontend                  frontend | backend | infra | workflow
+
+  One plain-prose paragraph on what changed and why. Prose, not bullets.
+
+  _______________________________________________________ HH:MM branch-name
+```
+
+**The closing rule is the load-bearing line.** An entry is CLOSED when a rule
+appears between its `time:` header and the next one; that is the only thing the
+checker asserts. Write the identity form — this ledger's underscore run is 81
+wide, then a space, then the entry's own `HH:MM` and its `worktree:` when it has
+one:
+
+```text
+  _________________________________________________________________________________ 23:15 cloud/my-slice
+```
+
+`.gitattributes` gives this file `merge=union`, and union emits a line both sides
+added exactly once. While every entry closed with the same bare rule, two parallel
+appends shared that one line, xdiff anchored each append before it, and one rule
+came out for two entries — the second entry's `time:` header landed directly under
+the first's prose and the two FUSED, with no conflict and nothing a merge check
+could see (#181 onto #180). An identity-bearing rule cannot be shared, so there is
+nothing left to fold.
+
+Three things it does not buy, all of them rulings rather than gaps:
+
+- It saves an entry's TAIL, not its HEAD. Two appends written in the same minute
+  open with identical `time:` and `agent:` lines and union folds those too, so the
+  second entry can arrive headerless while its rule survives — and the checker
+  reads the survivor as one closed entry and exits 0. Eyeball the head of a merged
+  entry when two slices share a minute.
+- An entry owns its rule, not the blank line after it. A blank line cannot be given
+  an identity. A merged append landing its header flush against the previous rule
+  is cosmetic; close it up by hand, never make the check red for it.
+- Union only fails safe for append/append. A NON-append change — a correction, a
+  redaction, a repaired separator, this block — lands in the same tail hunk a
+  concurrent append touches and union settles it by keeping both sides, silently
+  restoring the line the change removed. Any merge carrying one must be eyeballed.
+
+**Which checker this documents.** `scripts/check-ledger.mjs` on this tree: the port
+of ocean-bedrock's checker (bedrock's PR #62 for the checker, #98 for the identity
+separator), by way of the identical ocean-os copy, whose header declares every
+executable line byte-identical to bedrock's. This copy carries NO revision or digest
+stamp, so identify it by the constants above rather than by a number, and re-read it
+before trusting this block: a later bedrock revision that changes what closes an
+entry is not here until someone ports it. Exit codes are 0 clean, 1 an entry is open,
+2 the check could not run at all — an unreadable path, or a ledger holding no
+entries. Run it on any change to this file, and again on either side of a rebase
+carrying one; the two verdicts must match:
+
+```sh
+node scripts/check-ledger.mjs events.md      # --fix closes open entries by identity
+```
+
+What it deliberately does NOT check: separator uniqueness (the ~276 entries written
+before the identity convention all close with a bare rule and stay valid forever),
+rule width (81 is this ledger's convention, not an assertion), rule-lines-against-
+entry-count, and ORDER. Nothing in this repo checks that entries run in wall-clock
+order, and they do not: union emits the current branch's lines before the merged
+branch's, so merged entries interleave rather than sort. That is cosmetic — every
+entry carries its own `time:` field. AGENTS.md, "Repository Ledger", is the long
+form of everything above.
+
+time:      [01:06] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-sibling-rails-inherit-the-composer-gate-unexamined]
+type:      review
+area:      frontend
+
+Extended #163's ruling to the four rail sections that still inherited the
+composer's write gate without anyone having asked whether their write needs a
+peer, and made each of the five state its answer. Summary, artifacts and
+attachments all write to THIS daemon's store and nothing else — verified at
+ocean-os origin/main cd73312f rather than taken on trust: `crates/ocean-daemon/AGENTS.md`
+states a federated room's summary is local-only and never enqueued to the
+outbox, `room_create_artifact`/`room_amend_artifact` write through `with_rooms`
+and then `publish_room_wake` with no outbox row on either path, and
+`room_attachments.rs` contains no reference to the outbox at all (nor does
+`room_federation.rs` mirror artifacts or attachments). So all three now take a
+shared `local_store_write_gate` and stay writable through `Connecting` and
+`Recovering`, which is the whole user-visible change: startup and reconnect no
+longer grey out a summarize run, an artifact edit or an upload that would land
+regardless. Invite and repo keep `access_allows_writes` and gained the sentence
+saying why — a mint registers the room with the federation control plane, and
+every repo command is executed by a Bedrock container, so a down link is not a
+delay there but a write that cannot happen. `access_allows_writes` itself is
+untouched, still `Local|Live`, still the composer's; `trigger_policy_accepts_writes`
+keeps its name and #163's argument and now delegates to the shared gate rather
+than carrying a second copy of the same match. `Revoked` and unknown access stay
+held everywhere, exhaustively matched with no wildcard so a new access state must
+be ruled on. Three tests: the per-state table for the new gate stated as a
+difference from the composer's, a source guard pinning WHICH gate each of the
+five sections takes (the gate is a `Signal::derive` in the view, so no predicate
+test can reach it), and a guard that the three moved rails no longer carry the
+now-false doc line about never disagreeing with the composer and instead name the
+gate they do take. All three verified failing against the old wiring, in both
+directions, before landing. Two module headers the guard's needle does not reach
+were swept by hand for the same reason — `room_summary.rs` said the control is
+"gated exactly as the composer is" and `attachments.rs` said "the same two
+conditions the composer is", both now false — as were the three inline comments
+whose "the composer gates on access here" reads as a claim about WHICH gate this
+control takes. Frozen gate green: fmt, wasm32 clippy `-D warnings`,
+`RUSTFLAGS="-D warnings"` wasm32 check forced against a touched source, proxy
+check, wasm32 test no-run, native 1236/1236 — plus both `--all-targets` clippy
+lanes, which the frozen list does not cover and this diff adds test code to.
+_________________________________________________________________________________
+
+time:      [23:14] [08-30-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-trigger-rail-writable-nonterminal]
+type:      review
+area:      frontend
+
+Ruled that the wake-trigger rail stays WRITABLE while a room is `Connecting`
+or `Recovering`, and made the code say so. Since #160 the rail took
+`access_allows_writes` — true only for `Local`/`Live` — so all three trigger
+rows went read-only on both non-terminal access states. Nothing asks for that:
+the daemon's `room_update` (ocean-os origin/main, persistent_rooms.rs:654) has
+no access check at all, and both readers of the policy — the local post path
+and the federation bridge's ingest — read it back from THIS daemon's store, so
+the PATCH lands whatever the link is doing. The cost was the sharpest one
+available: a room stuck `Recovering` while every mention woke an agent gave the
+operator no way to turn `on_mention` off. `Revoked` and unknown access stay
+held — the daemon would take those writes too, but configuring a room you have
+been removed from cannot mean anything, and unknown may yet resolve to
+`Revoked`. Implemented as a rail-local `trigger_policy_accepts_writes` matched
+exhaustively over the access states (a new state must be ruled on, not inherit
+"writable"); the shared `access_allows_writes` is untouched and still gates the
+composer, join/leave, invites and ~10 other call sites. Split the old
+`a_room_that_blocks_writes_holds_every_trigger_row` into a `Revoked` test and a
+`Connecting`/`Recovering` test, and added one pinning the divergence between
+the two gates as a difference. `on_thread_reply` stays held-with-note on the
+federated states for its own pre-existing reason (the bridge can never build
+that event). Verified both new tests fail against the old gate before landing.
+Frozen gate green: fmt, wasm32 clippy `-D warnings`, `RUSTFLAGS="-D warnings"`
+wasm32 check forced against a touched source, proxy check, wasm32 test no-run,
+native 1183/1183.
+_________________________________________________________________________________
+
+time:      [09:45am] [08-06-26]
+agent:     [ocean] [rooms-pm]
+worktree:  [feat/rooms-slack-workspace]
+type:      bugfix
+area:      frontend
+
+Aligned the Rooms Surface with ocean-os PR #366's unified JS-safe read-cursor
+wire: PATCH and room-scoped SSE now strictly decode `{room_id, read_seq}` with
+decimal strings, validate room identity, preserve Local/Live projection meaning,
+and fail closed on malformed payloads. Added >2^53, null, wrong-room, and malformed
+regressions. Grouped message timestamps now remain visible on touch/non-hover
+surfaces. Frozen gates passed: fmt/diff, wasm UI and proxy checks, strict wasm
+clippy, wasm test no-run, and native UI 787/787 plus auxiliary suites. Independent
+follow-up review was CLEAR.
+_________________________________________________________________________________
+
+time:      [01:15pm] [07-19-26]
+agent:     [claude] [ocean TUI]
+worktree:  [main]
+type:      bugfix
+area:      frontend
+
+Mobile focus-zoom fix: iOS Safari auto-zooms any focused control whose
+computed font-size is below 16px; the composer input was 14px
+(composer.css:512) with no compact override, so tapping the prompt box
+zoomed the viewport. Added a `@media (pointer: coarse)` 16px floor for
+`.ocean-composer__input` in styles/compact.css — keyed on pointer
+coarseness (iPads zoom too), not the 720px breakpoint. Shell already uses
+100dvh so keyboard resize was fine. CSS-only. Committed 98c8a59, pushed.
+_________________________________________________________________________________
+
+time:      [11:52pm] [07-18-26]
+agent:     [ocean] [ocean-prs gate-authority]
+worktree:  [main]
+type:      integration
+area:      frontend
+
+Lane D: file preview intent — resolve, fetch, render (Tauri + web). 7 files,
++1239/-53, 14 production seam tests (3 file-scope helpers shared by Effects),
+462 passed. Frozen gates: fmt, clippy wasm32 -D warnings, check wasm32,
+check proxy, test wasm32 --no-run, test native. Patch-id f2087203bb18cc5c.
+8 review rounds (v1→v8) with independent codex re-trace. Committed 4b932aa.
+_________________________________________________________________________________
+
 time:      [11:25pm] [06-26-26]
 agent:     [codex] [gpt-5]
 worktree:  [main]
@@ -6522,3 +6730,47 @@ fmt, both clippy lanes at `-D warnings`, both checks, the wasm32 --no-run build 
 all 14 test binaries, and the host suite at 1313 passing across those 14 — 1252 unit
 tests plus 61 guards, 0 failed.
 _________________________________________________________________________________ 23:15 cloud/surface-guards-ordering-comment
+time:      [23:28] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-events-schema-block]
+type:      infra
+area:      infra
+
+Gave events.md the schema block it never had. The file opened mid-entry on a bare
+`time:` line, so its entry contract lived only in AGENTS.md's "Repository Ledger"
+section and in the failure text of the `ledger` job — nothing a reader who opened
+the ledger itself would find. The block now sits above the first entry and states
+the contract as THIS repo's checker enforces it today: the five header fields in
+the words ci.yml asks for them ("time [HH:MM] [MM-DD-YY] (24-hour), agent, worktree
+(branch when not on main), type, area, then one plain-prose paragraph on what
+changed and why"), the closing rule in its identity form — 81 underscores, a space,
+the entry's own HH:MM and worktree — and the union-merge caveat with the three
+rulings it does not buy: it saves an entry's tail and not its head, an entry owns
+its rule and not the blank line after it, and union only fails safe for
+append/append. The identification of the checker is deliberately not a number.
+scripts/check-ledger.mjs here carries NO revision or digest stamp; it is the port of
+ocean-bedrock's (bedrock's PR #62 for the checker, #98 for the identity separator)
+whose own header declares every executable line byte-identical to bedrock's, so the
+block names the constants — `/^time:/`, `/^_{5,}(?:[ \t].*)?$/`, exit 0/1/2 — and
+tells the reader to re-read the file rather than trust a revision that is not
+stamped anywhere. It also records what the checker does not check: separator
+uniqueness, rule width, rule-lines-against-entry-count, and ORDER. There is no
+order checker in this repo, and merged entries genuinely do not sort — union emits
+the current branch's lines before the merged branch's — which AGENTS.md already
+rules cosmetic because every entry carries its own time field. Prepending is the one
+non-append edit this file accepts, and it is safe only because neither of the
+checker's line anchors reaches the block: every sample line in the fenced template
+is indented two spaces. That indent was measured, not assumed, and the measurement
+found something worth writing down. Un-indent the whole template and the checker
+still exits 0 while the entry count rises from 287 to 288, because the sample rule
+closes the phantom entry the sample header opened — a silent miscount the exit code
+cannot see. Un-indent only the header and it exits 1 naming line 14. As written the
+verdict is byte-for-byte the baseline's: 287 entries, every one closed, exit 0,
+identical to origin/main before the block, and `git diff` is 82 lines of pure
+insertion with nothing removed, so the first entry is untouched. The block says all
+of this and tells the next editor to read the count and not just the code.
+scripts/check-ledger-order.mjs does not exist on this tree and could not be run;
+origin/main is 4ab7a71 (#192) and the #194 that was supposed to have added it, along
+with the r2 CODE_REVISION/CODE_DIGEST stamps, is not in this repo. Gate green on the
+final tree, all seven frozen commands.
+_________________________________________________________________________________ 23:28 cloud/surface-events-schema-block
