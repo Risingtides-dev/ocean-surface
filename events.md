@@ -6431,3 +6431,56 @@ the same tail hunk the eight other open surface PRs are appending to, and union
 settles that by keeping both sides. Gate green: all seven frozen commands, 1313 tests
 across 14 binaries, 0 failed.
 _________________________________________________________________________________ 23:59 cloud/surface-transcript-local-time
+time:      [22:31] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-hydration-comments]
+type:      fix
+area:      frontend
+
+Two comments in `rooms.rs` described mechanisms the code does not run, and both
+were about the hydration walk, which is the part of Rooms that has moved most in
+the last five PRs. The backlog recorded no anchors for either, so both were
+located by reading `open_room`, `backfill_open_transcript`,
+`hydration_backfill_start`, `transcript_older_cursor` and the tests around them.
+The first is a nine-line call-site comment in `open_room`, immediately above
+`hydration_backfill_start(&transcript, HYDRATION_TRANSCRIPT_LIMIT)`, and it is a
+restatement of that function's own doc: same three claims in the same order — a
+backward page is the last `limit` rows that qualify, so a short one provably
+reached the start of the log; reading the length rather than the flag keeps the
+decode arm as wide as it was; the one cost is a room whose length is an exact
+multiple of the window. Deleted rather than reworded. The callee's doc is one
+hop away and is the copy that will be maintained; a second copy at the call site
+is a copy that goes stale silently, and the call reads as what it is without it.
+
+The second is the doc on `a_daemon_without_backward_paging_still_decodes_and_
+still_terminates`, and it named a path the code cannot take on the daemon the
+test is about. It said such a daemon paints rows 0..window, so the walk seeds at
+row 0 and asks `before_seq=0`, "which is the daemon's own terminal empty page,
+since nothing precedes the first message. One request, then stop." That is a
+MODERN daemon's behaviour. A pre-#436 daemon is defined by ignoring `before_seq`
+altogether, so `before_seq=0` gets the same forward page back, `has_more` stays
+true, `prev_seq` stays absent, and the fallback names the same row every time —
+the cursor cannot fall, and the walk runs to `MAX_TRANSCRIPT_CATCHUP_PAGES`.
+The test did not take that path either: it decoded a body with an EMPTY
+transcript, which seeds no walk at all, and then asserted
+`transcript_backfill_cursor(1, false, None, None)` with `has_more` hand-fed as
+false, which is trivially `None` and says nothing about a legacy daemon in
+particular.
+
+Made the test take the path rather than rewriting the doc down to what it was
+doing, because the path is worth having under test and the two ways it could go
+were "assert less honestly" or "assert the real thing". The fixture is now a
+full window of a room's oldest rows with `prev_seq` absent, which is the shape
+such a daemon actually answers; the decode assertion stays; `hydration_backfill_
+start` is called for real and seeds at row 0; and the walk is driven with the
+decoded page's own `has_more`, `prev_seq` and oldest row rather than hand-picked
+arguments. It asserts the cursor never falls, that the walk makes exactly
+`MAX_TRANSCRIPT_CATCHUP_PAGES` requests, and that every one of them asks for
+`before_seq=0&limit=200` — which is the whole point: against such a daemon the
+page cap is the only stop condition left standing, so the bound belongs on the
+walk and not only on the daemon's word. No behaviour changed in this slice; the
+window is scaled to 4 to keep the fixture readable, the way the neighbouring
+`a_room_inside_the_first_paint_backfills_nothing` already does. Gate green: all
+seven frozen commands, 1252 unit tests and 61 guards across 14 binaries — the
+same numbers as origin/main, which is what a comment slice should produce.
+_________________________________________________________________________________ 22:31 cloud/surface-hydration-comments
