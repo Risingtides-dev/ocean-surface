@@ -716,6 +716,19 @@ pub struct Rooms {
     pub models: RwSignal<Vec<crate::daemon::ModelInfo>>,
     /// All persistent rooms (from `GET /v1/rooms/persistent`).
     pub list: RwSignal<Vec<Room>>,
+    /// Where the rail's NEXT page of rooms starts, or `None` when the rooms on
+    /// screen are every room the daemon will address from here (OCEAN-250).
+    /// The one condition the rail's "load more rooms" affordance renders on.
+    rooms_next_cursor: RwSignal<Option<String>>,
+    /// Whether a page-of-rooms press is still in flight, so the affordance can
+    /// say so and refuse a second one against a cursor the first has not moved.
+    rooms_more_in_flight: RwSignal<bool>,
+    /// Whether the rail holds rooms from beyond its first page. It is what the
+    /// 8-second unread poll reads to decide whether it may replace the list
+    /// outright: a rail that never paged is exactly one page and a fresh page
+    /// is the whole truth about it, while a paged rail would lose everything
+    /// below the fold on every tick.
+    rooms_paged_beyond_first: RwSignal<bool>,
     /// Whether the first `fetch_rooms` has resolved (success or failure). Starts
     /// false so the panel shows a loading placeholder instead of falsely
     /// asserting "No rooms yet" during the initial in-flight fetch.
@@ -818,19 +831,6 @@ pub struct Rooms {
     /// untouched, so nothing re-renders — which is why the error must be
     /// visible: the box alone would overstate what was stored.
     pub policy_update_error: RwSignal<Option<String>>,
-    /// Where the rail's NEXT page of rooms starts, or `None` when the rooms on
-    /// screen are every room the daemon will address from here (OCEAN-250).
-    /// The one condition the rail's "load more rooms" affordance renders on.
-    rooms_next_cursor: RwSignal<Option<String>>,
-    /// Whether a page-of-rooms press is still in flight, so the affordance can
-    /// say so and refuse a second one against a cursor the first has not moved.
-    rooms_more_in_flight: RwSignal<bool>,
-    /// Whether the rail holds rooms from beyond its first page. It is what the
-    /// 8-second unread poll reads to decide whether it may replace the list
-    /// outright: a rail that never paged is exactly one page and a fresh page
-    /// is the whole truth about it, while a paged rail would lose everything
-    /// below the fold on every tick.
-    rooms_paged_beyond_first: RwSignal<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -870,6 +870,9 @@ impl Rooms {
             url: daemon.url,
             models: daemon.models,
             list: RwSignal::new(Vec::new()),
+            rooms_next_cursor: RwSignal::new(None),
+            rooms_more_in_flight: RwSignal::new(false),
+            rooms_paged_beyond_first: RwSignal::new(false),
             rooms_loaded: RwSignal::new(false),
             rooms_loading: RwSignal::new(false),
             rooms_error: RwSignal::new(None),
@@ -897,9 +900,6 @@ impl Rooms {
             create_op: RwSignal::new((0, None)),
             policy_update_in_flight: RwSignal::new(false),
             policy_update_error: RwSignal::new(None),
-            rooms_next_cursor: RwSignal::new(None),
-            rooms_more_in_flight: RwSignal::new(false),
-            rooms_paged_beyond_first: RwSignal::new(false),
         };
 
         // Identity is RESOLVED, not snapshotted. `Rooms::new` runs synchronously
