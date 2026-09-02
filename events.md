@@ -5802,3 +5802,40 @@ reds only the guard with the wasm32 clippy lane still green. Tree restored after
 each. Gate green: all seven frozen commands, host suite 1252 unit tests plus 61
 guards across 14 binaries.
 _________________________________________________________________________________ 20:39 loop/surface-load-older-affordance
+
+time:      [23:33] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-dead-trigger-guard-grip]
+type:      testing
+area:      frontend
+
+Loosened dead_trigger_row_affordance's grip from a whole rule body to the one
+declaration it is actually guarding. The live-hover assertion read
+`.rooms-workspace__trigger:hover:not(:has(input:disabled)){color:var(--fg);}` off the
+whitespace-stripped sheet with the closing brace inside the needle, which pinned that
+rule as being exactly one declaration long. Its own header says it pins an affordance
+— the dead row must not brighten, the live row still must — but what it enforced was
+a byte-exact rule body, so a designer adding `text-decoration` to a live row's hover
+would have been told the dead row's affordance had regressed. The sibling test in the
+same file already avoided this: it pulls the rule through `rule_body` and asks
+`contains` for each declaration it cares about. The hover test now does the same, and
+the helper was already there. Premise re-derived before the change rather than taken
+from the title: adding `text-decoration: underline` to the guarded rule reds the
+ORIGINAL guard at line 64 with the sibling still green, which is the failure the slice
+claims. Five mutations then measured against the finished tree, one per run with the
+sheet restored between each. The added-declaration case is the one that flips — RED
+before, green after — and every genuine regression still reds: removing
+`color: var(--fg)` gives `got \`text-decoration:underline;\``, changing it to
+`var(--fg-2)` gives `got \`color:var(--fg-2);\``, deleting the rule outright panics in
+`rule_body` with ``no rule for `.rooms-workspace__trigger:hover:not(:has(input:disabled))` ``,
+and dropping `:not(:has(input:disabled))` from the prelude still reds at the
+unguarded-`:hover` assertion, which is untouched. The `;` inside the needle is what
+keeps the value exact — `color:var(--fg);` does not match `color:var(--fg-2);` — so
+the loosening costs no strictness on the property, only on the rule's length. The
+table is in the module header. Note for whoever files the precedent: ocean-surface
+#198, cited as the sibling guard-grip fix to read first, is not in this repo;
+origin/main is 4ab7a71 (#192). Gate green on the final tree, all seven frozen
+commands: fmt, both clippy lanes at `-D warnings`, both checks, the wasm32 --no-run
+build of all 14 test binaries, and the host suite at 1313 passing across those 14 —
+1252 unit tests plus 61 guards, 0 failed.
+_________________________________________________________________________________ 23:33 cloud/surface-dead-trigger-guard-grip
