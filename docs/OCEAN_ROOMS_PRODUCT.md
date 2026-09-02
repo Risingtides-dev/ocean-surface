@@ -193,6 +193,18 @@ trade is that a room closed on the daemon while it sits below the fold stays on
 screen until an interactive refresh (opening the panel, creating a room,
 redeeming an invite) replaces the rail with a fresh first page.
 
+**The paging boundary is re-derived on every retaining poll, never replayed.** A
+cursor is a room KEY, and the daemon resolves its place in the order from that
+room's *current* `updated_at` — it looks the anchor row up per request. So a
+message arriving in the room the cursor names moves that room to the front of
+`updated_at DESC` and takes the boundary with it: a press replaying the old key
+would ask for the rooms behind the *newest* room, get back a page of rooms
+already on screen, and — since a page that adds nothing retires the affordance —
+strand every room past the real boundary until an interactive refresh. The rail's
+own last row is the boundary instead, and it survives exactly the event that
+moves the parked key: a room with new activity is by definition in the fresh
+first page, deduped out of the tail, and the row behind it becomes the last.
+
 `.rooms-panel__list` keeps `min-height: 0` with vertical overflow — long room
 lists scroll instead of pushing status/actions outside the viewport.
 
