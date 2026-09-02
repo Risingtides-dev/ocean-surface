@@ -22,7 +22,7 @@ use crate::rooms::{
     RoomTriggerPolicy, Rooms,
 };
 
-use crate::rooms::{create_workspace_root, room_is_unbound};
+use crate::rooms::{create_workspace_root, room_is_unbound, workspace_draft_should_reseed};
 
 // ── Production helpers (testable directly, called from Effects) ─
 
@@ -350,17 +350,27 @@ fn trigger_toggle_row(
 /// from a participant projection, and the daemon's PATCH applies no owner check
 /// of its own — inventing one here would be a lock on the surface only.
 fn workspace_binding_section(rooms: Rooms, access: Option<&RoomAccessProjection>) -> impl IntoView {
-    let writable = trigger_policy_accepts_writes(access);
+    let access_writable = trigger_policy_accepts_writes(access);
     let draft = RwSignal::new(String::new());
+    // Which room the draft was last seeded for. Identity, not content — see
+    // `workspace_draft_should_reseed`: this effect must read `open_room` to
+    // find the stored value, so it re-runs on every write to that signal, and
+    // re-seeding on each one would wipe a path mid-type when an unrelated
+    // PATCH lands.
+    let seeded_for: RwSignal<Option<String>> = RwSignal::new(None);
     // Seeded from the stored binding so the field opens showing what it will
     // change, and a rebind is an edit rather than a retype.
     Effect::new(move |_: Option<()>| {
-        let stored = rooms
-            .open_room
-            .get()
-            .and_then(|room| room.workspace_root)
-            .unwrap_or_default();
-        draft.set(stored);
+        let open = rooms.open_room.get();
+        let id = open.as_ref().map(|room| room.id.clone());
+        if !workspace_draft_should_reseed(seeded_for.get_untracked().as_deref(), id.as_deref()) {
+            return;
+        }
+        draft.set(
+            open.and_then(|room| room.workspace_root)
+                .unwrap_or_default(),
+        );
+        seeded_for.set(id);
     });
     let unbound = move || rooms.open_room.get().as_ref().is_some_and(room_is_unbound);
     let bound_to = move || {
@@ -385,7 +395,12 @@ fn workspace_binding_section(rooms: Rooms, access: Option<&RoomAccessProjection>
                     <code class="rooms-workspace__workspace-bound-path">{root}</code>
                 </div>
             })}
-            {move || writable.then(|| view! {
+            // A soft-closed room is a frozen audit view — the daemon writes an
+            // OPEN room only, so a bind there is a guaranteed 404. Closing is
+            // read reactively because a room can close under an open panel;
+            // the access projection alone does not say so, since a closed room
+            // keeps whatever access state it had.
+            {move || (access_writable && !rooms.closed.get()).then(|| view! {
                 <div class="rooms-workspace__workspace-controls">
                     <input
                         class="rooms-workspace__workspace-input"
