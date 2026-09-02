@@ -410,8 +410,11 @@ The families the surface calls:
 | Messages | `POST …/{key}/messages`, `POST …/{key}/outbox/retry` |
 | Roster | `POST …/{key}/participants`, `DELETE …/{key}/participants/{id}` |
 | Federation | `POST …/{key}/invites`, `POST /v1/rooms/persistent/invites/redeem`, `POST …/{key}/members/agents`, `DELETE …/{key}/members/{id}` |
-| Room agents | `GET/POST …/{key}/agents`, `…/agents/bootstrap`, `…/agents/preview/{pkg}`, `…/agents/{id}` (`reauthorize`, `suspend`, `resume`, `invoke`) |
+| Room agents | `GET/POST …/{key}/agents`, `…/agents/bootstrap`, `…/agents/preview/{pkg}`, `…/agents/{id}` (`reauthorize`, `suspend`, `resume`) |
 | Artifacts and summary | `GET/POST …/{key}/artifacts[/{id}[/amend]]`, `POST …/{key}/summarize` |
 | Attachments | `GET/POST/DELETE …/{key}/attachments[/{id}]` |
 | Workspace and repo | `GET …/{key}/workspace`, `GET/POST …/{key}/workspace/{leaf}` (an allowlisted proxy to the room's Bedrock container: execs, files, ports, secrets, repo bind/clone/build/ci) |
 | Identity catalog | `GET/POST /v1/agents`, `GET/PUT/DELETE /v1/agents/{name}` |
+
+`invoke` is daemon-owned and is not called or allowlisted by the Surface or
+its authenticated browser proxy.

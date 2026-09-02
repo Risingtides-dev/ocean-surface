@@ -886,7 +886,7 @@ ________________________________________________________________________________
 time:      [7:37pm] [07-01-26]
 agent:     [claude] [fable 5]
 worktree:  [main]
-type:      [bug report]
+type:      [review]
 area:      [infra]
 
 Lane G1 leak-closure prep for the Basic-auth credential removed at HEAD by
@@ -5875,3 +5875,15 @@ the peer; invite handoff uses onboard_url when present and the raw redeemable
 code otherwise. Docs only; no UI, daemon, deployment, or production state
 changed.
 _________________________________________________________________________________ 21:57 docs/rooms-product-contract-truth
+
+time:      [22:16] [09-01-26]
+agent:     [codex] [gpt-5]
+worktree:  docs/rooms-product-contract-truth
+type:      [bug report]
+area:      [review]
+
+Closed the latest Codex contract findings. The append-only July ledger entry is
+restored byte-for-byte, and the Surface route summary no longer advertises the
+daemon-owned agent invoke action as browser-proxy capability. Docs only; no UI,
+daemon, deployment, or production state changed.
+_________________________________________________________________________________ 22:16 docs/rooms-product-contract-truth
