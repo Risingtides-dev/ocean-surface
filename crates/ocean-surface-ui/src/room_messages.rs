@@ -111,8 +111,15 @@ pub(crate) fn local_day_key(ts: &str, utc_offset_minutes: i64) -> Option<String>
 }
 
 /// The local day key of a message, `None` when unparseable.
-fn day_key(msg: &RoomMessage, utc_offset_minutes: i64) -> Option<String> {
-    local_day_key(&msg.created_at, utc_offset_minutes)
+///
+/// `offset_for` is asked about THIS message's instant, never about a
+/// neighbour's. Two rows minutes apart can sit on opposite sides of a DST
+/// change: in New York `2026-11-01T04:30Z` is 00:30 EDT and
+/// `2026-11-01T07:30Z` is 02:30 EST — the same local day under two different
+/// offsets. Resolving the pair with either row's offset alone maps the other
+/// to the wrong day and invents a separator between them.
+fn day_key(msg: &RoomMessage, offset_for: &impl Fn(&str) -> i64) -> Option<String> {
+    local_day_key(&msg.created_at, offset_for(&msg.created_at))
 }
 
 // ── Density decisions ──────────────────────────────────────────────────────
@@ -133,7 +140,14 @@ pub(crate) fn is_compact_system_row(msg: &RoomMessage) -> bool {
 /// the MEMBER'S midnight, not Greenwich's. Two messages a minute apart that
 /// straddle UTC midnight are one conversation to a reader in New York and
 /// must not be split into two headed rows.
-pub(crate) fn is_grouped(prev: &RoomMessage, cur: &RoomMessage, utc_offset_minutes: i64) -> bool {
+///
+/// `offset_for` is resolved per message, not once for the pair — see
+/// `day_key`.
+pub(crate) fn is_grouped(
+    prev: &RoomMessage,
+    cur: &RoomMessage,
+    offset_for: impl Fn(&str) -> i64,
+) -> bool {
     if !matches!(prev.kind, RoomMessageKind::Message)
         || !matches!(cur.kind, RoomMessageKind::Message)
     {
@@ -148,7 +162,7 @@ pub(crate) fn is_grouped(prev: &RoomMessage, cur: &RoomMessage, utc_offset_minut
     ) {
         (Some(p), Some(c)) => {
             (0..=GROUP_WINDOW_SECS).contains(&(c - p))
-                && day_key(prev, utc_offset_minutes) == day_key(cur, utc_offset_minutes)
+                && day_key(prev, &offset_for) == day_key(cur, &offset_for)
         }
         _ => false,
     }
@@ -174,15 +188,18 @@ pub(crate) fn needs_gap_header(prev: &RoomMessage, cur: &RoomMessage) -> bool {
 /// The day is the MEMBER'S. A separator drawn on UTC days lands mid-afternoon
 /// for a reader in New York and splits one evening's conversation in two,
 /// while the real local midnight it should have marked passes unmarked.
+///
+/// `offset_for` is resolved per message, not once for the pair — see
+/// `day_key`.
 pub(crate) fn day_separator_label(
     prev: Option<&RoomMessage>,
     cur: &RoomMessage,
-    utc_offset_minutes: i64,
+    offset_for: impl Fn(&str) -> i64,
 ) -> Option<String> {
-    let cur_day = day_key(cur, utc_offset_minutes)?;
+    let cur_day = day_key(cur, &offset_for)?;
     match prev {
         None => Some(cur_day),
-        Some(p) => (day_key(p, utc_offset_minutes).as_ref() != Some(&cur_day)).then_some(cur_day),
+        Some(p) => (day_key(p, &offset_for).as_ref() != Some(&cur_day)).then_some(cur_day),
     }
 }
 
@@ -236,6 +253,30 @@ mod tests {
     /// Greenwich, where the old rendering was accidentally right.
     const UTC: i64 = 0;
 
+    /// America/New_York across the 2026 autumn transition, as the browser
+    /// would answer it: EDT (-240) up to 2026-11-01T06:00Z, EST (-300) after.
+    /// The one offset a transcript cannot have a single value for.
+    fn new_york_2026(ts: &str) -> i64 {
+        match parse_iso_epoch(ts) {
+            Some(secs) if secs >= parse_iso_epoch("2026-11-01T06:00:00Z").unwrap() => -300,
+            _ => NEW_YORK_EDT,
+        }
+    }
+
+    /// A zone that springs forward at LOCAL MIDNIGHT — Santiago's convention,
+    /// and the only shape where a DST change can land inside the five-minute
+    /// grouping window. New York's 02:00 transition cannot: five minutes
+    /// either side of it is nowhere near a local midnight, so both offsets
+    /// name the same day and grouping looks correct even when it is computed
+    /// wrongly. Here -240 becomes -180 at 2026-09-06T04:00Z, which is 00:00
+    /// local jumping to 01:00 local.
+    fn springs_forward_at_midnight(ts: &str) -> i64 {
+        match parse_iso_epoch(ts) {
+            Some(secs) if secs >= parse_iso_epoch("2026-09-06T04:00:00Z").unwrap() => -180,
+            _ => -240,
+        }
+    }
+
     #[test]
     fn parse_iso_epoch_handles_day_and_bad_input() {
         assert_eq!(parse_iso_epoch("1970-01-01T00:00:00Z"), Some(0));
@@ -254,19 +295,27 @@ mod tests {
         let a = m(1, "u1", "2026-07-29T12:00:00Z");
         let b = m(2, "u1", "2026-07-29T12:05:00Z"); // exactly 300s: inclusive
         let c = m(3, "u1", "2026-07-29T12:05:01Z"); // 301s: full row
-        assert!(is_grouped(&a, &b, UTC));
-        assert!(!is_grouped(&a, &c, UTC));
+        assert!(is_grouped(&a, &b, |_: &str| UTC));
+        assert!(!is_grouped(&a, &c, |_: &str| UTC));
         // Elapsed time is offset-invariant: the window says the same thing
         // wherever it is read.
-        assert!(is_grouped(&a, &b, NEW_YORK_EDT));
-        assert!(!is_grouped(&a, &c, KOLKATA));
+        assert!(is_grouped(&a, &b, |_: &str| NEW_YORK_EDT));
+        assert!(!is_grouped(&a, &c, |_: &str| KOLKATA));
     }
 
     #[test]
     fn never_groups_across_author_kind_or_disorder() {
         let a = m(1, "u1", "2026-07-29T12:00:00Z");
-        assert!(!is_grouped(&a, &m(2, "u2", "2026-07-29T12:00:30Z"), UTC));
-        assert!(!is_grouped(&a, &m(2, "u1", "2026-07-29T11:59:59Z"), UTC)); // out of order
+        assert!(!is_grouped(
+            &a,
+            &m(2, "u2", "2026-07-29T12:00:30Z"),
+            |_: &str| UTC
+        ));
+        assert!(!is_grouped(
+            &a,
+            &m(2, "u1", "2026-07-29T11:59:59Z"),
+            |_: &str| UTC
+        )); // out of order
         assert!(!is_grouped(
             &a,
             &msg(
@@ -275,16 +324,16 @@ mod tests {
                 RoomMessageKind::ParticipantJoined,
                 "2026-07-29T12:00:30Z"
             ),
-            UTC,
+            |_: &str| UTC,
         ));
-        assert!(!is_grouped(&a, &m(2, "u1", "not-a-time"), UTC));
+        assert!(!is_grouped(&a, &m(2, "u1", "not-a-time"), |_: &str| UTC));
     }
 
     #[test]
     fn never_groups_across_midnight_even_within_window() {
         let a = m(1, "u1", "2026-07-29T23:58:00Z");
         let b = m(2, "u1", "2026-07-30T00:01:00Z"); // 180s but new day
-        assert!(!is_grouped(&a, &b, UTC));
+        assert!(!is_grouped(&a, &b, |_: &str| UTC));
     }
 
     #[test]
@@ -293,15 +342,15 @@ mod tests {
         // 20:01 the same afternoon). One conversation, so one headed row.
         let a = m(1, "u1", "2026-07-29T23:58:00Z");
         let b = m(2, "u1", "2026-07-30T00:01:00Z");
-        assert!(!is_grouped(&a, &b, UTC));
-        assert!(is_grouped(&a, &b, NEW_YORK_EDT));
+        assert!(!is_grouped(&a, &b, |_: &str| UTC));
+        assert!(is_grouped(&a, &b, |_: &str| NEW_YORK_EDT));
 
         // And the reverse: one UTC day, two New York days. 03:58Z is 23:58
         // the previous evening; 04:01Z is 00:01 the next morning.
         let c = m(3, "u1", "2026-07-29T03:58:00Z");
         let d = m(4, "u1", "2026-07-29T04:01:00Z");
-        assert!(is_grouped(&c, &d, UTC));
-        assert!(!is_grouped(&c, &d, NEW_YORK_EDT));
+        assert!(is_grouped(&c, &d, |_: &str| UTC));
+        assert!(!is_grouped(&c, &d, |_: &str| NEW_YORK_EDT));
     }
 
     #[test]
@@ -317,18 +366,21 @@ mod tests {
         let a = m(1, "u1", "2026-07-29T23:00:00Z");
         let b = m(2, "u1", "2026-07-30T01:00:00Z");
         assert_eq!(
-            day_separator_label(None, &a, UTC),
+            day_separator_label(None, &a, |_: &str| UTC),
             Some("2026-07-29".to_string())
         );
         assert_eq!(
-            day_separator_label(Some(&a), &b, UTC),
+            day_separator_label(Some(&a), &b, |_: &str| UTC),
             Some("2026-07-30".to_string())
         );
         assert_eq!(
-            day_separator_label(Some(&a), &m(3, "x", "2026-07-29T23:59:00Z"), UTC),
+            day_separator_label(Some(&a), &m(3, "x", "2026-07-29T23:59:00Z"), |_: &str| UTC),
             None
         );
-        assert_eq!(day_separator_label(Some(&a), &m(3, "x", "bad"), UTC), None);
+        assert_eq!(
+            day_separator_label(Some(&a), &m(3, "x", "bad"), |_: &str| UTC),
+            None
+        );
     }
 
     #[test]
@@ -338,30 +390,102 @@ mod tests {
         let a = m(1, "u1", "2026-07-29T23:00:00Z"); // 19:00 local, 07-29
         let b = m(2, "u1", "2026-07-30T01:00:00Z"); // 21:00 local, still 07-29
         assert_eq!(
-            day_separator_label(Some(&a), &b, UTC),
+            day_separator_label(Some(&a), &b, |_: &str| UTC),
             Some("2026-07-30".to_string()),
         );
-        assert_eq!(day_separator_label(Some(&a), &b, NEW_YORK_EDT), None);
+        assert_eq!(
+            day_separator_label(Some(&a), &b, |_: &str| NEW_YORK_EDT),
+            None
+        );
 
         // And the local midnight the UTC reading walked straight past.
         let c = m(3, "u1", "2026-07-29T03:00:00Z"); // 23:00 local, 07-28
         let d = m(4, "u1", "2026-07-29T05:00:00Z"); // 01:00 local, 07-29
-        assert_eq!(day_separator_label(Some(&c), &d, UTC), None);
+        assert_eq!(day_separator_label(Some(&c), &d, |_: &str| UTC), None);
         assert_eq!(
-            day_separator_label(Some(&c), &d, NEW_YORK_EDT),
+            day_separator_label(Some(&c), &d, |_: &str| NEW_YORK_EDT),
             Some("2026-07-29".to_string()),
         );
 
         // The label a member sees names their day, not the wire's: the row
         // that opens the transcript is dated where they are.
         assert_eq!(
-            day_separator_label(None, &c, NEW_YORK_EDT),
+            day_separator_label(None, &c, |_: &str| NEW_YORK_EDT),
             Some("2026-07-28".to_string()),
         );
         // East of Greenwich the shift runs the other way, and by a half hour.
         assert_eq!(
-            day_separator_label(None, &m(5, "u1", "2026-07-29T19:45:00Z"), KOLKATA),
+            day_separator_label(None, &m(5, "u1", "2026-07-29T19:45:00Z"), |_: &str| KOLKATA),
             Some("2026-07-30".to_string()),
+        );
+    }
+
+    /// A pair that straddles a DST change has TWO offsets, and resolving it
+    /// with either row's alone maps the other row to the wrong day.
+    ///
+    /// Codex caught this on #201: the view derived one offset from the CURRENT
+    /// row and both `day_separator_label` and `is_grouped` applied it to the
+    /// predecessor too. In New York on 2026-11-01, `04:30Z` is 00:30 EDT and
+    /// `07:30Z` is 02:30 EST — the same local day, three UTC hours apart,
+    /// under two different offsets. Under the current row's `-300`, the
+    /// predecessor maps to Oct 31 and a day separator appears between two rows
+    /// of the same local morning.
+    #[test]
+    fn a_dst_change_between_two_rows_does_not_invent_a_day() {
+        let before = m(1, "u1", "2026-11-01T04:30:00Z"); // 00:30 EDT, Nov 1
+        let after = m(2, "u1", "2026-11-01T07:30:00Z"); // 02:30 EST, Nov 1
+
+        // Each row against its own offset: one local day, so no separator.
+        assert_eq!(new_york_2026(&before.created_at), -240);
+        assert_eq!(new_york_2026(&after.created_at), -300);
+        assert_eq!(
+            day_separator_label(Some(&before), &after, new_york_2026),
+            None
+        );
+
+        // The defect, stated as the thing that must not happen: the current
+        // row's offset applied to both invents the boundary.
+        assert_eq!(
+            day_separator_label(Some(&before), &after, |_: &str| -300),
+            Some("2026-11-01".to_string()),
+            "this is the WRONG answer the per-pair offset produced — kept so \
+             the test fails loudly if the resolver stops being per message",
+        );
+
+        // A real boundary is still found when the rows genuinely span one.
+        let evening = m(3, "u1", "2026-11-01T03:30:00Z"); // 23:30 EDT, Oct 31
+        assert_eq!(
+            day_separator_label(Some(&evening), &before, new_york_2026),
+            Some("2026-11-01".to_string()),
+        );
+
+        // New York's fall-back sits at 02:00 local, so a five-minute window
+        // around it never reaches a local midnight and BOTH offsets name the
+        // same day. Grouping there is right either way — which is exactly why
+        // it is not evidence.
+        let last_edt = m(4, "u1", "2026-11-01T05:58:00Z"); // 01:58 EDT
+        let first_est = m(5, "u1", "2026-11-01T06:01:00Z"); // 01:01 EST
+        assert!(is_grouped(&last_edt, &first_est, new_york_2026));
+
+        // A zone that springs forward AT local midnight is where the same
+        // defect reaches `is_grouped`. Three minutes apart, genuinely two
+        // local days, so they must not group — but under the current row's
+        // -180 the predecessor moves to 00:58 of the SAME day and they do.
+        let before_jump = m(6, "u1", "2026-09-06T03:58:00Z"); // 23:58, Sep 5
+        let after_jump = m(7, "u1", "2026-09-06T04:01:00Z"); // 01:01, Sep 6
+        assert!(!is_grouped(
+            &before_jump,
+            &after_jump,
+            springs_forward_at_midnight
+        ));
+        assert!(
+            is_grouped(&before_jump, &after_jump, |_: &str| -180),
+            "the WRONG answer a per-pair offset produces — kept so this test \
+             fails loudly if the resolver stops being per message",
+        );
+        assert_eq!(
+            day_separator_label(Some(&before_jump), &after_jump, springs_forward_at_midnight),
+            Some("2026-09-06".to_string()),
         );
     }
 

@@ -3543,10 +3543,13 @@ pub fn RoomsWorkspace(
                                             let root_seq = m.seq;
                                             // Every density decision below that
                                             // turns on a DAY turns on the member's
-                                            // day, so all of them read the offset
-                                            // in force at this row's own instant.
-                                            let offset = viewer_utc_offset_minutes(&full_ts);
-                                            let day_label = room_messages::day_separator_label(prev.as_ref(), &m, offset)
+                                            // day, so each reads the offset in
+                                            // force at the instant of the row it
+                                            // is asking about — the resolver is
+                                            // passed down, never one row's answer
+                                            // applied to its neighbour. A pair
+                                            // straddling a DST change has two.
+                                            let day_label = room_messages::day_separator_label(prev.as_ref(), &m, viewer_utc_offset_minutes)
                                                 .map(|d| room_messages::humanize_day_label(&d, &today_day_key()));
                                             // A long silence gets a time header —
                                             // unless a day separator already marks
@@ -3559,7 +3562,7 @@ pub fn RoomsWorkspace(
                                             .then(|| local_clock_time(&full_ts));
                                             let grouped = prev
                                                 .as_ref()
-                                                .map(|p| room_messages::is_grouped(p, &m, offset))
+                                                .map(|p| room_messages::is_grouped(p, &m, viewer_utc_offset_minutes))
                                                 .unwrap_or(false);
                                             // Cloned for the ledger mark, which
                                             // re-reads reactively: the access
