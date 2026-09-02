@@ -2975,16 +2975,33 @@
   }
 
   /* 16px is the iOS threshold below which focusing an input zooms the page.
-     These six are every field a phone member focuses in a room, and they are
-     the live floor: tests/mobile_composer_regressions.rs pins this rule.
-     Until it did, the guard named three inputs of a rooms panel nothing
-     renders, and deleting this block passed the whole suite. */
+     EVERY text-entry control the rooms surface renders, not a chosen few:
+     tests/mobile_composer_regressions.rs derives the list from the view
+     source and fails if one is missing, so this rule cannot drift behind the
+     markup again. `__files-input` is deliberately absent — it is
+     `type="file"`, which opens a picker rather than the keyboard.
+
+     Until the guard was repointed it named three inputs of a rooms panel
+     nothing renders, and deleting this block passed the whole suite. The
+     second half of that miss was this list: the six composer/room controls
+     were covered while the right rail's eight — invite, repo, artifacts,
+     authorization and the compute panel — sat at 11-13px and zoomed. */
   .rooms-workspace__left-input,
   .rooms-workspace__composer-input,
   .rooms-workspace__addagent-select,
   .rooms-workspace__agentbuilder-input,
   .rooms-workspace__agentbuilder-select,
-  .rooms-workspace__agentbuilder-prompt {
+  .rooms-workspace__agentbuilder-prompt,
+  .rooms-workspace__invite-input,
+  .rooms-workspace__repo-input,
+  .rooms-workspace__artifacts-input,
+  .rooms-workspace__artifacts-select,
+  .rooms-workspace__artifacts-textarea,
+  .rooms-workspace__authority-select,
+  .rooms-workspace__compute-cmd-input,
+  .rooms-workspace__compute-port-input,
+  .rooms-workspace__compute-secret-name,
+  .rooms-workspace__compute-secret-value {
     font-size: 16px;
   }
 }
