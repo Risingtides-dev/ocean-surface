@@ -512,6 +512,53 @@ pub async fn notify(title: &str, body: &str) {
     let _ = Notification::new_with_options(title, &options);
 }
 
+/// Show a desktop notification whose click brings the surface forward.
+///
+/// Same permission handling and same silent degradation as [`notify`] — this
+/// is that function plus an `onclick`, kept separate so the frozen `notify`
+/// signature is untouched.
+///
+/// **Where the click is delivered.** In the browser PWA and the extension this
+/// is the standard Web Notifications API and `onclick` fires on activation.
+/// On the Tauri shell the notification plugin polyfills `window.Notification`
+/// and posts through the OS notification center; whether the OS routes an
+/// activation back into the webview is the plugin's business and is not
+/// something this bundle can detect. The handler is therefore attached
+/// unconditionally and is simply never called where activation is not
+/// delivered — the notification still does its main job, which is to pull the
+/// reader back to a room that named them.
+///
+/// The click closure is leaked (`Closure::forget`), as the event subscriptions
+/// in this module are: a notification is a rare, user-triggered object and the
+/// handler must outlive this call by definition.
+pub async fn notify_with_focus(title: &str, body: &str, on_click: impl Fn() + 'static) {
+    let Some(win) = web_sys::window() else { return };
+    if !Reflect::has(&win, &JsValue::from_str("Notification")).unwrap_or(false) {
+        return;
+    }
+    if Notification::permission() == NotificationPermission::Default {
+        if let Ok(promise) = Notification::request_permission() {
+            let _ = JsFuture::from(promise).await;
+        }
+    }
+    if Notification::permission() != NotificationPermission::Granted {
+        return;
+    }
+    let options = NotificationOptions::new();
+    options.set_body(body);
+    let Ok(notification) = Notification::new_with_options(title, &options) else {
+        return;
+    };
+    let closure = Closure::wrap(Box::new(move |_event: JsValue| {
+        if let Some(win) = web_sys::window() {
+            win.focus().ok();
+        }
+        on_click();
+    }) as Box<dyn Fn(JsValue)>);
+    notification.set_onclick(Some(closure.as_ref().unchecked_ref()));
+    closure.forget();
+}
+
 /// Set the dock/taskbar badge count. `Some(n)` displays `n` on the macOS dock
 /// icon (the shell's `set_badge` command maps to `Window::set_badge_count`);
 /// `None` clears it. No-op on non-Tauri hosts — browsers expose no portable

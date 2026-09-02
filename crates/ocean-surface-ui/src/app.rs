@@ -496,7 +496,11 @@ fn append_dictation(current: &str, fragment: &str) -> String {
 /// Whether the surface window currently has focus (`document.hasFocus()`).
 /// Defaults to `true` when the document can't be read so an off-focus
 /// notification is never fired on an uncertain state.
-fn window_focused() -> bool {
+///
+/// `pub(crate)` because the room mention notifier in `rooms.rs` needs the same
+/// rule — including the "uncertain means focused" default, which is the half
+/// worth not re-deriving.
+pub(crate) fn window_focused() -> bool {
     web_sys::window()
         .and_then(|w| w.document())
         .and_then(|d| d.has_focus().ok())
