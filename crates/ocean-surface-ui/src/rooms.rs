@@ -54,31 +54,14 @@ enum TailState {
     Reconnecting,
 }
 
-/// How MANY rows hydration asks for through `/snapshot`; the cursor below is
-/// which END they come from, and the first paint needs both. The route's own
+/// Rows asked for when hydrating a room through `/snapshot`. The route's own
 /// default is 200 while the store's ceiling is 1000, so naming the ceiling keeps
 /// the first paint exactly the size it was on the unpaged read — moving onto the
 /// cursor-bearing route adds the cursor without shrinking what an operator sees.
-///
-/// Doubles as the window [`hydration_backfill_start`] measures a page against:
-/// a page the daemon filled to this number is the only one that can have rows
-/// behind it.
 const HYDRATION_TRANSCRIPT_LIMIT: usize = 1000;
 
-/// The `before_seq` that opens a room at its NEWEST page. `/snapshot` pages
-/// backward exactly when this parameter is present, and a backward page is the
-/// newest `limit` rows strictly older than the cursor — so a cursor past every
-/// seq the room could ever hold is the literal way to name the tail, not a
-/// sentinel the daemon special-cases (ocean-os#436, and the ecosystem contract's
-/// "Transcript window" says so in as many words). `u64::MAX` is the only value
-/// no stored row can reach; the store pins it green in
-/// `transcript_tail_page_cursor_above_i64_max_is_the_newest_page`, which exists
-/// because an unchecked cast to SQLite's i64 once wrapped a cursor negative and
-/// read the wrong end of the log.
-const HYDRATION_TAIL_CURSOR: u64 = u64::MAX;
-
-/// The OTHER end of that cursor, for a read that wants the room's roster facts
-/// and none of its transcript. The contract defines `before_seq = 0` as a
+/// A `before_seq` of zero, for a read that wants the room's roster facts and
+/// none of its transcript. The contract defines `before_seq = 0` as a
 /// terminal empty page — nothing precedes the first message — while the daemon
 /// resolves `agent_owners`, `access` and `closed` from the room's own lock
 /// regardless of which page it serves. So this is how
@@ -87,21 +70,13 @@ const HYDRATION_TAIL_CURSOR: u64 = u64::MAX;
 /// history to learn it.
 const OWNERSHIP_ONLY_CURSOR: u64 = 0;
 
-/// Pages one catch-up read of `/transcript` will walk before it stops asking,
-/// and the same bound on the backward hydration walk. The route serves 200 rows
-/// a page, so five is the same 1000 rows a fresh open paints
-/// ([`HYDRATION_TRANSCRIPT_LIMIT`]). Past that a read that runs on every join,
-/// leave, removal and send would be pulling a long-lived room's whole log
+/// Pages one catch-up read of `/transcript` will walk before it stops asking.
+/// The route serves 200 rows a page, so five is the same 1000 rows a fresh open
+/// paints ([`HYDRATION_TRANSCRIPT_LIMIT`]). Past that a read that runs on every
+/// join, leave, removal and send would be pulling a long-lived room's whole log
 /// through four unrelated mutations, which is the full-table read the route's
 /// paging exists to avoid. The live tail owns everything beyond the cap.
 const MAX_TRANSCRIPT_CATCHUP_PAGES: usize = 5;
-
-/// Rows per page of the backward hydration walk. The forward catch-up gets 200
-/// from `/transcript`'s own default without asking; this names the same number
-/// so the two walks are the same shape and the one page cap above bounds both to
-/// the same 1000 rows. Spelled out rather than left to the route default because
-/// the backward read must pass `limit` beside `before_seq` anyway.
-const BACKFILL_TRANSCRIPT_PAGE_LIMIT: usize = 200;
 
 /// Stable identity used by explicit single-operator and direct-host surfaces.
 /// Browser deployments with a signed-in user never use this value: they stay
@@ -515,16 +490,11 @@ enum ReadCursorProjectionTarget {
 /// unpaged room GET answers a transcript with nothing beside it, so a room past
 /// the store's 1000-row cap hands back its oldest rows and no field says so.
 /// This route answers the same room, transcript and access plus the page's own
-/// cursor, in whichever direction the read asked for.
-///
-/// Hydration always asks BACKWARD ([`HYDRATION_TAIL_CURSOR`]), so `prev_seq` and
-/// `has_more` are the cursor pair this envelope decodes and
-/// [`Rooms::backfill_open_transcript`] is what reads them. `next_seq` stays
-/// undecoded, and now for a stronger reason than the one that used to stand
-/// here: a backward page's `next_seq` is `null` on the wire by construction, so
-/// decoding it would add a field that is not merely unread but never populated —
-/// exactly the dead code the `-D warnings` release lane rejects. A forward
-/// `/snapshot` read would populate it, and this crate makes none.
+/// cursor. `next_seq`/`has_more` ride along on the wire and are deliberately not
+/// decoded: the tail's durable replay from `last_seq` already delivers every row
+/// past the page, so nothing here would read them, and a field this crate never
+/// reads is dead code the `-D warnings` release lane rejects. The wave that
+/// builds backward paging is the one that should claim them.
 #[derive(Debug, Clone, Deserialize)]
 struct RoomSnapshotResponse {
     #[serde(default)]
@@ -540,31 +510,8 @@ struct RoomSnapshotResponse {
     /// rather than a compatibility window: `/snapshot` has carried `last_seq`
     /// since the commit that introduced the route, so no shipped daemon omits
     /// it. The fallback below is a decode safety net, not a version bridge.
-    ///
-    /// Unchanged by the move to a backward read: the daemon derives it from the
-    /// page's last row either way, and on a tail-anchored page that row is the
-    /// newest in the room — which is precisely the `after_seq` the live tail
-    /// wants. Anchoring hydration at the other end made this field MORE
-    /// truthful, not less.
     #[serde(default)]
     last_seq: Option<u64>,
-    /// OLDEST row on this page, replayed as the next `before_seq` to walk
-    /// further back. `Some` only on a backward page — a forward one carries
-    /// `next_seq` instead and leaves this null — and `None` once a page reaches
-    /// the start of the transcript. Read by
-    /// [`Rooms::backfill_open_transcript`] through
-    /// [`transcript_backfill_cursor`], and by
-    /// [`Rooms::load_older_transcript_page`] through
-    /// [`transcript_older_cursor`] — the same cursor, once the walk's page cap
-    /// has handed the decision to the operator.
-    #[serde(default)]
-    prev_seq: Option<u64>,
-    /// Whether more rows exist in the direction THIS page paged — older rows,
-    /// for the backward read hydration makes. It is not "the room has more
-    /// messages": on the tail page of a 5000-row room it is true and every row
-    /// it refers to is behind what was just painted.
-    #[serde(default)]
-    has_more: bool,
     /// Whether the soft-closed AUDIT view answered this read rather than the
     /// live one. `/snapshot` has always fallen through to it so a finished
     /// call stays replayable, and until ocean-os#434 the body never said which
@@ -641,10 +588,10 @@ struct RoomMutateResponse {
 /// this one and `has_more` says such a page exists, and
 /// [`Rooms::refresh_open_transcript`] walks both.
 ///
-/// [`RoomSnapshotResponse`] decodes its own `has_more` beside a BACKWARD
-/// cursor; the two fields are named the same and mean opposite directions, which
-/// is why neither envelope borrows the other's. `next_seq` is forward-only and
-/// lives only here — a `/snapshot` read this crate makes never populates it.
+/// [`RoomSnapshotResponse`] leaves the same two fields undecoded on purpose —
+/// nothing there reads them and a field this crate never reads is dead code the
+/// `-D warnings` release lane rejects. This envelope claims them because this
+/// one does read them, on the live catch-up path.
 #[derive(Debug, Clone, Deserialize)]
 struct TranscriptResponse {
     #[serde(default)]
@@ -913,20 +860,6 @@ pub struct Rooms {
     /// Monotonic: see [`advanced_resume_seq`] for why a lagging ingest may never
     /// lower it.
     resume_seq: RwSignal<Option<u64>>,
-    /// Where an on-demand older read resumes, and the whole reason the workspace
-    /// can offer one. `Some` means the daemon said older rows exist and nothing
-    /// on screen reaches them; `None` means a page provably reached the start of
-    /// the log, or no room is open. Written wherever
-    /// [`Rooms::backfill_open_transcript`] stops — a walk that hits its page cap
-    /// used to drop the page's `prev_seq` and `has_more` at that instant, which
-    /// is what left a long room's oldest painted row reading as the first
-    /// message in it. Read through [`Rooms::older_transcript_available`].
-    older_cursor: RwSignal<Option<u64>>,
-    /// Whether an on-demand older page is in flight, so a second press cannot
-    /// fire a second request against a cursor the first has not yet moved —
-    /// which would prepend the same page twice were `prepend_transcript_page`
-    /// not strict about it, and spends a request regardless.
-    older_in_flight: RwSignal<bool>,
     /// Free-form status line (errors, in-flight notices).
     pub status: RwSignal<String>,
     /// Monotonic generation: bumped when the open room changes so a stale
@@ -1146,8 +1079,6 @@ impl Rooms {
             open_room: RwSignal::new(None),
             transcript: RwSignal::new(Vec::new()),
             resume_seq: RwSignal::new(None),
-            older_cursor: RwSignal::new(None),
-            older_in_flight: RwSignal::new(false),
             status: RwSignal::new(String::new()),
             generation: RwSignal::new(0),
             identity_id: RwSignal::new(identity.id),
@@ -1260,13 +1191,6 @@ impl Rooms {
         self.open_room.set(None);
         self.transcript.set(Vec::new());
         self.resume_seq.set(None);
-        // Both halves of the older-history state, cleared for the same reason
-        // the transcript is: a cursor is one room's position in one room's log,
-        // and an in-flight press outlives the room it was made in — its
-        // completion re-checks `room_is_current` and writes nothing, so nothing
-        // else will ever lower the flag.
-        self.older_cursor.set(None);
-        self.older_in_flight.set(false);
         self.access.set(None);
         self.closed.set(false);
         // Ownership is one room's roster fact. Left standing, the previous
@@ -1676,15 +1600,9 @@ impl Rooms {
     /// generation, and start the room-scoped SSE live tail (TASK-10/TASK-11).
     /// Hydration reads `/snapshot`, the route that answers a cursor, so the tail
     /// resumes from the sequence the daemon says it served rather than one
-    /// re-derived from the rows on screen. This never was a "full transcript",
-    /// and which END of the log it is one page OF is the whole question: the
-    /// read now asks backward ([`room_snapshot_url`]), so a room past 1000 rows
-    /// opens on its NEWEST page and [`Rooms::backfill_open_transcript`] walks
-    /// older from there. Paging forward from the start instead meant opening on
-    /// message #1 of a 12 000-row room and reaching the rows the operator came
-    /// for only once the SSE tail's replay had dragged the eleven thousand
-    /// between them through the stream — and in a soft-closed room, which opens
-    /// no tail, not reaching them at all.
+    /// re-derived from the rows on screen. This never was a "full transcript" —
+    /// a room past 1000 rows paints its oldest page and the tail's replay from
+    /// `last_seq` brings the rest.
     ///
     /// `/snapshot` also falls through to the soft-closed audit view, so a room
     /// that used to fail to open now hydrates. The tail underneath it cannot:
@@ -1743,8 +1661,6 @@ impl Rooms {
             match result {
                 Ok((room, transcript, access, last_seq, closed, agent_owners)) => {
                     let resume_seq = snapshot_resume_seq(last_seq, &transcript);
-                    let backfill_from =
-                        hydration_backfill_start(&transcript, HYDRATION_TRANSCRIPT_LIMIT);
                     me.open_room.set(room);
                     me.transcript.set(transcript.clone());
                     me.access.set(Some(access.clone()));
@@ -1763,12 +1679,6 @@ impl Rooms {
                     );
                     me.status.set(String::new());
                     me.fetch_agents();
-                    // Unconditional on closedness, unlike the tail below: a
-                    // soft-closed room is the one that needs this most, being
-                    // the one with no tail to bring it anything else.
-                    if let Some(before_seq) = backfill_from {
-                        me.backfill_open_transcript(&key, generation_id, before_seq);
-                    }
                     // Not started rather than started-and-stopped: `/events`
                     // 404s a closed room and the loop below treats every
                     // failure as a reason to retry, so the only connection
@@ -2361,121 +2271,6 @@ impl Rooms {
         });
     }
 
-    /// Walk BACKWARD from the hydration page, prepending older rows.
-    ///
-    /// Anchoring the first paint at the tail is what makes this necessary.
-    /// Before it, a 1500-row room painted all of it — the oldest 1000 from the
-    /// head plus a 500-row forward catch-up — and the cost was opening on
-    /// message #1. Asking for the newest page instead fixes what the operator
-    /// sees and, on its own, would strand everything before it: `/transcript` is
-    /// forward-only by contract, so nothing else in this module can reach a row
-    /// older than the first one painted.
-    ///
-    /// So this mirrors [`Rooms::refresh_open_transcript`] in the other
-    /// direction, on the same page cap and the same page size: 1000 + 5×200, the
-    /// same row budget as before, anchored at the end an operator opens a room
-    /// to read. It runs once per open rather than on every mutation, which is
-    /// why it can afford to run at all.
-    ///
-    /// Beyond that budget a long room's older history is not on screen, where
-    /// before it arrived eventually — a deliberate trade that cost two things.
-    ///
-    /// The first is closed. Rows older than the window used to be absent with
-    /// nothing on screen saying so, because the last page's `has_more` and
-    /// `prev_seq` were dropped at the instant the walk returned, leaving the
-    /// oldest row painted reading as the first message in the room. They are
-    /// parked in [`Rooms::older_cursor`] now, and
-    /// [`Rooms::load_older_transcript_page`] replays one page from there per
-    /// press. History past the budget is a press away rather than gone, and a
-    /// room whose walk provably reached the start of the log parks `None` and
-    /// grows no affordance at all.
-    ///
-    /// The second stands, and is the harder one to design for: a row INSIDE the
-    /// window can render nowhere at all. `rooms_workspace` builds the main list
-    /// from `partition_thread_messages(&transcript, 0)`, whose
-    /// `roots` keep only rows carrying no `thread_parent_seq`; a reply
-    /// whose ROOT fell outside the window is dropped from that list, and
-    /// `thread_root_for` cannot find the missing root either, so no thread pane
-    /// opens on it. A reply at seq 2500 to a root at seq 800 is invisible with
-    /// nothing implying it exists. The unbounded catch-up this replaced could
-    /// not leave that standing — the root arrived eventually — so it is new, and
-    /// it is the reason the follow-on is more than a scroll trigger.
-    ///
-    /// What closes it is an answer for the orphaned reply — either fetching a
-    /// root the window missed or rendering the reply where the operator can see
-    /// it — and pressing "load older" enough times is not that answer: it walks
-    /// back a page at a time and cannot jump to one named root. Until then a
-    /// very long LIVE room trades unbounded eventual history for a correct first
-    /// paint plus a way back, and a very long SOFT-CLOSED room comes out
-    /// strictly ahead: it opens no tail at all, so its newest rows were never
-    /// merely late, they were unreachable.
-    ///
-    /// Never touches [`Rooms::resume_seq`]. That is the FORWARD position the
-    /// live tail resumes from, older rows say nothing about it, and moving it
-    /// backward would make the tail re-read what is already painted.
-    fn backfill_open_transcript(&self, key: &str, generation_id: u64, before_seq: u64) {
-        let base = self.base();
-        let me = *self;
-        let key = key.to_string();
-        spawn_local(async move {
-            let mut cursor = before_seq;
-            let mut pages_read = 0usize;
-            loop {
-                // Re-checked before EVERY page for the same reason the forward
-                // walk re-checks: each page is an await, and a room switched
-                // during one must not have the response prepended under the
-                // room the operator switched to.
-                if !me.room_is_current(generation_id, &key) {
-                    return;
-                }
-                let url =
-                    room_snapshot_tail_url(&base, &key, cursor, BACKFILL_TRANSCRIPT_PAGE_LIMIT);
-                // A request that never answered leaves the page it was reading
-                // exactly where it was, so the cursor is parked rather than
-                // dropped: a dropped one ends the room's history at whatever a
-                // flaky network happened to deliver, and says so to nobody.
-                let Ok(response) = Request::get(&url).send().await else {
-                    me.park_older_cursor(generation_id, &key, Some(cursor));
-                    return;
-                };
-                let Ok(page) = response.json::<RoomSnapshotResponse>().await else {
-                    me.park_older_cursor(generation_id, &key, Some(cursor));
-                    return;
-                };
-                if !me.room_is_current(generation_id, &key) {
-                    return;
-                }
-                if !page.ok {
-                    me.older_cursor.set(Some(cursor));
-                    return;
-                }
-                let reached_back_to = first_transcript_seq(&page.transcript);
-                me.transcript
-                    .update(|transcript| prepend_transcript_page(transcript, page.transcript));
-                pages_read += 1;
-                let Some(next) = transcript_backfill_cursor(
-                    pages_read,
-                    page.has_more,
-                    page.prev_seq,
-                    reached_back_to,
-                ) else {
-                    // The page cap is where this stops on a long room, and the
-                    // cursor it stops holding is the only route left to the rows
-                    // behind it. Parked unconditionally: the same call answers
-                    // `None` when the daemon said the log ran out, which is the
-                    // room that must NOT grow an affordance.
-                    me.older_cursor.set(transcript_older_cursor(
-                        page.has_more,
-                        page.prev_seq,
-                        reached_back_to,
-                    ));
-                    return;
-                };
-                cursor = next;
-            }
-        });
-    }
-
     /// Re-read who owns which agent, after something changed who does.
     ///
     /// Hydration is the only other writer, so without this a binding mutation
@@ -2520,85 +2315,6 @@ impl Rooms {
             if let Some(page) = page.filter(|page| page.ok) {
                 me.agent_owners.set(page.agent_owners);
             }
-        });
-    }
-
-    /// Park where an on-demand older read should resume, if the room this walk
-    /// belongs to is still the open one. Guarded because a walk's failure lands
-    /// after an await like everything else here, and writing a retired room's
-    /// cursor would offer the operator older history belonging to a room they
-    /// have already left.
-    fn park_older_cursor(&self, generation_id: u64, key: &str, cursor: Option<u64>) {
-        if self.room_is_current(generation_id, key) {
-            self.older_cursor.set(cursor);
-        }
-    }
-
-    /// Whether older history exists that nothing on screen reaches — the one
-    /// condition the workspace's "load older" affordance renders on. Reactive:
-    /// the hydration walk publishes this signal several page-loads after the
-    /// first paint, so a view reading it untracked would have asked before the
-    /// answer existed.
-    pub(crate) fn older_transcript_available(&self) -> bool {
-        self.older_cursor.get().is_some()
-    }
-
-    /// Whether the operator's older-history press is still in flight, so the
-    /// affordance can say so and refuse a second one.
-    pub(crate) fn older_transcript_in_flight(&self) -> bool {
-        self.older_in_flight.get()
-    }
-
-    /// Fetch ONE page older than the parked cursor and prepend it.
-    ///
-    /// The request is the hydration walk's own — same route, same page size,
-    /// same `room_is_current` re-check before anything is written — and the only
-    /// difference is what ends it. The walk stops at
-    /// [`MAX_TRANSCRIPT_CATCHUP_PAGES`] because it runs unasked on every open;
-    /// this runs once per press, so the cursor it leaves behind is
-    /// [`transcript_older_cursor`]'s answer and the operator decides whether to
-    /// ask again.
-    ///
-    /// A failed read leaves the cursor untouched on purpose: the affordance
-    /// stays on screen and the press can simply be repeated. Clearing it would
-    /// turn one dropped request into permanently unreachable history.
-    pub(crate) fn load_older_transcript_page(&self) {
-        if self.older_in_flight.get_untracked() {
-            return;
-        }
-        let Some(cursor) = self.older_cursor.get_untracked() else {
-            return;
-        };
-        let Some(key) = self.open_key.get_untracked() else {
-            return;
-        };
-        let generation_id = self.generation_snapshot();
-        let base = self.base();
-        let me = *self;
-        self.older_in_flight.set(true);
-        spawn_local(async move {
-            let url = room_snapshot_tail_url(&base, &key, cursor, BACKFILL_TRANSCRIPT_PAGE_LIMIT);
-            let page = match Request::get(&url).send().await {
-                Ok(response) => response.json::<RoomSnapshotResponse>().await.ok(),
-                Err(_) => None,
-            };
-            // Nothing below this line may write into a room the operator has
-            // left — `reset_room_state` has already cleared both signals, and
-            // lowering the flag here would lower the NEXT room's.
-            if !me.room_is_current(generation_id, &key) {
-                return;
-            }
-            if let Some(page) = page.filter(|page| page.ok) {
-                let reached_back_to = first_transcript_seq(&page.transcript);
-                me.transcript
-                    .update(|transcript| prepend_transcript_page(transcript, page.transcript));
-                me.older_cursor.set(transcript_older_cursor(
-                    page.has_more,
-                    page.prev_seq,
-                    reached_back_to,
-                ));
-            }
-            me.older_in_flight.set(false);
         });
     }
 
@@ -3646,10 +3362,6 @@ fn last_transcript_seq(transcript: &[RoomMessage]) -> Option<u64> {
     transcript.last().map(|message| message.seq)
 }
 
-fn first_transcript_seq(transcript: &[RoomMessage]) -> Option<u64> {
-    transcript.first().map(|message| message.seq)
-}
-
 /// Where the live tail resumes after a `/snapshot` hydration. The page's own
 /// `last_seq` is authoritative — it is the daemon naming what it just served —
 /// and the painted rows are the fallback for a response that omits it. No
@@ -3660,22 +3372,25 @@ fn snapshot_resume_seq(snapshot_last_seq: Option<u64>, transcript: &[RoomMessage
     snapshot_last_seq.or_else(|| last_transcript_seq(transcript))
 }
 
-/// The hydration read for `key`: the room's NEWEST page, at the store's full
-/// window. Both query arguments carry weight. `limit` is spelled out because the
-/// route's own default is 200, a fifth of what the unpaged read painted; without
-/// `before_seq` the route pages FORWARD from the start of the log, which for a
-/// room past the window means opening on its oldest thousand and reaching the
-/// rows an operator actually came for only by dragging every row between them
-/// through the live tail — and, for a soft-closed room, never, because that room
-/// opens no tail at all.
+/// The hydration read for `key`. `/snapshot` is the room read that answers a
+/// cursor beside its page; the row count is spelled out because the route's own
+/// default is 200, a fifth of what the unpaged read painted, so this one
+/// argument is the difference between moving onto the cursor and shrinking the
+/// first paint on the way there.
 fn room_snapshot_url(base: &str, key: &str) -> String {
-    room_snapshot_tail_url(base, key, HYDRATION_TAIL_CURSOR, HYDRATION_TRANSCRIPT_LIMIT)
+    format!(
+        "{base}/v1/rooms/persistent/{}/snapshot?limit={HYDRATION_TRANSCRIPT_LIMIT}",
+        encode(key)
+    )
 }
 
-/// One backward page of `/snapshot`: the newest `limit` rows strictly older than
-/// `before_seq`, ascending. `after_seq` is never sent beside it — the daemon
-/// answers the pair with a typed 400 (`conflicting_transcript_cursors`) rather
-/// than picking one, so the two cursors cannot share a builder.
+/// One page of `/snapshot` anchored at an explicit cursor, for a caller that
+/// wants a specific end of the log rather than the route's own default.
+/// [`Rooms::refresh_agent_owners`] is the one caller: an ownership-only read at
+/// [`OWNERSHIP_ONLY_CURSOR`] with `limit=1`, asking for zero transcript rows on
+/// purpose. `after_seq` is never sent beside `before_seq` — the daemon answers
+/// the pair with a typed 400 (`conflicting_transcript_cursors`) rather than
+/// picking one, so the two cursors cannot share a builder.
 fn room_snapshot_tail_url(base: &str, key: &str, before_seq: u64, limit: usize) -> String {
     format!(
         "{base}/v1/rooms/persistent/{}/snapshot?before_seq={before_seq}&limit={limit}",
@@ -3698,96 +3413,6 @@ fn append_transcript_page(transcript: &mut Vec<RoomMessage>, page: Vec<RoomMessa
             transcript.push(message);
         }
     }
-}
-
-/// Prepend one backward `/snapshot` page to the painted rows, keeping only
-/// entries older than the oldest one painted — the mirror of
-/// [`append_transcript_page`], and strict for the same reason: an overlapping
-/// read is a duplicate delivery, not a gap. The bound is read ONCE rather than
-/// per row because every kept row lands in front of it, so re-reading it after
-/// each insert would compare against a row this very page just added.
-///
-/// The page arrives ascending and entirely below the paint, so splicing the kept
-/// rows in at the front preserves the whole vector's `seq` order — which the
-/// renderer, the resume point and [`first_transcript_seq`] all depend on.
-fn prepend_transcript_page(transcript: &mut Vec<RoomMessage>, page: Vec<RoomMessage>) {
-    let oldest_painted = first_transcript_seq(transcript);
-    let older: Vec<RoomMessage> = page
-        .into_iter()
-        .filter(|message| {
-            oldest_painted
-                .map(|oldest| message.seq < oldest)
-                .unwrap_or(true)
-        })
-        .collect();
-    transcript.splice(0..0, older);
-}
-
-/// Where the backward hydration walk STARTS, or `None` when the first paint
-/// already holds the whole room.
-///
-/// The page's own length is the signal, not its `has_more`. A backward
-/// `/snapshot` page is the last `limit` rows that qualify, so a page shorter
-/// than the window provably reached the start of the log and a full one is the
-/// only shape that can have anything behind it. Reading the length rather than
-/// the flag keeps the hydration decode exactly as wide as it has always been —
-/// `closed` reaching the tail gate is mutation-tested on the literal shape of
-/// that arm — and costs one request in one case: a room whose length is an exact
-/// multiple of the window asks once and is told there is nothing older.
-///
-/// The cursor is the oldest row painted, which is where the walk's own rule
-/// would have put it. `before_seq` is exclusive, so the first page back cannot
-/// re-serve it.
-fn hydration_backfill_start(transcript: &[RoomMessage], window: usize) -> Option<u64> {
-    if transcript.len() < window {
-        return None;
-    }
-    first_transcript_seq(transcript)
-}
-
-/// Where the backward hydration walk continues, or `None` when it must stop. The
-/// mirror of [`transcript_catchup_cursor`], with the same two stop conditions —
-/// the daemon said the log ran out (`has_more` false, meaning no OLDER rows on a
-/// backward page), or the walk has taken [`MAX_TRANSCRIPT_CATCHUP_PAGES`] pages.
-///
-/// `prev_seq` is the daemon's own `before_seq` for the next page;
-/// `page_reached_back_to` — the LOWEST `seq` the page just served — is the
-/// fallback for a `has_more` page naming no cursor, and is also what forbids an
-/// endless walk over one: `before_seq` is exclusive, so every row on a page sits
-/// strictly below the cursor that produced it and the replayed cursor strictly
-/// decreases. It bottoms out at `before_seq = 0`, which the daemon answers as a
-/// terminal empty page because nothing precedes the first message.
-fn transcript_backfill_cursor(
-    pages_read: usize,
-    has_more: bool,
-    prev_seq: Option<u64>,
-    page_reached_back_to: Option<u64>,
-) -> Option<u64> {
-    if pages_read >= MAX_TRANSCRIPT_CATCHUP_PAGES {
-        return None;
-    }
-    transcript_older_cursor(has_more, prev_seq, page_reached_back_to)
-}
-
-/// Where an ON-DEMAND older read resumes, or `None` once a page has provably
-/// reached the start of the log.
-///
-/// The same cursor [`transcript_backfill_cursor`] answers, minus the page cap —
-/// which is the whole difference between the two callers. The hydration walk is
-/// bounded because it runs unasked on every open; a press is one page the
-/// operator asked for, so only the daemon's own `has_more` may end it. Deriving
-/// the bounded answer FROM this one is what stops the two drifting: a walk that
-/// stopped because the log ran out and a press that finds nothing older are then
-/// the same fact rather than two functions that happen to agree today.
-fn transcript_older_cursor(
-    has_more: bool,
-    prev_seq: Option<u64>,
-    page_reached_back_to: Option<u64>,
-) -> Option<u64> {
-    if !has_more {
-        return None;
-    }
-    prev_seq.or(page_reached_back_to)
 }
 
 /// Where a catch-up read continues after the page it just ingested, or `None`
@@ -5024,67 +4649,35 @@ mod tests {
         assert_eq!(current, Some(recovering));
     }
 
-    /// Hydration addresses the cursor-bearing route at the store's full page,
-    /// from the NEWEST end. Both query arguments are load-bearing and fail
-    /// differently. Drop `limit` and the route's own 200-row default silently
-    /// costs the first paint four fifths of itself; drop `before_seq` and the
-    /// route pages forward from the start of the log instead, which is a full
-    /// page of the WRONG rows — every other assertion in this module stays green
-    /// through either.
+    /// Hydration addresses the cursor-bearing route at the store's full page.
+    /// The route defaults to 200 rows and the unpaged read it replaces painted
+    /// up to 1000, so the limit is not decoration: drop it and the first paint
+    /// silently loses four fifths of itself while every other assertion in this
+    /// module still passes.
     #[test]
     fn hydration_reads_snapshot_at_the_stores_full_page() {
         assert_eq!(
             room_snapshot_url("http://127.0.0.1:7777", "ocean-surface"),
-            "http://127.0.0.1:7777/v1/rooms/persistent/ocean-surface/snapshot\
-             ?before_seq=18446744073709551615&limit=1000"
+            "http://127.0.0.1:7777/v1/rooms/persistent/ocean-surface/snapshot?limit=1000"
         );
         // Room keys are free-form, so the segment is encoded and the query is
         // not part of what gets encoded.
         assert_eq!(
             room_snapshot_url("https://ocean.example", "call/2026-09-01 standup"),
-            "https://ocean.example/v1/rooms/persistent/call%2F2026-09-01%20standup/snapshot\
-             ?before_seq=18446744073709551615&limit=1000"
-        );
-        // The cursor is `u64::MAX` spelled out: a room cannot store a seq at or
-        // above it, so the page is unconditionally the newest one. Pinned as a
-        // literal because the daemon parses this as a number, and a value that
-        // silently became a sentinel string or an i64 would still produce a URL.
-        assert_eq!(HYDRATION_TAIL_CURSOR.to_string(), "18446744073709551615");
-    }
-
-    /// The backward walk addresses the same route one page at a time, and never
-    /// beside `after_seq` — the daemon answers both cursors together with a
-    /// typed 400 rather than choosing, so a builder that could emit the pair is
-    /// a builder that can emit a request no room will ever answer.
-    #[test]
-    fn backfill_pages_the_snapshot_backward_at_the_forward_walks_page_size() {
-        assert_eq!(
-            room_snapshot_tail_url("http://127.0.0.1:7777", "ocean-surface", 800, 200),
-            "http://127.0.0.1:7777/v1/rooms/persistent/ocean-surface/snapshot\
-             ?before_seq=800&limit=200"
-        );
-        assert!(
-            !room_snapshot_tail_url("http://127.0.0.1:7777", "room-1", 1, 1).contains("after_seq"),
-            "after_seq beside before_seq is conflicting_transcript_cursors, not a page"
-        );
-        assert_eq!(
-            BACKFILL_TRANSCRIPT_PAGE_LIMIT * MAX_TRANSCRIPT_CATCHUP_PAGES,
-            HYDRATION_TRANSCRIPT_LIMIT,
-            "the backward walk is budgeted at exactly one more hydration page, \
-             the same bound the forward catch-up runs on"
+            "https://ocean.example/v1/rooms/persistent/call%2F2026-09-01%20standup/snapshot?limit=1000"
         );
     }
 
-    /// A `/snapshot` body decodes whole — the forward-only `next_seq` this
-    /// envelope still ignores must not break the decode — and the tail resumes
-    /// at the sequence the daemon named rather than one re-derived from the
-    /// painted rows.
+    /// A `/snapshot` body decodes whole — the `next_seq`/`has_more` this envelope
+    /// deliberately ignores must not break the decode — and the tail resumes at
+    /// the sequence the daemon named rather than one re-derived from the painted
+    /// rows.
     ///
     /// The body below puts the two sources three rows apart, which the daemon
     /// cannot emit today (it derives `last_seq` from the page's own last row).
     /// That is the point: the rule only has teeth on the day they diverge — a
-    /// filtered projection, a trimmed page — and on that day the daemon's number
-    /// is the one that names what it actually served.
+    /// filtered projection, a trimmed page, backward paging — and on that day
+    /// the daemon's number is the one that names what it actually served.
     /// `closed` is the ONLY thing in this envelope that tells the daemon's
     /// frozen audit view apart from a live room: both answer 200, both carry a
     /// transcript, and `access` describes the federation rail rather than the
@@ -5357,350 +4950,6 @@ mod tests {
             snapshot_resume_seq(None, &[message(3), message(9)]),
             Some(9)
         );
-    }
-
-    /// The tail-anchored hydration page, read as `open_room` reads it: the live
-    /// tail resumes from the NEWEST row and the backward walk starts at the
-    /// oldest, off one body, in opposite directions. Getting the two cursors
-    /// crossed is the failure this pins — `last_seq` into `before_seq` re-reads
-    /// the page forever, `prev_seq` into `after_seq` replays the whole log.
-    #[test]
-    fn tail_hydration_resumes_forward_and_backfills_from_opposite_ends() {
-        let page: RoomSnapshotResponse = serde_json::from_value(serde_json::json!({
-            "ok": true,
-            "room": null,
-            "participants": [],
-            "transcript": [
-                {
-                    "seq": 4001,
-                    "author_id": "member-1",
-                    "author_kind": "human",
-                    "kind": "message",
-                    "body": "oldest row on the tail page",
-                    "created_at": "2026-07-16T22:00:00Z"
-                },
-                {
-                    "seq": 5000,
-                    "author_id": "member-1",
-                    "author_kind": "human",
-                    "kind": "message",
-                    "body": "newest row in the room",
-                    "created_at": "2026-07-16T22:00:01Z"
-                }
-            ],
-            "last_seq": 5000,
-            // Null on every backward page, by construction — the arm that
-            // populates it is the forward one this crate never asks for.
-            "next_seq": null,
-            "prev_seq": 4001,
-            "has_more": true,
-            "access": { "state": "local" }
-        }))
-        .expect("a backward snapshot page should decode");
-        assert_eq!(page.prev_seq, Some(4001));
-        assert!(
-            page.has_more,
-            "on a backward page this means OLDER rows exist, not newer ones",
-        );
-
-        // Forward: the tail picks up past the newest row the page served, so a
-        // room opened at its tail replays nothing.
-        assert_eq!(
-            url_with_after_seq(
-                "/v1/rooms/persistent/room-1/events",
-                snapshot_resume_seq(page.last_seq, &page.transcript)
-            ),
-            "/v1/rooms/persistent/room-1/events?after_seq=5000"
-        );
-
-        // Backward: the walk starts at the oldest row painted. The window here
-        // is the page's own length, standing in for the 1000 `open_room` passes.
-        let backfill_from = hydration_backfill_start(&page.transcript, 2);
-        assert_eq!(backfill_from, Some(4001));
-        assert_eq!(
-            room_snapshot_tail_url(
-                "",
-                "room-1",
-                backfill_from.expect("a full page has rows behind it"),
-                BACKFILL_TRANSCRIPT_PAGE_LIMIT
-            ),
-            "/v1/rooms/persistent/room-1/snapshot?before_seq=4001&limit=200"
-        );
-        assert_ne!(
-            backfill_from, page.last_seq,
-            "seeding the walk from the NEWEST row would re-request the page it \
-             just painted, forever"
-        );
-    }
-
-    /// A room that fits in the first paint starts no walk, and one that fills it
-    /// does. The short case is the one that must stay byte-identical to the
-    /// head-anchored read: a room under the window painted its whole log before
-    /// this slice and still does, at the cost of no extra request.
-    #[test]
-    fn a_room_inside_the_first_paint_backfills_nothing() {
-        assert_eq!(
-            hydration_backfill_start(&[], 1000),
-            None,
-            "an empty room has nothing to walk back through",
-        );
-        assert_eq!(
-            hydration_backfill_start(&[message(0), message(1), message(2)], 1000),
-            None,
-            "a short page provably reached the start of the log — a backward \
-             page is the LAST `limit` rows that qualify, so fewer than asked \
-             for means no more qualify",
-        );
-        assert_eq!(
-            hydration_backfill_start(&[message(7), message(8), message(9)], 3),
-            Some(7),
-            "a page filled to the window is the only shape that can have rows \
-             behind it, and the oldest row painted is where they start",
-        );
-    }
-
-    /// A pre-#436 daemon ignores `before_seq` and answers a FORWARD page: the
-    /// oldest rows in the room, `prev_seq` absent, `has_more` meaning NEWER rows
-    /// exist. Its body must decode, and the walk it seeds must terminate rather
-    /// than spin.
-    ///
-    /// What terminates it is the PAGE CAP, and nothing else. Such a daemon
-    /// answers every request the walk makes with that same forward page, so
-    /// `prev_seq` is never there to fall back from, `page_reached_back_to` is
-    /// the same row every time, and the replayed cursor cannot fall — the one
-    /// property [`backfill_walks_older_and_is_bounded_by_the_same_page_cap`]
-    /// relies on to bound the walk against a modern daemon is exactly what a
-    /// legacy one does not give it. `MAX_TRANSCRIPT_CATCHUP_PAGES` is what
-    /// stands between this and an endless loop, which is why the bound belongs
-    /// on the walk and not only on the daemon's word.
-    ///
-    /// The window is scaled down to keep the fixture readable; nothing here
-    /// turns on its size, only on the page being FULL, which is the shape
-    /// [`hydration_backfill_start`] reads as "there may be rows behind this".
-    #[test]
-    fn a_daemon_without_backward_paging_still_decodes_and_still_terminates() {
-        const WINDOW: usize = 4;
-        let legacy: RoomSnapshotResponse = serde_json::from_value(serde_json::json!({
-            "ok": true,
-            "room": null,
-            "transcript": (0..WINDOW as u64).map(|seq| serde_json::json!({
-                "seq": seq,
-                "author_id": "member-1",
-                "author_kind": "human",
-                "kind": "message",
-                "body": format!("message {seq}"),
-            })).collect::<Vec<_>>(),
-            "last_seq": 1000,
-            "next_seq": WINDOW,
-            "has_more": true,
-            "access": { "state": "local" }
-        }))
-        .expect("a pre-backward-paging daemon's body should still decode");
-        assert_eq!(
-            legacy.prev_seq, None,
-            "the field is additive and such a daemon omits it",
-        );
-
-        // The walk seeds at the oldest row painted. On a forward page that is
-        // row 0 — the one row `before_seq` exclusivity guarantees no request
-        // can ever reach behind.
-        assert_eq!(
-            hydration_backfill_start(&legacy.transcript, WINDOW),
-            Some(0),
-            "a page filled to the window seeds a walk whatever direction the \
-             daemon actually served it in",
-        );
-
-        // And every request that walk makes is answered with that same page.
-        let mut cursor = 0u64;
-        let mut pages_read = 0usize;
-        let mut requested = Vec::new();
-        loop {
-            requested.push(room_snapshot_tail_url(
-                "",
-                "room-1",
-                cursor,
-                BACKFILL_TRANSCRIPT_PAGE_LIMIT,
-            ));
-            pages_read += 1;
-            let Some(next) = transcript_backfill_cursor(
-                pages_read,
-                legacy.has_more,
-                legacy.prev_seq,
-                first_transcript_seq(&legacy.transcript),
-            ) else {
-                break;
-            };
-            assert_eq!(
-                next, cursor,
-                "the cursor cannot fall: there is no `prev_seq`, and the \
-                 fallback is the same row on every identical page",
-            );
-            cursor = next;
-        }
-        assert_eq!(
-            requested.len(),
-            MAX_TRANSCRIPT_CATCHUP_PAGES,
-            "the cap is the only stop condition such a daemon leaves standing",
-        );
-        assert!(
-            requested
-                .iter()
-                .all(|url| url.ends_with("/snapshot?before_seq=0&limit=200")),
-            "and every one of them asks for the same page, got {requested:?}",
-        );
-    }
-
-    /// The backward walk: every request starts where the previous page's OLDEST
-    /// row was, the cursor strictly decreases so a daemon that keeps saying
-    /// "older rows exist" cannot spin it, and the page cap is what ends it.
-    #[test]
-    fn backfill_walks_older_and_is_bounded_by_the_same_page_cap() {
-        let mut cursor = 4001u64;
-        let mut pages_read = 0usize;
-        let mut requested = Vec::new();
-        loop {
-            requested.push(room_snapshot_tail_url(
-                "",
-                "room-1",
-                cursor,
-                BACKFILL_TRANSCRIPT_PAGE_LIMIT,
-            ));
-            pages_read += 1;
-            // A daemon with older rows to give, forever. Every page reaches back
-            // 200 rows below the cursor that produced it, because `before_seq`
-            // is exclusive.
-            let reached_back_to = cursor - BACKFILL_TRANSCRIPT_PAGE_LIMIT as u64;
-            let Some(next) =
-                transcript_backfill_cursor(pages_read, true, Some(reached_back_to), None)
-            else {
-                break;
-            };
-            assert!(
-                next < cursor,
-                "a backward cursor that does not fall is a loop"
-            );
-            cursor = next;
-        }
-        assert_eq!(
-            requested,
-            vec![
-                "/v1/rooms/persistent/room-1/snapshot?before_seq=4001&limit=200",
-                "/v1/rooms/persistent/room-1/snapshot?before_seq=3801&limit=200",
-                "/v1/rooms/persistent/room-1/snapshot?before_seq=3601&limit=200",
-                "/v1/rooms/persistent/room-1/snapshot?before_seq=3401&limit=200",
-                "/v1/rooms/persistent/room-1/snapshot?before_seq=3201&limit=200",
-            ],
-            "the walk is what keeps the rows before the tail page reachable at \
-             all — `/transcript` is forward-only and cannot serve one of them"
-        );
-        assert_eq!(requested.len(), MAX_TRANSCRIPT_CATCHUP_PAGES);
-
-        // And the page that stopped it is exactly where a press resumes. The
-        // walk above ends holding `has_more: true` and a cursor 200 rows below
-        // its last request; dropping that pair at this instant is what left the
-        // oldest painted row reading as the first message in the room.
-        assert_eq!(
-            transcript_older_cursor(
-                true,
-                Some(cursor - BACKFILL_TRANSCRIPT_PAGE_LIMIT as u64),
-                None
-            ),
-            Some(3001),
-            "the cursor the page cap stops on is the only route left to the \
-             rows behind it",
-        );
-    }
-
-    /// The two cursors are one rule with one extra stop condition, and the
-    /// difference is deliberate: the walk is capped because it runs unasked on
-    /// every open, a press is one page the operator asked for. What neither may
-    /// do is claim there is older history when the daemon said there is not.
-    #[test]
-    fn the_on_demand_cursor_is_the_walks_without_the_page_cap() {
-        // `has_more` false is the start of the log, from either caller. This is
-        // the room that must grow no affordance at all.
-        assert_eq!(transcript_older_cursor(false, Some(400), Some(400)), None);
-        assert_eq!(transcript_older_cursor(false, None, None), None);
-
-        // With rows behind it, the daemon's own `prev_seq` wins and the page's
-        // lowest row is the fallback for a page that names none — the same
-        // precedence the walk uses, because it is the same call.
-        assert_eq!(
-            transcript_older_cursor(true, Some(3801), Some(3802)),
-            Some(3801)
-        );
-        assert_eq!(transcript_older_cursor(true, None, Some(3802)), Some(3802));
-        assert_eq!(
-            transcript_older_cursor(true, None, None),
-            None,
-            "a `has_more` page naming no cursor and serving no rows leaves \
-             nothing to replay; offering a press that cannot move is worse than \
-             offering none",
-        );
-
-        // Past the cap the walk stops and the press does not. Below it they are
-        // the same answer, which is what makes deriving one from the other the
-        // point rather than a tidy-up.
-        assert_eq!(
-            transcript_backfill_cursor(MAX_TRANSCRIPT_CATCHUP_PAGES, true, Some(3001), None),
-            None,
-        );
-        assert_eq!(
-            transcript_older_cursor(true, Some(3001), None),
-            Some(3001),
-            "the press has no page budget to run out of",
-        );
-        for pages_read in 0..MAX_TRANSCRIPT_CATCHUP_PAGES {
-            assert_eq!(
-                transcript_backfill_cursor(pages_read, true, Some(3001), Some(3002)),
-                transcript_older_cursor(true, Some(3001), Some(3002)),
-            );
-            assert_eq!(
-                transcript_backfill_cursor(pages_read, false, Some(3001), Some(3002)),
-                transcript_older_cursor(false, Some(3001), Some(3002)),
-            );
-        }
-    }
-
-    /// Ingest: a backward page lands in FRONT of the paint, keeps the vector
-    /// ascending, and drops anything already on screen.
-    #[test]
-    fn backfill_ingest_prepends_before_the_paint_and_keeps_the_order() {
-        let mut painted = vec![message(5), message(6)];
-        prepend_transcript_page(&mut painted, vec![message(3), message(4)]);
-        assert_eq!(
-            painted.iter().map(|m| m.seq).collect::<Vec<_>>(),
-            vec![3, 4, 5, 6],
-            "older rows go in front, still ascending — the renderer, the resume \
-             point and the next backward cursor all read this order"
-        );
-
-        prepend_transcript_page(&mut painted, vec![message(4), message(5)]);
-        assert_eq!(
-            painted.iter().map(|m| m.seq).collect::<Vec<_>>(),
-            vec![3, 4, 5, 6],
-            "a page entirely inside the paint is a re-read, not a gap"
-        );
-
-        // The overlap case that decides whether the bound is read once or per
-        // row: row 2 is older than the paint and belongs; row 3 is already
-        // there. Re-reading `first()` after each insert would compare row 3
-        // against the row 2 this same page just added, and keep it.
-        prepend_transcript_page(&mut painted, vec![message(2), message(3)]);
-        assert_eq!(
-            painted.iter().map(|m| m.seq).collect::<Vec<_>>(),
-            vec![2, 3, 4, 5, 6]
-        );
-
-        // The forward walk's guard is the mirror of this one and neither may
-        // stand in for the other: an unpainted room takes everything.
-        let mut unpainted = Vec::new();
-        prepend_transcript_page(&mut unpainted, vec![message(7), message(8)]);
-        assert_eq!(first_transcript_seq(&unpainted), Some(7));
-        assert_eq!(last_transcript_seq(&unpainted), Some(8));
-
-        assert_eq!(first_transcript_seq(&[]), None);
     }
 
     #[test]
