@@ -7436,3 +7436,43 @@ rollback also preserves #192's refinement evidence and keeps #188/#189 intact.
 No daemon deploy and no migration. Publication remains release-owner authority;
 gates are recorded before handoff.
 _________________________________________________________________________________ 21:02 pm/revert-surface-190-192
+
+_________________________________________________________________________________ 21:02 pm/revert-surface-190-192
+time:      [00:12] [09-03-26]
+agent:     [ocean] [pm]
+worktree:  [pm/revert-surface-190-192-v2]
+type:      [rollback]
+area:      [frontend]
+
+Rebased pm/revert-surface-190-192 (24317d2 revert of #192, 56ff4ac revert of
+#190) onto post-incident main (1b88f86, carrying #211/#212). Two real conflicts,
+resolved by intent rather than blind take-theirs: #195's refresh_agent_owners
+and its OWNERSHIP_ONLY_CURSOR/room_snapshot_tail_url dependency landed in the
+same neighborhood as #192's load-older block and #190's tail-cursor hydration
+after the original revert commits were authored, so a literal replay would have
+deleted unrelated, still-wanted #195 code. Kept refresh_agent_owners and its
+room_snapshot_tail_url(base, key, before_seq, limit) helper (the ownership-only
+read's dependency, confirmed via its own pinned test
+the_ownership_only_read_asks_for_no_transcript_at_all); removed
+backfill_open_transcript, park_older_cursor, load_older_transcript_page, the
+three-state older-history plumbing, HYDRATION_TAIL_CURSOR, and their five
+tail-hydration/backfill unit tests, matching #190/#192's actual revert intent.
+Verified no stray references survived (grep across crates/ocean-surface-ui/src
+for every removed symbol) before compiling.
+
+All seven frozen gates green on 970cb39: fmt --check, wasm32 clippy -D
+warnings, all-targets clippy -D warnings, wasm32 check, proxy check, wasm32
+test --no-run, and native cargo test -p ocean-surface-ui (0 failed across every
+binary, including unheld_room_controls and room_hydration_resume). Ledger
+verified closed by check-ledger.mjs before this entry.
+
+Not fixed here, and worth recording: this machine's data volume repeatedly hit
+100%/ENOSPC mid-gate-run tonight, same class of failure the fix/desktop-live-sync
+entry above flagged un-pruned on 09-01. Space drifted back on its own during this
+run; still unpruned, still not this worktree's call.
+
+No daemon deploy, no migration. This commit does not merge itself — main branch
+protection (applied this incident cycle) requires one approving review from an
+identity other than the PR author, which this token cannot supply for its own
+PR. Pushed for review, not merged.
+_________________________________________________________________________________ 00:12 pm/revert-surface-190-192-v2
