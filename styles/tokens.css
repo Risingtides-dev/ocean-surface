@@ -219,6 +219,6 @@
   --ctl-h: 34px;
   --ctl-h-sm: 28px;
   --focus-ring: 0 0 0 2px var(--accent-ring);
-  --shell-max: 1120px;
+  --shell-max: 100%;
   --titlebar-inset: 82px;  /* desktop: brand clears the macOS traffic lights */
 }

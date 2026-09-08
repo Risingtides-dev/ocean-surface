@@ -260,7 +260,10 @@ CARVED → inset well). The names and recipes travel; only the renderer changes.
 
 ## 4. Layout
 
-- Shell: `max-width: var(--shell-max)` desktop, full-bleed below 960px.
+- Shell: full-bleed app frame (`--shell-max: 100%`); the transcript's
+  reading column centers itself with symmetric clamp padding instead of the
+  shell cap. The centered 1120px shell was retired 2026-09 for the
+  multi-pane cockpit posture (operator direction; North Star alignment).
 - Header: 56px raised bar (`--bg-raised`, bottom `--border-subtle`), OCEAN
   ramp wordmark left, controls right, 8px gaps, all controls `--ctl-h-sm`.
   Visible header controls are capped: context (project/session), ONE nav icon
