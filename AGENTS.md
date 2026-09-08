@@ -364,6 +364,8 @@ Web surface session UI:
   clobbering the other's. Phase 2 contributed-folder grants can take precedence
   over this fallback. An absent `workspace_root` therefore renders neutral
   "No default folder" metadata, never a claim that every agent is blocked.
+  Both create/edit inputs use the same accessible default-folder name as the
+  visible field, retaining the connected-machine context.
   Only daemon admission determines whether a particular agent has a usable cwd;
   do not infer grant readiness from this one legacy field. The daemon's
   `workspace_unavailable` refusal is NOT `room_repo.rs`'s

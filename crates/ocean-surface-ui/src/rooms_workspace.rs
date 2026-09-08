@@ -399,7 +399,7 @@ fn workspace_binding_section(rooms: Rooms, access: Option<&RoomAccessProjection>
                     <input
                         class="rooms-workspace__workspace-input"
                         type="text"
-                        aria-label="Workspace folder on the daemon host"
+                        aria-label="Default folder on the connected machine"
                         placeholder="/absolute/path/to/project"
                         prop:value=move || draft.get()
                         on:input=move |ev| draft.set(event_target_value(&ev))
@@ -3473,7 +3473,7 @@ pub fn RoomsWorkspace(
                         <input
                             class="rooms-workspace__left-input"
                             type="text"
-                            aria-label="Workspace folder on the daemon host"
+                            aria-label="Default folder on the connected machine"
                             aria-describedby="rooms-create-workspace-help"
                             placeholder="/absolute/path/to/project"
                             prop:value=move || create_workspace.get()

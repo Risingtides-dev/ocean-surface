@@ -197,4 +197,11 @@ fn the_unbound_notice_reports_only_the_fallback_and_the_host() {
             && compact.contains("Optional·ontheconnectedmachine"),
         "create and edit retain concise connected-host context",
     );
+    assert_eq!(
+        compact
+            .matches("aria-label=\"Defaultfolderontheconnectedmachine\"")
+            .count(),
+        2,
+        "both form controls expose fallback semantics to assistive technology",
+    );
 }

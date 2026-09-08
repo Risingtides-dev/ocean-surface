@@ -7430,3 +7430,13 @@ area:      [frontend], [design], [testing]
 
 Native Ocean showed a false blanket agent-blocked warning on Campaigns despite a live contributed-folder grant. The workspace control now reports only its actual fallback state: No default folder, with neutral styling and concise connected-machine context. Create/edit controls, path authority, wire fields and closed-room gates are unchanged. Updated the source guard so an absent fallback cannot be presented as failed admission; all six workspace-binding guards pass. Impeccable clarity guidance applied as restraint, without new controls or decorative UI. Root contract updated for landed Phase 2 precedence; ownership/indexes unchanged. Full UI/WASM/lint gates and review follow. Canonical source edits remain untouched.
 _________________________________________________________________________________ 14:41 codex/rooms-clarity-20260908
+
+
+time:      [14:50] [09-08-26]
+agent:     [codex]
+worktree:  [codex/rooms-clarity-20260908]
+type:      bug-report
+area:      frontend
+
+Addressed PR #214 review 3961162820: both create/edit input accessible names now say Default folder on the connected machine, matching the visible fallback semantics. Extended the existing source guard to require both exact accessible names. Six binding guards and strict host all-target Clippy pass. The first candidate passed the full UI tests, host/WASM strict lint, WASM test compilation, proxy check and format; exact-head gates rerun after this accessibility fix. Root contract updated; no ownership/index change.
+_________________________________________________________________________________ 14:50 codex/rooms-clarity-20260908
