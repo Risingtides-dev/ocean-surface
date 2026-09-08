@@ -932,17 +932,9 @@
 }
 
 @media (min-width: 1480px) {
-  .pinned-rail {
-    flex-direction: column;
-    top: 68px;
-    bottom: 12px;
-    right: auto;
-    width: clamp(150px, calc((100vw - var(--shell-max)) / 2 - 24px), 300px);
-    max-height: none;
-    overflow-x: hidden;
-    overflow-y: auto;
-  }
-
+  /* The vertical-gutter variant is retired: it rode the dead gutter beside
+     a centered 1120px shell, which the full-bleed frame removed. The
+     horizontal pinned rail remains the only pinned layout. */
   .pinned-card {
     flex: 0 0 auto;
   }

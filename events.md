@@ -7420,3 +7420,21 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+time:      [19:53] [09-08-26]
+agent:     [ocean] [gpt-5]
+worktree:  main
+type:      feature
+area:      frontend
+
+Restored the focused transcript as the app's default home instead of booting
+into Rooms, and renamed the overflow route from the misleading Direct messages
+label back to Sessions. Retired the compact centered 1120px site shell in favor
+of a full-bleed application frame while keeping transcript prose and the
+composer on a centered readable measure through symmetric fluid gutters. The
+pinned rail's obsolete vertical dead-margin mode left with the shell cap; its
+horizontal mode remains. Updated the web surface design contract with the
+full-bleed rule. Rebasing onto current main preserved all three product intents.
+Gates: fmt clean; wasm and proxy checks clean; wasm clippy clean with -D
+warnings; wasm tests build; native ocean-surface-ui tests pass.
+
+_________________________________________________________________________________ 19:53 main

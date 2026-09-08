@@ -1842,7 +1842,7 @@ pub(crate) fn unreachable_deep_link_room_status(key: &str) -> String {
 pub fn RoomsWorkspace(
     rooms: Rooms,
     /// Called when the user wants to leave the Rooms workspace entirely
-    /// (e.g. switch to Direct Messages). If `None` the close button is
+    /// (e.g. switch to Sessions). If `None` the close button is
     /// hidden.
     #[prop(optional)]
     on_close: Option<Callback<()>>,

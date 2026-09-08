@@ -202,7 +202,12 @@
   display: flex;
   flex-direction: column;
   gap: 18px;
-  padding: 18px 22px;
+  /* Full-bleed app frame: the shell no longer caps at 1120px, so the
+     reading column centers itself with symmetric inline padding instead.
+     The clamp floor keeps the old 22px gutters on narrow windows and the
+     42vw ceiling keeps very wide displays from stranding content. */
+  padding-block: 18px;
+  padding-inline: clamp(22px, calc((100% - 78ch) / 2), 42vw);
   /* Opaque on purpose: the animated pending badge keeps this scroll
      content on its own compositor layer, and a transparent layer's blacks
      can quantize differently from the page underneath — the boundary

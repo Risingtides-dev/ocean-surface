@@ -21,7 +21,11 @@
   align-items: center;
   column-gap: 8px;
   row-gap: 4px;
-  margin: 8px 18px 12px;
+  /* Full-bleed frame: align the composer's usable column with the
+     transcript reading column (see .transcript padding-inline) so the
+     typing surface and the reading surface read as one column. */
+  margin-block: 8px 12px;
+  margin-inline: clamp(22px, calc((100% - 78ch) / 2), 42vw);
   padding: 8px 12px;
   border-radius: var(--radius-lg);
   background: var(--bg-elevated);
