@@ -7453,3 +7453,36 @@ and an owner-editable rail reached through the PATCH route that PR reported as
 absent, so merging it would have removed two live triggers.
 
 _________________________________________________________________________________ 17:52 feat/rooms-unread-affordances
+
+time:      [18:06] [09-08-26]
+agent:     [claude] [opus 5]
+worktree:  feat/rooms-unread-affordances
+type:      bug-report
+area:      frontend
+
+Review on the PR caught a real defect in the divider baseline, and it was the
+common case rather than an edge. The baseline effect waited for
+open_read_cursor to load before locking, but open_room sets open_key and then
+resets that cursor to None, so the first thing to fill it back in is usually
+the mark-read PATCH that opening the room itself triggers. The effect then
+observed the already-advanced sequence and locked the baseline to it, leaving
+nothing past the baseline, so the divider a returning reader was meant to see
+silently never rendered. The fix captures the floor synchronously on the
+open_key transition from the room-list read_summaries, which at that instant
+still holds the pre-open value, and never revises it while the same room stays
+open. open_key is now the only tracked read in that effect, deliberately: any
+reactive read of the live cursor re-runs the effect after the advance and
+reintroduces the bug. Three pure tests cover the lock semantics, including the
+regression the reviewer specified — open at read_seq 5, advance to 9 and then
+42, baseline stays 5 — plus relock-on-room-change, clear-on-close, and a
+never-read room locking a None floor rather than staying unlocked. Because a
+pure test cannot see how the effect is wired, and the wiring is where the bug
+lived, a source-assertion guard pins that the effect's window contains no
+open_read_cursor read; that guard was mutation-checked by reinstating the
+cursor read, confirming it fails, and restoring. The referenced follow-up
+commit 04162c6 was not available in this container and was not cherry-picked,
+per the review's own instruction that its badge work is superseded. Gates: 1328
+lib tests plus every integration suite, wasm clippy -D warnings, host
+all-targets clippy, fmt, and the ledger checker.
+
+_________________________________________________________________________________ 18:06 feat/rooms-unread-affordances

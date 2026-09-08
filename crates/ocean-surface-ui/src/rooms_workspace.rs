@@ -1257,6 +1257,34 @@ fn roster_display_name(roster: &[RoomParticipant], author_id: &str) -> String {
 // the additive `unread_count`/`mention_count` projection); this lane owns only
 // the transcript's first-unread divider and the row's bold-unread modifier.
 
+/// Lock-on-key-change for the divider baseline.
+///
+/// The baseline is captured once for an opened room and never revised while
+/// that room stays open. This is the whole correctness property: opening a
+/// room auto-marks it read, so anything that re-reads a live read cursor
+/// after the open would lock onto the ALREADY-ADVANCED value, and the
+/// divider the reader was meant to see would silently never render.
+///
+/// `read_seq_at_open` must therefore come from the room-list
+/// `read_summaries` — the durable per-room floor, which at the instant
+/// `open_key` flips still holds the pre-open value — not from
+/// `open_read_cursor`, which `open_room` resets to `None` and the
+/// mark-read PATCH then fills in with the advanced sequence.
+fn next_unread_baseline(
+    current: Option<&(String, Option<u64>)>,
+    open_key: Option<&str>,
+    read_seq_at_open: Option<u64>,
+) -> Option<(String, Option<u64>)> {
+    let key = open_key?;
+    if let Some((locked_key, locked_seq)) = current {
+        if locked_key == key {
+            // Already locked for this room: never overwrite.
+            return Some((locked_key.clone(), *locked_seq));
+        }
+    }
+    Some((key.to_string(), read_seq_at_open))
+}
+
 /// Sequence of the first root message the reader has not seen, i.e. where
 /// the "new messages" divider belongs.
 ///
@@ -1974,32 +2002,29 @@ pub fn RoomsWorkspace(
         store_thread_view_mode(thread_view_mode.get());
     });
 
-    // Where the reader left off, captured as `(room_key, read_seq)` the
-    // first time the open room's cursor projection loads and held until the
-    // room changes. The live cursor advances as the transcript is scrolled,
-    // so reading it directly would slide the divider away mid-read.
+    // Where the reader left off, captured as `(room_key, read_seq)` once per
+    // opened room and held until the room changes.
+    //
+    // `open_key` is the ONLY tracked read here, deliberately. Opening a room
+    // auto-marks it read, so an Effect that also tracked the live cursor
+    // would re-run after that advance and lock the baseline onto the new
+    // latest sequence — leaving nothing past the baseline and silently
+    // dropping the divider. Tracking only the key means this runs once, at
+    // the synchronous moment the key flips, when the room-list summaries
+    // still hold the pre-open floor.
     let unread_baseline = RwSignal::new(None::<(String, Option<u64>)>);
     Effect::new(move |_| {
-        let Some(key) = rooms.open_key.get() else {
-            if unread_baseline.get_untracked().is_some() {
-                unread_baseline.set(None);
-            }
-            return;
-        };
-        let cursor = rooms.open_read_cursor.get();
-        unread_baseline.update(|current| {
-            let locked_for_room = current
-                .as_ref()
-                .is_some_and(|(locked_key, _)| locked_key == &key);
-            if locked_for_room {
-                return;
-            }
-            // Wait for the projection to load; `Some(projection)` with no
-            // read_seq is a loaded "never read" answer, not a pending one.
-            if let Some(projection) = cursor {
-                *current = Some((key, projection.read_seq));
-            }
+        let open_key = rooms.open_key.get();
+        let read_seq_at_open = open_key.as_deref().and_then(|key| {
+            rooms
+                .read_summaries
+                .with_untracked(|summaries| summaries.get(key).and_then(|s| s.read_seq))
         });
+        let current = unread_baseline.get_untracked();
+        let next = next_unread_baseline(current.as_ref(), open_key.as_deref(), read_seq_at_open);
+        if next != current {
+            unread_baseline.set(next);
+        }
     });
 
     // Persisted view state, captured BEFORE the persist effect below can
@@ -8656,6 +8681,84 @@ mod tests {
     }
 
     // ── Unread divider (badge is daemon-derived on main) ──────────────
+
+    /// The pure lock helper cannot see how the Effect is wired, and the
+    /// wiring is where the defect lived: an Effect that tracks the live
+    /// cursor re-runs after the open's mark-read advance and re-locks the
+    /// baseline. Pin that the baseline Effect reads ONLY `open_key`
+    /// reactively — any `open_read_cursor` read inside it is the bug
+    /// returning. Needle built at runtime so this test's own literal cannot
+    /// satisfy the scan of its own file.
+    #[test]
+    fn baseline_effect_does_not_track_the_live_read_cursor() {
+        let src = include_str!("rooms_workspace.rs");
+        let marker = ["let unread_baseline", " = RwSignal::new"].concat();
+        let start = src.find(&marker).expect("baseline signal must exist");
+        // The Effect immediately follows the signal; bound the scan at the
+        // next top-level `let ` binding after it so the window is the Effect.
+        let rest = &src[start..];
+        let end = rest[1..]
+            .find("\n    let ")
+            .map(|i| i + 1)
+            .unwrap_or(rest.len());
+        let effect_src = &rest[..end];
+        assert!(
+            effect_src.contains("open_key"),
+            "the baseline Effect must key off the open room"
+        );
+        let cursor = ["open_read", "_cursor"].concat();
+        assert!(
+            !effect_src.contains(&cursor),
+            "the baseline Effect must not read the live read cursor: opening a \
+             room auto-marks it read, so tracking the cursor re-locks the \
+             baseline onto the advanced sequence and the divider never renders"
+        );
+    }
+
+    /// Regression for the review defect on this PR: opening a room
+    /// auto-marks it read, so the baseline must NOT be revisable from the
+    /// advancing cursor. Open at read_seq=5, let the summary/cursor advance
+    /// to 9, and the baseline must still be 5 — otherwise nothing sits past
+    /// it and the divider silently never renders.
+    #[test]
+    fn baseline_survives_the_read_advance_that_opening_a_room_triggers() {
+        let opened = next_unread_baseline(None, Some("room-a"), Some(5));
+        assert_eq!(opened, Some(("room-a".to_string(), Some(5))));
+
+        // The mark-read PATCH lands and the projection advances to 9. Every
+        // subsequent evaluation for the same room must be a no-op.
+        let after_advance = next_unread_baseline(opened.as_ref(), Some("room-a"), Some(9));
+        assert_eq!(after_advance, Some(("room-a".to_string(), Some(5))));
+
+        // Still 5 after further advances, so the divider keeps its place.
+        let after_more = next_unread_baseline(after_advance.as_ref(), Some("room-a"), Some(42));
+        assert_eq!(after_more, Some(("room-a".to_string(), Some(5))));
+    }
+
+    #[test]
+    fn baseline_relocks_on_a_room_change_and_clears_on_close() {
+        let a = next_unread_baseline(None, Some("room-a"), Some(5));
+        // A different room takes its own floor, not room-a's.
+        let b = next_unread_baseline(a.as_ref(), Some("room-b"), Some(2));
+        assert_eq!(b, Some(("room-b".to_string(), Some(2))));
+        // Returning to room-a re-locks at whatever its floor is NOW.
+        let back = next_unread_baseline(b.as_ref(), Some("room-a"), Some(9));
+        assert_eq!(back, Some(("room-a".to_string(), Some(9))));
+        // Closing clears.
+        assert_eq!(next_unread_baseline(back.as_ref(), None, None), None);
+    }
+
+    /// A room with no durable floor locks a `None` baseline rather than
+    /// staying unlocked — otherwise the next evaluation, after the advance,
+    /// would capture a floor and pin a divider the reader never left off at.
+    #[test]
+    fn baseline_locks_none_for_a_never_read_room() {
+        let opened = next_unread_baseline(None, Some("room-a"), None);
+        assert_eq!(opened, Some(("room-a".to_string(), None)));
+        let after_advance = next_unread_baseline(opened.as_ref(), Some("room-a"), Some(7));
+        assert_eq!(after_advance, Some(("room-a".to_string(), None)));
+        assert_eq!(first_unread_root_seq(&[test_msg(3, "a", None)], None), None);
+    }
 
     #[test]
     fn first_unread_is_the_first_root_past_the_baseline() {
