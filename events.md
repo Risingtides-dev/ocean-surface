@@ -7523,3 +7523,38 @@ and confirming the failures. Gates: 1333 bin tests plus every integration
 suite, wasm clippy -D warnings, host all-targets clippy, fmt, ledger checker.
 
 _________________________________________________________________________________ 22:59 feat/rooms-unread-affordances
+
+time:      23:13 09-08-26
+agent:     claude
+worktree:  feat/rooms-unread-affordances
+type:      bug-report
+area:      frontend
+
+The divider inferred recency from absent metadata, which this file's own
+LedgerMark contract forbids. The prior commit skipped a live-room row carrying
+no federated metadata past the baseline on the reading that an unconfirmed row
+must be newer than any confirmed cursor. That reading is wrong here: the
+LedgerMark::Unmarked doc says a federated room's row without confirmation is
+local-era/G1 history, and says in the same breath that in-flight state belongs
+to the outbox and never the transcript, so a transcript row without metadata is
+old rather than new. RoomMessage::federated's own doc agrees, naming G1
+messages alongside local-only rooms as the None cases. The effect was that any
+live room with a pre-federation past would pin New messages above already-read
+history, at the first such row and therefore near the top of the transcript,
+even with the global cursor fully caught up. The global branch now selects only
+rows carrying Some(meta) whose global_sequence exceeds the baseline; a row with
+no comparable position is skipped rather than counted, and a live transcript
+that is entirely pre-federation draws no divider at all instead of one at row
+one. Two tests replace the one that encoded the wrong rule: unmarked rows
+sitting both before and between confirmed ones must not move the boundary off
+the first confirmed row past the baseline, and must not conjure a boundary when
+the cursor is caught up; and the all-legacy transcript draws nothing. Both were
+mutation-checked by restoring is_none_or and confirming they fail. Worth
+recording that the defect was a guess dressed as a deliberate choice: the same
+commit refused to guess a sequence space under Connecting/Recovering/Revoked
+and then guessed recency from a missing field two lines away, with the contract
+that settles it sitting in the same file. Gates: 1334 bin tests plus every
+integration suite, wasm clippy -D warnings, host all-targets clippy, fmt, and
+the ledger checker.
+
+_________________________________________________________________________________ 23:13 feat/rooms-unread-affordances

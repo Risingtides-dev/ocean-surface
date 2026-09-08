@@ -1332,7 +1332,8 @@ fn read_sequence_space(access: Option<&RoomAccessProjection>) -> Option<ReadSequ
 /// Returns `None` when there is no baseline — a room with no read floor has
 /// no "left off" point, and a divider pinned above the very first message
 /// would be noise rather than information — and when the read space is
-/// unknown, where any comparison would be a coin flip.
+/// unknown, where any comparison would be a coin flip, and when no row in
+/// the room has a position comparable to the baseline at all.
 fn first_unread_root_seq(
     roots: &[RoomMessage],
     baseline_read_seq: Option<u64>,
@@ -1344,13 +1345,18 @@ fn first_unread_root_seq(
         .iter()
         .find(|message| match space {
             ReadSequenceSpace::Transcript => message.seq > baseline,
-            // An unconfirmed message in a live room carries no global
-            // position, which is exactly what "the ledger has not accepted it
-            // yet" means — it necessarily sits past a confirmed baseline.
+            // A federated row without confirmation metadata is local-era/G1
+            // history, NOT an in-flight send: in-flight state belongs to the
+            // outbox, never the transcript (see [`LedgerMark::Unmarked`]).
+            // It has no comparable global position, and absence of metadata
+            // is not evidence of recency, so it is skipped rather than
+            // counted as unread — treating it as newer would pin the divider
+            // above already-read history in any room with a pre-federation
+            // past.
             ReadSequenceSpace::Global => message
                 .federated
                 .as_ref()
-                .is_none_or(|meta| meta.global_sequence > baseline),
+                .is_some_and(|meta| meta.global_sequence > baseline),
         })
         .map(|message| message.seq)
 }
@@ -8939,26 +8945,52 @@ mod tests {
         assert_eq!(first_unread_root_seq(&roots, Some(3), Some(&local)), None);
     }
 
-    /// A live-room message with no federated metadata has not been confirmed
-    /// onto the ledger, which is precisely what "newer than any confirmed
-    /// cursor" means. Skipping it would hide the boundary the reader needs.
+    /// A federated row carrying no confirmation metadata is local-era/G1
+    /// HISTORY, not an in-flight send — [`LedgerMark::Unmarked`] says so, and
+    /// in-flight rows live in the outbox rather than the transcript. Absence
+    /// of metadata is therefore not evidence of recency. Reading it as
+    /// "newer than any confirmed cursor" would pin "New messages" above
+    /// already-read history in every room with a pre-federation past, and
+    /// would do it at the FIRST such row, near the top of the transcript.
     #[test]
-    fn unconfirmed_live_messages_sit_past_the_baseline() {
+    fn legacy_rows_never_fabricate_an_unread_boundary() {
         let roots = vec![
-            federated_msg(1, 100),
-            test_msg(2, "still in flight", None),
-            federated_msg(3, 500),
+            test_msg(1, "G1 history", None),
+            federated_msg(2, 100),
+            test_msg(3, "more G1 history", None),
+            federated_msg(4, 500),
         ];
         let live = test_access(RoomAccessState::Live);
+
+        // The boundary is the first CONFIRMED row past the baseline, even
+        // though unmarked rows sit both before and between the confirmed ones.
         assert_eq!(
             first_unread_root_seq(&roots, Some(100), Some(&live)),
-            Some(2)
+            Some(4)
         );
-        // Even a baseline past every confirmed row still surfaces it.
         assert_eq!(
-            first_unread_root_seq(&roots, Some(500), Some(&live)),
+            first_unread_root_seq(&roots, Some(50), Some(&live)),
             Some(2)
         );
+
+        // Caught up on the ledger: the unmarked rows must not conjure a
+        // divider out of nothing.
+        assert_eq!(first_unread_root_seq(&roots, Some(500), Some(&live)), None);
+    }
+
+    /// The degenerate case of the rule above: a live room whose transcript is
+    /// entirely pre-federation has nothing comparable to the global cursor, so
+    /// there is no boundary to draw — not a boundary at row one.
+    #[test]
+    fn an_all_legacy_live_transcript_draws_no_divider() {
+        let roots = vec![
+            test_msg(1, "G1", None),
+            test_msg(2, "G1", None),
+            test_msg(3, "G1", None),
+        ];
+        let live = test_access(RoomAccessState::Live);
+        assert_eq!(first_unread_root_seq(&roots, Some(0), Some(&live)), None);
+        assert_eq!(first_unread_root_seq(&roots, Some(500), Some(&live)), None);
     }
 
     /// Only `Local` and `Live` write a durable cursor, so only they pin a
