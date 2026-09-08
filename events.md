@@ -7420,3 +7420,36 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+
+time:      [17:52] [09-08-26]
+agent:     [claude] [opus 5]
+worktree:  feat/rooms-unread-affordances
+type:      feature-request
+area:      frontend
+
+The rooms-interaction.css forward-CSS contract names three unread affordances
+for the Rust lane to adopt, and this branch has carried all three since August.
+Rebasing it onto three weeks of rooms work showed main had solved one of them
+better: room_attention_badge reads the daemon's additive unread_count and
+mention_count projection, so it renders a true count and an @N form for unread
+mentions, where this branch differenced latest_seq against read_seq and so
+counted system rows and thread replies as unread. Main's version also already
+carries content in the badge span, which retires the blank-pill cascade defect
+this branch was fixing — the interaction layer restyles __room-unread into a
+count pill and the row used to emit an empty span. So the badge helpers and
+their five tests are dropped rather than merged, and what lands is only the two
+affordances still unemitted anywhere: the transcript's first-unread divider and
+the room row's bold-unread modifier. The divider's baseline is snapshotted when
+the open room's cursor projection first loads and held while that room stays
+open, because reading the live cursor would slide the divider away as it
+advances on scroll; a room with no read floor has no left-off point and gets no
+divider rather than one pinned above its first message. One rebase adaptation:
+unread was a bare closure and main's attention badge now reads it too, so it is
+a Memo, matching the attention_label and attention_badge memos beside it. Gates:
+1324 lib tests plus every integration suite, wasm clippy -D warnings, the host
+all-targets clippy main added in #189, and fmt. Also closed the auto-reply
+policy branch as superseded — main's create panel now carries four wake toggles
+and an owner-editable rail reached through the PATCH route that PR reported as
+absent, so merging it would have removed two live triggers.
+
+_________________________________________________________________________________ 17:52 feat/rooms-unread-affordances
