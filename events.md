@@ -7450,3 +7450,13 @@ area:      frontend
 
 Addressed PR #214 review 3961223830: create-form, Room field, serialization, helper and mutation documentation now consistently describe fallback precedence instead of claiming all agents fail when the legacy folder is absent. Removed the same stale inference from the binding guard diagnostics. No runtime behavior changed. Prior b08f2b1 passed 1411 UI tests across 20 suites and all GitHub checks. Root contract already describes the corrected behavior; ownership/indexes intentionally unchanged.
 _________________________________________________________________________________ 14:57 codex/rooms-clarity-20260908
+
+
+time:      [15:04] [09-08-26]
+agent:     [codex]
+worktree:  [codex/rooms-clarity-20260908]
+type:      bug-report
+area:      writing
+
+Addressed PR #214 review 3961275536. Updated OCEAN_ROOMS_PRODUCT creation, update, turn-resolution and first-turn sections to describe daemon-admitted contributed-folder precedence over the optional fallback, not blanket execution failure. Repo-wide fallback wording audit found no further active claim of that blanket failure outside historical ledger evidence. Prior a2a0742 passed all GitHub gates, 1411 local UI tests, both strict lint targets, WASM test compilation and formatting. Documentation-only correction; current root contract and ownership/indexes remain accurate and unchanged.
+_________________________________________________________________________________ 15:04 codex/rooms-clarity-20260908
