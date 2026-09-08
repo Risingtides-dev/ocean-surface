@@ -7420,3 +7420,43 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+
+
+time:      [14:41] [09-08-26]
+agent:     [codex]
+worktree:  [codex/rooms-clarity-20260908]
+type:      [bug report]
+area:      [frontend], [design], [testing]
+
+Native Ocean showed a false blanket agent-blocked warning on Campaigns despite a live contributed-folder grant. The workspace control now reports only its actual fallback state: No default folder, with neutral styling and concise connected-machine context. Create/edit controls, path authority, wire fields and closed-room gates are unchanged. Updated the source guard so an absent fallback cannot be presented as failed admission; all six workspace-binding guards pass. Impeccable clarity guidance applied as restraint, without new controls or decorative UI. Root contract updated for landed Phase 2 precedence; ownership/indexes unchanged. Full UI/WASM/lint gates and review follow. Canonical source edits remain untouched.
+_________________________________________________________________________________ 14:41 codex/rooms-clarity-20260908
+
+
+time:      [14:50] [09-08-26]
+agent:     [codex]
+worktree:  [codex/rooms-clarity-20260908]
+type:      bug-report
+area:      frontend
+
+Addressed PR #214 review 3961162820: both create/edit input accessible names now say Default folder on the connected machine, matching the visible fallback semantics. Extended the existing source guard to require both exact accessible names. Six binding guards and strict host all-target Clippy pass. The first candidate passed the full UI tests, host/WASM strict lint, WASM test compilation, proxy check and format; exact-head gates rerun after this accessibility fix. Root contract updated; no ownership/index change.
+_________________________________________________________________________________ 14:50 codex/rooms-clarity-20260908
+
+
+time:      [14:57] [09-08-26]
+agent:     [codex]
+worktree:  [codex/rooms-clarity-20260908]
+type:      bug-report
+area:      frontend
+
+Addressed PR #214 review 3961223830: create-form, Room field, serialization, helper and mutation documentation now consistently describe fallback precedence instead of claiming all agents fail when the legacy folder is absent. Removed the same stale inference from the binding guard diagnostics. No runtime behavior changed. Prior b08f2b1 passed 1411 UI tests across 20 suites and all GitHub checks. Root contract already describes the corrected behavior; ownership/indexes intentionally unchanged.
+_________________________________________________________________________________ 14:57 codex/rooms-clarity-20260908
+
+
+time:      [15:04] [09-08-26]
+agent:     [codex]
+worktree:  [codex/rooms-clarity-20260908]
+type:      bug-report
+area:      writing
+
+Addressed PR #214 review 3961275536. Updated OCEAN_ROOMS_PRODUCT creation, update, turn-resolution and first-turn sections to describe daemon-admitted contributed-folder precedence over the optional fallback, not blanket execution failure. Repo-wide fallback wording audit found no further active claim of that blanket failure outside historical ledger evidence. Prior a2a0742 passed all GitHub gates, 1411 local UI tests, both strict lint targets, WASM test compilation and formatting. Documentation-only correction; current root contract and ownership/indexes remain accurate and unchanged.
+_________________________________________________________________________________ 15:04 codex/rooms-clarity-20260908

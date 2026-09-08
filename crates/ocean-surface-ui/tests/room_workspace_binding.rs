@@ -1,13 +1,9 @@
-//! A room the surface creates must be able to wake its agents.
+//! A room's fallback folder must remain editable through the surface.
 //!
 //! The defect this guards against is a field that is simply not there. The
 //! daemon has accepted `workspace_root` on `POST /v1/rooms/persistent` since
-//! OCEAN-260, and a room without one is unbound: the daemon resolves a
-//! room-bound agent turn's project and `cwd` from that binding, and with none
-//! stored it refuses every turn with `workspace_unavailable` before the agent
-//! sees the message. The surface sent `key`, `name` and `trigger_policy` only,
-//! so every room this product created was unbound and every agent mention in
-//! one did nothing at all.
+//! OCEAN-260. Before contributed-folder grants, this binding was the only
+//! supported cwd source. It remains the fallback and must stay editable.
 //!
 //! Nothing in the compiler holds a field's PRESENCE in a serialized body: drop
 //! `workspace_root` from either struct and the create still posts, the PATCH
@@ -43,9 +39,8 @@ fn the_create_body_carries_a_workspace_root() {
         .0;
     assert!(
         body.contains("workspace_root:Option<&'astr>"),
-        "`CreateRoomBody` must carry `workspace_root`, or every room this \
-         surface creates is unbound and its agents can never run (the field \
-         was missing entirely until Rooms 1.4)",
+        "`CreateRoomBody` must carry `workspace_root` so creating a room \
+         preserves the selected fallback folder",
     );
     assert!(
         body.contains("skip_serializing_if=\"Option::is_none\""),
@@ -178,24 +173,31 @@ fn the_binding_controls_refuse_a_closed_room() {
     );
 }
 
-/// The unbound notice must say what an operator can act on: that agents cannot
-/// run, and that the folder lives on the daemon's machine rather than theirs.
+/// A missing fallback is not failed admission: Phase 2 folder grants can
+/// supply the cwd. Keep host context without claiming all agents are blocked.
 #[test]
-fn the_unbound_notice_names_the_consequence_and_the_host() {
+fn the_unbound_notice_reports_only_the_fallback_and_the_host() {
     let workspace = view_source("rooms_workspace.rs");
     let compact = without_whitespace(&workspace);
     assert!(
-        compact.contains("Noworkspacefolderisbound."),
-        "the unbound room notice must survive; without it an operator sees \
-         four armed triggers over a room that refuses every turn",
+        compact.contains("Nodefaultfolder"),
+        "the fallback's absence remains visible",
     );
     assert!(
-        compact.contains("Agentsinthisroomcannotrun"),
-        "the notice must name the consequence, not just the missing value",
+        !compact.contains("Agentsinthisroomcannotrun")
+            && !compact.contains("itsagentscannotrununtilafolderisbound"),
+        "a missing fallback must not contradict an admitted folder grant",
     );
     assert!(
-        compact.contains("machinerunningthedaemon"),
-        "both the create field's helper text and the binding section must say \
-         whose filesystem the path is resolved on — the browser cannot see it",
+        compact.contains("Ontheconnectedmachine.")
+            && compact.contains("Optional·ontheconnectedmachine"),
+        "create and edit retain concise connected-host context",
+    );
+    assert_eq!(
+        compact
+            .matches("aria-label=\"Defaultfolderontheconnectedmachine\"")
+            .count(),
+        2,
+        "both form controls expose fallback semantics to assistive technology",
     );
 }

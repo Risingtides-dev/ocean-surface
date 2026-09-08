@@ -24,18 +24,18 @@ POST /v1/rooms/persistent
 The `key` is a free-form identifier (sluggish: lower-kebab). The creating human is
 automatically added as a `RoomParticipant { kind: Human }`.
 
-`workspace_root` is the folder the room's work happens in, and it is resolved on
+`workspace_root` is the room's optional fallback folder, resolved on
 the machine running the **daemon** — not in the browser, which cannot see that
 filesystem. It must be an absolute path that already exists there; the daemon
 canonicalizes it and refuses anything else with `400 { "ok": false, "error":
 "invalid_workspace_root" }`. The surface's create form carries a field for it,
-and leaving that field empty creates the room **unbound**.
+and leaving that field empty creates the room without a default folder.
 
-An unbound room is not a room with a missing convenience: **agent turns in it
-fail closed.** The daemon resolves a room-bound turn's project and `cwd` from
-the room's `workspace_root`, and with none stored it refuses every turn with
-`503 workspace_unavailable` before the agent sees the message — so an @mention
-in an unbound room does nothing, however its trigger policy is set.
+Phase 2 contributed-folder grants can supply an admitted turn's `cwd` ahead
+of this fallback. Its absence therefore does not mean every agent is blocked;
+its presence does not prove a particular agent is admitted. The daemon resolves
+the effective folder, project and resource authority for each turn. Surface
+renders only the fallback's state and never infers execution readiness from it.
 
 A room can also be bound, rebound, or unbound after creation:
 
@@ -46,9 +46,9 @@ PATCH /v1/rooms/persistent/{key}
 ```
 
 An absent field leaves the binding unchanged, so a rename can never silently
-unbind a working room. The surface renders this beside the room's trigger
-toggles, with an explicit notice while the room is unbound, because that is the
-condition which makes every trigger above it inert. The bind control requires an
+clear a working fallback. The surface renders this beside the room's trigger
+toggles, with neutral `No default folder` metadata when absent. Clearing this
+field does not revoke contributed-folder grants. The bind control requires an
 `ocean-os` daemon carrying `workspace_root` on `RoomUpdateRequest`; create-time
 binding works against any daemon that has the field on `RoomCreateRequest`.
 
@@ -156,8 +156,11 @@ policy state and provides toggles for the human to configure it.
 
 ### Agent Turns in Rooms
 
-An agent turn in a room context resolves its `cwd` and `project_id` from the
-room's `workspace_root`. The surface posts via the standard turn endpoint:
+The daemon resolves an agent turn's effective `cwd` and `project_id` from
+admitted Room resources, with `workspace_root` as the legacy fallback.
+Phase 2 contributed-folder grants may take precedence. Neither a trigger nor
+this fallback field alone establishes execution authority. The standard turn
+endpoint carries room context:
 
 ```
 POST /v1/agent/turns
@@ -169,8 +172,9 @@ POST /v1/agent/turns
 }
 ```
 
-The daemon resolves the owning project from `room_key → workspace_root` and
-injects it into the turn context. The agent's response streams back as SSE
+The daemon checks the Room's binding and resource authority, resolves the
+effective folder and owning project, and injects them into the turn context.
+The agent's response streams back as SSE
 events on the room's event endpoint, rendered as a `room_message` with the
 agent's participant id.
 
@@ -376,8 +380,10 @@ An agent identity already registered with the daemon (visible in
 ### Agent's First Turn in a Room
 
 1. Human @-mentions the agent in a message: "@builder review this diff".
-2. Daemon resolves: agent is in the room, `on_mention` is true → wake.
-3. Daemon creates a room-bound session with `workspace_root` from the room entity.
+2. Daemon checks the trigger, current binding, owner eligibility and resource
+   authority before admitting the wake.
+3. Daemon creates a room-bound session using the admitted contributed folder
+   or legacy `workspace_root` fallback; Surface does not choose the effective cwd.
 4. Agent receives the turn context: prompt, room transcript, workspace state.
 5. Agent responds; response appears as a room message with the agent's
    participant id and display name.

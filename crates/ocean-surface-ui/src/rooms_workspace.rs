@@ -333,13 +333,10 @@ fn trigger_toggle_row(
 /// The open room's workspace binding: the unbound notice, the folder it is
 /// bound to when it has one, and the bind/unbind control.
 ///
-/// This sits with the trigger rows because it is the precondition for all of
-/// them. A trigger decides WHETHER the room's agents are woken; the binding
-/// decides whether a woken turn can run at all — the daemon resolves the
-/// turn's project and `cwd` from the room's `workspace_root`, and with none
-/// stored it refuses with `workspace_unavailable` before the agent sees the
-/// message. So an unbound room can have every trigger checked and still do
-/// nothing, which is exactly the state the notice names.
+/// This edits the room's fallback folder, not its complete execution authority.
+/// Phase 2 contributed-folder grants can supply an agent's cwd ahead of this
+/// field. An absent fallback therefore says nothing about whether a particular
+/// agent can run; only the daemon's admission check can decide that.
 ///
 /// Gated on [`trigger_policy_accepts_writes`], the same gate the rows above
 /// take, because it is the same PATCH to the same route under the same
@@ -383,13 +380,12 @@ fn workspace_binding_section(rooms: Rooms, access: Option<&RoomAccessProjection>
         <div class="rooms-workspace__workspace-binding">
             {move || unbound().then(|| view! {
                 <div class="rooms-workspace__workspace-unbound" role="note">
-                    "No workspace folder is bound. Agents in this room cannot run \
-                     until one is — every turn is refused before it starts."
+                    "No default folder"
                 </div>
             })}
             {move || bound_to().map(|root| view! {
                 <div class="rooms-workspace__workspace-bound">
-                    <span class="rooms-workspace__workspace-bound-label">"Workspace"</span>
+                    <span class="rooms-workspace__workspace-bound-label">"Default folder"</span>
                     <code class="rooms-workspace__workspace-bound-path">{root}</code>
                 </div>
             })}
@@ -403,7 +399,7 @@ fn workspace_binding_section(rooms: Rooms, access: Option<&RoomAccessProjection>
                     <input
                         class="rooms-workspace__workspace-input"
                         type="text"
-                        aria-label="Workspace folder on the daemon host"
+                        aria-label="Default folder on the connected machine"
                         placeholder="/absolute/path/to/project"
                         prop:value=move || draft.get()
                         on:input=move |ev| draft.set(event_target_value(&ev))
@@ -434,8 +430,7 @@ fn workspace_binding_section(rooms: Rooms, access: Option<&RoomAccessProjection>
                 </div>
             })}
             <span class="rooms-workspace__workspace-help">
-                "The folder is resolved on the machine running the daemon, not in \
-                 this browser. It must be an absolute path that already exists there."
+                "On the connected machine."
             </span>
             {move || rooms.workspace_update_status.get().map(|status| view! {
                 <div class="rooms-workspace__workspace-error" role="alert">
@@ -2480,8 +2475,8 @@ pub fn RoomsWorkspace(
     let create_on_build_failure = RwSignal::new(false);
     let create_on_ci_failure = RwSignal::new(false);
     // The workspace folder the new room binds to, on the DAEMON's host. Empty
-    // leaves the room unbound — which is what every room this form made used
-    // to be, and an unbound room's agent turns all fail closed.
+    // leaves the fallback unset; an authorized folder grant can still supply
+    // an agent's cwd. The daemon remains the admission authority.
     let create_workspace = RwSignal::new(String::new());
     let create_room = move || {
         // Prevent concurrent dispatch: if a create is already in flight,
@@ -3463,22 +3458,18 @@ pub fn RoomsWorkspace(
                             pending_create,
                         )}
                     </div>
-                    // The folder the room's agents will actually run in. Its
-                    // own field rather than a trigger row because it is not a
-                    // flag: without it every trigger above is armed to wake an
-                    // agent that then fails closed on the daemon with
-                    // `workspace_unavailable`. The path is resolved on the
-                    // DAEMON's host — the browser cannot see that filesystem,
-                    // so nothing here validates it and the helper text says
-                    // whose machine it means.
+                    // Optional fallback folder on the daemon's host. Phase 2
+                    // contributed-folder grants may take precedence, so absence
+                    // here does not determine agent admission. Only the daemon
+                    // can validate this path on the connected machine.
                     <label class="rooms-workspace__create-workspace">
                         <span class="rooms-workspace__create-workspace-label">
-                            "Workspace folder on the daemon host"
+                            "Default folder"
                         </span>
                         <input
                             class="rooms-workspace__left-input"
                             type="text"
-                            aria-label="Workspace folder on the daemon host"
+                            aria-label="Default folder on the connected machine"
                             aria-describedby="rooms-create-workspace-help"
                             placeholder="/absolute/path/to/project"
                             prop:value=move || create_workspace.get()
@@ -3495,9 +3486,7 @@ pub fn RoomsWorkspace(
                             class="rooms-workspace__create-workspace-help"
                             id="rooms-create-workspace-help"
                         >
-                            "An absolute path that must already exist on the machine \
-                             running the daemon. Leave it empty to create the room \
-                             unbound — its agents cannot run until a folder is bound."
+                            "Optional · on the connected machine"
                         </span>
                     </label>
                 </div>
@@ -4838,12 +4827,8 @@ pub fn RoomsWorkspace(
                                     </div>
                                 })
                             }}
-                            // Directly under the four triggers, because this is
-                            // the condition that makes all four inert: a room
-                            // with no bound workspace refuses every agent turn
-                            // before it starts, so a checked @mention row above
-                            // an unbound room promises a wake that cannot
-                            // happen.
+                            // The room fallback lives with its trigger settings;
+                            // absence does not override contributed-folder grants.
                             {workspace_binding_section(rooms, access.as_ref())}
                         </div>
                     }.into_any()

@@ -420,16 +420,11 @@ pub struct Room {
     /// Optional auto-convene trigger policy. `None` = no automatic triggers.
     #[serde(default)]
     pub trigger_policy: Option<RoomTriggerPolicy>,
-    /// The workspace folder on the DAEMON's host this room is bound to, if any.
-    ///
-    /// Nothing to do with the SESSION workspace root every other module in this
-    /// crate means by that name — this one is the room's own, and it is what a
-    /// room-bound agent turn resolves its project and `cwd` from. `None` is an
-    /// unbound room, where every agent turn fails closed on the daemon with
-    /// `workspace_unavailable`, so the mention that was supposed to wake an
-    /// agent does nothing at all. `#[serde(default)]` because a daemon
-    /// predating the field simply omits it, and an omitted binding reads the
-    /// same as no binding.
+    /// Optional fallback execution folder on the DAEMON's host, distinct from
+    /// the SESSION workspace root used elsewhere in this crate. Phase 2
+    /// contributed-folder grants may take precedence; `None` means no fallback,
+    /// not that every agent is blocked. Only daemon admission resolves a turn's
+    /// usable project and `cwd`. Older daemons may omit the field.
     #[serde(default)]
     pub workspace_root: Option<String>,
 }
@@ -671,14 +666,9 @@ struct CreateRoomBody<'a> {
     /// (no triggers) applies; otherwise the daemon stores it verbatim.
     #[serde(skip_serializing_if = "Option::is_none")]
     trigger_policy: Option<RoomTriggerPolicy>,
-    /// The workspace folder on the daemon's host to bind the new room to.
-    /// Skipped when `None` — an omitted binding is what the daemon reads as
-    /// "unbound", and sending an explicit `null` would mean the same thing
-    /// while looking like a value the operator chose.
-    ///
-    /// Until this field existed the surface sent `key`, `name` and
-    /// `trigger_policy` only, so EVERY room this form made was unbound and
-    /// every agent mention in it did nothing.
+    /// Optional fallback folder on the daemon's host. Omit `None` rather than
+    /// claiming an explicit selection; contributed-folder grants may provide
+    /// the eventual turn's cwd independently of this fallback.
     #[serde(skip_serializing_if = "Option::is_none")]
     workspace_root: Option<&'a str>,
 }
@@ -1062,8 +1052,8 @@ impl WorkspaceBindStatus {
     }
 }
 
-/// Is this room unbound — no workspace folder on the daemon's host, so every
-/// agent turn in it fails closed before it starts?
+/// Does this room lack a fallback folder on the daemon's host?
+/// Contributed-folder grants and agent admission are not inferred here.
 ///
 /// A pure predicate over the decoded record, so the notice and the control's
 /// wording cannot drift apart, and so the rule is testable without a browser.
@@ -1516,10 +1506,9 @@ impl Rooms {
     /// Callers should gate dispatch on `pending_create` to prevent concurrent
     /// attempts — the closure in `rooms_workspace.rs` does this.
     ///
-    /// `workspace_root` is the folder on the DAEMON's host the new room binds
-    /// to. `None` (an empty field) leaves the room unbound, which is what every
-    /// room this form made used to be — and an unbound room's agent turns all
-    /// fail closed with `workspace_unavailable`, so a mention wakes nothing.
+    /// `workspace_root` is the optional fallback folder on the DAEMON's host.
+    /// `None` leaves that fallback unset; contributed-folder grants may supply
+    /// a turn's cwd instead. The daemon remains the admission authority.
     pub fn create_room(
         &self,
         name: String,
@@ -1890,8 +1879,8 @@ impl Rooms {
     /// `Some(path)` binds — the path must be absolute and must exist on the
     /// machine running the DAEMON, which is the only host that can see it, so
     /// the daemon canonicalizes and refuses; this surface never pre-validates.
-    /// `None` sends an explicit `null` and unbinds, putting the room back to
-    /// the state where its agent turns fail closed.
+    /// `None` sends an explicit `null` and clears only the fallback folder,
+    /// leaving contributed-folder grants and daemon admission unchanged.
     ///
     /// The body carries `workspace_root` alone, so this can never disturb the
     /// stored trigger policy — the daemon leaves an ABSENT field unchanged,
@@ -4667,10 +4656,8 @@ mod tests {
         assert_eq!(bound.workspace_root.as_deref(), Some("/dev/ocean-os"));
     }
 
-    /// The predicate the unbound notice renders from. Whitespace counts as
-    /// unbound: the daemon treats a blank value as no binding, so a room
-    /// carrying one would otherwise render as bound while its agent turns all
-    /// fail closed.
+    /// The fallback notice treats whitespace as absent, matching the daemon's
+    /// blank-value handling without inferring an agent's admission state.
     #[test]
     fn room_is_unbound_reads_absent_and_blank_the_same_way() {
         let room = |root: Option<&str>| Room {

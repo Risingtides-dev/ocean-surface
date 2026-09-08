@@ -352,7 +352,7 @@ Web surface session UI:
   room it was minted for. No fixture in this repo may carry a real one. The
   onboarding link EMBEDS the code, so it is the same grant in a longer form and
   gets the same discipline.
-- A room's `workspace_root` is the folder its agent turns run in, resolved on
+- A room's `workspace_root` is its fallback execution folder, resolved on
   the DAEMON's host — not the browser's, which cannot see that filesystem, so
   nothing here pre-validates a path and the daemon's canonicalizing
   `400 invalid_workspace_root` is the only verdict. Unrelated to the SESSION
@@ -361,10 +361,14 @@ Web surface session UI:
   `PATCH /v1/rooms/persistent/{key}`, where absent leaves the binding unchanged
   and an explicit `null` unbinds — so the unbind body must NOT skip `None`, and
   the policy and workspace PATCHes each send their own field alone rather than
-  clobbering the other's. An unbound room is not a cosmetic gap: every
-  room-bound agent turn in it is refused `503 workspace_unavailable` before the
-  agent sees the message, so the surface states that in words wherever the
-  trigger toggles render. That refusal is NOT `room_repo.rs`'s
+  clobbering the other's. Phase 2 contributed-folder grants can take precedence
+  over this fallback. An absent `workspace_root` therefore renders neutral
+  "No default folder" metadata, never a claim that every agent is blocked.
+  Both create/edit inputs use the same accessible default-folder name as the
+  visible field, retaining the connected-machine context.
+  Only daemon admission determines whether a particular agent has a usable cwd;
+  do not infer grant readiness from this one legacy field. The daemon's
+  `workspace_unavailable` refusal is NOT `room_repo.rs`'s
   `workspace_unavailable`, which is the compute lane saying Bedrock is
   unreachable; do not share wording between them.
 - Rooms G1 is daemon-native text collaboration. LiveKit controls stay outside
