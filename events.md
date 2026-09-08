@@ -7558,3 +7558,36 @@ integration suite, wasm clippy -D warnings, host all-targets clippy, fmt, and
 the ledger checker.
 
 _________________________________________________________________________________ 23:13 feat/rooms-unread-affordances
+
+time:      23:47 09-08-26
+agent:     claude
+worktree:  feat/rooms-unread-affordances
+type:      bug-report
+area:      frontend
+
+The unread baseline had the wrong lifetime: it was scoped to the workspace
+mount rather than to the room-open admission. app.rs gates RoomsWorkspace
+behind a Show on show_rooms, so switching to Direct messages unmounts the
+component while the App-scoped Rooms store keeps open_key and the live tail
+alive. AGENTS.md already states that invariant, in the mention-notification
+rule: open_key and the tail outlive the workspace unmounting behind Direct
+messages. A component-local baseline signal is therefore recreated empty on
+every return, and its effect re-derives the floor from read_summaries, which by
+then holds the advanced value opening the room wrote. The divider disappeared
+from a room the reader never left, which is the same failure the earlier
+baseline-lock fix addressed and the same reason: the floor was allowed to be
+recomputed after the advance. Locking harder inside the component could not
+reach it, because the component itself is what goes away. The baseline now
+lives on the Rooms store beside workspace_visible, captured synchronously in
+open_room while read_summaries still holds the pre-open floor and before
+reset_room_state clears the cursor, and cleared in close_room. next_unread_
+baseline moved to rooms.rs with it and is unchanged, so its three lock tests
+still apply; the component no longer owns a baseline signal at all and simply
+reads the store. The wiring guard was rewritten to pin what actually matters
+now: no workspace-local baseline declaration, the divider reading the
+App-scoped one, the field owned by the store, and open_room capturing before it
+touches the live cursor. Mutation-checked by restoring the component-local
+signal and effect, which fails it. Gates: 1334 bin tests plus every integration
+suite, wasm clippy -D warnings, host all-targets clippy, fmt, ledger checker.
+
+_________________________________________________________________________________ 23:47 feat/rooms-unread-affordances

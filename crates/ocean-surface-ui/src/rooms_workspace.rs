@@ -1257,34 +1257,6 @@ fn roster_display_name(roster: &[RoomParticipant], author_id: &str) -> String {
 // the additive `unread_count`/`mention_count` projection); this lane owns only
 // the transcript's first-unread divider and the row's bold-unread modifier.
 
-/// Lock-on-key-change for the divider baseline.
-///
-/// The baseline is captured once for an opened room and never revised while
-/// that room stays open. This is the whole correctness property: opening a
-/// room auto-marks it read, so anything that re-reads a live read cursor
-/// after the open would lock onto the ALREADY-ADVANCED value, and the
-/// divider the reader was meant to see would silently never render.
-///
-/// `read_seq_at_open` must therefore come from the room-list
-/// `read_summaries` — the durable per-room floor, which at the instant
-/// `open_key` flips still holds the pre-open value — not from
-/// `open_read_cursor`, which `open_room` resets to `None` and the
-/// mark-read PATCH then fills in with the advanced sequence.
-fn next_unread_baseline(
-    current: Option<&(String, Option<u64>)>,
-    open_key: Option<&str>,
-    read_seq_at_open: Option<u64>,
-) -> Option<(String, Option<u64>)> {
-    let key = open_key?;
-    if let Some((locked_key, locked_seq)) = current {
-        if locked_key == key {
-            // Already locked for this room: never overwrite.
-            return Some((locked_key.clone(), *locked_seq));
-        }
-    }
-    Some((key.to_string(), read_seq_at_open))
-}
-
 /// Which numbering a room's durable read cursor is recorded in.
 ///
 /// The two are NOT interchangeable, and the read cursor is written in one or
@@ -2060,31 +2032,6 @@ pub fn RoomsWorkspace(
         store_thread_view_mode(thread_view_mode.get());
     });
 
-    // Where the reader left off, captured as `(room_key, read_seq)` once per
-    // opened room and held until the room changes.
-    //
-    // `open_key` is the ONLY tracked read here, deliberately. Opening a room
-    // auto-marks it read, so an Effect that also tracked the live cursor
-    // would re-run after that advance and lock the baseline onto the new
-    // latest sequence — leaving nothing past the baseline and silently
-    // dropping the divider. Tracking only the key means this runs once, at
-    // the synchronous moment the key flips, when the room-list summaries
-    // still hold the pre-open floor.
-    let unread_baseline = RwSignal::new(None::<(String, Option<u64>)>);
-    Effect::new(move |_| {
-        let open_key = rooms.open_key.get();
-        let read_seq_at_open = open_key.as_deref().and_then(|key| {
-            rooms
-                .read_summaries
-                .with_untracked(|summaries| summaries.get(key).and_then(|s| s.read_seq))
-        });
-        let current = unread_baseline.get_untracked();
-        let next = next_unread_baseline(current.as_ref(), open_key.as_deref(), read_seq_at_open);
-        if next != current {
-            unread_baseline.set(next);
-        }
-    });
-
     // Persisted view state, captured BEFORE the persist effect below can
     // overwrite storage with this mount's initial empty state. Restores are
     // validated against live daemon data before they apply: the room must
@@ -2120,7 +2067,7 @@ pub fn RoomsWorkspace(
     // Row the "new messages" divider sits above, or None when the reader has
     // no left-off point in this room.
     let first_unread_seq = Memo::new(move |_| {
-        let baseline = match unread_baseline.get() {
+        let baseline = match rooms.unread_baseline.get() {
             Some((key, baseline)) if rooms.open_key.get().as_deref() == Some(key.as_str()) => {
                 baseline
             }
@@ -5246,9 +5193,10 @@ pub fn RoomsWorkspace(
 mod tests {
     use super::*;
     use crate::rooms::{
-        room_request_is_current, CreateOutcome, CreateResolution, FederatedActorType,
-        FederatedMessageMeta, FederatedRoomMemberProjection, FederatedRoomRole, MemberPresence,
-        RoomAccessProjection, RoomAccessState, RoomMessage, RoomMessageKind, RoomParticipantKind,
+        next_unread_baseline, room_request_is_current, CreateOutcome, CreateResolution,
+        FederatedActorType, FederatedMessageMeta, FederatedRoomMemberProjection, FederatedRoomRole,
+        MemberPresence, RoomAccessProjection, RoomAccessState, RoomMessage, RoomMessageKind,
+        RoomParticipantKind,
     };
 
     /// Flipping one exposed flag must normalize the unwired fields away —
@@ -8741,36 +8689,67 @@ mod tests {
 
     // ── Unread divider (badge is daemon-derived on main) ──────────────
 
-    /// The pure lock helper cannot see how the Effect is wired, and the
-    /// wiring is where the defect lived: an Effect that tracks the live
-    /// cursor re-runs after the open's mark-read advance and re-locks the
-    /// baseline. Pin that the baseline Effect reads ONLY `open_key`
-    /// reactively — any `open_read_cursor` read inside it is the bug
-    /// returning. Needle built at runtime so this test's own literal cannot
-    /// satisfy the scan of its own file.
+    /// The pure lock helper cannot see WHERE the baseline lives, and that is
+    /// where the second defect lived: held in a component-local signal, it
+    /// was re-derived every time `<Show>` remounted the workspace behind
+    /// Direct messages — by which point the room had been marked read, so the
+    /// re-derived floor sat past every message and the divider vanished from
+    /// a room the reader never left. AGENTS.md states the invariant that
+    /// makes this reachable: `open_key` and the tail outlive the workspace
+    /// unmount.
+    ///
+    /// Pin both halves: the baseline is owned by the App-scoped store and
+    /// captured at the open admission, and the workspace declares no local
+    /// one. Needles built at runtime so these literals cannot satisfy a scan
+    /// of their own file.
     #[test]
-    fn baseline_effect_does_not_track_the_live_read_cursor() {
-        let src = include_str!("rooms_workspace.rs");
-        let marker = ["let unread_baseline", " = RwSignal::new"].concat();
-        let start = src.find(&marker).expect("baseline signal must exist");
-        // The Effect immediately follows the signal; bound the scan at the
-        // next top-level `let ` binding after it so the window is the Effect.
-        let rest = &src[start..];
-        let end = rest[1..]
-            .find("\n    let ")
-            .map(|i| i + 1)
-            .unwrap_or(rest.len());
-        let effect_src = &rest[..end];
+    fn the_baseline_outlives_a_workspace_remount() {
+        let workspace = include_str!("rooms_workspace.rs");
+        let store = include_str!("rooms.rs");
+
+        let local_decl = ["let unread_baseline", " = RwSignal::new"].concat();
         assert!(
-            effect_src.contains("open_key"),
-            "the baseline Effect must key off the open room"
+            !workspace.contains(&local_decl),
+            "a workspace-local baseline is re-derived on every remount behind \
+             Direct messages, after the room has been marked read"
+        );
+        let store_read = ["rooms.unread_baseline", ".get()"].concat();
+        assert!(
+            workspace.contains(&store_read),
+            "the divider must read the App-scoped baseline"
+        );
+
+        let field = [
+            "pub unread_baseline",
+            ": RwSignal<Option<(String, Option<u64>)>>",
+        ]
+        .concat();
+        assert!(
+            store.contains(&field),
+            "the baseline must be owned by the App-scoped room store"
+        );
+
+        // Captured at the open admission, while the summaries still hold the
+        // pre-open floor — not from an effect that can re-run after it.
+        let open_fn = store
+            .find("pub fn open_room(&self, key: String) {")
+            .expect("open_room must exist");
+        let open_end = store[open_fn..]
+            .find("\n    }")
+            .map(|i| open_fn + i)
+            .unwrap_or(store.len());
+        let open_src = &store[open_fn..open_end];
+        let capture = ["self.unread_baseline", ".set("].concat();
+        assert!(
+            open_src.contains(&capture),
+            "open_room must capture the baseline"
         );
         let cursor = ["open_read", "_cursor"].concat();
+        let capture_at = open_src.find(&capture).unwrap();
         assert!(
-            !effect_src.contains(&cursor),
-            "the baseline Effect must not read the live read cursor: opening a \
-             room auto-marks it read, so tracking the cursor re-locks the \
-             baseline onto the advanced sequence and the divider never renders"
+            !open_src[..capture_at].contains(&cursor),
+            "the baseline must be captured before the room's live cursor is \
+             touched, or it locks onto the advanced sequence"
         );
     }
 
