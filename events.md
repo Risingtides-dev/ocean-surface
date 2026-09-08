@@ -7420,3 +7420,11 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+time:      [16:29] [09-08-26]
+agent:     [ocean] [gpt-5.6-sol]
+worktree:  pm/rooms-111-restack
+type:      testing
+area:      frontend
+
+Restacked the isolated Rooms Tauri acceptance shell onto current main after the original draft accumulated conflicting merge ancestry. The replacement preserves the debug-only webdriver feature boundary, acceptance configuration and capability, repository-owned Stage0 runner, native keyboard and drawer geometry assertions, and current privileged Room authority transport while excluding the obsolete branch ledger and unrelated workspace commits; static validation, formatting, diff checks, and the feature-gated native acceptance build pass on the clean restack.
+_________________________________________________________________________________ 16:29 pm/rooms-111-restack
