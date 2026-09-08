@@ -112,8 +112,8 @@ fn the_affordance_sits_at_the_end_of_the_scrolling_list() {
         .find("class=\"rooms-workspace__left-list\"")
         .expect("the rail's scroll container");
     let rows = workspace
-        .find("each=move||rooms.list.get()")
-        .expect("the `<For>` over the room list");
+        .find("each=move||group_rail_rooms(&rooms.list.get())")
+        .expect("the grouped `<For>` over the room list");
     let affordance = workspace
         .find("class=\"rooms-workspace__load-more-rooms\"")
         .expect("the load-more affordance");

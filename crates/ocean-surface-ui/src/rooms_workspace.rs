@@ -770,6 +770,80 @@ fn room_option_dom_id(key: &str) -> String {
     format!("rooms-opt-{key}")
 }
 
+/// A project group in the rail: rooms sharing one daemon-side
+/// `workspace_root` (the room's project binding), rendered under one
+/// collapsible header. `None` label is the "Other rooms" bucket for
+/// unbound rooms — always last.
+struct RailGroup {
+    label: Option<String>,
+    rooms: Vec<Room>,
+}
+
+/// Group the rail's rooms by their project binding. Derived state, not
+/// stored: the daemon owns `workspace_root`, the rail derives groups from
+/// whatever the current list carries. Group order is first-seen (the
+/// daemon's admission order — newest-first, so a group's first room is its
+/// newest), rooms keep list order within a group, and the unbound bucket
+/// always sinks to the end. Two rooms bind to the same project when their
+/// `workspace_root` strings are equal — the daemon canonicalizes the path
+/// it stores, so the surface compares verbatim.
+fn group_rail_rooms(rooms: &[Room]) -> Vec<RailGroup> {
+    let mut bound: Vec<RailGroup> = Vec::new();
+    let mut unbound: Vec<Room> = Vec::new();
+    for room in rooms {
+        match room.workspace_root.as_deref().filter(|s| !s.is_empty()) {
+            Some(root) => match bound.iter_mut().find(|g| g.label.as_deref() == Some(root)) {
+                Some(g) => g.rooms.push(room.clone()),
+                None => bound.push(RailGroup {
+                    label: Some(root.to_string()),
+                    rooms: vec![room.clone()],
+                }),
+            },
+            None => unbound.push(room.clone()),
+        }
+    }
+    if !unbound.is_empty() {
+        bound.push(RailGroup {
+            label: None,
+            rooms: unbound,
+        });
+    }
+    bound
+}
+
+/// The HashSet key for a group's collapsed state: the bound workspace root
+/// verbatim, or a fixed sentinel for the unbound bucket.
+fn rail_group_key(label: &Option<String>) -> String {
+    label.clone().unwrap_or_else(|| "\u{0}unbound".to_string())
+}
+
+/// The label a group header renders: the bound project's directory name
+/// (last path segment), or the fixed "Other rooms" for the unbound bucket.
+/// A root that ends in a separator renders the whole path, never "".
+fn rail_group_display_label(label: Option<&str>) -> String {
+    match label {
+        Some(root) => root
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(root)
+            .to_string(),
+        None => "Other rooms".to_string(),
+    }
+}
+
+/// Every room key a rail group renders, in visual order — the flat list
+/// the keyboard helpers already speak. Collapsed groups contribute
+/// nothing, so arrow navigation walks only what is on screen.
+fn rail_group_visible_keys(group: &RailGroup, collapsed: bool) -> Vec<String> {
+    if collapsed {
+        Vec::new()
+    } else {
+        group.rooms.iter().map(|r| r.id.clone()).collect()
+    }
+}
+
 fn transcript_is_near_bottom(
     scroll_height: i32,
     scroll_top: i32,
@@ -1937,6 +2011,11 @@ pub fn RoomsWorkspace(
 
     // Toggle for narrow-screen left-rail visibility.
     let show_left_rail = RwSignal::new(false);
+    // Collapsed project groups in the rail, keyed by group label (the bound
+    // workspace root, or the fixed "Other rooms" bucket). Collapsed groups
+    // render their header only; their rooms leave the keyboard model.
+    let collapsed_groups: RwSignal<std::collections::HashSet<String>> =
+        RwSignal::new(std::collections::HashSet::new());
 
     // Toggle for the members drawer where the inline rail is hidden
     // (narrow viewports, or mid-width desktops while a thread is open).
@@ -3237,11 +3316,20 @@ pub fn RoomsWorkspace(
                                     role="listbox"
                                     aria-label="Rooms"
                                     on:keydown=move |ev: web_sys::KeyboardEvent| {
-                                        let keys: Vec<String> = rooms
-                                            .list
-                                            .get_untracked()
+                                        // Only VISIBLE rooms participate in the roving
+                                        // model — a collapsed group's options are
+                                        // not in the DOM, so focusing them would
+                                        // silently drop focus.
+                                        let keys: Vec<String> = group_rail_rooms(&rooms.list.get())
                                             .iter()
-                                            .map(|r| r.id.clone())
+                                            .flat_map(|g| {
+                                                rail_group_visible_keys(
+                                                    g,
+                                                    collapsed_groups
+                                                        .get()
+                                                        .contains(&rail_group_key(&g.label)),
+                                                )
+                                            })
                                             .collect();
                                         let focused = web_sys::window()
                                             .and_then(|w| w.document())
@@ -3270,9 +3358,46 @@ pub fn RoomsWorkspace(
                                     }
                                 >
                                     <For
-                                        each=move || rooms.list.get()
-                                        key=|r: &Room| (r.id.clone(), r.participants.len(), r.updated_at.clone())
-                                        children=move |room: Room| {
+                                        each=move || group_rail_rooms(&rooms.list.get())
+                                        key=|g: &RailGroup| g.label.clone().unwrap_or_else(|| "\u{0}other".to_string())
+                                        children=move |group: RailGroup| {
+                                            let group_key = rail_group_key(&group.label);
+                                            let display = rail_group_display_label(group.label.as_deref());
+                                            let group_rooms = leptos::prelude::StoredValue::new(group.rooms.clone());
+                                            // The toggle closure needs its own key clone; the Memo
+                                            // below moves `group_key`. Memo<bool> is Copy, so every
+                                            // consumer (aria-expanded, caret, Show) shares it.
+                                            let toggle_key = group_key.clone();
+                                            let collapsed = Memo::new(move |_| {
+                                                collapsed_groups.get().contains(&group_key)
+                                            });
+                                            view! {
+                                                <div class="rooms-workspace__group">
+                                                    <button
+                                                        class="rooms-workspace__group-head"
+                                                        type="button"
+                                                        aria-expanded=move || (!collapsed.get()).to_string()
+                                                        on:click=move |_| {
+                                                            collapsed_groups.update(|set| {
+                                                                if set.contains(&toggle_key) {
+                                                                    set.remove(&toggle_key);
+                                                                } else {
+                                                                    set.insert(toggle_key.clone());
+                                                                }
+                                                            });
+                                                        }
+                                                    >
+                                                        <span class="rooms-workspace__group-caret" aria-hidden="true">
+                                                            {move || if collapsed.get() { "▸" } else { "▾" }}
+                                                        </span>
+                                                        <span class="rooms-workspace__group-label">{display.clone()}</span>
+                                                        <span class="rooms-workspace__group-count">{group.rooms.len()}</span>
+                                                    </button>
+                                                    <Show when=move || !collapsed.get()>
+                                                        <For
+                                                            each=move || group_rooms.get_value()
+                                                            key=|r: &Room| (r.id.clone(), r.participants.len(), r.updated_at.clone())
+                                                            children=move |room: Room| {
                                             let key = room.id.clone();
                                             let key2 = key.clone();
                                             let key_tab = key.clone();
@@ -3284,12 +3409,19 @@ pub fn RoomsWorkspace(
                                             let selected =
                                                 move || rooms.open_key.get().as_deref() == Some(&*key_sel);
                                             let is_tab_stop = move || {
-                                                let keys: Vec<String> = rooms
-                                                    .list
-                                                    .get()
-                                                    .iter()
-                                                    .map(|r| r.id.clone())
-                                                    .collect();
+                                                let keys: Vec<String> = group_rail_rooms(
+                                                    &rooms.list.get(),
+                                                )
+                                                .iter()
+                                                .flat_map(|g| {
+                                                    rail_group_visible_keys(
+                                                        g,
+                                                        collapsed_groups
+                                                            .get()
+                                                            .contains(&rail_group_key(&g.label)),
+                                                    )
+                                                })
+                                                .collect();
                                                 let open = rooms.open_key.get();
                                                 room_list_tab_stop(&keys, open.as_deref())
                                                     .and_then(|i| keys.get(i).cloned())
@@ -3361,6 +3493,11 @@ pub fn RoomsWorkspace(
                                                         </span>
                                                     </Show>
                                                 </button>
+                                                            }
+                                                            }
+                                                        />
+                                                    </Show>
+                                                </div>
                                             }
                                         }
                                     />
@@ -5078,6 +5215,93 @@ mod tests {
         FederatedMessageMeta, FederatedRoomMemberProjection, FederatedRoomRole, MemberPresence,
         RoomAccessProjection, RoomAccessState, RoomMessage, RoomMessageKind, RoomParticipantKind,
     };
+
+    /// Minimal Room for rail-grouping tests: identity plus a project
+    /// binding, nothing else — grouping reads only these two.
+    fn rail_room(id: &str, root: Option<&str>) -> Room {
+        Room {
+            id: id.to_string(),
+            name: id.to_string(),
+            participants: Vec::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            trigger_policy: None,
+            workspace_root: root.map(|r| r.to_string()),
+        }
+    }
+
+    #[test]
+    fn rail_groups_bound_rooms_by_workspace_root_in_first_seen_order() {
+        let rooms = vec![
+            rail_room("a", Some("/w/alpha")),
+            rail_room("u1", None),
+            rail_room("b", Some("/w/beta")),
+            rail_room("c", Some("/w/alpha")),
+        ];
+        let groups = group_rail_rooms(&rooms);
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[0].label.as_deref(), Some("/w/alpha"));
+        assert_eq!(
+            groups[0]
+                .rooms
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "c"]
+        );
+        assert_eq!(groups[1].label.as_deref(), Some("/w/beta"));
+        // Unbound bucket always sinks last, wherever its rooms appeared.
+        assert_eq!(groups[2].label, None);
+        assert_eq!(groups[2].rooms.len(), 1);
+    }
+
+    #[test]
+    fn rail_groups_all_unbound_rooms_land_in_one_tail_bucket() {
+        let rooms = vec![
+            rail_room("u1", None),
+            rail_room("u2", None),
+            rail_room("u3", None),
+        ];
+        let groups = group_rail_rooms(&rooms);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].label, None);
+        assert_eq!(groups[0].rooms.len(), 3);
+    }
+
+    #[test]
+    fn rail_group_display_label_takes_the_last_path_segment() {
+        assert_eq!(
+            rail_group_display_label(Some("/Users/eric/ocean-surface")),
+            "ocean-surface"
+        );
+        // Trailing separators must not yield an empty label.
+        assert_eq!(rail_group_display_label(Some("/w/")), "w");
+        assert_eq!(rail_group_display_label(None), "Other rooms");
+    }
+
+    #[test]
+    fn rail_group_visible_keys_empty_when_collapsed() {
+        let group = RailGroup {
+            label: Some("/w/alpha".into()),
+            rooms: vec![
+                rail_room("a", Some("/w/alpha")),
+                rail_room("c", Some("/w/alpha")),
+            ],
+        };
+        assert_eq!(rail_group_visible_keys(&group, false).len(), 2);
+        assert!(rail_group_visible_keys(&group, true).is_empty());
+    }
+
+    #[test]
+    fn rail_group_key_sentinel_never_collides_with_a_real_root() {
+        let bound = rail_group_key(&Some("/w/alpha".to_string()));
+        let unbound = rail_group_key(&None);
+        assert_eq!(bound, "/w/alpha");
+        assert_ne!(bound, unbound);
+        // The sentinel contains a NUL, which no daemon-side absolute path
+        // can contain — the collapse key is collision-free by construction.
+        assert!(unbound.contains('\u{0}'));
+    }
 
     /// Flipping one exposed flag must normalize the unwired fields away —
     /// the daemon refuses any write carrying `on_component_event: true` or a

@@ -7420,3 +7420,25 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+time:      [19:40] [09-08-26]
+agent:     [ocean] [gpt-5]
+worktree:  feat/rooms-rail-groups
+type:      feature
+area:      frontend
+
+Moved the Rooms rail from one flat channel list toward the forum-style
+information architecture: rooms now group automatically by the daemon-owned
+workspace_root project binding, with an explicit Other rooms tail bucket for
+unbound rooms. Each project group has a quiet collapsible header, room count,
+keyboard-safe disclosure state, and the rail's roving focus model now excludes
+collapsed rows that are absent from the DOM. Grouping preserves daemon list
+order within each project and first-seen project order. Added five native unit
+tests for ordering, fallback grouping, labels, collapse visibility, and stable
+keys; updated the room paging source guard to pin the grouped row loop while
+keeping Load more after the scrolling rows. Gates: fmt clean; both clippy lanes
+clean with -D warnings; wasm check clean; proxy check clean; wasm test suite
+builds; full native ocean-surface-ui suite passes. Verification initially hit
+the machine's full data volume, so only disposable worktree/root Cargo target
+artifacts were cleared before rerunning cleanly.
+
+_________________________________________________________________________________ 19:40 feat/rooms-rail-groups

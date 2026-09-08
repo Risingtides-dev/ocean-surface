@@ -327,6 +327,71 @@
 
 /* ── Left rail — room list item ───────────────────────────────────── */
 
+/* Project group: rooms sharing one daemon-side workspace_root render
+   under one collapsible header (see group_rail_rooms in
+   rooms_workspace.rs). The group is structure, not a card: no background,
+   no border — the header is a quiet disclosure row like the transcript's
+   disclosure heads. */
+.rooms-workspace__group {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.rooms-workspace__group + .rooms-workspace__group {
+  margin-top: 6px;
+}
+
+.rooms-workspace__group-head {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 12px 4px;
+  margin: 0;
+  border: none;
+  background: transparent;
+  color: var(--fg-3);
+  font-family: var(--font);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.rooms-workspace__group-head:hover {
+  color: var(--fg-2);
+}
+
+.rooms-workspace__group-head:focus-visible {
+  outline: none;
+  box-shadow: inset var(--focus-ring);
+}
+
+.rooms-workspace__group-caret {
+  font-size: 9px;
+  line-height: 1;
+  color: var(--fg-4);
+}
+
+.rooms-workspace__group-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rooms-workspace__group-count {
+  flex: 0 0 auto;
+  color: var(--fg-4);
+  font-weight: 400;
+  font-size: 10px;
+}
+
 .rooms-workspace__room {
   appearance: none;
   display: flex;
