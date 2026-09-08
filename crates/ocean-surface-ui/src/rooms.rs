@@ -2450,7 +2450,7 @@ impl Rooms {
     /// The request is the hydration walk's own — same route, same page size,
     /// same `room_is_current` re-check before anything is written — and the only
     /// difference is what ends it. The walk stops at
-    /// [`MAX_TRANSCRIPT_CATCHUP_PAGES`] because it runs unasked on every open;
+    /// [`MAX_TRANSCRIPT_BACKFILL_PAGES`] because it runs unasked on every open;
     /// this runs once per press, so the cursor it leaves behind is
     /// [`transcript_older_cursor`]'s answer and the operator decides whether to
     /// ask again.
@@ -5323,7 +5323,7 @@ mod tests {
     /// the same row every time, and the replayed cursor cannot fall — the one
     /// property [`backfill_walks_older_and_is_bounded_by_the_same_page_cap`]
     /// relies on to bound the walk against a modern daemon is exactly what a
-    /// legacy one does not give it. `MAX_TRANSCRIPT_CATCHUP_PAGES` is what
+    /// legacy one does not give it. `MAX_TRANSCRIPT_BACKFILL_PAGES` is what
     /// stands between this and an endless loop, which is why the bound belongs
     /// on the walk and not only on the daemon's word.
     ///
@@ -5393,7 +5393,7 @@ mod tests {
         }
         assert_eq!(
             requested.len(),
-            MAX_TRANSCRIPT_CATCHUP_PAGES,
+            MAX_TRANSCRIPT_BACKFILL_PAGES,
             "the cap is the only stop condition such a daemon leaves standing",
         );
         assert!(
