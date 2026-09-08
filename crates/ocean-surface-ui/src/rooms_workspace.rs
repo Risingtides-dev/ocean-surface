@@ -3458,14 +3458,10 @@ pub fn RoomsWorkspace(
                             pending_create,
                         )}
                     </div>
-                    // The folder the room's agents will actually run in. Its
-                    // own field rather than a trigger row because it is not a
-                    // flag: without it every trigger above is armed to wake an
-                    // agent that then fails closed on the daemon with
-                    // `workspace_unavailable`. The path is resolved on the
-                    // DAEMON's host — the browser cannot see that filesystem,
-                    // so nothing here validates it and the helper text says
-                    // whose machine it means.
+                    // Optional fallback folder on the daemon's host. Phase 2
+                    // contributed-folder grants may take precedence, so absence
+                    // here does not determine agent admission. Only the daemon
+                    // can validate this path on the connected machine.
                     <label class="rooms-workspace__create-workspace">
                         <span class="rooms-workspace__create-workspace-label">
                             "Default folder"

@@ -1,12 +1,9 @@
-//! A room the surface creates must be able to wake its agents.
+//! A room's fallback folder must remain editable through the surface.
 //!
 //! The defect this guards against is a field that is simply not there. The
 //! daemon has accepted `workspace_root` on `POST /v1/rooms/persistent` since
 //! OCEAN-260. Before contributed-folder grants, this binding was the only
 //! supported cwd source. It remains the fallback and must stay editable.
-//! The surface originally sent `key`, `name` and `trigger_policy` only,
-//! so every room this product created was unbound and every agent mention in
-//! one did nothing at all.
 //!
 //! Nothing in the compiler holds a field's PRESENCE in a serialized body: drop
 //! `workspace_root` from either struct and the create still posts, the PATCH
@@ -42,9 +39,8 @@ fn the_create_body_carries_a_workspace_root() {
         .0;
     assert!(
         body.contains("workspace_root:Option<&'astr>"),
-        "`CreateRoomBody` must carry `workspace_root`, or every room this \
-         surface creates is unbound and its agents can never run (the field \
-         was missing entirely until Rooms 1.4)",
+        "`CreateRoomBody` must carry `workspace_root` so creating a room \
+         preserves the selected fallback folder",
     );
     assert!(
         body.contains("skip_serializing_if=\"Option::is_none\""),

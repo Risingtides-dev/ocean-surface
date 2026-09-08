@@ -7440,3 +7440,13 @@ area:      frontend
 
 Addressed PR #214 review 3961162820: both create/edit input accessible names now say Default folder on the connected machine, matching the visible fallback semantics. Extended the existing source guard to require both exact accessible names. Six binding guards and strict host all-target Clippy pass. The first candidate passed the full UI tests, host/WASM strict lint, WASM test compilation, proxy check and format; exact-head gates rerun after this accessibility fix. Root contract updated; no ownership/index change.
 _________________________________________________________________________________ 14:50 codex/rooms-clarity-20260908
+
+
+time:      [14:57] [09-08-26]
+agent:     [codex]
+worktree:  [codex/rooms-clarity-20260908]
+type:      bug-report
+area:      frontend
+
+Addressed PR #214 review 3961223830: create-form, Room field, serialization, helper and mutation documentation now consistently describe fallback precedence instead of claiming all agents fail when the legacy folder is absent. Removed the same stale inference from the binding guard diagnostics. No runtime behavior changed. Prior b08f2b1 passed 1411 UI tests across 20 suites and all GitHub checks. Root contract already describes the corrected behavior; ownership/indexes intentionally unchanged.
+_________________________________________________________________________________ 14:57 codex/rooms-clarity-20260908
