@@ -7428,3 +7428,11 @@ area:      frontend
 
 Restacked the isolated Rooms Tauri acceptance shell onto current main after the original draft accumulated conflicting merge ancestry. The replacement preserves the debug-only webdriver feature boundary, acceptance configuration and capability, repository-owned Stage0 runner, native keyboard and drawer geometry assertions, and current privileged Room authority transport while excluding the obsolete branch ledger and unrelated workspace commits; static validation, formatting, diff checks, and the feature-gated native acceptance build pass on the clean restack.
 _________________________________________________________________________________ 16:29 pm/rooms-111-restack
+time:      [17:31] [09-08-26]
+agent:     [ocean] [gpt-5.6-sol]
+worktree:  pm/rooms-112-restack
+type:      testing
+area:      workflow
+
+Restacked the Rooms Tauri acceptance CI gate and its dedicated-login runbook onto the clean acceptance scaffold in PR #216. The workflow preserves every current main guard and ledger job, then adds only resolve-time default-versus-feature WebDriver isolation and the exact static-validation output check; the documentation names the macOS Stage0 command, isolation boundary, and artifact diagnostics without changing production shell behavior.
+_________________________________________________________________________________ 17:31 pm/rooms-112-restack
