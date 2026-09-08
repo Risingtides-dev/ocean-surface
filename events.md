@@ -7420,3 +7420,174 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+
+time:      [17:52] [09-08-26]
+agent:     [claude] [opus 5]
+worktree:  feat/rooms-unread-affordances
+type:      feature-request
+area:      frontend
+
+The rooms-interaction.css forward-CSS contract names three unread affordances
+for the Rust lane to adopt, and this branch has carried all three since August.
+Rebasing it onto three weeks of rooms work showed main had solved one of them
+better: room_attention_badge reads the daemon's additive unread_count and
+mention_count projection, so it renders a true count and an @N form for unread
+mentions, where this branch differenced latest_seq against read_seq and so
+counted system rows and thread replies as unread. Main's version also already
+carries content in the badge span, which retires the blank-pill cascade defect
+this branch was fixing — the interaction layer restyles __room-unread into a
+count pill and the row used to emit an empty span. So the badge helpers and
+their five tests are dropped rather than merged, and what lands is only the two
+affordances still unemitted anywhere: the transcript's first-unread divider and
+the room row's bold-unread modifier. The divider's baseline is snapshotted when
+the open room's cursor projection first loads and held while that room stays
+open, because reading the live cursor would slide the divider away as it
+advances on scroll; a room with no read floor has no left-off point and gets no
+divider rather than one pinned above its first message. One rebase adaptation:
+unread was a bare closure and main's attention badge now reads it too, so it is
+a Memo, matching the attention_label and attention_badge memos beside it. Gates:
+1324 lib tests plus every integration suite, wasm clippy -D warnings, the host
+all-targets clippy main added in #189, and fmt. Also closed the auto-reply
+policy branch as superseded — main's create panel now carries four wake toggles
+and an owner-editable rail reached through the PATCH route that PR reported as
+absent, so merging it would have removed two live triggers.
+
+_________________________________________________________________________________ 17:52 feat/rooms-unread-affordances
+
+time:      [18:06] [09-08-26]
+agent:     [claude] [opus 5]
+worktree:  feat/rooms-unread-affordances
+type:      bug-report
+area:      frontend
+
+Review on the PR caught a real defect in the divider baseline, and it was the
+common case rather than an edge. The baseline effect waited for
+open_read_cursor to load before locking, but open_room sets open_key and then
+resets that cursor to None, so the first thing to fill it back in is usually
+the mark-read PATCH that opening the room itself triggers. The effect then
+observed the already-advanced sequence and locked the baseline to it, leaving
+nothing past the baseline, so the divider a returning reader was meant to see
+silently never rendered. The fix captures the floor synchronously on the
+open_key transition from the room-list read_summaries, which at that instant
+still holds the pre-open value, and never revises it while the same room stays
+open. open_key is now the only tracked read in that effect, deliberately: any
+reactive read of the live cursor re-runs the effect after the advance and
+reintroduces the bug. Three pure tests cover the lock semantics, including the
+regression the reviewer specified — open at read_seq 5, advance to 9 and then
+42, baseline stays 5 — plus relock-on-room-change, clear-on-close, and a
+never-read room locking a None floor rather than staying unlocked. Because a
+pure test cannot see how the effect is wired, and the wiring is where the bug
+lived, a source-assertion guard pins that the effect's window contains no
+open_read_cursor read; that guard was mutation-checked by reinstating the
+cursor read, confirming it fails, and restoring. The referenced follow-up
+commit 04162c6 was not available in this container and was not cherry-picked,
+per the review's own instruction that its badge work is superseded. Gates: 1328
+lib tests plus every integration suite, wasm clippy -D warnings, host
+all-targets clippy, fmt, and the ledger checker.
+
+_________________________________________________________________________________ 18:06 feat/rooms-unread-affordances
+
+time:      22:59 09-08-26
+agent:     claude
+worktree:  feat/rooms-unread-affordances
+type:      bug-report
+area:      frontend
+
+The new-message divider compared two unrelated counters in a federated room.
+A room's durable read cursor is written in one of two spaces depending on the
+room: durable_read_candidate PATCHes last_confirmed_global_sequence for a Live
+room and RoomMessage::seq for a Local one, and the daemon hands that same value
+back as RoomReadSummary::read_seq, which is exactly what the divider baseline
+is snapshotted from at open. The selector then compared that baseline against
+message.seq unconditionally, so in a live federated room it measured a
+federated-ledger position against this room's transcript numbering. Those
+diverge by construction, since the ledger also carries other rooms' events: a
+baseline of global 300 over transcript seqs 1..3 drops the divider entirely,
+and a baseline that happens to land low pins it above an arbitrary row. The fix
+names the two spaces in a ReadSequenceSpace enum, derives which one applies
+from the access projection on the same Local/Live/neither split
+durable_read_candidate already uses, and compares federated.global_sequence in
+the global space while keeping message.seq as the returned row identity, which
+is what the timeline renders against. Two deliberate refusals to guess: a
+live-room message with no federated metadata is not yet confirmed onto the
+ledger, which is precisely what "past any confirmed cursor" means, so it counts
+as unread rather than being skipped; and Connecting/Recovering/Revoked pin no
+space at all, because a stored cursor could have been written under either, so
+the divider is withheld rather than placed on a coin flip. Five tests cover the
+global-space walk with an explicit assert that the transcript-space answer
+would be wrong, the local-space walk over the same federated rows, unconfirmed
+rows, every unknown-space state, and a source-assertion guard that the memo
+still hands the access projection to the selector rather than a None that would
+type-check silently. All three were mutation-checked by reintroducing the bug
+and confirming the failures. Gates: 1333 bin tests plus every integration
+suite, wasm clippy -D warnings, host all-targets clippy, fmt, ledger checker.
+
+_________________________________________________________________________________ 22:59 feat/rooms-unread-affordances
+
+time:      23:13 09-08-26
+agent:     claude
+worktree:  feat/rooms-unread-affordances
+type:      bug-report
+area:      frontend
+
+The divider inferred recency from absent metadata, which this file's own
+LedgerMark contract forbids. The prior commit skipped a live-room row carrying
+no federated metadata past the baseline on the reading that an unconfirmed row
+must be newer than any confirmed cursor. That reading is wrong here: the
+LedgerMark::Unmarked doc says a federated room's row without confirmation is
+local-era/G1 history, and says in the same breath that in-flight state belongs
+to the outbox and never the transcript, so a transcript row without metadata is
+old rather than new. RoomMessage::federated's own doc agrees, naming G1
+messages alongside local-only rooms as the None cases. The effect was that any
+live room with a pre-federation past would pin New messages above already-read
+history, at the first such row and therefore near the top of the transcript,
+even with the global cursor fully caught up. The global branch now selects only
+rows carrying Some(meta) whose global_sequence exceeds the baseline; a row with
+no comparable position is skipped rather than counted, and a live transcript
+that is entirely pre-federation draws no divider at all instead of one at row
+one. Two tests replace the one that encoded the wrong rule: unmarked rows
+sitting both before and between confirmed ones must not move the boundary off
+the first confirmed row past the baseline, and must not conjure a boundary when
+the cursor is caught up; and the all-legacy transcript draws nothing. Both were
+mutation-checked by restoring is_none_or and confirming they fail. Worth
+recording that the defect was a guess dressed as a deliberate choice: the same
+commit refused to guess a sequence space under Connecting/Recovering/Revoked
+and then guessed recency from a missing field two lines away, with the contract
+that settles it sitting in the same file. Gates: 1334 bin tests plus every
+integration suite, wasm clippy -D warnings, host all-targets clippy, fmt, and
+the ledger checker.
+
+_________________________________________________________________________________ 23:13 feat/rooms-unread-affordances
+
+time:      23:47 09-08-26
+agent:     claude
+worktree:  feat/rooms-unread-affordances
+type:      bug-report
+area:      frontend
+
+The unread baseline had the wrong lifetime: it was scoped to the workspace
+mount rather than to the room-open admission. app.rs gates RoomsWorkspace
+behind a Show on show_rooms, so switching to Direct messages unmounts the
+component while the App-scoped Rooms store keeps open_key and the live tail
+alive. AGENTS.md already states that invariant, in the mention-notification
+rule: open_key and the tail outlive the workspace unmounting behind Direct
+messages. A component-local baseline signal is therefore recreated empty on
+every return, and its effect re-derives the floor from read_summaries, which by
+then holds the advanced value opening the room wrote. The divider disappeared
+from a room the reader never left, which is the same failure the earlier
+baseline-lock fix addressed and the same reason: the floor was allowed to be
+recomputed after the advance. Locking harder inside the component could not
+reach it, because the component itself is what goes away. The baseline now
+lives on the Rooms store beside workspace_visible, captured synchronously in
+open_room while read_summaries still holds the pre-open floor and before
+reset_room_state clears the cursor, and cleared in close_room. next_unread_
+baseline moved to rooms.rs with it and is unchanged, so its three lock tests
+still apply; the component no longer owns a baseline signal at all and simply
+reads the store. The wiring guard was rewritten to pin what actually matters
+now: no workspace-local baseline declaration, the divider reading the
+App-scoped one, the field owned by the store, and open_room capturing before it
+touches the live cursor. Mutation-checked by restoring the component-local
+signal and effect, which fails it. Gates: 1334 bin tests plus every integration
+suite, wasm clippy -D warnings, host all-targets clippy, fmt, ledger checker.
+
+_________________________________________________________________________________ 23:47 feat/rooms-unread-affordances

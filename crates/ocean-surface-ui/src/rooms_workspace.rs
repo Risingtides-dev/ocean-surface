@@ -1251,6 +1251,88 @@ fn roster_display_name(roster: &[RoomParticipant], author_id: &str) -> String {
         .unwrap_or_else(|| author_id.to_string())
 }
 
+// ── Unread divider (designer-lane contract, styles/rooms-interaction.css) ──
+//
+// The room row's badge is daemon-derived (`room_attention_badge`, which reads
+// the additive `unread_count`/`mention_count` projection); this lane owns only
+// the transcript's first-unread divider and the row's bold-unread modifier.
+
+/// Which numbering a room's durable read cursor is recorded in.
+///
+/// The two are NOT interchangeable, and the read cursor is written in one or
+/// the other depending on the room. [`durable_read_candidate`] PATCHes
+/// `RoomAccessProjection::last_confirmed_global_sequence` for a `Live` room
+/// and `RoomMessage::seq` for a `Local` one; the daemon hands that same value
+/// straight back as `RoomReadSummary::read_seq`, which is what the divider
+/// baseline is snapshotted from. So a baseline read out of a live federated
+/// room is a federated-ledger position, and comparing it against a room
+/// transcript `seq` compares two unrelated counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadSequenceSpace {
+    /// `RoomMessage::seq` — this room's own transcript numbering.
+    Transcript,
+    /// `FederatedMessageMeta::global_sequence` — the federated ledger's.
+    Global,
+}
+
+/// The space the open room's read cursor is recorded in, or `None` when the
+/// access state does not pin one.
+///
+/// Only `Local` and `Live` ever produce a durable candidate (see
+/// [`durable_read_candidate`]), so those are the only two states that pin a
+/// space. Under `Connecting`/`Recovering`/`Revoked` the stored cursor could
+/// have been written under either, and the honest answer is that we do not
+/// know which counter the baseline is in — not a guess.
+fn read_sequence_space(access: Option<&RoomAccessProjection>) -> Option<ReadSequenceSpace> {
+    match access.map(|projection| projection.state) {
+        Some(RoomAccessState::Live) => Some(ReadSequenceSpace::Global),
+        Some(RoomAccessState::Local) => Some(ReadSequenceSpace::Transcript),
+        _ => None,
+    }
+}
+
+/// Sequence of the first root message the reader has not seen, i.e. where
+/// the "new messages" divider belongs.
+///
+/// `baseline_read_seq` is snapshotted when the room is opened and held for
+/// as long as it stays open, so the divider marks where the reader left off
+/// instead of sliding away as the live read cursor advances on scroll. It is
+/// compared in the room's own read space (see [`read_sequence_space`]) — the
+/// returned value is still a transcript `seq`, because that is the row
+/// identity the timeline renders against.
+///
+/// Returns `None` when there is no baseline — a room with no read floor has
+/// no "left off" point, and a divider pinned above the very first message
+/// would be noise rather than information — and when the read space is
+/// unknown, where any comparison would be a coin flip, and when no row in
+/// the room has a position comparable to the baseline at all.
+fn first_unread_root_seq(
+    roots: &[RoomMessage],
+    baseline_read_seq: Option<u64>,
+    access: Option<&RoomAccessProjection>,
+) -> Option<u64> {
+    let baseline = baseline_read_seq?;
+    let space = read_sequence_space(access)?;
+    roots
+        .iter()
+        .find(|message| match space {
+            ReadSequenceSpace::Transcript => message.seq > baseline,
+            // A federated row without confirmation metadata is local-era/G1
+            // history, NOT an in-flight send: in-flight state belongs to the
+            // outbox, never the transcript (see [`LedgerMark::Unmarked`]).
+            // It has no comparable global position, and absence of metadata
+            // is not evidence of recency, so it is skipped rather than
+            // counted as unread — treating it as newer would pin the divider
+            // above already-read history in any room with a pre-federation
+            // past.
+            ReadSequenceSpace::Global => message
+                .federated
+                .as_ref()
+                .is_some_and(|meta| meta.global_sequence > baseline),
+        })
+        .map(|message| message.seq)
+}
+
 /// Truthful reply-count label ("No replies yet" over a fake "0"), shared by
 /// the inline thread header and the panel subtitle.
 fn reply_count_label(reply_count: usize) -> String {
@@ -1982,6 +2064,22 @@ pub fn RoomsWorkspace(
 
     // Mention truth source: the open room's daemon-provided roster ids.
     // room_markdown highlights @id ONLY when it resolves here.
+    // Row the "new messages" divider sits above, or None when the reader has
+    // no left-off point in this room.
+    let first_unread_seq = Memo::new(move |_| {
+        let baseline = match rooms.unread_baseline.get() {
+            Some((key, baseline)) if rooms.open_key.get().as_deref() == Some(key.as_str()) => {
+                baseline
+            }
+            _ => return None,
+        };
+        first_unread_root_seq(
+            &partition_thread_messages(&rooms.transcript.get(), 0).roots,
+            baseline,
+            rooms.access.get().as_ref(),
+        )
+    });
+
     let member_ids = Memo::new(move |_| {
         let local_participants = rooms
             .open_room
@@ -3296,13 +3394,16 @@ pub fn RoomsWorkspace(
                                                     .as_deref()
                                                     == Some(&*key_tab)
                                             };
-                                            let unread = move || {
+                                            // Memo, not a bare closure: both the row's
+                                            // bold-unread modifier and the attention badge
+                                            // read it, and a closure is not Copy.
+                                            let unread = Memo::new(move |_| {
                                                 rooms.read_summaries.with(|summaries| {
                                                     crate::rooms::room_has_durable_unread(
                                                         summaries.get(&key_unread),
                                                     )
                                                 })
-                                            };
+                                            });
                                             let attention_label = Memo::new(move |_| {
                                                 rooms.read_summaries.with(|summaries| {
                                                     crate::rooms::room_attention_aria_label(
@@ -3321,6 +3422,7 @@ pub fn RoomsWorkspace(
                                                 <button
                                                     class="rooms-workspace__room"
                                                     class:is-active=active
+                                                    class:rooms-workspace__room--unread=move || unread.get()
                                                     type="button"
                                                     role="option"
                                                     id=room_option_dom_id(&room.id)
@@ -3351,7 +3453,7 @@ pub fn RoomsWorkspace(
                                                     <span class="rooms-workspace__room-name">
                                                         {room.name.clone()}
                                                     </span>
-                                                    <Show when=move || unread()>
+                                                    <Show when=move || unread.get()>
                                                         <span
                                                             class="rooms-workspace__room-unread"
                                                             role="img"
@@ -3776,6 +3878,23 @@ pub fn RoomsWorkspace(
                                             // keyed row was cached.
                                             let ledger_row = m.clone();
                                             view! {
+                                                // "New messages" line at the reader's
+                                                // left-off point. Above the day/gap
+                                                // headers so it reads as the boundary
+                                                // for everything that follows.
+                                                {move || {
+                                                    (first_unread_seq.get() == Some(root_seq)).then(|| {
+                                                        view! {
+                                                            <div
+                                                                class="rooms-workspace__unread-divider"
+                                                                role="separator"
+                                                                aria-label="New messages"
+                                                            >
+                                                                "New"
+                                                            </div>
+                                                        }
+                                                    })
+                                                }}
                                                 {day_label.map(|d| view! {
                                                     <div class="rooms-workspace__day-separator" data-day="true">{d}</div>
                                                 })}
@@ -5074,9 +5193,10 @@ pub fn RoomsWorkspace(
 mod tests {
     use super::*;
     use crate::rooms::{
-        room_request_is_current, CreateOutcome, CreateResolution, FederatedActorType,
-        FederatedMessageMeta, FederatedRoomMemberProjection, FederatedRoomRole, MemberPresence,
-        RoomAccessProjection, RoomAccessState, RoomMessage, RoomMessageKind, RoomParticipantKind,
+        next_unread_baseline, room_request_is_current, CreateOutcome, CreateResolution,
+        FederatedActorType, FederatedMessageMeta, FederatedRoomMemberProjection, FederatedRoomRole,
+        MemberPresence, RoomAccessProjection, RoomAccessState, RoomMessage, RoomMessageKind,
+        RoomParticipantKind,
     };
 
     /// Flipping one exposed flag must normalize the unwired fields away —
@@ -8564,6 +8684,366 @@ mod tests {
         assert!(
             markup.contains(&emitter),
             "confirmed rows must emit the ledger mark"
+        );
+    }
+
+    // ── Unread divider (badge is daemon-derived on main) ──────────────
+
+    /// The pure lock helper cannot see WHERE the baseline lives, and that is
+    /// where the second defect lived: held in a component-local signal, it
+    /// was re-derived every time `<Show>` remounted the workspace behind
+    /// Direct messages — by which point the room had been marked read, so the
+    /// re-derived floor sat past every message and the divider vanished from
+    /// a room the reader never left. AGENTS.md states the invariant that
+    /// makes this reachable: `open_key` and the tail outlive the workspace
+    /// unmount.
+    ///
+    /// Pin both halves: the baseline is owned by the App-scoped store and
+    /// captured at the open admission, and the workspace declares no local
+    /// one. Needles built at runtime so these literals cannot satisfy a scan
+    /// of their own file.
+    #[test]
+    fn the_baseline_outlives_a_workspace_remount() {
+        let workspace = include_str!("rooms_workspace.rs");
+        let store = include_str!("rooms.rs");
+
+        let local_decl = ["let unread_baseline", " = RwSignal::new"].concat();
+        assert!(
+            !workspace.contains(&local_decl),
+            "a workspace-local baseline is re-derived on every remount behind \
+             Direct messages, after the room has been marked read"
+        );
+        let store_read = ["rooms.unread_baseline", ".get()"].concat();
+        assert!(
+            workspace.contains(&store_read),
+            "the divider must read the App-scoped baseline"
+        );
+
+        let field = [
+            "pub unread_baseline",
+            ": RwSignal<Option<(String, Option<u64>)>>",
+        ]
+        .concat();
+        assert!(
+            store.contains(&field),
+            "the baseline must be owned by the App-scoped room store"
+        );
+
+        // Captured at the open admission, while the summaries still hold the
+        // pre-open floor — not from an effect that can re-run after it.
+        let open_fn = store
+            .find("pub fn open_room(&self, key: String) {")
+            .expect("open_room must exist");
+        let open_end = store[open_fn..]
+            .find("\n    }")
+            .map(|i| open_fn + i)
+            .unwrap_or(store.len());
+        let open_src = &store[open_fn..open_end];
+        let capture = ["self.unread_baseline", ".set("].concat();
+        assert!(
+            open_src.contains(&capture),
+            "open_room must capture the baseline"
+        );
+        let cursor = ["open_read", "_cursor"].concat();
+        let capture_at = open_src.find(&capture).unwrap();
+        assert!(
+            !open_src[..capture_at].contains(&cursor),
+            "the baseline must be captured before the room's live cursor is \
+             touched, or it locks onto the advanced sequence"
+        );
+    }
+
+    /// Regression for the review defect on this PR: opening a room
+    /// auto-marks it read, so the baseline must NOT be revisable from the
+    /// advancing cursor. Open at read_seq=5, let the summary/cursor advance
+    /// to 9, and the baseline must still be 5 — otherwise nothing sits past
+    /// it and the divider silently never renders.
+    #[test]
+    fn baseline_survives_the_read_advance_that_opening_a_room_triggers() {
+        let opened = next_unread_baseline(None, Some("room-a"), Some(5));
+        assert_eq!(opened, Some(("room-a".to_string(), Some(5))));
+
+        // The mark-read PATCH lands and the projection advances to 9. Every
+        // subsequent evaluation for the same room must be a no-op.
+        let after_advance = next_unread_baseline(opened.as_ref(), Some("room-a"), Some(9));
+        assert_eq!(after_advance, Some(("room-a".to_string(), Some(5))));
+
+        // Still 5 after further advances, so the divider keeps its place.
+        let after_more = next_unread_baseline(after_advance.as_ref(), Some("room-a"), Some(42));
+        assert_eq!(after_more, Some(("room-a".to_string(), Some(5))));
+    }
+
+    #[test]
+    fn baseline_relocks_on_a_room_change_and_clears_on_close() {
+        let a = next_unread_baseline(None, Some("room-a"), Some(5));
+        // A different room takes its own floor, not room-a's.
+        let b = next_unread_baseline(a.as_ref(), Some("room-b"), Some(2));
+        assert_eq!(b, Some(("room-b".to_string(), Some(2))));
+        // Returning to room-a re-locks at whatever its floor is NOW.
+        let back = next_unread_baseline(b.as_ref(), Some("room-a"), Some(9));
+        assert_eq!(back, Some(("room-a".to_string(), Some(9))));
+        // Closing clears.
+        assert_eq!(next_unread_baseline(back.as_ref(), None, None), None);
+    }
+
+    /// A room with no durable floor locks a `None` baseline rather than
+    /// staying unlocked — otherwise the next evaluation, after the advance,
+    /// would capture a floor and pin a divider the reader never left off at.
+    #[test]
+    fn baseline_locks_none_for_a_never_read_room() {
+        let opened = next_unread_baseline(None, Some("room-a"), None);
+        assert_eq!(opened, Some(("room-a".to_string(), None)));
+        let after_advance = next_unread_baseline(opened.as_ref(), Some("room-a"), Some(7));
+        assert_eq!(after_advance, Some(("room-a".to_string(), None)));
+        let local = test_access(RoomAccessState::Local);
+        assert_eq!(
+            first_unread_root_seq(&[test_msg(3, "a", None)], None, Some(&local)),
+            None
+        );
+    }
+
+    #[test]
+    fn first_unread_is_the_first_root_past_the_baseline() {
+        let roots = vec![
+            test_msg(2, "a", None),
+            test_msg(5, "b", None),
+            test_msg(9, "c", None),
+        ];
+        let local = test_access(RoomAccessState::Local);
+        assert_eq!(
+            first_unread_root_seq(&roots, Some(2), Some(&local)),
+            Some(5)
+        );
+        assert_eq!(
+            first_unread_root_seq(&roots, Some(4), Some(&local)),
+            Some(5)
+        );
+        assert_eq!(
+            first_unread_root_seq(&roots, Some(5), Some(&local)),
+            Some(9)
+        );
+        // Fully caught up: no divider.
+        assert_eq!(first_unread_root_seq(&roots, Some(9), Some(&local)), None);
+        assert_eq!(first_unread_root_seq(&roots, Some(99), Some(&local)), None);
+    }
+
+    #[test]
+    fn first_unread_needs_a_baseline_and_tolerates_an_empty_room() {
+        let roots = vec![test_msg(2, "a", None)];
+        let local = test_access(RoomAccessState::Local);
+        // No read floor: no "left off" point, so no divider is pinned to the
+        // very first message.
+        assert_eq!(first_unread_root_seq(&roots, None, Some(&local)), None);
+        assert_eq!(first_unread_root_seq(&[], Some(3), Some(&local)), None);
+        assert_eq!(first_unread_root_seq(&[], None, Some(&local)), None);
+    }
+
+    /// The divider marks a boundary in the ROOT timeline; thread replies are
+    /// rendered inside their thread, so they must not move it.
+    #[test]
+    fn first_unread_ignores_thread_replies() {
+        let roots = partition_thread_messages(
+            &[
+                test_msg(1, "root", None),
+                test_msg(2, "reply", Some(1)),
+                test_msg(3, "next root", None),
+            ],
+            1,
+        )
+        .roots;
+        assert_eq!(
+            first_unread_root_seq(&roots, Some(1), Some(&test_access(RoomAccessState::Local))),
+            Some(3)
+        );
+    }
+
+    fn federated_msg(seq: u64, global_sequence: u64) -> RoomMessage {
+        let mut message = test_msg(seq, "federated", None);
+        message.federated = Some(FederatedMessageMeta {
+            ledger_event_id: format!("evt-{global_sequence}"),
+            global_sequence,
+            source_id: "source".into(),
+            source_sequence: seq,
+            client_event_id: format!("client-{seq}"),
+            origin_principal_id: "principal".into(),
+            origin_member_id: "member".into(),
+        });
+        message
+    }
+
+    /// The regression this guards: a `Live` room's read cursor is a FEDERATED
+    /// ledger position (`durable_read_candidate` PATCHes
+    /// `last_confirmed_global_sequence`, and the daemon returns it as
+    /// `read_seq`), while `RoomMessage::seq` counts this room's transcript.
+    /// The two diverge by construction — the ledger also carries other rooms'
+    /// events — so comparing a baseline of 300 against seqs 1..3 would drop
+    /// the divider entirely, and a baseline of 2 would pin it to the top.
+    #[test]
+    fn first_unread_compares_global_sequence_in_a_live_room() {
+        let roots = vec![
+            federated_msg(1, 100),
+            federated_msg(2, 300),
+            federated_msg(3, 500),
+        ];
+        let live = test_access(RoomAccessState::Live);
+
+        // Read up to global 300: the next unread is the row at global 500,
+        // identified by its transcript seq 3.
+        assert_eq!(
+            first_unread_root_seq(&roots, Some(300), Some(&live)),
+            Some(3)
+        );
+        assert_eq!(
+            first_unread_root_seq(&roots, Some(100), Some(&live)),
+            Some(2)
+        );
+        // Caught up in global space, even though every transcript seq is far
+        // below the baseline.
+        assert_eq!(first_unread_root_seq(&roots, Some(500), Some(&live)), None);
+
+        // Reading the transcript seq instead would answer here (2 > 1) and
+        // miss there (no seq exceeds 300) — both wrong.
+        assert_ne!(first_unread_root_seq(&roots, Some(1), Some(&live)), Some(2));
+        assert_eq!(first_unread_root_seq(&roots, Some(1), Some(&live)), Some(1));
+    }
+
+    /// A local room never touches the ledger, so its cursor stays in
+    /// transcript space and federated metadata is irrelevant to it.
+    #[test]
+    fn first_unread_compares_transcript_seq_in_a_local_room() {
+        let roots = vec![
+            federated_msg(1, 100),
+            federated_msg(2, 300),
+            federated_msg(3, 500),
+        ];
+        let local = test_access(RoomAccessState::Local);
+        assert_eq!(
+            first_unread_root_seq(&roots, Some(1), Some(&local)),
+            Some(2)
+        );
+        assert_eq!(first_unread_root_seq(&roots, Some(3), Some(&local)), None);
+    }
+
+    /// A federated row carrying no confirmation metadata is local-era/G1
+    /// HISTORY, not an in-flight send — [`LedgerMark::Unmarked`] says so, and
+    /// in-flight rows live in the outbox rather than the transcript. Absence
+    /// of metadata is therefore not evidence of recency. Reading it as
+    /// "newer than any confirmed cursor" would pin "New messages" above
+    /// already-read history in every room with a pre-federation past, and
+    /// would do it at the FIRST such row, near the top of the transcript.
+    #[test]
+    fn legacy_rows_never_fabricate_an_unread_boundary() {
+        let roots = vec![
+            test_msg(1, "G1 history", None),
+            federated_msg(2, 100),
+            test_msg(3, "more G1 history", None),
+            federated_msg(4, 500),
+        ];
+        let live = test_access(RoomAccessState::Live);
+
+        // The boundary is the first CONFIRMED row past the baseline, even
+        // though unmarked rows sit both before and between the confirmed ones.
+        assert_eq!(
+            first_unread_root_seq(&roots, Some(100), Some(&live)),
+            Some(4)
+        );
+        assert_eq!(
+            first_unread_root_seq(&roots, Some(50), Some(&live)),
+            Some(2)
+        );
+
+        // Caught up on the ledger: the unmarked rows must not conjure a
+        // divider out of nothing.
+        assert_eq!(first_unread_root_seq(&roots, Some(500), Some(&live)), None);
+    }
+
+    /// The degenerate case of the rule above: a live room whose transcript is
+    /// entirely pre-federation has nothing comparable to the global cursor, so
+    /// there is no boundary to draw — not a boundary at row one.
+    #[test]
+    fn an_all_legacy_live_transcript_draws_no_divider() {
+        let roots = vec![
+            test_msg(1, "G1", None),
+            test_msg(2, "G1", None),
+            test_msg(3, "G1", None),
+        ];
+        let live = test_access(RoomAccessState::Live);
+        assert_eq!(first_unread_root_seq(&roots, Some(0), Some(&live)), None);
+        assert_eq!(first_unread_root_seq(&roots, Some(500), Some(&live)), None);
+    }
+
+    /// Only `Local` and `Live` write a durable cursor, so only they pin a
+    /// space. Anywhere else the stored baseline could be in either counter,
+    /// and a divider placed on a guess is worse than no divider.
+    #[test]
+    fn no_divider_when_the_read_space_is_unknown() {
+        let roots = vec![test_msg(1, "a", None), test_msg(2, "b", None)];
+        for state in [
+            RoomAccessState::Connecting,
+            RoomAccessState::Recovering,
+            RoomAccessState::Revoked,
+        ] {
+            let access = test_access(state);
+            assert_eq!(
+                first_unread_root_seq(&roots, Some(1), Some(&access)),
+                None,
+                "{state:?} does not pin a read space"
+            );
+        }
+        assert_eq!(first_unread_root_seq(&roots, Some(1), None), None);
+
+        assert_eq!(
+            read_sequence_space(Some(&test_access(RoomAccessState::Live))),
+            Some(ReadSequenceSpace::Global)
+        );
+        assert_eq!(
+            read_sequence_space(Some(&test_access(RoomAccessState::Local))),
+            Some(ReadSequenceSpace::Transcript)
+        );
+    }
+
+    /// Wiring guard: the divider memo must hand the live access projection to
+    /// the selector. Dropping that argument is exactly the bug above, and it
+    /// still type-checks if a `None` is passed instead.
+    #[test]
+    fn divider_memo_passes_the_access_projection() {
+        let source = include_str!("rooms_workspace.rs");
+        let call = ["first_unread_root", "_seq("].concat();
+        let arg = ["rooms.access.get()", ".as_ref(),"].concat();
+        let start = source
+            .find(&format!("{call}\n            &partition_thread_messages"))
+            .expect("divider memo must call the selector on the root partition");
+        let window = &source[start..start + 400];
+        assert!(
+            window.contains(&arg),
+            "the divider memo must pass the access projection, not a guessed space"
+        );
+    }
+
+    /// Both unread affordances are styled by the designer lane and must stay
+    /// emitted by the Rust lane (the forward-CSS contract in
+    /// styles/rooms-interaction.css names them).
+    #[test]
+    fn unread_affordances_are_styled_and_emitted() {
+        let css = include_str!("../../../styles/rooms-interaction.css");
+        let divider = ["rooms-workspace__unread", "-divider"].concat();
+        let row_modifier = ["rooms-workspace__room", "--unread"].concat();
+        assert!(
+            css.contains(&format!(".{divider}")),
+            "divider must stay styled"
+        );
+        assert!(
+            css.contains(&format!(".{row_modifier}")),
+            "bold-unread row must stay styled"
+        );
+        let markup = include_str!("rooms_workspace.rs");
+        assert!(
+            markup.contains(&format!("class=\"{divider}\"")),
+            "the transcript must emit the unread divider"
+        );
+        assert!(
+            markup.contains(&format!("class:{row_modifier}=")),
+            "the room row must emit the bold-unread modifier"
         );
     }
 

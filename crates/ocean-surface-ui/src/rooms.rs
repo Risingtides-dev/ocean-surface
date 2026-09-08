@@ -988,6 +988,19 @@ pub struct Rooms {
     pub read_summaries: RwSignal<HashMap<String, RoomReadSummary>>,
     /// Durable read cursor for the currently open room.
     pub open_read_cursor: RwSignal<Option<RoomReadCursorProjection>>,
+    /// Where the reader left off in the open room, as `(room_key, read_seq)`,
+    /// for the "new messages" divider.
+    ///
+    /// App-scope for the same reason `workspace_visible` is: the workspace
+    /// unmounts behind Direct messages while `open_key` and the tail survive
+    /// it (see the mention-notification rule in AGENTS.md). A component-local
+    /// baseline would be re-derived on every remount — and by then the room
+    /// has been marked read, so the re-derived floor sits past every message
+    /// and the divider silently disappears from a room the reader never left.
+    ///
+    /// Captured by [`Rooms::open_room`] and cleared by [`Rooms::close_room`],
+    /// because it belongs to the room-open admission and nothing shorter.
+    pub unread_baseline: RwSignal<Option<(String, Option<u64>)>>,
     /// Monotonic in-flight guard for PATCH /read-cursor on the open room.
     read_cursor_in_flight: RwSignal<Option<u64>>,
     /// Last read cursor value attempted for the open room; dedupes monotonic re-sends.
@@ -1161,6 +1174,7 @@ impl Rooms {
             agent_owners: RwSignal::new(None),
             read_summaries: RwSignal::new(HashMap::new()),
             open_read_cursor: RwSignal::new(None),
+            unread_baseline: RwSignal::new(None),
             read_cursor_in_flight: RwSignal::new(None),
             last_sent_read_cursor: RwSignal::new(None),
             create_op: RwSignal::new((0, None)),
@@ -1704,6 +1718,19 @@ impl Rooms {
         let generation_id = self.generation.get_untracked().wrapping_add(1);
         self.generation.set(generation_id);
         self.open_key.set(Some(key.clone()));
+        // Snapshot the reader's left-off point BEFORE `reset_room_state`
+        // clears the cursor and before opening marks the room read. At this
+        // instant the room-list summaries still hold the pre-open floor; a
+        // moment later they hold the advanced one, which is no floor at all.
+        let read_seq_at_open = self
+            .read_summaries
+            .with_untracked(|summaries| summaries.get(&key).and_then(|s| s.read_seq));
+        let baseline = next_unread_baseline(
+            self.unread_baseline.get_untracked().as_ref(),
+            Some(key.as_str()),
+            read_seq_at_open,
+        );
+        self.unread_baseline.set(baseline);
         self.reset_room_state();
         self.status.set("loading room…".into());
 
@@ -1785,6 +1812,7 @@ impl Rooms {
     pub fn close_room(&self) {
         self.generation.update(|g| *g = g.wrapping_add(1));
         self.open_key.set(None);
+        self.unread_baseline.set(None);
         self.reset_room_state();
     }
 
@@ -3394,6 +3422,34 @@ fn current_durable_read_seq(cursor: &RoomReadCursorProjection) -> Option<u64> {
 /// lagging summary from re-sending a PATCH the durable cursor already covers.
 fn applied_open_read_seq(summary_read_seq: Option<u64>, durable_read_seq: Option<u64>) -> u64 {
     max_optional_u64(summary_read_seq, durable_read_seq).unwrap_or(0)
+}
+
+/// Lock-on-key-change for the divider baseline.
+///
+/// The baseline is captured once for an opened room and never revised while
+/// that room stays open. This is the whole correctness property: opening a
+/// room auto-marks it read, so anything that re-reads a live read cursor
+/// after the open would lock onto the ALREADY-ADVANCED value, and the
+/// divider the reader was meant to see would silently never render.
+///
+/// `read_seq_at_open` must therefore come from the room-list
+/// `read_summaries` — the durable per-room floor, which at the instant
+/// `open_key` flips still holds the pre-open value — not from
+/// `open_read_cursor`, which `open_room` resets to `None` and the
+/// mark-read PATCH then fills in with the advanced sequence.
+pub(crate) fn next_unread_baseline(
+    current: Option<&(String, Option<u64>)>,
+    open_key: Option<&str>,
+    read_seq_at_open: Option<u64>,
+) -> Option<(String, Option<u64>)> {
+    let key = open_key?;
+    if let Some((locked_key, locked_seq)) = current {
+        if locked_key == key {
+            // Already locked for this room: never overwrite.
+            return Some((locked_key.clone(), *locked_seq));
+        }
+    }
+    Some((key.to_string(), read_seq_at_open))
 }
 
 fn latest_summary_seq_for_open_room(
