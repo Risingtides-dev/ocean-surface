@@ -1290,10 +1290,7 @@
 
 /* ── Room workspace binding ───────────────────────────────────────── */
 
-/* Sits inside the triggers sliver because it is the precondition for every
-   row above it: with no bound folder the daemon refuses each woken turn
-   before it starts, so an armed trigger over an unbound room promises a wake
-   that cannot happen. */
+/* Room-level fallback; contributed-folder grants can take precedence. */
 .rooms-workspace__workspace-binding {
   display: flex;
   flex-direction: column;
@@ -1303,12 +1300,9 @@
   border-top: 1px solid var(--border-subtle);
 }
 
-/* A warning, not an error: the room is fine, its agents just cannot run yet. */
+/* Missing fallback is metadata, not proof that agent execution is blocked. */
 .rooms-workspace__workspace-unbound {
-  padding: 4px 6px;
-  border-radius: 4px;
-  background: var(--warn-soft);
-  color: var(--warn);
+  color: var(--fg-3);
   font-size: 11px;
   line-height: 1.45;
 }

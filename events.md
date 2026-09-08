@@ -7420,3 +7420,13 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+
+
+time:      [14:41] [09-08-26]
+agent:     [codex]
+worktree:  [codex/rooms-clarity-20260908]
+type:      [bug report]
+area:      [frontend], [design], [testing]
+
+Native Ocean showed a false blanket agent-blocked warning on Campaigns despite a live contributed-folder grant. The workspace control now reports only its actual fallback state: No default folder, with neutral styling and concise connected-machine context. Create/edit controls, path authority, wire fields and closed-room gates are unchanged. Updated the source guard so an absent fallback cannot be presented as failed admission; all six workspace-binding guards pass. Impeccable clarity guidance applied as restraint, without new controls or decorative UI. Root contract updated for landed Phase 2 precedence; ownership/indexes unchanged. Full UI/WASM/lint gates and review follow. Canonical source edits remain untouched.
+_________________________________________________________________________________ 14:41 codex/rooms-clarity-20260908
