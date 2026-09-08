@@ -1285,21 +1285,73 @@ fn next_unread_baseline(
     Some((key.to_string(), read_seq_at_open))
 }
 
+/// Which numbering a room's durable read cursor is recorded in.
+///
+/// The two are NOT interchangeable, and the read cursor is written in one or
+/// the other depending on the room. [`durable_read_candidate`] PATCHes
+/// `RoomAccessProjection::last_confirmed_global_sequence` for a `Live` room
+/// and `RoomMessage::seq` for a `Local` one; the daemon hands that same value
+/// straight back as `RoomReadSummary::read_seq`, which is what the divider
+/// baseline is snapshotted from. So a baseline read out of a live federated
+/// room is a federated-ledger position, and comparing it against a room
+/// transcript `seq` compares two unrelated counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadSequenceSpace {
+    /// `RoomMessage::seq` — this room's own transcript numbering.
+    Transcript,
+    /// `FederatedMessageMeta::global_sequence` — the federated ledger's.
+    Global,
+}
+
+/// The space the open room's read cursor is recorded in, or `None` when the
+/// access state does not pin one.
+///
+/// Only `Local` and `Live` ever produce a durable candidate (see
+/// [`durable_read_candidate`]), so those are the only two states that pin a
+/// space. Under `Connecting`/`Recovering`/`Revoked` the stored cursor could
+/// have been written under either, and the honest answer is that we do not
+/// know which counter the baseline is in — not a guess.
+fn read_sequence_space(access: Option<&RoomAccessProjection>) -> Option<ReadSequenceSpace> {
+    match access.map(|projection| projection.state) {
+        Some(RoomAccessState::Live) => Some(ReadSequenceSpace::Global),
+        Some(RoomAccessState::Local) => Some(ReadSequenceSpace::Transcript),
+        _ => None,
+    }
+}
+
 /// Sequence of the first root message the reader has not seen, i.e. where
 /// the "new messages" divider belongs.
 ///
 /// `baseline_read_seq` is snapshotted when the room is opened and held for
 /// as long as it stays open, so the divider marks where the reader left off
-/// instead of sliding away as the live read cursor advances on scroll.
+/// instead of sliding away as the live read cursor advances on scroll. It is
+/// compared in the room's own read space (see [`read_sequence_space`]) — the
+/// returned value is still a transcript `seq`, because that is the row
+/// identity the timeline renders against.
 ///
 /// Returns `None` when there is no baseline — a room with no read floor has
 /// no "left off" point, and a divider pinned above the very first message
-/// would be noise rather than information.
-fn first_unread_root_seq(roots: &[RoomMessage], baseline_read_seq: Option<u64>) -> Option<u64> {
+/// would be noise rather than information — and when the read space is
+/// unknown, where any comparison would be a coin flip.
+fn first_unread_root_seq(
+    roots: &[RoomMessage],
+    baseline_read_seq: Option<u64>,
+    access: Option<&RoomAccessProjection>,
+) -> Option<u64> {
     let baseline = baseline_read_seq?;
+    let space = read_sequence_space(access)?;
     roots
         .iter()
-        .find(|message| message.seq > baseline)
+        .find(|message| match space {
+            ReadSequenceSpace::Transcript => message.seq > baseline,
+            // An unconfirmed message in a live room carries no global
+            // position, which is exactly what "the ledger has not accepted it
+            // yet" means — it necessarily sits past a confirmed baseline.
+            ReadSequenceSpace::Global => message
+                .federated
+                .as_ref()
+                .is_none_or(|meta| meta.global_sequence > baseline),
+        })
         .map(|message| message.seq)
 }
 
@@ -2071,6 +2123,7 @@ pub fn RoomsWorkspace(
         first_unread_root_seq(
             &partition_thread_messages(&rooms.transcript.get(), 0).roots,
             baseline,
+            rooms.access.get().as_ref(),
         )
     });
 
@@ -8757,7 +8810,11 @@ mod tests {
         assert_eq!(opened, Some(("room-a".to_string(), None)));
         let after_advance = next_unread_baseline(opened.as_ref(), Some("room-a"), Some(7));
         assert_eq!(after_advance, Some(("room-a".to_string(), None)));
-        assert_eq!(first_unread_root_seq(&[test_msg(3, "a", None)], None), None);
+        let local = test_access(RoomAccessState::Local);
+        assert_eq!(
+            first_unread_root_seq(&[test_msg(3, "a", None)], None, Some(&local)),
+            None
+        );
     }
 
     #[test]
@@ -8767,22 +8824,33 @@ mod tests {
             test_msg(5, "b", None),
             test_msg(9, "c", None),
         ];
-        assert_eq!(first_unread_root_seq(&roots, Some(2)), Some(5));
-        assert_eq!(first_unread_root_seq(&roots, Some(4)), Some(5));
-        assert_eq!(first_unread_root_seq(&roots, Some(5)), Some(9));
+        let local = test_access(RoomAccessState::Local);
+        assert_eq!(
+            first_unread_root_seq(&roots, Some(2), Some(&local)),
+            Some(5)
+        );
+        assert_eq!(
+            first_unread_root_seq(&roots, Some(4), Some(&local)),
+            Some(5)
+        );
+        assert_eq!(
+            first_unread_root_seq(&roots, Some(5), Some(&local)),
+            Some(9)
+        );
         // Fully caught up: no divider.
-        assert_eq!(first_unread_root_seq(&roots, Some(9)), None);
-        assert_eq!(first_unread_root_seq(&roots, Some(99)), None);
+        assert_eq!(first_unread_root_seq(&roots, Some(9), Some(&local)), None);
+        assert_eq!(first_unread_root_seq(&roots, Some(99), Some(&local)), None);
     }
 
     #[test]
     fn first_unread_needs_a_baseline_and_tolerates_an_empty_room() {
         let roots = vec![test_msg(2, "a", None)];
+        let local = test_access(RoomAccessState::Local);
         // No read floor: no "left off" point, so no divider is pinned to the
         // very first message.
-        assert_eq!(first_unread_root_seq(&roots, None), None);
-        assert_eq!(first_unread_root_seq(&[], Some(3)), None);
-        assert_eq!(first_unread_root_seq(&[], None), None);
+        assert_eq!(first_unread_root_seq(&roots, None, Some(&local)), None);
+        assert_eq!(first_unread_root_seq(&[], Some(3), Some(&local)), None);
+        assert_eq!(first_unread_root_seq(&[], None, Some(&local)), None);
     }
 
     /// The divider marks a boundary in the ROOT timeline; thread replies are
@@ -8798,7 +8866,147 @@ mod tests {
             1,
         )
         .roots;
-        assert_eq!(first_unread_root_seq(&roots, Some(1)), Some(3));
+        assert_eq!(
+            first_unread_root_seq(&roots, Some(1), Some(&test_access(RoomAccessState::Local))),
+            Some(3)
+        );
+    }
+
+    fn federated_msg(seq: u64, global_sequence: u64) -> RoomMessage {
+        let mut message = test_msg(seq, "federated", None);
+        message.federated = Some(FederatedMessageMeta {
+            ledger_event_id: format!("evt-{global_sequence}"),
+            global_sequence,
+            source_id: "source".into(),
+            source_sequence: seq,
+            client_event_id: format!("client-{seq}"),
+            origin_principal_id: "principal".into(),
+            origin_member_id: "member".into(),
+        });
+        message
+    }
+
+    /// The regression this guards: a `Live` room's read cursor is a FEDERATED
+    /// ledger position (`durable_read_candidate` PATCHes
+    /// `last_confirmed_global_sequence`, and the daemon returns it as
+    /// `read_seq`), while `RoomMessage::seq` counts this room's transcript.
+    /// The two diverge by construction — the ledger also carries other rooms'
+    /// events — so comparing a baseline of 300 against seqs 1..3 would drop
+    /// the divider entirely, and a baseline of 2 would pin it to the top.
+    #[test]
+    fn first_unread_compares_global_sequence_in_a_live_room() {
+        let roots = vec![
+            federated_msg(1, 100),
+            federated_msg(2, 300),
+            federated_msg(3, 500),
+        ];
+        let live = test_access(RoomAccessState::Live);
+
+        // Read up to global 300: the next unread is the row at global 500,
+        // identified by its transcript seq 3.
+        assert_eq!(
+            first_unread_root_seq(&roots, Some(300), Some(&live)),
+            Some(3)
+        );
+        assert_eq!(
+            first_unread_root_seq(&roots, Some(100), Some(&live)),
+            Some(2)
+        );
+        // Caught up in global space, even though every transcript seq is far
+        // below the baseline.
+        assert_eq!(first_unread_root_seq(&roots, Some(500), Some(&live)), None);
+
+        // Reading the transcript seq instead would answer here (2 > 1) and
+        // miss there (no seq exceeds 300) — both wrong.
+        assert_ne!(first_unread_root_seq(&roots, Some(1), Some(&live)), Some(2));
+        assert_eq!(first_unread_root_seq(&roots, Some(1), Some(&live)), Some(1));
+    }
+
+    /// A local room never touches the ledger, so its cursor stays in
+    /// transcript space and federated metadata is irrelevant to it.
+    #[test]
+    fn first_unread_compares_transcript_seq_in_a_local_room() {
+        let roots = vec![
+            federated_msg(1, 100),
+            federated_msg(2, 300),
+            federated_msg(3, 500),
+        ];
+        let local = test_access(RoomAccessState::Local);
+        assert_eq!(
+            first_unread_root_seq(&roots, Some(1), Some(&local)),
+            Some(2)
+        );
+        assert_eq!(first_unread_root_seq(&roots, Some(3), Some(&local)), None);
+    }
+
+    /// A live-room message with no federated metadata has not been confirmed
+    /// onto the ledger, which is precisely what "newer than any confirmed
+    /// cursor" means. Skipping it would hide the boundary the reader needs.
+    #[test]
+    fn unconfirmed_live_messages_sit_past_the_baseline() {
+        let roots = vec![
+            federated_msg(1, 100),
+            test_msg(2, "still in flight", None),
+            federated_msg(3, 500),
+        ];
+        let live = test_access(RoomAccessState::Live);
+        assert_eq!(
+            first_unread_root_seq(&roots, Some(100), Some(&live)),
+            Some(2)
+        );
+        // Even a baseline past every confirmed row still surfaces it.
+        assert_eq!(
+            first_unread_root_seq(&roots, Some(500), Some(&live)),
+            Some(2)
+        );
+    }
+
+    /// Only `Local` and `Live` write a durable cursor, so only they pin a
+    /// space. Anywhere else the stored baseline could be in either counter,
+    /// and a divider placed on a guess is worse than no divider.
+    #[test]
+    fn no_divider_when_the_read_space_is_unknown() {
+        let roots = vec![test_msg(1, "a", None), test_msg(2, "b", None)];
+        for state in [
+            RoomAccessState::Connecting,
+            RoomAccessState::Recovering,
+            RoomAccessState::Revoked,
+        ] {
+            let access = test_access(state);
+            assert_eq!(
+                first_unread_root_seq(&roots, Some(1), Some(&access)),
+                None,
+                "{state:?} does not pin a read space"
+            );
+        }
+        assert_eq!(first_unread_root_seq(&roots, Some(1), None), None);
+
+        assert_eq!(
+            read_sequence_space(Some(&test_access(RoomAccessState::Live))),
+            Some(ReadSequenceSpace::Global)
+        );
+        assert_eq!(
+            read_sequence_space(Some(&test_access(RoomAccessState::Local))),
+            Some(ReadSequenceSpace::Transcript)
+        );
+    }
+
+    /// Wiring guard: the divider memo must hand the live access projection to
+    /// the selector. Dropping that argument is exactly the bug above, and it
+    /// still type-checks if a `None` is passed instead.
+    #[test]
+    fn divider_memo_passes_the_access_projection() {
+        let source = include_str!("rooms_workspace.rs");
+        let call = ["first_unread_root", "_seq("].concat();
+        let arg = ["rooms.access.get()", ".as_ref(),"].concat();
+        let start = source
+            .find(&format!("{call}\n            &partition_thread_messages"))
+            .expect("divider memo must call the selector on the root partition");
+        let window = &source[start..start + 400];
+        assert!(
+            window.contains(&arg),
+            "the divider memo must pass the access projection, not a guessed space"
+        );
     }
 
     /// Both unread affordances are styled by the designer lane and must stay

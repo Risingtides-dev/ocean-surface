@@ -7486,3 +7486,40 @@ lib tests plus every integration suite, wasm clippy -D warnings, host
 all-targets clippy, fmt, and the ledger checker.
 
 _________________________________________________________________________________ 18:06 feat/rooms-unread-affordances
+
+time:      22:59 09-08-26
+agent:     claude
+worktree:  feat/rooms-unread-affordances
+type:      bug-report
+area:      frontend
+
+The new-message divider compared two unrelated counters in a federated room.
+A room's durable read cursor is written in one of two spaces depending on the
+room: durable_read_candidate PATCHes last_confirmed_global_sequence for a Live
+room and RoomMessage::seq for a Local one, and the daemon hands that same value
+back as RoomReadSummary::read_seq, which is exactly what the divider baseline
+is snapshotted from at open. The selector then compared that baseline against
+message.seq unconditionally, so in a live federated room it measured a
+federated-ledger position against this room's transcript numbering. Those
+diverge by construction, since the ledger also carries other rooms' events: a
+baseline of global 300 over transcript seqs 1..3 drops the divider entirely,
+and a baseline that happens to land low pins it above an arbitrary row. The fix
+names the two spaces in a ReadSequenceSpace enum, derives which one applies
+from the access projection on the same Local/Live/neither split
+durable_read_candidate already uses, and compares federated.global_sequence in
+the global space while keeping message.seq as the returned row identity, which
+is what the timeline renders against. Two deliberate refusals to guess: a
+live-room message with no federated metadata is not yet confirmed onto the
+ledger, which is precisely what "past any confirmed cursor" means, so it counts
+as unread rather than being skipped; and Connecting/Recovering/Revoked pin no
+space at all, because a stored cursor could have been written under either, so
+the divider is withheld rather than placed on a coin flip. Five tests cover the
+global-space walk with an explicit assert that the transcript-space answer
+would be wrong, the local-space walk over the same federated rows, unconfirmed
+rows, every unknown-space state, and a source-assertion guard that the memo
+still hands the access projection to the selector rather than a None that would
+type-check silently. All three were mutation-checked by reintroducing the bug
+and confirming the failures. Gates: 1333 bin tests plus every integration
+suite, wasm clippy -D warnings, host all-targets clippy, fmt, ledger checker.
+
+_________________________________________________________________________________ 22:59 feat/rooms-unread-affordances
