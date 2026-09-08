@@ -1583,7 +1583,7 @@ pub fn App() -> impl IntoView {
     // Rooms is the primary product workspace in web and Tauri. Start there;
     // the legacy one-to-one session transcript remains reachable as Direct
     // messages, rather than making Rooms a slide-over browser or room stage.
-    let show_rooms = RwSignal::new(true);
+    let show_rooms = RwSignal::new(false);
     let toggle_sessions = move || {
         let opening = !show_sessions.get_untracked();
         if opening {
@@ -2749,7 +2749,7 @@ pub fn App() -> impl IntoView {
                                     toggle_rooms();
                                 }
                             >
-                                {move || if show_rooms.get() { "Direct messages" } else { "Rooms" }}
+                                {move || if show_rooms.get() { "Sessions" } else { "Rooms" }}
                             </button>
                             <Show when=crate::daemon::running_as_extension>
                                 <button
@@ -2828,8 +2828,8 @@ pub fn App() -> impl IntoView {
                 open=show_livekit_controls
             />
 
-            // Rooms is the default collaboration workspace. Direct messages
-            // retain the existing session transcript/composer and are reached
+            // Rooms is the default collaboration workspace. Sessions retain
+            // the existing session transcript/composer and are reached
             // explicitly from the app menu; selecting a room never swaps in a
             // separate stage or overlay.
             <Show when=move || show_rooms.get()>
