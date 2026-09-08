@@ -7420,3 +7420,11 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+time:      [19:07] [09-08-26]
+agent:     [ocean] [gpt-5.6-sol]
+worktree:  pm/rooms-193-sse
+type:      bug-report
+area:      frontend
+
+Removed the four mutation-triggered transcript refresh walks from persistent Rooms so join, leave, participant removal, and message post no longer race the room-scoped SSE tail or repeatedly scan a long-lived channel. Initial hydration still opens on the newest snapshot and performs its bounded one-time backward walk, while the shared resume cursor advances only from hydration and admitted SSE messages; the hydration source guard now rejects any restored mutation polling and pins the single forward-ingest path.
+_________________________________________________________________________________ 19:07 pm/rooms-193-sse

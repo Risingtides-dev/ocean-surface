@@ -2,9 +2,9 @@
 //!
 //! Opening a room reads `/snapshot` and seeds `Rooms::resume_seq` with the
 //! cursor that body names (`last_seq`) rather than anything re-deriving one from
-//! the rows it just painted. Both readers of that signal are pinned here: the
-//! live tail's first connection and its reconnects, and the catch-up read the
-//! four roster/message mutations fire. That wiring is expressions spread over
+//! the rows it just painted. The live tail's first connection and reconnects
+//! are pinned here, along with the absence of mutation-triggered transcript
+//! reads that could compete with it. That wiring is expressions spread over
 //! 500 lines and every one of them is silent: the review of the change that
 //! introduced it replaced `RwSignal::new(resume_seq)` with
 //! `RwSignal::new(last_transcript_seq(&self.transcript.get_untracked()))` — the
@@ -12,8 +12,9 @@
 //! including the unit test named after the thesis. A pure helper tested in
 //! isolation proves the RULE; nothing proved the rule was wired to anything.
 //! The same gap then survived the fix: `refresh_open_transcript` went on
-//! re-deriving its own cursor from the painted rows for another wave, one line
-//! below a doc comment declaring the opposite, and every gate stayed green.
+//! re-deriving its own cursor from the painted rows for another wave. The live
+//! tail is now the sole forward-ingest path, so bringing that helper or any of
+//! its four mutation call sites back is the regression this gate rejects.
 //!
 //! The backward hydration walk is pinned here too, for the same reason and by
 //! the same lever: it is wiring in the same function, its rules live in pure
@@ -40,8 +41,7 @@
 //! | `open_room`'s `snapshot_resume_seq(..)` → `last_transcript_seq(..)`  | RED — first needle |
 //! | `room_snapshot_url` call → the old unpaged `format!` room GET        | RED here, and `dead_code` on the wasm lane |
 //! | `HYDRATION_TRANSCRIPT_LIMIT` 1000 → 200 (`/snapshot`'s own default)  | RED in `rooms.rs`, not here — the URL literal is asserted there |
-//! | one catch-up call site's cursor → `last_transcript_seq(&me.transcript…)` | RED — the prohibition, and the counted call sites at 3 against 4 |
-//! | the catch-up walk's `page.next_seq` argument → `None`                | RED here; `rooms.rs`'s unit tests stay green, they own the rule and never its wiring |
+//! | reintroduce `refresh_open_transcript` after a mutation                | RED — the tail is the sole forward-ingest path |
 //! | the tail's `advanced_resume_seq(*seq, entry.seq)` → `Some(entry.seq)` | RED — the tail must advance the shared resume like everything else |
 //! | `me.backfill_open_transcript(..)` moved inside `if !closed`         | RED — and green on all seven gates without this file |
 //! | the backward walk's `page.prev_seq` argument → `None`               | RED here; otherwise only `dead_code` on the field catches it |
@@ -97,53 +97,26 @@ fn the_snapshot_cursor_reaches_the_tails_first_connection() {
     );
 }
 
-/// The catch-up read is handed the same signal, for the same reason. Mutations
-/// run: an `after_seq` argument at a call site replaced with
-/// `last_transcript_seq(&me.transcript.get_untracked())` (the shape this slice
-/// removed), and the walk's `page.next_seq` argument replaced with `None`, which
-/// silently demotes the daemon's cursor to the page's last row. Both leave
-/// clippy, both `cargo check`s and every unit test in `rooms.rs` green — the
-/// unit tests own the cursor RULE, never its wiring.
+/// Mutation responses must not start a second forward reader. The SSE tail owns
+/// ordered replay, advances the one resume signal, and already reconnects from
+/// it. Reintroducing the old helper or a call site would let a request-time read
+/// race that stream and publish an older transcript after a newer frame.
 #[test]
-fn the_catchup_read_is_handed_the_rooms_resume_point_and_pages_on_the_daemons() {
+fn mutation_responses_leave_forward_ingest_to_the_live_tail() {
     let rooms = without_whitespace(&view_source("rooms.rs"));
 
     assert!(
-        rooms.contains(
-            "fnrefresh_open_transcript(&self,key:&str,generation_id:u64,after_seq:Option<u64>){"
-        ),
-        "the catch-up read must take its start from the caller; deriving one \
-         inside is what left the module holding two answers",
-    );
-    // COUNTED, not merely present: `contains` stays green while three of the
-    // four sites hand over the resume and the fourth re-derives one, which is
-    // the shape of the bug this slice removed. A fifth caller reds this on
-    // purpose — the number is here to make its author say which cursor it hands
-    // over, and 4 is join, leave, remove-participant and post-message.
-    assert_eq!(
-        rooms
-            .matches("me.refresh_open_transcript(&key,generation_id,me.resume_seq.get_untracked())")
-            .count(),
-        4,
-        "every catch-up call site must hand over the room's resume point — the \
-         same signal the tail seeds and advances. If you have just ADDED a \
-         caller, this count is the ask, not the failure: check which cursor \
-         your call hands over, then bump the number",
-    );
-    assert!(
-        rooms.contains("transcript_catchup_cursor(pages_read,page.has_more,page.next_seq,covered)"),
-        "the walk must continue on the cursor the PAGE named: `/transcript` \
-         serves at most 200 rows, so one request keeps the first page of a \
-         burst and drops the rest in silence",
+        !rooms.contains("refresh_open_transcript"),
+        "mutation responses must not reintroduce the old competing forward \
+         reader; the SSE tail is the sole owner of replay and resume",
     );
 }
 
 /// The mutation itself, stated as a prohibition over the whole module.
 /// `last_transcript_seq` is still the fallback INSIDE `snapshot_resume_seq`,
-/// where the daemon has declined to answer, and it still reads a PAGE the daemon
-/// just served in the catch-up walk. What it may never read is the transcript
-/// signal: those rows are one page of a log (the store caps a page at 1000 rows)
-/// and a resume taken from them is the daemon's answer thrown away.
+/// where the daemon has declined to answer. What it may never read is the live
+/// transcript signal: those rows are one page of a log (the store caps a page
+/// at 1000 rows) and a resume taken from them is the daemon's answer thrown away.
 #[test]
 fn no_resume_is_ever_re_derived_from_the_painted_rows() {
     let rooms = without_whitespace(&view_source("rooms.rs"));
