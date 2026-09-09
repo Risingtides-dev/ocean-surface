@@ -770,23 +770,26 @@ fn room_option_dom_id(key: &str) -> String {
     format!("rooms-opt-{key}")
 }
 
-/// A project group in the rail: rooms sharing one daemon-side
-/// `workspace_root` (the room's project binding), rendered under one
-/// collapsible header. `None` label is the "Other rooms" bucket for
-/// unbound rooms — always last.
+/// A workspace-root group in the rail: rooms sharing one daemon-side
+/// `workspace_root` binding, rendered under one static, non-interactive
+/// header (`role="group"`, `aria-labelledby` the header). `None` label is
+/// the "Other rooms" bucket for unbound rooms — always last. Groups are
+/// never collapsible: every room they hold stays in the DOM and in the
+/// roving-tabindex roster below.
 struct RailGroup {
     label: Option<String>,
     rooms: Vec<Room>,
 }
 
-/// Group the rail's rooms by their project binding. Derived state, not
-/// stored: the daemon owns `workspace_root`, the rail derives groups from
-/// whatever the current list carries. Group order is first-seen (the
+/// Group the rail's rooms by their `workspace_root` binding. Derived state,
+/// not stored: the daemon owns `workspace_root`, the rail derives groups
+/// from whatever the current list carries. Group order is first-seen (the
 /// daemon's admission order — newest-first, so a group's first room is its
 /// newest), rooms keep list order within a group, and the unbound bucket
-/// always sinks to the end. Two rooms bind to the same project when their
+/// always sinks to the end. Two rooms share a group when their
 /// `workspace_root` strings are equal — the daemon canonicalizes the path
-/// it stores, so the surface compares verbatim.
+/// it stores, so the surface compares verbatim. A shared `workspace_root`
+/// is a folder binding, not proof of a daemon Project identity.
 fn group_rail_rooms(rooms: &[Room]) -> Vec<RailGroup> {
     let mut bound: Vec<RailGroup> = Vec::new();
     let mut unbound: Vec<Room> = Vec::new();
@@ -811,36 +814,56 @@ fn group_rail_rooms(rooms: &[Room]) -> Vec<RailGroup> {
     bound
 }
 
-/// The HashSet key for a group's collapsed state: the bound workspace root
-/// verbatim, or a fixed sentinel for the unbound bucket.
+/// A group's identity key: the bound workspace root verbatim, or a fixed
+/// sentinel for the unbound bucket. Used only to derive the `<For>` key and
+/// the header's DOM id — there is no collapsed-state map to index anymore.
 fn rail_group_key(label: &Option<String>) -> String {
     label.clone().unwrap_or_else(|| "\u{0}unbound".to_string())
 }
 
-/// The label a group header renders: the bound project's directory name
-/// (last path segment), or the fixed "Other rooms" for the unbound bucket.
-/// A root that ends in a separator renders the whole path, never "".
+/// The label a group header renders: the full daemon-owned `workspace_root`
+/// (trailing separators trimmed, never truncated to a path segment — two
+/// distinct roots that happen to share a basename, e.g. `/clients/acme/web`
+/// and `/archive/acme/web`, must render two distinguishable headers), or the
+/// fixed "Other rooms" for the unbound bucket.
 fn rail_group_display_label(label: Option<&str>) -> String {
     match label {
-        Some(root) => root
-            .trim_end_matches('/')
-            .rsplit('/')
-            .next()
-            .filter(|s| !s.is_empty())
-            .unwrap_or(root)
-            .to_string(),
+        Some(root) => {
+            let trimmed = root.trim_end_matches('/');
+            if trimmed.is_empty() {
+                root.to_string()
+            } else {
+                trimmed.to_string()
+            }
+        }
         None => "Other rooms".to_string(),
     }
 }
 
-/// Every room key a rail group renders, in visual order — the flat list
-/// the keyboard helpers already speak. Collapsed groups contribute
-/// nothing, so arrow navigation walks only what is on screen.
-fn rail_group_visible_keys(group: &RailGroup, collapsed: bool) -> Vec<String> {
-    if collapsed {
-        Vec::new()
-    } else {
-        group.rooms.iter().map(|r| r.id.clone()).collect()
+/// Every room key a rail group renders, in visual order — the flat list the
+/// keyboard helpers already speak. Groups are never collapsible, so this is
+/// simply the group's rooms, but it stays a named helper because both the
+/// keydown handler and the per-room tab-stop check need the identical flat
+/// ordering.
+fn rail_group_room_keys(group: &RailGroup) -> Vec<String> {
+    group.rooms.iter().map(|r| r.id.clone()).collect()
+}
+
+/// Deterministic DOM id for a group's static header, referenced by the
+/// enclosing `role="group"`. Encode the stable workspace-root identity rather
+/// than its list index: keyed groups survive first-seen reorder, so index ids
+/// can collide when a new group is inserted ahead of an existing one.
+fn rail_group_header_dom_id(label: Option<&str>) -> String {
+    match label {
+        Some(root) => {
+            let encoded = root
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            format!("rooms-group-head-bound-{encoded}")
+        }
+        None => "rooms-group-head-unbound".to_string(),
     }
 }
 
@@ -2011,11 +2034,6 @@ pub fn RoomsWorkspace(
 
     // Toggle for narrow-screen left-rail visibility.
     let show_left_rail = RwSignal::new(false);
-    // Collapsed project groups in the rail, keyed by group label (the bound
-    // workspace root, or the fixed "Other rooms" bucket). Collapsed groups
-    // render their header only; their rooms leave the keyboard model.
-    let collapsed_groups: RwSignal<std::collections::HashSet<String>> =
-        RwSignal::new(std::collections::HashSet::new());
 
     // Toggle for the members drawer where the inline rail is hidden
     // (narrow viewports, or mid-width desktops while a thread is open).
@@ -3310,26 +3328,24 @@ pub fn RoomsWorkspace(
                             // via their DOM ids. Enter/Space activate through
                             // the button default. aria-selected drives the
                             // interaction stylesheet's selected treatment.
+                            // Workspace-root groups are static structure
+                            // around the options — role="group" with a
+                            // non-interactive, aria-labelledby header — so
+                            // the listbox still owns exactly one roving tab
+                            // stop across every room, never a header.
                             view! {
                                 <div
                                     class="rooms-workspace__left-options"
                                     role="listbox"
                                     aria-label="Rooms"
                                     on:keydown=move |ev: web_sys::KeyboardEvent| {
-                                        // Only VISIBLE rooms participate in the roving
-                                        // model — a collapsed group's options are
-                                        // not in the DOM, so focusing them would
-                                        // silently drop focus.
+                                        // Groups are never collapsible, so
+                                        // every room in every group is
+                                        // always in the DOM and always part
+                                        // of the roving model.
                                         let keys: Vec<String> = group_rail_rooms(&rooms.list.get())
                                             .iter()
-                                            .flat_map(|g| {
-                                                rail_group_visible_keys(
-                                                    g,
-                                                    collapsed_groups
-                                                        .get()
-                                                        .contains(&rail_group_key(&g.label)),
-                                                )
-                                            })
+                                            .flat_map(rail_group_room_keys)
                                             .collect();
                                         let focused = web_sys::window()
                                             .and_then(|w| w.document())
@@ -3358,46 +3374,64 @@ pub fn RoomsWorkspace(
                                     }
                                 >
                                     <For
-                                        each=move || group_rail_rooms(&rooms.list.get())
-                                        key=|g: &RailGroup| g.label.clone().unwrap_or_else(|| "\u{0}other".to_string())
-                                        children=move |group: RailGroup| {
-                                            let group_key = rail_group_key(&group.label);
-                                            let display = rail_group_display_label(group.label.as_deref());
-                                            let group_rooms = leptos::prelude::StoredValue::new(group.rooms.clone());
-                                            // The toggle closure needs its own key clone; the Memo
-                                            // below moves `group_key`. Memo<bool> is Copy, so every
-                                            // consumer (aria-expanded, caret, Show) shares it.
-                                            let toggle_key = group_key.clone();
-                                            let collapsed = Memo::new(move |_| {
-                                                collapsed_groups.get().contains(&group_key)
-                                            });
+                                        each=move || {
+                                            group_rail_rooms(&rooms.list.get())
+                                                .into_iter()
+                                                .map(|g| g.label)
+                                                .collect::<Vec<_>>()
+                                        }
+                                        key=|label| rail_group_key(label)
+                                        children=move |label| {
+                                            let display = rail_group_display_label(label.as_deref());
+                                            let header_id =
+                                                rail_group_header_dom_id(label.as_deref());
+                                            let head_label_id = header_id.clone();
+                                            // Both the count and the membership below re-derive
+                                            // this group's rooms from the live `rooms.list`
+                                            // signal on every read rather than from a Vec
+                                            // snapshotted when this outer `<For>` item was
+                                            // created. `<For>` only recreates an item when its
+                                            // KEY (here, the group label) changes, so a frozen
+                                            // `group.rooms` clone would stop tracking a room
+                                            // joining, leaving, or reordering within a
+                                            // workspace root that was already on screen —
+                                            // Codex found exactly that on this branch. Reading
+                                            // `rooms.list.get()` inside these closures keeps
+                                            // both reactive regardless of whether the outer
+                                            // item was ever recreated.
+                                            let count_label = label.clone();
+                                            let membership_label = label.clone();
                                             view! {
-                                                <div class="rooms-workspace__group">
-                                                    <button
-                                                        class="rooms-workspace__group-head"
-                                                        type="button"
-                                                        aria-expanded=move || (!collapsed.get()).to_string()
-                                                        on:click=move |_| {
-                                                            collapsed_groups.update(|set| {
-                                                                if set.contains(&toggle_key) {
-                                                                    set.remove(&toggle_key);
-                                                                } else {
-                                                                    set.insert(toggle_key.clone());
-                                                                }
-                                                            });
-                                                        }
-                                                    >
-                                                        <span class="rooms-workspace__group-caret" aria-hidden="true">
-                                                            {move || if collapsed.get() { "▸" } else { "▾" }}
-                                                        </span>
+                                                <div
+                                                    class="rooms-workspace__group"
+                                                    role="group"
+                                                    aria-labelledby=head_label_id
+                                                >
+                                                    // A static, non-interactive header: it labels the
+                                                    // room options that follow, and only that — no
+                                                    // button, no click handler, no extra Tab stop.
+                                                    <div class="rooms-workspace__group-head" id=header_id>
                                                         <span class="rooms-workspace__group-label">{display.clone()}</span>
-                                                        <span class="rooms-workspace__group-count">{group.rooms.len()}</span>
-                                                    </button>
-                                                    <Show when=move || !collapsed.get()>
-                                                        <For
-                                                            each=move || group_rooms.get_value()
-                                                            key=|r: &Room| (r.id.clone(), r.participants.len(), r.updated_at.clone())
-                                                            children=move |room: Room| {
+                                                        <span class="rooms-workspace__group-count">
+                                                            {move || {
+                                                                group_rail_rooms(&rooms.list.get())
+                                                                    .into_iter()
+                                                                    .find(|g| g.label == count_label)
+                                                                    .map(|g| g.rooms.len())
+                                                                    .unwrap_or(0)
+                                                            }}
+                                                        </span>
+                                                    </div>
+                                                    <For
+                                                        each=move || {
+                                                            group_rail_rooms(&rooms.list.get())
+                                                                .into_iter()
+                                                                .find(|g| g.label == membership_label)
+                                                                .map(|g| g.rooms)
+                                                                .unwrap_or_default()
+                                                        }
+                                                        key=|r: &Room| (r.id.clone(), r.participants.len(), r.updated_at.clone())
+                                                        children=move |room: Room| {
                                             let key = room.id.clone();
                                             let key2 = key.clone();
                                             let key_tab = key.clone();
@@ -3413,14 +3447,7 @@ pub fn RoomsWorkspace(
                                                     &rooms.list.get(),
                                                 )
                                                 .iter()
-                                                .flat_map(|g| {
-                                                    rail_group_visible_keys(
-                                                        g,
-                                                        collapsed_groups
-                                                            .get()
-                                                            .contains(&rail_group_key(&g.label)),
-                                                    )
-                                                })
+                                                .flat_map(rail_group_room_keys)
                                                 .collect();
                                                 let open = rooms.open_key.get();
                                                 room_list_tab_stop(&keys, open.as_deref())
@@ -3496,7 +3523,6 @@ pub fn RoomsWorkspace(
                                                             }
                                                             }
                                                         />
-                                                    </Show>
                                                 </div>
                                             }
                                         }
@@ -5216,7 +5242,7 @@ mod tests {
         RoomAccessProjection, RoomAccessState, RoomMessage, RoomMessageKind, RoomParticipantKind,
     };
 
-    /// Minimal Room for rail-grouping tests: identity plus a project
+    /// Minimal Room for rail-grouping tests: identity plus a workspace-root
     /// binding, nothing else — grouping reads only these two.
     fn rail_room(id: &str, root: Option<&str>) -> Room {
         Room {
@@ -5269,18 +5295,35 @@ mod tests {
     }
 
     #[test]
-    fn rail_group_display_label_takes_the_last_path_segment() {
+    fn rail_group_display_label_preserves_the_full_root_and_disambiguates_shared_basenames() {
+        // Truthful disambiguation, not a truncated last path segment: two
+        // distinct daemon-owned roots that happen to share a basename must
+        // render two distinguishable headers, or an operator looking at
+        // "web" and "web" cannot tell which workspace owns which channel.
         assert_eq!(
             rail_group_display_label(Some("/Users/eric/ocean-surface")),
-            "ocean-surface"
+            "/Users/eric/ocean-surface"
+        );
+        assert_eq!(
+            rail_group_display_label(Some("/clients/acme/web")),
+            "/clients/acme/web"
+        );
+        let alpha = rail_group_display_label(Some("/clients/acme/web"));
+        let beta = rail_group_display_label(Some("/archive/acme/web"));
+        assert_ne!(
+            alpha, beta,
+            "two roots sharing a basename must not collapse to one label"
         );
         // Trailing separators must not yield an empty label.
-        assert_eq!(rail_group_display_label(Some("/w/")), "w");
+        assert_eq!(rail_group_display_label(Some("/w/")), "/w");
+        assert_eq!(rail_group_display_label(Some("/")), "/");
         assert_eq!(rail_group_display_label(None), "Other rooms");
     }
 
     #[test]
-    fn rail_group_visible_keys_empty_when_collapsed() {
+    fn rail_group_room_keys_lists_every_room_in_group_order() {
+        // Groups are never collapsible: every room a group holds is always
+        // part of the roving-tabindex roster, in the group's own order.
         let group = RailGroup {
             label: Some("/w/alpha".into()),
             rooms: vec![
@@ -5288,8 +5331,7 @@ mod tests {
                 rail_room("c", Some("/w/alpha")),
             ],
         };
-        assert_eq!(rail_group_visible_keys(&group, false).len(), 2);
-        assert!(rail_group_visible_keys(&group, true).is_empty());
+        assert_eq!(rail_group_room_keys(&group), vec!["a", "c"]);
     }
 
     #[test]
@@ -5299,8 +5341,77 @@ mod tests {
         assert_eq!(bound, "/w/alpha");
         assert_ne!(bound, unbound);
         // The sentinel contains a NUL, which no daemon-side absolute path
-        // can contain — the collapse key is collision-free by construction.
+        // can contain — the group's identity key is collision-free by
+        // construction.
         assert!(unbound.contains('\u{0}'));
+    }
+
+    /// The defect Codex found on this branch: an outer `<For>` item keyed
+    /// only by the group label is not recreated when a room joins, leaves,
+    /// or reorders within a workspace root that already has a group on
+    /// screen, so a rendering path that captures `group.rooms` once at that
+    /// item's creation freezes membership and the count. The render closures
+    /// avoid this by re-deriving a group's rooms from `group_rail_rooms`
+    /// applied to the live list on every read instead of holding a
+    /// snapshot — this test pins the pure function both those closures call,
+    /// proving a same-root membership change is visible in its output.
+    #[test]
+    fn rail_groups_reflect_membership_changes_within_an_existing_root() {
+        let before = vec![
+            rail_room("a", Some("/w/alpha")),
+            rail_room("b", Some("/w/beta")),
+        ];
+        let groups_before = group_rail_rooms(&before);
+        assert_eq!(groups_before[0].label.as_deref(), Some("/w/alpha"));
+        assert_eq!(groups_before[0].rooms.len(), 1);
+
+        // A second room joins the SAME workspace root already rendered.
+        let after = vec![
+            rail_room("a", Some("/w/alpha")),
+            rail_room("c", Some("/w/alpha")),
+            rail_room("b", Some("/w/beta")),
+        ];
+        let groups_after = group_rail_rooms(&after);
+        assert_eq!(groups_after[0].label.as_deref(), Some("/w/alpha"));
+        assert_eq!(
+            groups_after[0]
+                .rooms
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "c"],
+            "the group must gain the new room and keep its count in step",
+        );
+
+        // The room that made the alpha group leaves it again.
+        let removed = vec![
+            rail_room("a", Some("/w/alpha")),
+            rail_room("b", Some("/w/beta")),
+        ];
+        let groups_removed = group_rail_rooms(&removed);
+        assert_eq!(
+            groups_removed[0]
+                .rooms
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a"],
+            "a room leaving an existing group must not linger in it",
+        );
+    }
+
+    #[test]
+    fn rail_group_header_ids_follow_identity_not_position() {
+        let alpha = rail_group_header_dom_id(Some("/w/alpha"));
+        let beta = rail_group_header_dom_id(Some("/w/beta"));
+        let unbound = rail_group_header_dom_id(None);
+
+        assert_ne!(alpha, beta);
+        assert_ne!(alpha, unbound);
+        assert_ne!(beta, unbound);
+        assert_eq!(alpha, rail_group_header_dom_id(Some("/w/alpha")));
+        assert!(alpha.starts_with("rooms-group-head-bound-"));
+        assert!(unbound.starts_with("rooms-group-head-"));
     }
 
     /// Flipping one exposed flag must normalize the unwired fields away —

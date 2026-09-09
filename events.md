@@ -7442,3 +7442,11 @@ the machine's full data volume, so only disposable worktree/root Cargo target
 artifacts were cleared before rerunning cleanly.
 
 _________________________________________________________________________________ 19:40 feat/rooms-rail-groups
+time:      [21:50] [09-08-26]
+agent:     [ocean] [gpt-5.6-sol]
+worktree:  pm/rooms-219-fix
+type:      bug-report
+area:      frontend
+
+Corrected the Rooms rail grouping before release: workspace-root buckets now use static labelled ARIA groups inside the existing one-stop listbox instead of adding disclosure buttons, retain the full case-sensitive root without hover-only truncation, and derive collision-safe header ids from stable root identity rather than list position. Retained keyed groups re-read current daemon room membership and counts so refresh, reassignment, creation, and pagination cannot leave stale rows while keyboard navigation sees a newer list; focused native/source guards pin roles, tab stops, root disambiguation, identity ids, live membership, and the paging edge.
+_________________________________________________________________________________ 21:50 pm/rooms-219-fix

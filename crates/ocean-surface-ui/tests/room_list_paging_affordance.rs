@@ -112,7 +112,7 @@ fn the_affordance_sits_at_the_end_of_the_scrolling_list() {
         .find("class=\"rooms-workspace__left-list\"")
         .expect("the rail's scroll container");
     let rows = workspace
-        .find("each=move||group_rail_rooms(&rooms.list.get())")
+        .find("each=move||{group_rail_rooms(&rooms.list.get())")
         .expect("the grouped `<For>` over the room list");
     let affordance = workspace
         .find("class=\"rooms-workspace__load-more-rooms\"")
@@ -280,6 +280,158 @@ fn the_affordance_is_a_full_width_row_not_a_floating_pill() {
          `pointer-events: none` suppresses the disabled cursor along with the \
          click, got `{disabled}`",
     );
+}
+
+// ── PR #219 blocking review findings ─────────────────────────────────────
+//
+// #1: `role="listbox"` held one ordinary tabbable `<button>` per group
+// header in addition to the single roving-tabindex room option, so Tab
+// entered the rail N+1 times. The fix removed collapsibility rather than
+// invent tree semantics: workspace-root groups are static `role="group"`
+// structure with a non-interactive, `aria-labelledby` header, and the
+// listbox still owns exactly one roving Tab stop across every room.
+//
+// #2: `rail_group_display_label` reduced every bound root to its last path
+// segment, so two distinct roots sharing a basename (`/clients/acme/web`,
+// `/archive/acme/web`) rendered two indistinguishable headers. The fix
+// renders the full daemon-owned root and calls these workspace-root groups,
+// never "project" groups — `workspace_root` is a folder binding, not proof
+// of a daemon Project identity.
+
+/// The rail window: from the listbox container through the room options,
+/// stopping before the "Load more rooms" affordance that follows them. The
+/// mention-composer's own `role="listbox"` lives elsewhere in the file, so
+/// scoping to this window keeps a needle from being satisfied by that
+/// unrelated control.
+fn rail_options_window(workspace: &str) -> &str {
+    let start = workspace
+        .find("class=\"rooms-workspace__left-options\"")
+        .expect("the rail's listbox container");
+    let end = workspace[start..]
+        .find("class=\"rooms-workspace__load-more-rooms\"")
+        .map(|offset| start + offset)
+        .expect("the load-more affordance that follows the rail's rows");
+    &workspace[start..end]
+}
+
+/// Blocking finding #1, first half: the listbox and its workspace-root
+/// groups carry only valid, static roles — `role="listbox"` once,
+/// `role="group"` around each bucket, `role="option"` on every room.
+///
+/// Mutation checked: renaming `role="group"` to a bare `<div>` (no role) on
+/// the group wrapper makes this RED.
+#[test]
+fn the_rail_listbox_holds_valid_static_group_and_option_roles() {
+    let workspace = view_source("rooms_workspace.rs");
+    let window = without_whitespace(rail_options_window(&workspace));
+
+    assert!(
+        window.contains(r#"role="listbox""#),
+        "the rail is the ARIA listbox that owns the roving-tabindex model",
+    );
+    assert!(
+        window.contains(r#"role="group""#),
+        "workspace-root buckets must be valid ARIA structure around their \
+         options, not an unmarked wrapper",
+    );
+    assert!(
+        window.contains("aria-labelledby=head_label_id"),
+        "the group must be LABELLED by its static header, not merely sit \
+         next to it",
+    );
+    assert!(
+        window.contains("rail_group_header_dom_id(label.as_deref())"),
+        "header ids must follow stable workspace-root identity, not a list \
+         index that can collide when groups reorder",
+    );
+    assert!(
+        window.contains(r#"role="option""#),
+        "every room stays a listbox option",
+    );
+}
+
+/// Blocking finding #1, second half: the group header is a static label, not
+/// a control. A `<button>` (or any `on:click`, or `aria-expanded`) on it
+/// re-adds a second kind of Tab stop the listbox's one-stop roving model does
+/// not account for.
+///
+/// Mutation checked: changing the header's element back to `<button
+/// class="rooms-workspace__group-head" type="button" on:click=...>` (the
+/// pre-fix shape) makes this RED without the wasm clippy lane objecting —
+/// nothing else in the crate reads what element the header is.
+#[test]
+fn the_group_head_is_a_static_label_not_a_button() {
+    let workspace = view_source("rooms_workspace.rs");
+    let window = without_whitespace(rail_options_window(&workspace));
+
+    let head_at = window
+        .find("class=\"rooms-workspace__group-head\"")
+        .expect("the group header element");
+    assert!(
+        window[..head_at].ends_with("<div"),
+        "the header must be a <div>, not a <button> — a button is an \
+         implicit Tab stop the listbox's one-stop roving model does not \
+         account for",
+    );
+    let head_close = window[head_at..]
+        .find("</div>")
+        .expect("the header's own closing tag");
+    let head_body = &window[head_at..head_at + head_close];
+    assert!(
+        !head_body.contains("on:click"),
+        "the header must carry no click handler — collapsibility is gone, \
+         so there is nothing left for a click to do, got `{head_body}`",
+    );
+    assert!(
+        !head_body.contains("aria-expanded"),
+        "aria-expanded implies a disclosure control the header is not, got \
+         `{head_body}`",
+    );
+}
+
+/// Blocking finding #2: the header renders the full daemon-owned
+/// `workspace_root`, not a truncated last path segment, so two roots sharing
+/// a basename stay distinguishable. Pairs with
+/// `rail_group_display_label_preserves_the_full_root_and_disambiguates_shared_basenames`
+/// in `rooms_workspace.rs`'s own unit tests, which pins the same rule at the
+/// function the header calls; this guard pins that the RENDER actually calls
+/// it rather than a path-basename helper.
+///
+/// Mutation checked: reverting `rail_group_display_label` to
+/// `.rsplit('/').next()` makes the paired unit test RED but leaves every
+/// other gate green — this file has no independent lever on that function's
+/// body, so the coverage lives in `rooms_workspace.rs` and this test only
+/// pins that the header still reads the function's return value rather than
+/// a hand-rolled basename.
+#[test]
+fn the_group_head_label_reads_the_display_label_helper() {
+    let workspace = view_source("rooms_workspace.rs");
+    let window = without_whitespace(rail_options_window(&workspace));
+
+    assert!(
+        window.contains("letdisplay=rail_group_display_label(label.as_deref());"),
+        "the header's text must come from the one helper that preserves the \
+         full root, not a truncated re-derivation inline in the view",
+    );
+    assert!(
+        window.contains("class=\"rooms-workspace__group-label\">{display.clone()}</span>"),
+        "and the header must actually render what that helper returned",
+    );
+}
+
+/// Full roots must remain visibly distinguishable without hover. Uppercasing
+/// collapses case-distinct roots on case-sensitive hosts, while a one-line
+/// ellipsis can hide the only differing path segment in a narrow/touch rail.
+#[test]
+fn workspace_root_labels_wrap_without_case_folding_or_ellipsis() {
+    let css = css_without_whitespace(&strip_css_comments(&read("styles/rooms-workspace.css")));
+    let body = rule_body(&css, ".rooms-workspace__group-label");
+
+    assert!(body.contains("white-space:normal"));
+    assert!(body.contains("overflow-wrap:anywhere"));
+    assert!(!body.contains("text-transform:"));
+    assert!(!body.contains("text-overflow:"));
+    assert!(!body.contains("overflow:hidden"));
 }
 
 // ---- Scanning helpers -------------------------------------------------------
