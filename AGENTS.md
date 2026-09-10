@@ -243,6 +243,12 @@ Web surface session UI:
 
 ## Rooms Contract
 
+Design direction for the Rooms workspace (identity rule, transcript vs
+activity, the room details drawer, agent authoring, the S0-S8 slice plan):
+`docs/OCEAN_ROOMS_DESIGN_DIRECTION.md`. It supersedes the rendering bullets of
+`docs/OCEAN_ROOMS_PRODUCT.md`; the contract bullets below describe main as it
+ships today and are updated slice by slice.
+
 - Browser-hosted Rooms treat `/api/config` as the current-user authority and
   keep join/post unavailable until that identity resolves; never act under a
   previous tenant's browser storage. Explicit single-operator and direct

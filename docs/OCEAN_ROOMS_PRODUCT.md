@@ -8,6 +8,12 @@ same room data through the same API contract.
 **Reference only, never dependencies:** Buzz's VISION_SOVEREIGN + VISION_AGENT
 docs, Stitchpad's daemon-side room loop, Slack/Discord interaction patterns.
 
+**Design direction:** `OCEAN_ROOMS_DESIGN_DIRECTION.md` (2026-09-09) is the
+accepted-for-review direction for the Rooms surface — identity, transcript vs
+activity, the room details drawer, agent authoring, and the slice plan. It
+supersedes the rendering bullets in this document; the API contract below
+stays authoritative for the wire.
+
 ---
 
 ## Room Lifecycle

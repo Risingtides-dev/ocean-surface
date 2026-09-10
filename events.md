@@ -7420,3 +7420,12 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+
+time:      [19:59] [09-09-26]
+agent:     [claude] [fable 5.1]
+worktree:  [docs/rooms-design-direction]
+type:      plan
+area:      design
+
+Landed docs/OCEAN_ROOMS_DESIGN_DIRECTION.md, the accepted-for-review design direction for the Rooms workspace produced by a three-lens judged design pass (ops-console proposal won; the strongest parts of the programmatic-native and conversation-first proposals were folded in, and every judge-named fatal flaw is answered in place as a Ruling). It records the observed problem on :8790 at origin/main 1b88f86, the product model and wire vocabulary, the identity rule (one human = one member id = the proxy login principal, sourced from the proxy session or the daemon's GET /v1/identity, with the surface-operator and web-hex placeholders retired daemon-side before any surface slice deploys), the transcript-vs-activity timeline model with the daemon's closed whitelist and five-minute compaction, the room details drawer (Members & Agents, Folders, Profile, Settings), package authoring moving out of the room to an Agents view, the full-bleed layout and density rules, the daemon contract used plus the nine gaps requested from ocean-os, and a serial slice plan S0-S8 with a parallel desktop lane D, each with owned files, dependencies, acceptance and a live-after-merge line. Indexed from the root AGENTS.md Rooms Contract and linked from the top of docs/OCEAN_ROOMS_PRODUCT.md, whose rendering bullets it supersedes. Docs only; no code, styles or contracts changed in this PR.
+_________________________________________________________________________________ 19:59 docs/rooms-design-direction
