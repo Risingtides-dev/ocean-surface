@@ -7420,3 +7420,43 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+
+time:      12:55 09-10-26
+agent:     claude
+worktree:  feat/rooms-resizable-rails
+type:      feature
+area:      frontend
+
+Both Rooms side rails shipped a fixed flex-basis, 240px left and 220px right,
+that no window size changed. On a wide monitor that gives a sprawling
+transcript beside two cramped rails; on a narrow one the rails eat the
+transcript. This adds a draggable edge to each. The rails now take their basis
+from a custom property with the shipped width as the fallback, so an unset
+override is exactly the previous layout and the default lives in the stylesheet
+alone rather than being duplicated into a Rust constant that could drift. The
+Rust lane writes only the two custom properties onto the workspace root, never
+a width: the overlay-drawer rules set their own width, and emitting one here
+would strand a drawer at rail width. Each splitter is the ARIA windowSplitter
+pattern, focusable with a reported value, answering arrow keys plus Home and
+End, with pointer capture so a fast drag that outruns the seam keeps steering
+it, and a double-click back to the default. Arrow keys move the HANDLE rather
+than the rail, so a rightward press widens the left rail and narrows the right
+one; the same asymmetry governs the drag, where the left rail's edge is the
+pointer x and the right rail's is the gap from x to the viewport edge. Both
+clamp rather than collapsing a rail or letting one eat the transcript, which
+also keeps a pointer dragged past the viewport edge from asking for a negative
+width. A splitter steers a flex-basis, so each retires at exactly the
+breakpoint that turns its rail into a fixed-position drawer, 1080px for the
+right rail and 1440px once a thread panel is open, 650px for the left, plus any
+coarse pointer, rather than leaving a control that moves nothing. Stored widths
+fail closed as one record: a pair out of range in either half falls back to
+both defaults, because a stored pair is one reader intent and honouring half of
+it invents a layout nobody chose. Seven tests cover the drag asymmetry, both
+clamp ends, the key mapping including the no-op at each end, the storage round
+trip and every malformed shape, the custom-property-only contract, the
+stylesheet reading those properties with the shipped fallback, and the
+breakpoint retirement. The direction and breakpoint guards were mutation
+checked. Gates: 1327 bin tests plus every integration suite, wasm clippy
+-D warnings, host all-targets clippy, fmt, and the ledger checker.
+
+_________________________________________________________________________________ 12:55 feat/rooms-resizable-rails

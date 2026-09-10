@@ -1177,6 +1177,161 @@ fn store_view_state(room_key: Option<&str>, thread_root_seq: Option<u64>) {
     }
 }
 
+/// Rail widths the reader has dragged to, in CSS pixels.
+///
+/// Both rails ship a fixed flex-basis (240px left, 220px right) that no
+/// window size changes, so a wide monitor gets a sprawling transcript beside
+/// cramped rails and a narrow one gets rails eating the transcript. These are
+/// the reader's override, applied as custom properties on the workspace root
+/// so the stylesheet keeps owning the defaults.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RailWidths {
+    left: u32,
+    right: u32,
+}
+
+const RAIL_LEFT_DEFAULT: u32 = 240;
+const RAIL_RIGHT_DEFAULT: u32 = 220;
+const RAIL_LEFT_MIN: u32 = 180;
+const RAIL_LEFT_MAX: u32 = 480;
+const RAIL_RIGHT_MIN: u32 = 180;
+const RAIL_RIGHT_MAX: u32 = 420;
+/// One arrow press. Coarse enough to cross the range in a few presses,
+/// fine enough to land where the reader means to.
+const RAIL_KEY_STEP: i32 = 16;
+
+impl Default for RailWidths {
+    fn default() -> Self {
+        Self {
+            left: RAIL_LEFT_DEFAULT,
+            right: RAIL_RIGHT_DEFAULT,
+        }
+    }
+}
+
+/// Which rail a splitter sits against. The two differ in their clamp range
+/// and in which direction a drag widens them: the left rail grows rightward
+/// with the pointer, the right rail grows leftward against it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Rail {
+    Left,
+    Right,
+}
+
+impl Rail {
+    fn bounds(self) -> (u32, u32) {
+        match self {
+            Rail::Left => (RAIL_LEFT_MIN, RAIL_LEFT_MAX),
+            Rail::Right => (RAIL_RIGHT_MIN, RAIL_RIGHT_MAX),
+        }
+    }
+
+    fn default_width(self) -> u32 {
+        match self {
+            Rail::Left => RAIL_LEFT_DEFAULT,
+            Rail::Right => RAIL_RIGHT_DEFAULT,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Rail::Left => "Room list width",
+            Rail::Right => "Members rail width",
+        }
+    }
+}
+
+fn clamp_rail(rail: Rail, width: i32) -> u32 {
+    let (min, max) = rail.bounds();
+    width.clamp(min as i32, max as i32) as u32
+}
+
+/// Width for a drag: the pointer's viewport x, turned into a rail width.
+///
+/// The left rail's edge IS the pointer position. The right rail's is the
+/// distance from the pointer to the viewport's right edge, which is why this
+/// needs the viewport width rather than the delta alone.
+fn rail_width_from_pointer(rail: Rail, pointer_x: i32, viewport_width: i32) -> u32 {
+    let raw = match rail {
+        Rail::Left => pointer_x,
+        Rail::Right => viewport_width - pointer_x,
+    };
+    clamp_rail(rail, raw)
+}
+
+/// Width after one keyboard nudge. Arrow keys move the SPLITTER, so on the
+/// right rail a rightward arrow shrinks it — the rail is on the far side of
+/// the handle the reader is pushing.
+fn rail_width_from_key(rail: Rail, current: u32, key: &str) -> Option<u32> {
+    let (min, max) = rail.bounds();
+    let toward_end = match rail {
+        Rail::Left => RAIL_KEY_STEP,
+        Rail::Right => -RAIL_KEY_STEP,
+    };
+    let next = match key {
+        "ArrowRight" => current as i32 + toward_end,
+        "ArrowLeft" => current as i32 - toward_end,
+        "Home" => min as i32,
+        "End" => max as i32,
+        _ => return None,
+    };
+    let next = clamp_rail(rail, next);
+    (next != current).then_some(next)
+}
+
+const ROOMS_RAIL_WIDTHS_KEY: &str = "ocean.rooms.rails.v1";
+
+/// `left\nright`, both decimal. Two independent values in one key because
+/// they are written together on every drag end and read together on mount.
+fn encode_rail_widths(widths: RailWidths) -> String {
+    format!("{}\n{}", widths.left, widths.right)
+}
+
+/// Fail-closed: anything unparsable, out of range, or the wrong shape falls
+/// back to the stylesheet defaults rather than to a rail the reader cannot
+/// see or cannot shrink.
+fn decode_rail_widths(raw: &str) -> RailWidths {
+    let mut parts = raw.split('\n');
+    let left = parts.next().and_then(|v| v.trim().parse::<u32>().ok());
+    let right = parts.next().and_then(|v| v.trim().parse::<u32>().ok());
+    if parts.next().is_some() {
+        return RailWidths::default();
+    }
+    match (left, right) {
+        (Some(left), Some(right))
+            if (RAIL_LEFT_MIN..=RAIL_LEFT_MAX).contains(&left)
+                && (RAIL_RIGHT_MIN..=RAIL_RIGHT_MAX).contains(&right) =>
+        {
+            RailWidths { left, right }
+        }
+        _ => RailWidths::default(),
+    }
+}
+
+fn load_rail_widths() -> RailWidths {
+    local_storage()
+        .and_then(|storage| storage.get_item(ROOMS_RAIL_WIDTHS_KEY).ok().flatten())
+        .as_deref()
+        .map(decode_rail_widths)
+        .unwrap_or_default()
+}
+
+fn store_rail_widths(widths: RailWidths) {
+    if let Some(storage) = local_storage() {
+        let _ = storage.set_item(ROOMS_RAIL_WIDTHS_KEY, &encode_rail_widths(widths));
+    }
+}
+
+/// The custom properties the stylesheet reads for its flex-basis. Written as
+/// one inline `style` on the workspace root so a drag touches a single
+/// attribute and the rails' own rules stay in the sheet.
+fn rail_widths_style(widths: RailWidths) -> String {
+    format!(
+        "--rooms-rail-left: {}px; --rooms-rail-right: {}px",
+        widths.left, widths.right
+    )
+}
+
 /// How an open thread is presented. Inline is the default: the conversation
 /// surfaces directly underneath its root message in the timeline. The side
 /// panel is an optional pop-out the reader chooses, and the choice sticks.
@@ -1955,6 +2110,9 @@ pub fn RoomsWorkspace(
     // validated against live daemon data before they apply: the room must
     // still be in the fetched list, the thread root must be in the
     // transcript — a stale restore silently degrades, never errors.
+    // Rail widths, restored before first paint so the rails never flash at
+    // their default width and jump.
+    let rail_widths = RwSignal::new(load_rail_widths());
     let restored_view = load_view_state();
     let pending_room_restore: RwSignal<Option<PendingRoomOpen>> = RwSignal::new(
         restored_view
@@ -2742,6 +2900,81 @@ pub fn RoomsWorkspace(
         }
     });
 
+    // One draggable rail edge. Both splitters are the same control with a
+    // different clamp range and drag direction, so they share this.
+    //
+    // `role="separator"` with a tabindex is the ARIA windowSplitter pattern:
+    // it is focusable, reports its value, and answers arrow keys. Pointer
+    // capture means a fast drag that outruns the 6px handle keeps steering it
+    // instead of dropping the grab mid-gesture.
+    //
+    // Hidden by CSS at the widths where its rail becomes an overlay drawer —
+    // a fixed-position drawer has no flex-basis to resize, so a handle there
+    // would be a control that does nothing.
+    let rail_splitter = move |rail: Rail| -> AnyView {
+        let width_of = move || {
+            let widths = rail_widths.get();
+            match rail {
+                Rail::Left => widths.left,
+                Rail::Right => widths.right,
+            }
+        };
+        let set_width = move |next: u32| {
+            rail_widths.update(|widths| match rail {
+                Rail::Left => widths.left = next,
+                Rail::Right => widths.right = next,
+            });
+            store_rail_widths(rail_widths.get_untracked());
+        };
+        let (min, max) = rail.bounds();
+        let modifier = match rail {
+            Rail::Left => "rooms-workspace__splitter--left",
+            Rail::Right => "rooms-workspace__splitter--right",
+        };
+        view! {
+            <div
+                class=format!("rooms-workspace__splitter {modifier}")
+                role="separator"
+                tabindex="0"
+                aria-orientation="vertical"
+                aria-label=rail.label()
+                aria-valuemin=min.to_string()
+                aria-valuemax=max.to_string()
+                aria-valuenow=move || width_of().to_string()
+                on:pointerdown=move |ev: web_sys::PointerEvent| {
+                    ev.prevent_default();
+                    if let Some(target) = ev.target().and_then(|t| {
+                        t.dyn_into::<web_sys::Element>().ok()
+                    }) {
+                        let _ = target.set_pointer_capture(ev.pointer_id());
+                    }
+                }
+                on:pointermove=move |ev: web_sys::PointerEvent| {
+                    // No button held means this is a hover, not a drag. The
+                    // capture stays armed either way; only a held button moves
+                    // the rail.
+                    if ev.buttons() == 0 {
+                        return;
+                    }
+                    ev.prevent_default();
+                    let viewport_width = web_sys::window()
+                        .and_then(|w| w.inner_width().ok())
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0) as i32;
+                    set_width(rail_width_from_pointer(rail, ev.client_x(), viewport_width));
+                }
+                on:keydown=move |ev: web_sys::KeyboardEvent| {
+                    if let Some(next) = rail_width_from_key(rail, width_of(), &ev.key()) {
+                        ev.prevent_default();
+                        set_width(next);
+                    }
+                }
+                on:dblclick=move |_| set_width(rail.default_width())
+            ></div>
+        }
+        .into_any()
+    };
+
     // Shared thread-conversation pieces. Exactly one presentation renders
     // at a time (inline under the root, or the opt-in side panel), so the
     // composer state and its mention-listbox id never exist twice.
@@ -3002,6 +3235,7 @@ pub fn RoomsWorkspace(
     view! {
         <div
             class="rooms-workspace"
+            style=move || rail_widths_style(rail_widths.get())
             class:rooms-workspace--thread-open=move || {
                 selected_thread_root_seq.get().is_some()
                     && thread_view_mode.get() == ThreadViewMode::Panel
@@ -3511,6 +3745,8 @@ pub fn RoomsWorkspace(
                 // in.
                 <crate::room_redeem::RoomRedeem rooms=rooms state=redeem />
             </div>
+
+            {rail_splitter(Rail::Left)}
 
             // ═══ CENTER RAIL — header + transcript + composer ═══════════
             <div class="rooms-workspace__center">
@@ -4298,6 +4534,7 @@ pub fn RoomsWorkspace(
                     ().into_any()
                 }
             }}
+            {rail_splitter(Rail::Right)}
             <div
                 id="rooms-workspace-members"
                 class="rooms-workspace__right"
@@ -8539,6 +8776,210 @@ mod tests {
             markup.contains(&emitter),
             "the timeline must emit the inline thread container"
         );
+    }
+
+    // ── Rail splitters ────────────────────────────────────────────────
+
+    /// A drag reads the pointer's viewport x. The left rail's edge IS that x;
+    /// the right rail's is the gap from x to the viewport's right edge — get
+    /// that backwards and the right rail runs the wrong way under the hand.
+    #[test]
+    fn a_drag_turns_pointer_x_into_the_right_rail_edge() {
+        assert_eq!(rail_width_from_pointer(Rail::Left, 300, 1600), 300);
+        // 1600 - 1300 = 300 from the right edge.
+        assert_eq!(rail_width_from_pointer(Rail::Right, 1300, 1600), 300);
+        // Same pointer, opposite rails, different widths — the asymmetry is
+        // the point.
+        assert_ne!(
+            rail_width_from_pointer(Rail::Left, 400, 1600),
+            rail_width_from_pointer(Rail::Right, 400, 1600),
+        );
+    }
+
+    /// Dragging past either end clamps instead of collapsing a rail to
+    /// nothing or letting it eat the transcript.
+    #[test]
+    fn a_drag_clamps_at_both_ends() {
+        assert_eq!(rail_width_from_pointer(Rail::Left, 0, 1600), RAIL_LEFT_MIN);
+        assert_eq!(
+            rail_width_from_pointer(Rail::Left, 9000, 1600),
+            RAIL_LEFT_MAX
+        );
+        assert_eq!(
+            rail_width_from_pointer(Rail::Right, 1600, 1600),
+            RAIL_RIGHT_MIN
+        );
+        assert_eq!(
+            rail_width_from_pointer(Rail::Right, -9000, 1600),
+            RAIL_RIGHT_MAX
+        );
+        // A pointer past the viewport's right edge would be a negative width
+        // for the right rail; clamping is what keeps it a width at all.
+        assert_eq!(
+            rail_width_from_pointer(Rail::Right, 2000, 1600),
+            RAIL_RIGHT_MIN
+        );
+    }
+
+    /// Arrow keys move the SPLITTER, not the rail: pushing the handle right
+    /// widens the left rail and narrows the right one. Mirroring this wrong
+    /// makes the right rail fight the key the reader pressed.
+    #[test]
+    fn arrow_keys_move_the_handle_not_the_rail() {
+        assert_eq!(
+            rail_width_from_key(Rail::Left, 240, "ArrowRight"),
+            Some(240 + RAIL_KEY_STEP as u32)
+        );
+        assert_eq!(
+            rail_width_from_key(Rail::Left, 240, "ArrowLeft"),
+            Some(240 - RAIL_KEY_STEP as u32)
+        );
+        assert_eq!(
+            rail_width_from_key(Rail::Right, 240, "ArrowRight"),
+            Some(240 - RAIL_KEY_STEP as u32)
+        );
+        assert_eq!(
+            rail_width_from_key(Rail::Right, 240, "ArrowLeft"),
+            Some(240 + RAIL_KEY_STEP as u32)
+        );
+
+        assert_eq!(
+            rail_width_from_key(Rail::Left, 240, "Home"),
+            Some(RAIL_LEFT_MIN)
+        );
+        assert_eq!(
+            rail_width_from_key(Rail::Left, 240, "End"),
+            Some(RAIL_LEFT_MAX)
+        );
+
+        // Already at the end: no change, so the handler leaves the event
+        // alone rather than swallowing a key that did nothing.
+        assert_eq!(
+            rail_width_from_key(Rail::Left, RAIL_LEFT_MAX, "ArrowRight"),
+            None
+        );
+        assert_eq!(
+            rail_width_from_key(Rail::Left, RAIL_LEFT_MIN, "ArrowLeft"),
+            None
+        );
+        assert_eq!(
+            rail_width_from_key(Rail::Right, RAIL_RIGHT_MIN, "ArrowRight"),
+            None
+        );
+        // Keys the splitter does not own stay unclaimed.
+        assert_eq!(rail_width_from_key(Rail::Left, 240, "Enter"), None);
+        assert_eq!(rail_width_from_key(Rail::Left, 240, "ArrowUp"), None);
+    }
+
+    /// A stored width round-trips; anything else falls back to the shipped
+    /// defaults rather than to a rail the reader cannot see or shrink.
+    #[test]
+    fn stored_rail_widths_round_trip_and_fail_closed() {
+        let widths = RailWidths {
+            left: 300,
+            right: 260,
+        };
+        assert_eq!(decode_rail_widths(&encode_rail_widths(widths)), widths);
+
+        for bad in [
+            "",
+            "300",
+            "abc\n260",
+            "300\nabc",
+            "300\n260\n999",
+            // Out of range in either half rejects the WHOLE record: a stored
+            // pair is one reader intent, and honouring half of it silently
+            // invents a layout nobody chose.
+            "10\n260",
+            "9000\n260",
+            "300\n10",
+            "300\n9000",
+        ] {
+            assert_eq!(
+                decode_rail_widths(bad),
+                RailWidths::default(),
+                "{bad:?} must fall back to defaults"
+            );
+        }
+    }
+
+    /// The Rust lane writes ONLY custom properties; the stylesheet keeps
+    /// owning what a rail does with them. Emitting a `width` here would
+    /// override the overlay-drawer rules and strand the drawer at rail width.
+    #[test]
+    fn rail_widths_are_published_as_custom_properties_only() {
+        let style = rail_widths_style(RailWidths {
+            left: 300,
+            right: 260,
+        });
+        assert!(style.contains("--rooms-rail-left: 300px"));
+        assert!(style.contains("--rooms-rail-right: 260px"));
+        assert!(
+            !style.contains("width:") && !style.contains("flex"),
+            "the root must not set layout directly: {style}"
+        );
+    }
+
+    /// The stylesheet must consume those properties WITH the shipped default
+    /// as the fallback, so an unset override is exactly today's layout and
+    /// the default lives in one place.
+    #[test]
+    fn the_rails_read_the_custom_properties_with_a_default_fallback() {
+        let css = include_str!("../../../styles/rooms-workspace.css");
+        let left = ["var(--rooms-rail-left, ", "240px)"].concat();
+        let right = ["var(--rooms-rail-right, ", "220px)"].concat();
+        assert!(css.contains(&left), "left rail must read its property");
+        assert!(css.contains(&right), "right rail must read its property");
+        assert_eq!(
+            RAIL_LEFT_DEFAULT, 240,
+            "the Rust default must match the stylesheet fallback"
+        );
+        assert_eq!(RAIL_RIGHT_DEFAULT, 220);
+    }
+
+    /// A splitter steers a flex-basis. Where the rail becomes a
+    /// fixed-position drawer it has no flex-basis, so the handle must go with
+    /// it — at the same breakpoints, or the reader gets a control that moves
+    /// nothing.
+    #[test]
+    fn splitters_retire_at_the_breakpoints_that_float_their_rail() {
+        let css = include_str!("../../../styles/rooms-workspace.css");
+        let hidden = |needle: &str| {
+            let at = css
+                .find(needle)
+                .unwrap_or_else(|| panic!("missing {needle}"));
+            css[at..at + 120].contains("display: none")
+        };
+        // Right rail floats at 1080px, and at 1440px once a thread panel is
+        // open; left rail floats at 650px.
+        assert!(hidden(
+            &[
+                "@media (max-width: 1080px) {\n  .rooms-workspace__",
+                "splitter--right"
+            ]
+            .concat()
+        ));
+        assert!(hidden(
+            &[
+                "@media (max-width: 1440px) {\n  .rooms-workspace--thread-open .rooms-workspace__",
+                "splitter--right"
+            ]
+            .concat()
+        ));
+        assert!(hidden(
+            &[
+                "@media (max-width: 650px) {\n  .rooms-workspace__",
+                "splitter--left"
+            ]
+            .concat()
+        ));
+        assert!(hidden(
+            &[
+                "@media (pointer: coarse) {\n  .rooms-workspace__",
+                "splitter"
+            ]
+            .concat()
+        ));
     }
 
     /// The ledger mark must exist in both the stylesheet and the markup,
