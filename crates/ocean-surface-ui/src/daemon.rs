@@ -211,6 +211,11 @@ struct ProxyConfig {
     livekit_token_path: String,
     #[serde(default)]
     tldraw_sync_uri: String,
+    /// Who the proxy says is signed in. Empty in single-operator mode.
+    #[serde(default)]
+    user_id: String,
+    #[serde(default)]
+    user_display_name: String,
 }
 
 /// A component interaction event sent from the client to the daemon.
@@ -1980,6 +1985,16 @@ pub struct Daemon {
     /// Rendered independently of the SSE `status` string so it isn't clobbered
     /// by connect()'s "connecting…"/"connected" transitions.
     pub voice_ready: RwSignal<bool>,
+    /// Who `/api/config` says is signed in. Empty until bootstrap answers, and
+    /// empty in single-operator mode.
+    ///
+    /// This is a SIGNAL, not a boot snapshot, because bootstrap is a network
+    /// round-trip that resolves AFTER the rooms panel is constructed. Reading
+    /// it once at construction is how the first session after every login ended
+    /// up acting under the previous identity.
+    pub adopted_user_id: RwSignal<String>,
+    /// Display name for [`Self::adopted_user_id`].
+    pub adopted_display_name: RwSignal<String>,
     /// Google Maps JS API key from /api/config, used by the map component to
     /// load the Maps script. Empty until bootstrap (and when no key is set).
     pub maps_key: RwSignal<String>,
@@ -2003,6 +2018,14 @@ pub struct Daemon {
     /// cannot steal focus from a session started while its POST was in flight
     /// (TASK-43, finding 1). See [`admit_create_intent`].
     session_intent_generation: RwSignal<u64>,
+    /// Which machine the catalogues on screen belong to.
+    ///
+    /// Bumped by [`Self::reattach_to_selected_device`]. Every fetch that
+    /// REPLACES a catalogue wholesale captures it before its await and drops a
+    /// response that arrives after a switch — otherwise the old machine's
+    /// models or projects win the last write and the picker offers choices the
+    /// attached daemon does not own, which a later turn then submits.
+    device_epoch: RwSignal<u64>,
     /// First-open readiness for the active agent and permission streams. Voice
     /// Planner awaits both before posting its first normal turn, then reconciles
     /// the durable permission snapshot so no gate can be missed in the handoff.
@@ -2224,7 +2247,10 @@ pub struct Daemon {
     pub preview_file_intent: RwSignal<Option<(String, u64)>>,
 }
 
-/// A selectable model, mirroring the daemon's KnownModel.
+/// A selectable model, mirroring the daemon's KnownModel plus the readiness
+/// the daemon reports for it (`GET /v1/models` serializes ReadyModel flat:
+/// id/provider/label top-level, `ready` and optional `credential_source`
+/// alongside).
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct ModelInfo {
     pub id: String,
@@ -2232,6 +2258,69 @@ pub struct ModelInfo {
     pub provider: String,
     #[serde(default)]
     pub label: String,
+    /// Whether the daemon could route a turn to this model right now
+    /// (credential visible to that process — configuration truth, not a
+    /// liveness probe). Deliberately `Option`, not a defaulted bool: a daemon
+    /// predating readiness omits the field, and defaulting to `false` would
+    /// render its whole catalogue as unusable.
+    #[serde(default)]
+    pub ready: Option<bool>,
+    /// Where the daemon resolved the credential, kept as loose JSON on
+    /// purpose: `fetch_models` throws away the WHOLE catalogue on any decode
+    /// error, so a typed enum here would let one new daemon-side variant
+    /// blank the picker. Formatted by [`credential_source_hint`].
+    #[serde(default)]
+    pub credential_source: Option<Value>,
+}
+
+impl ModelInfo {
+    /// Why this model cannot run, when the daemon has said so. `None` for a
+    /// ready model — and for a daemon that never reported readiness, so an
+    /// older daemon's catalogue renders exactly as it did before the field
+    /// existed.
+    pub fn unready_reason(&self) -> Option<String> {
+        if self.ready != Some(false) {
+            return None;
+        }
+        // Today's daemon attaches credential_source only to entries whose
+        // credential actually resolved, so an unready entry usually names
+        // nothing — fall back to the provider, which is what the operator
+        // needs to go configure.
+        Some(
+            match self
+                .credential_source
+                .as_ref()
+                .and_then(credential_source_hint)
+            {
+                Some(hint) => format!("no credential: {hint}"),
+                None if self.provider.is_empty() => "no credential".to_string(),
+                None => format!("no credential for {}", self.provider),
+            },
+        )
+    }
+}
+
+/// Human-readable name for a `credential_source` wire value. The daemon's
+/// enum is externally tagged snake_case — `{"env":{"name":"…"}}`,
+/// `{"ocean_auth_file":{"path":"…"}}`, `{"codex_cli_auth_file":{"path":"…"}}`,
+/// or the bare string `"not_required"` — and grows variants over time, so an
+/// unrecognized shape degrades to its tag instead of failing anything.
+fn credential_source_hint(source: &Value) -> Option<String> {
+    match source {
+        Value::String(tag) => Some(tag.replace('_', " ")),
+        Value::Object(map) => {
+            let (tag, body) = map.iter().next()?;
+            match body
+                .get("name")
+                .or_else(|| body.get("path"))
+                .and_then(Value::as_str)
+            {
+                Some(detail) => Some(detail.to_string()),
+                None => Some(tag.replace('_', " ")),
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Token usage for a turn (or summed for a session), mirrored from the daemon's
@@ -2437,9 +2526,11 @@ struct SessionToolContext {
     arguments: Option<serde_json::Value>,
 }
 
-/// TASK-46: outcome of `commit_session_projection` — whether the detail was
-/// terminal (sync done with full transcript) or still live (quarantined
-/// prefix + sync_pending poll running).
+/// Outcome of `commit_session_projection`.
+///
+/// New session projections always return `Terminal` after committing the full
+/// daemon transcript. `Live` remains only for the retired TASK-46 poll cleanup
+/// path; session switches and reconnects no longer enter that quarantine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProjectionOutcome {
     Terminal,
@@ -2450,9 +2541,10 @@ const SESSION_PROJECTION_ACTIVITY_CHANGED: &str =
     "session activity changed while loading; retrying authoritative snapshot";
 
 /// A terminal HTTP snapshot can briefly race a TurnStarted frame received
-/// before the daemon registers the request in its durable request map. Keep the
-/// local live projection and let sync_pending poll once registration settles.
-fn should_defer_terminal_snapshot(query_is_live: bool, local_has_live_turn: bool) -> bool {
+/// before the daemon registers the request in its durable request map. Preserve
+/// the already-admitted local Stop target while still committing the complete
+/// transcript instead of deferring the whole projection.
+fn should_preserve_local_live_state(query_is_live: bool, local_has_live_turn: bool) -> bool {
     !query_is_live && local_has_live_turn
 }
 
@@ -2463,6 +2555,8 @@ impl Daemon {
             turns: RwSignal::new(Vec::new()),
             streaming: RwSignal::new(false),
             session_id: RwSignal::new(None),
+            adopted_user_id: RwSignal::new(String::new()),
+            adopted_display_name: RwSignal::new(String::new()),
             status: RwSignal::new("disconnected".into()),
             status_detail: RwSignal::new(None),
             cwd: RwSignal::new(default_cwd()),
@@ -2474,6 +2568,7 @@ impl Daemon {
             tldraw_sync_uri: RwSignal::new(String::new()),
             sse_generation: RwSignal::new(0),
             session_intent_generation: RwSignal::new(0),
+            device_epoch: RwSignal::new(0),
             agent_stream_ready: RwSignal::new(None),
             permission_stream_ready: RwSignal::new(None),
             permission_revision: RwSignal::new(0),
@@ -2547,6 +2642,8 @@ impl Daemon {
             streaming: RwSignal::new(false),
             session_id: RwSignal::new(None),
             status: RwSignal::new("dummy".into()),
+            adopted_user_id: RwSignal::new(String::new()),
+            adopted_display_name: RwSignal::new(String::new()),
             status_detail: RwSignal::new(None),
             cwd: RwSignal::new("/".into()),
             voice_ready: RwSignal::new(false),
@@ -2557,6 +2654,7 @@ impl Daemon {
             tldraw_sync_uri: RwSignal::new(String::new()),
             sse_generation: RwSignal::new(0),
             session_intent_generation: RwSignal::new(0),
+            device_epoch: RwSignal::new(0),
             agent_stream_ready: RwSignal::new(None),
             permission_stream_ready: RwSignal::new(None),
             permission_revision: RwSignal::new(0),
@@ -2630,6 +2728,9 @@ impl Daemon {
             let is_extension = running_as_extension();
             if is_extension {
                 daemon.url.set(DEFAULT_DAEMON_URL.to_string());
+                let identity = crate::rooms::RoomIdentity::direct_host();
+                daemon.adopted_user_id.set(identity.id);
+                daemon.adopted_display_name.set(identity.display_name);
                 // No proxy fronts the side panel: voice goes daemon-direct to
                 // `/v1/voice/*`, so readiness is host-neutral (offered) and any
                 // missing-credential state surfaces per request. There is no
@@ -2642,7 +2743,10 @@ impl Daemon {
                     load_persisted_session().as_deref(),
                     daemon.session_id.get_untracked().as_deref(),
                 ) {
-                    if restore_session_or_clear(&daemon, id).await {
+                    let intent = daemon.session_intent_generation.get_untracked();
+                    if restore_session_or_clear(&daemon, id, intent).await
+                        == RestoreOutcome::Restored
+                    {
                         daemon.fetch_models();
                         daemon.fetch_projects();
                         return;
@@ -2683,6 +2787,20 @@ impl Daemon {
                         daemon
                             .tldraw_sync_uri
                             .set(cfg.tldraw_sync_uri.trim().to_string());
+                        // The login IS the room identity. Without this the
+                        // surface mints a per-browser `web-<random>` and a
+                        // roster shows opaque client ids instead of people.
+                        let identity = crate::rooms::RoomIdentity::from_proxy_config(
+                            &cfg.user_id,
+                            &cfg.user_display_name,
+                        );
+                        let adopted_id = identity.id;
+                        let adopted_name = identity.display_name;
+                        // Publish only after the authenticated config response.
+                        // Until then browser Rooms remain unresolved and cannot
+                        // act under identity state from a previous login.
+                        daemon.adopted_user_id.set(adopted_id);
+                        daemon.adopted_display_name.set(adopted_name);
                     }
                     Err(_) => {
                         // Non-JSON / unexpected shape — keep the fallback url.
@@ -2721,7 +2839,8 @@ impl Daemon {
                 load_persisted_session().as_deref(),
                 daemon.session_id.get_untracked().as_deref(),
             ) {
-                if restore_session_or_clear(&daemon, id).await {
+                let intent = daemon.session_intent_generation.get_untracked();
+                if restore_session_or_clear(&daemon, id, intent).await == RestoreOutcome::Restored {
                     daemon.fetch_models();
                     daemon.fetch_projects();
                     return;
@@ -3334,12 +3453,19 @@ impl Daemon {
     }
 
     pub fn send_prompt(&self, prompt: String) {
+        self.send_prompt_with_display(prompt.clone(), prompt);
+    }
+
+    /// Send `prompt` to the model while echoing a concise `display_prompt` in the
+    /// transcript. The composer uses this for explicitly attached text context:
+    /// the wire prompt contains bounded file contents, while the local transcript
+    /// shows the operator's instruction plus attachment names instead of dumping
+    /// entire source files into the chat rail.
+    pub fn send_prompt_with_display(&self, prompt: String, display_prompt: String) {
         if prompt.trim().is_empty() {
             return;
         }
-        // Echo the user prompt immediately, then dispatch under the surface's
-        // ambient client identity (web vs. extension).
-        self.turns.update(|t| t.push(Turn::user(prompt.clone())));
+        self.turns.update(|t| t.push(Turn::user(display_prompt)));
         self.streaming.set(true);
         self.dispatch_prompt(prompt, false, surface_client_type());
     }
@@ -3890,6 +4016,13 @@ impl Daemon {
                 .send()
                 .await
                 .map_err(|e| format!("fetch: {e}"))?;
+            // The proxy answers a typed 503 when the machine this session is
+            // attached to cannot serve it. Decoding that body as a session page
+            // yields "expected value" and hides which machine is down — read it
+            // as the sentence it is (`crate::devices::device_unavailable_error`).
+            if resp.status() == 503 {
+                return Err(crate::devices::device_unavailable_error(resp).await);
+            }
             let r: SessionsResponse = resp.json().await.map_err(|e| format!("decode: {e}"))?;
             if !r.ok {
                 return Err("sessions fetch not ok".into());
@@ -4062,6 +4195,10 @@ impl Daemon {
         let url = self.url.get_untracked();
         let models = self.models;
         let model = self.model;
+        // The catalogue belongs to one machine; a reply that lands after a
+        // switch describes the machine we left.
+        let epoch = self.device_epoch;
+        let asked_at = epoch.get_untracked();
         spawn_local(async move {
             #[derive(Deserialize)]
             struct Current {
@@ -4079,6 +4216,10 @@ impl Daemon {
             match Request::get(&get_url).send().await {
                 Ok(resp) => match resp.json::<ModelsResponse>().await {
                     Ok(r) => {
+                        if epoch.get_untracked() != asked_at {
+                            log::debug!("model catalogue from a machine we left; dropped");
+                            return;
+                        }
                         if let Some(cur) = r.current {
                             if !cur.model.is_empty() {
                                 model.set(Some(cur.model));
@@ -4100,6 +4241,11 @@ impl Daemon {
         let url = self.url.get_untracked();
         let projects = self.projects;
         let current = self.project;
+        // Same rule as the model catalogue, and it matters more here: this
+        // fetch also CLEARS a selection its list does not contain, so a late
+        // reply from the old machine would drop a project the new one owns.
+        let epoch = self.device_epoch;
+        let asked_at = epoch.get_untracked();
         spawn_local(async move {
             #[derive(Deserialize)]
             struct ProjectsResponse {
@@ -4110,6 +4256,10 @@ impl Daemon {
             match Request::get(&get_url).send().await {
                 Ok(resp) => match resp.json::<ProjectsResponse>().await {
                     Ok(r) => {
+                        if epoch.get_untracked() != asked_at {
+                            log::debug!("project catalogue from a machine we left; dropped");
+                            return;
+                        }
                         // Drop a persisted selection that no longer exists.
                         if let Some(sel) = current.get_untracked() {
                             if !r.projects.iter().any(|p| p.id == sel) {
@@ -4313,19 +4463,6 @@ impl Daemon {
         self.sync_in_flight.set(false);
         self.sync_deadline.set(None);
         self.sync_pending.set(false);
-    }
-
-    /// Manual refresh: abort any in-flight sync fetch and kick an immediate
-    /// poll tick. Idempotent — no-op if sync_pending is not active. Resets
-    /// the deadline so a stalled banner can be revived by the operator.
-    pub fn sync_touch(&self) {
-        if !self.sync_pending.get_untracked() {
-            return;
-        }
-        // Reset the 5-minute deadline.
-        self.sync_deadline.set(Some(now_millis() + 300_000.0));
-        // Bump the kick counter — the Effect in start_sync_poll fires a tick.
-        self.sync_poll_kick.update(|k| *k = k.wrapping_add(1));
     }
 
     /// Enter sync_pending mode for `(session_id, sse_generation)`. Commit the
@@ -4578,25 +4715,15 @@ impl Daemon {
             return ProjectionOutcome::Live;
         }
 
-        // Check state: live or terminal?
-        let query_is_live = detail.state.is_some_and(|s| s.is_live());
+        // TASK-46 rollback: always commit the complete daemon transcript. The
+        // prior live-state branch truncated at the last user entry and started a
+        // detail poll, leaving legitimate long operations behind a "detail
+        // syncing…" quarantine for their entire duration.
         let active_requests = detail.active_requests.clone();
-        let (transcript_for_commit, outcome) = if query_is_live {
-            // Quarantine at last user entry.
-            let split_idx = detail
-                .transcript
-                .iter()
-                .rposition(|e| e.role == "user")
-                .unwrap_or(0);
-            let prefix: Vec<_> = detail.transcript.iter().take(split_idx).cloned().collect();
-            (prefix, ProjectionOutcome::Live)
-        } else {
-            (detail.transcript.clone(), ProjectionOutcome::Terminal)
-        };
 
-        // Commit the quarantined or full transcript atomically.
+        // Commit the full transcript atomically.
         let (rebuilt_turns, rebuilt_pinned) =
-            turns_from_session_transcript(transcript_for_commit, &detail.tool_context);
+            turns_from_session_transcript(detail.transcript.clone(), &detail.tool_context);
         // Poll ticks reconcile only live-turn state; the permission view is owned
         // by the control stream / full projection, so this arm never publishes it
         // (Fresh(empty) here is discarded — only `active_turn_id`/`streaming` are
@@ -4625,7 +4752,7 @@ impl Daemon {
             self.model.set(Some(detail.model.clone()));
         }
 
-        outcome
+        ProjectionOutcome::Terminal
     }
 
     /// Switch to a different session. Clears the current turns, sets the
@@ -4735,10 +4862,10 @@ impl Daemon {
     /// waiting-for-permission, or cancelling session is never transiently
     /// declared idle; only a terminal state clears the Stop target.
     ///
-    /// TASK-46: when the fetched detail state is Running/WaitingForPermission/
-    /// Cancelling, quarantine the transcript at the last user entry (render
-    /// prefix only) and return `ProjectionOutcome::Live` so the caller starts
-    /// the sync_pending poll. Terminal states return `ProjectionOutcome::Terminal`.
+    /// Running/WaitingForPermission/Cancelling snapshots commit their complete
+    /// persisted transcript immediately while preserving the daemon-owned live
+    /// Stop state. Session switching never enters a client-side detail
+    /// quarantine or requires a manual refresh.
     async fn commit_session_projection(
         &self,
         id: &str,
@@ -4816,7 +4943,7 @@ impl Daemon {
         }
 
         // Both HTTP awaits are done; the rest is the synchronous post-fetch
-        // commit (final admission recheck, transcript quarantine + rebuild, and
+        // commit (final admission recheck, full transcript rebuild, and
         // the atomic signal commit incl. the two-state permission publish),
         // extracted so it is drivable in a native test with injected fetch
         // results (codex HOLD on c2a1810).
@@ -5022,6 +5149,22 @@ impl Daemon {
     }
 
     pub fn new_session(&self) {
+        self.reset_session_local_state();
+        clear_persisted_session();
+        self.connect();
+    }
+
+    /// Drop every scrap of state that belonged to the session we are leaving,
+    /// WITHOUT opening a stream and without forgetting the persisted session
+    /// id.
+    ///
+    /// Two callers, and the split is exactly where they differ. [`new_session`]
+    /// forgets the id (a fresh cockpit intent has no past) and connects.
+    /// [`reattach_to_selected_device`] keeps the id, because whether the
+    /// machine we just moved to has that session is the next question it asks
+    /// — and it opens its stream through the restore path or `connect`, never
+    /// both.
+    fn reset_session_local_state(&self) {
         self.stop_sync_poll();
         self.turns.set(Vec::new());
         self.streaming.set(false);
@@ -5037,18 +5180,92 @@ impl Daemon {
         self.retire_permission_state();
         self.active_decision_token.set(None);
         self.session_id.set(None);
-        clear_persisted_session();
         // A New Session is a fresh cockpit intent. Bump the intent generation so
         // a still-in-flight fresh-session create — even one that also left the
         // active session `None` — is retired and cannot adopt over this intent
-        // (TASK-43, finding 1).
+        // (TASK-43, finding 1). A device switch needs the same retirement, for
+        // the same reason and more so: the in-flight create it retires was
+        // aimed at a different machine.
         self.bump_session_intent();
         self.awaiting_session_adoption.set(false);
         self.session_title.set(String::new());
         self.status.set("new session".into());
         self.status_detail.set(None);
         self.reset_token_stats();
-        self.connect();
+    }
+
+    /// Follow the surface onto the machine this session was just attached to.
+    ///
+    /// The proxy has already recorded the choice, so every request from here
+    /// on lands on the new daemon; what has to happen client-side is that
+    /// nothing from the old one is left standing. The SSE stream, the
+    /// transcript, the model catalogue, the project catalogue and the session
+    /// list all belong to the machine we left — `connect` bumps the stream
+    /// generation, which retires the old tail rather than racing it.
+    ///
+    /// The one thing that may cross is the remembered session id, and only if
+    /// the new machine actually has it: `restore_session_or_clear` reopens it
+    /// when it does and forgets it when it does not
+    /// ([`crate::devices::classify_session_restore`]). A session that is not
+    /// on this machine is the ordinary case of two machines with different
+    /// histories — never an error put in front of the person.
+    pub fn reattach_to_selected_device(&self) {
+        let daemon = self.clone();
+        spawn_local(async move {
+            // Read the remembered id BEFORE the reset, which is what makes the
+            // reset safe to share with `new_session`.
+            let persisted = load_persisted_session();
+            daemon.reset_session_local_state();
+            // Everything on screen now describes a machine we are leaving.
+            // Retiring the epoch here is what lets a catalogue fetch already
+            // in flight against it be dropped rather than land on top of the
+            // new machine's.
+            daemon.device_epoch.update(|e| *e = e.wrapping_add(1));
+            daemon.models.set(Vec::new());
+            daemon.projects.set(Vec::new());
+            daemon.status.set("switching device".into());
+            // The intent this restore belongs to. A session-detail fetch is a
+            // round trip, and the composer is live throughout it: whoever
+            // starts a session in that window owns the focus, and a restore
+            // that lands afterwards must not yank it back or clear the id that
+            // session just persisted.
+            let intent = daemon.session_intent_generation.get_untracked();
+            let outcome = match should_restore_session(
+                persisted.as_deref(),
+                daemon.session_id.get_untracked().as_deref(),
+            ) {
+                Some(id) => restore_session_or_clear(&daemon, id, intent).await,
+                None => RestoreOutcome::Cleared,
+            };
+            match outcome {
+                // The machine has that session; its own workspace root and
+                // model arrive with the projection commit.
+                RestoreOutcome::Restored => {}
+                RestoreOutcome::Cleared => {
+                    // No session to inherit a workspace from, and the cwd and
+                    // project still on the signals belong to the machine we
+                    // left. A path from another machine either fails session
+                    // creation or — worse — resolves to an unrelated directory
+                    // that happens to share the name, and the next prompt would
+                    // run the agent there. Fall back to the same projectless
+                    // Chat root `begin_chat_session` uses; the new machine's
+                    // own projects arrive with its catalogue.
+                    daemon.set_project(None);
+                    daemon.cwd.set(CHAT_WORKSPACE_ROOT.to_string());
+                    daemon.connect();
+                }
+                // Somebody started another session while the restore was in
+                // flight. That intent owns the focus and has opened its own
+                // stream; touching either here is the yank this guard exists
+                // to prevent.
+                RestoreOutcome::Superseded => {}
+            }
+            // The catalogues are per-machine too: a model, project or session
+            // list from the old daemon is a list of things that are not here.
+            daemon.fetch_models();
+            daemon.fetch_projects();
+            daemon.fetch_sessions();
+        });
     }
 
     /// Select project `id`, pin the working directory to the explicit section
@@ -6005,7 +6222,7 @@ struct SessionCommitSignals {
 }
 
 /// The post-fetch body of `commit_session_projection`: the final admission
-/// recheck, the terminal-vs-live decision, the transcript quarantine + rebuild,
+/// recheck, the live-state decision, the full transcript rebuild,
 /// and the one atomic (no-`await`) commit of every session signal — including the
 /// two-state permission publish. `detail` and `settle` are the two fetch RESULTS,
 /// injected so this whole wrapper runs in a native test (codex HOLD on c2a1810:
@@ -6043,16 +6260,16 @@ fn apply_session_projection(
         return Err(SESSION_PROJECTION_ACTIVITY_CHANGED.into());
     }
 
-    // 4. TASK-46: determine whether this detail is terminal or live.
+    // 4. Determine whether the daemon reports a live turn. A terminal snapshot
+    // can briefly race an already-admitted TurnStarted frame, so remember that
+    // local Stop target for the atomic commit below.
     let query_is_live = detail.state.is_some_and(|s| s.is_live());
     let local_has_live_turn =
         sig.streaming.get_untracked() && sig.active_turn_id.get_untracked().is_some();
-    if should_defer_terminal_snapshot(query_is_live, local_has_live_turn) {
-        // Register-before-accepted: an SSE TurnStarted can precede the request
-        // registry that enriches SessionDetail. Do not let that transient terminal
-        // snapshot clear the local Stop target; the bounded sync poll reconciles.
-        return Ok(ProjectionOutcome::Live);
-    }
+    let preserve_local_live_state =
+        should_preserve_local_live_state(query_is_live, local_has_live_turn);
+    let local_active_turn_id = sig.active_turn_id.get_untracked();
+    let local_streaming = sig.streaming.get_untracked();
 
     // 5. Pure projection, then one atomic commit — no `await` between writes.
     let SessionDetail {
@@ -6070,22 +6287,7 @@ fn apply_session_projection(
         ..
     } = detail;
 
-    // TASK-46 quarantine: when state is live, split at last user entry and render
-    // only the prefix; the suffix is quarantined. Conservative under-display is
-    // allowed; false-complete partial content is not.
-    let (quarantined_transcript, outcome) = if query_is_live {
-        let split_idx = transcript
-            .iter()
-            .rposition(|e| e.role == "user")
-            .unwrap_or(0);
-        let prefix: Vec<_> = transcript.iter().take(split_idx).cloned().collect();
-        (prefix, ProjectionOutcome::Live)
-    } else {
-        (transcript, ProjectionOutcome::Terminal)
-    };
-
-    let (rebuilt_turns, rebuilt_pinned) =
-        turns_from_session_transcript(quarantined_transcript, &tool_context);
+    let (rebuilt_turns, rebuilt_pinned) = turns_from_session_transcript(transcript, &tool_context);
     let authority = sig.decision_authority.get_untracked();
     // Publish the two-state permission view through the shared signal seam: reads
     // prior view + tombstones from their signals, folds `detail_ids − tombstones`,
@@ -6127,15 +6329,20 @@ fn apply_session_projection(
     }
     sig.turns.set(rebuilt_turns);
     sig.pinned_widgets.set(rebuilt_pinned);
-    sig.active_turn_id.set(projection.active_turn_id);
-    sig.streaming.set(projection.streaming);
+    if preserve_local_live_state {
+        sig.active_turn_id.set(local_active_turn_id);
+        sig.streaming.set(local_streaming);
+    } else {
+        sig.active_turn_id.set(projection.active_turn_id);
+        sig.streaming.set(projection.streaming);
+    }
     // permission_view + tombstones already published by commit_permission_view
     // (or skipped if a newer epoch superseded this claim).
     sig.decision_authority.update(|authority| {
         prune_session_authority(authority, id, &live_requests);
     });
     sig.status.set("session loaded".into());
-    Ok(outcome)
+    Ok(ProjectionOutcome::Terminal)
 }
 
 /// Build the `args_preview` stored on a `ToolCall` block.
@@ -6204,9 +6411,10 @@ fn apply_event(
         return;
     }
 
-    // TASK-46: suppression gate — during sync_pending, content-mutating events
-    // are suppressed so the quarantined transcript stays intact until the detail
-    // poll reaches terminal state. State/Stop/permissions/SurfacePatch still flow.
+    // Retired TASK-46 compatibility guard. New session projections never enable
+    // sync_pending, but an already-running legacy poll still suppresses content
+    // until its replacement bundle reloads. State/Stop/permissions/SurfacePatch
+    // continue to flow.
     let sp = sync_pending.get_untracked();
     if sp {
         match event {
@@ -7935,7 +8143,21 @@ fn should_restore_session<'a>(persisted: Option<&'a str>, active: Option<&str>) 
 /// restore via [`Daemon::switch_session`]. On failure (non-200, decode error,
 /// missing session) the persisted key is cleared and this returns `false` so
 /// the caller falls through to the normal boot path with state untouched.
-async fn restore_session_or_clear(daemon: &Daemon, id: &str) -> bool {
+/// What became of a remembered session id on the machine we asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RestoreOutcome {
+    /// The machine had it and it is now the focused session.
+    Restored,
+    /// It is not there (or the reply was unreadable): forgotten, and the
+    /// caller opens a fresh stream.
+    Cleared,
+    /// A different session intent took over while this was in flight. The
+    /// answer is stale by definition — neither the focus nor the persisted id
+    /// is ours to touch any more.
+    Superseded,
+}
+
+async fn restore_session_or_clear(daemon: &Daemon, id: &str, intent: u64) -> RestoreOutcome {
     let url = daemon.url.get_untracked();
     let get_url = format!(
         "{}/v1/sessions/{}",
@@ -7944,23 +8166,45 @@ async fn restore_session_or_clear(daemon: &Daemon, id: &str) -> bool {
     );
     match Request::get(&get_url).send().await {
         Ok(resp) => match resp.json::<SessionDetailResponse>().await {
-            Ok(r) if r.ok => {
-                if let Some(detail) = r.session {
-                    daemon.switch_session(detail.id, detail.title);
-                    return true;
+            // One rule, two callers: boot restores the session this browser
+            // remembers, and a device switch asks the same question of the
+            // machine it just moved to. Absence is `Clear`, never an error
+            // (`crate::devices::classify_session_restore`).
+            Ok(r) => {
+                // The round trip is over; whoever owns the intent NOW owns the
+                // answer to what this browser should be looking at.
+                if !crate::devices::claim_is_current(
+                    intent,
+                    daemon.session_intent_generation.get_untracked(),
+                ) {
+                    log::info!("session restore superseded by a newer intent");
+                    return RestoreOutcome::Superseded;
+                }
+                if crate::devices::classify_session_restore(r.ok, r.session.is_some())
+                    == crate::devices::SessionRestore::Restore
+                {
+                    if let Some(detail) = r.session {
+                        daemon.switch_session(detail.id, detail.title);
+                        return RestoreOutcome::Restored;
+                    }
                 }
             }
             Err(err) => {
                 log::error!("session restore decode error: {err}");
             }
-            _ => {}
         },
         Err(err) => {
             log::error!("session restore fetch error: {err}");
         }
     }
+    // Same guard on the clearing arm, and it is the half that bites hardest:
+    // clearing here after a new session persisted its id would lose it.
+    if !crate::devices::claim_is_current(intent, daemon.session_intent_generation.get_untracked()) {
+        log::info!("session restore superseded before it could clear");
+        return RestoreOutcome::Superseded;
+    }
     clear_persisted_session();
-    false
+    RestoreOutcome::Cleared
 }
 
 /// Resolve the daemon URL at startup from compile-time env → page origin → loopback.
@@ -8029,6 +8273,73 @@ mod tests {
             tool_name: Some("read_file".into()),
             is_error: Some(is_error),
         }
+    }
+
+    #[test]
+    fn model_info_decodes_the_daemons_flat_readiness_payload() {
+        // The daemon serializes ReadyModel FLAT (id/provider/label top-level
+        // plus ready + optional credential_source) and its own wire test pins
+        // that shape; this is the client half of the same contract, including
+        // the bare-string "not_required" variant.
+        let models: Vec<ModelInfo> = serde_json::from_value(serde_json::json!([
+            {"id": "claude-opus-5", "provider": "anthropic", "label": "Opus 5",
+             "ready": true, "credential_source": {"env": {"name": "ANTHROPIC_API_KEY"}}},
+            {"id": "fake-local", "provider": "fake", "label": "Fake",
+             "ready": true, "credential_source": "not_required"},
+            {"id": "grok-4", "provider": "xai", "label": "Grok 4", "ready": false},
+        ]))
+        .expect("flat readiness payload decodes");
+
+        assert_eq!(models[0].ready, Some(true));
+        assert_eq!(models[0].unready_reason(), None);
+        assert_eq!(
+            models[1].credential_source,
+            Some(Value::String("not_required".into()))
+        );
+        assert_eq!(models[1].unready_reason(), None);
+        // Unready entries carry no credential_source on today's wire, so the
+        // reason names the provider the operator has to configure.
+        assert_eq!(models[2].ready, Some(false));
+        assert_eq!(
+            models[2].unready_reason().as_deref(),
+            Some("no credential for xai")
+        );
+    }
+
+    #[test]
+    fn model_info_from_an_older_daemon_renders_exactly_as_before() {
+        // A daemon predating readiness omits both fields. That must decode to
+        // ready: None — NOT false — or every model shows as unusable.
+        let models: Vec<ModelInfo> = serde_json::from_value(serde_json::json!([
+            {"id": "claude-opus-5", "provider": "anthropic", "label": "Opus 5"}
+        ]))
+        .expect("pre-readiness payload decodes");
+        assert_eq!(models[0].ready, None);
+        assert_eq!(models[0].credential_source, None);
+        assert_eq!(models[0].unready_reason(), None);
+    }
+
+    #[test]
+    fn unknown_credential_source_variants_cannot_blank_the_picker() {
+        // fetch_models keeps the OLD list on any decode error, so a daemon
+        // that grows a credential_source variant must still decode here —
+        // and the hint degrades to the variant's tag.
+        let models: Vec<ModelInfo> = serde_json::from_value(serde_json::json!([
+            {"id": "m", "provider": "p", "label": "M", "ready": false,
+             "credential_source": {"os_keychain": {"service": "ocean"}}},
+            {"id": "n", "provider": "q", "label": "N", "ready": false,
+             "credential_source": {"env": {"name": "ANTHROPIC_API_KEY"}}},
+        ]))
+        .expect("unknown credential_source variant still decodes");
+        assert_eq!(
+            models[0].unready_reason().as_deref(),
+            Some("no credential: os keychain")
+        );
+        // A recognized source on an unready entry names the concrete thing.
+        assert_eq!(
+            models[1].unready_reason().as_deref(),
+            Some("no credential: ANTHROPIC_API_KEY")
+        );
     }
 
     #[test]
@@ -8715,11 +9026,11 @@ mod tests {
     }
 
     #[test]
-    fn register_before_accepted_defers_only_terminal_snapshot_with_local_live_turn() {
-        assert!(should_defer_terminal_snapshot(false, true));
-        assert!(!should_defer_terminal_snapshot(true, true));
-        assert!(!should_defer_terminal_snapshot(false, false));
-        assert!(!should_defer_terminal_snapshot(true, false));
+    fn register_before_accepted_preserves_only_terminal_snapshot_with_local_live_turn() {
+        assert!(should_preserve_local_live_state(false, true));
+        assert!(!should_preserve_local_live_state(true, true));
+        assert!(!should_preserve_local_live_state(false, false));
+        assert!(!should_preserve_local_live_state(true, false));
     }
 
     // 6. Deciding an old card after a new dispatch resolves the ORIGINAL turn's
@@ -10922,6 +11233,16 @@ mod tests {
         }
     }
 
+    fn assistant_entry(text: &str) -> SessionTranscriptEntry {
+        SessionTranscriptEntry {
+            role: "assistant".into(),
+            text: text.into(),
+            tool_call_id: None,
+            tool_name: None,
+            is_error: None,
+        }
+    }
+
     fn wrapper_detail(
         pending: Vec<String>,
         transcript: Vec<SessionTranscriptEntry>,
@@ -10981,6 +11302,38 @@ mod tests {
         let epoch = daemon.claim_permission_epoch();
         apply_session_projection(&daemon.commit_signals(), "s1", 5, 0, epoch, detail, settle)
             .expect("admission passes for the focused session")
+    }
+
+    #[test]
+    fn live_session_projection_commits_full_transcript_without_sync_quarantine() {
+        let daemon = wrapper_daemon();
+        let mut detail = wrapper_detail(
+            vec![],
+            vec![
+                user_entry("start the long task"),
+                assistant_entry("partial persisted response"),
+            ],
+        );
+        detail.state = Some(SessionRunState::Running);
+        detail.active_requests = vec!["turn-live".into()];
+
+        let outcome = run_wrapper(&daemon, detail, SnapshotSettle::Fresh(Vec::new()));
+
+        assert_eq!(outcome, ProjectionOutcome::Terminal);
+        assert_eq!(daemon.turns.get_untracked().len(), 2);
+        assert!(matches!(
+            &daemon.turns.get_untracked()[1].blocks[..],
+            [Block::Text(text)] if text == "partial persisted response"
+        ));
+        assert!(daemon.streaming.get_untracked());
+        assert_eq!(
+            daemon.active_turn_id.get_untracked().as_deref(),
+            Some("turn-live")
+        );
+        assert!(
+            !daemon.sync_pending.get_untracked(),
+            "session switching must never require client-side detail polling"
+        );
     }
 
     // Regression 1: FIRST load, degraded snapshot — the TRANSCRIPT still commits
@@ -12143,50 +12496,7 @@ mod tests {
         );
     }
 
-    // ── 3. sync_touch ──────────────────────────────────────────────────────────
-
-    #[test]
-    fn sync_touch_noop_when_sync_pending_is_false() {
-        let daemon = Daemon::dummy();
-        let prev_kick = daemon.sync_poll_kick.get_untracked();
-        let prev_deadline = daemon.sync_deadline.get_untracked();
-
-        daemon.sync_touch();
-
-        assert_eq!(
-            daemon.sync_poll_kick.get_untracked(),
-            prev_kick,
-            "kick must not change"
-        );
-        assert_eq!(
-            daemon.sync_deadline.get_untracked(),
-            prev_deadline,
-            "deadline must not change"
-        );
-    }
-
-    #[test]
-    fn sync_touch_resets_deadline_and_bumps_kick_when_pending() {
-        let daemon = daemon_with_sync(true, Some(now_millis() + 1000.0));
-        let prev_kick = daemon.sync_poll_kick.get_untracked();
-
-        daemon.sync_touch();
-
-        assert_eq!(
-            daemon.sync_poll_kick.get_untracked(),
-            prev_kick.wrapping_add(1),
-            "kick must bump"
-        );
-        let new_deadline = daemon.sync_deadline.get_untracked().expect("deadline set");
-        // Should be ~300s from now, within 500ms tolerance.
-        let expected = now_millis() + 300_000.0;
-        assert!(
-            (new_deadline - expected).abs() < 500.0,
-            "deadline reset to ~5 min ahead; got {new_deadline}"
-        );
-    }
-
-    // ── 4. suppression gate: content events ────────────────────────────────────
+    // ── 3. suppression gate: content events ────────────────────────────────────
 
     #[test]
     fn apply_event_suppresses_tool_call_started_when_sync_pending() {

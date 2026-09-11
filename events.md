@@ -1,28 +1,109 @@
-time:      [01:15pm] [07-19-26]
-agent:     [claude] [ocean TUI]
-worktree:  [main]
-type:      bugfix
-area:      frontend
+# Ocean Surface ledger — entry schema
 
-Mobile focus-zoom fix: iOS Safari auto-zooms any focused control whose
-computed font-size is below 16px; the composer input was 14px
-(composer.css:512) with no compact override, so tapping the prompt box
-zoomed the viewport. Added a `@media (pointer: coarse)` 16px floor for
-`.ocean-composer__input` in styles/compact.css — keyed on pointer
-coarseness (iPads zoom too), not the 720px breakpoint. Shell already uses
-100dvh so keyboard resize was fine. CSS-only. Committed 98c8a59, pushed.
+This block is not an entry, and it is the one non-append edit this file accepts.
+`scripts/check-ledger.mjs` finds entries by line anchors — `/^time:/` opens one,
+`/^_{5,}(?:[ \t].*)?$/` closes one — so every sample line below is indented two
+spaces and matches neither. The first real entry begins under it, untouched.
+**Strip that two-space indent when you copy the template**, or your header opens no
+entry and your rule closes none. The underscore run in it is the full 81 this ledger
+writes, so a copy is correct once it is flush left.
 
-time:      [11:52pm] [07-18-26]
-agent:     [ocean] [ocean-prs gate-authority]
-worktree:  [main]
-type:      integration
-area:      frontend
+That indentation is load-bearing, and the exit code alone will not tell you so.
+Measured on this ledger: un-indent the whole template and the checker still exits
+0 while the entry count goes up by ONE — the sample rule quietly closes the phantom
+entry the sample header opened. Un-indent only the header and it exits 1, naming the
+template's `time:` line. A delta rather than two absolute numbers on purpose: the
+count moves with every append, so only the change this block causes is stable enough
+to write down. So after any edit to this block, read the COUNT, not just the code —
+against the same tree with the block removed, not against a number quoted here.
 
-Lane D: file preview intent — resolve, fetch, render (Tauri + web). 7 files,
-+1239/-53, 14 production seam tests (3 file-scope helpers shared by Effects),
-462 passed. Frozen gates: fmt, clippy wasm32 -D warnings, check wasm32,
-check proxy, test wasm32 --no-run, test native. Patch-id f2087203bb18cc5c.
-8 review rounds (v1→v8) with independent codex re-trace. Committed 4b932aa.
+An entry is appended at EOF and never edited afterwards. `.github/workflows/ci.yml`
+(job `ledger`) asks for it in these words: "time [HH:MM] [MM-DD-YY] (24-hour),
+agent, worktree (branch when not on main), type, area, then one plain-prose
+paragraph on what changed and why."
+
+```text
+  time:      [HH:MM] [MM-DD-YY]        24-hour clock, America/New_York
+  agent:     [claude] [opus 5]
+  worktree:  [branch-name]             omit only on the main checkout
+  type:      infra                     bug-report | feature-request | refactor |
+                                       review | testing | infra | merge
+  area:      frontend                  frontend | backend | infra | workflow
+
+  One plain-prose paragraph on what changed and why. Prose, not bullets.
+
+  _________________________________________________________________________________ HH:MM branch-name
+```
+
+**The closing rule is the load-bearing line.** An entry is CLOSED when a rule
+appears between its `time:` header and the next one; that is the only thing the
+checker asserts. Write the identity form — this ledger's underscore run is 81
+wide, then a space, then the entry's own `HH:MM` and its `worktree:` when it has
+one:
+
+```text
+  _________________________________________________________________________________ 23:15 cloud/my-slice
+```
+
+`.gitattributes` gives this file `merge=union`, and union emits a line both sides
+added exactly once. While every entry closed with the same bare rule, two parallel
+appends shared that one line, xdiff anchored each append before it, and one rule
+came out for two entries — the second entry's `time:` header landed directly under
+the first's prose and the two FUSED, with no conflict and nothing a merge check
+could see (#181 onto #180). An identity-bearing rule cannot be shared, so there is
+nothing left to fold.
+
+Three things it does not buy, all of them rulings rather than gaps:
+
+- It saves an entry's TAIL, not its HEAD. Two appends written in the same minute
+  open with identical `time:` and `agent:` lines and union folds those too, so the
+  second entry can arrive headerless while its rule survives — and the checker
+  reads the survivor as one closed entry and exits 0. Eyeball the head of a merged
+  entry when two slices share a minute.
+- An entry owns its rule, not the blank line after it. A blank line cannot be given
+  an identity. A merged append landing its header flush against the previous rule
+  is cosmetic; close it up by hand, never make the check red for it.
+- Union only fails safe for append/append. A NON-append change — a correction, a
+  redaction, a repaired separator, this block — lands in the same tail hunk a
+  concurrent append touches and union settles it by keeping both sides, silently
+  restoring the line the change removed. Any merge carrying one must be eyeballed.
+
+**Which checker this documents.** `scripts/check-ledger.mjs` at revision r2:
+`CODE_REVISION = 'r2'`, `CODE_DIGEST = '56adab136337'`. That is ocean-bedrock's
+checker (bedrock #62 for the checker, #98 for the identity separator, #103 for the
+entry guard that compares real paths, #124 for the stamp), ported here by
+ocean-surface #194, which also moved the five entries this ledger once carried
+newest-first at its top into the slots their stamps name and added the order
+sibling below. This block lands after #194 and describes that tree. A copy of the
+checker with no `CODE_DIGEST` is the earlier, unstamped port, identified only by
+the constants above; `scripts/check-ledger.test.mjs` recomputes the digest every
+run and reds when the logic changes without a stamp bump, so "is this the checker
+the block means" is one grep for `CODE_DIGEST`, or `--digest` against the file.
+A digest that is neither `56adab136337` nor absent is a revision this block has not
+been checked against: bedrock #127 took bedrock's copy to r3, which changes what
+CLOSES an entry, and r3 is ported to neither this repo nor ocean-os. Everything
+above about headers, rules and the identity form describes r2. Re-read the checker
+before trusting this block against any other stamp.
+Exit codes are 0 clean, 1 an entry is open, 2 the check could not run at all — an
+unreadable path, or a ledger holding no entries. Run both checks on any change to
+this file, and again on either side of a rebase carrying one; the verdicts must
+match:
+
+```sh
+node scripts/check-ledger.mjs events.md         # --fix closes open entries by identity
+node scripts/check-ledger-order.mjs events.md   # order, described below
+```
+
+What the parse check deliberately does NOT check: separator uniqueness (the ~278
+entries written before the identity convention all close with a bare rule and stay
+valid forever), rule width (81 is this ledger's convention, not an assertion), and
+rule-lines-against-entry-count. ORDER is checked by the sibling
+`scripts/check-ledger-order.mjs`, never by this file, and it is a band rather than a
+sort: entries land in MERGE order, not clock order (union emits the current
+branch's lines before the merged branch's), so a descent of hours between
+neighbours is the ledger doing its job and passes, while an entry more than a day
+out of place — a prepend, a backdate — is red. AGENTS.md, "Repository Ledger", is
+the long form of everything above.
 
 time:      [11:25pm] [06-26-26]
 agent:     [codex] [gpt-5]
@@ -1292,6 +1373,8 @@ deepseek-v4-pro (least-flaky of a currently-flaky provider set; codex/claude
 multi-minute provider STALLS remains an ocean-os follow-up (daemon holds the
 turn Running with no terminal frame; surface clears cleanly only on emitted
 TurnFinished).
+_________________________________________________________________________________
+
 time:      [11:08pm] [07-09-26]
 agent:     [codex] [gpt-5.6-sol]
 worktree:  gitbutler/workspace
@@ -1335,6 +1418,8 @@ type:      [feature-request]
 area:      [frontend]
 
 Shipped the voice-first menu IA and completed the STT/TTS ownership migration. The voice menu now leads with the two products - Voice chat (live speech-to-speech) then Dictate (transcript into the composer) - with a muted Microphone group label above the demoted Off / Push to talk / Hands-free radios and the Spoken replies toggle unchanged; pure presentation, no mode/persistence changes. The proxy's /api/stt and /api/tts stopped calling xAI directly: they forward to the daemon's new /v1/voice/stt and /v1/voice/tts (paired ocean-os landing fc8f5000), the xAI key/client/resolver code was deleted from the proxy, has_auth now reports route availability with per-request errors carrying daemon credential state, and the daemon-response translation is a pure unit-tested fn. AGENTS.md/README updated: the proxy holds no provider credentials. Verified 292 UI tests, 16 proxy tests, wasm check, live daemon round-trips (stt 200 {text:""} on a tone clip, tts 200 audio/mpeg 22KB), and the realtime mint now returns 200 with an ephemeral secret on the rebuilt daemon - Voice chat is live end-to-end pending a real-mic session.
+_________________________________________________________________________________
+
 time:      [03:51pm] [07-10-26]
 agent:     [claude] [fable-5]
 type:      [merge]
@@ -1396,6 +1481,8 @@ FilesPanel selected_path signal removed, dir_row recursion-only param dropped
 daemon_stop host seam + allow(too_many_arguments) on rehydrate_transcript with
 rationale. Gates on this exact tree: CI's five steps green locally (proxy
 build/test/clippy, ui wasm check/clippy 0 errors) + 296 host tests.
+_________________________________________________________________________________
+
 time:      [5:49pm] [07-10-26]
 agent:     [omp] [gpt-5.6-sol]
 worktree:  /tmp/ocean-realtime-signal-fix (origin/main detached)
@@ -1950,6 +2037,19 @@ ________________________________________________________________________________
 
 _________________________________________________________________________________
 
+time:      [11:52pm] [07-18-26]
+agent:     [ocean] [ocean-prs gate-authority]
+worktree:  [main]
+type:      integration
+area:      frontend
+
+Lane D: file preview intent — resolve, fetch, render (Tauri + web). 7 files,
++1239/-53, 14 production seam tests (3 file-scope helpers shared by Effects),
+462 passed. Frozen gates: fmt, clippy wasm32 -D warnings, check wasm32,
+check proxy, test wasm32 --no-run, test native. Patch-id f2087203bb18cc5c.
+8 review rounds (v1→v8) with independent codex re-trace. Committed 4b932aa.
+_________________________________________________________________________________
+
 time:      [01:37] [19-07-26]
 agent:     [codex] [gpt-5]
 worktree:  [main]
@@ -2138,6 +2238,21 @@ area:      [frontend]
 
 Landed TASK-35 (dictate textarea growth + voice affordance cleanup) as b8dcf20 on main — the final composer-voice verdict slice. Fable builder sub, reviewed from the committed diff: dictated text now sizes the textarea via a rAF-deferred fit after prop:value reconciliation with UTF-16-aware caret-to-end, reusing the existing bounded grow/clamp/reset logic; pure append_dictation extracted (whitespace-aware joining preserves newlines) with tests; voice trigger and live chip get vertical-only coarse-pointer hit extensions (siblings are 2px apart horizontally — all-sides insets would overlap, correctly avoided); duplicate dot span removed in favor of the single ::before source; inert is-voicechat modifier dropped. 556 crate tests + wasm + fmt green. I pushed. Wave-3 fable-sub slate complete: 33/34/35/36/37/38/39 all landed; only ocean's TASK-32 remains in flight.
 _________________________________________________________________________________
+time:      [01:15pm] [07-19-26]
+agent:     [claude] [ocean TUI]
+worktree:  [main]
+type:      bugfix
+area:      frontend
+
+Mobile focus-zoom fix: iOS Safari auto-zooms any focused control whose
+computed font-size is below 16px; the composer input was 14px
+(composer.css:512) with no compact override, so tapping the prompt box
+zoomed the viewport. Added a `@media (pointer: coarse)` 16px floor for
+`.ocean-composer__input` in styles/compact.css — keyed on pointer
+coarseness (iPads zoom too), not the 720px breakpoint. Shell already uses
+100dvh so keyboard resize was fine. CSS-only. Committed 98c8a59, pushed.
+_________________________________________________________________________________
+
 time:      [13:34] [19-07-26]
 agent:     [claude] [fable 5]
 worktree:  task32-repo-panel-gh-depth
@@ -2341,6 +2456,8 @@ GCP. GitHub secret-scanning alert 1 was resolved as `revoked`; current public
 `origin/main` retains containment commit `05f5283` and has zero
 Google-key-shaped literals in the proxy source. Public history was intentionally
 left intact because prior objects remain in public fork and PR refs.
+_________________________________________________________________________________
+
 time:      [07:07] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-71-traversal (fable, self-claimed)
@@ -2364,6 +2481,8 @@ type:      bug-report
 area:      infra
 
 TASK-73 landed a26f1e2 — proxy audit MEDIUM+LOW batch, closing the audit's actionable set (71 traversal, 72 headers, 73 this). The consequential one: every forward shared the untimed client SSE requires, so a wedged daemon hung each buffered JSON passthrough forever with no bound — split into a 120s-timeout client for buffered forwards, untimed retained for the four SSE stream paths. Also constant-time credential compare (local helper, no crypto dep on a boundary binary; both halves compared unconditionally), opaque error bodies (502s leaked the daemon bind address; the Observatory 503 leaked the FULL path of the credential file), dropped CorsLayer::permissive() which answered preflights BEFORE the auth gate and stamped * on 401s, oversized bodies now 413 instead of silently becoming EMPTY forwarded requests, and the boot log records that auth is on rather than who. PROBE FOUND WHAT TESTS DID NOT, twice: three stt/tts error sites a naive string replace missed, and a stale probe process from the TASK-72 lane still holding the port so my first run measured the OLD binary and reported false failures. Lesson recorded: kill probe processes by PORT not by path pattern, and re-verify the binary under test is the one bound. Final probe on the correct binary: good creds 200, wrong pass 401, wrong user 401, body exactly "daemon unreachable", zero CORS headers, four security headers present, no username logged. 22 tests, fmt, clippy raw-exit 0.
+_________________________________________________________________________________
+
 time:      [09:36] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-74-csp-report (fable, self-claimed)
@@ -2371,6 +2490,8 @@ type:      feature-request
 area:      infra
 
 TASK-74 PART 1 landed 68770cf: CSP violation sink at /csp-report. TASK-72's report-only policy had nowhere to report — decorative, browser-console only. Now it produces operator-visible signal, which is the prerequisite for enforcing script-src on evidence rather than assumption. DESIGN CALL worth recording: my first draft put it under /api/csp-report and the new test caught a 401 — /api/ is hard-rejected by the auth namespace guard, and that guard is precisely what makes the exemption list safe to reason about (audit finding L4). Rather than special-case /api/ and weaken a durable invariant for one endpoint, I moved the endpoint to root and allow-listed it explicitly. The test earned its keep on its first run. Handler is deliberately boring because it is publicly reachable: 16KB cap, body never trusted as structure, always 204 (a browser must never retry or show an error), info-level (violations are EXPECTED during measurement, must not read as incidents), handles both legacy envelope and flat shape. Probe-verified live: 204 without auth, garbage swallowed, report-uri in policy, app still serves, violation logged with parsed fields. PART 2 (nonce-enforced script-src) is now tractable and evidence-driven — the shell already propagates script[nonce] and has only two script tags — but should wait for real collected data before flipping enforcement on a live app.
+_________________________________________________________________________________
+
 time:      [10:23] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-76-tab-guidance (fable, self-claimed)
@@ -2378,6 +2499,8 @@ type:      bug-report
 area:      frontend
 
 TASK-76 landed 7ac844c — prompt injection via browser tab titles, found by the first extension audit and confirmed by reading the daemon in the sibling repo (which the audit could not see). Chain: any site the operator has open authors document.title -> extension snapshots it verbatim -> surface interpolated it into prose with NO escaping/cap/delimiter -> shipped as AgentTurnRequest::guidance -> daemon apply_turn_guidance HONORS it and renders under "Operator guidance for this turn:". Website text therefore reached a tool-ungated agent wearing OPERATOR authority, zero-click (tab open + operator types anything). ROOT CAUSE OF THE MISS: a stale in-repo comment (ocean-gui canvas/context.rs, OCEAN-143) asserted guidance was "a silent no-op, daemon discards it" — false on current daemon main. A comment was doing load-bearing safety reasoning and the code disagreed; this is the second time tonight code-over-comments mattered. Fix REMOVES the freeform channel rather than escaping it: the structured client_context path carries the same snapshot and is already sanitized daemon-side (sanitize_browser_field — cap, control chars collapsed, markdown neutered), so no capability is lost and one unsanitized channel disappears. Regression pins the SOURCE (the three builder fns are gone; reintroducing prose requires re-adding a producer) with needles assembled at runtime — a literal matched the test's own source and failed on first run, which is exactly the self-reference trap worth recording. 684+ tests, wasm, fmt, clippy raw-exit 0. SEVERITY CORRECTION recorded in the artifact: the explorer rated the structured path equally unsanitized; it is not, and I documented the daemon-side hardening rather than inflating the finding.
+_________________________________________________________________________________
+
 time:      [10:39] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-77-ext-hygiene (fable, self-claimed)
@@ -2385,6 +2508,8 @@ type:      refactor
 area:      frontend
 
 TASK-77 landed 8b22135, closing the extension audit's actionable set (76 injection, 77 this). Dropped the `storage` permission (zero chrome.storage refs anywhere — session state uses web localStorage) and the dead `ws://` connect-src entry (no WebSocket client exists; live updates are SSE). On an extension whose only network peer is an unauthenticated tool-executing daemon, unused permission/CSP latitude is worth deleting rather than leaving as future rope. Also percent-encoded session ids at four daemon-URL sites: NOT a live traversal (ids are daemon- or extension-localStorage-sourced, sidepanel takes no query params) but it is the exact raw-interpolation pattern that produced the CONFIRMED proxy traversal in TASK-71, and rooms.rs already did it correctly — consistency now instead of one module disciplined and its neighbour not. Regression covers encoder behavior on path-breaking chars AND pins that raw interpolation cannot return; its needle is runtime-assembled because a literal matched the test's own COMMENT and failed on first run — second occurrence of the self-reference trap in two tasks, now called out in both tests so the next person does not rediscover it. Gates: 684+ tests, wasm, fmt, clippy, and a real scripts/build-extension.sh run, all raw-exit 0.
+_________________________________________________________________________________
+
 time:      [11:14] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-78-daemon-bin (fable, self-claimed)
@@ -2392,6 +2517,8 @@ type:      bug-report
 area:      infra
 
 TASK-78 landed 17efb95 — first Tauri shell audit (tauri-audit-raw-v1.md) found a native code-execution primitive reachable from the webview: daemon_start/daemon_restart took a binary path from IPC, trimmed and non-empty-checked it, and handed it to ProcessCommand::spawn as a DETACHED child (not kill_on_drop) with output to a log file — silent, outliving the app. KEY FACT worth internalising: Tauri 2 capabilities do NOT gate generate_handler! commands (only plugin/core: ones), so this crate's genuinely minimal capability set — no fs, shell, http, or process plugins, shell:allow-execute absent — gave ZERO protection. The chain: daemon runs tools ungated so a turn can already write+chmod a payload; this supplied the missing exec primitive from a TCC-blessed native process. Authority was entirely unused (both callers passed None), so removal cost nothing. Closed on BOTH sides so it cannot return from either end: native commands take no path, wasm host seam sends none. The resolver signature is now the boundary — re-adding an explicit param breaks its test at compile time. THIRD self-reference trap today: my own explanatory doc comment matched the source-assertion needle; runtime-assembled and noted in-test. Gates: ocean-tauri 27 tests, surface 684+ across 7 suites, wasm, fmt, surface clippy all raw-exit 0. NOTE: ocean-tauri carries 8 PRE-EXISTING clippy errors on clean main (crate was never in the gate chain) — I verified my change adds none rather than fixing them in a security commit; worth its own hygiene task. Audit also CLEARED the deep-link handler (no fs/shell/nav/eval), the capability set, open_file's traversal check (correctly canonicalizes both sides), and confirmed TASK-63's Info.plist landed clean. Remaining open from it: no CSP + devtools in release (F2), deep-link id charset validation (F3), open_external_url gesture enforcement (F4).
+_________________________________________________________________________________
+
 time:      [11:36] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-80-deeplink-id (fable, self-claimed)
@@ -2399,6 +2526,8 @@ type:      bug-report
 area:      frontend
 
 TASK-80 landed 301c052 (Tauri audit F3). Deep links are attacker-triggerable by construction — any web page can navigate to ocean://…, and macOS scheme prompts are per-browser and commonly suppressed after first accept — and that untrusted string drove a real state change (foreground + active-session switch, clearing state and reconnecting the SSE tail) with no validation beyond non-empty/no-slash. parse_deep_link now requires the daemon-minted shape (ASCII alnum + - _, length-bounded); percent-encodings, dot segments, control chars, whitespace and unbounded input are rejected before becoming a DeepLinkAction. DEFENCE IN DEPTH, not a duplicate traversal fix: TASK-77 already encodes at the daemon URL format sites, so a malformed id was being safely encoded and then failing downstream as a confusing 404 — rejecting at the boundary is both safer and a better error. Tests cover the smuggling shapes AND assert uuid/slug/at-limit ids still work, because a guard that breaks the feature it protects is not a fix. NOTE the residual I did NOT close and left on the ticket: a website can still force a switch to a VALID id it happens to know — that needs a confirmation prompt, which is a UX decision rather than a validation one. Audit had CLEARED the native handler itself (shows window, re-emits, no fs/shell/nav/eval) — the entire gap was downstream in the surface. Gates: 684+ tests across 7 suites, wasm, fmt, clippy all raw-exit 0.
+_________________________________________________________________________________
+
 time:      [12:05] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-81-tauri-clippy (fable, self-claimed)
@@ -2406,6 +2535,8 @@ type:      refactor
 area:      infra
 
 TASK-81 landed 75adc95: cleared 6 clippy errors that sat on clean main in crates/ocean-tauri (doc comment split by a blank line, unused test import, hand-written Default -> derive with #[default], two same-type usize casts, useless format!). All mechanical, zero behavior change. THE REAL FINDING IS THE GAP, not the lints: the CI scope note enumerated THREE crates and ocean-tauri was not among them, so no gate ever ran over it and errors accumulated silently — the same crate that turned out to hold TASK-78's arbitrary-exec primitive. I deliberately did NOT add a CI job I cannot validate from this machine; instead the scope note now names the crate, records why it is ungated, and hands the next person the two concrete blockers, both verified by hand: (1) generate_context! panics at COMPILE time when frontendDist ../../dist is missing so even cargo check fails in a bare checkout — a stub dist/index.html suffices for a lint gate; (2) webkit2gtk/libsoup on the ubuntu runner, or a macOS runner. Removing dist/ reproduces the documented panic exactly, so the note is tested prose rather than a guess. Crate is clippy-clean now, so the job should go green first run — if not, the runner setup is at fault, not the source. Verified: 27 tauri tests, fmt clean, clippy -D warnings exit 0 with dist present.
+_________________________________________________________________________________
+
 time:      [12:46] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-82-traversal-bypass (fable)
@@ -2413,6 +2544,8 @@ type:      bug-report
 area:      infra
 
 TASK-82 landed 947e099 — MY TASK-71 FIX WAS BYPASSED AND I SHIPPED IT. The guard ran on the RAW request path in proxy_rooms_persistent and matched only literal dot segments, so %2e%2e passed; the url crate decodes BEFORE RFC-3986 collapse, so the traversal worked anyway. Confirmed on the LIVE proxy before fixing: raw ../../.. -> 400 blocked, %2e%2e x3 -> 200 REACHED THE DAEMON. proxy_longhouse was never affected (guards the already-decoded axum Path capture). TWO CAUSES, both mine: (1) the guard's own doc said "call this on the DECODED tail" and one of its two call sites passed the raw path — a rule depending on every caller passing the right form eventually meets a caller that does not, so the guard now decodes internally and is correct on either input; (2) my probe matrix tested raw-on-rooms and encoded-on-longhouse, never encoded-on-rooms — a partial matrix READS as thorough and proves nothing. Regression now enumerates {raw, encoded, mixed-case} x both forwarders. Decoding is single-pass to match the url crate exactly (%252e stays literal '%2e', which upstream also will not collapse); malformed escapes preserved literally so nothing decodes into something shorter that looks safe. Re-probed full matrix: all traversals 400, legitimate room.v2 still routes, listener received ONLY the legitimate request. FOUND BY the adversarial review I commissioned over my own nine solo landings — the single most valuable thing I did today was doubt my own work. Reviewer also flagged four more real defects (stt/tts/observatory still on the untimed client; TASK-77 missed three interpolation sites; tauri open_file takes a caller-supplied root so its containment check is self-satisfiable; TASK-76's guidance:None assertion is tautological) — all filed rather than fixed in this commit.
+_________________________________________________________________________________
+
 time:      [13:05] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-85-open-file (fable)
@@ -2420,6 +2553,8 @@ type:      bug-report
 area:      infra
 
 TASK-85 landed 1c9fd0f (adversarial-review finding). open_file's containment check is correctly WRITTEN but structurally vacuous: both root and path come from the same IPC caller, so target.starts_with(&root) is self-satisfiable — root "/" passes any absolute path — and Tauri 2 capabilities do not gate generate_handler! commands. On macOS opener::open IS open(1), so that made it an arbitrary-file-EXECUTION primitive: .command/.terminal/.workflow/.scpt run, as does anything with the exec bit. Same threat model TASK-78 closed, different door — daemon writes and chmods a payload, this launches it. Making root trustworthy would require the shell to independently know the session workspace, which it does not today, so rather than pretend the check is a boundary I closed the CONSEQUENCE: refuse targets macOS would execute (extension denylist, case-insensitive, plus any executable bit — the shape a tool-writing daemon actually produces). Root check REMAINS as defence in depth and is now documented as such in-code so the next reader cannot mistake it for a boundary. Tests drive the real predicate against real files: .command/.COMMAND/.terminal/.workflow/.scpt and an exec-bit .txt all refused; md/json/png/pdf/extensionless all still open — a guard that blocks the feature it protects is not a fix. 28 tauri tests, clippy, fmt green. NOTE the remaining structural debt this does NOT fix: watch_paths and repo_state still accept arbitrary caller paths (watchers anywhere, git metadata leak) — same root cause, filed in the TASK-85 ticket text for whoever pins roots shell-side properly.
+_________________________________________________________________________________
+
 time:      [13:34] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-83-timeouts (fable)
@@ -2427,6 +2562,8 @@ type:      bug-report
 area:      infra
 
 TASK-83 landed 6cc5a2d — finishing TASK-73, whose commit message claimed the timeout split covered "every buffered JSON passthrough" and did not. Three handlers stayed on the untimed SSE client: stt (buffers via .json()), tts (via .bytes()), and observatory /snapshot + /replay — so dictation, speech and Observatory still hung forever on a wedged daemon. Observatory needed a BRANCH not a swap: one handler serves both an SSE tail and buffered routes, and the client was chosen BEFORE the branch that distinguishes them; it now picks by route shape, tail keeps the untimed client (a timeout there severs a live session), buffered routes get the bounded one. Verified the inverse mistake never happened — exactly three untimed uses remain, all genuine SSE tails. REGRESSION PINS THE CLASSIFICATION: it walks every untimed use and asserts each sits in a handler that feeds sse_stream_response, reporting offending line numbers. I PROVED it non-tautological by introducing a buffered use in a non-streaming fn, watching it fail with the correct line, then reverting — a step I now consider mandatory for any source-assertion test, because three of mine today passed for the wrong reason. Found by the adversarial review, which classified every call site where I had spot-checked. 25 tests, fmt, clippy green.
+_________________________________________________________________________________
+
 time:      [14:06] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-84-encode (fable)
@@ -2434,6 +2571,8 @@ type:      bug-report
 area:      frontend
 
 TASK-84 landed 771e595 — fourth review finding, fourth one of mine. TASK-77 encoded four session-id sites and shipped a regression to hold them; that regression matched a SINGLE literal binding ({id}), so three sites binding {session_id} were invisible to it — two paths and one QUERY STRING (/v1/agent/events?session_id={}), where an & or # splits the query and injects a parameter rather than traversing a path. ROOT LESSON: a regression narrower than the invariant it protects is exactly how a fix looks complete while call sites stay raw. The check now enumerates every binding name across both path shapes AND the query position, and reports which forms it found instead of just failing. Broadening it immediately surfaced a FOURTH hit the adversarial review had not flagged — which proved to be a doc comment describing the URL shape, not a call site; comments cannot execute, so the scan now strips them. That is the same self-reference trap that has hit these source-assertion tests four times today (needle matching its own test, its own comment, and now prose elsewhere in the file). Proved non-tautological per my new standing rule: reverted one encoding, watched it fail naming the exact form, restored. 685+ tests across 7 suites, wasm, fmt, clippy green.
+_________________________________________________________________________________
+
 time:      [14:38] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-86-tautology (fable)
@@ -2441,6 +2580,8 @@ type:      bug-report
 area:      frontend
 
 TASK-86 landed de35279 — LAST adversarial-review finding, and the worst kind of mine: a test that could not fail while appearing to guard a prompt-injection boundary. TASK-76's pin was src.contains("guidance: None,") where src is the same file containing that literal INSIDE the assertion; it would have passed with guidance: Some(page_controlled_text) at the call site. A test that cannot fail is worse than no test — it converts an unchecked invariant into a checked-LOOKING one, which is how it survived my own review. Fix is not a cleverer string match: the decision now lives in a pure turn_guidance() fn the call site calls, so the invariant is behavior a unit test asserts. PROVED by falsification (my standing rule since TASK-83): body replaced with Some(page_controlled_text) -> test fails loudly; restored -> passes. Also corrected THREE stale ocean-gui comments claiming per OCEAN-143 that the daemon DISCARDS guidance and using it is "a silent no-op" — false on current daemon main (apply_turn_guidance live, renders under "Operator guidance for this turn:"). That stale claim was LOAD-BEARING: it made a dangerous field look inert and is why the surface shipped tab titles through it. Prompt-folding stays right in ocean-gui, for the honest reason (one daemon-controlled framing site), not because the alternative is harmless. Gates: 685+ tests across 7 suites, wasm, fmt, clippy, plus cargo check -p ocean-gui — all raw-exit 0. ADVERSARIAL REVIEW NOW FULLY ACTIONED: 5 findings, 5 fixed (82 traversal bypass, 85 open_file exec, 83 timeout split, 84 encoding sites, 86 this).
+_________________________________________________________________________________
+
 time:      [15:05] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  deploy-gap (fable, ops)
@@ -2448,6 +2589,8 @@ type:      handoff
 area:      infra
 
 DEPLOY GAP CLOSED + NAMED. Verifying rather than assuming (the TASK-82 lesson applied to my own deploy story) surfaced that BOTH Tauri security fixes were missing from the installed app: /Applications/Ocean.app was built 23:09 on 07-19, while TASK-78 (webview could spawn an arbitrary executable) landed 11:14 and TASK-85 (open_file executes any file; containment self-satisfiable) landed 13:05 on 07-20. The web surface auto-deploys via the rail; crates/ocean-tauri DOES NOT — so I landed two native-shell exec fixes, announced them, and the machine ran the vulnerable build for hours. Rebuilt (trunk release + cargo tauri build), verified BOTH fixes present in the compiled binary by string-matching the error paths rather than trusting build exit 0, checked no running instance before replacing, installed to /Applications at 15:05, confirmed mic key survived. STRUCTURAL LESSON, bigger than the incident: "landed" and "deployed" are DIFFERENT CLAIMS and I have been reporting the former while letting it read as the latter. For anything outside the surface rail they can be days apart. Filed TASK-87 so the shell gets either its own rail or an explicit rebuild-required signal when ocean-tauri changes; until then every shell fix carries this silent lag. Also verified live on the web side: encoded traversal 400, csp sink 204, rail at 0ea8425.
+_________________________________________________________________________________
+
 time:      [15:35] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-87-rail (fable)
@@ -2455,6 +2598,8 @@ type:      feature-request
 area:      infra
 
 TASK-87 landed 1e7d3b3 — closes the deploy gap that let two native exec fixes (78, 85) sit undeployed for hours while reported as landed. The rail promotes web assets and can restart the shell but never RECOMPILES it; crates/ocean-tauri changes are Rust and a restart cannot pick them up. Rail now diffs crates/ocean-tauri across outgoing->incoming and writes tauri-rebuild-required + an explicit "a restart will NOT pick this up" log line. Scoped deliberately: frontend-only deploys stay silent, because a signal that fires every promotion is one nobody reads. scripts/rebuild-tauri-app.sh clears it and encodes the two hand-earned safety rules — refuses to replace a RUNNING app, and verifies the security guards exist in the COMPILED BINARY via strings rather than trusting exit 0. Rebuild stays manual on purpose: minutes-long build, and replacing an app under the operator is hostile; the rail's job is making debt visible, not acting on it. BUG FOUND WHILE BUILDING IT, and it is the day's lesson in miniature: my first version read the previous revision AFTER $MARKER was overwritten, so prev always equalled the incoming rev and the detector never fired — and the source-assertion test PASSED anyway, because it checked the script CONTAINED the right strings rather than that the behavior worked. Running an actual promote caught it. That is the sixth tautological test I have written today. Both directions now proven by execution: shell-source range writes the marker and logs REBUILD REQUIRED; frontend-only range writes nothing. 24 rail assertions green.
+_________________________________________________________________________________
+
 time:      [16:50] [20-07-26]
 agent:     [claude] [fable 5]
 worktree:  task-88-canvas-inject (fable)
@@ -2482,6 +2627,7 @@ Updated the Surface routing map for the agent-package split. Public ocean-agents
 now owns only reusable profiles and package mechanisms; private
 risingtides-agents owns production Rising Tides assistants, couriers, Slack
 intake, and workflows. Surface remains a thin client of ocean-os.
+_________________________________________________________________________________
 
 time:      [01:34] [07-21-26]
 agent:     [claude] [opus 4.8]
@@ -2729,3 +2875,4548 @@ dedicated Ocean tunnel LaunchAgent; repointed DNS to the existing Ocean tunnel;
 then verified the authenticated public title is Ocean, /health is healthy, and
 Pasture/Stitchpad markers are absent. Removed the temporary laptop recovery jobs
 and moved their exact files to Trash. No source build or source-code change.
+_________________________________________________________________________________
+time:      [03:04] [07-25-26]
+agent:     [ocean] [gpt-5.2]
+worktree:  [fix-public-login]
+type:      [bug-report]
+area:      [backend]
+
+Fixed the public cookie-login lockout reproduced through ocean.agentsworld.org.
+The CSRF check inferred the browser origin from cloudflared's origin-facing Host
+and x-forwarded-proto headers, so valid credentials were rejected with 403 before
+credential validation whenever the tunnel rewrote those headers. Added a strict,
+validated OCEAN_SURFACE_PUBLIC_ORIGIN setting: login/logout compare Origin exactly
+against that configured authority and use its HTTPS scheme for Secure cookies.
+The unconfigured local/LAN path retains inferred same-origin behavior and now
+handles comma-appended forwarding headers. Added regression coverage for rewritten
+tunnel headers, malformed origin configuration, and the real POST /login route
+setting an HttpOnly SameSite=Strict Secure session cookie. Production config pins
+https://ocean.agentsworld.org; no credentials are stored in source.
+_________________________________________________________________________________
+time:      [12:41pm] [07-25-26]
+agent:     [codex desktop] [gpt-5]
+worktree:  [codex/simplify-public-login]
+type:      [bug report]
+area:      [backend]
+
+Replaced the brittle public-login CSRF/origin gate with the operator's durable
+auth contract: any ordinary browser or device may exchange the configured
+username/password for the normal session cookie. Login no longer considers
+Origin, Host, forwarded headers, Cloudflare Access, Tailscale, or device
+posture. Credential comparison remains constant-time, failed credentials keep
+the existing 750ms delay, and the session cookie remains Path=/, HttpOnly,
+SameSite=Strict, and Secure when OCEAN_SURFACE_COOKIE_SECURE=on. Logout is an
+idempotent cookie clear with no origin rejection. Updated the proxy launcher,
+install guidance, and root devlog contract. Verified on the authoritative Mac
+mini worktree with cargo fmt --check, cargo check -p ocean-surface-proxy, all
+27 proxy tests, bash -n for the touched launch/install scripts, and diff check.
+_________________________________________________________________________________
+time:      [01:10pm] [07-26-26]
+agent:     [codex desktop] [gpt-5]
+worktree:  [codex/rollback-session-quarantine]
+type:      [bug report]
+area:      [frontend]
+
+Rolled back the TASK-46 client-side live-session quarantine that intentionally
+truncated a switched transcript, suppressed SSE content, displayed
+`detail syncing…`, and polled until a long-running turn ended. Public Chrome
+reproduction and Mac mini logs separated the two behaviors: the selected
+session remained visually hidden while its daemon turn was legitimately active
+for 884,913ms, and a second turn was correctly rejected by the daemon's
+one-operation guard. Session switches and reconnects now commit the daemon's
+complete persisted transcript immediately, preserve the live Stop projection,
+and continue the scoped SSE tail without a manual refresh control. Added a
+production-wrapper regression for a live session with partial persisted output.
+Verified 722 UI unit tests plus the integration suites, WASM check, strict WASM
+Clippy, formatting, and diff hygiene before deployment.
+_________________________________________________________________________________
+time:      [01:25pm] [08-03-26]
+agent:     [ocean] [gpt-5.6-sol]
+worktree:  [rooms-workspace]
+type:      [bug report]
+area:      [frontend]
+
+Closed the reviewed Rooms Slice 1 landing blockers without changing the product
+boundary. Room-list publication is latest-request-wins and exposes truthful
+loading/error state; room mutations, transcript refreshes, posts, and federated
+outbox retries admit results only for the current room generation. Non-local
+membership uses only the safe access projection. The workspace restores the
+unconfirmed outbox outside the transcript with failed-only retry, normalizes and
+single-flights sends while preserving edited drafts, and adds drawer focus,
+status, labels, presence semantics, and extension stylesheet inventory. Verified
+755 UI tests, strict WASM Clippy, WASM and proxy checks, Tauri check, formatting,
+script syntax, and diff hygiene; independent defect-first review returned CLEAR.
+_________________________________________________________________________________
+time:      [03:03pm] [08-03-26]
+agent:     [ocean] [gpt-5.6-sol]
+worktree:  [rooms-workspace]
+type:      [feature]
+area:      [frontend]
+
+Completed the TASK-49 Rooms interaction-layer checkpoint on top of the reviewed
+Slice 1 branch. The additive stylesheet supplies channel selection/focus states,
+unread and timeline forward contracts, compact touch refinements, and reduced-
+motion coverage without rendering fake presence; current live/unavailable
+presence remains owned by the daemon-backed base layer. Synced web and extension
+stylesheet inventories. Verified 755 UI tests plus integration suites, strict
+WASM Clippy, formatting, diff/script hygiene, and a Trunk release bundle; an
+independent exact-commit review returned CLEAR.
+_________________________________________________________________________________
+time:      [09:45am] [08-06-26]
+agent:     [ocean] [rooms-pm]
+worktree:  [feat/rooms-slack-workspace]
+type:      bugfix
+area:      frontend
+
+Aligned the Rooms Surface with ocean-os PR #366's unified JS-safe read-cursor
+wire: PATCH and room-scoped SSE now strictly decode `{room_id, read_seq}` with
+decimal strings, validate room identity, preserve Local/Live projection meaning,
+and fail closed on malformed payloads. Added >2^53, null, wrong-room, and malformed
+regressions. Grouped message timestamps now remain visible on touch/non-hover
+surfaces. Frozen gates passed: fmt/diff, wasm UI and proxy checks, strict wasm
+clippy, wasm test no-run, and native UI 787/787 plus auxiliary suites. Independent
+follow-up review was CLEAR.
+_________________________________________________________________________________
+
+time:      [23:42] [08-26-26]
+agent:     [claude] [opus 5 1m]
+worktree:  feat/agent-builder-ui
+type:      [feature-request]
+area:      [frontend]
+
+Built the agent builder into the rooms members rail, closing the gap where the
+daemon had full folder-as-agent CRUD but the surface only ever performed the
+read half — authoring an agent meant hand-writing agent.toml and instructions.md
+on disk, or curling JSON. Under the same `+ agent` disclosure that lists existing
+agents there is now a form (name, description, model, tools, instructions.md)
+that creates a new agent and edits an existing one, refreshing the picker above
+it on success so the agent is one click from being in the room. New module
+crates/ocean-surface-ui/src/agents.rs owns the write layer; the model picker is
+driven by the daemon's own /v1/models through a shared Rooms::models handle
+rather than a hardcoded list; tools stays free text because no /v1/tools
+catalogue exists to build a picker from. Two data-loss guards ship with edit: the
+write body round-trips capabilities and yolo verbatim (the daemon rebuilds
+agent.toml from what it is handed, so an omitted field is deleted from disk), and
+an agent declaring [[subprocess_capability]] is refused outright because the
+write API's AgentSpec cannot express it. Prefill reads config.tools, never the
+merged AgentDef.tools, so a no-op edit cannot promote tools/ filename stems into
+agent.toml. Also fixed the reason this would have been dead on web: the proxy is
+an allowlist, and /v1/agents was GET-only with no /v1/agents/{name} at all —
+added POST plus GET/PUT with the has_dot_segment guard (percent-encoding does not
+neutralise `..`; `.` is unreserved), pinned by production-router tests that
+discriminate 502-from-the-forwarder against 404/405-from-the-fallback. Landed as
+two commits: create, then edit with its guards. Verified cargo fmt --check, both
+cargo check targets, 878 native UI tests, 41 proxy tests, and the wasm test build.
+NOT verified against a live daemon: the write routes are on ocean-os
+feat/agent-crud (5a010452), not main, so this is blocked on that merge. One
+honest caveat — `cargo clippy -p ocean-surface-ui --target wasm32-unknown-unknown
+-- -D warnings` was ALREADY red on origin/main (dead `mint_suffix` in rooms.rs)
+before any of this work; my own code is clippy-clean and that error is untouched.
+_________________________________________________________________________________
+time:      [00:07] [08-27-26]
+agent:     [codex desktop] [gpt-5]
+worktree:  [fix/rooms-identity-ordering]
+type:      [bug report]
+area:      [frontend]
+
+Closed the cross-login Rooms identity race on top of the initial ordering fix.
+Browser Rooms now remain unresolved until the same-origin proxy publishes the
+current login, so a previous tenant's local storage can never authorize an
+early join or post. Single-operator, extension, and Tauri hosts use one stable
+local identity; reactive identity signals own their strings without leaking an
+allocation on each change. Removed the obsolete random-id generator and added
+identity normalization/fallback tests. Verified 869 UI tests plus integration
+suites, strict WASM Clippy, WASM and proxy checks, formatting, and diff hygiene.
+_________________________________________________________________________________
+time:      [00:42] [08-27-26]
+agent:     [codex desktop] [gpt-5]
+worktree:  [fix/rooms-identity-ordering]
+type:      [bug report]
+area:      [frontend]
+
+Rebased the fail-closed identity correction onto current Surface main and
+closed two additional Rooms lifecycle defects in the same client bundle.
+Channel and thread drafts, mentions, and pending-send confirmation now reset on
+the exact room generation, so switching or closing cannot carry content into a
+different room or strand both composers behind `Sending…`. Empty hydrated
+transcripts now omit `after_seq`; the first zero-based room row is no longer
+silently skipped by refresh or SSE startup.
+
+Verified 882 native UI tests plus integration suites, strict WASM Clippy, WASM
+check and test compilation, all 46 proxy tests, proxy check, formatting, and
+diff hygiene. Production deployment remains pending review and merge.
+_________________________________________________________________________________
+time:      [22:55] [08-27-26]
+agent:     [claude] [opus 5]
+worktree:  loop/attachments-ui
+type:      [feature-request]
+area:      [frontend]
+
+Room context files are reachable from a browser. The four daemon attachment
+routes had landed and been verified live, and nothing in the UI called them, so
+the feature read to the user as nothing at all. New attachments.rs owns the
+panel: list, upload with a real error rather than a hang at the 8 MiB cap, and
+open. The proxy half is where the substance is — the room lane forwarded
+everything under one 1 MiB JSON body limit and stamped every buffered reply
+`application/json`, so an upload could not physically reach the daemon and a
+download arrived mislabelled with its Content-Disposition dropped. The lane is
+now classified by segment shape, not by substring: a room literally keyed
+`attachments`, a path one segment deeper, and an empty id all stay JSON, and
+that is four negative tests rather than a comment.
+
+ATTACHMENT_UPLOAD_BODY_LIMIT mirrors the daemon's own MAX_ATTACHMENT_BYTES +
+BODY_LIMIT_SLACK exactly, verified against ocean-os origin/main rather than
+guessed. The slack is load-bearing: capping at the cap would turn every
+oversize upload into our own untyped 413, which reads as a proxy bug instead of
+the rule it is. The download lane early-returns before the JSON buffering and
+forwards the upstream content type verbatim, injecting nosniff only where
+upstream declared no type at all.
+
+Review found one real defect in the state machine, in exactly the area the
+module's comments claimed to have solved: the upload-completion path had no
+current-room guard, so a room switch mid-upload painted the previous room's file
+list under the new room's name with dead links and left the new room's control
+stuck on "uploading…". The module had invented a narrower ticket covering only
+the list path. It now uses the repo's own idiom — generation_snapshot() at start,
+room_is_current() re-validated immediately before ANY write in the completion
+arm — the same guard rooms.rs uses at its eight async-completion sites. reset()
+also clears `uploading`, which the doc comment already claimed it did.
+
+Two tests were dead weight and one is now gone. The ceiling test asserted a
+constant equals its own literal and stayed green with the body-limit fix fully
+reverted; clippy --all-targets rejected the same line as an assertion on a
+constant, so it was deleted. The constant's own doc already carries the why, at
+more length and better. Real coverage for the ceiling and the header contract
+lives in the build_app tests, which do fail on revert.
+
+Verified: 926 native UI tests, 50 proxy tests, cargo fmt --check, strict clippy
+on both crates under --all-targets, RUSTFLAGS="-D warnings" wasm check, and the
+frozen wasm --no-run test link. Deploy remains a human decision.
+_________________________________________________________________________________
+
+time:      [20:53] [08-27-26]
+agent:     [claude] [opus 5]
+worktree:  loop/room-summary-ui
+type:      [feature-request]
+area:      [frontend]
+
+A room can be summarized from a browser, and the summary reads back where
+people look. The daemon has been able to summarize since the summarize route
+landed — bounded transcript tail, one model turn, folded into the well-known
+room-summary artifact — and no browser could run it or read what it wrote, so
+the feature did not exist to anyone using Ocean. A control in the right rail
+now runs one turn, and the artifact renders in the room including on open,
+through the GET, so a room summarized last week reads back without spending
+another turn. Three things the wire contract forced and they are the design:
+summarized:false is not a failure (unchanged still carries the artifact that
+stands, and no_messages and empty_summary are equally truthful 200s, so notes
+and errors are separate signals with separate colours); the artifact is a
+singleton, so this side mints no ids and watches version move, which is what
+makes a repeat run an amend; and 403/429/502/504 each say something an
+operator can act on, at_capacity in particular reading as busy rather than
+broken. Follows attachments-ui throughout — workspace-scoped state mounted as
+a sibling of the roster closure, a monotonic read ticket, a (generation, key)
+re-validation on the run, and reset clearing the in-flight flag.
+
+Review found the module's load-bearing guards were decoration: three of the
+four its own doc comments call load-bearing could be deleted with all 908
+tests and clippy silent. One real behavioural hole rode along — summarize()
+minted no ticket, and since can_summarize deliberately does not wait on
+loading, the room-open GET was still out holding the PRE-run artifact and,
+landing last, published stale prose and an older v{n} over the summary the
+operator had just paid a turn for. begin_run now bumps the ticket and clears
+loading with it. The trade is stated in its doc rather than left to be found:
+a run that then FAILS leaves no standing summary until the next run or reopen,
+because the run is the authority for the room it started in. The two
+admissions moved into publish_read and publish_run as arguments rather than
+recomputed conditions, so each refusal is reachable with no Rooms and no
+browser; the old a_run_landing_after_a_room_change_cannot_publish asserted
+rooms.rs's own pre-existing predicate and is gone. The 404 arm now answers
+only to unknown_artifact, the daemon's only coded 404 there — an unknown room
+comes back with no code at all, and reading that as "no summary yet" told an
+operator a room that is GONE merely had nothing to say.
+
+Verified at land: ocean-surface-ui 913 lib tests plus 30 across the six
+integration binaries, proxy 50, clippy --all-targets -D warnings clean on both
+crates, cargo fmt --check clean, and RUSTFLAGS="-D warnings" cargo check
+--target wasm32-unknown-unknown exit 0 — the release lane the test profile does
+not stand in for. Five mutations, each applied alone and reverted, each failing
+a named test; the guard deletions were written with _-prefixed params so they
+do not trip the incidental unused-variable warning that was the only thing
+catching the naive version. INERT UNTIL THE DAEMON SHIPS: the summarize routes
+exist only on ocean-os main at 88c34cf0 and later, and a surface pointed at an
+older daemon now gets a real fault rather than a false "No summary yet." Surface
+deploy stays a human decision. No migration. PR #125.
+_________________________________________________________________________________
+
+time:      [03:33] [08-28-26]
+agent:     [claude] [fable 5]
+worktree:  loop/exec-and-build-history-in-the-room-ui, loop/proxy-forward-timeout-unpinned
+type:      [merge]
+area:      [frontend]
+
+Wave 6 landed two surface slices. PR #132: the room's workspace is no longer
+curl-only — a right-rail Workspace section opens a panel showing provision
+facts, the last build's outcome (derived from the exec list via Bedrock's
+"# ocean-room-build" marker), and recent execs with verdict, exit code, and
+per-stream tails. ABSENT tails render as a withheld sentence and NULL tails
+(still running) render nothing, kept distinct by a double-option serde shim
+that a test pins against reversion. The panel polls both lane routes at 4s
+using the room_repo ticket/epoch idiom because the daemon's federation ingest
+only accepts event_type=="message", so room.workspace.* events never reach the
+surface — the push path is filed as its own ocean-os slice
+(workspace-events-do-not-reach-the-room). No provision/destroy affordance:
+those routes are not on the daemon lane, so absence is stated, not offered.
+Until a human deploys both Bedrock (railway up) and a current daemon, the
+panel's "isn't available on this deployment yet" state is the expected
+production behavior. PR #133: the proxy's 990s workspace-command forward
+timeout — previously applied by one untested match arm — is now routed through
+fn forward_timeout(shape) and unit-tested: WorkspaceCommand gets 990s (above
+the daemon's 960s budget), buffered non-command shapes ride the 120s JSON
+budget, and EventsTail is deliberately absent because the SSE tail streams on
+the untimed client where any budget would sever every live tail. On the
+record: the builder-site wiring is guarded by clippy dead_code, not a test.
+Verified at land, both PRs: 998 UI + 53 proxy + integration suites 0 failed,
+clippy --all-targets -D warnings clean, fmt clean, RUSTFLAGS="-D warnings"
+wasm check clean.
+_________________________________________________________________________________
+time:      [13:46] [08-29-26]
+agent:     [claude] [fable 5]
+worktree:  loop/repo-bind-unbind-ui
+type:      [merge]
+area:      [frontend]
+
+Landed wave 17's two ocean-surface slices. PR #141: owner bind/unbind
+controls in the repo panel, entirely in room_repo.rs + the root stylesheet.
+Bind form (remote/branch/dir) builds its payload with a pure bind_payload()
+sending exactly the keys validateRepoBinding admits and omitting empty
+branch/dir so upstream defaults stay upstream's; unbind sits behind a
+one-click-arms-confirm flow since bedrock#40 made it delete the checkout,
+and posts {} because the daemon lane demands a JSON object. Neither verb
+trusts its mutation reply into the view — publish_command notes the outcome
+and the caller re-fetches GET repo (pinned by test). checkout_removed is
+surfaced honestly (removed / no_container / rm_failed), the owner refusal
+reads as a calm state, Bedrock's prose-only 403 relays in its own words, and
+no client-side authorization was invented — the daemon gate is the
+authority. 13 new tests. Inert until a daemon at >= ocean-os#390 is
+deployed; old daemons degrade gracefully. PR #142: exec history stops
+headlining a CI pull as "# ocean-room-ci" — command_headline sheds either
+bookkeeping marker via find_map, a CI row headlines its gh line, and a new
+test pins that last_build_sentence keys on the build marker alone so a CI
+pull can never masquerade as a build. Gates re-run at land after rebase:
+full suite green (1063 UI tests at #142), clippy -D warnings, fmt, and the
+RUSTFLAGS="-D warnings" wasm32 release-lane check all clean, both PRs.
+_________________________________________________________________________________
+
+time:      [23:54] [08-29-26]
+agent:     [claude] [fable 5]
+worktree:  loop/surface-agent-delete-control
+type:      [feature-request]
+area:      [frontend]
+
+Agents created in the UI are no longer immortal there: the agent builder's
+edit mode grew a delete control wired to the daemon's DELETE /v1/agents/{name}.
+First click arms, second removes (the workspace panel's destroy two-step);
+start_create, load_def, form close, and dispatch all disarm, so a primed
+confirm never survives a target switch. Success exits edit mode into a blank
+create and refreshes the picker via on_deleted; failures render inline through
+write_error_message, so a daemon or proxy without the verb reads as
+NO_WRITE_API rather than a decode error. The subprocess-capability block
+deliberately gates Save alone -- DELETE round-trips nothing, so a lossily
+unsaveable agent can still be removed whole (pinned by test). The proxy's
+pinned "DELETE is deliberately absent" test demanded this be a decision:
+decided -- proxy_agent_delete forwards through agent_daemon_path (same
+dot-segment guard as GET/PUT, pinned as 400 on %2e%2e), the allowlist comment
+records it, and the flipped test asserts the forwarder is reached. Known gap
+noted, not fixed (ocean-os work): a room already holding the agent keeps its
+roster row -- agentdir::remove deletes only the folder. Gate green: 1101 UI +
+54 proxy tests, clippy -D warnings, fmt, wasm32 -D warnings check.
+_________________________________________________________________________________
+
+time:      [00:59] [08-30-26]
+agent:     [claude] [fable 5]
+worktree:  loop/surface-workspace-failed-reason-discarded
+type:      [feature-request]
+area:      [frontend]
+
+A failed workspace provision now tells its owner why. Bedrock has been
+spreading last_error into the workspace projection all along -- owner-only,
+present only while status is failed -- but WorkspaceProjection had no field
+for it, so serde dropped the key and the panel rendered the bare word
+"failed". The projection grew `#[serde(default)] last_error: Option<String>`
+(plain Option, not double_option -- the key is never null on the wire), and a
+failed_reason guard renders it as a role="alert" div under the facts grid
+only when status is failed and the reason is non-empty. Absent renders
+nothing: a non-owner or an older Bedrock is unknown, never "no reason" --
+mirroring the repo panel's clone_error. view_flip deliberately untouched: a
+reason cannot change without the status flipping through provisioning first,
+because beginProvision forces failed -> provisioning. Negative control proven
+at review and re-proven at land: with the field #[serde(skip)] (the original
+bug) the keeps-the-owner-reason test fails at None vs Some. Gate re-run at
+land after rebase onto origin/main: 1133 tests green, clippy -D warnings,
+fmt, wasm32 -D warnings release-lane check all clean.
+_________________________________________________________________________________
+
+time:      [01:52] [08-30-26]
+agent:     [claude] [fable 5]
+worktree:  loop/surface-roster-agent-remove-control
+type:      [feature-request]
+area:      [frontend]
+
+The browser can finally take an agent OUT of a room. The daemon's
+participant DELETE landed long ago but only self-leave ever called it, so
+a mistyped agent sat in the roster forever. Rooms::remove_participant
+mirrors leave_open aimed at another row (status names who went, view
+stays up), and every Local member row except the caller's own grows a
+quiet x arming a remove/keep confirm -- two-step because the removal is
+durable, same vocabulary as the agent builder's delete. The armed id
+lives at component scope per the rail-closure warning (roster SSE
+rebuilds would disarm it mid-interaction), and a pruning effect drops it
+when the target leaves the roster or the room changes -- the room check
+exists because a same-id agent in the next room would otherwise inherit
+the primed confirm. Federated rosters untouched (bedrock-authoritative).
+Gate green: 1108 UI tests + integration suites, clippy -D warnings, fmt,
+wasm32 -D warnings release-lane check.
+_________________________________________________________________________________
+
+time:      [02:51] [08-30-26]
+agent:     [claude] [fable 5]
+worktree:  loop/surface-access-writes-single-source
+type:      [refactor]
+area:      [frontend]
+
+The access policy now has one source of truth. Two divergent copies of
+access_allows_writes gated every write control, and the banner policy had
+already split for real: rooms.rs pinned "Connecting"/"Recovering" in a
+test while the mounted banner rendered "Connecting to federated room..."
+-- the tested strings and the rendered strings disagreed. Hoisted along
+the #149 room_is_federated pattern: rooms_workspace.rs owns pub(crate)
+access_allows_writes (rooms.rs imports it) plus a private access_banner
+returning the RENDERED labels, which the stage banner match now calls for
+its text so test and UI cannot diverge again; classes and roles stay in
+the view. One matrix test pins write policy + rendered banner per state.
+Dead agent-id helpers (Rooms::agent_ids, agent_ids_for) deleted whole
+with their tests: zero callers, and the shape is wrong for the composer
+hint they promised (member UUIDs vs typed @names) -- that hint is a
+future slice. Net -98 lines. Gate green: 1102 UI tests + integration
+suites, clippy -D warnings, fmt, wasm32 -D warnings release-lane check.
+_________________________________________________________________________________
+
+time:      [04:03] [08-30-26]
+agent:     [claude] [fable 5]
+type:      [merge]
+area:      [frontend]
+
+Ocean-loop wave land phase: merged #155 (federated roster remove control) --
+the PR branch did not carry its ledger entry, so recording here. os#402
+landed the daemon's federated-member DELETE two days ago and no browser
+control reached it. Federated roster rows now carry the same arm-confirm
+remove control as local rows: Rooms::remove_member (DELETE
+/v1/rooms/persistent/{key}/members/{member_id}) with a status-discriminated
+pure decoder -- a 200 body IS the refreshed RoomAccessProjection, applied
+via apply_access_projection so the member is gone the moment the response
+lands; failures decode {"ok":false,"error":code}; 403 federation_forbidden
+renders as a per-attempt refusal, never as revocation; the generation guard
+keeps late responses out of other rooms. Every federated row offers the
+control (the projection carries no self flag -- bedrock's owner-or-self
+policy answers), and keep_armed_remove now also consults the access
+projection's members so an armed federated confirm survives the SSE access
+updates that rebuild the rail. styles/rooms-workspace.css needed zero
+delta. Gate at land after a no-op rebase: 1108+4+8+4+7+5+2 tests green (3
+new decode + 3 new federated prune tests), clippy -D warnings, fmt, wasm32
+-D warnings release-lane check; review mutation-tested the prune-survival
+test. Known nits backlogged: keep_armed_remove ORs both rosters instead of
+checking the rendered one (theoretical -- id namespaces do not overlap),
+and remove_member's success path skips refresh_open_transcript (the 200
+body already carries the roster; any transcript marker rides the SSE tail).
+NEEDS HUMAN for production effect: bedrock #46's owner-or-self policy is
+merged but undeployed (Railway has no GitHub source) -- until a railway up,
+production federated removes answer 404/unknown-route; local stack works.
+The projection's missing self identity is the queued
+os-access-projection-carries-self-member / surface-roster-marks-your-own-
+rows pair.
+_________________________________________________________________________________
+time:      [05:47] [08-30-26]
+agent:     [claude] [fable 5]
+worktree:  loop/surface-roster-marks-your-own-rows
+type:      [feature-request]
+area:      [frontend]
+
+Federated roster now knows which row is you. Mirrored ocean-os e2796999's
+RoomAccessProjection.self_member_id into the surface wire types (Option,
+default + skip-if-none, so absent keys and older daemons decode to None and
+None never serializes back) with an os-posture serde compat test. The
+federated members branch threads it per row: your own row renders badges but
+no remove control -- self-removal is the header's Leave, and removing your
+own membership would sever your federation -- and agent rows you own get a
+"yours" chip, the rows bedrock's owner-or-self policy actually lets a
+non-owner remove, replacing a dial-and-403 probe per attempt. Both marks are
+pure predicates (federated_member_is_self / federated_member_is_yours) in
+the file's house style; the yours one requires is_some() first because a
+naive owner_member_id == self_member_id reads None == None as ownership.
+keep_armed_remove gained a self_member_id param that disarms a confirm whose
+target the projection later reveals to be the caller, and the armed render
+gates on !is_self for the same race. The stale EVERY-row-offers-the-control
+comment now tells the new truth while keeping the 403 fallback half. When
+self_member_id is None (local room, older daemon) every row renders exactly
+as before. Gate: 1112+4+8+4+7+5+2 tests green (1 serde + 2 predicate + 1
+prune test new), clippy -D warnings on wasm32, fmt --check clean, wasm32
+-D warnings release-lane check green.
+_________________________________________________________________________________
+
+time:      [11:41] [08-30-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-ci-events-ledger-guard
+type:      [gh-actions]
+area:      [infra]
+
+Added a ledger job to CI so a PR that changes code must carry its events.md
+entry in the same diff. Ledger discipline slipped three consecutive waves of
+the automated loop that works this repo, and the land phase kept appending the
+missing entries afterwards from disposable worktrees; a machine check beats a
+fourth reminder. Mirrors the ocean-bedrock guard landed as its PR #50, with the
+guarded set re-derived for this repo rather than copied: crates/ and styles/ are
+the app (stylesheets live at the repo root here), index.html is trunk's entry
+point, and scripts/ ops/ deploy/ extension/ vscode-extension/ .github/ change
+how it builds or ships. docs/, mockups/, design-systems/, local_plans/, audit/,
+legacy-voice/, public/ and the root manifests stay unguarded. Like every other
+job here it is deliberately not a required check — red is information, not a
+lock. The predicate was exercised against eight diff shapes before landing,
+including this PR's own.
+_________________________________________________________________________________
+
+time:      [13:01] [08-30-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-room-invite-control
+type:      [feature-request]
+area:      [frontend]
+
+Rooms are the multiplayer surface and there was no way to put a second person
+in one from a browser: POST /v1/rooms/persistent/{key}/invites has been live in
+the daemon for months and grep for "invite" across crates/ocean-surface-ui
+returned nothing. New room_invite.rs in the house pattern -- a rail row under
+the roster, where adding a person belongs, and a panel with an optional
+recipient, an expiry, the minted code with copy, and when it expires. Three
+things about this lane differ from its neighbours and each is a test. The 201
+answers the raw InviteResponse with no {ok:true} envelope, so a decoder copied
+from artifacts or the workspace lane reads a successful mint as malformed.
+`code` is the grant on a success and the refusals carry their machine code in
+the top-level `error` instead, so success is settled on status-plus-code first
+and only a non-success is asked what its error means -- otherwise a minted code
+that happens to spell a refusal classifies as one. And a bare 404 is a daemon
+predating the route ("not available yet") while a 404 carrying room_not_found
+is the room being gone; 503 federation_unavailable is the deployment saying
+federation isn't configured, which is a state, not a failure. The trap worth
+the most: on a Local room this call BOOTSTRAPS federation -- room_federation.rs
+registers the room with Bedrock under the daemon's owner token and it stays
+federated -- so unlike RoomRepo this section renders for Local rooms and the
+first click only arms, with the consequence stated before anything is sent. The
+code is a bearer grant, so it lives in one signal and the open panel only: the
+rail line says an invite exists and never what it is, a room switch clears it,
+and a source guard fails the suite if anyone reaches for a logger in this
+module. Redeem is deliberately absent -- it belongs in the left rail beside
+create-room, not in a room. Gate: 1136+4+8+4+7+5+2 tests green (24 new), clippy
+-D warnings on wasm32, fmt --check clean, and the wasm32 -D warnings
+release-lane check green.
+_________________________________________________________________________________
+
+time:      [14:12] [08-30-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-room-invite-control
+type:      [review]
+area:      [frontend]
+
+Review pass on the invite control found two ways it answers into the void, both
+fixed here. The invalid_request sentence said "check the expiry", which is the
+one thing that cannot be wrong: parse_ttl already holds the field to the route's
+own 1..=10080, so a request that leaves this module can never earn the daemon's
+ttl 400. The reachable cause is create_invite's canonical_room_key check -- a
+Local room whose key isn't lowercase-ascii/digits/._- or runs past 128 bytes is
+refused at the federation bootstrap -- and room keys are never validated at
+create (RoomKey::new is a bare newtype, create_in_workspace only rejects empty),
+so any room made by the CLI or an agent, or a long slugified name, lands there.
+The sentence now names the key and states the rule. Second: MintOutcome::State
+rendered only inside the panel, while the error rendered in the rail too.
+Nothing cancels an in-flight mint when the panel closes and publish still
+writes, so closing the panel mid-mint and getting back a 503 or a route-absent
+404 left the operator with no answer anywhere on screen. Both slots now render
+in the rail, held by a source guard that slices the module at the panel gate and
+asserts each read appears before it. Gate: 1138+4+8+4+7+5+2 tests green (26 in
+room_invite, 2 new), clippy -D warnings on wasm32, the wasm32 -D warnings
+release-lane check, fmt --check, and the proxy clippy job all clean.
+_________________________________________________________________________________
+
+time:      [15:04] [08-30-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-room-invite-redeem
+type:      [feature-request]
+area:      [frontend]
+
+The browser could mint an invite and never consume one. POST
+/v1/rooms/persistent/invites/redeem has been live in the daemon and nothing on
+this surface called it, so joining a room you were invited to meant curl. New
+room_redeem module and a rail control: paste a code, and on success you land in
+the room. Three things in that route make it a different animal from mint, and
+each cost a decision. Its 200 is a RoomAccessProjection with NO room key --
+recover_pending derives the key from the invite scope, creates the room with it,
+and drops it on the way out -- so a successful redemption cannot say which room
+it joined. Rather than invent one from an opaque code, the module snapshots the
+room-list keys before the request and diffs them after through a pure
+newly_joined_key, opening the room only when EXACTLY one appeared and falling
+back to "it's in your list" otherwise; a concurrent create or an already-held
+room both refuse to guess. The diff needs an await point that fire-and-forget
+fetch_rooms cannot give, so it runs its own key-only probe and still hands the
+canonical refresh to fetch_rooms. Second: room_not_found is unreachable on this
+route (no path through redeem_invite/recover_pending returns
+IntentError::NotFound), so a 404 is always the router and never the room, and
+the backlog's refusal list was wrong to include it. Third, and the trap: the
+refusals split on whether the CODE IS SPENT, not on severity. remove_pending
+runs on 403 alone; every other refusal retains the pending redemption and
+get_or_insert_pending_redemption keys it on the code, so re-sending the SAME
+code resumes rather than starting a second -- which makes the 409 an invitation
+to retry, not a dead end, and makes 503/500 and a cut connection safe to retry
+too. Retry and Refused are separate outcome arms for that reason, a join clears
+the field and every refusal keeps it, and the 503 sentence carries both of its
+causes since unlike mint's it is a transient as often as a deployment fact.
+Review caught the one test that was decoration: the mount guard searched
+rooms_workspace.rs for "room_redeem::RoomRedeem", which is a strict prefix of
+the RoomRedeemState binding at component scope, so it passed with the element
+deleted. Its needle is now the element form, and a second guard reads the
+component body from source for its class literals and both answer slots --
+without it, emptying the view to a bare div left all 24 tests green, because
+the stylesheet tests only ever read the stylesheet. Both are mutation-checked.
+Gate: 1163+4+8+4+7+5+2 tests green (25 new in room_redeem), clippy -D warnings
+on wasm32, the wasm32 -D warnings release-lane check, cargo check on the proxy,
+the wasm32 test build, and fmt --check all clean.
+_________________________________________________________________________________
+
+time:      [17:04] [08-30-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-trigger-toggle-is-hidden-on-exactly-the-rooms-where-it-fires
+type:      [bug-report]
+area:      [frontend]
+
+The build-failure toggle was visible in exactly the rooms where it cannot fire
+and hidden in exactly the rooms where it can. The Triggers section was wrapped
+in a Local-only gate whose comment claimed a federated room's policy "is
+evaluated by its owning daemon, and PATCHing the local mirror would only forge
+a copy that changes nothing." Traced through ocean-os at origin/main 0b32db5d,
+that premise is false: every one of the three flags is judged against a policy
+read from THIS daemon's store, and the federation bridge reads it too --
+ingest_message_row calls store.trigger_policy(&credential.room_id) and
+ingest_workspace_row calls store.trigger_policy(key), the same store
+room_update's PATCH writes, and neither that route nor
+Rooms::update_open_room_policy carries a local/federated gate. So a federated
+room's policy is live state, not a mirror. What actually varies is which flag's
+EVENT can be constructed for which kind of room, and it is a three-way split,
+not the one-way exemption the backlog guessed. RoomTriggerEvent::BuildFailed is
+built in one place -- ingest_workspace_row, on a room.workspace.build_failed
+marker -- and workspace markers arrive only over the bridge, so a Local room
+has no workspace to fail and the checkbox was pure decoration there. Mention is
+built on BOTH paths, so the gate was over-restrictive for it too. ThreadReply
+is genuinely Local-only, and for a reason worth writing down: it is built
+solely on the local post path from the thread root's author, and the federated
+MessagePayload decodes to {client_event_id, author_member_id, body,
+mention_member_ids} with no thread parent at all, so the bridge can never
+construct one. The section now renders in every access state and the decision
+moved per-row into trigger_row_dead_here, which returns the note a row wears
+when its flag is dead here; trigger_row_is_editable pairs it with the rail-wide
+access_allows_writes gate every other section already takes, so Connecting,
+Recovering and Revoked hold all three rows rather than offering a write the
+room is not accepting. A dead row renders disabled with its reason inline
+instead of vanishing, so the section keeps its shape and the user learns which
+kind of room the flag needs -- the existing :has(input:disabled) dimming
+already covered the treatment. This was reachable, not theoretical: since #159
+a room joined by redeeming an invite arrives federated and was never Local, so
+build-failure waking could not be turned on from the browser at all, not even
+via set-it-at-create-then-federate. The read half already contradicted the
+write half -- the Response Policy summary was never gated and has been printing
+"build failure" for federated rooms that had no control to change it. Gate:
+1168+4+8+4+7+5+2 tests green (5 new, one per arm of the split plus the
+write-gate and unknown-access rows), clippy -D warnings on wasm32 and on
+--all-targets, the wasm32 -D warnings release-lane check, cargo check on the
+proxy, the wasm32 test build, and fmt --check all clean.
+_________________________________________________________________________________
+
+time:      [17:29] [08-30-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-trigger-toggle-is-hidden-on-exactly-the-rooms-where-it-fires
+type:      [review]
+area:      [frontend]
+
+Review sent the trigger-row fix back for the right reason: the engineering held
+up under independent re-tracing, but the five new tests were decoration. They
+exercise trigger_row_dead_here and trigger_row_is_editable, two pure functions
+the view is free to stop calling, and the reviewer proved it by reverting each
+half of the fix on its own -- re-inserting the old Local-only early return into
+the section closure, then dropping the gate out of the row's disabled binding
+-- and watching the whole suite stay green both times. A pure-function test can
+only show a helper answers correctly when asked; nothing pinned that anything
+asks. The wiring is text in this file, so it is now pinned the way the guards
+further down this module already pin an emitter: slice the source between the
+triggers closure's opening brace and the group it emits and assert no
+RoomAccessState survives in that span, then slice trigger_toggle_row and assert
+its disabled= line still mentions the gate. Needles are concatenated at runtime
+so the test's own literals cannot stand in for the code it scans -- the same
+trick the __thread-inline and __msg-ledger guards use, and the reason the
+recent room_redeem mount guard was caught passing on a strict prefix. Both of
+the reviewer's reverts were re-run against the new test and both now fail
+loudly, on the assertion written for them: experiment 1 on "the triggers
+section must render in every access state", experiment 2 on "`disabled=` must
+consult the per-row gate". Gate: 1169+4+8+4+7+5+2 tests green (one new),
+clippy -D warnings on --all-targets and on wasm32, the wasm32 -D warnings
+release-lane check, cargo check on the proxy, the wasm32 test build, and
+fmt --check all clean.
+_________________________________________________________________________________
+
+time:      [18:59] [08-30-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-redeem-reads-the-room-key-and-drops-the-diff
+type:      [feature-request]
+area:      [frontend]
+
+ocean-os #407 landed `room_key` on the redeem 200 two days ago and this bundle
+was not decoding it -- state written and never read -- so room_redeem.rs now
+reads the key off the reply and opens exactly that room, and the
+snapshot-the-list-then-diff-it dance is demoted to the fallback for a daemon
+predating #407. The field is OPTIONAL surface-side on purpose even though the
+daemon requires it: the bundle and the user's local daemon roll forward
+independently, and a hard decode requirement would turn a redemption that
+already succeeded -- room created, credential installed, no un-redeem -- into
+an unreadable reply. newly_joined_key, RoomsProbe, fetch_room_list, the
+`before` snapshot and joined_sentence's None branch all stay reachable through
+that fallback arm rather than being deleted or muted with #[allow(dead_code)],
+which is what the wasm32 -D warnings lane is there to catch. Three findings
+settled in the same file. A proxy 502/504 answers HTML, the body never decodes,
+and the old code called that Refused -- i.e. told the operator their invite is
+spent, which is a lie: the daemon runs remove_pending only on a 403 it produced
+itself (room_federation.rs:1367, :1408), so a gateway fault RETAINS the pending
+redemption and the same code resumes it; every 5xx that no known refusal code
+named is now Retry, on the undecodable path, the codeless path, and an unknown
+code. The empty-submit guard returned without clearing `note`, stacking "Paste
+an invite code first." on top of a stale "Joined warroom. Connecting..." -- it
+clears both slots now like every other path. And no_sentence_can_carry_the_code
+was true by construction: it fed the four sentence builders a room key and
+machine error codes, none of which takes the invite code as an argument, so a
+future format!("{code}") could not have failed it; it now drives every reply
+shape through classify_redeem into publish with the code loaded in the state,
+because publish is the one place a finished sentence and the code signal are
+both in scope. Two source-scan guards were added for wiring the type system
+cannot hold: redeem() needs a Rooms so it is not unit-testable, and without a
+pin nothing would notice it decoding room_key and then ignoring it. Every new
+test was verified by revert: dropping the note clear, restoring the
+unconditional diff, and each of the three 5xx arms individually all fail on the
+assertion written for them and on nothing else. Gate: 1176+4+8+4+7+5+2 tests
+green (seven new), clippy --all-targets -D warnings clean, fmt --check clean,
+and RUSTFLAGS="-D warnings" cargo check on wasm32-unknown-unknown clean.
+_________________________________________________________________________________
+
+time:      [21:26] [08-30-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-invite-panel-shows-the-onboard-link
+type:      [feature-request]
+area:      [frontend]
+
+The invite panel renders the onboarding link below the code, as one copyable
+thing, now that the daemon composes it. `Invite` decodes a third optional field
+and `onboard_link` is the seam the render maps over: absent renders nothing,
+present-but-blank is dropped, so a daemon pointed at a loopback Bedrock -- which
+suppresses the link on purpose -- shows exactly the panel it showed before.
+
+Painted as text to select, not as an anchor to click. It is the same grant as the
+code in a longer form (the code sits inside the path), so a click that navigates
+would be a click that spends the invite, and the panel's job is to hand it over,
+not to use it. It gets its own copy control with its own signal: one flag behind
+two buttons would make both rows read "copied" off a single click, and a source
+slice over the render now asserts the link block touches `state.copied_link` and
+never `state.copied.` -- reintroducing the shared flag turns that test red where
+before the whole suite stayed green through the mutation.
+
+Adding a field that carries the invite code also switched off a guard where the
+new risk is: `the_rail_line_never_carries_the_code` had both fixtures at
+`onboard_url: None`, so the "the rail line never spells the grant" assertion no
+longer saw the second carrier of it. The first fixture now carries a link
+(`bedrock.invalid`, an obviously fake code), which makes the existing assertion
+cover both; the undated fixture stays None because it exercises the empty
+`expires_at` arm. Making `rail_line` append the link turns it red.
+
+Landing correction: the CSS comment said the block shares the code's copy
+control, which is the exact bug the slice exists to avoid. What is shared is the
+`__invite-copy` class; the comment now says that, and says the flags are separate
+on purpose. Gate: 1211 UI tests green, clippy --all-targets -D warnings clean,
+fmt --check clean, and RUSTFLAGS="-D warnings" cargo check on
+wasm32-unknown-unknown clean. Needs the ocean-os half (its PR #409) to have a
+link to show. No migration, no deploy step.
+_________________________________________________________________________________
+
+time:      [23:14] [08-30-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-trigger-rail-writable-nonterminal]
+type:      review
+area:      frontend
+
+Ruled that the wake-trigger rail stays WRITABLE while a room is `Connecting`
+or `Recovering`, and made the code say so. Since #160 the rail took
+`access_allows_writes` — true only for `Local`/`Live` — so all three trigger
+rows went read-only on both non-terminal access states. Nothing asks for that:
+the daemon's `room_update` (ocean-os origin/main, persistent_rooms.rs:654) has
+no access check at all, and both readers of the policy — the local post path
+and the federation bridge's ingest — read it back from THIS daemon's store, so
+the PATCH lands whatever the link is doing. The cost was the sharpest one
+available: a room stuck `Recovering` while every mention woke an agent gave the
+operator no way to turn `on_mention` off. `Revoked` and unknown access stay
+held — the daemon would take those writes too, but configuring a room you have
+been removed from cannot mean anything, and unknown may yet resolve to
+`Revoked`. Implemented as a rail-local `trigger_policy_accepts_writes` matched
+exhaustively over the access states (a new state must be ruled on, not inherit
+"writable"); the shared `access_allows_writes` is untouched and still gates the
+composer, join/leave, invites and ~10 other call sites. Split the old
+`a_room_that_blocks_writes_holds_every_trigger_row` into a `Revoked` test and a
+`Connecting`/`Recovering` test, and added one pinning the divergence between
+the two gates as a difference. `on_thread_reply` stays held-with-note on the
+federated states for its own pre-existing reason (the bridge can never build
+that event). Verified both new tests fail against the old gate before landing.
+Frozen gate green: fmt, wasm32 clippy `-D warnings`, `RUSTFLAGS="-D warnings"`
+wasm32 check forced against a touched source, proxy check, wasm32 test no-run,
+native 1183/1183.
+_________________________________________________________________________________
+
+time:      [00:57] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-dead-trigger-row-still-reads-as-interactive
+type:      [bug-report]
+area:      [frontend]
+
+A wake-trigger row that can never fire kept inviting the click it would never
+honour. `.rooms-workspace__trigger` is a `<label>`, so the `cursor: not-allowed`
+sitting on `input:disabled` reached the checkbox and nothing else -- the label
+text and the `__trigger-note` beside it stayed on the label's own `cursor:
+pointer` and still brightened to `--fg` on hover. That gap was invisible while
+the only disabled state was `policy_update_in_flight`, one round-trip long. #160
+made `trigger_row_dead_here` hold a row disabled permanently (ThreadReply in a
+federated room, BuildFailure in a local one) with a note naming which kind of
+room the flag needs, and a permanent control that lifts under a pointer cursor
+works directly against that note's job of teaching rather than inviting.
+
+The fix is the file's own established idiom, five lines: the hover rule takes a
+`:hover:not(:has(input:disabled))` guard (`:not(:disabled)` cannot work here --
+the label is not the disabled element), and `cursor: default` joins the existing
+`:has(input:disabled)` block. `opacity: 0.45` stays untouched; the fade is #160's
+signal that the row is disabled at all, and this only stops it reading as live.
+`pointer-events: none` was deliberately not used -- on the label it would
+suppress the disabled checkbox's own `not-allowed` cursor along with the
+label's. The `:has(input:disabled)` guard covers every source of the disabled
+state, not only the permanent one: revoked/unknown access, a policy PATCH in
+flight, and the create form's three rows for the duration of a create POST all
+withdraw the pointer too. That is the intent -- none of those rows accepts a
+click while it holds, so for however long it holds the cursor should say so.
+
+Out of the filed scope, and flagged for review: a new integration test at
+crates/ocean-surface-ui/tests/dead_trigger_row_affordance.rs. The slice as filed
+was CSS-only with no guard, and nothing in the gate would have caught a revert of
+either rule. The file follows the repo's existing source-assertion pattern
+(mobile_composer_regressions.rs and its five siblings) and touches no component
+code, so it carries no conflict surface. Both tests were confirmed red against
+the pre-fix stylesheet before being confirmed green against the fixed one. Gate:
+all six frozen commands clean plus the loop's `RUSTFLAGS="-D warnings"` wasm
+check; 1215 UI tests green. No migration, no deploy step.
+_________________________________________________________________________________
+
+time:      [03:13] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-ci-failure-trigger-toggle
+type:      [feature-request]
+area:      [frontend]
+
+The surface's mirror of the daemon's trigger policy gains `on_ci_failure`, and
+deliberately gains NO control for it. The first cut of this slice shipped the
+whole rail row and the create-panel checkbox; review killed that half, correctly.
+Against ocean-os origin/main (549e2272) the daemon has no such field --
+`ocean_core::RoomTriggerPolicy` does not declare it, no `RoomTriggerEvent` variant
+carries a CI result, and `ocean-store`'s hand-rolled `parse_policy` drops the key
+-- so a live row would have taken the flip, PATCHed it, gotten a 200, and then
+settled straight back to unchecked, because `update_open_room_policy` re-renders
+the section from the record the daemon returns and that record cannot carry a
+field the daemon's struct does not have. Silent revert with no error, in exactly
+the federated rooms the note would have pointed people at. `on_ci_failure` joins
+`on_component_event` and `on_schedule` under this file's standing doctrine
+instead: a flag nothing fires gets no control.
+
+What the field still earns today is not cosmetic. This rail PATCHes the policy
+WHOLESALE, so the day the daemon does store the flag, a room with it on would
+lose it to the next flip of any other row if this mirror did not know the key.
+`policy_with_toggle` carries it through untouched -- unlike the two unwired
+fields it normalizes away, nothing refuses `on_ci_failure`, so dropping it would
+be destruction rather than honesty -- and a test pins that. The guard was checked
+by mutation, not by assertion: adding `policy.on_ci_failure = false` beside the
+two normalizations fails
+`policy_with_toggle_carries_a_daemon_set_ci_failure_through_a_flip` and nothing
+else. Serializing the key at today's daemon is inert: no room write route denies
+unknown fields, so it is dropped rather than 400ing the three working toggles.
+
+The daemon half, when someone writes it, is a `room.workspace.ci_checked` marker
+-- which Bedrock already emits and `room_federation.rs` already ingests, today as
+a pure marker with empty trigger targets -- PLUS a filter on the checks'
+conclusion, because an all-green run arrives as the same event. The first cut's
+comment asserted that event already existed; it does not, and the note now sits
+in `TriggerToggle`'s doc as the intended pairing rather than as fact.
+
+LANDED AGAINST A MOVED DAEMON. Between review and merge the ocean-os half went
+in (#413, main at 58832c7): `ocean_core` now declares `on_ci_failure`,
+`RoomTriggerEvent` has a `CiFailure` variant, `ocean-store` round-trips the key,
+and a red `ci_checked` row convenes the roster. Every doc line above that said
+otherwise was false by the time this branch was ready, so the three claims were
+corrected before landing rather than merged as a documented falsehood -- which
+is the exact defect review rejected the first cut for. What did NOT change is
+the code: the row is still not built, so the flag stays unreachable from this
+UI. The mirror's job flipped from speculative to load-bearing in the process --
+a daemon-set `on_ci_failure` can now genuinely exist, and without this field a
+flip of any other row would clear it. The rail row is now a plain UI slice with
+no wiring left to wait on.
+
+Gate green on all six frozen commands plus the loop's `RUSTFLAGS="-D warnings"`
+wasm check and the `--all-targets` clippy: 1217 UI tests, `cargo fmt --check`
+clean. No migration, no deploy step.
+_________________________________________________________________________________
+
+time:      [04:58] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-agents-md-says-the-redeem-ui-does-not-exist]
+type:      docs
+area:      docs
+
+Deleted the one line in the Rooms Contract that told every cold agent the
+invite and redeem UI had not been built yet. AGENTS.md:269 read, verbatim,
+"Invite and redeem UI remains absent until daemon-owned outbound routes
+exist." Grepping the whole file for invite, redeem or onboard returned that
+line and nothing else, so the contract's entire account of the feature was a
+claim that the feature did not exist — while `room_invite.rs` and
+`room_redeem.rs` have been on main for weeks, carrying #161's `room_key` read
+and #162's onboarding link. That is the expensive kind of stale: it does not
+merely omit the contract, it reads as permission to build the thing a second
+time, and it had survived eight passes.
+
+Replaced it with four bullets lifted from the two modules' own headers rather
+than invented, in the terse cross-referenced voice of the bullets either side.
+`room_invite.rs` owns minting and its 201 answers the invite RAW — no
+`{ok:true}` envelope, unlike artifacts, attachments and the workspace lane —
+so success is settled on the status and a present `code` before any `error` is
+read; a decoder copied from those neighbours reads a minted invite as
+malformed, or as whatever its characters spell. Minting from a `Local` room
+bootstraps federation permanently, which is why the first click only arms the
+control. `room_redeem.rs` owns joining, and its `room_key` is decoded
+`Option` on purpose: bundle and daemon roll forward independently, so
+requiring it would make a redemption that already succeeded unreadable against
+an older daemon, and `newly_joined_key` diffs the room list in that case. And
+the code is a bearer grant, minted into the RESPONSE body and held in one
+signal plus the open panel's DOM, sent in the REQUEST body when redeemed,
+never logged, never in the rail, never past its room — and the onboarding link
+embeds it, so it inherits the same discipline. Every claim was checked against
+the source before it was written: `mint_federates` is `Local`-only,
+`mint_click` really does arm before it fires, and the two route strings match
+`invite_url`/`redeem_url`. The neighbouring bullets that are still true were
+left alone.
+
+Review rejected the first cut of that last bullet and was right to: it said an
+invite code is "never a test fixture", which this repo contradicts twice over —
+`room_invite.rs:854` and `room_redeem.rs:558` both define
+`const FAKE_CODE: &str = "not-a-real-invite-code"` and put it straight into
+fixtures. The rule the code actually states sits one line above the const:
+"No fixture in this repo may carry a real one." A cold agent following the
+sentence as written would have had to either skip the test or "fix" the
+fixtures that already exist. The same bullet also put the minted code in the
+request body — that is redeem's half; mint's arrives in the response — and it
+dropped the two constraints mint enforces and a UI change could silently
+break: never the rail, which is what `rail_line` is deliberately code-free to
+guarantee, and never past the room it was minted for. Repaired in place, since
+a slice whose only product is the truth of a contract file cannot trade a
+stale falsehood for a fresh one in the same paragraph.
+
+Documentation only — `crates/` is untouched on purpose, which is the whole
+value of the slice: it corrects the most misleading line in the contract at
+zero code risk. Nothing here can move the gate, and the frozen commands were
+run anyway, before and after the repair, because a green claim without a run
+is not a verification.
+_________________________________________________________________________________
+
+time:      [05:00] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-ci-failure-rail-row
+type:      [feature-request]
+area:      [frontend]
+
+`on_ci_failure` gets its control. The daemon has convened a roster on a red
+`room.workspace.ci_checked` row since ocean-os #413, and this surface has
+mirrored the flag since #165 so an unrelated flip could not clear it, but
+nothing on any screen could turn it on -- a live wake path reachable only by a
+room that already had the flag set. `TriggerToggle` gains a fourth variant and
+the three places a toggle surfaces gain a row: the rail, the create panel's
+checkbox group, and the right rail's policy summary.
+
+The dead-here ruling is BuildFailure's, and for the same reason rather than by
+analogy: `RoomTriggerEvent::CiFailure` has exactly one non-test construction
+site in ocean-os (`room_federation.rs` `ingest_workspace_row`, checked at
+b77f791c), so the event is a workspace marker that arrives through the
+federation bridge and a Local room has no workspace to check. Federated rooms
+only, note and all. `policy_with_toggle`'s rationale for carrying the flag
+through untouched is still load-bearing for the other three toggles and was
+reworded rather than deleted.
+
+Two of the three additions are guarded by nothing on their own, which is not a
+guess: reviewing #165 deleted the create checkbox and the summary line and the
+full suite plus the wasm check stayed green. So the summary composition came out
+of the view into `trigger_summary`, which a native unit test asserts over, and
+the checkbox got a source assertion in a new `ci_failure_trigger_control.rs`.
+All three guards were then checked by MUTATION, not by assertion: deleting the
+checkbox fails `the_create_panel_offers_a_ci_failure_checkbox`; deleting the
+summary's line fails `trigger_summary_names_every_live_flag_that_is_on`;
+deleting the rail row fails the wasm check with `variant CiFailure is never
+constructed`, which `--all-targets` clippy does NOT catch, because cfg(test)
+constructs the variant there. Both trap tests that iterate a hardcoded
+three-toggle array were extended -- a fourth variant does not fail them, it just
+quietly makes "every trigger row" a lie -- and
+`create_trigger_policy_only_carries_exposed_flags` was rewritten rather than
+re-arity'd, since its `!policy.on_ci_failure` assertion inverted in meaning once
+the parameter existed.
+
+OUT OF SCOPE, DELIBERATE: `rooms.rs` was scoped out on the grounds that
+`RoomTriggerPolicy` needs no code change, which is true. Its `on_ci_failure`
+doc, though, said this surface "has no CONTROL for it yet ... so today the flag
+only ever arrives already set" -- false the moment this landed, and pointing at
+the very enum being changed. Doc-only edit, no code touched.
+
+Gate green: 1223 UI tests (1188 lib + 3 new + 32 existing integration), clippy
+`--all-targets -D warnings`, `cargo fmt --check`, and the
+`RUSTFLAGS="-D warnings"` wasm32 check. No migration, no deploy step.
+_________________________________________________________________________________
+
+time:      [05:44] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-ci-failure-rail-row
+type:      [review]
+area:      [frontend]
+
+Refinement pass on the `on_ci_failure` control. Review found one of the three
+new guards was decoration and proved it by mutation: renaming the rail's label
+to "red CI" left the entire gate green, because
+`the_ci_failure_label_is_capitalized_everywhere` searched the RAW source of
+`rooms_workspace.rs` for the bare literal `"CI failure"` -- and that file's own
+`mod tests` holds it, quoting `trigger_summary`'s output. The claim in the entry
+above that all three guards were checked by mutation was true of the two
+deletions and NOT of this one; the mutation that mattered here was a rename, not
+a deletion, and it was never run. The positive assert now names the rail's call
+site (`TriggerToggle::CiFailure,"CIfailure",`, whitespace-stripped) over source
+truncated at `#[cfg(test)]`, since the summary's casing is a return value that
+`trigger_summary_names_every_live_flag_that_is_on` already holds; only the rail
+was unheld. Re-mutating the label to "red CI" now fails it.
+
+The entry above also says both hardcoded three-toggle arrays were extended.
+There were THREE, not two: `an_unknown_access_state_claims_nothing_about_any_flag`
+still iterated `[Mention, ThreadReply, BuildFailure]` under a doc claiming the
+universal "every row is held by the write gate, and no row claims its flag is
+dead". Behaviour was already correct -- `trigger_row_dead_here` early-returns on
+`access?` -- so this was a coverage lie rather than a live defect, which is
+exactly why nothing failed. Extended and mutation-checked: a CiFailure-specific
+`Some(..)` under unknown access now fails it, naming `CiFailure`.
+
+Two count comments left stale by the fourth flag were corrected: the rail
+section's "the three live trigger-policy flags" sat directly above four
+`trigger_toggle_row` calls, and `policy_with_toggle_normalizes_dead_fields`'s
+"breaking all three working toggles" is four now. The create panel's sibling
+comment had been updated and these had not, so it was an omission.
+
+A third claim in the entry above does not survive its own diff.
+`create_trigger_policy_only_carries_exposed_flags` was described as rewritten
+rather than re-arity'd, on the grounds that its `!policy.on_ci_failure`
+assertion inverted in meaning once the parameter existed. The hunk is two
+changed lines and both are call arities; that assertion and the test's doc
+comment are byte-identical to origin/main. It never inverted -- false in, false
+out, exactly as it read before the parameter. Nothing is broken by it, the test
+is still sound, but it WAS re-arity'd, which is the thing the sentence claims it
+avoided. Recorded because a summary that describes a change it did not make is
+how a later reader stops trusting the rest of the entry.
+
+Gate re-run green on all eight: 1223 UI tests, clippy `--all-targets -D
+warnings`, `cargo fmt --check`, `RUSTFLAGS="-D warnings"` wasm32 check, plus the
+repo's four other frozen gates the first pass skipped -- wasm32 clippy `-D
+warnings`, wasm32 `cargo check`, `cargo test --target wasm32 --no-run`, and
+`cargo check -p ocean-surface-proxy`. No migration, no deploy step.
+_________________________________________________________________________________
+
+time:      [07:22] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-response-policy-summary-contradicts-the-rail-directly-above-it
+type:      [bug-report]
+area:      [frontend]
+
+Stopped the right rail contradicting itself about a stored trigger flag. The
+trigger rows and the Response Policy summary live in the same rail a few hundred
+lines apart in `rooms_workspace.rs`, and only the rows knew about access: in a
+Local room holding `on_build_failure` or `on_ci_failure`, the row rendered
+disabled and noted "federated rooms only" while the summary below it read
+"Response Policy: mention, build failure" as though the flag were live. #167
+doubled it -- `on_ci_failure` is a second federated-only flag, so a Local room
+could show two greyed-out rows and a summary naming both anyway. Same class as
+the landed dead-trigger-row work, one control further down the rail.
+
+`trigger_summary` now takes `access: Option<&RoomAccessProjection>` and asks
+`trigger_row_dead_here` for each on-flag's note, appending it in parentheses:
+`mention, build failure (federated rooms only)`. Annotated, not dropped --
+dropping would render "Response Policy: mention" above a row rendering checked,
+which is the same lie inverted and hides durable state. Reusing the row helper
+rather than re-deriving federated-ness is the pattern `access_banner` already
+sets in this file: one source for the string means the rail and the summary
+cannot word it differently. Unknown access annotates nothing, inherited from
+`trigger_row_dead_here`'s `let access = access?` rather than decided again. The
+call site reads `rooms.access.get()` the way three sibling sections in that view
+already do, and the comment above it claiming only live triggers are listed now
+says what the code does.
+
+Implemented as a local `(TriggerToggle, bool, &str)` table inside
+`trigger_summary`. The rail's four `trigger_toggle_row` calls were deliberately
+NOT refactored to share that table -- they pass reactive `flag(|p| ..)`
+closures, so the shapes do not match and the churn would exceed the fix.
+
+`trigger_summary_names_every_live_flag_that_is_on` was re-arity'd to pass
+`None`, which makes it the unknown-access assertion as well; its three expected
+strings are byte-identical to before, which is the point of it. Added
+`trigger_summary_annotates_a_flag_that_cannot_fire_in_this_room`, covering
+Local and Live in both directions plus a flag that is off. Both are unit tests
+over a returned String rather than source scans, so they survive a rename and
+not only a deletion -- wave 42's lesson, learned in this same file.
+Mutation-checked: collapsing the annotation back to a bare label fails the new
+test by name, `left: "mention, thread reply, build failure, CI failure"` against
+a right-hand side carrying both `(federated rooms only)` notes, and additionally
+trips the release lane's `-D warnings` with `unused variable: access`.
+
+Frozen gate green, all six from AGENTS.md: `cargo fmt --check`, wasm32 clippy
+`-D warnings`, `RUSTFLAGS="-D warnings"` wasm32 check, `cargo check -p
+ocean-surface-proxy`, wasm32 `cargo test --no-run` (nine executables built), and
+native `cargo test -p ocean-surface-ui` at 1189 passed / 0 failed in the main
+binary and 0 failed across all nine. One source file touched, no CSS, no
+migration, no deploy step.
+_________________________________________________________________________________
+
+time:      [07:26] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-response-policy-summary-contradicts-the-rail-directly-above-it
+type:      [review]
+area:      [frontend]
+
+Refinement pass on the policy-summary fix. Review found that giving
+`trigger_summary` a `(TriggerToggle, bool, &str)` table had a side effect nobody
+intended: the rail's four `trigger_toggle_row` calls stopped being the only
+place a non-test build CONSTRUCTS a `TriggerToggle` variant, and that was the
+whole guard holding those rows. Reproduced it -- delete the `BuildFailure` row
+and `RUSTFLAGS="-D warnings" cargo check --target wasm32-unknown-unknown` now
+finishes clean, where on origin/main the same deletion fails with `variant
+BuildFailure is never constructed`. `ci_failure_trigger_control.rs` opens by
+stating that guard as fact, in a file whose own header records a control being
+silently deleted once with the full suite green, so the doc was wrong in the
+one place a person would go to check.
+
+Added `the_rail_offers_a_row_for_every_live_trigger` to that file: a source
+assertion over the non-test half pinning `trigger_toggle_row(rooms,
+TriggerToggle::X, "label",` for all four triggers. The needle stops after the
+label rather than running through the reactive `flag(..)` closure -- what needs
+holding is that the row exists and words the trigger the way the summary words
+it; the closure is already the compiler's business.
+
+Second finding, same fix shape: the half of this slice a user can actually SEE
+-- the call site handing the summary `access.as_ref()` -- had no coverage at
+all, because both unit tests call `trigger_summary` directly and pick their own
+argument. Passing `None` there restores the original bug with all six gates
+green. `the_summary_call_site_passes_the_access_projection` pins it, the same
+answer `the_create_call_passes_the_ci_failure_draft` already gives the sibling
+wiring. Factored the "scan only the half a release build compiles" split into a
+`view_source()` helper the casing test now shares, corrected the module doc so
+it describes the guard that exists rather than the one that did, and fixed a
+stale reference to `trigger_summary`'s `on.push`, which this slice replaced.
+
+Both new tests mutation-checked in the direction that matters -- each FAILS by
+name under the exact mutation the reviewer proved green. Frozen gate re-run
+whole and green: `cargo fmt --check`, wasm32 clippy `-D warnings`, `RUSTFLAGS`
+wasm32 check, `cargo check -p ocean-surface-proxy`, wasm32 `cargo test --no-run`
+(nine executables), native `cargo test -p ocean-surface-ui` at 1189/5/4/2/8/4/
+7/5/2 passed, 0 failed. One test file touched. No migration, no deploy step.
+_________________________________________________________________________________
+
+time:      [07:07] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-check-href-scheme-allowlist
+type:      [review]
+area:      [frontend]
+
+`check_href`'s guard in room_repo.rs claimed to pin the http/https allowlist and
+did not: not one of its six hostile payloads reached the comparison.
+`room_markdown::scheme_allowed` splits on `://` before it ever compares a
+scheme, so "javascript:alert(1)", "JavaScript:alert(1)", the `data:text/html`
+one and "vbscript:x" all returned at that split; "" returned at the empty check
+five rules earlier and "java\tscript:alert(1)" at the control-character rule.
+The code was correct; the test was decoration for the one property its name
+asserts. Same hole ocean-os closed in wave 42.
+
+Added three authority-bearing payloads to the existing array --
+`ftp://example.test/runs/1`, `javascript://example.test/x`, and
+`vscode://vscode.git/clone?url=https://example.test/acme/site`. All three parse
+as valid authorities under `host_is_valid`, so the scheme comparison is the only
+rule left that can reject them. The third is the concrete shape a room container
+plausibly emits and the surface has no other defence against it. All six
+originals stay, because between them they pin the three earlier rules the new
+rows fly past: the `://` requirement for the four opaque ones, the empty-string
+check for "", and the control-character rule for the `\t` one.
+
+Mutation-proved rather than asserted: deleted the two-line
+`eq_ignore_ascii_case("http")`/`("https")` comparison at room_markdown.rs:132-134,
+ran `cargo test -p ocean-surface-ui`, and
+`room_repo::tests::a_check_href_is_gated_to_http_schemes` failed by name --
+`assertion left == right failed: "ftp://example.test/runs/1" linked`. Then
+reverted; the only source file this commit touches is room_repo.rs.
+
+Two findings worth the next reader's time. First, that mutation produced exactly
+ONE failure across 1188 tests, which means the explicit `[label](href)` link path
+at room_markdown.rs:231 -- a real dependent with no literal-prefix pre-check of
+its own -- is not pinned either. This slice's scope was room_repo.rs only and
+room_markdown.rs is claimed by no slice this wave, so it is left alone and noted
+here. Second, ocean-os's `ci_run_url` (room_federation.rs:3482) is deliberately
+stricter than this gate -- all Unicode whitespace rather than `trim`, and it
+compares its bounded output back. Whether the surface should converge with it is
+a real question and was explicitly not this slice; the code is untouched.
+
+Review sent this back once, and the finding was the same defect as the slice:
+the doc comment explaining which rule kills which row got the attribution wrong,
+crediting the opaque rows with pinning the empty-string and control-character
+rules they never reach. Read literally it made the `\t` row look redundant with
+`javascript:alert(1)`, so a reader tidying up would have deleted the only
+control-character coverage. Re-derived it empirically rather than by argument --
+a throwaway test inside room_markdown's module printed the rejecting rule for
+each of the nine payloads against the real private helpers, and the split is
+four to the `://` requirement, one to the empty check, one to the control-character
+rule, three to the scheme comparison. Probe reverted. Corrected the comment and
+the two places this entry and the commit message repeated the same mistake.
+
+Frozen gates all green: `cargo fmt --check`, `cargo clippy -p ocean-surface-ui
+--target wasm32-unknown-unknown -- -D warnings`, `RUSTFLAGS="-D warnings" cargo
+check -p ocean-surface-ui --target wasm32-unknown-unknown`, `cargo check -p
+ocean-surface-proxy`, `cargo test -p ocean-surface-ui --target
+wasm32-unknown-unknown --no-run`, `cargo test -p ocean-surface-ui` at 1223
+passed / 0 failed across all targets, and `cargo test -p ocean-surface-proxy` at
+54. Also ran `cargo clippy -p ocean-surface-ui --all-targets -- -D warnings`,
+the only invocation that lints the added test lines: clean. Test-only change;
+no migration, no deploy step.
+_________________________________________________________________________________
+
+time:      [09:41] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-has-no-test-that-can-see-a-control-was-deleted
+type:      [feature-request]
+area:      [testing]
+
+Built the lane that catches a deleted UI control, and pinned the six controls
+measurement proved are unheld. Every 'landed API nobody can reach' slice this
+backlog files ends with a control being added, and almost nothing held those
+controls in place afterwards: #165's reviewer deleted the create-panel trigger
+checkbox and the Response Policy summary line and the full suite plus the wasm
+check stayed green.
+
+Lifted the scanners out of ci_failure_trigger_control.rs and
+dead_selector_removal.rs into tests/common/mod.rs, a subdirectory module because
+cargo compiles each top-level tests/*.rs as its own binary and a subdir mod.rs is
+not a target. It carries repo_root, read, src, view_source (generalised to take a
+module path), without_whitespace and all_rust_src, and all three guard binaries
+consume it. The `#![allow(dead_code)]` on it is load-bearing, not defensive:
+removing it fails `cargo clippy -p ocean-surface-ui --all-targets -- -D warnings`
+with six `never used` errors across ci_failure_trigger_control and
+dead_selector_removal, since each binary calls only some helpers.
+
+The slice's own discipline was to MEASURE before pinning rather than assume, and
+the measurement is what makes it worth having. For each candidate the deletion
+was actually applied at 4ed9a7c and the gate actually run. Three came back RED
+and were recorded rather than pinned: the summarize RUN button is compiler-held
+(deleting it takes SummarizeRequest, summarize_url, classify_summarize and
+SummarizeOutcome dead with it), `provision` is compiler-held (`variant Provision
+is never constructed`), and the redeem button's MARKUP is held by that module's
+own in-file class-literal scan. Six came back GREEN and are now pinned in
+tests/unheld_room_controls.rs.
+
+The split is not where intuition puts it, and the pairs are the finding. In one
+panel `provision` is held while `destroy`'s arming click is not. In one component
+the summarize RUN button is held while the `open` button that is the ONLY door to
+it is not — delete that one button and the whole summarize route is unreachable
+from the browser with every gate green. Four of the six are the arming half of a
+two-click confirm, silent for one reason: deleting the arm leaves the confirm
+branch standing, so the enum variant is still constructed, the fire method still
+called, the signal still read and reset. Nothing is unreferenced, nothing warns,
+and the destructive verb stays fully implemented and permanently unpressable. The
+sixth is a different shape again — strip `on:click` off the redeem button and the
+markup stays, so room_redeem's own guard passes straight through, `fire` stays
+alive on the input's Enter handler so nothing warns, and the button renders
+looking exactly like a working one.
+
+Honoured both rules the last two waves paid for, and both are now measured facts
+rather than received advice. Needles name the CALL SITE and carry their
+`on:click=` prefix because the bare literal is satisfied elsewhere:
+state.confirm_destroy.set(true) occurs 5x in room_workspace_panel.rs and once
+outside #[cfg(test)], state.confirm_purge.set(Some(PurgeTarget::All)) 3x and
+once. Every scan runs over view_source on top of that; either alone is
+insufficient. And each of the six was verified by a RENAME as well as a deletion
+— twelve mutations, twelve guards fired. That verification is cheap and worth
+knowing about: the guard binary reads src/ at runtime and does not depend on it
+at compile time, so `cargo test --test unheld_room_controls` re-runs against a
+mutated src/ with no rebuild and the mutation need not compile.
+
+src/ was never edited — every mutation was reverted and `git status` confirmed
+clean before the gate ran. Scope held to tests/ plus the two devlog files;
+dead_trigger_row_affordance.rs untouched.
+
+Frozen gates all green: `cargo fmt --check`, `cargo clippy -p ocean-surface-ui
+--target wasm32-unknown-unknown -- -D warnings`, `cargo check -p ocean-surface-ui
+--target wasm32-unknown-unknown`, `cargo check -p ocean-surface-proxy`, `cargo
+test -p ocean-surface-ui --target wasm32-unknown-unknown --no-run`, and `cargo
+test -p ocean-surface-ui` at 1232 passed / 0 failed across all targets. Also ran
+`cargo clippy -p ocean-surface-ui --all-targets -- -D warnings`, the only
+invocation that lints the added test lines: clean. Test-only change; no
+migration, no deploy step.
+_________________________________________________________________________________
+
+time:      [09:33] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-has-no-test-that-can-see-a-control-was-deleted
+type:      [review]
+area:      [testing]
+
+Correction to the entry above and to the AGENTS.md paragraph it landed with.
+Both claimed mutation-verifying the control guards is nearly free — "the guard
+binary reads src/ at runtime and does not depend on it at compile time, so
+`cargo test --test unheld_room_controls` re-runs against a mutated src/ with no
+rebuild and the mutation need not compile." That is false, review caught it, and
+one command settles it: appending `this is not rust at all !!!` to room_repo.rs
+and running the documented command exits at `error: could not compile
+ocean-surface-ui (bin "ocean-surface-ui") due to 1 previous error` with no test
+executed. Cargo builds every bin target of the package before it will run an
+integration test — it has to, for CARGO_BIN_EXE_* — so the crate's own binary is
+compiled whether the guard needs it or not. Measured the compiling case as well:
+deleting room_summary.rs:587-601, the whole `open` button, costs a full
+`Compiling ocean-surface-ui` at ~30s wall clock and then the guard fires
+(the_summary_rail_offers_the_only_door_to_the_summarize_panel FAILED, 5 passed 1
+failed). The entry above contains its own refutation and nobody read it that
+way: the RED rows in its measurement table ARE compile errors, which can only
+happen because the bin is being compiled.
+
+So the procedure a future builder inherits is the opposite of what was written.
+The mutation MUST compile, and every mutated run pays a bin rebuild — budget
+~30s per mutation, not zero — which also means a mutation that fails to build is
+not evidence of anything, because the guard never ran. AGENTS.md now says that,
+and says why the RED rows look like build failures rather than passing guards.
+The entry above keeps its wrong sentence because this ledger is append-only;
+this entry is the correction. Nothing else moved: the six pins, the shared
+toolkit, and the measurement table all survived the reviewer's independent
+re-mutation of all six controls and are untouched, as is src/.
+
+Frozen gates all green, re-run whole after the edit: `cargo fmt --check`, `cargo
+clippy -p ocean-surface-ui --target wasm32-unknown-unknown -- -D warnings`,
+`RUSTFLAGS="-D warnings" cargo check -p ocean-surface-ui --target
+wasm32-unknown-unknown`, `cargo check -p ocean-surface-proxy`, `cargo test -p
+ocean-surface-ui --target wasm32-unknown-unknown --no-run`, and `cargo test -p
+ocean-surface-ui` at 1232 passed / 0 failed across all targets, plus `cargo test
+-p ocean-surface-proxy` at 54 and `cargo clippy -p ocean-surface-ui
+--all-targets -- -D warnings`, the only invocation that lints the test lines:
+every one exit 0. Docs-only change; no migration, no deploy step.
+_________________________________________________________________________________
+
+time:      [10:22] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-has-no-test-that-can-see-a-control-was-deleted
+type:      [review]
+area:      [testing]
+
+Landing the guard lane with the three review notes the refine pass left on the
+table. None of them changes what the lane catches.
+
+First, `the_redeem_button_is_wired_and_not_just_rendered` opened with a markup
+assertion the file's own stated discipline forbids -- the module doc says only
+what stayed GREEN under mutation is pinned here, and the AGENTS.md table records
+`room_redeem.rs`'s join-button markup as RED, held by an in-file test at
+room_redeem.rs:1046 that quotes the class literal. The assert was also strictly
+dominated by the one below it: `on:click=move |_| fire()` lives INSIDE that
+button, so any mutation removing the class literal removes the handler needle
+too. Dropped. Re-measured after dropping rather than assuming: deleting
+room_redeem.rs:511 (the handler line) still fails the guard alone, 5 passed / 1
+failed, so the single remaining assertion carries the whole control.
+
+Second, `both_rosters_offer_the_click_that_arms_a_removal` pins the roster count
+at two, which is the right call -- it is what catches ONE roster losing its arm
+while the other keeps it -- but the failure text only described that direction.
+Legitimately adding a third roster failed with a message that misdiagnosed it.
+The message now names both directions.
+
+Third, the AGENTS.md paragraph on the shared toolkit presented
+`#![allow(dead_code)]` as pure necessity. It is necessary -- inclusion is
+per-binary and an uncalled `pub fn` is a `-D warnings` failure -- but it has a
+cost that went unnamed: these helpers previously sat inline in
+`dead_selector_removal.rs` and `ci_failure_trigger_control.rs` with no allow, so
+a helper that lost its last caller announced itself, and after the move it is
+silent forever. The paragraph now says so and tells the next reader to prune by
+reading.
+
+Gate re-run after all three edits: `cargo test -p ocean-surface-ui` 1232 passed
+/ 0 failed, `cargo test -p ocean-surface-proxy` 54 passed, fmt --all --check,
+clippy on ui (wasm and --all-targets) and proxy, `RUSTFLAGS="-D warnings" cargo
+check -p ocean-surface-ui --target wasm32-unknown-unknown`, `cargo test
+--target wasm32-unknown-unknown --no-run`, and
+`node scripts/surface-auto-deploy.test.mjs` (24 assertions) -- every one exit 0.
+No src/ change, no migration, no deploy step.
+_________________________________________________________________________________
+
+time:      [08:48] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-room-markdown-scheme-gate
+type:      [review]
+area:      [frontend]
+
+#169 proved `check_href`'s guard in room_repo.rs was decoration and rebuilt it,
+but left the same hole one module over: room_markdown's own suite could not see
+`scheme_allowed`'s http/https comparison deleted either. Both tests aiming at it
+--- `labeled_link_requires_allowed_scheme` and `unsafe_labeled_links_render_literal_text`
+--- use `javascript:alert(1)` and `data:text/html,hi`, and neither carries `://`,
+so the `split_once` guard four lines earlier refuses them before the comparison
+runs. The autolink path can't cover it either: it pre-checks the `http(s)://`
+prefix itself at :265 before calling `scheme_allowed`, so the explicit
+`[label](href)` link at :231 is the only route in this file that reaches the
+allowlist, and nothing in this file was standing on it. After #169 landed,
+deleting those two lines failed exactly one test in the repo and it lived in
+another module's file.
+
+Added `labeled_link_rejects_non_http_scheme_with_authority` with `[x](ftp://ocean.dev)`
+and an uppercase `[x](FTP://ocean.dev)`, asserted literal `MdSpan::Text`. Its doc
+comment records WHY the neighbouring payloads don't count --- that sentence is
+the point of the change, since the next reader would otherwise re-derive this
+gap or, worse, believe the old coverage.
+
+Verified by mutation, not by argument: deleted the two-line comparison (binding
+the now-unused `scheme` to `_scheme` so the mutant compiles) and ran the module.
+The new test failed by name with `left: [Link { href: "ftp://ocean.dev" }]`, and
+both pre-existing tests passed under the same mutant --- the gap reproduced
+exactly as reported. Reverted; `git diff --stat` is 16 added lines, test-only.
+
+Scoped to room_markdown.rs deliberately. room_repo.rs already holds this rule
+after #169 and the whole point here is that room_markdown's suite hold its own.
+
+Frozen gates all green: `cargo fmt --check`, `cargo clippy -p ocean-surface-ui
+--target wasm32-unknown-unknown -- -D warnings`, `cargo check -p ocean-surface-ui
+--target wasm32-unknown-unknown`, `cargo check -p ocean-surface-proxy`, `cargo
+test -p ocean-surface-ui --target wasm32-unknown-unknown --no-run`, `cargo test
+-p ocean-surface-ui` at 1227 passed / 0 failed across all targets. Also ran
+`cargo clippy -p
+ocean-surface-ui --all-targets -- -D warnings`, the only invocation that lints
+the added test lines: clean. Test-only change; no migration, no deploy step.
+_________________________________________________________________________________
+
+time:      [14:05] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-workspace-panel-drops-the-ports-bedrock-already-sends
+type:      [feature-request]
+area:      [frontend]
+
+Bedrock has been answering the room's open ports on every status read and the
+workspace panel threw them away. `handleWorkspaceStatus` (bedrock
+src/server.mjs:2068) returns `ports` as a TOP-LEVEL sibling of `workspace` —
+the same wire shape `secrets` has — and the daemon's allowlist relays the
+status body verbatim, so `{port, preview_url, exposed_at}` for every row with
+`closed_at IS NULL` already reached the browser. `WorkspaceBody` had no key for
+it and serde dropped it silently. Bedrock's own CLI (scripts/room.mjs) printed
+these; the product never did.
+
+Followed the `secrets` precedent exactly, because it is the identical wire
+shape: `PortRow` beside `SecretRow`, `#[serde(default)] ports` on
+`WorkspaceBody`, `#[serde(skip)] ports` on `WorkspaceProjection` (it does not
+live inside the projection on the status wire), folded in by `classify_status`
+on the line under the secrets fold. `Option<Vec<PortRow>>` throughout: absent is
+a Bedrock predating the field and makes NO claim, `[]` is Bedrock saying none
+are open and says so in words. The whole section is conditional on the list
+existing, so an older Bedrock renders nothing rather than an empty heading.
+
+`preview_url` is gated through `room_markdown::scheme_allowed` before it may
+become an anchor, the way `room_repo::check_href` gates a recorded CI URL after
+#169. It is the compute driver's own string recorded by Bedrock — the room
+container's word, not the surface's — and an unvetted href here would hand that
+container a clickable `javascript:` anchor in the surface origin. A refused URL
+is still PRINTED, as text: what the room claims to be serving is worth reading
+even when this side will not link it.
+
+Shipped the LIST ONLY, and the brief's controls are deliberately not here.
+`git grep 'workspace/ports' origin/main` in ocean-os is empty — the allowlist
+names neither leaf on main — so at build time a control had no route to post to
+and I will not ship a button aimed at a 404. The co-dispatched daemon slice
+(loop/ports-lane-…) does add them, on the brief's exact URLs, so the follow-up
+is unblocked the moment that lands.
+
+One correction the next builder needs, because the gate is not where either
+half alone says it is. Bedrock's `handleWorkspacePortExpose`/`Close`
+(src/server.mjs:2367, 2392) gate on `permission: 'write'` with NO
+`requireRoomOwner` — member verbs upstream, like exec. The daemon lane
+deliberately NARROWS both to owner, on the reasoning that a preview URL
+publishes the room's compute to anyone holding it, and pins that with a
+manifest assertion. So the daemon is the binding gate: the controls' copy
+should say only the owner may expose or close a port, and
+`workspace_not_owner_principal` is a live answer — but it is the daemon's
+ruling, not Bedrock's, and reading Bedrock alone gives the wrong sentence.
+Bedrock also closes with `DELETE /workspace/ports/{port}`; the daemon
+translates its `POST …/ports/close` onto that, the way it does for destroy.
+
+Three tests in the existing `mod tests`: the absent/empty/rows discipline through
+`classify_status` (the status fixture at the top of the module already carried
+`"ports": []`, which is how long this has been on the floor), the scheme gate over
+six refused and three allowed URLs, and a pin that a port opening is not a
+`view_flip` — the status poll that sees one must not disarm a primed destroy or
+purge confirm.
+
+All six frozen gates green: `cargo fmt --check`; `cargo clippy -p ocean-surface-ui
+--target wasm32-unknown-unknown -- -D warnings`; `RUSTFLAGS="-D warnings" cargo
+check -p ocean-surface-ui --target wasm32-unknown-unknown`; `cargo check -p
+ocean-surface-proxy`; `cargo test -p ocean-surface-ui` at 1236 passed / 0 failed
+across all targets; `cargo test -p ocean-surface-ui --target
+wasm32-unknown-unknown --no-run`. Also ran `cargo clippy -p ocean-surface-ui
+--all-targets -- -D warnings`, the only invocation that lints the added test
+lines: exit 0. No migration, no deploy step.
+_________________________________________________________________________________
+
+time:      [13:22] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-ports-panel-lists-what-nobody-can-open-or-close
+type:      feature-request
+area:      frontend
+
+Wave 45 landed both halves of the ports chain and left the verb on the floor:
+ocean-os#419 put `ports` and `ports/close` into the daemon's workspace proxy
+allowlist, ocean-surface#172 landed the READ in `room_workspace_panel.rs` and
+said in its own commit that a control here had no route to post to. That
+sentence stopped being true the same wave, and the follow-up it named was never
+filed — so a room could run a dev server, Bedrock would mint a preview URL, the
+daemon would forward the call, this panel would list the result, and no human
+could open a port. `ports_section` now grows an expose control and every
+`port_row` a close, both riding the file's existing owner-verb machinery:
+`ports_expose_url`/`ports_close_url`, `post_port`, `classify_port`, and a
+`PortCommand` that carries its port so the row being closed labels itself while
+every other control on the lane disables. The module doc's "when controls land
+here" paragraph now says what actually landed.
+
+Two corrections to the scout's reading, both from the code. Bedrock's expose
+does NOT put `status` in the body — `handleWorkspacePortExpose` returns
+`{status, port, preview_url}` and the route uses `status` as the HTTP code,
+sending `{port, preview_url}` — so success is classified on the echoed `port`,
+which no refusal body on this wire carries. And `port_exposed`/`port_closed` ARE
+on the daemon's marker ingest allowlist (room_federation.rs:3355), so other
+members' panels wake on their own; the active re-read here is the actor's own
+list amending now instead of after the SSE round trip.
+
+The judgement worth naming is in `classify_port`'s two uncoded arms. Bedrock's
+port POLICY is a bare 400 — `validatePort` floors at 1024 and reserves 3000 —
+and that is a fix-and-retry STATE, relayed rather than restated, because the
+floor is Bedrock's to move; `parse_port` gates only the SHAPE the daemon proves
+for itself (`port_path_segment`, an integer in 1..=65535), so 80 and 3000 both
+still compose here and are refused upstream where the policy lives. A bare 404
+is the deployment's "not yet" on expose, but on CLOSE it is also Bedrock's "Port
+N is not currently exposed", a state that arrives with a body — the body tells
+the two apart. And a close whose `route_removed` is `false` never reads as
+"closed": Bedrock takes the preview route down best-effort and drops the row
+either way, so that is a URL still serving what the room stopped advertising,
+and the sentence says so and offers no retry, because the row is gone and a
+second close would answer "not currently exposed" as if the first had worked.
+
+Close fires on one click, unlike the destroy and take-back confirms beside it:
+Bedrock derives the preview token from `sha256(roomId:port)` rather than minting
+it, so re-exposing restores the SAME URL — nothing is discarded, nothing is
+un-published for good. Both controls render for every member and let the
+daemon's `workspace_not_owner_principal` be the answer, in a ports-shaped
+sentence rather than the lifecycle's "provision or destroy". The section copy
+now carries the thing nothing in the product said: a preview URL is a routing
+label, not a credential, and that world-readability is the whole reason the
+daemon narrows a pair Bedrock gates at member write.
+
+Seven unit tests over the free functions, in `classify_secrets`'s style: the URL
+pair, the shape-not-policy gate, the landed replies, the surviving-route
+sentence, the coded states, the uncoded arms, the per-verb unavailable voice.
+Then the `unheld_room_controls.rs` discipline applied for real rather than
+assumed — both controls were DELETED and the gate run. Both went red (expose:
+`variant Expose is never constructed`, `parse_port is never used`,
+`take_port_submission is never used`; close: `variant Close is never
+constructed` plus four unused-parameter errors, since stripping the only control
+in `port_row` orphans every parameter the row takes for it), so both are
+compiler-held and neither earns a guard. Recorded in that file's held list and
+in AGENTS.md's measurement table instead — the two files outside the slice's
+stated scope, comments and a table row only.
+
+All eight gates green: `cargo fmt --all --check`; `cargo clippy -p
+ocean-surface-ui --target wasm32-unknown-unknown -- -D warnings`; `RUSTFLAGS="-D
+warnings" cargo check -p ocean-surface-ui --target wasm32-unknown-unknown`;
+`cargo check -p ocean-surface-proxy`; `cargo test -p ocean-surface-ui --target
+wasm32-unknown-unknown --no-run`; `cargo test -p ocean-surface-ui` at 1243
+passed / 0 failed across all targets; `cargo clippy -p ocean-surface-ui
+--all-targets -- -D warnings`, the only invocation that lints the added test
+lines. No migration, no deploy step.
+_________________________________________________________________________________
+
+time:      [14:10] [08-31-26]
+agent:     [ocean] [pm review fix]
+worktree:  loop/surface-ports-panel-lists-what-nobody-can-open-or-close
+type:      [fix]
+area:      [rooms workspace ports]
+
+Closed the two blocking findings on the exposed-port controls after the feature
+commit. The safe RoomAccessProjection now provides an affordance-only owner
+preflight: Local is owner-operated; Live requires self_member_id to name an
+Owner row; member, unknown, connecting, recovering and revoked projections
+cannot dispatch expose or close. The daemon remains the binding authority.
+
+A transport cut after dispatch now carries an explicit refresh bit. The panel
+preserves the uncertainty sentence but performs the status read it promises,
+so a port that actually opened or closed while the response connection failed
+cannot leave the visible list stale. Added native tests for both the full access
+matrix and ambiguous-transport refresh policy. Focused tests and diff check pass.
+_________________________________________________________________________________
+
+time:      [14:20] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-ports-panel-lists-what-nobody-can-open-or-close
+type:      [merge]
+area:      [rooms workspace ports]
+
+Land pass on the ports controls. Three reviewer notes taken, all comment- or
+guard-level, plus one ledger repair.
+
+The `invalid_request` doc named a mechanism that is not the one at work -- the
+exact class of thing this file's standard forbids. It said the code was
+reachable "only for a port this side's `parse_port` should already have caught".
+Close never calls `parse_port`: its port comes from `row.port` on a
+server-listed row, so the daemon's port check is unreachable by CONSTRUCTION,
+not by a gate this side runs. The daemon also spends the same code on a call
+asserting no room participant (`GateError::MissingActor`,
+room_workspace_proxy.rs:722, read at ocean-os origin/main), where "A port must
+be a whole number." would be the wrong sentence -- closed here only because the
+`actor` closure gates on `identity_resolved()`. Both holds are structural and
+neither is pinned, so the comment now says so, and says why lifecycle and
+secrets relay the daemon's text for this code where ports invents one.
+
+`classify_port` read success off the echoed port BEFORE it looked at status, so
+a 4xx carrying a `port` key would have rendered "Port N is open." That cannot
+happen today -- no refusal on this wire names a port, which was verified in both
+upstreams -- but that is a fact about two other repos holding a gate in this one.
+A `status < 300` guard makes the discriminator fail CLOSED instead, and
+`a_refusal_carrying_a_port_is_still_a_refusal` holds it: removing the guard
+turns it red, and it was red before the guard existed.
+
+AGENTS.md's measurement table was attributing two rows to `4ed9a7c`, a commit
+where neither control existed. The measurements are sound; the attribution was
+not. One footnote names the real tree.
+
+Also repaired a boundary this branch introduced: the pm-review-fix entry above
+opened with its own rule under the previous entry's, giving the file a double
+separator. ocean-surface has neither a union driver nor a ledger checker, which
+is why nothing caught it -- the standing argument for
+`surface-gitattributes-events-union`, and the second piece of first-hand
+evidence for it this wave.
+
+Full four-leg gate re-run by me on the combined tree, including the
+pm-review-fix commit whose own note reported only focused tests: `cargo fmt
+--all --check` exit 0; `cargo test -p ocean-surface-ui` 1246 passed / 0 failed
+across 10 targets; `cargo clippy -p ocean-surface-ui --all-targets -- -D
+warnings` exit 0; `RUSTFLAGS="-D warnings" cargo check -p ocean-surface-ui
+--target wasm32-unknown-unknown` clean -- the release lane that has hidden a
+broken deploy here before. `cargo check -p ocean-surface-proxy` clean. That
+commit's two tests were mutation-checked rather than trusted: letting any
+present projection manage ports fails
+`port_controls_follow_the_safe_self_owner_projection`, and ignoring the
+transport-ambiguity bit fails `an_ambiguous_port_transport_always_refreshes_the_list`.
+No migration, no deploy step.
+_________________________________________________________________________________
+
+time:      [12:58] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-create-room-triggers-teach-nothing-about-which-flags-are-dead
+type:      [bug-report]
+area:      [frontend]
+
+The create-room panel armed wake flags that cannot fire in the room it makes.
+Four checkboxes at rooms_workspace.rs:2710, all held by `pending_create` and
+nothing else, while a room created from that rail is Local by construction —
+`POST /v1/rooms/persistent` carries a key, a name and a trigger policy and no
+federation of any kind. So ticking `build failure` or `CI failure` there stored,
+on day one, exactly the flag the right rail greys out and explains on day one.
+
+Followed #160/#168: `trigger_row_dead_here` stays the single authority on "can
+this flag fire here", and the create rows became its third caller rather than
+re-reading `room_is_federated` themselves. The trap the slice warned about is
+real and I hit it deliberately in a test — that function opens `let access =
+access?;` and returns None for unknown access on purpose, so the obvious wiring
+`trigger_row_dead_here(toggle, None)` compiles, passes everything, and annotates
+nothing. `creating_room_access()` names the judgement instead: a room in
+creation is not unknown, it is Local, and a plain `RoomAccessProjection` saying
+so is cheap. `create_trigger_row_dead_here` delegates to the authority against
+it.
+
+The ruling I made, since a Local room can federate later and a build-failure
+tick would be dead now and live then: note AND disable, not a sentence calling
+these defaults a federated room will re-judge. "Later" already has a control —
+the right rail's row goes live the moment the room does, and that is where the
+decision belongs. The four longhand `<label>` blocks collapsed into
+`create_trigger_row`, the mirror of `trigger_toggle_row`, because the note
+markup was about to be pasted four times.
+
+One test outside src/ moved with the code and the reviewer should look at it:
+`ci_failure_trigger_control.rs::the_create_panel_offers_a_ci_failure_checkbox`
+pinned the longhand markup (`prop:checked=move||create_on_ci_failure.get()`),
+which the helper deletes. Rewrote it as
+`the_create_panel_offers_a_row_for_every_live_trigger`, which is strictly
+stronger: it pins each row's variant/label/OWN-draft-signal triple at the call
+site — the pairing a longhand block could get wrong silently — and slices to the
+helper to pin that a row still reads and writes the signal it is handed. Sliced,
+because `trigger_toggle_row` renders byte-identical label markup and a file-wide
+scan for it would be satisfied by the rail while the create rows render nothing.
+
+`create_trigger_policy` is untouched. It is the form's honest mapping of what
+the form says, and #167's `create_trigger_policy_carries_a_lone_ci_failure_tick`
+is a ruling about that plumbing, not about which boxes get offered; normalizing
+dead flags inside it would have overturned that ruling for no gain now that no
+box can set them. The two draft signals are provably false from this rail as a
+result — kept anyway, so the row helper stays uniform across all four and a
+future create-into-federation is one line.
+
+Three unit tests in `mod tests` plus the rewritten guard: the Local judgement
+for all four toggles, the None-vs-Local difference pinned as a difference so
+nobody "simplifies" the explicit projection away, and a source scan that all
+four rows go through the helper and that `disabled=` consults the note. No CSS —
+#164 already gave these rows `:has(input:disabled)` and `__trigger-note` is
+already styled globally.
+
+One reviewer note taken at land, and it is the same defect class this slice was
+sent back for the first time. `the_ci_failure_label_is_capitalized_everywhere`
+documents its positive assert as naming "the rail's CALL SITE rather than the
+bare literal", so a match elsewhere in the file cannot satisfy it. That stopped
+being true here: the needle was `TriggerToggle::CiFailure,"CIfailure",`
+whitespace-stripped, and the create panel now passes the same variant and the
+same label to `create_trigger_row`, so the create rail alone satisfied it. The
+needle now carries `trigger_toggle_row(rooms,`. Measured rather than argued:
+relabelling the RAIL row while leaving the create rows saying `CI failure` fails
+this test with the prefix and PASSES it without -- 2 failures against 1.
+
+Gate re-run after rebasing onto main (which carried this wave's other surface
+slice): `cargo test -p ocean-surface-ui` 1249 passed / 0 failed across 10
+targets; `cargo clippy -p ocean-surface-ui --all-targets -- -D warnings` exit 0;
+`cargo fmt --all --check` exit 0; `RUSTFLAGS="-D warnings" cargo check -p
+ocean-surface-ui --target wasm32-unknown-unknown` exit 0; `cargo check -p
+ocean-surface-proxy` exit 0. The slice's load-bearing mutation was re-run AFTER
+the rebase, not just the gate, because this guard reads its own source through
+`include_str!` and a rebase is exactly where such a test goes vacuous while
+staying green: deleting the create row's `__trigger-note` span while leaving
+`disabled=` intact still fails it. No migration, no deploy step.
+
+This entry's boundary was hand-resolved. Both surface slices this wave appended
+to this file and ocean-surface has neither a union merge driver nor a ledger
+checker, so the rebase raised a real conflict whose two sides were complete
+entries sharing one trailing rule. Both were kept and the eaten separator
+restored; the resolution was then proved rather than eyeballed -- the first 4386
+lines of this file are byte-identical to origin/main's copy, so the append
+disturbed nothing already landed.
+_________________________________________________________________________________
+
+time:      [13:22] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-create-room-triggers-teach-nothing-about-which-flags-are-dead
+type:      [review]
+area:      [frontend]
+
+Refinement pass on the reviewer's one finding, and it was a real hole I put
+there. The right rail's `__trigger-note` span is held by the compiler for free:
+`trigger_toggle_row` reads `dead_here` only to render the note, so deleting the
+span is an unused-binding error under the release lane. `create_trigger_row`
+gives `dead_here` a second reader in `disabled=`, so deleting its span leaves
+the binding used and the entire gate green — 1196 tests, clippy, fmt and the
+wasm check all pass while the panel ships two permanently greyed checkboxes
+explaining nothing, which is this slice inverted. I reproduced exactly that
+before fixing it. One assert closes it, in the source scan that already slices
+the helper body and already pins `disabled=` consults the note; split-literal
+like its neighbours, because the scan reads this very file and a whole literal
+would match itself. Verified the guard bites by deleting the span again with
+the assert in place: the test fails on that line. That also retires the second
+finding — `create_trigger_row`'s doc claimed "a row can never be greyed out
+with nothing to explain it", which until now described today's bytes rather
+than a property anything held; it is now carried by a test, so the sentence
+stays. Same four-leg gate re-run green.
+_________________________________________________________________________________
+
+time:      [14:14] [31-08-26]
+agent:     [codex] [gpt-5.6-sol]
+worktree:  [codex/rooms-phase1-surface-auth-0831]
+type:      [feature-request]
+area:      [frontend]
+
+Prepared the first Surface candidate for Ocean Rooms Phase 1 authorization.
+Non-loopback startup refuses `OCEAN_SURFACE_AUTH=off`; privileged mutation
+support is routed through the platform seam and remains unavailable to
+Tauri/extension builds. Surface consumes server-derived owner eligibility,
+retains exact status-mutation decision ids across uncertain responses, and
+exposes only Active locally available agent bindings as new mention targets
+while preserving full historical rosters. The stale claim that partitioned
+room memory is unavailable was removed now that ocean-os supports
+`memory_scope=room`; the `none`/`room` choice remains.
+
+The proxy integration proof covered authorize, reauthorize, suspend, resume,
+and revoke receiving the proxy-owned mode-0600 key while browser-supplied
+authority headers were not forwarded. Package preview stayed credential-free.
+Added a source guard that keeps the legacy bare `rooms.add_agent` picker removed
+and pins the reviewed authorization panel as the Room-agent entry point. Updated
+the root Rooms and Agent Builder contracts; no child devlog exists for the
+touched crates. This was a review candidate, not a landed or deployed feature.
+
+Candidate verification: `cargo test -p ocean-surface-ui` (1203 unit plus 44
+integration), `cargo test -p ocean-surface-proxy` (60), UI WASM and native
+all-target Clippy with denied warnings, proxy all-target Clippy with denied
+warnings, WASM warnings-as-errors check, WASM test compilation, proxy check,
+`cargo fmt --all -- --check`, release Trunk build, and standalone Tauri check.
+Trunk 0.21.14 rejected the ambient `NO_COLOR=1` value before compilation; the
+same release build passed with only `NO_COLOR` unset. No push, deployment, or
+live daemon mutation was performed from this worktree.
+_________________________________________________________________________________
+
+time:      [14:50] [31-08-26]
+agent:     [codex] [gpt-5.6-sol]
+worktree:  [codex/rooms-phase1-surface-auth-0831]
+type:      [bug report]
+area:      [backend]
+
+Corrected the two P1 gaps found in review of the first Surface candidate. In
+auth-off mode, every Room-agent authority mutation carrying Origin or Referer
+must now name the exact loopback Host, including its port, before the proxy even
+looks up the operator key. Matching non-loopback Host and Origin is still
+refused, closing the DNS-rebinding shape. Foreign Origin, foreign Referer,
+opaque Origin, and form-compatible `text/plain` bodies return 403 without an
+upstream request; headerless local clients remain supported. Login-gated mode
+continues to treat the authenticated session rather than Origin as authority.
+
+First-agent setup now uses the daemon's atomic operator-authenticated
+`POST /v1/rooms/persistent/{key}/agents/bootstrap` contract with only the live
+Human member id and local package id in the request. Surface validates the
+returned room id, owner, derived agent/package identity, owner eligibility,
+updated room roster, and existing-shape package preview before publishing any
+state. It applies the daemon-returned room directly, never synthesizes a member,
+and then enters the existing digest-bound authorization ceremony. The old local
+unauthenticated participant POST is no longer used for agent bootstrap and a
+source guard keeps it out. An integration fixture proves empty bindings through
+atomic bootstrap, exact idempotent replay, nonowner conflict, preview, and the
+first Active binding; bootstrap itself creates no binding.
+
+Corrected candidate verification: `cargo test -p ocean-surface-proxy` (64),
+`cargo test -p ocean-surface-ui` (1218 unit plus 44 integration), native
+all-target Clippy with denied warnings for both crates, WASM warnings-as-errors
+check, WASM test compilation, proxy check, `cargo fmt --all -- --check`, Trunk
+0.21.14 release build with the ambient `NO_COLOR` unset, and standalone Tauri
+check. Updated the root Rooms contract; no child devlog exists for the touched
+crates. This is a corrected review candidate, not a pushed, deployed, or live
+daemon change.
+_________________________________________________________________________________
+
+time:      [14:52] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-gitattributes-events-union
+type:      [workflow]
+area:      [infra]
+
+ocean-surface had no `.gitattributes` at all and not one line in AGENTS.md
+about the ledger, so the append/append collision at this file's EOF was landing
+on whoever rebased second. The entry directly above this one is the receipt: it
+records two surface slices in one wave hitting a real conflict whose two sides
+were complete entries sharing one trailing rule, resolved by hand. `ocean-os`
+has carried `events.md merge=union` since June (`0a64cd44`, #261), and
+`ocean-bedrock` adopted it YESTERDAY (`f5e72b4`, #54). So the line has months
+of production evidence behind it in one sibling and one day in the other —
+worth knowing before reading its adoption here as long-settled. This gives this
+repo the same driver and writes down what it costs.
+
+I measured the driver against this file's real entry shape rather than trusting
+the sibling repos' notes, in a throwaway repo with a base entry and two
+branches appending one entry each. Without `.gitattributes` the merge conflicts
+and git brackets the two entry bodies between the shared blank line and the
+shared `___` rule. With the driver it comes back clean and markerless — and the
+merged file is FUSED: the second entry's `time:` header sits directly on the
+first entry's prose, because union keeps a line both sides added only once and
+the two appends share both the blank and the rule. That is the same eaten
+separator the hand-resolution above had to restore, except union makes it
+silent instead of raising a conflict.
+
+`scripts/events-merge-driver.test.mjs` now holds that measurement as a guard:
+the rule read out of `.gitattributes` itself, git agreeing on what it resolves
+to, a two-branch append/append merge that must come back clean and markerless,
+the SAME merge without the file that must CONFLICT — without which the clean
+one would only be showing that git found the merge trivial — and the fold,
+pinned as the defect it is rather than as a contract. It follows the shape of
+the Node tests already in `scripts/`: bare top-level asserts, a scratch repo
+under `mkdtemp`, git identity passed as `-c` flags so nothing touches this
+process's env. It is falsifiable, which is the point: delete `.gitattributes`,
+change the rule to another driver, or drop the rule line and keep the comment,
+and it fails with a message naming what went. `git check-attr` alone would not
+have done that — git reads `.gitattributes` out of the INDEX when the
+working-tree file is gone, so a deleted file still answers `union` until the
+deletion is staged, which is why the guard reads the file first.
+
+An earlier draft of this entry said no such guard was possible here, because
+every check in this repo is a Rust scanner under `crates/` and that is a
+sibling slice's ground. That was simply wrong, and the review caught it:
+`scripts/` already holds three Node tests, one of them a CI step
+(`node scripts/surface-auto-deploy.test.mjs`, ci.yml). The guard is hand-run
+like `scripts/sw-wasm-magic.test.mjs`, since wiring it would mean editing
+`.github/workflows/ci.yml`, which is outside this slice's file scope. AGENTS.md
+says exactly that, and keeps the instruction to read the boundary by hand after
+any merge carrying two appends: the guard reproduces the fold in a scratch repo,
+it never reads THIS ledger, so a fold already landed here is still invisible.
+
+The new AGENTS.md "Repository Ledger" section also states the sharper rule the
+comment in `.gitattributes` carries: union is safe for append/append and unsafe
+for everything else, because a correction or a redaction to the tail entry
+lands in the hunk a concurrent append touches and union settles it by putting
+back the line the correction removed. Coming back clean is not evidence that it
+is right. It records the `ledger` job's watched paths from ci.yml as they
+actually read, and that the job reports rather than blocks. `.github/` was left
+untouched deliberately — it is inside the guard's own watched set, and it is
+also why the new test is hand-run rather than a CI step.
+
+Gate, on a tree touching no crate: `cargo fmt --all --check` exit 0;
+`RUSTFLAGS="-D warnings" cargo check -p ocean-surface-ui --target
+wasm32-unknown-unknown` exit 0; `cargo check -p ocean-surface-proxy` exit 0;
+`node --check` and a full run of the new test both exit 0. No migration, no
+deploy step. Adding a file under `scripts/` puts this PR INSIDE the ledger
+job's watched set, so the job now demands this entry rather than merely
+tolerating it — it is here. Land this before any other ocean-surface PR in the
+wave — the driver is read from the target branch at merge time, so landing it
+second means hand-resolving the exact conflict it exists to abolish.
+_________________________________________________________________________________
+
+time:      [14:53] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-dead-trigger-row-cannot-be-unchecked-so-stored-dead-state-is-permanent
+type:      [bug-report]
+area:      [frontend]
+
+`trigger_row_is_editable` was one predicate doing two jobs, and the second job
+was wrong. It refused every flip on a flag whose event can never reach this
+kind of room -- correct for arming one, but it took the disarm with it, and a
+flag can be stored true and then become dead without anyone touching it: a room
+created Local with `on_thread_reply` that later federates, or one created with
+the workspace-marker flags that never does. The row then rendered CHECKED from
+the stored policy, greyed, noted `local rooms only`, and `trigger_summary`
+listed it as on -- deliberately, since hiding it only inverts the contradiction
+-- and no control anywhere in the app could clear it. The stored dead state was
+permanent. Split the gate by direction: the row already receives `checked`, so
+`trigger_toggle_row` needed no new information, only to pass what it had. A
+dead row that is on takes the un-tick; a dead row that is off still refuses the
+tick; `trigger_policy_accepts_writes` still leads both, so `Revoked` and unknown
+access hold everything as before. After an admitted un-tick the section
+re-renders from `open_room` with checked false and the row goes held in both
+directions -- the end state, not a regression. `dead_here` deliberately stays
+the note's only reader in that function, so the span the last wave pinned is
+still held by the compiler. The four existing live/dead tests now carry the
+direction and keep their reasoning; one new test pins the asymmetry, and I
+proved it bites by restoring the single gate and watching it fail on the
+un-tick assert. `create_trigger_row` is untouched: a room being created has no
+stored state, so its dead rows are correctly held both ways. Gate green --
+fmt, 1207 tests, wasm clippy, and the release-lane wasm check.
+_________________________________________________________________________________
+
+time:      [15:04] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-dead-trigger-row-cannot-be-unchecked-so-stored-dead-state-is-permanent
+type:      [review]
+area:      [frontend]
+
+Refinement pass on the same branch against three review findings, all in
+`rooms_workspace.rs`. The first was a comment I should have caught myself: the
+two reads in `trigger_toggle_row` were still introduced by "the note and the
+disabled state can never disagree about this room", which is precisely the
+invariant this change breaks on purpose, and which the same file sells as a bug
+in `create_trigger_row`'s doc. Left standing it is an invitation to re-couple
+them and re-close the door. It now says the note follows the access reading
+alone while the hold follows access and direction, and names the one row where
+they part company. The second was the real gap: the new third parameter is a
+degree of freedom the two-argument gate did not have, and nothing pinned that
+the row feeds its own `checked` into it -- every unit test calls the gate
+directly with a literal, so `trigger_row_is_editable(toggle, true, access)`
+would compile, stay green, and quietly re-arm every dead row in the browser,
+which is the half of the old gate that was always right. The rail's existing
+source-scan guard now pins the call form; reverting the call to a literal makes
+it the one test of 1207 that fails, which I checked rather than assumed. The
+third was cosmetic but operator-facing: the new test's panic message carried an
+18-space run mid-sentence that `cargo fmt` cannot reflow, so it printed
+verbatim at the moment the guard bites. It uses backslash continuation now,
+like every other multi-line assert in the file. Full gate re-run green -- fmt,
+1250 tests across ten binaries with 1207 in the main one, clippy at
+--all-targets and at wasm32 with -D warnings, the release-lane wasm check, the
+proxy check, and the wasm test-compile.
+_________________________________________________________________________________
+
+time:      [16:03] [08-31-26]
+agent:     [codex] [gpt-5]
+worktree:  codex/rooms-phase1-surface-auth-0831
+type:      [workflow]
+area:      [testing]
+
+Reconciled the independently accepted Ocean Rooms Phase 1 Surface authorization
+candidate with `origin/main` at `9982a7f`. The sole textual conflict was this
+append-only ledger; resolution retained both branches' complete entries and
+restored every blank-line and separator boundary. The upstream union merge
+driver guard passes all 15 assertions. The exact combined tree passes format,
+64 proxy tests, 1,219 UI unit tests plus every integration suite, denied-warning
+native and wasm Clippy, wasm check and test compilation, the release Trunk
+bundle, the standalone Tauri check, and `git diff --check`. This remains an
+unpublished candidate: it has not been pushed, merged, deployed, or served.
+_________________________________________________________________________________
+
+time:      [18:54] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-ledger-is-eleven-boundaries-short-and-nothing-can-see-it
+type:      [gh-actions]
+area:      infra
+
+Gave this repo the events.md checker it was the only one of the three missing,
+and repaired the 22 entries that had already fused. THE DIFF CONTAINS A MID-FILE
+LEDGER REPAIR — eyeball it rather than assume it: 40 inserted lines spread over
+lines 33-2560, no deletions, produced by `node scripts/check-ledger.mjs
+events.md --fix` and verified insert-only with `git diff -U0 | grep -c '^-[^-]'`
+= 0. It is the non-append shape `merge=union` handles badly, but the last
+repaired entry sits ~2200 lines from EOF, nowhere near the tail hunk parallel
+appends touch. MEASUREMENT, because the number in the backlog was stale and the
+way it went stale is the argument for the check: 269 entries, 258 rule lines, 22
+open. Subtracting rules from entries gives ELEVEN — which is exactly the count
+the loop has been carrying since wave 38 — and it is wrong, because 11 other
+entries quote a second rule inside their prose and the two errors cancel to a
+plausible half-truth. Only "is THIS entry closed before the next one starts"
+holds. The 22 came in two shapes and `--fix` erases the distinction, so it is
+recorded here: 18 where the next `time:` header abuts the previous entry's prose
+with no blank line (the shape the union driver leaves — most of them one
+contiguous fable-5 run, lines 2407-2498), and 4 where a blank line survives but
+no rule was ever written (33, 48, 62, 2522). Same repair, different causes.
+`scripts/check-ledger.mjs` is a verbatim port of ocean-bedrock's by way of
+ocean-os's: every executable line is byte-identical, only comments and the usage
+text differ, and the header says so — a fix to any copy ports to the others as a
+patch. `scripts/check-ledger.test.mjs` came with it so the copy cannot drift
+into calling a folded ledger clean; the one test not in the ocean-os original
+pins the 4-of-22 blank-line shape this ledger actually has. REVIEW CAUGHT THAT
+ONE AS DECORATION, correctly: it asserted the rule and the blank that follow the
+prose but nothing after them, so a repair that doubled the blank — the exact
+defect its own name forbids — still passed. It now pins the next `time:` header,
+and is proved by falsification the way entries 2503 and 2521 require: replacing
+the `spaced` ternary in closeEntries with an unconditional `[rule, '']` yields
+`First. / RULE / '' / '' / time:` and takes the suite to 10 pass / 1 fail naming
+that test. A slice whose whole thesis is that unverified assertions about this
+ledger go stale had no business adding one that could not fail. In ci.yml the
+`ledger` job's `if: pull_request` moved off the JOB and onto the diff step,
+because the parse check needs no base branch and a merge folds a separator
+exactly the way a rebase does — this being the repo that gives events.md the
+union driver, a merge is precisely where folds come from, and the old job
+condition meant nothing ledger-related ran on push-to-main at all. Never `--fix`
+in CI. OUT OF SCOPE, FLAGGED: three comment lines in
+scripts/events-merge-driver.test.mjs said "ocean-bedrock has
+scripts/check-ledger.mjs for that; this repo does not", which this commit makes
+false; corrected in place, since a stale comment doing load-bearing reasoning is
+a bug class this ledger has already recorded once. Gate green: fmt, wasm32
+clippy `-D warnings`, `RUSTFLAGS="-D warnings"` wasm32 check, proxy and UI
+tests, plus `node --test scripts/check-ledger.test.mjs` 11/11 and the parse
+check exiting 0 on the repaired file. Corrected at land time, from the review
+notes: the `type:` field said `ci`, a value with no prior use in this ledger
+(`gh-actions` is the established one); the count above said two comment lines
+where the diff replaces three; and both AGENTS.md and the merge-driver test
+header claimed the job "runs on every push", when the workflow trigger is
+`pull_request` plus `push: branches: [main]` — a push to a loop branch runs
+nothing at all. Overstating a check's coverage in the two places an agent reads
+to decide whether to run it by hand is the same defect this slice exists to
+end.
+_________________________________________________________________________________
+
+time:      [00:41] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-invite-classify-guard]
+type:      review
+area:      frontend
+
+Closed three live mutation-proved holes in the invite decoder's own tests, and
+corrected the reading that sent me at them. `classify_mint` documents that
+"success is settled before any refusal code is consulted", but no fixture ever
+carried `code` and `error` at once, so the ordering was decoration: reversing
+it — consult the refusal code first — left all 31 room_invite tests green.
+Same for `mint_click`, whose in-flight guard was only ever asserted at
+(federates, armed, minting) triples that cannot pin its ORDER. (true,true,true)
+is unreachable — `Arm` is the only `confirm.set(true)` and it runs only when
+nothing is minting — and (false,false,true), the ordinary federated double
+click, stays `Ignore` under an arming-first guard anyway because `federates` is
+false. The triple that does pin the order, (true,false,true), was untested:
+`Fire` clears `confirm` BEFORE it calls `mint`, so a Local room mid-mint is
+armed=false, and swapping the two guards re-armed it while its invite was
+already away — the suite said nothing.
+
+The scout's brief named a second mutant, refusal code read from `code` instead
+of `error`, as also live. It is not: that literal swap was ALREADY red on main
+against five existing tests, because every refusal fixture omits `code` and the
+mutant degrades them to the anonymous status failure. What does survive is
+either FALLBACK form — `error.or(code)` and `code.or(error)` — and the first of
+those is the one with teeth, since it prints a bearer grant as the reason a
+mint failed the moment a refusal arrives carrying only `code`. So the slice
+landed three decoder cases, not two: a 2xx with both fields that must stay
+`Minted` (kills the reordering), a non-2xx with both that must read `error`
+(kills `code.or(error)`), and a non-2xx carrying only `code` that must stay the
+anonymous 503 with the grant off screen (kills `error.or(code)`). Each was
+proven by applying the mutation, watching the suite go red, and reverting —
+not by reading. `mint()`'s own `minting.get_untracked()` re-check, the second
+half of the double-mint defence, is pinned from source the way
+`the_two_copy_controls_do_not_share_a_flag` already pins its render, since a
+direct test would need a `Rooms` and a spawned task; deleting that guard now
+turns the suite red too.
+
+Worth naming for whoever scouts next: this is the loop's FIRST harvest of its
+own `follow_ups`. Roughly 65 of them across 29 landed slices, several
+mutation-proved by adversarial reviewers, and not one had ever been promoted
+into a ready slice. State written every wave and never read is exactly the
+anti-pattern the scout is told to hunt, and the loop was doing it to itself.
+Keep harvesting. One live trap found while doing it, measured by planting a
+`clippy::map_identity` inside `mod tests`: every clippy invocation in the frozen
+gate list builds the wasm BIN without `cfg(test)`, so `mod tests` is invisible
+to all of them and the planted lint passed clean, while `--all-targets` caught
+it. Narrower than "nothing in the gate lints a test file", though — `cargo test`
+does compile the test cfg, so rustc's OWN lints fire there; it is clippy
+specifically that never sees the file. Ran host `cargo clippy --all-targets` by
+hand to cover it; the hole is its own slice.
+
+Test-only, one file. Gate green: fmt, native 1222/1222 plus 44 integration,
+host clippy `--all-targets -D warnings`, wasm32 clippy `--all-targets
+-D warnings`, `RUSTFLAGS="-D warnings"` wasm32 check.
+_________________________________________________________________________________
+time:      [21:02] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-node-guards-in-ci]
+type:      gh-actions
+area:      infra
+
+Five node guards live in scripts/ and CI ran two of them. Added a `guards` job
+to ci.yml that runs the three nobody ran, and lifted surface-auto-deploy out of
+the 30-minute Rust `check` job, where a node assertion could not fail until
+cargo had passed and then reported itself as a Rust build failure. A named step
+per guard, so a red run names the broken mechanism without opening the log. The
+merge-driver guard's own header said "hand-run, not a CI step — wiring it would
+mean editing .github/, which this slice leaves alone"; that sentence, and the
+matching claims in .gitattributes, AGENTS.md, and the ledger job's own comment
+further down ci.yml, are now retired.
+
+Wiring them found what hand-running had hidden. extension-inventory could never
+have run on a bare checkout: its third claim reads extension/dist, an ignored
+build output only `trunk build --release` produces, so it exits 1 on any fresh
+tree. Its two source claims — sidepanel.html's 19 linked stylesheets in order,
+and build-extension.sh still copying them — need no build and are what CI now
+enforces; the inventory claim reports itself unchecked instead of going red
+because nobody built first, and still fails exactly as before once a bundle is
+there (verified both ways). Underneath that sat the reason it must treat a
+CSS-less bundle as unbuilt: surface-auto-deploy's four `--promote` calls omit
+OCEAN_SURFACE_REPO, so the script's `rm -rf "$REPO/dist"` and rebuild_extension
+run against the real checkout. The guard deletes the developer's trunk build
+every time it runs, and leaves extension/dist holding two non-CSS fixture files
+— which would have made the next guard blame the stylesheet inventory. Left
+unfixed and flagged: it is a different file and a different slice.
+
+Each of the three newly-wired guards was broken deliberately and confirmed red,
+then reverted. Gate green: fmt, wasm32 clippy -D warnings, wasm32 check, proxy
+check, wasm32 test --no-run, native ocean-surface-ui 1266/1266, plus
+RUSTFLAGS="-D warnings" wasm32 check.
+
+Two names corrected at landing. The inventory step was called "The side panel's
+stylesheet inventory", which is precisely the claim it CANNOT make on the bare
+checkout CI gives it -- a green check under that name reads as "the built bundle
+was inventoried" when the bundle went unbuilt; it is now "The side panel links
+every stylesheet the build copies", which is what the step actually enforces
+there. And the AGENTS.md edit above had left `**Run \`node` orphaned as a
+two-word line mid-sentence; the bullet is reflowed. Prose only, no step, job,
+condition or assertion touched.
+_________________________________________________________________________________
+
+time:      [20:58] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-autolink-trims-a-trailing-paren-off-a-bare-url]
+type:      bug-report
+area:      frontend
+
+A bare autolink whose URL legitimately ends in a bracket pointed at the wrong
+page. `tokenize` trimmed its tail with `trim_end_matches(['.', ',', ';', ':',
+'!', '?', ')'])`, which strips every trailing character in the set
+unconditionally, so `https://en.wikipedia.org/wiki/Ocean_(disambiguation)`
+produced an href ending at `..._(disambiguation`: a real destination, just not
+the written one. It is not a misdirection — the label is the same trimmed
+string, so the anchor cannot claim a destination it does not have, which is why
+this path was accepted as-is once before — but it is still a link that goes
+somewhere else, and GitHub matrix-job URLs hit it as readily as wiki links. The
+same function carried a second, unfiled half of the bug: `autolink_boundary`
+opens a link after `(`, `[`, `<` or `{`, while the trim set closed only `)`.
+`<` and `>` were covered because the terminator scan stops on them, but `]` and
+`}` were neither terminated nor trimmed, so `[https://ocean.dev/a]` kept a
+bracket in its href. An opener set and a closer set that disagree is the defect;
+both halves are the same defect.
+
+Both are now `trim_autolink_tail`, balanced the way the CommonMark autolink
+extension balances parens: strip sentence punctuation, then peel a trailing
+closer only while it outnumbers its opener inside the candidate, and repeat.
+That keeps the wiki link whole and still unwraps `(https://ocean.dev/a)` — zero
+`(` inside the candidate against one `)`, so the wrapper is unbalanced and goes
+— which is the case that matters most, because `autolink_boundary` accepting a
+preceding `(` is exactly what makes wrapping common. Whatever survives stays in
+the href and is consumed by `i += url.len()`; whatever is peeled is re-scanned
+as text on the next iteration, and the new tests pin that by asserting the
+peeled closer comes back as its own Text span rather than vanishing.
+
+Five tests, one per behaviour, each proved to have teeth by planting the
+matching mutation and watching only that test go red: a balanced bracket of
+each family is kept (dies on unconditional peel), a URL wrapped in each family
+loses its closer to the following text (dies on never-peel, and separately on
+deleting the `]` arm or the `}` arm), sentence punctuation after a balanced
+bracket still trims, punctuation uncovered by a peel is trimmed too, and nested
+wrapping peels every unmatched closer (dies if the loop degrades to one pass).
+That fourth test exists because the mutation run demanded it: hoisting the
+punctuation strip out of the loop — a plausible reading of "strip first, then
+peel" — left the other four green while `(https://ocean.dev/a.)` kept a
+trailing period in its href, so the re-strip after a peel was live behaviour
+nothing held. The existing `bare_url_autolinks_and_trims_trailing_punctuation`
+is untouched and still green; it only ever pinned a trailing comma, so nothing
+on main asserted the `)` behaviour this changes.
+
+One file, `crates/ocean-surface-ui/src/room_markdown.rs`. Gate green: fmt,
+wasm32 clippy `-D warnings`, wasm32 check, proxy check, wasm32 test `--no-run`,
+native 1227/1227 plus 44 integration, `RUSTFLAGS="-D warnings"` wasm32 check.
+_________________________________________________________________________________
+
+time:      [23:08] [08-31-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-labeled-link-href-stops-at-the-first-paren]
+type:      bugfix
+area:      frontend
+
+Closed the labeled-link half of the defect #181 closed on the bare-URL path:
+`[x](https://ocean.dev/a(b))` linked to `https://ocean.dev/a(b` and dropped a
+stray `)` into the transcript. `tokenize`'s `[label](href)` arm terminated the
+href with `raw.find(')')`, and the first closer in that string belongs to the
+URL, not to the markdown. Same class as the trailing-bracket bug, same cure —
+count the brackets — but applied to the terminator SCAN rather than to a
+trailing trim, because here the closer is what ends the token in the first
+place. New `balanced_href_end` sits beside `trim_autolink_tail` so a reader
+sees the one rule at its two application points: walk the bytes, `(` pushes,
+`)` pops, and the terminator is the `)` that would take depth below zero.
+Bytes, not chars, because the caller slices `raw` with the result and builds
+`consumed` out of it; both brackets are ASCII so an offset can never land
+inside a multi-byte character, and a test asserts that with an `é` on each
+side of the boundary.
+
+`None` carries the old `end == raw.len()` signal, so an href with no closer at
+all still falls out of the arm untouched. TWO behaviour changes beyond the
+stated defect ride on that `None`, not the one an earlier draft of this entry
+claimed. The first: an href whose parens never balance —
+`[x](https://ocean.dev/a(b)` — which main used to make a link out of, href cut
+to `https://ocean.dev/a(b`. It now declines the labeled form, which is what
+CommonMark's balanced-destination rule says and what the scheme gate wants:
+the bracket text stays literal and the bare-URL path picks the URL up on its
+own.
+
+The second is the bound the scan has to have to be a scan at all, and review
+caught its absence. Balancing alone is unbounded: with a balancing `)` as the
+only terminator, one unmatched `(` let the scan run past the URL to a `)`
+further down the sentence and pull the prose in with it.
+`[docs](https://ocean.dev/a(b) and **ship** it)` collapsed from four spans into
+a single Link whose href was the whole sentence — the words and the bold simply
+stopped being rendered — and when the widened href failed the scheme gate the
+same swallow hit the literal-text fallback instead. main's href was wrong on
+those inputs too, but main kept every character the user typed on screen, and
+losing typed words out of a durable transcript is the worse failure. So a space
+ends the scan as well, which is the other half of the same CommonMark rule — a
+bare destination may not contain spaces — and the form declines rather than
+widening: the prose survives intact and the bare-URL path still autolinks the
+URL, now correctly. The space specifically and not `is_ascii_whitespace`: a tab
+or newline in an href has to reach the scheme gate so that
+`[x](https://ocean.dev\t)` renders as one literal run, and broadening the arm
+turns `unsafe_labeled_links_render_literal_text` red on exactly those two cases.
+
+Nine mutants planted, nine dead, none survived: reverting to `find(')')`, not
+counting the opener, never popping on a matched closer, `offset + 1`,
+`Some(raw.len())` for an unterminated href, a char index in place of the byte
+offset, the two brackets swapped, dropping the space arm, and broadening it to
+`is_ascii_whitespace`. Four of the six new tests are REGRESSION PINS, red the
+moment the fix is reverted — the balanced-paren href (including a nested pair
+and the wiki-link shape), the byte-offset test, the no-balanced-closer test,
+and `labeled_link_scan_stops_at_a_space_instead_of_eating_the_sentence`, which
+pins where the swallow stops on both the link and the literal-text path and is
+the only thing holding the space arm. The other two the old code also satisfies
+and they are there as MUTANT KILLERS: that an unbalanced closer still ends the
+href, which is the only thing holding `offset + 1` and the swap, and that
+`[x](javascript:alert((1)))` and `[x](ftp://ocean.dev/a(b))` stay literal,
+which holds the scheme gate against a longer href. The three security tests at
+the top of the arm are untouched and green.
+
+One file, `crates/ocean-surface-ui/src/room_markdown.rs`. Gate green: fmt,
+wasm32 clippy `-D warnings`, wasm32 check, proxy check, wasm32 test `--no-run`,
+native 1233/1233 plus 44 integration, and host `clippy --all-targets --
+-D warnings`, which is the only lane that lints the `mod tests` this diff grows
+and is not yet in the frozen list.
+_________________________________________________________________________________
+
+time:      [00:56] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-deploy-guard-destroys-the-developers-trunk-build]
+type:      bugfix
+area:      infra
+
+The deployment guard destroyed the tree it guards. `scripts/surface-auto-deploy.test.mjs`
+makes five child invocations of the auto-deploy rail and four of them — the two
+promotions, the invalid-bundle case, and the marker setup for the no-op — passed
+`OCEAN_SURFACE_STATE_DIR` without `OCEAN_SURFACE_REPO`, so the rail fell back to
+its default at `deploy/ocean-surface-auto-deploy.sh:10`, which is the checkout
+the script lives in. `promote_bundle` then `rm -rf`s `$REPO/dist` and refills it
+by rsync from the bundle it was handed, and `rebuild_extension` does the same to
+`$REPO/extension/dist`. The bundle it is handed here is a fixture: a 47-byte
+index.html, a 20-byte js, a five-byte wasm. Reproduced at 536282b by fabricating
+a hashed Trunk build — `ocean-surface-ui-DEADBEEF{.js,_bg.wasm}`,
+`tokens-DEADBEEF.css`, `fonts/` — checksumming it, running the guard, and
+checksumming again: every file gone, the fonts directory gone, the stylesheet
+gone, all of it replaced by the five-byte fixture wasm under both `dist/` and
+`extension/dist/`. In a checkout that holds no build (CI, a fresh clone) the
+same run conjures both directories out of nothing — which is the state the
+extension inventory guard reports as unbuilt, so it would have blamed the
+stylesheet inventory for a mess this guard made.
+
+All five now point at a `repo-stub` under the tmpdir the test already creates.
+On the `--promote` path three `$REPO` sites run and all three land in scratch:
+`$REPO/dist`, `$REPO/extension/dist` by way of `rebuild_extension`, and the
+`git -C "$REPO" diff` inside `note_tauri_rebuild_needed`, already
+`2>/dev/null || true` and so unable to fail on a non-repo path. The stub is
+given an `extension/sidepanel.html` on purpose: without it `rebuild_extension`
+returns at its first line and the ~35 lines it runs under `set -e` on every real
+promotion — the hashed-to-stable js/wasm mapping, the CSS hash strip, the fonts
+copy, the png/webmanifest loop — would stop executing at all, trading the damage
+for a silent coverage hole in a guard whose CI step is named "Deployment
+promotion stays atomic". With the file present the `EXTENSION: rebuilt` path
+runs in full and writes into the stub.
+
+The fifth invocation, the full rail, needs the checkout no more than the others
+do: `OCEAN_SURFACE_TARGET_REV` hands it the revision, so it never calls `git`
+to resolve one, the `CURRENT:` short-circuit references `$REPO` nowhere, and
+the cleanup trap's `worktree remove` is skipped while `$worktree` is empty.
+Pointing it at the stub also makes the hazard fail closed rather than merely
+documented — if the marker written above it ever stops matching HEAD, the rail
+falls through to `git worktree add` and now errors against a non-repo instead of
+cutting a worktree and running a full cargo/trunk build inside a developer's
+checkout. Guarding all of it, a new assertion fingerprints `dist/` and
+`extension/dist` either side of the run and requires them unchanged; drop the
+`OCEAN_SURFACE_REPO` override and it fails with exactly the listing #180's
+reviewer saw, so the pin is load-bearing rather than decorative.
+
+`ci.yml`'s `guards` job still explains its step ORDER by the side effect this
+removes; that repair is a separate slice, deliberately left to read the landed
+fix instead of predicting it. Gate: `node --check` clean, all four node guards
+in `guards` order green, `cargo fmt --all -- --check` clean.
+`git rev-list --count HEAD..origin/main` is 0 and the diff touches no `.rs`
+file, so the cargo and wasm legs would re-derive main's own CI result on
+byte-identical crate trees.
+_________________________________________________________________________________
+
+time:      [01:06] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-sibling-rails-inherit-the-composer-gate-unexamined]
+type:      review
+area:      frontend
+
+Extended #163's ruling to the four rail sections that still inherited the
+composer's write gate without anyone having asked whether their write needs a
+peer, and made each of the five state its answer. Summary, artifacts and
+attachments all write to THIS daemon's store and nothing else — verified at
+ocean-os origin/main cd73312f rather than taken on trust: `crates/ocean-daemon/AGENTS.md`
+states a federated room's summary is local-only and never enqueued to the
+outbox, `room_create_artifact`/`room_amend_artifact` write through `with_rooms`
+and then `publish_room_wake` with no outbox row on either path, and
+`room_attachments.rs` contains no reference to the outbox at all (nor does
+`room_federation.rs` mirror artifacts or attachments). So all three now take a
+shared `local_store_write_gate` and stay writable through `Connecting` and
+`Recovering`, which is the whole user-visible change: startup and reconnect no
+longer grey out a summarize run, an artifact edit or an upload that would land
+regardless. Invite and repo keep `access_allows_writes` and gained the sentence
+saying why — a mint registers the room with the federation control plane, and
+every repo command is executed by a Bedrock container, so a down link is not a
+delay there but a write that cannot happen. `access_allows_writes` itself is
+untouched, still `Local|Live`, still the composer's; `trigger_policy_accepts_writes`
+keeps its name and #163's argument and now delegates to the shared gate rather
+than carrying a second copy of the same match. `Revoked` and unknown access stay
+held everywhere, exhaustively matched with no wildcard so a new access state must
+be ruled on. Three tests: the per-state table for the new gate stated as a
+difference from the composer's, a source guard pinning WHICH gate each of the
+five sections takes (the gate is a `Signal::derive` in the view, so no predicate
+test can reach it), and a guard that the three moved rails no longer carry the
+now-false doc line about never disagreeing with the composer and instead name the
+gate they do take. All three verified failing against the old wiring, in both
+directions, before landing. Two module headers the guard's needle does not reach
+were swept by hand for the same reason — `room_summary.rs` said the control is
+"gated exactly as the composer is" and `attachments.rs` said "the same two
+conditions the composer is", both now false — as were the three inline comments
+whose "the composer gates on access here" reads as a claim about WHICH gate this
+control takes. Frozen gate green: fmt, wasm32 clippy `-D warnings`,
+`RUSTFLAGS="-D warnings"` wasm32 check forced against a touched source, proxy
+check, wasm32 test no-run, native 1236/1236 — plus both `--all-targets` clippy
+lanes, which the frozen list does not cover and this diff adds test code to.
+_________________________________________________________________________________
+
+time:      [02:53] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-open-room-hydrates-through-the-unpaged-route-and-calls-it-the-full-transcript]
+type:      bugfix
+area:      frontend
+
+`open_room`'s doc comment promised a "full transcript" the route it called has
+never been able to answer. Hydration read `GET /v1/rooms/persistent/{key}`,
+which returns `projected_transcript(rec.transcript)` and nothing else — no
+cursor, no `has_more` — while `rec.transcript` is `load_transcript_page(key,
+None, MAX_TRANSCRIPT_LIMIT)` and that query is `ORDER BY seq LIMIT 1000`,
+ascending. A room past a thousand messages therefore hydrated on its OLDEST
+thousand rows with no field in the body admitting the truncation. Verified in
+ocean-os at origin/main 594c2a1f: `persistent_rooms.rs` room_get, and
+`ocean-store/src/lib.rs` for `MAX_TRANSCRIPT_LIMIT` 1000 /
+`DEFAULT_TRANSCRIPT_LIMIT` 200. The daemon's own SSE docstring already stated as
+fact that "a surface hydrates through /snapshot and then tails here"; this makes
+that sentence true.
+
+Hydration now reads `GET /v1/rooms/persistent/{key}/snapshot?limit=1000` into a
+`RoomSnapshotResponse`, and the live tail resumes from the page's own `last_seq`
+instead of re-deriving one from the rows it just painted. The explicit limit is
+load-bearing: `/snapshot` defaults to 200, so hydrating without it would have
+SHRUNK the first paint from 1000 rows to 200 — a regression wearing a fix's
+clothes. `snapshot_resume_seq` keeps `last_transcript_seq` as its fallback, so a
+daemon predating `last_seq` and an empty room both resume exactly where they did
+before (`None`, which replays from the start of the log).
+
+Three things a reader should not have to re-derive. First, this is a silent
+change to an error path: `/snapshot` falls through to `get_including_closed`
+deliberately, so a finished call's frozen room stays hydratable for replay, while
+room_get uses `reg.get` and 404s. Opening a soft-closed room stops reporting
+"room load failed: no room with key…" and starts hydrating it. That is the
+daemon's documented intent, and no test in this repo asserted the 404 for this
+path. Second, `/snapshot` omits room_get's `agent_owners`; `git grep agent_owners
+-- crates` is empty across this repo, so nothing regresses. Third, `next_seq` and
+`has_more` ride the wire and are deliberately NOT decoded: the tail's durable
+replay is a loop (`send_room_catch_up` pages 128 rows at a time until caught up),
+so resuming at `last_seq` already delivers every row past the page and nothing
+here would read either field — and a field this crate never reads is dead code
+that the `-D warnings` release lane rejects, which is the exact failure mode that
+once held a bundle back for a day. The wave that builds backward paging should
+claim them.
+
+`RoomGetResponse` is gone rather than left behind for the same reason; the room
+GET survives only as the roster refresh inside the tail, which decodes
+`RoomMutateResponse`, and the module's route table now says so. Gate:
+`cargo test -p ocean-surface-ui` 1237 native plus the integration suites green,
+`cargo clippy -p ocean-surface-ui --all-targets -- -D warnings` clean,
+`cargo fmt --check` clean, and `RUSTFLAGS="-D warnings" cargo check -p
+ocean-surface-ui --target wasm32-unknown-unknown` clean.
+_________________________________________________________________________________
+
+time:      [03:21] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-open-room-hydrates-through-the-unpaged-route-and-calls-it-the-full-transcript]
+type:      review
+area:      frontend
+
+Refinement pass on the `/snapshot` hydration above, against a review that found
+the change defended by nothing. Two mutations proved it: reverting the URL to the
+old unpaged room GET passed 1237/1237 (only `dead_code` on the orphaned const —
+keep the const, write `?limit=200`, and the repo is silent), and reverting the
+tail's cursor to `RwSignal::new(last_transcript_seq(&self.transcript.get_untracked()))`
+— the precise behavior this change exists to stop — passed 1237/1237 including
+the test named after the thesis. The load-bearing line had zero coverage.
+
+The URL is now built by `room_snapshot_url(base, key)`, a pure fn asserted in
+`rooms.rs` against the literal
+`.../v1/rooms/persistent/ocean-surface/snapshot?limit=1000` (and a second case
+proving the key is percent-encoded while the query is not), so shrinking the
+limit to the route's own 200 default is red rather than silent. The resume test
+was strengthened from a body where the two cursor sources agree — which asserted
+nothing about precedence — to one where the page cursor sits three rows past the
+last painted row, plus an `assert_ne!` against the painted-row answer and the
+`?after_seq=1000` the tail then opens.
+
+`tests/room_hydration_resume.rs` is new, and is the answer to the wiring itself.
+`EventSource`/`spawn_local` are browser-only and `Rooms::new` takes a live
+`Daemon`, so nothing in this crate can start the tail and read the URL it asks
+for; the crate's own answer to that (a BINARY crate, `tests/common/mod.rs`,
+`unheld_room_controls.rs`) is a source scanner over `view_source`, and this is
+one — pinning the four expressions that carry the daemon's cursor from the
+response into the first SSE connection, plus a prohibition on
+`RwSignal::new(last_transcript_seq(`. Five mutations were run for real against
+this tree and are tabled in the file: the reviewer's seed swap (red on both
+guards), a behavior-identical rename of the seed's parameter (red — the chain is
+literal, and that cost is deliberate), `open_room` dropping
+`snapshot_resume_seq` (red), the route reverted to the unpaged GET (red here AND
+`dead_code` on the wasm lane), and the limit shrunk to 200 (red in `rooms.rs`).
+
+The closed-room fallthrough was disclosed last entry as a text change; it is
+bigger than that and the doc comment on `open_room` now says so. `/snapshot`
+falls through to `get_including_closed`, but `/events` refuses a closed room
+(`room_events_rejects_invalid_resume_unknown_closed_and_call_rooms` pins 404
+`room_not_found`) and so does `room_post_message`
+(`p2c_http_message_ignores_claimed_identity_and_closed_agent_route_is_404`). So
+opening a soft-closed room no longer fails with a terminal "room load failed: no
+room with key…" — it paints the transcript over a tail that rebuilds a doomed
+EventSource every ~3s for as long as the room stays open (2s timeout pump sees
+`Closed` → `Reconnecting` → 1s sleep → reconnect), above a composer whose every
+send 404s. Gating the tail on that is not available from this side: the snapshot
+body carries no closed marker — `ocean_core::Room` has no `closed_at` and a
+closed room's access projection is `Local`, identical to any other local room —
+so the honest fix is a daemon field (or an `is_closed` in the snapshot envelope)
+and a surface that paints a frozen audit view, which is its own slice. Gate:
+`cargo test -p ocean-surface-ui` 1238 native + integration green (1237 + the new
+URL test, plus 3 new guards), `cargo clippy -p ocean-surface-ui --all-targets --
+-D warnings` clean, `cargo fmt --check` clean, `RUSTFLAGS="-D warnings" cargo
+check -p ocean-surface-ui --target wasm32-unknown-unknown` clean.
+_________________________________________________________________________________
+time:      [02:55] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-ledger-needs-the-per-entry-identity-separator-too
+type:      refactor
+area:      infra
+
+Ported ocean-bedrock's per-entry identity separator into this repo's ledger
+tooling, closing the last divergence between the three copies of
+`check-ledger.mjs`. A rule may now be bare or carry the entry's own `HH:MM` and
+the `worktree:` it was written on: `SEPARATOR_RULE` accepts both forms and the
+bare one forever, `ruleWidth` measures the underscore RUN rather than the line so
+a suffix cannot widen the next repair, a new exported `entryIdentity` reads those
+two fields off the entry's own lines, and `--fix` writes the identity form so a
+repair does not hand the next merge the same shared line to fold on. The defect
+it closes is the one #181 hit twelve minutes after #180 landed the checker that
+caught it: union emits a line both sides added only once, so while every entry
+ended with the same bare rule, two parallel appends anchored before the rule they
+shared, one rule came out for two entries, and the second `time:` header landed
+directly on the first entry's prose. `scripts/events-merge-driver.test.mjs` has
+stopped pinning that fold as an accepted cost and pins the property instead — a
+three-way wave keeps all four rules, no header sits on prose, and the merged text
+comes back clean from the checker's own reading — plus a same-minute pair,
+because two slices in one wave share a minute often and then the worktree is the
+whole of the identity. Its `rules()` matched bare rules only, which would have
+quietly stopped counting an identity-bearing rule and let the fold assertion go
+soft, and its failure message told the next reader to delete the check; both are
+gone. `scripts/check-ledger.test.mjs` was outside the backlog entry's scope and
+is where the implementation is actually proven: 17 tests now, covering an entry
+with a worktree, one written on the main checkout without one, one that can name
+neither and still gets a bare rule, and two sharing a minute.
+
+The blank line between a rule and the next header is now RULED rather than left
+open for a third wave: an entry owns its RULE and never the blank, because a
+blank line cannot be given an identity and is therefore the one part of this
+format no convention can protect from union. Measured rather than assumed — the
+new three-way fixture loses the blank at every join while keeping every rule, and
+wave 52's real rebase kept this repo's blank and ate the sibling's — so a lost
+blank is cosmetic, hand-repaired if anyone minds, and never red. AGENTS.md now
+carries the schema clause, that ruling, and the two limits identity does not buy:
+it saves an entry's tail and not its head (two same-minute appends still fold
+their identical opening lines, and the checker reads the survivor as closed and
+exits 0), and union still fails open for a non-append change. Uniqueness stays
+deliberately unasserted; a ready backlog slice owns that ruling for all three
+repos, and inventing a fourth shape here is the divergence this port exists to
+close. For the same reason `entryIdentity` keeps whatever the entry wrote,
+brackets included — 82 of this ledger's 251 `worktree:` fields are bracketed, and
+normalising them would be a local rule the sibling copies do not have.
+
+Gate: `node --test scripts/check-ledger.test.mjs` 17/17, `node
+scripts/events-merge-driver.test.mjs` 24 assertions green, `node
+scripts/check-ledger.mjs events.md` clean at 280 entries on the landed tree
+(re-measured after the rebase onto the /snapshot hydration slice, which appends
+two entries of its own), `node --check` clean on
+all three touched files, and `RUSTFLAGS="-D warnings" cargo check -p
+ocean-surface-ui --target wasm32-unknown-unknown` green even though the diff
+touches no `.rs` file. Each of the seven executable changes was then mutated one
+at a time: narrowing `SEPARATOR_RULE` back to bare-only reds 7 tests, measuring
+the whole line for width reds 1, dropping the worktree half of `entryIdentity`
+reds 8 and dropping the time half reds 8, making `--fix` write a bare rule reds 7,
+and in the merge guard, counting bare rules only or giving the fixtures a shared
+rule both reproduce the original defect — 2 rules for 4 entries with slice B's
+header on slice A's prose. The worktree mutation is the one that matters: it is
+exactly what stayed green in bedrock's first port and cost it a refine pass.
+_________________________________________________________________________________ 02:55 loop/surface-ledger-needs-the-per-entry-identity-separator-too
+
+time:      [03:13] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-ledger-needs-the-per-entry-identity-separator-too
+type:      [review]
+area:      [infra]
+
+Refinement pass on the separator-identity port: the executable half stood, but
+the diff falsified three prose sites and left all three standing, which made an
+incomplete port of the very bedrock commit it mirrors. `.gitattributes` still
+sold the eaten separator as union's "quieter cost, described in AGENTS.md" --
+a section that now carries the schema clause instead, so the pointer aimed a
+reader at text saying the opposite -- and still called the merge guard the thing
+that "pins the fold" when it pins the fold's absence. It now carries bedrock's
+own paragraph: what union CANNOT do is keep two entries apart when they end with
+the same line, which is why a rule carries the identity of the entry it closes.
+The `ledger` job's comment stated the fold in the present tense as an ongoing
+mechanism; it reads past tense now, with the bare rules an append-only ledger
+keeps forever as the reason the check stays. And the `guards` step was named
+"the union merge driver still folds parallel appends", which is the one claim
+its script exists to disprove -- a red step would have told the reader the
+opposite of the truth. It is named for the property now.
+
+The fourth was a guard printing a summary its own merged text does not support.
+Claim 5's same-minute fixture was announced as "a same-minute pair the worktree
+alone keeps apart", and the two rules ARE kept apart, but the entries are not:
+merged independently outside the harness, slice B loses its `time:` and `agent:`
+lines entirely and its body hangs under slice A's rule -- 2 headers for 3
+entries, which check-ledger reads as clean and exits 0. Not a regression (the
+same merge under bare rules gives 2 headers as well) and AGENTS.md already
+documents it as identity saving an entry's tail and not its head, but it lived
+only in prose the guard's own summary line contradicted. The head fold is now
+counted at exactly one lost header, so it cannot silently worsen while the rule
+assertions stay green, and the summary says which half the worktree keeps apart.
+Bedrock left this unasserted on the grounds that the exact shape is one git
+version's diff context; the count is held rather than the shape, and the comment
+tells the next reader that three headers means git stopped folding and the line
+is to be relaxed rather than widened.
+
+Gate: `node --test scripts/check-ledger.test.mjs` 17/17, all four `guards`
+scripts in CI order green with the merge guard now at 25 assertions, `node
+scripts/check-ledger.mjs events.md` clean at 280 entries on the landed tree,
+`node --check` clean on the three touched `.mjs` files, `ci.yml` still parses to
+four jobs, and `RUSTFLAGS="-D warnings" cargo check -p ocean-surface-ui --target
+wasm32-unknown-unknown` green. The new assertion was mutated to 3 to prove it is
+live and fails `2 !== 3`. Comments, one step name and one assertion -- no route,
+no schema, no wire field, so nothing to deploy or migrate.
+_________________________________________________________________________________ 03:13 loop/surface-ledger-needs-the-per-entry-identity-separator-too
+
+time:      [05:07] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-refresh-open-transcript-discards-the-cursor-and-silently-keeps-one-page
+type:      [bug-report]
+area:      [frontend]
+
+The rooms panel's catch-up read could only ever fetch 200 rows, once, and it
+took its starting point from the rows on screen -- one line below a doc comment
+declaring that a resume point belongs to the caller. `/transcript` has answered
+`next_seq` and `has_more` since OCEAN-249 and `TranscriptResponse` declared
+neither, so `refresh_open_transcript` did one `Request::get`, appended what came
+back and returned. The route's default page is 200 rows, so any of the four
+mutations that fire it -- join, leave, remove-participant, post-message -- kept
+the first 200 rows of a larger burst and silently dropped the rest. I took the
+brief's option (a) over deleting the path: the tail covers all four sites on a
+healthy connection, but this is also what runs when the tail is down, and a
+paging fallback is a smaller diff than proving a reconnecting SSE stream is the
+only catch-up a room ever needs. So the envelope now claims both fields and the
+read walks them, which is also the wave the `RoomSnapshotResponse` comment
+nominated to claim them -- there, they stay undecoded, because nothing there
+reads them and an unread field is the dead code the `-D warnings` release lane
+rejects.
+
+The provenance half is the same bug wearing different clothes and is fixed in
+the same pass. #185 gave `start_live_tail` a private `RwSignal` for its cursor,
+which left the module with two answers to "where does a resume come from": the
+tail's, seeded from the daemon's own `last_seq`, and the catch-up read's,
+re-derived from the painted rows. There is one now. `Rooms::resume_seq` is the
+open room's resume point -- the highest seq this client has ingested -- seeded by
+hydration through `start_live_tail`, advanced by the tail as frames land and by
+the catch-up read as pages land, cleared with the rest of the room state. The
+four call sites hand it over explicitly, which is the rule #185 stated and could
+not enforce. A useful side effect: a reconnecting tail now resumes past whatever
+a catch-up read pulled in while it was down, instead of replaying it.
+
+The walk is bounded at five pages -- 1000 rows, the same window a fresh open
+paints -- because an unbounded `while has_more` inside `spawn_local` against a
+12 000-row room is the full-table read the route's paging exists to avoid, and it
+would run on every join, leave, removal and send. Hitting the cap is not a gap:
+the tail holds its own server-side position and keeps delivering. The generation
+guard is re-checked before EVERY page rather than once at entry, since each page
+is an await and a room switched mid-walk must not have the next response
+appended under it.
+
+Scope note for the reviewer: the slice named `rooms.rs` and `events.md`, and I
+had to edit `crates/ocean-surface-ui/tests/room_hydration_resume.rs` as well.
+That guard is a source scanner and it pins the exact line #185 wrote --
+`let last_seq = RwSignal::new(resume_seq);` -- which is the line this change had
+to replace, so the slice was not doable without it. Rather than only re-aiming
+the needles I widened the file to the thing it is now about: the prohibition
+covers every `last_transcript_seq(&me.transcript` / `&self.transcript` in the
+module instead of just `RwSignal::new(last_transcript_seq(`, the four call sites
+are COUNTED rather than merely present (a `contains` stays green while three
+sites hand over the resume and the fourth re-derives one, which is exactly the
+bug), and the tail's advance and the walk's cursor are pinned too.
+
+Gate: all six frozen gates green, plus `RUSTFLAGS="-D warnings" cargo check -p
+ocean-surface-ui --target wasm32-unknown-unknown` -- the lane that would have
+caught a decoded-but-unread field -- and `cargo test -p ocean-surface-ui` at
+1241 unit tests and 4 in `room_hydration_resume`. Nine mutations run
+individually against this tree: the daemon's cursor demoted below the page
+fallback (`Some(399)` vs `Some(400)`), the `has_more` stop dropped (`Some(500)`
+vs `None`), `has_more`'s serde default removed (`missing field 'has_more'`), the
+page cap loosened by one (six URLs against five), the append guard widened to
+`<=` (`[1, 2, 2, 3]` vs `[1, 2, 3]`), the monotonic resume flattened (`Some(3)`
+vs `Some(9)`), one call site re-derived from the painted rows (reds both guards,
+`left: 3 right: 4`), the walk's `page.next_seq` argument nulled, and the tail's
+`advanced_resume_seq` replaced with a bare `Some(entry.seq)`. Client-side only --
+no route, no schema, no migration, and the daemon fields consumed have shipped
+since OCEAN-249 -- so there is nothing to deploy by hand.
+_________________________________________________________________________________ 05:07 loop/surface-refresh-open-transcript-discards-the-cursor-and-silently-keeps-one-page
+
+time:      [05:28] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  loop/surface-refresh-open-transcript-discards-the-cursor-and-silently-keeps-one-page
+type:      [review]
+area:      [frontend]
+
+Refinement pass on the same branch against two review findings, both doc
+comments in `rooms.rs`, no code touched. The first is the one that mattered:
+`refresh_open_transcript` introduced itself as "the catch-up for the four
+mutations that write a row without going through the tail", and the tail does
+carry those rows -- its own `is_roster_change` arm exists for the
+ParticipantJoined/ParticipantLeft frames join/leave/remove write, and
+post_message's row is an ordinary message frame. The same file says the
+opposite at the `MAX_TRANSCRIPT_CATCHUP_PAGES` constant, "the live tail owns
+everything beyond the cap", which is the sentence the five-page bound is
+justified by -- so the module was telling two stories about who owns those
+rows, and the false one is exactly the premise a reader would use to argue the
+cap is unsafe and must go. It now says what it is: the fallback for the day the
+tail is down, with the tail carrying those rows on a live connection. The
+second claimed `append_transcript_page` applies "the same ascending-only rule
+the live tail's own ingest applies"; the tail's ingest dedupes on `seq`
+equality across the whole vector and pushes in arrival order, with no ordering
+rule at all, while the page append rejects anything not strictly past the last
+painted row. The difference is load-bearing -- it is why a tail frame landing
+after a catch-up page can sit out of order -- so the doc now names the append as
+the stricter of the two rather than equating them. Gate re-run on the amended
+tree: all six frozen gates green, plus the `RUSTFLAGS="-D warnings"` wasm
+release lane and `node scripts/check-ledger.mjs events.md`. 1241 unit tests and
+every integration binary green, `room_hydration_resume` still 4/4. One further
+line at land, from a reviewer note rather than a finding: the counted call-site
+assertion pins a magic 4, and a legitimate fifth caller reds it with a message
+about resume provenance rather than about the count. Its failure text now says
+so out loud -- if you have just added a caller, the count is the ask, not the
+failure: check which cursor your call hands over, then bump the number.
+_________________________________________________________________________________ 05:28 loop/surface-refresh-open-transcript-discards-the-cursor-and-silently-keeps-one-page
+
+time:      [07:10] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-closed-room-audit-view]
+type:      bug-report
+area:      frontend
+
+Read the closedness marker ocean-os#434 landed, so a soft-closed room stops
+pretending to be alive. `/snapshot` has always fallen through to the daemon's
+soft-closed audit view (OCEAN-170), and since dbd3d220 the body says which of
+the two arms answered -- `closed`, a plain bool, true exactly when the open-room
+read missed. That flag is the ONLY discriminator on the wire: closing a room
+stamps `closed_at` and leaves the access row alone, so a closed room answers
+200, carries its transcript, and goes on projecting whatever access it had --
+`Local` for a room that never had an access row (every purely local room, and
+the daemon's own soft-closed fixture), an unchanged `Live` or `Revoked` with its
+members and outbox for a federated one. #187 moved hydration onto `/snapshot` and
+inherited the problem it fixes -- `room_get`'s 404 used to BE the signal -- so
+until now a finished room painted its transcript above an `EventSource`
+reconnecting forever and a composer whose every send 404d in silence. Now
+`open_room` decodes `closed` with `#[serde(default)]` (the contract's additive
+rule: a pre-field daemon says nothing and nothing means open), publishes it as
+`Rooms::closed` beside `access`, and on true opens no `EventSource` AT ALL. The
+gate is at the call site rather than inside `start_live_tail` because that
+function is an unconditional reconnect loop with no stop condition in it; the
+only connection that never reconnects is the one never opened. Closedness is a
+second axis and not derivable from access, so the write half went through one
+new `composer_writes_allowed(access, closed)` beside `access_allows_writes`
+rather than a second copy of the question at each site: `post_message` and all
+four `disabled=` bindings plus both send handlers now ask it, and the composer
+carries a sentence saying the room is closed and why nothing will send -- for an
+empty closed room that notice is the only thing on the pane, since the
+transcript's own empty state is suppressed until the tail reaches Live and this
+room's tail never starts. The two rails documented as deliberately keeping the
+composer's gate (invite, repo) were left alone: minting into a frozen room is
+plausibly also dead, but that is a separate ruling and this slice does not make
+it. The outbox Retry button in the same pane was a harder case and is gated
+here: a closed FEDERATED room still carries its outbox, and the daemon's
+`retry_failed_outbox` gates on the room EXISTING rather than on `closed_at`, so
+a press in the "frozen" view answers 202 and requeues a federated send. It now
+asks closedness both where it is painted and at `retry_outbox`'s head, while the
+outbox rows themselves stay visible as part of the record. Six tests: a decode
+unit test proving absent reads as OPEN and true reads as closed on one fixture,
+and five guards in a new `tests/closed_room_audit_view.rs` naming the call site,
+counting `start_live_tail`'s one caller and the composer gate's six sites,
+pinning the notice and its stylesheet rule, and holding both halves of the retry
+gate. Ten mutations run individually with the full suite executed each time:
+nine are caught by NOTHING in this repository except the new file, including one
+where five of six composer sites stay correct and the sixth drifts. The first
+mutation pass was thrown away and redone -- it
+reverted by swapping text back, and deleting `if !closed { ... }` leaves the
+`start_live_tail` line it wrapped, so the reverse swap was a no-op and seven
+runs measured a tree that still had the first mutation applied. Revert by
+writing the original bytes back and read the failing test's NAME, not its
+colour. Also corrected the scout's premise in passing: there is no visible
+"Reconnecting" indicator to replace -- `tail_state` has exactly one reader in
+the whole crate, `transcript_tail_is_live`, which only suppresses the empty
+state -- so the visible terminal state had to be built, not swapped. Review sent
+this back for the record rather than the mechanism, and both findings held up
+against ocean-os `origin/main`: the first draft claimed six times that a closed
+room projects `Local` "identical to every live local room", which is true only
+of a room with no access row (`SqliteRoomStore::room_access`), and that false
+premise is what hid the ungated Retry button. Both are fixed above. The invite
+and repo rails stay deferred -- they fail loudly, which retry did not. Frozen
+gate green, all six: fmt --check, wasm32 clippy -D warnings, wasm32 check, proxy
+check, wasm32 test --no-run, and the host suite at 1295 passing.
+_________________________________________________________________________________ 07:10 loop/surface-closed-room-audit-view
+
+time:      [09:41] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-clippy-lints-cfg-test]
+type:      workflow
+area:      infra
+
+Closed the hole where `ocean-surface-ui` was the one crate in this repo whose
+test code was never linted, by adding `cargo clippy -p ocean-surface-ui
+--all-targets -- -D warnings` to the frozen gate list, to CI, and to the release
+lane. Every clippy the three of them named for this crate targeted wasm32, which
+builds the bin without `cfg(test)` and so cannot see a single `mod tests` block
+— and this crate is where the loop's test-only slices land, so the blind spot
+sat directly under the traffic. Both other enumerations made the gap visible by
+contrast rather than closing it: CI lints the proxy and ocean-gui
+`--all-targets` and not this crate, and `deploy/ocean-surface-auto-deploy.sh`
+carries the same asymmetry one file over, running the proxy's test-code lints
+beside a wasm32-only clippy for the UI while already blocking a promote on that
+crate's `cargo test`. Proven rather than argued: a `comparison_to_empty` planted
+inside `app.rs`'s `mod tests` left the documented wasm32 clippy at exit 0 and
+failed the new command at exit 101 with `could not compile ocean-surface-ui (bin
+"ocean-surface-ui" test)`; the probe was reverted before the commit. The two
+clippy lines are not redundant and AGENTS.md now says why in place: wasm32 is
+the target the release lane denies warnings on and is what can stop a bundle
+promoting, host `--all-targets` is the only thing that lints test code, and host
+rather than a second wasm32 pass because `cargo test --target
+wasm32-unknown-unknown --no-run` already proves the test code compiles there —
+what was missing was a lint, not a compile. The seventh command also falsifies
+the two cross-references at AGENTS.md:374 and :657 that read "the same six
+listed under File Preview Deep-Link"; both now say seven, or the repo would have
+documented two different gates depending on which section you opened. Recent
+waves have covered this by hand — entry after entry above this one records
+running an `--all-targets` lane the frozen list does not name — which is the
+manual step this removes. Checked and deliberately did NOT change the `cargo fmt --check` /
+`cargo fmt --all -- --check` drift between this list and CI: `default-members`
+is proxy-only, so the shorter form looked like it might skip the UI crate, but
+cargo-fmt ignores `default-members` and a misformatted `app.rs` fails both
+identically (verified, exit 1 naming that file). Cosmetic, so the frozen list
+keeps its wording. Review sent the first draft back for two things and both
+held. The release lane was the third enumeration of the gate and had been left
+at six, carrying verbatim the asymmetry this slice exists to close; it is fixed
+above, and `node scripts/surface-auto-deploy.test.mjs` asserts nothing about the
+cargo lines, so the addition costs that suite nothing. And this entry itself was
+prepended at BOF and closed with a bare rule, violating the identity-separator
+convention 0379846 landed two commits before this branch's base — in a parallel
+loop append, the exact fold case that convention exists for, and one
+`check-ledger.mjs` deliberately never asserts. Re-appended at EOF with the
+identity form, which is the point: an unenforced documented rule is worthless,
+and this slice cannot make that argument while breaking the repo's freshest one
+in its own diff. Gate green: all six frozen commands plus the new seventh, the
+host suite at 1295 passing across 13 binaries.
+_________________________________________________________________________________ 09:41 loop/surface-clippy-lints-cfg-test
+
+time:      [11:14] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-hydrates-room-at-tail]
+type:      bug-report
+area:      frontend
+
+Hydration now opens a room at its NEWEST page instead of its oldest. ocean-os#436
+landed `before_seq` on `/snapshot` in wave 55 and this surface had never sent it —
+`git grep before_seq -- crates/ocean-surface-ui/src` returned nothing at b8f9934 —
+so `room_snapshot_url` asked for a forward page and got the first thousand rows a
+room ever recorded. Correcting the scout's framing, which said the newest rows were
+never painted: for a LIVE room they did arrive, because `send_room_catch_up` in the
+daemon is an unbounded pager and the SSE tail dragged the whole log through the
+stream one row at a time to get there — the ecosystem contract's own "hydration
+opens at message #1 and the tail is reachable only by transferring the whole log".
+The genuinely unreachable case is a SOFT-CLOSED room: `open_room` opens no
+`EventSource` for one at all, so a finished call room past a thousand messages
+could only ever show its oldest thousand, permanently, with no affordance anywhere
+to reach the rest. Same fix for both.
+
+The trap is that `before_seq` alone would have stranded the other end — `/transcript`
+is forward-only by contract, so nothing in this module can reach a row older than
+the first one painted, and a 1500-message room that paints all of it today would
+have painted 1000 and lost 500. So the tail-anchored read comes with a bounded
+backward walk mirroring the forward catch-up: `prepend_transcript_page` as the
+sibling of `append_transcript_page`, `transcript_backfill_cursor` as the sibling of
+`transcript_catchup_cursor`, five pages of 200 replaying `prev_seq` as the next
+`before_seq`. Same 1000 + 5x200 row budget as before, anchored at the end an
+operator opens a room to read. `RoomSnapshotResponse` claims `prev_seq`/`has_more`
+as its doc comment asked the backward-paging wave to; `next_seq` stays undecoded
+for a stronger reason than before, being null on every backward page by
+construction.
+
+Past ~2000 messages the window is a real truncation, and the review was right that
+calling it "older history off-screen" undersold it. Two costs, and the second one
+is new rather than merely inherited. Nothing signals the cut: the last page's
+`has_more` is dropped, so the oldest row painted reads as the first message in the
+room. And a row INSIDE the window can render nowhere at all — `rooms_workspace.rs`
+builds the main list from `partition_thread_messages(&transcript, 0).roots`, which
+keeps only rows with no `thread_parent_seq`, so a reply at seq 2500 whose root sits
+at seq 800 is dropped from the list, and `thread_root_for` cannot find that root
+either, so no thread pane opens on it. It is invisible with nothing implying it
+exists. The unbounded `send_room_catch_up` could not leave that standing because
+the root arrived eventually. So the follow-on "load older" slice in
+`rooms_workspace.rs` is more than a scroll trigger: it needs the affordance
+replaying `prev_seq` (the walk here is already that request, only its trigger is
+missing) AND an answer for the orphaned reply, either fetching a root the window
+missed or rendering the reply where it can be seen. Both are stated on
+`backfill_open_transcript` so the next slice inherits them rather than rediscovers
+them.
+
+Seeded the walk from the hydration page's LENGTH rather than its `has_more`, which
+was not the first design. Carrying two more fields out of the decode arm broke two
+mutation-tested needles in `tests/closed_room_audit_view.rs` that pin that arm's
+literal shape to prove `closed` reaches the tail gate — a file outside this slice's
+scope, and guards worth more than the tidier seed. A backward page is the last
+`limit` rows that qualify, so a short page provably reached the start of the log
+and a full one is the only shape with rows behind it; the equivalence costs one
+request for a room whose length is an exact multiple of 1000. Left the inline test
+`hydration_reads_snapshot_at_the_stores_full_page` under its old name for the same
+reason: `room_hydration_resume.rs` cites it by name. Scope held at rooms.rs,
+`tests/room_hydration_resume.rs` and this file; nothing outside them changed.
+
+The refine pass closed the gap that stopped the first attempt landing: every unit
+test covering the backward walk was a pure-helper test, so the reviewer could move
+`me.backfill_open_transcript(..)` inside the `if !closed` gate — silently reverting
+the soft-closed case, the whole reason this slice exists — and keep all seven gates
+green. The wiring now has the same kind of guard the forward walk already had, in
+the file that owns hydration wiring: `room_hydration_resume.rs` pins the call
+sitting outside any closedness gate (the gate's body asserted to hold the tail and
+nothing else, and the snapshot's `closed` asserted to be consulted exactly once),
+the window the walk is seeded against, and `page.prev_seq` in the cursor call —
+which until now was caught only incidentally, by `dead_code` on the struct field.
+Four mutations run against the finished tree and all four RED: the call moved
+inside the gate, the call wrapped in a gate of its own, `prev_seq` dropped, and the
+seed measured against 200 instead of the window hydration asked for. Gate green,
+all seven frozen commands, host suite 1302 passing across 13 binaries.
+_________________________________________________________________________________ 11:14 loop/surface-hydrates-room-at-tail
+
+time:      [20:13] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-load-older-affordance]
+type:      feature-request
+area:      frontend
+
+A long room's older history is now a press away instead of gone. #190 anchored
+hydration at the newest page and walked back 5x200 rows; past that budget the walk
+`return`ed and dropped the page's `prev_seq` and `has_more` at that instant, so the
+oldest row painted read as the first message in the room with nothing saying
+otherwise. `backfill_open_transcript` now parks that cursor in a new `older_cursor`
+signal wherever it stops — including on a dropped request, where the page it was
+reading is still there and a flaky network should not be allowed to end a room's
+history in silence — and `load_older_transcript_page` replays one page from it per
+press, reusing `room_snapshot_tail_url`, `prepend_transcript_page` and the same
+`room_is_current` re-check the walk makes before every page. The stop rule is a new
+`transcript_older_cursor`, and `transcript_backfill_cursor` was rewritten to
+delegate to it: the walk is that answer plus the page cap, so a walk that stopped
+because the log ran out and a press that finds nothing older are the same fact
+rather than two functions that agree today. A room whose walk provably reached the
+start parks `None` and grows no control at all.
+
+Scope was wider than the backlog said and the brief was right about why: the
+backlog scoped this to rooms_workspace.rs + CSS, but the walk is a private method
+on `Rooms` and the discarded cursor is unreachable from the view. rooms.rs was
+needed and was in the brief's scope. Nothing outside the four scoped files changed.
+
+The hard half was not the fetch. Prepending rows to a scrolled container pushes
+everything the reader was looking at down by the height of what arrived, and the
+existing transcript Effect read that growth as an append: `len > prev_len` with the
+reader scrolled up is the `RaiseJump` arm, so pressing "load older" raised
+"New messages" over rows that had landed ABOVE. That was already latent before this
+slice — any hydration-walk page arriving after the reader scrolled up hit it — and
+the affordance would have made it routine. `transcript_pass_action` grew a
+`grew_at_front` argument and an `AnchorOlder` arm; the signal is a fallen oldest
+`seq` across passes, not a row count, so a page that was entirely already painted
+(`prepend_transcript_page` keeps only rows strictly older than the paint) reads as
+no movement rather than as history arriving. The Effect's carried state became a
+`TranscriptPassState { len, oldest_seq }` so both halves travel together.
+
+The anchor itself is captured by the PRESS, not by the arm. This Effect cannot know
+whether it runs before or after the `<For>` writes the new rows to the DOM, so
+measuring inside the arm would read whichever it happened to be and compute a delta
+of zero half the time; the press records `(scroll_height, scroll_top)` before the
+request and a frame callback restores `scroll_top + grown` after. CSS scroll
+anchoring was considered and rejected: `overflow-anchor` is default-on in Chromium
+and Firefox and absent in WebKit, which is the Tauri host.
+
+Ten mutations run against the finished tree, and one came back other than expected.
+Deleting the button's `on:click` was assumed to leave every lane but the new guard
+green — a control wired to nothing — and it does not: `load_older_transcript_page`
+loses its only caller and the wasm32 clippy lane fails with "method
+`load_older_transcript_page` is never used". Written into the guard's header rather
+than dropped, because the assumption is the interesting part. The two rows that
+matter most both hold: parking `None` where the walk stops, and forcing
+`grew_at_front` to `false`, each leave all 1251 unit tests green and red only
+`tests/room_load_older_affordance.rs`.
+
+Explicitly not grown into: the second defect #190 documents, a reply whose ROOT
+fell outside the window rendering nowhere at all. Pressing "load older" enough
+times is not an answer to it — the walk goes back a page at a time and cannot jump
+to one named root — so the doc comment on `backfill_open_transcript` was rewritten
+to say the first defect is closed and the second stands, rather than left claiming
+both. Gate green: all seven frozen commands, host suite 1251 unit tests plus 60
+guards across 14 binaries.
+_________________________________________________________________________________ 20:13 loop/surface-load-older-affordance
+
+time:      [20:39] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [loop/surface-load-older-affordance]
+type:      review
+area:      frontend
+
+Refinement pass. The review found the one thing the build asked it to look hardest
+at, and it was right: the `AnchorOlder` arm swallowed EVERY prepend but only acted
+on one — `older_anchor` is written in exactly one place, the button's `on:click`.
+So `backfill_open_transcript`'s remaining four pages routed to an arm that, with no
+anchor parked, fell through both `if let` bindings and did nothing at all. No pin,
+no anchor, nothing. On origin/main those passes took `PinAndQueue` and re-pinned to
+the bottom each time, because the first fill's rAF had already put the reader there
+and the walk's first page is a network round-trip later. `.rooms-workspace__transcript`
+is a plain `overflow-y: auto` column, so leaving `scroll_top` alone while rows land
+above it drifts the reader backwards by the height of the page that arrived, once
+per walk step, for every room past the 1000-row window — d58a145's exact symptom,
+reintroduced through a different mechanism one commit later. The knock-on was worse
+than the drift: a hydration ending scrolled up makes the access projection's
+re-entry pass (`len == prev_len`, `grew_at_front` false, `near_bottom` now false)
+take `Hold` instead of `PinAndQueue`, so the `last_confirmed_global_sequence` read
+advance that re-entry exists to queue was never queued for a long room at all.
+
+Fixed by giving the decision the fact it was missing rather than by moving the arm:
+`transcript_pass_action` takes an `anchored` argument and the prepend route is
+`grew_at_front && anchored`. An anchor is the only evidence a prepend was ASKED
+for, so an unasked one falls through to the same `prev_len == 0 || near_bottom` pin
+it took before this slice existed. The Effect reads `older_anchor` untracked — two
+arms below clear it, and tracking what the pass writes would re-enter the pass.
+
+Second finding, also right: the `<For>` comment asserted "the transcript is
+append-only under one generation, so a cached keyed child never sees its
+predecessor change", which is precisely the invariant this slice is built to break.
+Keyed on `m.seq`, the row that WAS the oldest keeps the view it was built with when
+its predecessor was `None`, and `day_separator_label(None, cur)` answers `Some`
+unconditionally — so a same-day row arriving directly above it left a stray day
+divider and an avatar-headed, ungrouped seam row. One of each per press, right
+where the reader is looking. The key is now `(prev.seq, m.seq)`: only the seam row's
+identity changes on a prepend, so exactly one child rebuilds and a tail append still
+caches the whole list. The comment says what is actually true now.
+
+Both findings measured, not argued. The two new mutations run for real against the
+finished tree: `anchor.is_some()` forced to `true` reds only the guard and leaves
+1252 unit tests green (which is why the guard names the call site rather than
+trusting the pure function's own tests), and the `<For>` key reverted to `m.seq`
+reds only the guard with the wasm32 clippy lane still green. Tree restored after
+each. Gate green: all seven frozen commands, host suite 1252 unit tests plus 61
+guards across 14 binaries.
+_________________________________________________________________________________ 20:39 loop/surface-load-older-affordance
+
+time:      [21:21] [09-01-26]
+agent:     [claude-code] [claude-fable-5-1]
+worktree:  cloud/surface-check-ledger
+type:      [fix]: the ledger checker ports bedrock #103 and #124, and a sibling reads the clock
+area:      [ledger]: scripts/check-ledger.mjs, scripts/check-ledger-order.mjs, events.md, ci
+
+Three things about this ledger were not true. Its checker's header claimed every
+executable line was byte-identical to ocean-bedrock's while bedrock #103 had
+already replaced the entry guard: a checker invoked through a symlinked path
+compared the two paths as typed, ran nothing, and exited 0 on an open ledger.
+The checker is now bedrock's r2 shape — realpath guard, CODE_REVISION and
+CODE_DIGEST from bedrock #124, `--digest` — with this repo's comments, and it
+digests to the same 56adab136337 bedrock prints, which
+scripts/check-ledger.test.mjs recomputes every run and which a symlink test now
+exercises for real. Its header counts (298 rules, 287 entries, 289 bare, 11
+second rules) are true as of this commit. Second, five entries — 09-01 01:06,
+08-30 23:14, 08-06 09:45am, 07-19 01:15pm, 07-18 11:52pm — sat at the TOP of
+this file newest-first above an entry from 06-26, and nothing read the clock.
+They are moved, unchanged, into the slots their stamps name (each after the
+last entry at or before it); the five blocks are the whole diff to the ledger
+body, and `git diff --numstat` reads 120/120. Third, scripts/check-ledger-order.mjs
+now owns order, as its own file so the three checker copies keep digesting the
+same: it reads every clock and date order history wrote, and reds an entry more
+than a day out of MERGE order — a prepend or a backdate — while the forty
+descents of hours that parallel slices leave pass. The ledger job runs it and
+its tests. Nothing under crates/ or styles/ changed; the Rust gates are
+untouched by this PR.
+_________________________________________________________________________________ 21:21 cloud/surface-check-ledger
+time:      [21:20] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/rooms-agent-owners]
+type:      feature
+area:      frontend
+
+Finish-line item 1.8. The daemon has served `agent_owners` on room detail and on
+`/snapshot` since ocean-os#437 — one row per owned Agent participant, naming the
+agent, the WORKER who owns it, and whether that worker is still on the roster,
+ordered by roster position — and `git grep agent_owners crates/ocean-surface-ui/src`
+returned nothing. Served, contracted, decoded nowhere. A member could not see who
+owned an agent, or that an agent was unclaimed, including in the audit view of a
+closed room where there is nobody left to ask.
+
+`RoomAgentOwner` decodes off `RoomSnapshotResponse` with `#[serde(default)]`, which
+is not decoration here: a daemon predating #437 omits the key entirely, and without
+the default that body is a decode error `open_room` reports as a failed open — every
+room on such a daemon refusing to load over a field the open path never needs. The
+mutation confirms it reds six `rooms.rs` unit tests, every fixture in that module
+that builds a snapshot body without the key. `open_room` publishes the rows into a
+new `Rooms::agent_owners` signal AHEAD of the `if !closed` tail gate and outside it,
+because a soft-closed room reports ownership unchanged and the snapshot IS its audit
+view; `reset_room_state` clears it beside `access` and `closed`, or the next room
+opened badges its same-named agents with the previous room's owners.
+
+The rail half is one pure function, `agent_ownership`, and one call site in the
+LOCAL members branch of `rooms_workspace.rs`. Agent rows get a second line — `owned
+by <name>` with the rail's own presence dot, or `unclaimed` — and unclaimed is a
+distinct rendered state rather than an absent badge, because before this slice an
+agent nobody owns and a rail with nothing to say looked identical.
+
+Two limits are deliberate and both are written into the doc. Presence is the
+daemon's `owner_present` AND the owner still being on the roster in front of the
+reader: join, leave and remove all replace `Room::participants` from routes that
+carry no `agent_owners` at all, so a `true` beside a worker the rail no longer shows
+is one read stale, and rendering it would badge a present owner nobody can find
+three pixels above. Not symmetric — a daemon that says absent stays absent, since a
+participant id is reusable and a rejoin is not evidence the original binding
+survived. And the FEDERATED rail renders no ownership: `SqliteRoomStore::agent_owners`
+joins the ownership row to `participants` and orders by `p.position`, so both ids in
+every row are local participant ids, while a federated row's `member_id` is a
+bedrock-minted binding id out of `room_agent_bindings`. Looking one up in the other
+matches nothing and would mark every federated agent unclaimed — a confident lie
+where saying nothing is the truth.
+
+Two contract details from the brief did not survive contact with the tree, and the
+tree won. There is no "detail" wire type in `rooms.rs` to teach: since #190 this
+crate opens rooms through `/snapshot` alone and decodes the unpaged detail route
+nowhere, so `/snapshot` is the only envelope that carries the field. And
+`docs/OCEAN_ROOMS_PRODUCT.md` had no Roster section to put a status line under — it
+now has one, rather than filing roster behaviour under Transcript Rendering.
+
+Six mutations run for real against the finished tree, each alone with the tree
+restored verbatim, tabled in the new guard's header. One came back other than
+expected and is written down rather than dropped: deleting the rail's ownership
+block reds the wasm32 clippy lane too, because `agent_ownership`'s only non-test
+callers live in the view. One pre-existing guard changed, and it earned it —
+`closed_room_audit_view.rs` quoted every element of `open_room`'s success tuple, so
+it went red for a slice carrying one more field out of the same envelope, having
+broken nothing that file is about. It now scans the arm for `r.closed` instead.
+Gate green: all seven frozen commands, host suite 1257 unit tests plus 65 guards
+across 15 binaries.
+_________________________________________________________________________________ 21:20 cloud/rooms-agent-owners
+
+time:      [00:11] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/rooms-agent-owners]
+type:      review
+area:      frontend
+
+Codex review on #195 found two real defects in the ownership slice, both mine, and
+both are fixed here rather than argued with.
+
+The first is a provenance collapse, and the irony is that the sibling slice on
+cloud/rooms-load-older was built entirely around not making it. `#[serde(default)]`
+on a bare `Vec` reads an ABSENT `agent_owners` — a daemon predating ocean-os#437,
+which may hold durable ownership rows it simply cannot project — identically to a
+current daemon answering `[]`. The rail then badged every agent in every room
+`unclaimed`: a confident claim assembled purely out of the surface's own ignorance.
+The field is `Option<Vec<RoomAgentOwner>>` now and the signal with it; `None` is no
+answer, `Some([])` is the daemon saying nobody owns anything. `AgentOwnership`
+grew an `Unknown` variant that renders NOTHING, which is the same three-state shape
+`OlderHistory` takes one branch over, for the same reason: an absent answer is not
+a negative one. The default stays — it is the compatibility half, and without it
+every room on such a daemon refuses to open.
+
+The second is staleness. `SqliteRoomStore` INSERTS a `room_agent_owners` row as
+part of creating an agent participant (crates/ocean-store/src/lib.rs, the
+participant_created arm), so a first-agent bootstrap leaves the room owned in the
+database and `unclaimed` on screen until it is closed and reopened — this slice's
+own bug arriving through the one door that bypasses hydration.
+`bootstrap_local_package` replaces only `rooms.open_room` and `authorize` only its
+own bindings list, neither of which the rail reads. Both now call a new
+`refresh_agent_owners`, which invalidates to `None` BEFORE it asks — a re-read that
+never answers must degrade to silence, not to a stale claim — and asks through
+`/snapshot?before_seq=0&limit=1`. That cursor is the contract's terminal empty page
+while the daemon resolves `agent_owners` from the room's own lock whichever page it
+serves, so the refresh costs one request and no transcript: re-hydrating would
+throw away every older page the operator had pressed for.
+
+Four mutations run for real for the fixes. One is compiler-held and recorded as a
+finding: `Option<Vec<_>>` back to `Vec<_>` does not build, because the rail's call
+site passes `as_deref()`. One is the reason measurement is not optional — rendering
+`unclaimed` from the Unknown arm left the guard GREEN, because the arm needle this
+header claimed had silently failed to apply and a bare `contains` on the unclaimed
+markup is satisfied by whichever arm emits it. The assertion is now a COUNT of
+exactly one unclaimed render plus a needle on the Unknown arm, and the mutation
+re-run against the fixed file comes back red. A guard written and not mutated is a
+guard that has not been measured; this one was written, not measured, and shipped
+green for an hour. Gate green: all seven frozen commands, host suite 1259 unit
+tests plus 66 guards across 15 binaries.
+_________________________________________________________________________________ 00:11 cloud/rooms-agent-owners
+time:      [21:24] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/rooms-workspace-root-surface]
+type:      bug report
+area:      frontend
+
+A room this surface created could never wake an agent. The daemon has taken an
+optional `workspace_root` on `POST /v1/rooms/persistent` since OCEAN-260, and a
+room without one is unbound: `spawn_room_agent_turn` resolves a room-bound turn's
+project and `cwd` from that binding and refuses every turn `503
+workspace_unavailable` before the agent sees the message. `CreateRoomBody` carried
+`key`, `name` and `trigger_policy` only. So every room this product made was
+unbound, and every agent mention in one did nothing — with all four trigger rows
+rendering exactly as they do in a room that works.
+
+`Room` now decodes `workspace_root` (serde default, so an older daemon that omits
+it reads as no binding rather than failing the whole decode and blanking the
+panel). `CreateRoomBody` carries it, skipped when `None` because an ABSENT key is
+what the daemon reads as unbound and an always-present null would say the same
+thing while looking like a chosen value. The create form gains a text field with
+helper text naming whose filesystem the path is resolved on — the browser cannot
+see the daemon's, so nothing here pre-validates and the daemon's canonicalizing
+400 is the only verdict.
+
+Beside the trigger toggles, because that is the condition which makes all four
+inert: an unbound notice saying agents in this room cannot run until a folder is
+bound, the bound path when there is one, and Bind/Unbind. `RoomWorkspacePatchBody`
+sends `workspace_root` ALONE and deliberately does NOT skip `None` — the daemon
+leaves an absent field unchanged, so a skipped `None` would make every unbind a
+request that changes nothing and still answers 200. One field per body also means
+this PATCH and the policy PATCH cannot clobber each other's value. Generation-gated
+like the policy write; a reply landing after a room switch writes nothing.
+
+Two deviations from the brief, both because the code said otherwise. The bind
+control is gated on `trigger_policy_accepts_writes` — the same gate the rows above
+it take — and NOT on a room owner: this repo's contract is that owner authority is
+server-derived and never inferred from a participant projection, there is no
+server-derived room-owner signal at this site, and the daemon's PATCH applies no
+owner check of its own, so a local gate would be a lock on the surface only. And
+`OCEAN_ROOMS_PRODUCT.md` §1 had no dated status paragraph to replace: it was
+already written as intent, describing a create body the surface never sent. It now
+states what is true, including the fail-closed consequence and the PATCH path,
+which it never carried.
+
+Tests: serde wire-shape round-trips (create body sends the key only when set; the
+PATCH body's `None` IS an explicit null and the body is one field wide; `Room`
+decodes with and without), the `room_is_unbound` predicate reading blank the same
+as absent, `create_workspace_root` trimming, and `WorkspaceBindStatus` matching the
+daemon's frozen code EXACTLY rather than by substring — with an assertion that its
+sentence is not `room_repo.rs`'s `workspace_unavailable` wording, which is the
+COMPUTE lane saying Bedrock is unreachable and a different condition entirely. Plus
+a source guard, `tests/room_workspace_binding.rs`: nothing in the compiler holds a
+field's presence in a serialized body, so both wire structs, both control click
+sites, the create form's pass-through, and the notice's wording are pinned by scan
+over `view_source`.
+
+Gates: all seven frozen commands green — fmt --check, both clippy lanes with -D
+warnings (the wasm one caught a redundant closure on the input's `disabled`, fixed),
+both checks, the wasm test build, and the host suite at 1258 unit tests plus 65
+guards across 15 binaries. Paired with ocean-os `cloud/rooms-workspace-root-daemon`,
+which adds the PATCH field the bind control needs; create-time binding works against
+today's daemon without it.
+_________________________________________________________________________________ 21:24 cloud/rooms-workspace-root-surface
+time:      [00:08] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/rooms-workspace-root-surface]
+type:      review
+area:      frontend
+
+Codex raised three P2s on #196. All three are real, all three are in code this
+slice added, and all three are fixed. Each was verified against the source
+before acting rather than taken on the bot's word.
+
+ONE — competing PATCH projections. The slice's own note claimed the two room
+PATCHes "cannot clobber each other's value" because each sends its field alone.
+True on the WIRE and false in the projection, which is the half that was wrong.
+The daemon applies the two writes in ITS order; the replies race back in THEIRS;
+and both success arms did `open_room.set(Some(room))` with the WHOLE returned
+`Room`. A reply carrying the other field's pre-change value landing last
+therefore reverts a durably stored field — and the trigger toggle builds its
+next policy from the record it can see, so a stale projection becomes a stale
+WRITE that un-does a persisted flag. Both arms now go through
+`merge_room_field`, which applies one closure to the open room and its list row
+and leaves everything else standing: the policy arm merges `trigger_policy`,
+the workspace arm merges `workspace_root`. Roster and timestamps keep arriving
+through hydration and the SSE tail, which is where they came from before either
+control existed. The separate in-flight flags stay — serialising the two would
+be a hold with nothing behind it now that neither reply can overwrite the other.
+
+TWO — the draft was wiped mid-type. The seeding Effect read `open_room` to find
+the stored binding, which makes it re-run on EVERY write to that signal: a
+trigger PATCH completing two inches away, any hydration refresh. Each re-run
+overwrote the field, so a typed path could vanish before Bind was pressed. It
+now keys on room IDENTITY through `workspace_draft_should_reseed(seeded_for,
+open_room_id)` — a room switch replaces the draft, an unrelated update leaves it
+alone. The effect still reads the signal reactively; it just no longer writes.
+
+THREE — the controls were live in a frozen room. A soft-closed room keeps
+whatever access state it had, so `trigger_policy_accepts_writes` alone said
+writable, while the daemon's `update` writes an OPEN room only — every press a
+guaranteed 404 dressed up as a failed write, inside a view the UI itself calls
+an audit view. The controls now take `access_writable && !rooms.closed.get()`,
+read reactively because a room can close under an open panel, and
+`set_open_room_workspace` refuses on `closed` as a second lock so a caller
+reaching the method another way cannot spend the round trip either.
+
+Note for whoever picks up the trigger rows: `trigger_toggle_row` has the same
+closed-room gap, since `trigger_policy_accepts_writes` is its whole gate too.
+That is PRE-EXISTING and deliberately not fixed here — widening this PR into a
+control it did not add is how a review round turns into a refactor — but it is
+the same bug one row up and worth its own slice.
+
+Tests: `the_workspace_draft_reseeds_only_when_the_room_identity_changes` covers
+the seeding rule at every transition (first open, unrelated update, switch,
+close, nothing-open). Two new source guards, because none of this is
+compiler-held: `open_room.set(Some(room))` compiles and reads like the obvious
+thing, so the merge guard asserts BOTH arms name their own field and that the
+wholesale assignment appears nowhere; the closed guard pins the reactive UI gate
+and the dispatcher's refusal.
+
+Gates: all seven frozen commands green, 1335 unit tests plus guards across 16
+binaries, ledger check PASS.
+_________________________________________________________________________________ 00:08 cloud/rooms-workspace-root-surface
+time:      [22:20] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-panels-css-repoint]
+type:      fix
+area:      frontend
+
+Re-pointed the iOS anti-zoom guard at the fields a phone member can actually focus,
+then deleted the rooms panel CSS it had been holding up. `tests/mobile_composer_
+regressions.rs` asserted the 16px floor on `.rooms-panel__create-input`,
+`.rooms-composer__input` and `.rooms-addagent__input` — three classes with zero
+emitters anywhere in `src/`, `index.html` or the extension wrapper. The floor a
+member's thumb meets lives in `styles/rooms-workspace.css` on `__left-input`,
+`__composer-input`, `__addagent-select` and the three `__agentbuilder-*` controls,
+and nothing asserted it. Measured before touching anything: on origin/main, deleting
+that live rule outright leaves all seven frozen gates green and 1313 tests passing
+across 14 binaries. Below 16px iOS Safari force-zooms the page on input focus, so
+the room name field, the composer and the agent builder would each have started
+shifting the layout under the reader with the suite still reporting clean. The guard
+now names those six; dropping the rule to 13px reds it with "found 13px", deleting
+the block reds it with the missing-floor panic, and the tree was restored after each.
+
+Only then the deletion. `styles/panels.css` carried about 110 `.rooms-*` selector
+occurrences — shell, overlay, head, list, create form, policy details, roster chips,
+message rows, outbox, mention hint, composer, status — for a right slide-over the
+Leptos surface never renders; `rooms_workspace.rs` is the shipped rooms UI and
+styles itself `.rooms-workspace__*` throughout. Every selector was grepped across
+the whole crate, both proxy and UI, `index.html`, the extension and every stylesheet
+before removal. The grep turned up one thing the slice had not counted: nine
+`.room-stage .rooms-*` re-scales in `styles/call.css` re-scaling base rules that
+were about to stop existing. Those went too, since they are the same dead family;
+`.room-stage__*` is a separate question and was left alone. Where a `:is(...)` list
+mixed dead rooms members with live sessions ones, only the rooms members came out
+and the group collapsed to the survivor — `.sessions-overlay`, `.sessions-panel__
+close`, `.sessions-panel__list` and `.sessions-create__input` are asserted present
+so the deletion could not over-reach.
+
+The `app.rs` guard that asserted on `.rooms-panel__list {` is what made this worth
+doing rather than tidy: it pinned a dead rule in place, so the panel's CSS could not
+be removed without a red gate while the live rail list it describes went unguarded.
+Re-pointed rather than deleted — the invariant (a flex child that can shrink and
+scroll, or a long list pushes the create field and status line off screen) is still
+real, it just belongs to `.rooms-workspace__left-list`. That is a deliberate
+departure from the slice as filed, which said to delete it; deleting would have
+traded one dead assertion for no assertion. `AGENTS.md` named the old selector in the
+Rooms Contract and now names the live one. A new case in `tests/dead_selector_
+removal.rs` asserts the ten removed families are absent from both stylesheets and
+unemitted from any Rust source, which is the lane's own convention for a deletion.
+Gate green: all seven frozen commands, 1314 tests across 14 binaries, 0 failed.
+_________________________________________________________________________________ 22:20 cloud/surface-panels-css-repoint
+
+time:      [00:05] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-panels-css-repoint]
+type:      fix
+area:      frontend
+
+Review follow-up, and the finding was right about the half the slice missed. Codex
+read the repointed anti-zoom guard and reported P2: the six selectors it names are
+not every field a phone member focuses. `__invite-input`, `__repo-input`, the three
+artifact editor fields, `__authority-select` and the two compute-panel inputs all
+render in the mobile right rail at 11-13px with no coarse-pointer floor, so focusing
+any of them force-zooms the page — while this very test asserted, in its own header,
+that none could. The first half of the miss was a guard pointing at dead selectors;
+the second half was that its replacement was a list someone wrote by hand.
+
+So the Rooms half of the table is no longer hand-written.
+`every_rooms_text_entry_control_is_in_the_anti_zoom_floor` walks the crate's view
+source, finds every `<input>`, `<select>` and `<textarea>`, reads the
+`rooms-workspace__*` class off each, and requires a 16px coarse floor for all of
+them. `type="file"` is excluded on purpose: it opens a picker, not the keyboard. The
+attribute region is bounded by tracking bracket depth rather than scanning to the
+first `>`, because a Leptos attribute value is a Rust expression and can hold one.
+
+The scanner earned itself on the first run. It found two controls neither the review
+nor the grep behind the first fix had named — `__compute-secret-name` and
+`__compute-secret-value`, both `type="text"` at 12px — because that grep matched only
+class names ENDING in input/select/textarea and these do not. A hand-maintained list
+would have shipped this slice claiming completeness and still missing two. Fourteen
+controls now carry the floor; the guard also asserts the scanner found at least ten,
+so a scanner that stops matching the markup reds instead of quietly passing.
+
+Three mutations: dropping one selector from the floor reds it by name, renaming a
+rendered control to a class with no floor reds it by name, and both leave the rest of
+the suite green. Tree restored after each. Gate green: all seven frozen commands,
+1315 tests across 14 binaries, 0 failed.
+_________________________________________________________________________________ 00:05 cloud/surface-panels-css-repoint
+time:      [22:25] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-rail-gate-guard]
+type:      fix
+area:      frontend
+
+Anchored the rail-gate guard to the rail it names. `each_rail_takes_the_gate_its_
+write_destination_earns` found its section by `markup.find(tag)` and truncated it at
+the first `/>`, which is the rail's own close only for as long as every rail
+self-closes — and nothing held that. The slice arrived carrying this as a claim
+nobody had verified, so it was verified before anything was written: a rail whose
+component gains a `children` prop mounts as `<Rail …>…</Rail>`, its children carry
+no `/>` of their own, and the first `/>` after the tag belongs to the NEXT rail.
+
+The mutation was run for real against origin/main. `RoomSummary` given a `children`
+prop, mounted non-self-closing with a `<span></span>` child, and its gate replaced
+with `Signal::derive(move || true)` — a rail whose writes ignore the room's access
+projection entirely, which is precisely the wiring this guard exists to catch. It
+passed. Not just the guard: 1313 tests across 14 binaries, plus the wasm32 clippy
+lane, all green, because the window ran through Summary's close and on into
+`RoomArtifacts`, whose `local_store_write_gate` satisfied the "must take" needle
+while Summary's hardcoded gate matched neither needle and so tripped nothing. A
+guard reporting on its neighbour and calling it by its neighbour's name.
+
+The window is now `rail_attribute_window(view, tag)`, which bounds the region at the
+earliest of the tag's own `/>` and the next `<crate::` mount, and returns `Err`
+rather than a guess when the mount comes first. Refusing is the point: a rail that
+legitimately grows children should red this gate and make someone re-anchor it, not
+quietly hand the assertion a different rail. Two smaller holes closed on the way —
+the scan runs over the production half of the file only (this module's own fixtures
+quote rail markup, and the old scan read the whole file), and the tag match requires
+a following separator, since `<crate::x::Foo` is a prefix of `<crate::x::FooBar`.
+
+The demonstration is kept as `a_rail_that_stops_self_closing_is_read_off_its_
+neighbour`: two fixture rails under fake module paths, the first non-self-closing
+with a hardcoded gate, and all three of the guard's own assertions shown passing
+over the unanchored window — the silent green, executable and permanent. Then the
+anchored window refused by name, a self-closing neighbour still reading exactly its
+own attributes, and the live view asserted still anchorable so the guard above is
+not asserting on nothing. Re-running the same source mutation against the fixed
+guard reds it with the rail named in the message. Tree restored after each run.
+Gate green: all seven frozen commands, 1314 tests across 14 binaries, 0 failed.
+_________________________________________________________________________________ 22:25 cloud/surface-rail-gate-guard
+
+time:      [00:09] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-rail-gate-guard]
+type:      fix
+area:      frontend
+
+Review follow-up, and the finding lands on the fix rather than on the original
+defect. Codex read the anchored rail-gate window and reported P2: bounding at "the
+first `/>` unless a `<crate::` mount comes first" still accepts a window that is not
+the rail's. Give a rail children and make the FIRST child a self-closing HTML element
+— `<input … />` — and that `/>` arrives before any neighbouring mount, so the
+lookahead never fires and the window comes back as if it were the rail's own. If the
+child names the wanted gate anywhere, a `disabled=` reading it for instance, while
+the rail's `writes_allowed` is hardcoded, all three assertions pass. The same silent
+green, one layer further in. The lookahead was answering the wrong question: whether
+a neighbour interrupts, rather than whether this rail closes.
+
+It now asks the rail's own opening tag. Scan forward to the first `>` at bracket
+depth zero, outside string literals, and require the character before it to be `/`.
+A Leptos attribute value is a Rust expression that can hold a `>` — a closure's `->`,
+a turbofish, a comparison, a quoted one — so depth and quote tracking are what make
+"the end of the opening tag" a real position rather than a guess; that is pinned by
+its own test with a `-> bool` closure and a `title="a > b"` in the same mount.
+
+Measured on the real tree, both directions, which is the part worth keeping. The
+mutation is now Codex's exact shape: `RoomSummary` given a `children` prop, its gate
+replaced with a hardcoded `Signal::derive(move || true)`, and its first child an
+`<input />` whose `disabled=` names `local_store_write_gate`. Against the shipped
+bound the guard reds and names the rail. Against the previous revision's bound —
+spliced back in with the mutation still in place — `each_rail_takes_the_gate_its_
+write_destination_earns` reports ok. A rail that writes regardless of the room's
+access projection, and the gate that rules on exactly that says nothing. Tree
+restored after each run. The fixture keeps both shapes permanently: the neighbour
+read and the self-closing-child read, each with the wrong answer asserted so the
+window cannot quietly go back to accepting either. Gate green: all seven frozen
+commands, 1316 tests across 14 binaries, 0 failed.
+_________________________________________________________________________________ 00:09 cloud/surface-rail-gate-guard
+time:      [22:12] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-room-list-paging]
+type:      feature
+area:      frontend
+
+The rooms rail stopped at a hundred rooms and said nothing about it. `GET
+/v1/rooms/persistent` has been paged since OCEAN-250 — `?limit=&cursor=` in,
+`next_cursor` and `has_more` out, cursor being the KEY of the last room on the
+page, order `updated_at DESC, id ASC`, store default a hundred — and the
+surface's `RoomsListResponse` decoded `ok`, `rooms`, `read_states` and `error`,
+so the page boundary arrived as an ordinary complete list. A member with more
+rooms than that could not reach them and, worse, could not tell they existed:
+the rail ended, and an ending rail is exactly what a whole list looks like. Both
+fields now decode with serde defaults, which is what keeps a daemon predating
+that route reading as one complete page rather than as a second page the rail
+would offer and then fail to fetch. The end of the loaded list grows a `Load
+more rooms` press that renders on the parked cursor and on nothing else, so its
+presence IS the statement that there is more; it fetches one page, appends the
+rooms the rail does not already list, and re-parks. Every press either adds
+rooms or takes the affordance away — the daemon falls back to its first page
+when the cursor names a room that has since closed, so a press can come back
+holding nothing new, and parking that page's cursor would leave a control
+permanently pressable and permanently inert.
+
+The eight-second unread poll was the harder half. It re-reads the list to keep
+the unread dots honest, and paging gave it two bad options: re-read every loaded
+page every eight seconds, or read the first page and silently delete everything
+below the fold while the member is looking at it. It reads ONE page, and keeps
+the pages it did not read behind it. That is sound rather than merely cheap
+because of the daemon's own ordering: `updated_at DESC` puts every room with new
+activity on the first page, which is the page being read, so nothing an unread
+refresh exists to notice can hide in the retained tail. The tail's cursor is
+retained with it, or the poll would rewind paging on every tick and the next
+press would re-serve rooms already on screen. What the trade costs is
+re-verification: a room closed on the daemon while it sits below the fold stays
+listed until an interactive read replaces the rail with a fresh first page.
+Written into `docs/OCEAN_ROOMS_PRODUCT.md`, whose Browsing Rooms section had
+been describing a `?limit=50&cursor=<opaque>` request the surface has never
+sent and "all rooms the daemon knows about".
+
+Anchors re-derived rather than trusted: the backlog's line numbers predate #192
+and four open PRs into these two files, and every one of them had moved.
+`RoomsListResponse` was at 386, not 386-395; the list fetch at 994-1060, not
+975-1050; the rail render at 2837-2960, not 1912-1928. The three `next_cursor`
+hits already in the crate are `daemon.rs` on agent SESSIONS and were left alone.
+`tests/room_list_paging_affordance.rs` pins the consumer half, and its seven
+mutations were run for real: five are its own catch with both clippy lanes and
+all 1258 unit tests green under them, including the two that matter most —
+`retain_paged_tail` forced to `false`, and the cursor park unguarded — because
+the pure helpers' unit tests own those rules and never their wiring. Two came
+back compiler-held through `-D warnings` and are recorded in the file as
+findings with a shelf life, since both holds are the accident of a helper having
+exactly one caller. Gate green: all seven frozen commands, 1258 unit tests and
+66 guards across 15 binaries. Expect a rebase against #195, #196 and #197 in
+`rooms.rs` around `reset_room_state`, where all three land hunks within thirty
+lines of this one's; the rail render at 2837 and the stylesheet's rail block are
+untouched by all three.
+_________________________________________________________________________________ 22:12 cloud/surface-room-list-paging
+
+time:      [23:58] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-room-list-paging]
+type:      review
+area:      frontend
+
+Refinement pass on the paging slice. Codex reviewed #200 at 6658de5 and found the
+one thing that would have shipped broken, and it was right. A cursor on this route
+is a room KEY, and the daemon resolves its place in the order from that room's
+CURRENT `updated_at` — `list_page` looks the anchor row up per request
+(`SELECT updated_at, id FROM rooms WHERE id = ?1 AND closed_at IS NULL`) and then
+pages strictly after wherever that row now sits. So the one event a parked key
+cannot survive is a message arriving in the room it names: `updated_at DESC` puts
+that room at the FRONT, and a press replaying its key asks for the hundred rooms
+behind the newest one, every one of them already on screen. `rooms_next_page_cursor`
+then does exactly what this slice built it to do — a page that adds nothing retires
+the affordance — and the rooms past the real boundary become unreachable until an
+interactive refresh. On a rail loaded to 200 of 250 rooms, one message in room 200
+strands rooms 201 to 250 and takes the control away while doing it.
+
+The retaining poll is where this bites, because it is the only path that holds a
+key across time: it re-read the first page every eight seconds and kept the parked
+key for the life of the paging session, so this is not a race but the expected
+outcome of any activity in one room. Fixed by keeping the POSITION and re-deriving
+the KEY: `retained_tail_cursor(parked, rail_ends_at)` parks the id of the rail's
+own last row, and only while a cursor was parked at all, so a rail that had reached
+the end of the list cannot grow the affordance back merely because a poll ran. That
+row is the boundary and it is stable under exactly the event that moves the old one
+— a tail room with new activity is by definition in the fresh first page, deduped
+out of the tail by `append_rooms_page`, and the row behind it becomes the last. The
+non-retaining path was checked and left alone: there `rooms.last()` and the daemon's
+own `next_cursor` are the same room by the daemon's own definition of the field, so
+there is nothing to re-derive, and the residual window between a page load and a
+press is inherent to a keyset cursor over a mutable sort key rather than anything
+this branch can close.
+
+Two mutations run for real against the finished tree, bringing this guard's total to
+nine. `rooms.last()` swapped for `rooms.first()` reds only `room_list_paging_affordance.rs`
+— both clippy lanes and all 1260 unit tests stay green while the same stranding is
+back — which is why the needle names the rail rather than merely naming a cursor.
+Replaying the parked key reds the wasm clippy lane too, but only because it orphans
+`rail_ends_at` and `retained_tail_cursor` along the way; that is the shape of the fix,
+not a hold worth relying on, and it is recorded in the file as such. Gate green: all
+seven frozen commands, 1260 unit tests and 66 guards across 15 binaries.
+_________________________________________________________________________________ 23:58 cloud/surface-room-list-paging
+time:      [22:35] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-transcript-local-time]
+type:      fix
+area:      frontend
+
+Room transcript times are the member's now, not Greenwich's. The slice arrived with
+unverified anchors, so the wire contract was established from both trees before any
+edit. ocean-os mints `created_at` through `fmt_ts`, `to_rfc3339_opts(Nanos, true)` —
+always a `Z`, always UTC. The surface rendered bytes 11..16 of that string as the
+row's visible clock (`canonical_wire_clock_time`, at 1122, the proposal's "1061-
+1088" having drifted) and compared `ts[0..10]` UTC date keys for day separators,
+with `today_day_key` at 560 (the proposal's "556-572") reading `Date::to_iso_string`,
+which is also UTC. So for an operator in New York every timestamp on every row read
+four hours late, the day separator landed at 20:00 in the middle of an evening's
+conversation, the local midnight it should have marked passed unmarked, and between
+local and UTC midnight "Today" meant tomorrow. Nothing in the transcript was right
+except in Greenwich.
+
+`room_messages` was extended rather than duplicated, as the slice asked. It already
+owned `parse_iso_epoch` and `days_from_civil`; it now owns their inverse
+`civil_from_days`, plus `local_clock_time` and `local_day_key`, both taking the
+offset as minutes to ADD to UTC so they stay pure. `day_key` reads local, which
+carries `day_separator_label` and `is_grouped`'s midnight rule with it — both gained
+the offset argument, so the compiler holds every call site and no guard needs to.
+
+The offset is read per timestamp, not once. A transcript that spans a DST change has
+rows on both sides of it, and one offset for the whole list renders half of them an
+hour out; `viewer_utc_offset_minutes` asks the browser about the row's own instant.
+`today_day_key` now builds its key from `get_full_year`/`get_month`/`get_date`, the
+local getters. The full wire value stays verbatim on `datetime`, `title` and
+`aria-label` — the instant is what a machine and a screen reader want, and it is the
+only unambiguous value on the row. Only the visible text moved.
+
+`canonical_wire_clock_time` is deleted, not left unused, and its seven tests with it;
+their coverage — fractional seconds, garbage, a short string, a non-canonical
+separator, multi-byte input that must not panic — is carried by the new pure tests,
+which also pin a half-hour zone, both midnights, a month end, a year end and a leap
+day, and assert `civil_from_days` round-trips against the `days_from_civil` the day
+keys were already built on. Three mutations measured against the finished tree: a row
+reverted to the UTC slicer reds only the new source guard while 1250 tests stay green
+(which is why the guard names the call site and counts all three `<time>` rows);
+`today_day_key` reverted to `to_iso_string` reds the same guard on its own clause;
+and `day_key` ignoring the offset reds exactly the two pure tests written for the
+boundary. Tree restored after each. This slice touches the transcript row closure
+that #197 also touches — its hunks there add an orphan-reply note below the ledger
+mark, mine sit above it at the density decisions and on the `<time>` line, so a
+rebase should be mechanical but is expected. Gate green: all seven frozen commands,
+1312 tests across 14 binaries, 0 failed.
+_________________________________________________________________________________ 22:35 cloud/surface-transcript-local-time
+
+time:      [23:59] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-transcript-local-time]
+type:      fix
+area:      frontend
+
+Review follow-up on the same branch, and the finding was right. Codex read the slice
+above and reported P2: `day_separator_label` and `is_grouped` took ONE offset and
+applied it to both messages, while the view derived that offset from the current row
+alone. A pair straddling a DST change has two. In New York on 2026-11-01, `04:30Z` is
+00:30 EDT and `07:30Z` is 02:30 EST — the same local morning under two different
+offsets — and resolving the pair with the later row's -300 maps the earlier one to
+Oct 31 and draws a day separator between two rows of one conversation. That
+contradicted this slice's own stated design, which reads the offset per instant
+precisely so a transcript spanning a DST change stays right; the pair comparison then
+threw that away. Both functions now take `offset_for: impl Fn(&str) -> i64` and ask
+it about each message's own timestamp, and the view passes the resolver down rather
+than a resolved value, so the compiler holds every call site.
+
+The test cost a wrong first attempt, and the reason is worth keeping. The reported
+New York example proves the separator half and CANNOT prove the grouping half: that
+fall-back sits at 02:00 local, the grouping window is five minutes, so a straddling
+pair is nowhere near a local midnight and both offsets name the same day — grouping
+reads correct there even when computed wrongly. The first version of the test
+asserted the flat offset would disagree and went red against correct code. Pinning
+`is_grouped` needs a zone that springs forward AT local midnight, Santiago's
+convention: `2026-09-06T03:58Z` is 23:58 on Sep 5 at -240 and `04:01Z` is 01:01 on
+Sep 6 at -180, genuinely two local days three minutes apart, which the current row's
+-180 collapses into one. `a_dst_change_between_two_rows_does_not_invent_a_day` covers
+both halves and keeps the wrong answer as an explicit assertion in each, so the test
+reds loudly if the resolver ever stops being per message. That asymmetry is written
+into the test rather than left for the next reader to rediscover.
+
+Measured, not argued: restoring the defect reds only the new test while
+`the_day_a_separator_marks_is_the_member_s_day` and `the_midnight_that_splits_a_
+group_is_the_member_s_own` both stay green, which is exactly why neither caught it.
+Tree restored. This entry is an append rather than a correction to the 22:35 entry
+above it, whose test count now reads one low: a non-append edit to this file lands in
+the same tail hunk the eight other open surface PRs are appending to, and union
+settles that by keeping both sides. Gate green: all seven frozen commands, 1313 tests
+across 14 binaries, 0 failed.
+_________________________________________________________________________________ 23:59 cloud/surface-transcript-local-time
+time:      [22:31] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-hydration-comments]
+type:      fix
+area:      frontend
+
+Two comments in `rooms.rs` described mechanisms the code does not run, and both
+were about the hydration walk, which is the part of Rooms that has moved most in
+the last five PRs. The backlog recorded no anchors for either, so both were
+located by reading `open_room`, `backfill_open_transcript`,
+`hydration_backfill_start`, `transcript_older_cursor` and the tests around them.
+The first is a nine-line call-site comment in `open_room`, immediately above
+`hydration_backfill_start(&transcript, HYDRATION_TRANSCRIPT_LIMIT)`, and it is a
+restatement of that function's own doc: same three claims in the same order — a
+backward page is the last `limit` rows that qualify, so a short one provably
+reached the start of the log; reading the length rather than the flag keeps the
+decode arm as wide as it was; the one cost is a room whose length is an exact
+multiple of the window. Deleted rather than reworded. The callee's doc is one
+hop away and is the copy that will be maintained; a second copy at the call site
+is a copy that goes stale silently, and the call reads as what it is without it.
+
+The second is the doc on `a_daemon_without_backward_paging_still_decodes_and_
+still_terminates`, and it named a path the code cannot take on the daemon the
+test is about. It said such a daemon paints rows 0..window, so the walk seeds at
+row 0 and asks `before_seq=0`, "which is the daemon's own terminal empty page,
+since nothing precedes the first message. One request, then stop." That is a
+MODERN daemon's behaviour. A pre-#436 daemon is defined by ignoring `before_seq`
+altogether, so `before_seq=0` gets the same forward page back, `has_more` stays
+true, `prev_seq` stays absent, and the fallback names the same row every time —
+the cursor cannot fall, and the walk runs to `MAX_TRANSCRIPT_CATCHUP_PAGES`.
+The test did not take that path either: it decoded a body with an EMPTY
+transcript, which seeds no walk at all, and then asserted
+`transcript_backfill_cursor(1, false, None, None)` with `has_more` hand-fed as
+false, which is trivially `None` and says nothing about a legacy daemon in
+particular.
+
+Made the test take the path rather than rewriting the doc down to what it was
+doing, because the path is worth having under test and the two ways it could go
+were "assert less honestly" or "assert the real thing". The fixture is now a
+full window of a room's oldest rows with `prev_seq` absent, which is the shape
+such a daemon actually answers; the decode assertion stays; `hydration_backfill_
+start` is called for real and seeds at row 0; and the walk is driven with the
+decoded page's own `has_more`, `prev_seq` and oldest row rather than hand-picked
+arguments. It asserts the cursor never falls, that the walk makes exactly
+`MAX_TRANSCRIPT_CATCHUP_PAGES` requests, and that every one of them asks for
+`before_seq=0&limit=200` — which is the whole point: against such a daemon the
+page cap is the only stop condition left standing, so the bound belongs on the
+walk and not only on the daemon's word. No behaviour changed in this slice; the
+window is scaled to 4 to keep the fixture readable, the way the neighbouring
+`a_room_inside_the_first_paint_backfills_nothing` already does. Gate green: all
+seven frozen commands, 1252 unit tests and 61 guards across 14 binaries — the
+same numbers as origin/main, which is what a comment slice should produce.
+_________________________________________________________________________________ 22:31 cloud/surface-hydration-comments
+time:      [23:15] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-guards-ordering-comment]
+type:      infra
+area:      infra
+
+The `guards` job in .github/workflows/ci.yml justified the order of its four steps
+by a side effect that #184 deleted. The comment above "The side panel links every
+stylesheet the build copies" said the deploy guard below it "invokes the auto-deploy
+script against this checkout, and its promote path rewrites extension/dist" — true
+when it was written, because four of the five child invocations in
+scripts/surface-auto-deploy.test.mjs passed OCEAN_SURFACE_STATE_DIR without
+OCEAN_SURFACE_REPO and the rail then defaulted to the checkout the script lives in.
+#184 pointed all five at a repo stub under the tmpdir the test already makes and
+added a closing assertion that fingerprints dist/ and extension/dist either side of
+the run and requires them unchanged; its own message said the ci.yml comment still
+justified a step order by this side effect and left that repair for a change that
+could read the landed fix. Re-derived rather than taken on trust: all five
+invocations carry OCEAN_SURFACE_REPO: repoStub at lines 53, 64, 75, 86 and 99, the
+buildTrees() deepEqual sits at line 143, and the guard is green here at 24
+assertions. The comment now records what the side effect was, that the order never
+gated a verdict — this step reads no CSS in either state and calls the bundle
+unbuilt either way, so what the order bought was an honest message rather than a
+correct one — and that #184 removed the side effect instead of the order, leaving
+the four steps reorderable. It names the assertion as its own pin, and that pin was
+measured: dropping OCEAN_SURFACE_REPO from the first --promote invocation reds
+"Deployment promotion stays atomic" with `running this guard must leave the
+checkout's dist/ and extension/dist untouched`, actual against an expected of
+[null, null], exit 1; restored and green again after. One stale sibling claim is
+deliberately left alone as out of this slice's scope: scripts/extension-inventory.test.mjs
+still says a CSS-less bundle "was written by the auto-deploy script's
+rebuild_extension instead — which scripts/surface-auto-deploy.test.mjs triggers
+against this very checkout", which #184 made false in the same way. Comment-only
+change; the seven frozen gates were run on the final tree regardless and are green:
+fmt, both clippy lanes at `-D warnings`, both checks, the wasm32 --no-run build of
+all 14 test binaries, and the host suite at 1313 passing across those 14 — 1252 unit
+tests plus 61 guards, 0 failed.
+_________________________________________________________________________________ 23:15 cloud/surface-guards-ordering-comment
+time:      [23:28] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-events-schema-block]
+type:      infra
+area:      infra
+
+Gave events.md the schema block it never had. The file opened mid-entry on a bare
+`time:` line, so its entry contract lived only in AGENTS.md's "Repository Ledger"
+section and in the failure text of the `ledger` job — nothing a reader who opened
+the ledger itself would find. The block now sits above the first entry and states
+the contract as THIS repo's checker enforces it today: the five header fields in
+the words ci.yml asks for them ("time [HH:MM] [MM-DD-YY] (24-hour), agent, worktree
+(branch when not on main), type, area, then one plain-prose paragraph on what
+changed and why"), the closing rule in its identity form — 81 underscores, a space,
+the entry's own HH:MM and worktree — and the union-merge caveat with the three
+rulings it does not buy: it saves an entry's tail and not its head, an entry owns
+its rule and not the blank line after it, and union only fails safe for
+append/append. The identification of the checker is deliberately not a number.
+scripts/check-ledger.mjs here carries NO revision or digest stamp; it is the port of
+ocean-bedrock's (bedrock's PR #62 for the checker, #98 for the identity separator)
+whose own header declares every executable line byte-identical to bedrock's, so the
+block names the constants — `/^time:/`, `/^_{5,}(?:[ \t].*)?$/`, exit 0/1/2 — and
+tells the reader to re-read the file rather than trust a revision that is not
+stamped anywhere. It also records what the checker does not check: separator
+uniqueness, rule width, rule-lines-against-entry-count, and ORDER. There is no
+order checker in this repo, and merged entries genuinely do not sort — union emits
+the current branch's lines before the merged branch's — which AGENTS.md already
+rules cosmetic because every entry carries its own time field. Prepending is the one
+non-append edit this file accepts, and it is safe only because neither of the
+checker's line anchors reaches the block: every sample line in the fenced template
+is indented two spaces. That indent was measured, not assumed, and the measurement
+found something worth writing down. Un-indent the whole template and the checker
+still exits 0 while the entry count rises from 287 to 288, because the sample rule
+closes the phantom entry the sample header opened — a silent miscount the exit code
+cannot see. Un-indent only the header and it exits 1 naming the template's `time:`
+line. Those measurements were taken on the BLOCK-ONLY tree, before this entry was
+appended, where the ledger held 287 entries and the un-indent took it to 288; the
+committed tree holds 288 and the same mutation would take it to 289. The number that
+survives an append is the DELTA — the block adds no entry, a mis-indented one adds
+exactly one — so the block states it that way and this entry does too, rather than
+leaving a pair of absolute counts that stop being reproducible the moment anyone
+appends. On the committed tree: 288 entries, every one closed, exit 0. Against
+origin/main with this branch's changes removed the verdict is identical but for the
+one entry this branch adds, and `git diff` for the block commit is 82 lines of pure
+insertion with nothing removed, so the first entry is untouched.
+Two corrections to this entry as first written, both mine. It said the #194 that
+brings the r2 stamps and the order sibling "is not in this repo": wrong, and wrong in
+the way that matters. #194 is OPEN, on cloud/surface-check-ledger. It is unmerged, so
+this branch's base at 4ab7a71 (#192) carries neither scripts/check-ledger-order.mjs
+nor a CODE_REVISION stamp and neither could be run from here — but "not landed yet"
+and "does not exist" are different claims and only the first was ever true. The
+sentence read as a correction of the card when the card was right. Second, the block
+above no longer documents main's unstamped port at all: it describes the tree #194
+leaves, because the card's merge order lands #194 first, which is knowledge this
+branch's first run did not have. That rewrite is 0ca70f7's, not this run's, and it is
+the right call — a block that opens an append-only ledger should describe the tree it
+will actually sit in, not the one it was drafted against. What this run added on top
+is one caveat the revision question needs: a digest that is neither 56adab136337 nor
+absent is a revision the block has not been checked against, because bedrock #127
+took bedrock's copy to r3 and r3 changes what CLOSES an entry. r3 is ported to
+neither this repo nor ocean-os, so everything the block says about headers, rules and
+the identity form describes r2 and should be re-read against any other stamp. Gate
+green on the final tree, all seven frozen commands.
+_________________________________________________________________________________ 23:28 cloud/surface-events-schema-block
+time:      [23:33] [09-01-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-dead-trigger-guard-grip]
+type:      testing
+area:      frontend
+
+Loosened dead_trigger_row_affordance's grip from a whole rule body to the one
+declaration it is actually guarding. The live-hover assertion read
+`.rooms-workspace__trigger:hover:not(:has(input:disabled)){color:var(--fg);}` off the
+whitespace-stripped sheet with the closing brace inside the needle, which pinned that
+rule as being exactly one declaration long. Its own header says it pins an affordance
+— the dead row must not brighten, the live row still must — but what it enforced was
+a byte-exact rule body, so a designer adding `text-decoration` to a live row's hover
+would have been told the dead row's affordance had regressed. The sibling test in the
+same file already avoided this: it pulls the rule through `rule_body` and asks
+`contains` for each declaration it cares about. The hover test now does the same, and
+the helper was already there. Premise re-derived before the change rather than taken
+from the title: adding `text-decoration: underline` to the guarded rule reds the
+ORIGINAL guard at line 64 with the sibling still green, which is the failure the slice
+claims. Five mutations then measured against the finished tree, one per run with the
+sheet restored between each. The added-declaration case is the one that flips — RED
+before, green after — and every genuine regression still reds: removing
+`color: var(--fg)` gives `got \`text-decoration:underline;\``, changing it to
+`var(--fg-2)` gives `got \`color:var(--fg-2);\``, deleting the rule outright panics in
+`rule_body` with ``no rule for `.rooms-workspace__trigger:hover:not(:has(input:disabled))` ``,
+and dropping `:not(:has(input:disabled))` from the prelude still reds at the
+unguarded-`:hover` assertion, which is untouched. The table is in the module header.
+
+Two corrections after review, both to claims this entry made in its first form. The
+first was a real hole and Codex found it: the assertion was
+`body.contains("color:var(--fg);")`, and this entry said the trailing `;` kept the
+value exact so the loosening cost no strictness on the property. It did not. A
+substring test is equally satisfied by `background-color:var(--fg);` and
+`border-color:var(--fg);`, either of which leaves the row's TEXT as dim as it was —
+the one change this guard exists to catch. Measured both ways on the same mutated
+sheet: with `color` swapped for `background-color`, the substring form passed 2/2
+while the row no longer brightens, and the assert now splits the body on `;` and
+compares one declaration for equality, which reds with ``got
+`background-color:var(--fg);` ``. The body is whitespace-stripped, so each piece IS
+one declaration and `==` gets the boundary for free. Six mutations now, all re-run
+against the final form: baseline and the added-declaration case green, value-changed,
+declaration-removed, rule-deleted, prelude-unguarded and colour-property-swapped all
+red. The sixth row came from review rather than from the mutation set, which is worth
+recording as such — it is the row the table did not think to try. The second
+correction: this entry said ocean-surface #198 "is not in this repo". Wrong. #198 is
+OPEN, on cloud/surface-panels-css-repoint — unmerged, not absent, and the card was
+right to cite it. Having now read it, it confirms this slice rather than changing it:
+same shape (a guard gripping something dead, re-pointed to the live property, proved
+by mutation, recorded), and it states the rule this slice followed — deleting the
+assertion "would have traded one dead assertion for no assertion". No file overlap
+between the two branches. Gate green on the final tree, all seven frozen
+commands: fmt, both clippy lanes at `-D warnings`, both checks, the wasm32 --no-run
+build of all 14 test binaries, and the host suite at 1313 passing across those 14 —
+1252 unit tests plus 61 guards, 0 failed.
+_________________________________________________________________________________ 23:33 cloud/surface-dead-trigger-guard-grip
+time:      [04:58] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-desktop-parity]
+type:      feature-request
+area:      frontend
+
+The desktop app can now run the Room-agent authorization ceremony, which it has
+been locked out of since Phase 1 landed. The lock was never about the desktop
+being less trusted: `room_authority_mutations_for_host` returned false on Tauri
+because the operator credential is injected server-side by the browser proxy on
+six exact routes, and the shell owned no equivalent privileged transport, so a
+mutation from the desktop would have reached the daemon bare and failed closed as
+an opaque 401. AGENTS.md said "until they own an equivalent privileged transport";
+this slice gives the shell one. `daemon_operator_request` takes a METHOD and a
+PATH — never a URL, never a header — re-checks both against a byte-for-byte mirror
+of the proxy's six-route allowlist (Tauri 2 capabilities do not gate
+`generate_handler!` commands, so that allowlist is the boundary, not the ACL),
+reads `operator.key` under the same five-condition custody check the proxy uses
+(regular file, owner-owned, single-linked, mode 0600, opened `O_NOFOLLOW`),
+supplies the daemon origin itself from `OCEAN_DAEMON_URL`, and returns the
+daemon's status and body and nothing else — the key never crosses back into the
+webview. On the surface side every privileged mutation now leaves the ceremony
+through ONE seam, `send_authority_mutation`, addressed by an `AuthorityRoute` that
+only four builders construct and only the seam consumes, so the compiler holds
+what a reviewer used to: bootstrap, authorize/reauthorize and the three status
+mutations cannot be addressed by a path the transport did not choose. The host
+branch lives in that seam and nowhere else. The extension stays read-only — it is
+a browser page with no shell behind it and no proxy in front of it — and the
+host predicate is now a four-arm match that says so in words. Pinned four ways:
+the flipped host test, six ocean-tauri unit tests over the allowlist and the
+custody reader (including that a path can never carry an origin), route tests
+proving each privileged path encodes its untrusted identity into one segment and
+that the browser join still produces the byte-identical URL, and a source guard
+that scans BELOW the seam's own body — the seam's two `Request` builders are the
+browser half of the transport and would otherwise satisfy an assertion about call
+sites — for exactly three seam calls, zero bare `Request::delete`, and exactly one
+surviving `Request::post` (federated membership, on no allowlist and deliberately
+credential-free). `scripts/rebuild-tauri-app.sh` gains a third `strings` needle,
+because this is Rust in the shell: a restart cannot pick it up, and an installed
+app missing that string still shows the read-only notice while being reported as
+shipped. Gate green: all seven frozen commands, 1319 host assertions across 14
+binaries, plus ocean-tauri's own fmt, `clippy --all-targets -D warnings` and 34
+tests (6 new) — the crate is ungated by CI but does build headless once
+`libgtk-3-dev` and `libwebkit2gtk-4.1-dev` are installed.
+_________________________________________________________________________________ 04:58 cloud/surface-desktop-parity
+
+time:      [07:01] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-desktop-parity]
+type:      bug-report
+area:      frontend
+
+Review found a real escape past the allowlist the desktop operator forwarder
+exists to be, and it is worth the ledger because the lesson is about mirroring.
+`%2e%2e` is not `..` to a string comparison but it IS to the URL parser, which
+normalises the escape and collapses the segment. Measured against `url` 2.x
+rather than argued: `/v1/rooms/persistent/team/agents/%2e%2e` resolves to
+`/v1/rooms/persistent/team/`, while `%2F` is left alone. So a `DELETE` on that
+path passed the literal dot-segment check, passed the six-route allowlist as a
+non-empty member id, and would have carried the mode-0600 operator credential
+to a destructive route on no allowlist at all. The proxy never had this hole:
+`has_dot_segment` runs there on axum's already-DECODED wildcard capture, before
+the allowlist. This command mirrored the allowlist and not that guard, which is
+the shape of the mistake — a mirror copied at the layer that was visible and
+not at the layer that mattered, where the proxy's decode had already happened
+for free. Closed twice over on purpose. Segments are decoded before the dot
+test, and any run of dots is refused rather than just `.` and `..`, because
+refusing the whole shape leaves no edge to re-derive. Then the built URL is
+re-parsed and the request refused unless its path still equals the one the
+allowlist approved, BEFORE the credential is read — so a path the parser would
+rewrite never reaches the key. That second check is the one that matters
+beyond this instance: it makes the whole normalisation class inert, and the
+next such rule arrives as a dependency bump rather than as a diff in this file.
+The second finding was a shape error rather than a hole: a stub returning `Err`
+off unix meant a Windows build would render Authorize, suspend, resume and
+revoke over a credential that could never be read, every action guaranteed to
+fail, which is precisely the inverse of the platform contract's absence-not-
+errors rule. Hiding the controls needs the bundle to know the shell's OS and a
+synchronous render-time predicate cannot learn it without machinery this lane
+could not exercise, so the crate now refuses to build for a non-unix target
+with a compile error naming what such a build needs — an ACL custody
+equivalent and a capability handshake. Linux is unix; nothing that has ever
+been built regresses. `crates/ocean-tauri` is ungated by CI, so the surface's
+own guard now scans the shell for both dot-segment holds and all four custody
+conditions: that scan is the only place this repo's gate sees any of it. The
+mutation was run — restoring the literal-only check reds the new test alone,
+with the other seven transport tests green — and the new tests also pin that
+legitimate encoded routes still forward, because a guard that blocks the thing
+it protects is not a fix. Gate green: all seven frozen commands, 1319 host
+assertions, plus ocean-tauri fmt, `clippy --all-targets -D warnings` and 36
+tests.
+_________________________________________________________________________________ 07:01 cloud/surface-desktop-parity
+time:      [05:09] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-desktop-parity-deeplink]
+type:      feature-request
+area:      frontend
+
+`ocean://room/<key>` now opens a room in the desktop app, alongside the
+`ocean://session/<id>` link that has worked since TASK-80. `parse_deep_link`
+stops stripping one hard-coded prefix and splits host from id instead, so the
+host became an allowlist of exactly two rather than a wildcard — a test says so,
+because `ocean://rooms/x` and `ocean://Room/x` failing is the whole difference
+between adding a shape and opening the parser. The id keeps the SAME charset and
+length rule the session id has: a room key is minted by `slugify` from lowercase
+alphanumerics and `-`, which is strictly narrower than the existing alnum plus
+`-`/`_`, so one predicate serves both hosts without widening either, and a deep
+link is attacker-triggerable either way. Routing does NOT open the room from
+`app.rs`. The key goes onto the `Rooms` handle and the workspace's one-shot
+restore queue consumes it, which is what makes an EARLY link work: that queue
+already waits for the fetched room list, and a cold launch — the OS starting the
+app expressly to handle the URL — is precisely when the list is still in flight,
+so opening from the listener would race it or open nothing while saying nothing.
+Joining the persisted restore's queue meant the queue had to learn where an entry
+came from, because the two sources are owed different things: a persisted restore
+is a convenience that loses to a user action and degrades silently when its room
+is gone, while a deep link is a person asking out loud, so it switches away from
+a room already open and, when the key names nothing this daemon has, puts a line
+in the room-list status lane instead of appearing to do nothing. That whole
+policy is one pure `room_open_outcome` with a table test over both sources times
+open/not-open times known/unknown, including the case worth its own name: a link
+to the room already on screen is a no-op, because reopening would throw away a
+hydrated transcript to show the same thing. The `rooms ` prefix on the unknown-key
+line is load-bearing and pinned — it is what selects the left-rail lane, and there
+is no open transcript to put the line under. Revealing Rooms and closing Sessions
+is all the reveal discipline needed: the mutual-exclusion Effect in `app.rs` closes
+the Island for any sibling opened directly, and its comment already named "a future
+deep link" as the case. Three files in `crates/ocean-tauri` decide whether a URL
+ever ARRIVES and none of them is compiled by this crate, so
+`tests/desktop_deep_link_registration.rs` scans all three — the `ocean` scheme in
+`tauri.conf.json`, `deep-link:default` on the `main` window, and the shell's
+`on_open_url` re-emitting each URL as `deep-link` while bringing the hidden window
+forward. Deleting any one leaves every gate green and the feature silently dead in
+a way indistinguishable from a mistyped link; both JSON guards were measured RED
+under their mutation (permission dropped, scheme renamed to `oceanx`) and the tree
+restored. macOS recipe in the PR; no live check ran here. Gate green: all seven
+frozen commands, 1329 host assertions across 14 binaries, plus ocean-tauri fmt,
+`clippy --all-targets -D warnings` and 34 tests.
+_________________________________________________________________________________ 05:09 cloud/surface-desktop-parity-deeplink
+time:      [07:01] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-desktop-parity]
+type:      bug-report
+area:      frontend
+
+Review found a real escape past the allowlist the desktop operator forwarder
+exists to be, and it is worth the ledger because the lesson is about mirroring.
+`%2e%2e` is not `..` to a string comparison but it IS to the URL parser, which
+normalises the escape and collapses the segment. Measured against `url` 2.x
+rather than argued: `/v1/rooms/persistent/team/agents/%2e%2e` resolves to
+`/v1/rooms/persistent/team/`, while `%2F` is left alone. So a `DELETE` on that
+path passed the literal dot-segment check, passed the six-route allowlist as a
+non-empty member id, and would have carried the mode-0600 operator credential
+to a destructive route on no allowlist at all. The proxy never had this hole:
+`has_dot_segment` runs there on axum's already-DECODED wildcard capture, before
+the allowlist. This command mirrored the allowlist and not that guard, which is
+the shape of the mistake — a mirror copied at the layer that was visible and
+not at the layer that mattered, where the proxy's decode had already happened
+for free. Closed twice over on purpose. Segments are decoded before the dot
+test, and any run of dots is refused rather than just `.` and `..`, because
+refusing the whole shape leaves no edge to re-derive. Then the built URL is
+re-parsed and the request refused unless its path still equals the one the
+allowlist approved, BEFORE the credential is read — so a path the parser would
+rewrite never reaches the key. That second check is the one that matters
+beyond this instance: it makes the whole normalisation class inert, and the
+next such rule arrives as a dependency bump rather than as a diff in this file.
+The second finding was a shape error rather than a hole: a stub returning `Err`
+off unix meant a Windows build would render Authorize, suspend, resume and
+revoke over a credential that could never be read, every action guaranteed to
+fail, which is precisely the inverse of the platform contract's absence-not-
+errors rule. Hiding the controls needs the bundle to know the shell's OS and a
+synchronous render-time predicate cannot learn it without machinery this lane
+could not exercise, so the crate now refuses to build for a non-unix target
+with a compile error naming what such a build needs — an ACL custody
+equivalent and a capability handshake. Linux is unix; nothing that has ever
+been built regresses. `crates/ocean-tauri` is ungated by CI, so the surface's
+own guard now scans the shell for both dot-segment holds and all four custody
+conditions: that scan is the only place this repo's gate sees any of it. The
+mutation was run — restoring the literal-only check reds the new test alone,
+with the other seven transport tests green — and the new tests also pin that
+legitimate encoded routes still forward, because a guard that blocks the thing
+it protects is not a fix. Gate green: all seven frozen commands, 1319 host
+assertions, plus ocean-tauri fmt, `clippy --all-targets -D warnings` and 36
+tests.
+_________________________________________________________________________________ 07:01 cloud/surface-desktop-parity
+
+time:      [07:01] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-desktop-parity-deeplink]
+type:      bug-report
+area:      frontend
+
+Two review findings on the room deep link, both real, both about trusting a
+name for something it does not mean. The first: a room key was being validated
+by the SESSION id rule. A daemon `RoomKey` deserializes from a bare string,
+`create_room` derives its key with `slugify` which has no length bound, and
+`encode` passes `-`, `.`, `_` and `~` through unescaped — so a room made by a
+CLI or agent path with a dot in its key, or one with a long name, shows in the
+rooms list and opens on a click while its deep link was dropped in silence.
+Room keys now get their own validator admitting the RFC 3986 unreserved set,
+which is exactly what `encode` leaves alone: a key it accepts is one the URL
+builder does not have to change to address, and that is the line worth
+drawing rather than an ad-hoc "also allow dots". Percent-encoding stays
+rejected, because admitting it re-opens the structure smuggling TASK-80
+closed; and a key that is nothing but dots is refused, because `encode` leaves
+a dot VERBATIM and `..` would become a real path segment in the daemon URL —
+the same reason the session rule excluded dots in the first place, which is
+why this is a new validator rather than a loosened one. The session rule is
+untouched and a test pins that the widening did not leak into it. The second:
+`rooms_loaded` is not freshness. `finish_rooms_fetch` sets it on any settled
+request, success or failure; nothing ever clears it; `list` is replaced only
+on success; and it lives on the App-scope handle that outlives the workspace.
+So `rooms_loaded == true` is equally true of a list fetched ten minutes ago
+and of an empty list a failed fetch left behind, and a deep link answering out
+of either reports "no room named X" for a room that exists — worse than saying
+nothing, because it sends someone hunting. A new `list_settled` counter is
+bumped once per request that was still current when it landed, failures
+included: a reader waiting on freshness has to be released by a fetch that
+could not answer, or a daemon that is down leaves it pending forever. The link
+records the counter when queued and waits for it to move, so its answer always
+comes from a list fetched after the link arrived. That forced one more
+distinction the finding implied but did not state: releasing on a FAILED
+settle would answer out of exactly the list that could not be refreshed, so
+that case now says it could not load the room list rather than denying the
+room. The persisted restore is deliberately unchanged — it answers silently,
+so a stale answer costs nothing, and that asymmetry between the two sources is
+now stated in the predicate and pinned. Both reproduced red before fixing.
+`list_settled` sits beside its sibling `list_request_ticket` rather than at the
+end of `Rooms`, following the anchor discipline the relocation commit on this
+branch established. Gate green: all seven frozen commands, 1335 host
+assertions across 14 binaries, plus ocean-tauri fmt, clippy and 36 tests.
+_________________________________________________________________________________ 07:01 cloud/surface-desktop-parity-deeplink
+
+time:      [05:20] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-desktop-parity-mentions]
+type:      feature-request
+area:      frontend
+
+Being named in a room now reaches you when you are not looking at it. Nothing
+detected a mention before: `room_markdown` tokenised `@id` for HIGHLIGHTING
+only, and `host::notify` — which already reaches macOS through the notification
+plugin's `window.Notification` polyfill — had exactly one caller, the
+turn-complete effect. The predicate is deliberately not a second scan:
+`mentions_member` runs the SAME tokeniser the renderer runs, handed the reader's
+own ids rather than the roster, so it answers "was I named" by the rule that
+paints the highlight. One grammar, so what notifies is what shows — including
+the two consequences the table test states out loud, that an `@id` inside
+backticks is code and does not notify, and that `**@bob**` does not either,
+because the grammar is single-pass with no nesting and the bold arm swallows it.
+Both were measured, not assumed; the second corrected a test row written from
+intuition. WHEN a mention may notify is a separate pure function, and three of
+its four clauses exist to NOT notify: a join/leave/system row is not someone
+talking to you, your own message quoting your own id is the easiest way to build
+a notifier that pings you constantly, and a notification while you are looking
+straight at the message is noise. That last one is a disjunction, not a
+conjunction — focused at a DIFFERENT room still notifies — which the table
+states in its own test because reading it the other way is the natural mistake.
+The fourth clause is where it is asked, and no function can hold that: the
+transcript is written from three places, and only the room-scoped SSE tail is
+someone talking to you now. Hydration and #192's load-older backfill walk write
+it too, and a call moved or added there leaves every gate green while opening a
+long room replays months of old mentions as one notification per row — loud for
+the reader, silent for CI, which is the shape a scanner exists for.
+`tests/room_mention_notification.rs` slices the tail's `Message` arm out of
+`view_source` and requires the ask, the host call and the dedupe gate inside it,
+and requires the whole module to hold exactly one call. Three mutations run
+against the finished tree and all three RED: the `.filter(|_| appended)` dedupe
+dropped (a resumed tail redelivers a seq already on screen, and one ping per
+redelivery is how a reconnect becomes a burst), a second call site added
+elsewhere in `Rooms`, and `self_member_id` dropped from the reader's id set —
+that last one is why the guard reads the builder's body rather than trusting the
+call, since dropping either half silently stops notifying a whole class of
+member. Title is the room's display name (falling back to its key, so a title is
+never empty), body is the author plus a one-line excerpt truncated on a
+CHARACTER boundary, which a test pins with a body of 400 `é` because a byte
+slice would have panicked on the first message not written in ASCII. Click
+focuses the window and, if the reader moved on first, reopens that room;
+`notify_with_focus` is additive beside the frozen `notify` and says in its own
+doc that whether the Tauri plugin routes an OS activation back into the webview
+is the plugin's business and not something this bundle can detect, so the
+handler is attached unconditionally and is simply never called where it is not
+delivered. Gate green: all seven frozen commands, 1339 host assertions across 15
+binaries, plus ocean-tauri fmt, `clippy --all-targets -D warnings` and 34 tests.
+_________________________________________________________________________________ 05:20 cloud/surface-desktop-parity-mentions
+time:      [07:02] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-desktop-parity-mentions]
+type:      bug-report
+area:      frontend
+
+Four review findings on mention notifications; three fixed, one answered as a
+limitation and deliberately left open. The one that mattered most silenced the
+feature for exactly the reader it exists for: `open_key` is not "the room on
+screen". It lives on the App-scope `Rooms` handle and survives the Rooms
+workspace unmounting behind Direct messages, and the room-scoped tail keeps
+running underneath, so a focused reader who switched to Direct messages had
+this room still "open" while seeing none of it — and `window_focused &&
+open_room == Some(row_room)` read that as looking straight at the message and
+suppressed every mention. Suppression is now its own named predicate over a
+conjunction of three facts, focused AND Rooms on screen AND that room open,
+with a test per way of dropping one; visibility reaches the tail through one
+Effect mirroring `show_rooms` onto the handle, and a guard pins that mirror,
+because without it the parameter is silently always true and the fix
+evaporates. The notification's click had the same root cause: with the reader
+behind Direct messages the room already IS `open_key`, so a
+reopen-if-different check was the whole handler and the click navigated
+nowhere. It now asks for the reveal unconditionally and reopens only if the
+reader moved on, routed through `app.rs` because revealing a peer surface has
+to close the competing ones and `rooms.rs` sits below those signals — a guard
+forbids it writing them, naming the WRITE rather than the word, since the
+module has to discuss `show_rooms` in prose to explain why the open key is not
+visibility. Third: browsers gate `Notification.requestPermission()` on
+transient user activation and an arriving SSE frame is not that, so a fresh
+browser user could never be granted permission and the feature could never
+turn on — already true of the turn-complete notifier this sits beside, which
+this slice merely made visible. The request now happens synchronously from the
+room-open click, a real gesture and the moment being mentioned starts being
+possible, with no new chrome added for it. The fourth is not fixed and should
+not be: a mention in a room you do not have OPEN does not notify, because only
+the open room has a tail and `accept_room_tail_frame` drops every other room's
+frames before the notifier sees them. The suggested remedy was a background
+feed per room, which is an `EventSource` per room and contradicts the Rooms
+Contract's one-room tail in as many words — a connection-count and lifecycle
+change to the room model, decided by a review comment on a notification slice.
+So it is recorded instead: in the predicate's docs, in the Rooms Contract, and
+in an open thread carrying the proposal that the daemon already knows who a
+message mentions and one per-identity frame would close it at one connection.
+The unreachable arm is kept because it is the correct answer if that ever
+lands, and a test name implying it was live behaviour was corrected. Gate
+green: all seven frozen commands, 1348 host assertions across 15 binaries,
+plus ocean-tauri fmt, clippy and 36 tests.
+_________________________________________________________________________________ 07:02 cloud/surface-desktop-parity-mentions
+time:      [07:47] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-device-profiles]
+type:      feature-request
+area:      backend
+
+Signing in at ocean.agentsworld.org now reaches whichever of your own machines you
+mean, instead of the one machine your roster entry was pinned to. The proxy already
+had a multi-user roster where each entry named exactly one `daemon_url`, so a login
+decided WHOSE Ocean you saw but never WHICH; a person with a mini and a studio had
+one profile and one of their two daemons. A user entry may now carry `devices`: a
+list of `{ name, daemon_url, observer_token_path?, operator_key_path?, default? }`,
+validated on load for unique non-empty names, absolute http(s) URLs, and at most
+one default (with roster order electing one when nobody marks it). The legacy
+single `daemon_url` still loads and normalizes into one device named after its
+host, so every existing deployment keeps working byte-for-byte; setting both on one
+entry is refused rather than merged, because guessing which machine somebody's
+turns execute on is not a thing to ship.
+
+Selection is per session and server-side. `GET /api/devices` answers the roster
+with a live `/health` probe per device (ok with version/rev, unhealthy, or
+unreachable, all probed concurrently on a 3s client so a roster of sleeping laptops
+costs one timeout) plus `selected` and `selection_explicit` — the second is what
+lets the surface offer the picker once after a login rather than nagging on every
+load. `POST /api/devices/select {name}` records the choice against a SHA-256 digest
+of the session token in a 0600 `device-selections.json`, written atomically and
+re-read at boot, so a switch survives a deploy and never rides in the cookie. No
+`daemon_url` appears in either payload: the browser addresses a machine by name
+only, so nobody types a URL and no page renders a tailnet address.
+
+Routing moved wholesale rather than per-route. The auth gate already resolved one
+`ResolvedDaemon` per request and every proxying handler read it, so the change was
+to make that resolution answer the session's SELECTED device and to carry the
+device's observer token and operator key ON the resolution — the credential now
+travels with the upstream it belongs to and the two cannot drift apart. The
+no-fallback custody rule is unchanged and now per-device: the process-wide token
+and key apply only to the device that is in fact the process default, and a machine
+naming no credential of its own gets none. `every_daemon_route_resolves_its_upstream_through_one_resolver`
+is the guard the compiler does not hold: a new handler that builds a URL from
+`state.daemon_url` compiles and passes everything else while quietly pinning one
+route to the old machine. Both of its arms were mutation-checked for real. A
+forward that cannot reach its machine, and a selection the roster no longer has,
+both answer one typed 503 `device_unavailable` naming the device — replacing the
+opaque 502 `daemon unreachable`, whose test now proves the stronger property that a
+NAMED device's address never appears in a body at all. `/api/config` and
+`/api/devices` deliberately keep answering under a stale selection, or a removed
+device would be a locked door.
+
+ops/README.md carries the device recipe and says the quiet part out loud: the
+daemon has no auth of its own, so binding it to a machine's tailnet address (never
+0.0.0.0) trades loopback trust for the tailnet ACL, and that ACL is then the entire
+boundary. `ops/add-device.sh` appends a device atomically with 0600 preserved,
+folds a legacy `daemon_url` into an explicit device on the way, and refuses a
+non-tailnet URL unless `--allow-public` is passed in as many words. This is one
+person reaching their OWN daemons; cross-person rooms still federate through
+Bedrock and no daemon accepts another person's connection. Gates green: all seven
+frozen commands plus `cargo test -p ocean-surface-proxy`, 78 passed.
+_________________________________________________________________________________ 07:47 cloud/surface-device-profiles
+
+time:      [08:36] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-device-profiles]
+type:      review
+area:      backend
+
+Five findings from the Codex review on #209, all verified against the code before
+being fixed, and two of them change the contract this slice shipped an hour ago.
+
+Recording a selection only affected FUTURE requests, so a tab whose SSE tail was
+already connected kept receiving the old machine's events while its turns and
+decisions went to the new one — two machines blended into one transcript, which is
+what the session contract exists to forbid. Selecting now broadcasts the selections
+row it changed, and every proxied stream opened through that row ends; the client
+reconnects and lands on the new machine. The broadcast carries the ROW and never a
+device name, because two people can both be sitting on a machine called "studio"
+and only one of them switched, and a lagged receiver keeps streaming rather than
+guessing it missed its own switch — ending a live transcript on a suspicion is
+worse than a stream that outlives one switch. Both halves are pinned: a held-open
+stub daemon whose proxied body must end within a timeout (mutation-checked by
+returning None from the resolver, which reds it), and a unit test that one row's
+change leaves another row's future pending.
+
+The selection was keyed on the PERSON, not the browser. This proxy derives a
+session token from username and password so an installed PWA stays signed in
+across deploys — which means every browser one person owns presents the same
+token, and picking a machine on the phone re-pointed the desktop's next request.
+The key is now a digest of the session token AND an opaque per-browser id in a new
+HttpOnly `ocean_device` cookie, minted when a browser first lists its devices.
+Neither half alone would do: the token is shared across browsers, and a cookie is
+a thing a browser sends, so an id alone would be a bearer key to somebody else's
+routing. The auth cookie was left exactly as it was, because it is load-bearing
+for staying signed in.
+
+`ops/add-device.sh` accepted a public host that merely LOOKED like a tailnet one:
+`100.64.0.1.example.com` matched the `100.` glob and `127.example.com` matched
+`127.`, so both walked past the --allow-public acknowledgement standing in front
+of a daemon with no auth. A prefix match is not an address check; the host is now
+parsed and classified as a literal address by range, with `*.ts.net` requiring a
+label of its own. The same script also wrote names the proxy would then refuse — a
+whitespace-only name trims to empty at startup, and `mini ` evades a raw duplicate
+check to collide after trimming — either way leaving a surface that will not boot
+after the restart the script tells you to run. Names are now normalized the way
+the proxy normalizes them, before anything is written.
+
+Last, concurrent selections raced their file writes: the snapshot was taken under
+the lock and persisted outside it through a temp file named only for the pid, so
+two writers could rename over each other and leave the file disagreeing with
+memory until the next restart, at which point somebody silently gets a machine
+they did not pick. The lock now spans the whole read-modify-write and the rename,
+temp names carry a per-process counter, and rows gained a timestamp so the file
+can be pruned by age and cap — one row per (person, browser), and a private window
+is a new browser. Proxy tests 78 -> 84. Gates green including `cargo clippy -p
+ocean-surface-proxy --all-targets -- -D warnings`, which is a CI lane the seven
+frozen gates do not cover and which caught three needless borrows this slice
+shipped with.
+_________________________________________________________________________________ 08:36 cloud/surface-device-profiles
+time:      [08:08] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-device-profiles-ui]
+type:      feature-request
+area:      frontend
+
+The surface half of device profiles: a person signed in at ocean.agentsworld.org
+can now see the machines their login owns, pick one, and land in that machine's
+sessions — and switch later without signing in again. New `devices.rs` reads the
+proxy's `/api/devices`, which publishes names, health and which one you are on and
+deliberately no `daemon_url`, so nothing in this module accepts, stores or renders
+an address and no URL is ever typed in a browser. The picker is offered once after
+a login on the SERVER's account of the facts: `selection_explicit` is false until
+somebody actually picks, so a fresh login with two machines is asked and a browser
+reopened tomorrow is not — no client-side "have I asked" flag to be wrong in the
+second browser or lost with a cleared cache.
+
+A switch is one POST, then a re-attach. `Daemon::reattach_to_selected_device` drops
+everything that belonged to the machine being left — transcript, permission cards,
+session intent, the SSE tail, whose generation `connect` bumps rather than races —
+then re-fetches models, projects and sessions, because each of those catalogues is
+a list of things that are not on the new machine. The one thing that may cross is
+the remembered session id, and only if the new daemon has it: `classify_session_restore`
+answers Restore or Clear and absence is Clear, never an error, because two machines
+with different histories is the ordinary case. That classifier now runs on the boot
+path too, so restore-after-switch and restore-at-boot are one rule with one test
+rather than two implementations that agree today. `new_session` and the switch share
+`reset_session_local_state`; the split is exactly where they differ, which is that
+one forgets the persisted id and connects and the other keeps it to ask the next
+question with.
+
+Four controls, measured before pinning. Deleting the `<DeviceChip>` mount reds the
+wasm clippy lane (its props' `state` goes unread) and deleting `<DevicePicker>`
+takes `daemon_for_devices` and the whole `reattach_to_selected_device` path dead
+with it — both compiler-held, recorded not pinned. The boot `devices.load(true)`
+and the header overflow's `Devices` row are both GREEN under deletion: `load` is
+still called by `select` and `open` is still written by the chip and read by the
+picker, so nothing goes unreferenced while the feature becomes invisible and
+unreachable. Those two are pinned in `tests/unheld_device_controls.rs`, each needle
+naming its call site over `view_source`, each verified by a rename as well as a
+deletion.
+
+`app.rs` takes five small hunks and nothing else, which is the point given four open
+PRs on that file. Styles are additive in `chrome.css` (the header chip, reading like
+the status chip beside it), `panels.css` (a centered dialog, deliberately outside
+the reveal rail's close-exactly-one chain — it consumes its own Escape like the
+palette) and `compact.css` (the chip keeps its name on a phone under a hard cap;
+which machine you are driving is exactly what a small screen must not drop). No new
+stylesheet, so the three enumeration sites are untouched. A proxied route's typed
+503 now reads as a sentence naming the machine instead of a JSON decode error, and
+the picker says so about the machine you are on. Gates green: all seven frozen
+commands, 1322 host tests across 15 binaries, plus `cargo test -p
+ocean-surface-proxy` 78 passed.
+_________________________________________________________________________________ 08:08 cloud/surface-device-profiles-ui
+
+time:      [08:44] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-device-profiles-ui]
+type:      review
+area:      frontend
+
+The surface half of the review round. Making a selection per BROWSER rather than
+per person, and having the proxy end the streams open on the machine being left,
+closes the blend at the transport layer and leaves exactly one layer of it above:
+a background tab whose stream was ended reconnects onto the NEW machine while
+still showing the transcript it had already rendered from the old one. Nothing
+pushes that change to the tab, so `recheck_on_focus` asks `/api/devices` again
+when the tab is looked at — the moment a stale transcript would otherwise be read
+as current — and re-attaches when the answer names a different machine.
+`switched_underneath` is the pure decider and its test says why the two empty
+cases are not switches: an empty `was` is this tab's own boot, and an empty answer
+from the proxy is an unreadable reply rather than a machine, and re-attaching on
+either would tear down a healthy transcript to arrive back where it started.
+Measured like the others and RED — deleting the one call site takes
+`recheck_on_focus` dead — so it is recorded in the guard file's table rather than
+pinned. Gates green: all seven frozen commands, 1323 host tests across 15
+binaries, plus the proxy crate's 84 and its own clippy lane.
+_________________________________________________________________________________ 08:44 cloud/surface-device-profiles-ui
+
+time:      [09:20] [09-02-26]
+agent:     [claude] [opus 5]
+worktree:  [cloud/surface-device-profiles-ui]
+type:      review
+area:      frontend
+
+Eight findings from the Codex review on #210, all verified before being fixed, and
+the pattern across them is one thing said eight ways: a device switch is a wider
+identity change than the code treated it as, and every piece of state that belongs
+to a machine has to be retired with it.
+
+The open ROOM was not. `Rooms` is separate state with its own generation and its
+own tail, and a G1 room is daemon-native — local to the machine holding it — so
+after a switch the open room was either gone or, worse, a different room sharing
+the key, while its transcript, roster, access projection and drafts still described
+the machine we left. A switch now closes the room synchronously and re-lists, which
+is the same one reset path the rooms contract already requires of open and close.
+Nothing held that call — `close_room` is still called by the rooms UI and
+`attach.rooms` by the very next line — so it is pinned, mutation-checked by both a
+deletion and a rename.
+
+The CWD was not, and this is the one that could have run an agent somewhere
+nobody asked for. When the remembered session does not exist on the new machine
+there is no projection to inherit a workspace from, so `cwd` and `project` stayed
+as the old machine's; the next prompt lazily creates a session with them. On a
+machine with a different layout that either fails or — worse — resolves to an
+unrelated directory that happens to share the path. The cleared arm now falls back
+to the same projectless Chat root `begin_chat_session` uses, and the new machine's
+own projects arrive with its catalogue. The restored arm already adopts the
+session's own root through the projection commit, so it is left alone.
+
+The model and project CATALOGUES were not: neither fetch had a generation, so an
+old machine's reply could win the last write and leave the picker offering choices
+the attached daemon does not own — and `fetch_projects` additionally CLEARS a
+selection its list lacks, which a late reply would have done to a valid one. Both
+now capture a `device_epoch` before their await and drop a reply that outlived a
+switch. The device listing had the same hole in the other direction: `/api/devices`
+snapshots `selected` BEFORE probing health, so a focus-triggered listing that
+started before a switch could land after it, overwrite the new selection, leave the
+header naming the wrong machine indefinitely, and fire a re-attach that clears the
+transcript the switch had just restored. Everything that writes `selected` now
+holds a ticket.
+
+And the SESSION RESTORE was not guarded against the person: a session-detail fetch
+is a round trip with a live composer throughout it, so whoever starts a session in
+that window owns the focus — while the restore, landing later, either yanked it
+back or cleared the id that new session had just persisted. It now carries the
+intent generation it started under and answers Superseded rather than acting.
+`claim_is_current` is that rule, shared with the listing ticket because it is the
+same rule twice.
+
+Two smaller ones, both real: opening the picker never moved focus into it, so a
+`keydown` bound to the panel never saw the first Escape — it sailed past to the
+window rail and closed a reveal UNDERNEATH the open picker. The dialog now takes
+focus when it opens, which is both the fix and the a11y contract. And `known()` was
+true for any successful listing including a single-device one, so every
+single-operator install grew a permanent header chip and a menu row whose only
+action was to reselect the machine it was already on; visibility is now
+`device_chrome_visible`, which asks whether there is anywhere to go. The overlay's
+`rgba(6, 6, 6, 0.72)` moved to `--overlay` in tokens.css, taking the two
+pre-existing literals in panels.css with it. Gates green: all seven frozen commands,
+1326 host tests across 15 binaries, the proxy crate's 84, and both clippy lanes.
+_________________________________________________________________________________ 09:20 cloud/surface-device-profiles-ui
+time:      [15:30] [09-02-26]
+agent:     [codex] [gpt-5.6-sol]
+worktree:  codex/integrate-cloud-rooms-194-210
+type:      feature-request
+area:      frontend
+
+Integrated the frozen Ocean Cloud Rooms surface slices from PRs #194 through
+#210 onto the current main line, resolving their shared Rooms and device-state
+touchpoints without changing the source branches. The room list now consumes
+the daemon's additive, identity-scoped attention projection: sparse counts are
+validated against the matching read state, unopened rooms show a compact unread
+count or @mention count, present empty attention clears stale badges, and older
+daemons retain the sequence-based unread fallback without claiming mention
+knowledge. A live open-room tail raises unread immediately while the next
+bounded attention poll remains authoritative. Focused attention tests passed;
+the full release gate set remains pending on this integration head.
+_________________________________________________________________________________ 15:30 codex/integrate-cloud-rooms-194-210
+time:      [15:50] [09-02-26]
+agent:     [codex] [gpt-5.6-sol]
+worktree:  codex/integrate-cloud-rooms-194-210
+type:      testing
+area:      frontend
+
+Closed the integration release gates and the visual QA pass. The merged ledger
+had reintroduced duplicate copies of five historical entries above the schema
+header's chronological body; removed only those duplicate prologue copies while
+preserving their existing correctly placed originals, leaving 317 closed and
+order-valid entries. The Rooms list attention contract, monotonic merge, live-tail
+update, coarse-pointer text floor, proxy routing, WASM target, and native host
+suites are green: 1317 UI tests, 84 proxy tests, both strict UI clippy lanes,
+proxy clippy, Trunk release output, and standalone Tauri check/clippy. Headed
+browser QA on the branch bundle opened the durable Ocean Release Room against the
+local daemon. That pass also found the remaining decorative Spark glyph on system
+rows; the four Rooms render paths now use a plain neutral S initial, with a fresh
+release bundle proving the icon is gone.
+_________________________________________________________________________________ 15:50 codex/integrate-cloud-rooms-194-210
+time:      [17:45] [09-02-26]
+agent:     [claude] [fable 5.1]
+worktree:  fix/desktop-live-sync
+type:      bug-report
+area:      frontend
+
+smaths reported the desktop app "buggy as hell — the daemon never connects,
+not synced with the web app". Looked before fixing: the running Ocean.app was a
+build from 08-03 (main was 09-02) showing "daemon offline", an empty model
+picker and an unanswered turn, with no webview connection to :4780 at all,
+while the daemon answered curl and CORS-allowed tauri://localhost. Two real
+defects, both desktop-only. (1) host.rs subscribed to shell events through
+__TAURI_INTERNALS__.event.listen, which Tauri 2 does not expose — every
+shell→webview event (daemon-status, menu-command, path-changed, deep-link) was
+silently never delivered, so the offline chip froze at its boot seed and native
+menu commands vanished; tauri_listen now registers the handler via
+transformCallback and invokes the core plugin:event|listen command, logging a
+rejection instead of swallowing it. (2) generate_context!() embeds dist/ at
+compile time, so the installed app carried whatever dist the last manual
+cargo tauri build saw while the rail promoted main to the browser within
+minutes — the "not synced" half. New crates/ocean-tauri/src/live_surface.rs
+wraps the generated context's assets so the promoted release
+(~/.config/ocean-surface/current; OCEAN_SURFACE_DIST overrides, empty disables)
+is served from disk per request, path-checked, never mixed with the embedded
+fallback; a watcher reloads a hidden window on promote and emits
+surface-updated to a visible one; File ▸ Reload Surface (Cmd+R) and a tray
+item re-read the bundle; surface_bundle reports live/embedded + revision.
+run-tauri.sh points dev at the dist it just built; the rail's phantom "restart
+Tauri" step (a launchd label that never existed) is now a log line, its TASK-87
+rebuild marker stays. Carries the sibling fix/daemon-status-stability commit
+(revisioned snapshots, debounce, probe every resolved address, pre-probe).
+Verified LIVE on the fresh bundle with an injected diagnostic overlay,
+screenshotted: daemon fetches 200, /v1/events EventSource opens, daemon_status
+running, plugin:event|listen accepted, Commands ▸ Toggle Sessions arrived as
+menu-command and opened the panel, a touched index.html produced
+surface-updated within one poll. Gates: ocean-tauri 48 tests + clippy -D
+warnings + fmt; ocean-surface-ui 1320 lib tests + integration suites (one
+source-assertion test pins daemon_operator_request as the last registered
+command, so surface_bundle registers before it) + wasm clippy -D warnings +
+fmt; rail guard 24 assertions. Not fixed here: the machine's data volume was
+at 100% (≈92 GB of cargo target dirs under /private/tmp agent lanes); every
+build failed with ENOSPC until space drifted back, and pruning other lanes'
+caches was declined by the auto-mode classifier — that is smaths' call.
+
+_________________________________________________________________________________ 17:45 fix/desktop-live-sync

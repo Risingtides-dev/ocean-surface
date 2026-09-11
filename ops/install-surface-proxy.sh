@@ -55,6 +55,7 @@ if [[ ! -f "$AUTH_ENV" ]]; then
   echo "         OCEAN_SURFACE_AUTH=on" >&2
   echo "         OCEAN_SURFACE_USER=..." >&2
   echo "         OCEAN_SURFACE_PASS=..." >&2
+  echo "         OCEAN_SURFACE_COOKIE_SECURE=on  # public HTTPS tunnel" >&2
   echo "       Create it before installing (chmod 600). Password material" >&2
   echo "       typically lives in ~/.config/ocean-surface/proxy-basic-auth.txt." >&2
   echo "       There are no built-in operator credentials." >&2

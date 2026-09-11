@@ -46,6 +46,13 @@ tokio = { version = "1", features = ["sync", "time", "macros"] }
 git2 = { version = "0.20", features = ["vendored-libgit2"] }
 # Open a file with the OS default application (B0: Open Externally).
 opener = "0.7"
+# Privileged room-authority forwarder (spec 1.12): the shell attaches the
+# mode-0600 operator key to the six ceremony routes on the supervised daemon,
+# which is loopback HTTP — no TLS backend is enabled, and none is wanted.
+reqwest = { version = "0.13", default-features = false }
+# Credential custody: O_NOFOLLOW + the process euid, matching the proxy's
+# reader. std exposes the file's uid but not the caller's.
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

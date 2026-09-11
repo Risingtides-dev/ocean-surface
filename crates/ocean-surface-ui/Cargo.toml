@@ -21,6 +21,7 @@ futures-util  = "0.3"
 console_error_panic_hook = "0.1"
 console_log   = "1"
 log           = "0.4"
+base64        = "0.22"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 web-sys = { version = "0.3", features = [
   "Window",
@@ -30,6 +31,11 @@ web-sys = { version = "0.3", features = [
   "Element",
   "HtmlElement",
   "HtmlInputElement",
+  "File",
+  "FileList",
+  "ClipboardEvent",
+  "DataTransfer",
+  "Selection",
   "HtmlTextAreaElement",
   "HtmlFormElement",
   "Storage",

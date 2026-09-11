@@ -105,7 +105,7 @@ permission requests, completion). Surfaces must subscribe scoped to their own
 The daemon must be running (in `../ocean-os`: `cargo run -p ocean-daemon --release`). Then:
 
 ```sh
-# Tailnet or trusted LAN: Basic auth is required because the default bind is 0.0.0.0:8790.
+# Tailnet or trusted LAN: operator login is required because the default bind is 0.0.0.0:8790.
 export OCEAN_SURFACE_USER='<user>'
 export OCEAN_SURFACE_PASS='<strong password>'
 ./run-surface.sh
@@ -119,10 +119,10 @@ OCEAN_SURFACE_BIND=127.0.0.1:18790 OCEAN_SURFACE_AUTH=off ./run-surface.sh
 ```
 
 `run-surface.sh` builds both the Trunk release bundle and
-`target/release/ocean-surface-proxy` before serving. It fails before building if
-Basic auth is enabled without nonblank credentials, or if auth is disabled on a
+`target/release/ocean-surface-proxy` before serving. It fails before building
+when operator login lacks nonblank credentials or auth is disabled on a
 non-loopback bind. Tailnet traffic is encrypted; direct LAN HTTP should be used
-only on a trusted network because Basic auth does not encrypt transport.
+only on a trusted network because the login form does not encrypt transport.
 Override the daemon or voice profile with `OCEAN_DAEMON_URL` and
 `OCEAN_VOICE_PROFILE`. Maps are optional: set a referrer-restricted
 `GOOGLE_MAPS_API_KEY` to enable them. No organization-owned Maps key is bundled;
@@ -174,6 +174,29 @@ via ocean-os's provider auth file). The proxy no longer reads or stores an
 xAI key.
 
 `GET /api/config` reports `has_auth`; the UI fetches it on boot so no URL or credential is ever typed in the browser.
+
+## Devices — your machines, one login
+
+A person's entry in the proxy roster (`~/.config/ocean-surface/users.json`,
+0600) may list **devices**: the machines whose Ocean daemons that login can
+attach to. Sign in once, pick a device, and you are in that machine's sessions
+— switching machines later is a click, not a second login. The choice is kept
+server-side, per browser, and survives a proxy restart, so a browser reopened
+tomorrow lands where you left it while your other devices keep their own. Setup, the tailnet boundary this depends on, and
+`ops/add-device.sh` are in [`ops/README.md`](ops/README.md).
+
+| Route | Answers |
+|---|---|
+| `GET /api/config` | boot payload: `has_auth`, `user_id`, LiveKit/maps defaults |
+| `GET /api/devices` | `{ devices: [{ name, default, selected, health }], selected, selection_explicit }` — `health.state` is `ok` (with `version`/`rev`), `unhealthy`, or `unreachable`, probed live with a short timeout. `selection_explicit` is false until someone actually picks, which is how the surface offers the choice once after a login instead of on every load. |
+| `POST /api/devices/select` | `{ name }` → `{ ok, selected }`; a name that is not on your roster is a 404 |
+
+Both device routes are behind the login, like every other `/api/` route. The
+payload names devices and never their `daemon_url`: nobody types a URL in a
+browser and no page learns your tailnet addresses. A request routed to a device
+that is unreachable — or to one the roster no longer has — answers `503
+{"error":"device_unavailable","reason":…,"device":…}`, which is what the picker
+shows.
 
 ## Roadmap
 

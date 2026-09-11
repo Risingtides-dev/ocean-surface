@@ -1,0 +1,5181 @@
+/* Rooms workspace — dense, restrained Slack/Discord desktop layout.
+   Three-rail: left (room list), center (header + timeline + composer),
+   right (members / thread). Compact responsive collapse. All colours from
+   tokens.css; no floating cards, centered stage, room-mode animation,
+   or new raw colours. */
+
+/* ── Timeline density contract ─────────────────────────────────────── */
+
+.rooms-workspace__msg--grouped {
+  margin-top: 2px;
+}
+
+.rooms-workspace__msg--grouped .rooms-workspace__msg-avatar {
+  opacity: 0;
+  width: 0;
+  min-width: 0;
+  margin-right: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.rooms-workspace__msg--grouped .rooms-workspace__msg-name {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.rooms-workspace__msg--grouped .rooms-workspace__msg-time {
+  margin-left: auto;
+  color: var(--fg-4);
+  opacity: 0.68;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__msg--grouped:hover .rooms-workspace__msg-time,
+.rooms-workspace__msg--grouped:focus-within .rooms-workspace__msg-time {
+  opacity: 1;
+}
+
+/* Touch and other non-hover surfaces need a persistent timestamp fallback. */
+@media (hover: none), (pointer: coarse) {
+  .rooms-workspace__msg--grouped .rooms-workspace__msg-time {
+    opacity: 1;
+  }
+}
+
+.rooms-workspace__day-separator {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin: 12px 0;
+  color: var(--fg-4);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  line-height: 1;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.rooms-workspace__day-separator::before,
+.rooms-workspace__day-separator::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--border-subtle);
+}
+
+.rooms-workspace__day-separator::after {
+  opacity: 0.7;
+}
+
+/* If the view reuses the same divider class for a gap timestamp, keep the
+   same full-width treatment but soften the emphasis slightly. */
+.rooms-workspace__day-separator:where(:not([data-day])) {
+  color: var(--fg-3);
+  font-weight: 500;
+}
+
+.rooms-workspace__day-separator:where(:not([data-day]))::before,
+.rooms-workspace__day-separator:where(:not([data-day]))::after {
+  opacity: 0.85;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rooms-workspace__msg--grouped,
+  .rooms-workspace__day-separator,
+  .rooms-workspace__msg--grouped .rooms-workspace__msg-time {
+    transition: none;
+  }
+}
+
+
+
+/* ── Shell ─────────────────────────────────────────────────────────── */
+
+.rooms-workspace {
+  /* Persistent flex child inside the app shell — NOT an overlay.
+     The parent flex container sets the available height; we fill it. */
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+/* ── Left rail — room / channel list ──────────────────────────────── */
+
+.rooms-workspace__left {
+  flex: 0 0 240px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-raised);
+  border-right: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__left-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 12px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__left-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-3);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__left-close {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-4);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__left-close:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__left-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.rooms-workspace__left-create {
+  padding: 8px 10px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__left-input {
+  box-sizing: border-box;
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  background: var(--bg-elevated);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font);
+  font-size: 12px;
+  line-height: 28px;
+  outline: none;
+  transition: border-color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__left-input::placeholder {
+  color: var(--fg-4);
+}
+
+.rooms-workspace__left-input:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.rooms-workspace__left-input:focus:not(:disabled) {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+/* ── Left rail — join by invite code ──────────────────────────────── */
+/* Sibling of the create block, wearing its footer geometry so the two read
+   as one group with a rule between the verbs. The field borrows
+   `__left-input` outright rather than growing a twin: it is the same control
+   in the same rail, and the shared class also picks up the 16px iOS
+   zoom-threshold rule below. */
+
+.rooms-workspace__redeem {
+  padding: 8px 10px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__redeem-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rooms-workspace__redeem-row .rooms-workspace__left-input {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+}
+
+.rooms-workspace__redeem-run {
+  appearance: none;
+  flex: 0 0 auto;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-family: var(--font);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__redeem-run:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__redeem-run:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.rooms-workspace__redeem-run:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.rooms-workspace__redeem-note {
+  padding-top: 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__redeem-error {
+  padding-top: 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--err);
+  overflow-wrap: anywhere;
+}
+
+/* ── Trigger-policy toggles ───────────────────────────────────────── */
+/* `__trigger` is shared by the create form below the name input and the
+   right-rail Triggers section. Native checkboxes on purpose: policy flips
+   are rare, and a real checkbox keeps keyboard + AT semantics for free.
+   The input's `not-allowed` reaches the checkbox alone — never the label
+   text or its note — so any disabled row withdraws the label's own cursor
+   and hover lift too. Any, not only the permanently dead one: a row held by
+   revoked access, by a policy PATCH in flight, or by the create POST refuses
+   the click just as squarely for as long as it lasts. */
+
+.rooms-workspace__create-triggers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  margin-top: 6px;
+}
+
+.rooms-workspace__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--fg-3);
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+  transition: color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__trigger:hover:not(:has(input:disabled)) {
+  color: var(--fg);
+}
+
+.rooms-workspace__trigger input {
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.rooms-workspace__trigger input:disabled {
+  cursor: not-allowed;
+}
+
+.rooms-workspace__trigger:has(input:disabled) {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* ── Left rail — room list item ───────────────────────────────────── */
+
+.rooms-workspace__room {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 12px;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--fg-2);
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 400;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__room:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__room.is-active {
+  background: var(--accent-soft);
+  color: var(--fg);
+}
+
+.rooms-workspace__room-hash {
+  flex: 0 0 auto;
+  width: 16px;
+  color: var(--fg-4);
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
+  text-align: center;
+}
+
+.rooms-workspace__room.is-active .rooms-workspace__room-hash {
+  color: var(--accent);
+}
+
+.rooms-workspace__room-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rooms-workspace__room-unread {
+  flex: 0 0 auto;
+  height: 6px;
+  width: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent-soft);
+}
+
+/* The end of the rail's loaded pages. A full-width row rather than a floating
+   pill, for the same reason `.rooms-workspace__load-older` is one: it marks a
+   position IN the list and has to scroll with it. */
+.rooms-workspace__load-more-rooms {
+  appearance: none;
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 4px 0 0;
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  border-radius: 0;
+  padding: 8px 12px;
+  background: transparent;
+  color: var(--fg-3);
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__load-more-rooms:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__load-more-rooms:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* A fade and a cursor, never a removed hit area: `pointer-events: none` would
+   suppress the progress cursor along with the click. */
+.rooms-workspace__load-more-rooms:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+.rooms-workspace__left-empty {
+  padding: 32px 16px;
+  color: var(--fg-3);
+  font-size: 12px;
+  line-height: 1.55;
+  text-align: center;
+}
+
+.rooms-workspace__left-empty--error,
+.rooms-workspace__left-status {
+  color: var(--warn);
+}
+
+.rooms-workspace__left-status {
+  flex: 0 0 auto;
+  padding: 7px 10px;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+/* ── Center rail — room header ────────────────────────────────────── */
+
+.rooms-workspace__center {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.rooms-workspace__center-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border-subtle);
+  box-shadow: inset 0 1px 0 var(--specular-soft);
+}
+
+.rooms-workspace__center-hash {
+  flex: 0 0 auto;
+  color: var(--fg-3);
+  font-family: var(--mono);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.rooms-workspace__center-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.rooms-workspace__center-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rooms-workspace__center-back {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-3);
+  font-size: 14px;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__center-back:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+/* ── Center rail — transcript ─────────────────────────────────────── */
+
+.rooms-workspace__transcript {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 16px 8px;
+}
+
+.rooms-workspace__empty {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 48px 16px;
+  color: var(--fg-3);
+  font-size: 13px;
+  line-height: 1.55;
+  text-align: center;
+}
+
+/* ── Center rail — message row ────────────────────────────────────── */
+
+.rooms-workspace__msg {
+  display: flex;
+  gap: 12px;
+  padding: 4px 0;
+}
+
+.rooms-workspace__msg:hover {
+  background: var(--bg-raised);
+  margin: 0 -16px;
+  padding-left: 16px;
+  padding-right: 16px;
+  border-radius: var(--radius-sm);
+}
+
+.rooms-workspace__msg-avatar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  margin-top: 2px;
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.rooms-workspace__msg--system .rooms-workspace__msg-avatar {
+  background: var(--bg-hover);
+  color: var(--fg-4);
+}
+
+.rooms-workspace__msg-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-top: 1px;
+}
+
+.rooms-workspace__msg-author {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 2px;
+  min-width: 0;
+}
+
+.rooms-workspace__msg-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  line-height: 1.35;
+}
+
+.rooms-workspace__msg--system .rooms-workspace__msg-name {
+  font-weight: 400;
+  color: var(--fg-3);
+  font-style: italic;
+}
+
+.rooms-workspace__msg-time {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-4);
+  line-height: 1.35;
+}
+
+/* A row Bedrock confirmed onto the shared ledger wears a small check beside
+   its timestamp. Positive-only: a row without ledger metadata renders no
+   mark at all, because in a Local room (and for pre-federation history)
+   absence is correct, not a failure — in-flight state belongs to the outbox
+   block. Grouped rows keep the per-row mark and mirror the timestamp's
+   dim-until-hover treatment from the density contract above. */
+.rooms-workspace__msg-ledger {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  color: var(--fg-4);
+  opacity: 0.75;
+}
+
+.rooms-workspace__msg--grouped .rooms-workspace__msg-ledger {
+  opacity: 0.68;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__msg--grouped:hover .rooms-workspace__msg-ledger,
+.rooms-workspace__msg--grouped:focus-within .rooms-workspace__msg-ledger {
+  opacity: 1;
+}
+
+@media (hover: none), (pointer: coarse) {
+  .rooms-workspace__msg--grouped .rooms-workspace__msg-ledger {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rooms-workspace__msg--grouped .rooms-workspace__msg-ledger {
+    transition: none;
+  }
+}
+
+.rooms-workspace__msg-text {
+  color: var(--fg-2);
+  font-size: 13px;
+  line-height: 1.55;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.rooms-workspace__msg--system .rooms-workspace__msg-text {
+  color: var(--fg-3);
+  font-style: italic;
+}
+
+/* ── Center rail — inline attachment media ────────────────────────── */
+
+/* An image marker's inline preview. Bounded hard: an unconstrained upload
+   would let one screenshot own the viewport, and the timeline's readable
+   measure comes from its padding, so the cap is the img's own, not a column's. */
+.rooms-workspace__media {
+  margin-top: 6px;
+}
+
+.rooms-workspace__media-img {
+  display: block;
+  max-width: min(560px, 100%);
+  max-height: min(340px, 45vh);
+  width: auto;
+  height: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+
+/* The load-failed fallback wears the files-panel row's classes so the two
+   affordances stay one affordance; this modifier only shrink-wraps it and
+   gives it an edge, since here it sits on the transcript, not in a list. */
+.rooms-workspace__media-fallback {
+  width: fit-content;
+  max-width: 100%;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+}
+
+/* ── Center rail — thread affordances ─────────────────────────────── */
+
+.rooms-workspace__thread-toggle {
+  appearance: none;
+  margin-top: 8px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-3);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.rooms-workspace__thread-toggle:hover,
+.rooms-workspace__thread-toggle--active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+
+.rooms-workspace__outbox {
+  flex: 0 0 auto;
+  display: grid;
+  gap: 4px;
+  max-height: 128px;
+  overflow-y: auto;
+  padding: 6px 16px;
+  background: var(--bg-raised);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__outbox-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 5px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--fg-3);
+  font-size: 11px;
+}
+
+.rooms-workspace__outbox-item--failed {
+  border-color: var(--warn);
+}
+
+.rooms-workspace__outbox-state {
+  flex: 0 0 auto;
+  color: var(--fg-4);
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__outbox-item--failed .rooms-workspace__outbox-state {
+  color: var(--warn);
+}
+
+.rooms-workspace__outbox-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rooms-workspace__outbox-retry {
+  appearance: none;
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font: inherit;
+  cursor: pointer;
+}
+
+.rooms-workspace__outbox-retry:hover {
+  border-color: var(--border-strong);
+  color: var(--fg);
+}
+
+/* ── Center rail — composer ───────────────────────────────────────── */
+
+.rooms-workspace__composer {
+  flex: 0 0 auto;
+  padding: 10px 16px;
+  background: var(--bg-raised);
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* The reason a dead composer is dead. Sits above the row rather than replacing
+   it: the input stays visible and disabled, so the room still looks like a room
+   you are reading and not a pane that failed to load. */
+.rooms-workspace__composer-closed {
+  margin-bottom: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--fg-3);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.rooms-workspace__composer-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.rooms-workspace__composer-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  box-sizing: border-box;
+  height: var(--ctl-h);
+  padding: 0 12px;
+  background: var(--bg-elevated);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: var(--ctl-h);
+  outline: none;
+  transition: border-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__composer-input::placeholder {
+  color: var(--fg-4);
+}
+
+.rooms-workspace__composer-input:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.rooms-workspace__composer-input:focus:not(:disabled) {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.rooms-workspace__composer-send {
+  appearance: none;
+  flex: 0 0 auto;
+  height: var(--ctl-h);
+  padding: 0 14px;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--fg-on-accent);
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: filter var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__composer-send:hover:not(:disabled) {
+  filter: brightness(1.12);
+}
+
+.rooms-workspace__composer-send:active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+.rooms-workspace__composer-send:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ── Right rail — members / thread ────────────────────────────────── */
+
+.rooms-workspace__right {
+  flex: 0 0 220px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-raised);
+  border-left: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__right-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 12px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__right-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-3);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* Members-drawer dismiss. Hidden while the rail is inline; the narrow-layout
+   blocks (≤1080px, and thread-open ≤1440px) reveal it alongside the drawer. */
+.rooms-workspace__right-close {
+  appearance: none;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-4);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__right-close:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__right-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.rooms-workspace__right-empty {
+  padding: 32px 16px;
+  color: var(--fg-3);
+  font-size: 12px;
+  line-height: 1.55;
+  text-align: center;
+}
+
+/* ── Right rail — member row ──────────────────────────────────────── */
+
+.rooms-workspace__member {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  color: var(--fg-2);
+  font-size: 12px;
+  cursor: default;
+}
+
+.rooms-workspace__member:hover {
+  background: var(--bg-hover);
+}
+
+.rooms-workspace__member-avatar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.rooms-workspace__member-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rooms-workspace__member-kind {
+  flex: 0 0 auto;
+  color: var(--fg-4);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* ── Thread panel — dedicated conversation column ─────────────────── */
+
+/* A real conversation column, NOT the 220px members rail the thread view
+   used to be mode-swapped into. Sits in flow to the right of the members
+   rail; below 900px it overlays instead (see the responsive blocks). */
+.rooms-workspace__thread-panel {
+  flex: 0 0 380px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-raised);
+  border-left: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__thread-panel-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 12px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__thread-panel-title {
+  margin: 0 0 2px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  line-height: 1.35;
+}
+
+.rooms-workspace__thread-panel-subtitle {
+  font-size: 11px;
+  color: var(--fg-3);
+  line-height: 1.35;
+}
+
+.rooms-workspace__thread-panel-close {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-4);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__thread-panel-close:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+/* The composer sits OUTSIDE this scroll container, pinned to the panel
+   bottom, so long threads can never scroll the reply box away. */
+.rooms-workspace__thread-panel-transcript {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 12px;
+}
+
+.rooms-workspace__thread-panel-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.rooms-workspace__thread-panel-dock {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-4);
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__thread-panel-dock:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+/* Replies are denser than the main timeline: smaller identity marks keep
+   the conversation about the text, not the chrome. */
+.rooms-workspace__thread-panel .rooms-workspace__msg-avatar,
+.rooms-workspace__thread-inline .rooms-workspace__msg-avatar {
+  width: 24px;
+  height: 24px;
+  font-size: 9px;
+}
+
+/* ── Inline thread — default presentation ─────────────────────────── */
+
+/* The thread surfaces directly underneath its root message in the
+   timeline; the side panel above is the opt-in pop-out. The left accent
+   guide reads as "this belongs to the message above". */
+.rooms-workspace__thread-inline {
+  margin: 2px 8px 6px 44px;
+  padding: 4px 0 0;
+  border-left: 2px solid var(--accent-soft);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: var(--bg-raised);
+}
+
+.rooms-workspace__thread-inline-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 10px 4px;
+}
+
+.rooms-workspace__thread-inline-count {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__thread-inline-expand {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-4);
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__thread-inline-expand:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__thread-inline .rooms-workspace__composer {
+  padding: 6px 10px 8px;
+}
+
+/* The 44px root-avatar indent would crush the conversation on narrow
+   screens; hug the timeline edge instead. */
+@media (max-width: 650px) {
+  .rooms-workspace__thread-inline {
+    margin-left: 8px;
+  }
+}
+
+.rooms-workspace__composer--thread {
+  padding: 10px 12px;
+}
+
+.rooms-workspace__msg--thread-root {
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__msg--thread-reply {
+  padding-top: 10px;
+}
+
+/* ── Join button (center rail placeholder) ────────────────────────── */
+
+.rooms-workspace__join {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  gap: 12px;
+  padding: 48px 24px;
+  text-align: center;
+}
+
+.rooms-workspace__join-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.rooms-workspace__join-desc {
+  font-size: 13px;
+  color: var(--fg-3);
+  line-height: 1.5;
+  max-width: 36ch;
+}
+
+.rooms-workspace__join-btn {
+  appearance: none;
+  height: var(--ctl-h);
+  padding: 0 18px;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--fg-on-accent);
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  transition: filter var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__join-btn:hover:not(:disabled) {
+  filter: brightness(1.12);
+}
+
+.rooms-workspace__join-btn:active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+.rooms-workspace__join-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ── Room triggers (rail section) ─────────────────────────────────── */
+/* A fixed sliver like every section on this rail: a head and one row per
+   exposed wake flag. Renders in every access state; a flag whose event
+   cannot reach this kind of room is disabled and wears a `__trigger-note`
+   saying which kind it needs. Shares `__trigger` rows with the create form. */
+
+.rooms-workspace__triggers {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 12px 6px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__triggers-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  padding-bottom: 6px;
+}
+
+.rooms-workspace__triggers-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-3);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__triggers .rooms-workspace__trigger {
+  display: flex;
+  padding: 2px 0;
+}
+
+/* Why a disabled row is disabled, inline after its label. The row already
+   dims via `:has(input:disabled)`, so this only has to name the reason. */
+.rooms-workspace__trigger-note {
+  margin-left: auto;
+  padding-left: 6px;
+  color: var(--fg-3);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.rooms-workspace__triggers-error {
+  padding: 4px 0 2px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--err);
+}
+
+/* ── Room workspace binding ───────────────────────────────────────── */
+
+/* Sits inside the triggers sliver because it is the precondition for every
+   row above it: with no bound folder the daemon refuses each woken turn
+   before it starts, so an armed trigger over an unbound room promises a wake
+   that cannot happen. */
+.rooms-workspace__workspace-binding {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 6px;
+  margin-top: 4px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* A warning, not an error: the room is fine, its agents just cannot run yet. */
+.rooms-workspace__workspace-unbound {
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.rooms-workspace__workspace-bound {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.rooms-workspace__workspace-bound-label {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg-3);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* A path is long and has no spaces, so it scrolls rather than forcing the
+   rail wider or wrapping mid-segment. */
+.rooms-workspace__workspace-bound-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  color: var(--fg-2);
+  font-size: 11px;
+}
+
+.rooms-workspace__workspace-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.rooms-workspace__workspace-input {
+  flex: 1 1 140px;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-size: 11px;
+  outline: none;
+}
+
+.rooms-workspace__workspace-input:focus:not(:disabled) {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.rooms-workspace__workspace-bind,
+.rooms-workspace__workspace-unbind {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.rooms-workspace__workspace-bind:hover:not(:disabled),
+.rooms-workspace__workspace-unbind:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--fg);
+}
+
+.rooms-workspace__workspace-bind:disabled,
+.rooms-workspace__workspace-unbind:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.rooms-workspace__workspace-help,
+.rooms-workspace__create-workspace-help {
+  color: var(--fg-3);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.rooms-workspace__workspace-error {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--err);
+}
+
+/* The create form's half of the same binding, under the trigger checkboxes. */
+.rooms-workspace__create-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 6px;
+}
+
+.rooms-workspace__create-workspace-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg-3);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* ── Room summary (rail row + reading panel) ──────────────────────── */
+
+/* A fixed sliver like every section on this rail: a head, one glance line,
+   and a panel on the overlay tier for the prose. No percentage claim — see
+   the rail-convention note at the artifacts section below. */
+.rooms-workspace__summary {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 0 6px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__summary-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 12px 6px;
+}
+
+.rooms-workspace__summary-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-3);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__summary-open {
+  appearance: none;
+  padding: 2px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__summary-open:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__summary-open:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.rooms-workspace__summary-run {
+  appearance: none;
+  padding: 2px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__summary-run:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__summary-run:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* A note is a truthful non-result (`unchanged`, `no_messages`); only an error
+   earns the error colour. Colouring the two alike would send an operator
+   looking for a broken room every time the model repeated itself. */
+.rooms-workspace__summary-note,
+.rooms-workspace__summary-error {
+  padding: 4px 12px 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__summary-error {
+  color: var(--err);
+}
+
+/* The one rail line: name, version, who moved it last. The version is the
+   currency marker; the prose it stands for lives in the panel. */
+.rooms-workspace__summary-line {
+  padding: 0 12px 4px;
+  font-size: 11px;
+  color: var(--fg-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Model prose carries its own line structure — paragraph breaks and bullet
+   lines are the shape of the summary, not incidental whitespace. `pre-wrap`
+   for the same reason `__msg-text` has it: room_markdown is a span tokenizer
+   and emits no block elements of its own. */
+.rooms-workspace__summary-body {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--fg-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* A dropped artifact is a tombstone the daemon deliberately preserves. It stays
+   readable and stops looking like the room's current word. */
+.rooms-workspace__summary-body--dropped {
+  opacity: 0.55;
+}
+
+.rooms-workspace__summary-meta {
+  margin-top: 6px;
+  font-size: 10px;
+  color: var(--fg-4);
+  overflow-wrap: anywhere;
+}
+
+/* ── The panel: where the summary is actually read ────────────────── */
+
+.rooms-workspace__summary-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 440;
+  background: var(--scrim);
+}
+
+.rooms-workspace__summary-panel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 445;
+  display: flex;
+  flex-direction: column;
+  /* The artifacts panel's measure, for the same reason: model prose is
+     unreadable at the rail's 220px. */
+  width: min(680px, 92vw);
+  max-height: min(80vh, 760px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-lg);
+}
+
+.rooms-workspace__summary-panel-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__summary-panel-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.rooms-workspace__summary-close {
+  appearance: none;
+  flex: 0 0 auto;
+  width: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.rooms-workspace__summary-close:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__summary-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 16px 16px;
+}
+
+/* ── Room artifacts (rail list + reading panel) ───────────────────── */
+
+/* THE RAIL CONVENTION, stated once: every section on this 220px column is a
+   fixed sliver — a head, at most one glance line, and a scrim + fixed panel
+   on the overlay tier (scrim 440, panel 445) for everything that needs a
+   reading measure. No section claims a percentage of the column, so the
+   roster's `flex: 1` keeps the rest and a sixth section would cost it next
+   to nothing. This one additionally caps its compact list in PIXELS so a
+   long list scrolls in place instead of swallowing the rail. */
+.rooms-workspace__artifacts {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 0 6px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__artifacts-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 12px 6px;
+}
+
+.rooms-workspace__artifacts-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-3);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__artifacts-open {
+  appearance: none;
+  padding: 2px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__artifacts-open:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__artifacts-open:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.rooms-workspace__artifacts-note {
+  padding: 4px 12px 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__artifacts-error {
+  padding: 4px 12px 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--err);
+}
+
+/* Three rows, then scroll. The cap is the whole reason this section can sit
+   under two percentage-sized neighbours without crowding the roster out. */
+.rooms-workspace__artifacts-list {
+  flex: 0 0 auto;
+  max-height: 84px;
+  overflow-y: auto;
+}
+
+.rooms-workspace__artifact {
+  appearance: none;
+  display: block;
+  width: 100%;
+  padding: 4px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--fg-2);
+  font-family: var(--font);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rooms-workspace__artifact:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+/* A dropped artifact is a tombstone, never a delete — history is append-only
+   and a retracted task must stay explainable. Dim it; do not hide it. */
+.rooms-workspace__artifact--dropped,
+.rooms-workspace__artifacts-row--dropped {
+  opacity: 0.55;
+}
+
+.rooms-workspace__artifact-name {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.rooms-workspace__artifact-meta {
+  display: block;
+  font-size: 10px;
+  color: var(--fg-4);
+  overflow-wrap: anywhere;
+}
+
+/* ── The panel: where artifacts are actually read and written ─────── */
+
+.rooms-workspace__artifacts-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 440;
+  background: var(--scrim);
+}
+
+.rooms-workspace__artifacts-panel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 445;
+  display: flex;
+  flex-direction: column;
+  /* A real reading measure. Prose written by a model or a person is unreadable
+     at the rail's 220px, and a compare-and-swap story told there is worse. */
+  width: min(680px, 92vw);
+  max-height: min(80vh, 760px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-lg);
+}
+
+.rooms-workspace__artifacts-panel-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__artifacts-panel-title {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.rooms-workspace__artifacts-close {
+  appearance: none;
+  flex: 0 0 auto;
+  width: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.rooms-workspace__artifacts-close:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__artifacts-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 16px 16px;
+}
+
+.rooms-workspace__artifacts-new {
+  appearance: none;
+  width: 100%;
+  height: var(--ctl-h-sm);
+  margin-bottom: 10px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-family: var(--font);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.rooms-workspace__artifacts-new:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+  color: var(--fg);
+}
+
+.rooms-workspace__artifacts-new:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.rooms-workspace__artifacts-row {
+  appearance: none;
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-family: var(--font);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rooms-workspace__artifacts-row:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__artifacts-row-name {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.rooms-workspace__artifacts-row-meta {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--fg-4);
+}
+
+.rooms-workspace__artifacts-meta {
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__artifacts-body {
+  margin: 8px 0 14px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--fg-2);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The compare-and-swap refusal, and the one control that recovers from it.
+   Warn, not error: nothing was lost and nothing was overwritten — the write
+   was refused precisely so the author could look before deciding again. */
+.rooms-workspace__artifacts-conflict {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 9px 12px;
+  border: 1px solid var(--warn);
+  border-radius: var(--radius-sm);
+  background: var(--warn-soft);
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.rooms-workspace__artifacts-reread {
+  appearance: none;
+  flex: 0 0 auto;
+  height: var(--ctl-h-sm);
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.rooms-workspace__artifacts-reread:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.rooms-workspace__artifacts-reread:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.rooms-workspace__artifacts-label {
+  display: block;
+  margin: 10px 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-3);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__artifacts-input,
+.rooms-workspace__artifacts-select,
+.rooms-workspace__artifacts-textarea {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.rooms-workspace__artifacts-textarea {
+  font-family: var(--mono);
+  font-size: 12px;
+  resize: vertical;
+}
+
+.rooms-workspace__artifacts-input:focus-visible,
+.rooms-workspace__artifacts-select:focus-visible,
+.rooms-workspace__artifacts-textarea:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 1px;
+}
+
+/* The minted id, shown while the title is being typed: it is the addressing
+   segment of two routes, so a duplicate-id refusal has to be legible before
+   it arrives rather than mysterious after. */
+.rooms-workspace__artifacts-hint {
+  min-height: 14px;
+  margin-top: 4px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-4);
+}
+
+.rooms-workspace__artifacts-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+/* The version this amend will present. It is the whole contract: if it is not
+   the version that stands, the write is refused rather than merged. */
+.rooms-workspace__artifacts-version {
+  margin-right: auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__artifacts-cancel,
+.rooms-workspace__artifacts-save {
+  appearance: none;
+  height: var(--ctl-h-sm);
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-family: var(--font);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__artifacts-save {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.rooms-workspace__artifacts-cancel:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__artifacts-save:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+.rooms-workspace__artifacts-cancel:disabled,
+.rooms-workspace__artifacts-save:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ── Room context files (rail row + panel) ────────────────────────── */
+
+/* A fixed sliver like its neighbours — the rail-convention note sits at the
+   artifacts section above. The rail holds one count line; the names, sizes
+   and links live in the panel. */
+.rooms-workspace__files {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 0 6px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__files-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 12px 6px;
+}
+
+.rooms-workspace__files-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-3);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__files-open {
+  appearance: none;
+  padding: 2px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__files-open:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__files-open:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.rooms-workspace__files-add {
+  appearance: none;
+  padding: 2px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__files-add:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__files-add:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* The button forwards the user gesture; this is the real control. */
+.rooms-workspace__files-input {
+  display: none;
+}
+
+.rooms-workspace__files-note,
+.rooms-workspace__files-error {
+  padding: 4px 12px 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__files-error {
+  color: var(--err);
+}
+
+/* The one rail line: that files exist, and how many. */
+.rooms-workspace__files-line {
+  padding: 0 12px 4px;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__file {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 2px 8px;
+  padding: 5px 12px;
+  color: var(--fg-2);
+  font-size: 12px;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.rooms-workspace__file:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__file-glyph {
+  grid-row: span 2;
+  font-size: 13px;
+  line-height: 1;
+  text-align: center;
+}
+
+/* A filename is the one thing here that must never be silently reflowed into
+   the rail's width — truncate it and let the title attribute carry the rest. */
+.rooms-workspace__file-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rooms-workspace__file-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-4);
+  font-size: 10px;
+}
+
+/* ── The panel: where the file list is actually read ──────────────── */
+
+.rooms-workspace__files-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 440;
+  background: var(--scrim);
+}
+
+.rooms-workspace__files-panel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 445;
+  display: flex;
+  flex-direction: column;
+  /* The repo panel's measure: rows of facts, not prose. Wide enough that a
+     filename and its meta read on one line each. */
+  width: min(560px, 92vw);
+  max-height: min(70vh, 620px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-lg);
+}
+
+.rooms-workspace__files-panel-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__files-panel-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.rooms-workspace__files-close {
+  appearance: none;
+  flex: 0 0 auto;
+  width: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.rooms-workspace__files-close:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__files-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 16px 16px;
+}
+
+/* ── Room policy summary (access info, below roster) ──────────────── */
+
+.rooms-workspace__policy {
+  flex: 0 0 auto;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 11px;
+  color: var(--fg-3);
+  line-height: 1.45;
+}
+
+.rooms-workspace__policy-label {
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  margin-bottom: 2px;
+}
+
+/* ── Responsive collapse ──────────────────────────────────────────── */
+
+@media (max-width: 900px) {
+  .rooms-workspace {
+    position: relative;
+  }
+
+  .rooms-workspace__right {
+    display: none;
+  }
+
+  /* The thread column no longer fits in flow: float it over the transcript
+     instead of hiding it (the old mode-swapped rail simply vanished here). */
+  .rooms-workspace__thread-panel {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(400px, 56vw);
+    z-index: 220;
+    box-shadow: var(--shadow-md);
+  }
+}
+
+/* At 650px and below: shell stacks vertically (top nav + center), left rail
+   becomes a fixed drawer with a backdrop. This breakpoint matches the native
+   shell's minimum width while preserving the denser desktop layout above it.
+   Thread rail takes full width. */
+@media (max-width: 650px) {
+  .rooms-workspace {
+    flex-direction: column;
+  }
+  .rooms-workspace__left {
+    display: none;
+  }
+  .rooms-workspace__left--visible {
+    display: flex;
+    position: fixed;
+    inset: 0;
+    z-index: 400;
+    max-width: 280px;
+    border-right: 1px solid var(--border-subtle);
+    box-shadow: var(--shadow-md);
+  }
+  .rooms-workspace__thread-panel {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    z-index: 410;
+  }
+}
+
+/* ── Mobile nav ────────────────────────────────────────────────────── */
+
+/* Hidden above the shared 650px compact breakpoint; revealed as a top bar
+   with a hamburger toggle and active-room name so readers are never stranded. */
+.rooms-workspace__mobile-nav {
+  display: none;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__mobile-nav-toggle {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 16px;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__mobile-nav-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__mobile-nav-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+/* ── Left-rail backdrop (mobile only) ──────────────────────────────── */
+
+.rooms-workspace__left-backdrop {
+  display: none;
+}
+
+/* Visibility overrides must follow the hidden base rules above so the compact
+   drawer controls win the cascade at the shared native/mobile breakpoint. */
+@media (max-width: 650px) {
+  .rooms-workspace__left-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 399;
+    background: var(--scrim);
+  }
+
+  .rooms-workspace__mobile-nav {
+    display: flex;
+  }
+}
+
+/* ── Member presence dot ──────────────────────────────────────────── */
+
+.rooms-workspace__member-presence {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-left: auto;
+}
+
+.rooms-workspace__member-presence--live {
+  background: var(--ok);
+}
+
+.rooms-workspace__member-presence--unavailable {
+  background: var(--fg-4);
+}
+
+/* ── Member role badge ────────────────────────────────────────────── */
+
+.rooms-workspace__member-role {
+  flex: 0 0 auto;
+  color: var(--fg-4);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* ── Your-agent chip ──────────────────────────────────────────────── */
+
+/* Marks federated agent rows the caller owns — the rows bedrock's
+   owner-or-self policy lets a non-owner remove, so the chip replaces a
+   dial-and-403 probe per attempt. */
+.rooms-workspace__member-yours {
+  flex: 0 0 auto;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 3px;
+  padding: 1px 4px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* ── Agent ownership line ─────────────────────────────────────────── */
+
+/* Members rail, agent rows: which worker owns this agent. Sits on its own
+   line under the name for the same reason the descriptor does — a 220px
+   rail cannot hold another badge beside the kind and remove controls. The
+   presence dot inside it reuses the roster's own dot, so it drops that
+   rule's `margin-left: auto` (which is what pins the ROW's dot right). */
+.rooms-workspace__member-owner {
+  flex-basis: 100%;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding-left: 32px;
+  color: var(--fg-4);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rooms-workspace__member-owner .rooms-workspace__member-presence {
+  margin-left: 0;
+  width: 6px;
+  height: 6px;
+}
+
+.rooms-workspace__member-owner--unclaimed {
+  color: var(--warn);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 9px;
+}
+
+/* ── Member local/remote agent states ─────────────────────────────── */
+
+.rooms-workspace__member--local-agent .rooms-workspace__member-name {
+  color: var(--accent);
+}
+
+.rooms-workspace__member--remote-agent .rooms-workspace__member-name {
+  color: var(--fg-3);
+}
+
+/* ── Status bar ───────────────────────────────────────────────────── */
+
+.rooms-workspace__status {
+  padding: 6px 12px 2px;
+  color: var(--fg-3);
+  font-size: 11px;
+  font-style: italic;
+  line-height: 1.35;
+}
+
+/* ── Add-agent control ────────────────────────────────────────────── */
+
+.rooms-workspace__addagent {
+  appearance: none;
+  display: block;
+  width: 100%;
+  padding: 6px 12px;
+  margin-top: 8px;
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-3);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__addagent:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__addagent-picker {
+  margin-top: 4px;
+}
+
+.rooms-workspace__addagent-select {
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--fg);
+  font-size: 12px;
+}
+
+/* ── Member remove control ────────────────────────────────────────── */
+/* Always rendered, not hover-revealed — the platform contract forbids
+   hover-only affordances (this rail is also the mobile drawer). Quiet by
+   default so a rail of rows doesn't read as a wall of delete buttons; the
+   armed pair borrows the agent builder's delete/keep vocabulary because
+   both discard something durable. */
+
+.rooms-workspace__member-remove {
+  appearance: none;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-4);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__member-remove:hover {
+  background: var(--err-soft);
+  color: var(--err);
+}
+
+.rooms-workspace__member-remove-btn {
+  appearance: none;
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-3);
+  font-family: var(--font);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__member-remove-btn:hover {
+  background: var(--bg-hover);
+}
+
+.rooms-workspace__member-remove-btn--danger {
+  border-color: var(--err);
+  color: var(--err);
+}
+
+.rooms-workspace__member-remove-btn--danger:hover {
+  background: var(--err-soft);
+}
+
+/* ── Agent builder (author a new agent in place) ──────────────────── */
+/* Sits directly under the picker above, inside the same disclosure: the
+   picker offers agents that already exist, this authors one that does not.
+   Deliberately quieter than the picker (dashed toggle, no accent) so the
+   common action — add an existing agent — stays the visually primary one. */
+
+.rooms-workspace__agentbuilder-toggle {
+  appearance: none;
+  display: block;
+  width: 100%;
+  padding: 5px 8px;
+  margin-top: 6px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-4);
+  font-family: var(--font);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__agentbuilder-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--fg-2);
+}
+
+.rooms-workspace__agentbuilder {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  margin-top: 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+.rooms-workspace__agentbuilder-input,
+.rooms-workspace__agentbuilder-select,
+.rooms-workspace__agentbuilder-prompt {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 12px;
+  outline: none;
+  transition: border-color var(--dur-fast) var(--ease);
+}
+
+/* The system prompt is the one field that wants room to think in, so it
+   grows with the rail rather than sitting at input height. */
+.rooms-workspace__agentbuilder-prompt {
+  min-height: 96px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.rooms-workspace__agentbuilder-input::placeholder,
+.rooms-workspace__agentbuilder-prompt::placeholder {
+  color: var(--fg-4);
+}
+
+.rooms-workspace__agentbuilder-input:hover:not(:disabled),
+.rooms-workspace__agentbuilder-select:hover:not(:disabled),
+.rooms-workspace__agentbuilder-prompt:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.rooms-workspace__agentbuilder-input:focus:not(:disabled),
+.rooms-workspace__agentbuilder-select:focus:not(:disabled),
+.rooms-workspace__agentbuilder-prompt:focus:not(:disabled) {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.rooms-workspace__agentbuilder-input:disabled,
+.rooms-workspace__agentbuilder-select:disabled,
+.rooms-workspace__agentbuilder-prompt:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* A refusal keeps the form open with its input intact, so the message has to
+   live with the fields rather than replacing them. */
+.rooms-workspace__agentbuilder-error {
+  color: var(--err);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+/* A block, unlike an error, is not something the operator can retype their way
+   out of — it explains why Save is gone. Warn, not error: nothing failed. */
+.rooms-workspace__agentbuilder-note {
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.rooms-workspace__agentbuilder-save {
+  appearance: none;
+  padding: 6px 12px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--fg-on-accent);
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  transition: filter var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__agentbuilder-save:hover:not(:disabled) {
+  filter: brightness(1.12);
+}
+
+.rooms-workspace__agentbuilder-save:active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+.rooms-workspace__agentbuilder-save:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Delete belongs to edit mode and wears the risk it carries, like the
+   compute panel's destroy: first click arms, second removes the folder. */
+.rooms-workspace__agentbuilder-delete {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.rooms-workspace__agentbuilder-delete-btn {
+  appearance: none;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-3);
+  font-family: var(--font);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__agentbuilder-delete-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.rooms-workspace__agentbuilder-delete-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.rooms-workspace__agentbuilder-delete-btn--danger {
+  border-color: var(--err);
+  color: var(--err);
+}
+
+.rooms-workspace__agentbuilder-delete-btn--danger:hover:not(:disabled) {
+  background: var(--err-soft);
+}
+
+.rooms-workspace__agentbuilder-delete-warn {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--err);
+  overflow-wrap: anywhere;
+}
+
+/* ── Scrollbar ────────────────────────────────────────────────────── */
+
+.rooms-workspace__left-list,
+.rooms-workspace__right-list,
+.rooms-workspace__transcript,
+.rooms-workspace__thread-panel-transcript {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-subtle) transparent;
+}
+
+.rooms-workspace__left-list::-webkit-scrollbar,
+.rooms-workspace__right-list::-webkit-scrollbar,
+.rooms-workspace__transcript::-webkit-scrollbar,
+.rooms-workspace__thread-panel-transcript::-webkit-scrollbar {
+  width: 8px;
+}
+
+.rooms-workspace__left-list::-webkit-scrollbar-thumb,
+.rooms-workspace__right-list::-webkit-scrollbar-thumb,
+.rooms-workspace__transcript::-webkit-scrollbar-thumb,
+.rooms-workspace__thread-panel-transcript::-webkit-scrollbar-thumb {
+  border-radius: var(--radius-pill);
+  background: var(--border-subtle);
+}
+
+.rooms-workspace__left-list::-webkit-scrollbar-thumb:hover,
+.rooms-workspace__right-list::-webkit-scrollbar-thumb:hover,
+.rooms-workspace__transcript::-webkit-scrollbar-thumb:hover,
+.rooms-workspace__thread-panel-transcript::-webkit-scrollbar-thumb:hover {
+  background: var(--border-strong);
+}
+
+/* ── Reduced motion ───────────────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .rooms-workspace * {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+/* ── Focus ring (shared across interactive children) ──────────────── */
+
+.rooms-workspace__left-input:focus-visible,
+.rooms-workspace__composer-input:focus-visible,
+.rooms-workspace__left-close:focus-visible,
+.rooms-workspace__right-close:focus-visible,
+.rooms-workspace__center-back:focus-visible,
+.rooms-workspace__join-btn:focus-visible,
+.rooms-workspace__agentbuilder-toggle:focus-visible,
+.rooms-workspace__agentbuilder-save:focus-visible,
+.rooms-workspace__agentbuilder-delete-btn:focus-visible,
+.rooms-workspace__member-remove:focus-visible,
+.rooms-workspace__member-remove-btn:focus-visible,
+.rooms-workspace__composer-send:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* ── Product polish pass ─────────────────────────────────────────────
+   Keep the workspace quiet and spatially clear: aligned rail headers,
+   bounded reading width, stronger active context, and an inset composer. */
+
+.rooms-workspace__left {
+  flex-basis: 252px;
+  box-shadow: inset -1px 0 0 var(--specular-soft);
+}
+
+.rooms-workspace__left-head,
+.rooms-workspace__right-head,
+.rooms-workspace__center-head {
+  box-sizing: border-box;
+  min-height: 52px;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.rooms-workspace__left-head,
+.rooms-workspace__right-head {
+  padding-right: 14px;
+  padding-left: 14px;
+}
+
+.rooms-workspace__left-title,
+.rooms-workspace__right-title {
+  font-size: 11px;
+  letter-spacing: 0.11em;
+}
+
+.rooms-workspace__left-list {
+  padding: 10px 8px;
+}
+
+.rooms-workspace__room {
+  margin: 1px 0;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+}
+
+.rooms-workspace__room.is-active {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.rooms-workspace__left-create {
+  padding: 12px;
+  background: var(--bg-raised);
+}
+
+/* Same footer surface as the create block above it — the polish pass raises
+   the rail's whole bottom group, not just the create half of it. */
+.rooms-workspace__redeem {
+  padding: 12px;
+  background: var(--bg-raised);
+}
+
+.rooms-workspace__redeem-run {
+  height: 34px;
+  border-radius: var(--radius);
+}
+
+.rooms-workspace__left-input {
+  height: 34px;
+  padding: 0 10px;
+  background: var(--bg);
+  border-radius: var(--radius);
+  line-height: 34px;
+}
+
+.rooms-workspace__center {
+  isolation: isolate;
+}
+
+.rooms-workspace__center-head {
+  padding-right: 18px;
+  padding-left: 18px;
+}
+
+.rooms-workspace__transcript {
+  padding: 20px clamp(18px, 3vw, 42px) 12px;
+  scroll-padding-bottom: 24px;
+}
+
+.rooms-workspace__msg {
+  /* Full-bleed left-aligned rows (Slack/Discord). A centered max-width
+     column reads as a floating chat box — banned by the layout ruling;
+     readable measure comes from the timeline's padding, not centering. */
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__msg:hover {
+  background: var(--bg-hover);
+}
+
+.rooms-workspace__msg-avatar,
+.rooms-workspace__member-avatar {
+  border: 1px solid var(--border-subtle);
+  border-radius: 50%;
+}
+
+.rooms-workspace__msg-avatar {
+  width: 34px;
+  height: 34px;
+  margin-top: 1px;
+  font-size: 11px;
+}
+
+.rooms-workspace__msg-text {
+  line-height: 1.62;
+  white-space: pre-wrap;
+}
+
+.rooms-workspace__composer {
+  padding: 12px clamp(18px, 3vw, 42px) 14px;
+  box-shadow: 0 -8px 24px var(--bg);
+}
+
+/* Composer + status follow the timeline: full-width, no centered column. */
+
+.rooms-workspace__composer-input {
+  height: 40px;
+  padding: 0 14px;
+  background: var(--bg);
+  border-radius: var(--radius);
+  box-shadow: var(--well);
+  line-height: 40px;
+}
+
+.rooms-workspace__composer-send {
+  height: 40px;
+  padding: 0 18px;
+}
+
+.rooms-workspace__status {
+  padding: 7px 2px 0;
+  font-style: normal;
+}
+
+.rooms-workspace__right {
+  flex-basis: 236px;
+  box-shadow: inset 1px 0 0 var(--specular-soft);
+}
+
+.rooms-workspace__right-list {
+  padding: 10px 8px;
+}
+
+.rooms-workspace__member {
+  min-height: 36px;
+  padding: 5px 8px;
+  border-radius: var(--radius);
+}
+
+.rooms-workspace__member-avatar {
+  width: 26px;
+  height: 26px;
+  font-size: 9px;
+}
+
+.rooms-workspace__addagent {
+  width: calc(100% - 16px);
+  margin: 10px 8px 0;
+  padding: 7px 9px;
+  border-color: var(--border);
+  font-family: var(--font);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.rooms-workspace__addagent:hover {
+  border-color: var(--border-strong);
+}
+
+.rooms-workspace__addagent-picker {
+  margin: 6px 8px 0;
+}
+
+/* Preserve a useful reading column before the member rail is removed. */
+@media (max-width: 1080px) and (min-width: 901px) {
+  .rooms-workspace__right {
+    display: none;
+  }
+}
+
+/* ── Members reachability ─────────────────────────────────────────── */
+
+/* Everywhere the inline members rail is hidden (≤1080px, or ≤1440px while a
+   thread is open), a header chip reopens it as a right-hand drawer. Without
+   this, the roster — and the only add-agent affordance in the product — was
+   unreachable on narrow viewports. */
+
+.rooms-workspace__members-chip {
+  display: none;
+  align-items: center;
+  gap: 5px;
+  height: var(--ctl-h-sm);
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-family: var(--font);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__members-chip:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+  color: var(--fg);
+}
+
+.rooms-workspace__members-backdrop {
+  display: none;
+}
+
+/* Members yield the row to the thread column on mid-width desktops; the
+   chip keeps them one click away. */
+@media (max-width: 1440px) {
+  .rooms-workspace--thread-open
+    .rooms-workspace__right:not(.rooms-workspace__right--visible) {
+    display: none;
+  }
+
+  .rooms-workspace--thread-open .rooms-workspace__members-chip {
+    display: inline-flex;
+  }
+
+  .rooms-workspace--thread-open .rooms-workspace__right-close {
+    display: inline-flex;
+  }
+
+  .rooms-workspace--thread-open
+    .rooms-workspace__right.rooms-workspace__right--visible {
+    display: flex;
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(320px, 86vw);
+    z-index: 430;
+    border-left: 1px solid var(--border-subtle);
+    box-shadow: var(--shadow-md);
+  }
+
+  .rooms-workspace--thread-open
+    .rooms-workspace__members-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 425;
+    background: var(--scrim);
+  }
+}
+
+/* Below 1080px the inline rail is gone regardless of threads. */
+@media (max-width: 1080px) {
+  .rooms-workspace__members-chip {
+    display: inline-flex;
+  }
+
+  .rooms-workspace__right-close {
+    display: inline-flex;
+  }
+
+  .rooms-workspace__right.rooms-workspace__right--visible {
+    display: flex;
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(320px, 86vw);
+    z-index: 430;
+    border-left: 1px solid var(--border-subtle);
+    box-shadow: var(--shadow-md);
+  }
+
+  .rooms-workspace__members-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 425;
+    background: var(--scrim);
+  }
+}
+
+@media (max-width: 650px) {
+  .rooms-workspace__left--visible {
+    inset: auto;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: min(86vw, 300px);
+    max-width: 300px;
+  }
+
+  .rooms-workspace__transcript {
+    padding: 14px 8px 8px;
+  }
+
+  .rooms-workspace__msg,
+  .rooms-workspace__msg:hover {
+    padding: 6px 8px;
+  }
+
+  .rooms-workspace__composer {
+    padding: 10px 12px max(10px, env(safe-area-inset-bottom));
+  }
+}
+
+/* Keyboard and touch parity for every interactive workspace control. */
+.rooms-workspace__room:focus-visible,
+.rooms-workspace__mobile-nav-toggle:focus-visible,
+.rooms-workspace__members-chip:focus-visible,
+.rooms-workspace__thread-panel-close:focus-visible,
+.rooms-workspace__thread-panel-dock:focus-visible,
+.rooms-workspace__thread-inline-expand:focus-visible,
+.rooms-workspace__addagent:focus-visible,
+.rooms-workspace__files-add:focus-visible,
+.rooms-workspace__summary-run:focus-visible,
+.rooms-workspace__file:focus-visible,
+.rooms-workspace__addagent-select:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+@media (pointer: coarse) {
+  .rooms-workspace__left-close,
+  .rooms-workspace__right-close,
+  .rooms-workspace__thread-panel-close,
+  .rooms-workspace__center-back,
+  .rooms-workspace__mobile-nav-toggle {
+    position: relative;
+  }
+
+  .rooms-workspace__left-close::after,
+  .rooms-workspace__right-close::after,
+  .rooms-workspace__thread-panel-close::after,
+  .rooms-workspace__center-back::after,
+  .rooms-workspace__mobile-nav-toggle::after {
+    content: '';
+    position: absolute;
+    inset: -8px;
+  }
+
+  /* 16px is the iOS threshold below which focusing an input zooms the page.
+     EVERY text-entry control the rooms surface renders, not a chosen few:
+     tests/mobile_composer_regressions.rs derives the list from the view
+     source and fails if one is missing, so this rule cannot drift behind the
+     markup again. `__files-input` is deliberately absent — it is
+     `type="file"`, which opens a picker rather than the keyboard.
+
+     Until the guard was repointed it named three inputs of a rooms panel
+     nothing renders, and deleting this block passed the whole suite. The
+     second half of that miss was this list: the six composer/room controls
+     were covered while the right rail's eight — invite, repo, artifacts,
+     authorization and the compute panel — sat at 11-13px and zoomed. */
+.rooms-workspace__left-input,
+.rooms-workspace__workspace-input,
+.rooms-workspace__composer-input,
+  .rooms-workspace__addagent-select,
+  .rooms-workspace__agentbuilder-input,
+  .rooms-workspace__agentbuilder-select,
+  .rooms-workspace__agentbuilder-prompt,
+  .rooms-workspace__invite-input,
+  .rooms-workspace__repo-input,
+  .rooms-workspace__artifacts-input,
+  .rooms-workspace__artifacts-select,
+  .rooms-workspace__artifacts-textarea,
+  .rooms-workspace__authority-select,
+  .rooms-workspace__compute-cmd-input,
+  .rooms-workspace__compute-port-input,
+  .rooms-workspace__compute-secret-name,
+  .rooms-workspace__compute-secret-value {
+    font-size: 16px;
+  }
+}
+
+/* ── "Load older" affordance ────────────────────────────────────────
+   The opposite end from the jump affordance below, and deliberately the
+   opposite weight. That one is a floating accent pill because it
+   interrupts; this one is a full-width row inside the scroll container
+   marking where the loaded transcript starts, so it reads as the top
+   edge of the log rather than as a control laid over it. Shown only
+   while the daemon says older rows exist beyond what hydration walked
+   back to. */
+.rooms-workspace__load-older {
+  display: block;
+  width: 100%;
+  margin: 0 0 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  padding: 7px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-2);
+  background: var(--bg-2);
+  cursor: pointer;
+  transition:
+    color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__load-older:hover:not(:disabled) {
+  color: var(--fg);
+  background: var(--bg-hover);
+}
+
+.rooms-workspace__load-older:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.rooms-workspace__load-older:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+/* ── "New messages" jump affordance ─────────────────────────────────
+   Shown only when appends arrive while the reader is scrolled up.
+   Client scroll state — not read-cursor unread semantics. */
+.rooms-workspace__center {
+  position: relative;
+}
+
+.rooms-workspace__jump-new {
+  position: absolute;
+  left: 50%;
+  bottom: 88px;
+  transform: translateX(-50%);
+  z-index: 5;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  padding: 5px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-on-accent);
+  background: var(--accent);
+  box-shadow: var(--shadow-md);
+  cursor: pointer;
+}
+
+.rooms-workspace__jump-new:hover {
+  filter: brightness(1.08);
+}
+
+.rooms-workspace__jump-new:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* ── Semantic wrappers (parity audit) ───────────────────────────────
+   Pure a11y containers (listbox / list roles). Layout-neutral by
+   design: parents are plain block-flow scroll containers with no
+   child combinators, so these must stay display:block. */
+.rooms-workspace__left-options,
+.rooms-workspace__member-list {
+  display: block;
+}
+
+/* ── Message action rail ────────────────────────────────────────────
+   Hover/focus-revealed row actions; ONLY real actions (reply-in-thread
+   today). Persistent when the thread has replies or is open — truthful
+   state never hides. Keyboard: the button stays in tab order and
+   focus-within reveals it. */
+.rooms-workspace__action-rail {
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__msg:hover .rooms-workspace__action-rail,
+.rooms-workspace__msg:focus-within .rooms-workspace__action-rail,
+.rooms-workspace__action-rail--persistent {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  /* Touch: no hover reveal exists — actions stay visible. */
+  .rooms-workspace__action-rail {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rooms-workspace__action-rail {
+    transition: none;
+  }
+}
+
+/* ── Avatar identity hues ───────────────────────────────────────────
+   Deterministic per-author hue from avatar_identity_class(). Existing
+   palette tokens ONLY (accent/ok/warn/info/err soft pairs) — no new
+   raw colors. System rows keep the neutral accent avatar. */
+.rooms-workspace__msg-avatar--hue0 {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.rooms-workspace__msg-avatar--hue1 {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.rooms-workspace__msg-avatar--hue2 {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.rooms-workspace__msg-avatar--hue3 {
+  background: var(--info-soft);
+  color: var(--info);
+}
+
+.rooms-workspace__msg-avatar--hue4 {
+  background: var(--err-soft);
+  color: var(--err);
+}
+
+/* ── Mention autosuggest popup (composer typeahead) ─────────────────────── */
+
+.rooms-workspace__composer {
+  position: relative;
+}
+
+.rooms-workspace__mention-pop {
+  position: absolute;
+  bottom: calc(100% - 2px);
+  left: 16px;
+  right: 16px;
+  margin-bottom: 6px;
+  padding: 4px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  box-shadow: var(--shadow-popover);
+  max-height: 264px;
+  overflow-y: auto;
+  z-index: 30;
+}
+
+.rooms-workspace__mention-opt {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.rooms-workspace__mention-opt--active,
+.rooms-workspace__mention-opt:hover {
+  background: var(--border-subtle);
+}
+
+.rooms-workspace__mention-name {
+  font-weight: 600;
+  color: var(--fg-2);
+}
+
+.rooms-workspace__mention-id {
+  color: var(--fg-4);
+  font-size: 12px;
+}
+
+.rooms-workspace__mention-kind {
+  margin-left: auto;
+  color: var(--fg-4);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border: 1px solid var(--border-subtle);
+  padding: 1px 6px;
+  border-radius: 999px;
+}
+
+.rooms-workspace__mention-desc {
+  flex-basis: 100%;
+  padding-left: 32px;
+  color: var(--fg-4);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Members rail: one-line agent descriptor under the name */
+.rooms-workspace__member-desc {
+  flex-basis: 100%;
+  padding-left: 32px;
+  color: var(--fg-4);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rooms-workspace__member {
+  flex-wrap: wrap;
+}
+
+/* ── Room invite (rail row + mint panel) ───────────────────────────── */
+
+/* The same rail contract as its neighbours: a fixed sliver, one line, and
+   every verb in the panel it opens. The line here says an invite EXISTS and
+   never what it is — the code is a bearer grant and the rail is on screen for
+   as long as the room is. */
+.rooms-workspace__invite {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 0 6px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__invite-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 12px 6px;
+}
+
+.rooms-workspace__invite-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-3);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__invite-open {
+  appearance: none;
+  padding: 2px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__invite-open:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__invite-note {
+  padding: 4px 12px 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__invite-error {
+  padding: 4px 12px 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--err);
+  overflow-wrap: anywhere;
+}
+
+.rooms-workspace__invite-line {
+  padding: 0 12px 4px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-2);
+}
+
+/* ── The panel: where an invite is minted and read ─────────────────── */
+
+.rooms-workspace__invite-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 440;
+  background: var(--scrim);
+}
+
+.rooms-workspace__invite-panel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 445;
+  display: flex;
+  flex-direction: column;
+  /* Narrow like the repo panel: two fields, one button and a code. Wide
+     enough that the code reads without wrapping mid-token. */
+  width: min(480px, 92vw);
+  max-height: min(70vh, 560px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-lg);
+}
+
+.rooms-workspace__invite-panel-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__invite-panel-title {
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.rooms-workspace__invite-close {
+  appearance: none;
+  flex: 0 0 auto;
+  width: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.rooms-workspace__invite-close:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__invite-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 16px 16px;
+}
+
+/* The consequence of minting on a Local room, said before the request
+   exists. It wears the error colour deliberately: publishing a private room
+   is not undoable from this surface. */
+.rooms-workspace__invite-warn {
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--err);
+  border-radius: var(--radius-sm);
+  color: var(--err);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.rooms-workspace__invite-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rooms-workspace__invite-input {
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.rooms-workspace__invite-input:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 1px;
+}
+
+.rooms-workspace__invite-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rooms-workspace__invite-run {
+  appearance: none;
+  height: var(--ctl-h-sm);
+  padding: 0 12px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--accent);
+  font-family: var(--font);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__invite-run:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+.rooms-workspace__invite-run:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* A mint that would federate the room wears the risk, like unbind does. */
+.rooms-workspace__invite-run--danger {
+  border-color: var(--err);
+  color: var(--err);
+}
+
+.rooms-workspace__invite-run--danger:hover:not(:disabled) {
+  background: var(--err-soft);
+}
+
+/* The code itself: mono and selectable, because it is copied by hand as
+   often as by the button beside it. */
+.rooms-workspace__invite-code {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+.rooms-workspace__invite-code-value {
+  flex: 1;
+  min-width: 0;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+  user-select: all;
+  overflow-wrap: anywhere;
+}
+
+.rooms-workspace__invite-copy {
+  appearance: none;
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: pointer;
+}
+
+.rooms-workspace__invite-copy:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+/* The onboarding link, below the code and sharing its `__invite-copy` button
+   styling — NOT its copy control, which is a separate flag on purpose so one
+   click cannot make both rows read "copied". It is the same grant in a longer
+   form — the code sits inside the path — so it is painted as text to select,
+   not as an anchor to click. Quieter than the code above it: the code is the
+   thing, this is the thing that explains it. */
+.rooms-workspace__invite-onboard {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+/* `anywhere` is load-bearing, not cosmetic: the URL is one unbroken token and
+   would otherwise push the fixed-width panel out from the inside. */
+.rooms-workspace__invite-onboard-value {
+  flex: 1;
+  min-width: 0;
+  color: var(--fg-2);
+  font-family: var(--mono);
+  font-size: 11px;
+  user-select: all;
+  overflow-wrap: anywhere;
+}
+
+.rooms-workspace__invite-footnote {
+  margin-top: 14px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-4);
+}
+
+/* ── Room repo (rail row + workspace panel) ────────────────────────── */
+
+/* A fixed sliver like the artifacts above it, and for the same reason: the
+   rail is 220px with two proportional neighbours already on it. The rail
+   holds one compact line — remote and clone state — and everything with a
+   verb happens in the panel it opens. */
+.rooms-workspace__repo {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 0 6px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__repo-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 12px 6px;
+}
+
+.rooms-workspace__repo-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-3);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__repo-open {
+  appearance: none;
+  padding: 2px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__repo-open:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__repo-open:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.rooms-workspace__repo-note {
+  padding: 4px 12px 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__repo-error {
+  padding: 4px 12px 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--err);
+  overflow-wrap: anywhere;
+}
+
+/* The one rail line: remote tail, clone state, head sha. Mono because two of
+   those three are identifiers the eye compares character by character. */
+.rooms-workspace__repo-line {
+  padding: 0 12px 4px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── The panel: where the binding is read and clone/build run ─────── */
+
+.rooms-workspace__repo-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 440;
+  background: var(--scrim);
+}
+
+.rooms-workspace__repo-panel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 445;
+  display: flex;
+  flex-direction: column;
+  /* Narrower than the artifacts panel: a binding is facts and two controls,
+     not prose. Still wide enough that a remote URL reads on one line. */
+  width: min(560px, 92vw);
+  max-height: min(70vh, 620px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-lg);
+}
+
+.rooms-workspace__repo-panel-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__repo-panel-title {
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.rooms-workspace__repo-close {
+  appearance: none;
+  flex: 0 0 auto;
+  width: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.rooms-workspace__repo-close:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__repo-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 16px 16px;
+}
+
+.rooms-workspace__repo-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 12px;
+  align-items: baseline;
+}
+
+.rooms-workspace__repo-fact-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg-4);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__repo-fact-value {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+
+.rooms-workspace__repo-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.rooms-workspace__repo-run {
+  appearance: none;
+  height: var(--ctl-h-sm);
+  padding: 0 12px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--accent);
+  font-family: var(--font);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__repo-run:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+.rooms-workspace__repo-run:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* The script field sits beside its button; mono because it names a package
+   script, and flexes so the pair fills the measure. */
+.rooms-workspace__repo-input {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.rooms-workspace__repo-input:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 1px;
+}
+
+/* ── Bind and unbind: the owner verbs ───────────────────────────────── */
+
+/* The bind form: the remote gets the full measure — URLs need it —
+   branch and dir share the next line. Owner-gated on the wire, not
+   here, so the form renders for every member. */
+.rooms-workspace__repo-bind {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.rooms-workspace__repo-bind-pair {
+  display: flex;
+  gap: 8px;
+}
+
+/* The column's own gap spaces the action row; the standalone margin
+   would double it. */
+.rooms-workspace__repo-bind .rooms-workspace__repo-actions {
+  margin-top: 0;
+}
+
+/* Unbind deletes the workspace checkout, so the control wears the risk
+   and the first click only arms a confirm. */
+.rooms-workspace__repo-unbind {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.rooms-workspace__repo-run--danger {
+  border-color: var(--err);
+  color: var(--err);
+}
+
+.rooms-workspace__repo-run--danger:hover:not(:disabled) {
+  background: var(--err-soft);
+}
+
+.rooms-workspace__repo-unbind-warn {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--err);
+}
+
+/* The honest boundary, now the gate's rather than a missing control's:
+   the verbs are here, and the daemon refuses non-owners in type. */
+.rooms-workspace__repo-footnote {
+  margin-top: 14px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-4);
+}
+
+/* ── Recorded CI: the checks Bedrock's table already knows ─────────── */
+
+/* Read on open with no container run, replaced wholesale by a pull's
+   reply. Mono rows for the rail line's reason: name, verdict and sha are
+   compared character by character. */
+.rooms-workspace__repo-ci {
+  margin-top: 14px;
+}
+
+.rooms-workspace__repo-ci-title {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg-4);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__repo-ci-list {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rooms-workspace__repo-check {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.rooms-workspace__repo-check-line {
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-2);
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+a.rooms-workspace__repo-check-line:hover {
+  color: var(--fg);
+  text-decoration: underline;
+}
+
+.rooms-workspace__repo-check-line--good {
+  color: var(--ok);
+}
+
+.rooms-workspace__repo-check-line--bad {
+  color: var(--err);
+}
+
+/* The pull reply's own flag: a result this room had not recorded. */
+.rooms-workspace__repo-check-new {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* When this room first saw the result — the recorded read's field. */
+.rooms-workspace__repo-check-seen {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--fg-4);
+  white-space: nowrap;
+}
+
+/* ═══ WORKSPACE — status glance and command history ══════════════════
+   The read half of the repo section's lane: what the room's container is,
+   and what has run in it. Rail contract as its neighbours: a fixed sliver,
+   never a share of the column; reading happens in the overlay panel. */
+
+.rooms-workspace__compute {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 0 6px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__compute-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 12px 6px;
+}
+
+.rooms-workspace__compute-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-3);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__compute-open {
+  appearance: none;
+  padding: 2px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__compute-open:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__compute-open:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.rooms-workspace__compute-note {
+  padding: 4px 12px 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__compute-error {
+  padding: 4px 12px 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--err);
+  overflow-wrap: anywhere;
+}
+
+/* The one rail line: provision status and driver. Mono to match the repo
+   line beside it — the pair reads as one column of facts. */
+.rooms-workspace__compute-line {
+  padding: 0 12px 4px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── The panel: provision facts and the command history ───────────── */
+
+.rooms-workspace__compute-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 440;
+  background: var(--scrim);
+}
+
+.rooms-workspace__compute-panel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 445;
+  display: flex;
+  flex-direction: column;
+  /* The artifacts panel's reading measure: command tails are code, and code
+     at the repo panel's 560px wraps into noise. */
+  width: min(680px, 92vw);
+  max-height: min(80vh, 760px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-lg);
+}
+
+.rooms-workspace__compute-panel-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__compute-panel-title {
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.rooms-workspace__compute-close {
+  appearance: none;
+  flex: 0 0 auto;
+  width: var(--ctl-h-sm);
+  height: var(--ctl-h-sm);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.rooms-workspace__compute-close:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__compute-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 16px 16px;
+}
+
+.rooms-workspace__compute-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 12px;
+  align-items: baseline;
+}
+
+.rooms-workspace__compute-fact-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg-4);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__compute-fact-value {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+
+/* The failure's reason, under the fact that says `failed`. Owner-only on
+   the wire, so its presence is already permissioned — and distinct from
+   `__compute-error` above, which is the panel's own fetch failure. */
+.rooms-workspace__compute-failed-reason {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--err);
+  overflow-wrap: anywhere;
+}
+
+/* ── The owner lifecycle: provision and destroy ─────────────────────────
+   Rendered for every member — the daemon's owner gate refuses non-owners
+   in type, so no control is hidden here — and destroy arms a confirm
+   first: the container is flushed back to Bedrock, then discarded. */
+.rooms-workspace__compute-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.rooms-workspace__compute-run {
+  appearance: none;
+  height: var(--ctl-h-sm);
+  padding: 0 12px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--accent);
+  font-family: var(--font);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__compute-run:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+.rooms-workspace__compute-run:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Destroy wears the risk it carries. */
+.rooms-workspace__compute-run--danger {
+  border-color: var(--err);
+  color: var(--err);
+}
+
+.rooms-workspace__compute-run--danger:hover:not(:disabled) {
+  background: var(--err-soft);
+}
+
+.rooms-workspace__compute-destroy-warn {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--err);
+}
+
+/* ── The ports the room serves on ──────────────────────────
+   The port, the preview URL it answers on, when it was exposed, and the
+   verb that takes it down — with the expose form under the list. The URL
+   is an anchor only when it cleared the room link allowlist; an un-linked
+   one styles identically on purpose, since the difference the operator
+   cares about is what the URL SAYS. */
+.rooms-workspace__compute-ports-title {
+  margin-top: 14px;
+  padding-bottom: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg-4);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__compute-ports-copy {
+  padding-bottom: 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__compute-ports-list {
+  margin: 0 0 6px;
+  padding: 0;
+  list-style: none;
+}
+
+.rooms-workspace__compute-ports-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.rooms-workspace__compute-ports-row-port {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-2);
+}
+
+/* A preview URL runs long and is the row's only wrapping part; the
+   exposure time keeps its place at the end. */
+.rooms-workspace__compute-ports-row-url {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-3);
+  text-decoration: none;
+}
+
+a.rooms-workspace__compute-ports-row-url:hover {
+  color: var(--fg);
+  text-decoration: underline;
+}
+
+.rooms-workspace__compute-ports-row-at {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--fg-4);
+}
+
+/* Last in the row and pushed to its edge, so the control lands in the same
+   place whether or not the row has a URL or an exposure time to show. */
+.rooms-workspace__compute-port-close {
+  appearance: none;
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 1px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-4);
+  font-family: var(--font);
+  font-size: 11px;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__compute-port-close:hover:not(:disabled) {
+  color: var(--fg);
+  border-color: var(--border-strong);
+}
+
+.rooms-workspace__compute-port-close:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* The expose form, under the list its result joins. */
+.rooms-workspace__compute-ports-form {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* A port is four digits; the field says so rather than running the width of
+   the panel like the command and secret inputs beside it. */
+.rooms-workspace__compute-port-input {
+  box-sizing: border-box;
+  height: var(--ctl-h-sm);
+  min-width: 0;
+  flex: 0 1 90px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+  outline: none;
+  transition: border-color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__compute-port-input::placeholder {
+  color: var(--fg-4);
+}
+
+.rooms-workspace__compute-port-input:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.rooms-workspace__compute-port-input:focus:not(:disabled) {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.rooms-workspace__compute-port-input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ── The room's secrets ─────────────────────────────────────────────
+   The list above the form is what the room holds — names and metadata
+   alone, the status body carries no value to show — and values stay
+   set-only below it: the value is a password field so a pasted token
+   never sits readable on screen. */
+.rooms-workspace__compute-secrets-title {
+  margin-top: 14px;
+  padding-bottom: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg-4);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__compute-secrets-copy {
+  padding-bottom: 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__compute-secrets-list {
+  margin: 0 0 6px;
+  padding: 0;
+  list-style: none;
+}
+
+.rooms-workspace__compute-secrets-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+/* The name in the vocabulary it lives in — env, so mono — and free to
+   wrap: a long name outranks the row's one line. */
+.rooms-workspace__compute-secrets-row-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-2);
+}
+
+.rooms-workspace__compute-secrets-row-at {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--fg-4);
+}
+
+.rooms-workspace__compute-secrets-form {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.rooms-workspace__compute-secret-name,
+.rooms-workspace__compute-secret-value {
+  box-sizing: border-box;
+  height: var(--ctl-h-sm);
+  min-width: 0;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+  outline: none;
+  transition: border-color var(--dur-fast) var(--ease);
+}
+
+/* Names run short (GH_TOKEN) and values run long; the flex basis says so. */
+.rooms-workspace__compute-secret-name {
+  flex: 0 1 150px;
+}
+
+.rooms-workspace__compute-secret-value {
+  flex: 1 1 180px;
+}
+
+.rooms-workspace__compute-secret-name::placeholder,
+.rooms-workspace__compute-secret-value::placeholder {
+  color: var(--fg-4);
+}
+
+.rooms-workspace__compute-secret-name:hover:not(:disabled),
+.rooms-workspace__compute-secret-value:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.rooms-workspace__compute-secret-name:focus:not(:disabled),
+.rooms-workspace__compute-secret-value:focus:not(:disabled) {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.rooms-workspace__compute-secret-name:disabled,
+.rooms-workspace__compute-secret-value:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ── The member's run-command form ──────────────────────────────────
+   One input and a submit, above the history its row lands in. Command
+   only on the wire: cwd, flush, and attribution are the defaults the
+   daemon and Bedrock already hold. */
+.rooms-workspace__compute-cmd-title {
+  margin-top: 14px;
+  padding-bottom: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg-4);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__compute-cmd-copy {
+  padding-bottom: 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__compute-cmd-form {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.rooms-workspace__compute-cmd-input {
+  box-sizing: border-box;
+  height: var(--ctl-h-sm);
+  min-width: 0;
+  flex: 1 1 220px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+  outline: none;
+  transition: border-color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__compute-cmd-input::placeholder {
+  color: var(--fg-4);
+}
+
+.rooms-workspace__compute-cmd-input:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.rooms-workspace__compute-cmd-input:focus:not(:disabled) {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+.rooms-workspace__compute-cmd-input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* The last build's outcome, above the list it is derived from. */
+.rooms-workspace__compute-build {
+  margin-top: 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--fg-2);
+}
+
+.rooms-workspace__compute-execs-title {
+  margin-top: 14px;
+  padding-bottom: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg-4);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__compute-exec {
+  padding: 8px 0 6px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__compute-exec-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.rooms-workspace__compute-exec-mark {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__compute-exec-badge {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__compute-exec-command {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rooms-workspace__compute-exec-meta {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+/* One stream's tail. Capped: thirty rows each holding up to 2KB per stream
+   would otherwise make the panel a scroll of one command's noise. */
+.rooms-workspace__compute-tail {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  max-height: 160px;
+  overflow-y: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--fg-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Withheld output and per-stream clipping: states with sentences, never
+   empty boxes. */
+.rooms-workspace__compute-tail-note {
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--fg-4);
+}
+
+/* The owner's take-back. The whole-history control reuses the lifecycle
+   action row; the per-row trigger stays quiet on the row — the history is
+   for reading — and only wears the risk color on intent. Not hover-only:
+   the control is always visible, hover just raises it. */
+.rooms-workspace__compute-actions--purge {
+  margin-top: 6px;
+}
+
+.rooms-workspace__compute-exec-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.rooms-workspace__compute-exec-purge {
+  appearance: none;
+  padding: 1px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-4);
+  font-family: var(--font);
+  font-size: 11px;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__compute-exec-purge:hover:not(:disabled) {
+  color: var(--err);
+  border-color: var(--err);
+}
+
+.rooms-workspace__compute-exec-purge:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* The workspace tree, one directory at a time. Every row is a button now:
+   directory rows navigate, file rows open their bounded content over the
+   listing. */
+.rooms-workspace__compute-files-title {
+  margin-top: 14px;
+  padding-bottom: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--fg-4);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__compute-files-path {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-bottom: 4px;
+}
+
+.rooms-workspace__compute-files-up {
+  appearance: none;
+  padding: 0 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 11px;
+  line-height: 1.6;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__compute-files-up:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.rooms-workspace__compute-files-dir {
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-3);
+  overflow-wrap: anywhere;
+}
+
+.rooms-workspace__compute-file {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 4px 0;
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+  background: transparent;
+  text-align: left;
+}
+
+.rooms-workspace__compute-file--dir,
+.rooms-workspace__compute-file--openable {
+  appearance: none;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.rooms-workspace__compute-file--dir:hover,
+.rooms-workspace__compute-file--openable:hover {
+  background: var(--bg-hover);
+}
+
+.rooms-workspace__compute-file-kind {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__compute-file-name {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rooms-workspace__compute-file-size {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+/* The open file's size line, under the path row. */
+.rooms-workspace__compute-file-meta {
+  padding-bottom: 4px;
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+/* The open file's content. Its own scroll, taller than a command tail —
+   this IS the panel's subject while it is open — but still bounded so the
+   command history below stays reachable. */
+.rooms-workspace__compute-file-text {
+  margin: 0;
+  padding: 6px 8px;
+  max-height: min(48vh, 420px);
+  overflow-y: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--fg-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Room-agent authority is intentionally denser than a general settings form:
+   one bounded ceremony, four durable binding states, no parallel "available"
+   roster that could imply an unbound package may act. */
+.rooms-workspace__authority {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.rooms-workspace__authority-head,
+.rooms-workspace__authority-binding-main,
+.rooms-workspace__authority-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rooms-workspace__authority-title {
+  flex: 1;
+  margin: 0;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--fg);
+}
+
+.rooms-workspace__authority-count,
+.rooms-workspace__authority-binding-state {
+  padding: 1px 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__authority-list,
+.rooms-workspace__authority-ceremony,
+.rooms-workspace__authority-preview,
+.rooms-workspace__authority-ready {
+  display: grid;
+  gap: 7px;
+}
+
+.rooms-workspace__authority-binding,
+.rooms-workspace__authority-preview,
+.rooms-workspace__authority-confirm {
+  padding: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+.rooms-workspace__authority-binding[data-state="active"] {
+  border-left: 2px solid var(--ok);
+}
+
+.rooms-workspace__authority-binding[data-state="suspended"],
+.rooms-workspace__authority-binding[data-state="stale"] {
+  border-left: 2px solid var(--warn);
+}
+
+.rooms-workspace__authority-binding[data-state="revoked"],
+.rooms-workspace__authority-binding[data-state="unavailable"] {
+  border-left: 2px solid var(--err);
+}
+
+.rooms-workspace__authority-binding-name,
+.rooms-workspace__authority-preview-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.rooms-workspace__authority-digest,
+.rooms-workspace__authority-diff code,
+.rooms-workspace__authority-confirm code {
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--fg-3);
+  overflow-wrap: anywhere;
+}
+
+.rooms-workspace__authority-meta,
+.rooms-workspace__authority-empty,
+.rooms-workspace__authority-readonly,
+.rooms-workspace__authority-narrow,
+.rooms-workspace__authority-requested,
+.rooms-workspace__authority-unavailable,
+.rooms-workspace__authority-membership {
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__authority-requested {
+  display: grid;
+  gap: 2px;
+}
+
+.rooms-workspace__authority-requested > span,
+.rooms-workspace__authority-unavailable > span {
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__authority-requested code {
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.rooms-workspace__authority-unavailable,
+.rooms-workspace__authority-membership,
+.rooms-workspace__authority-readonly[data-state="unavailable"] {
+  padding: 6px 7px;
+  border-left: 2px solid var(--err);
+  background: var(--err-soft);
+}
+
+.rooms-workspace__authority-unavailable ul {
+  display: grid;
+  gap: 4px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rooms-workspace__authority-unavailable li {
+  display: grid;
+  gap: 1px;
+}
+
+.rooms-workspace__authority-unavailable code {
+  font-family: var(--mono);
+  color: var(--fg-2);
+}
+
+.rooms-workspace__authority-membership {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.rooms-workspace__authority-label,
+.rooms-workspace__authority-policies span,
+.rooms-workspace__authority-capabilities legend {
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+
+.rooms-workspace__authority-select,
+.rooms-workspace__authority-policies select {
+  width: 100%;
+  min-width: 0;
+  padding: 5px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--fg-2);
+  font-size: 11px;
+}
+
+.rooms-workspace__authority-capabilities {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.rooms-workspace__authority-capabilities label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--fg-2);
+}
+
+.rooms-workspace__authority-policies {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.rooms-workspace__authority-policies label {
+  display: grid;
+  gap: 3px;
+}
+
+.rooms-workspace__authority-actions {
+  justify-content: flex-end;
+}
+
+.rooms-workspace__authority-actions button,
+.rooms-workspace__authority-review,
+.rooms-workspace__authority-membership button {
+  appearance: none;
+  padding: 4px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-2);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.rooms-workspace__authority-actions button:disabled,
+.rooms-workspace__authority-review:disabled,
+.rooms-workspace__authority-membership button:disabled {
+  color: var(--fg-4);
+  cursor: default;
+}
+
+.rooms-workspace__authority-actions .rooms-workspace__authority-approve {
+  border-color: var(--accent-ring);
+  background: var(--accent-soft);
+  color: var(--accent-bright);
+}
+
+.rooms-workspace__authority-actions .rooms-workspace__authority-danger {
+  color: var(--err);
+}
+
+.rooms-workspace__authority-confirm dl {
+  display: grid;
+  gap: 3px;
+  margin: 0 0 8px;
+}
+
+.rooms-workspace__authority-confirm dl > div {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  gap: 5px;
+  font-size: 9px;
+}
+
+.rooms-workspace__authority-confirm dt {
+  color: var(--fg-4);
+}
+
+.rooms-workspace__authority-confirm dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+
+.rooms-workspace__authority-notice {
+  display: flex;
+  gap: 6px;
+  padding: 6px 7px;
+  border-left: 2px solid var(--info);
+  background: var(--info-soft);
+  font-size: 10px;
+  color: var(--fg-2);
+}
+
+.rooms-workspace__authority-notice > span {
+  flex: 0 0 auto;
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.rooms-workspace__authority-notice[data-state="active"] {
+  border-left-color: var(--ok);
+  background: var(--ok-soft);
+}
+
+.rooms-workspace__authority-notice[data-state="revoked"],
+.rooms-workspace__authority-notice[data-state="denied"],
+.rooms-workspace__authority-notice[data-state="unavailable"] {
+  border-left-color: var(--err);
+  background: var(--err-soft);
+}
+
+@media (max-width: 420px) {
+  .rooms-workspace__authority-policies {
+    grid-template-columns: 1fr;
+  }
+}

@@ -6,46 +6,17 @@
 //!   * `.island-group`               (was styles/island.css)
 //!   * `.ocean-council-modal__frame` (was styles/chrome.css)
 //!   * `.ocean-map__panel` (was styles/components.css, incl. its `gmp-place-search` descendant rule)
+//!   * the whole `.rooms-*` panel family (was styles/panels.css, plus its
+//!     `.room-stage .rooms-*` re-scales in styles/call.css)
 //!
 //! Each is asserted absent from BOTH the stylesheet AND the Rust source tree,
 //! so it can neither be re-added to CSS nor emitted from a component without
 //! failing this guard. Live sibling selectors that must survive are asserted
 //! present so the deletions can't over-reach.
 
-use std::path::Path;
+mod common;
 
-fn repo_root() -> &'static Path {
-    // tests/ -> ocean-surface-ui/ -> crates/ -> repo root
-    Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
-}
-
-fn read(rel: &str) -> String {
-    let path = repo_root().join(rel);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
-}
-
-/// Every `.rs` file under the crate's `src/`, read into one blob so a class
-/// literal emitted anywhere in the component tree is detectable.
-fn all_rust_src() -> String {
-    let src = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
-    let mut blob = String::new();
-    let mut stack = vec![src.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in
-            std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()))
-        {
-            let entry = entry.expect("dir entry");
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-                blob.push_str(&std::fs::read_to_string(&path).unwrap_or_default());
-                blob.push('\n');
-            }
-        }
-    }
-    blob
-}
+use common::{all_rust_src, read};
 
 // ---- Deleted selectors are gone from CSS and never emitted from Rust --------
 
@@ -92,6 +63,56 @@ fn map_panel_selector_is_removed_and_unemitted() {
     );
 }
 
+/// The rooms *panel* — a right slide-over with its own list, create form,
+/// policy details, roster chips, message rows, outbox and composer — was never
+/// rendered by the Leptos surface. `rooms_workspace.rs` is the shipped rooms
+/// UI and emits `.rooms-workspace__*` throughout; every `.rooms-<leaf>` class
+/// below had zero emitters anywhere in `src/`, in `index.html`, or in the
+/// extension wrapper. ~110 selector occurrences of styling nobody could see.
+///
+/// The cost of leaving them was not weight, it was cover: a guard in `app.rs`
+/// asserted on one of these dead rules, and `mobile_composer_regressions.rs`
+/// asserted the iOS 16px anti-zoom floor on three dead input classes — so the
+/// live floor in `styles/rooms-workspace.css` could be deleted with every gate
+/// green. That test now names the six live fields instead.
+#[test]
+fn rooms_panel_selector_family_is_removed_and_unemitted() {
+    let panels = read("styles/panels.css");
+    let call = read("styles/call.css");
+    let rust = all_rust_src();
+    // One representative per removed block. `rooms-panel` covers the shell,
+    // head, list, create form and status; the rest are its leaves.
+    for dead in [
+        "rooms-panel",
+        "rooms-overlay",
+        "rooms-item",
+        "rooms-chip",
+        "rooms-policy",
+        "rooms-msg",
+        "rooms-outbox",
+        "rooms-mention-hint",
+        "rooms-composer",
+        "rooms-addagent",
+    ] {
+        assert!(
+            !panels.contains(dead),
+            "`.{dead}` belongs to the rooms panel nothing renders and must not \
+             reappear in styles/panels.css — the shipped rooms UI is \
+             rooms_workspace.rs and styles it with `.rooms-workspace__*`",
+        );
+        assert!(
+            !call.contains(dead),
+            "the `.room-stage .{dead}` re-scale in styles/call.css re-scaled a \
+             base rule that no longer exists and must not reappear",
+        );
+        assert!(
+            !rust.contains(dead),
+            "`{dead}` must have no Rust emitter — if the rooms panel is ever \
+             rebuilt, land its CSS with the markup, not ahead of it",
+        );
+    }
+}
+
 // ---- Live siblings must survive the deletions -------------------------------
 
 #[test]
@@ -110,6 +131,31 @@ fn live_siblings_of_deleted_selectors_survive() {
     assert!(
         components.contains(".ocean-map__loading"),
         ".ocean-map__loading is live and must survive the __panel deletion",
+    );
+    // The sessions slide-over shared every one of the rooms panel's grouped
+    // `:is(...)` rules — shell, close button, field treatment, scrollbars. It
+    // is live, and unpicking the rooms members must not have taken it with
+    // them. Its coarse-pointer floor is asserted in
+    // mobile_composer_regressions.rs.
+    let panels = read("styles/panels.css");
+    for live in [
+        ".sessions-overlay",
+        ".sessions-panel__close",
+        ".sessions-panel__list",
+        ".sessions-create__input",
+    ] {
+        assert!(
+            panels.contains(live),
+            "{live} is live and must survive the rooms-panel deletion",
+        );
+    }
+    // Same for the room stage's own classes in call.css: only the
+    // `.room-stage .rooms-*` descendant re-scales were removed.
+    let call = read("styles/call.css");
+    assert!(
+        call.contains(".room-stage__transcript") && call.contains(".room-stage__head"),
+        ".room-stage__* is a separate family and must survive the \
+         `.room-stage .rooms-*` deletion",
     );
     // The bare Places UI Kit element selectors are theming for Google's own
     // web components (not Rust-class-emitted) and must stay after only the

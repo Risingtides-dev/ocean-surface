@@ -54,12 +54,34 @@ Capability Matrix). The load-bearing rules:
 `run-surface.sh` requires `OCEAN_SURFACE_USER` and `OCEAN_SURFACE_PASS` for its
 default LAN/tailnet bind. For trusted localhost diagnostics only, bind
 `127.0.0.1` and set `OCEAN_SURFACE_AUTH=off`. Direct `cargo tauri dev` does not
-rebuild `dist/`; use `run-tauri.sh` whenever freshness matters.
+rebuild `dist/`; use `run-tauri.sh` whenever freshness matters (it points the
+shell at the `dist/` it just built; after another `trunk build`, Cmd+R in the
+app re-reads it without a Rust rebuild).
+
+The public proxy login contract is username/password to an HttpOnly,
+SameSite=Strict session cookie. Ordinary browsers and devices must not be
+rejected by Origin, Host, forwarded-header, Cloudflare Access, Tailscale, or
+device-posture gates. Public HTTPS deployments set
+`OCEAN_SURFACE_COOKIE_SECURE=on`; that setting controls only the cookie's
+Secure attribute.
 
 Native surface direction:
 
-- Tauri 2.x shell (`crates/ocean-tauri`) loads `dist/` as `frontendDist` — the
-  same Trunk-built Leptos WASM bundle the browser PWA ships.
+- Tauri 2.x shell (`crates/ocean-tauri`) serves the SAME promoted release the
+  proxy serves the browser — `~/.config/ocean-surface/current` (override:
+  `OCEAN_SURFACE_DIST`, the proxy's variable; empty disables) — read from
+  disk at request time by `src/live_surface.rs`. The Trunk `dist/` embedded
+  at build time is only the fallback for a machine with no rail. A rail
+  promote therefore reaches the desktop without a rebuild: a hidden window
+  reloads itself, a visible one gets `surface-updated`, and Cmd+R (File ▸
+  Reload Surface) re-reads the bundle. Only changes to the shell's own Rust
+  still need `scripts/rebuild-tauri-app.sh`.
+- Shell → webview events (`daemon-status`, `menu-command`, `path-changed`,
+  `deep-link`, `surface-updated`) travel through `host.rs::tauri_listen`,
+  which registers the handler via `__TAURI_INTERNALS__.transformCallback`
+  and invokes the core `plugin:event|listen` command. Tauri 2 exposes no
+  `__TAURI_INTERNALS__.event`; a wrapper that looks one up subscribes to
+  nothing, silently.
 - Rust commands in the Tauri backend replace the GPUI crate's `rfd` (folder
   dialogs) and `notify` (path watcher) native bits.
 - Native LiveKit Rust client is a later phase behind a feature flag, not part
@@ -196,6 +218,11 @@ Web surface session UI:
   quiet zero-height sticky `↓ latest` affordance returns and re-pins, and a
   session switch always re-pins so the new transcript opens at its latest
   turn. Do not re-add unconditional scroll-to-bottom on stream deltas.
+- Session switches and reconnects commit the daemon's complete persisted
+  transcript immediately, including while a turn is live, while preserving the
+  daemon-owned running/Stop projection and continuing the scoped SSE tail.
+  Never quarantine a live session behind client-side detail polling,
+  `detail syncing…`, or a manual refresh control.
 - Every complete session-list request—thin daemon spawner or A1 panel
   poll—claims the same daemon-owned generation ticket. Only the latest claimant
   may replace `session_list`; panel-local generation/open guards still protect
@@ -216,9 +243,18 @@ Web surface session UI:
 
 ## Rooms Contract
 
-- Every successful `GET /v1/rooms/persistent/{key}` carries a required
-  `RoomAccessProjection`, including explicit `Local` for G1 rooms. Surface
-  `None` means loading or no open room; it is never a local-room discriminator.
+- Browser-hosted Rooms treat `/api/config` as the current-user authority and
+  keep join/post unavailable until that identity resolves; never act under a
+  previous tenant's browser storage. Explicit single-operator and direct
+  extension/Tauri hosts use the stable `surface-operator` identity, and Room
+  identity signals own `String` values rather than leaked process-lifetime
+  string allocations.
+- Every successful room open carries a required `RoomAccessProjection`,
+  including explicit `Local` for G1 rooms. Hydration decodes it off `GET
+  /v1/rooms/persistent/{key}/snapshot`, which is the route an open now reads —
+  the unpaged `GET /v1/rooms/persistent/{key}` answers the same field and is no
+  longer what the surface opens with. Surface `None` means loading or no open
+  room; it is never a local-room discriminator.
 - Room transcripts hydrate once, then tail only the room-scoped SSE endpoint
   `GET /v1/rooms/persistent/{key}/events` with sequence resume. Subscribe to
   both `room_message` and `room_access` immediately: messages alone advance the
@@ -229,10 +265,60 @@ Web surface session UI:
   so stale transcript, access, and tail state cannot leak across room identity.
 - The browser PWA proxy must forward `/v1/agents` as JSON and stream room SSE
   unbuffered while preserving `Last-Event-ID`; Tauri reaches the same daemon
-  endpoints directly.
-- Agent participants are selected from daemon-owned `/v1/agents` identities
-  and remain subject to daemon join validation. Free-text agent creation does
-  not belong in the surface.
+  endpoints directly. The proxy is an ALLOWLIST, not a passthrough: the agent
+  builder's write verbs (`POST /v1/agents`, `GET`/`PUT`/`DELETE
+  /v1/agents/{name}`) are registered explicitly, and an unregistered verb
+  answers with an empty body
+  that the surface can only report as a JSON decode error. Adding an
+  `/v1/agents/{name}` route requires the `has_dot_segment` guard —
+  percent-encoding does not neutralise `..`, because `.` is unreserved.
+- Agent participants are selected from daemon-owned `/v1/agents` identities and
+  remain subject to daemon authorization and admission. The surface never mints
+  a participant from free text or calls the legacy bare `add_agent` path: a
+  package becomes a local first-agent participant only through the atomic
+  operator-authenticated `POST .../agents/bootstrap` response, and becomes room
+  execution authority only through that response's daemon-derived room/preview,
+  digest-bound owner ceremony, and durable binding. Never restore the local
+  unauthenticated participant POST as agent bootstrap. Activation, context,
+  grants, and `none`/`room` memory scope are operator choices in that ceremony;
+  the daemon remains authoritative for their accepted intersection.
+- Browser-PWA Room-agent mutations are available only through the server-side
+  proxy host; every non-loopback host remains login-gated. The proxy injects
+  its mode-0600 operator key only on the exact
+  bootstrap, authorize, reauthorize, suspend, resume, and revoke routes;
+  inspection and package preview stay credential-free. Browser
+  `X-Ocean-Operator`, Cookie, Origin, and Referer headers never cross that
+  boundary. In auth-off mode, a mutation carrying Origin or Referer must name
+  the exact loopback Host; reject it before credential lookup otherwise, while
+  retaining headerless localhost CLI clients. Auth-off startup is refused on
+  non-loopback binds. The Tauri shell now owns the equivalent privileged
+  transport this rule required: its `daemon_operator_request` command takes a
+  method and a PATH (never a URL, never a header), re-checks both against a
+  mirror of the same six-route allowlist, reads the same `operator.key` under
+  the same five-condition custody check, supplies the daemon origin itself from
+  `OCEAN_DAEMON_URL`, and returns only the daemon's status and body. Tauri 2
+  capabilities do not gate `generate_handler!` commands, so that allowlist is
+  the boundary. Dot segments are judged AFTER percent-decoding, because the
+  URL parser normalises `%2e%2e` into `..` and would otherwise carry the
+  credential to a route the allowlist approved a different string for; the
+  built URL is then re-parsed and refused unless its path still equals the
+  approved one, which makes the whole normalisation class inert. The shell
+  does not build for a non-unix target: its custody contract is POSIX, and a
+  ceremony rendered writable over a credential that cannot be read is the
+  opposite of "absence, not errors". The extension host has no shell and no proxy and REMAINS
+  read-only. On the surface side every privileged mutation leaves
+  `room_agent_authorization.rs` through one seam addressed by an
+  `AuthorityRoute` the four route builders alone construct; the credential
+  enters no host's WASM bundle.
+- Binding reads carry server-derived owner eligibility. Surface does not infer
+  owner authority from a local participant projection. With no binding, a
+  resolved Human already in a Local roster may see only the bootstrap
+  affordance; the operator-authenticated daemon establishes or refuses the
+  durable owner role and returns the authoritative updated room plus package
+  preview. Lost-response retries for binding status changes reuse the exact
+  decision id until the operation settles. Agent mention candidates require an
+  Active binding (and federated `local_binding_available=true`); historical
+  roster rows remain visible.
 - Local rosters and mention ids come from `Room.participants`; every non-Local
   roster and mention id comes only from the safe access member projection.
   Composer writes are enabled only for `Local` and `Live` access.
@@ -240,13 +326,117 @@ Web surface session UI:
   are informational; only failed items expose the daemon retry action, and the
   returned access projection applies immediately behind the room-generation
   guard before any duplicate SSE projection arrives.
-- Invite and redeem UI remains absent until daemon-owned outbound routes exist.
+- `room_invite.rs` owns minting: `POST /v1/rooms/persistent/{key}/invites`
+  answers 201 with the invite RAW — no `{ok:true}` envelope, unlike artifacts,
+  attachments and the workspace lane. Success is settled first, on the status
+  and a present `code`; only a reply that is not a success is asked what its
+  top-level `error` means. A decoder copied from those neighbours reads a
+  minted invite as a malformed reply, or as whatever its characters spell.
+- Minting from a `Local` room BOOTSTRAPS federation, permanently and
+  irreversibly from this surface, so the first click only ARMS the control and
+  states what firing it will do. A 503 `federation_unavailable` is the
+  deployment describing itself, not a fault.
+- `room_redeem.rs` owns joining: `POST /v1/rooms/persistent/invites/redeem`
+  answers 200 with a flattened `RoomAccessProjection` plus `room_key`.
+  `room_key` is decoded OPTIONAL on purpose — bundle and daemon roll forward
+  independently, and requiring it would make a redemption that ALREADY
+  succeeded unreadable on an older daemon. Absent it, `newly_joined_key` diffs
+  the room list and opens a room only when exactly one appeared. The panel
+  mounts in the left rail, because someone holding a code has no room open and
+  may have no rooms at all.
+- An invite code is a bearer grant to the room. A minted one arrives in the
+  RESPONSE body and lives in one signal and the open panel's DOM; a redeemed
+  one goes in the REQUEST body. Never a log line, never an error sentence, and
+  never the rail — `rail_line` is deliberately code-free because the rail is on
+  screen for as long as the room is and the panel is not — and never past the
+  room it was minted for. No fixture in this repo may carry a real one. The
+  onboarding link EMBEDS the code, so it is the same grant in a longer form and
+  gets the same discipline.
+- A room's `workspace_root` is the folder its agent turns run in, resolved on
+  the DAEMON's host — not the browser's, which cannot see that filesystem, so
+  nothing here pre-validates a path and the daemon's canonicalizing
+  `400 invalid_workspace_root` is the only verdict. Unrelated to the SESSION
+  workspace root the rest of this crate means by that name. It rides the create
+  body (`key`, `name`, `trigger_policy?`, `workspace_root?`) and
+  `PATCH /v1/rooms/persistent/{key}`, where absent leaves the binding unchanged
+  and an explicit `null` unbinds — so the unbind body must NOT skip `None`, and
+  the policy and workspace PATCHes each send their own field alone rather than
+  clobbering the other's. An unbound room is not a cosmetic gap: every
+  room-bound agent turn in it is refused `503 workspace_unavailable` before the
+  agent sees the message, so the surface states that in words wherever the
+  trigger toggles render. That refusal is NOT `room_repo.rs`'s
+  `workspace_unavailable`, which is the compute lane saying Bedrock is
+  unreachable; do not share wording between them.
 - Rooms G1 is daemon-native text collaboration. LiveKit controls stay outside
   the room join, leave, roster, and transcript lifecycle until explicitly
   reintroduced behind a reviewed platform contract.
-- The rooms browser is a flex column; `.rooms-panel__list` keeps
-  `min-height: 0` with vertical overflow so long room lists scroll instead of
-  pushing status/actions outside the viewport.
+- The rooms browser is the left rail of `rooms_workspace.rs`, a flex column;
+  `.rooms-workspace__left-list` keeps `min-height: 0` with vertical overflow so
+  long room lists scroll instead of pushing the create field and status line
+  outside the viewport. (It was `.rooms-panel__list` in `styles/panels.css`
+  until that never-rendered panel's CSS was deleted.)
+- Channel/thread drafts, mention state, and pending-send confirmation are
+  scoped to the exact open-room generation. A room switch or close clears them
+  synchronously so content and a stale `Sending…` gate cannot cross rooms.
+- An empty hydrated transcript has no resume cursor. Surface omits
+  `after_seq` until it owns a real room sequence, preserving the daemon's
+  zero-based first row.
+- Mention notifications are raised from the LIVE TAIL only, by the same
+  `room_markdown` tokeniser that paints the highlight, so what notifies is what
+  shows. Hydration and the load-older backfill never notify — history arriving
+  is not someone talking to you now. A notification is suppressed only when the
+  reader is demonstrably looking at that room: focused, Rooms on screen, and
+  that room open. `open_key` alone is NOT "on screen" — it and the tail both
+  outlive the workspace unmounting behind Direct messages. Consequently a
+  mention in a room you do not have OPEN does not raise an OS notification:
+  only the open room has a tail, and standing up a tail per room to change that
+  would contradict the one-room rule above. The room-list response now carries
+  a daemon-derived, identity-scoped sparse `attention` projection for every
+  selected page. Surface uses it for unopened-room unread/mention badges and
+  never scans message text or opens N `EventSource`s to synthesize attention.
+  An absent projection means an older daemon and falls back to legacy sequence
+  unread state; a present empty projection is authoritative zero.
+
+## Agent Builder Contract
+
+- `agents.rs` owns the package write layer; its form mounts inside the Room-agent
+  authorization ceremony and reuses `Rooms::available_agents` as the ceremony's
+  package selector and the builder's edit-target list. No parallel agent list
+  and no bare participant picker.
+- The model picker is built from the daemon's `/v1/models` catalogue shared
+  through `Rooms::models` — never a hardcoded list, never a second fetch.
+  `model_options` must always include the current value, because `/v1/models`
+  resolves asynchronously and a missing option silently rewrites a pinned model
+  to "inherit default" on save.
+- Tools is free text until the daemon publishes a tool catalogue. There is no
+  `/v1/tools` route; a hardcoded dropdown would rot on the next tool added.
+- Prefill reads `agent.config.tools`, never the merged `AgentDef.tools` — the
+  latter includes `tools/` filename stems, and round-tripping it writes
+  filesystem-derived names into `agent.toml`.
+- A write body is the WHOLE `agent.toml`: the daemon rebuilds the file from the
+  spec it is handed, so `capabilities` and `yolo` are round-tripped verbatim
+  even though the form does not render them. `[[subprocess_capability]]` cannot
+  be expressed in the write API's spec, so an agent declaring one is refused
+  (`blocks_save`) rather than saved lossily.
+- An agent IS its folder: identity comes from the PUT path, the name field is
+  read-only while editing, and renaming is a move on disk, not a form edit.
+- Form state lives in `AgentBuilderState` at `RoomsWorkspace` scope. The
+  members-rail closure re-runs on every `rooms.access` change, so state created
+  inside it is destroyed by unrelated roster traffic.
+- Every pre-dispatch decision is a pure function with a native test. The daemon
+  stays the authority on all of them; the client copies exist to save a
+  round-trip, never to replace one.
+- Requires `ocean-os` `feat/agent-crud` on main. Against an older daemon the
+  write verbs answer 405 and `write_error_message` says so in words.
+
+**Files:** `crates/ocean-surface-ui/src/agents.rs`,
+`room_agent_authorization.rs`, `rooms_workspace.rs` (mount), `rooms.rs`
+(`models` handle, `pub(crate) encode`),
+`crates/ocean-surface-proxy/src/main.rs` (allowlist),
+`styles/rooms-workspace.css`.
+
+**Frozen gates:** the same seven listed under File Preview Deep-Link, plus
+`cargo test -p ocean-surface-proxy`.
 
 ## Workspace Map
 
@@ -268,6 +458,90 @@ provider credentials or direct provider calls to the proxy. Google Maps is
 optional and enabled only by an explicit non-empty `GOOGLE_MAPS_API_KEY`; never
 commit an organization-owned browser key or restore a compiled-in default.
 
+## Repository Ledger
+
+Root `events.md` is this repo's append-only chronological ledger. Record
+meaningful work there; a PR touching `crates/`, `styles/`, `scripts/`, `ops/`,
+`deploy/`, `extension/`, `vscode-extension/`, `.github/` or `index.html` must
+carry its entry in the same diff, which the `ledger` job in
+`.github/workflows/ci.yml` reports on without blocking the merge.
+
+Parallel branches each append their OWN entry — never settle an `events.md`
+merge by dropping the other branch's. `.gitattributes` gives the file
+`merge=union` so those appends stop conflicting at EOF, which they did the last
+time two surface slices landed in one wave (#174, hand-resolved).
+
+**Close an entry with a separator that carries the entry's own identity:** 81
+underscores, a space, the entry's `HH:MM`, and the `worktree:` it was written on
+when it has one — `______ 23:52 loop/my-slice`. Union emits a line both sides
+added only ONCE, so two entries that end with the same line cannot be kept
+apart: while every entry closed with the same bare rule, each extra parallel
+append ate one separator and the next entry's `time:` header landed directly
+under the previous entry's prose, FUSING two entries into one. #181 folded onto
+#180 twelve minutes after #180 landed the check that catches it. `HH:MM` alone
+is not the identity — it is minute resolution, and two slices in one wave land
+in the same minute often enough to have done it; the worktree is what the clock
+cannot give, and two parallel appends are by definition on two different
+branches. An entry with no worktree was written on the main checkout, where
+there is one writer and nothing to race, so its minute alone is enough.
+
+The bare rule stays valid forever — the 276 entries written before this
+convention all close with one, and `events.md` is append-only — so the check
+accepts both forms and NEVER asserts that a separator is unique or
+identity-bearing; requiring the new form would red every historical entry and
+every entry a slice in flight is writing right now. What it asserts is that each
+entry is CLOSED before the next one starts, which is what a fold destroys. **Run
+`node scripts/check-ledger.mjs events.md` on any change to `events.md`, and again
+on either side of a rebase carrying one; the two verdicts must match.** It runs in
+CI on PRs and on pushes to main, and
+its exit codes are 0 clean / 1 an entry is open / 2 the check could not run at
+all. `--fix` closes what it finds by insertion only and writes the identity form,
+so a repair does not hand the next merge the same shared line — never in CI,
+because that is a non-append edit to a file under `merge=union` and the last cost
+below applies to it. `scripts/events-merge-driver.test.mjs` proves a three-way
+parallel append keeps all four rules and fuses nothing, but it reproduces the
+merge in a scratch repo and never reads THIS file, so CI's `guards` job running
+it proves the driver, not the ledger.
+
+**Run `node scripts/check-ledger-order.mjs events.md` beside it.** The checker
+never reads a `time:` header past the word, so five entries sat at the top of
+this ledger newest-first for months and it called the file clean. The order
+check reads the clock and reds any entry more than a day out of merge order —
+a prepend, a backdate — while descents of hours, which is how parallel slices
+land, pass. Same exit codes, no `--fix`: moving an entry is a decision, made
+once by hand and recorded in the ledger. `scripts/check-ledger.mjs` itself is
+one of three copies (bedrock, os, surface) and carries a code stamp; its test
+recomputes the digest, so an edit that forks it from bedrock's copy is red
+until the fork is written down.
+
+Three things the identity separator does NOT buy:
+
+- **An entry owns its rule, not the blank line after it.** That is a ruling, not
+  an omission: a blank line cannot be given an identity, so it is the one part
+  of the format no convention can protect from union. A merged append can land
+  its `time:` header flush against the previous rule — the three-way fixture in
+  `scripts/events-merge-driver.test.mjs` loses the blank at every join, while
+  wave 52's real rebase kept this repo's and ate the sibling's, so it turns on
+  where xdiff anchors rather than on anything worth asserting. The entry
+  boundary survives either way. Cosmetic; close it up by hand if you mind, and
+  never make the check red for it.
+- **It saves an entry's TAIL, not its HEAD.** Two appends written in the same
+  minute open with two identical lines (`time:` and `agent:`) and union folds
+  those the same way, so the second entry can arrive without its header while
+  its rule survives — and the check reads the survivor as one closed entry and
+  exits 0. Eyeball the head of a merged entry when two slices share a minute;
+  the fix belongs to the entry schema, not to the separator.
+- **union only fails safe for append/append.** A NON-append change to
+  `events.md` — a correction, a redaction, a repaired separator — lands in the
+  same tail hunk a concurrent append touches, and union settles it by keeping
+  both sides, silently restoring the line the change removed. Any merge
+  carrying one must be eyeballed; that it came back clean is not evidence that
+  it is right.
+
+Merged entries may also INTERLEAVE rather than land in strict wall-clock order,
+since union emits the current branch's lines before the merged branch's. That
+one is cosmetic: every entry carries its own `time:` field.
+
 ## Build / Check
 
 ```sh
@@ -284,7 +558,7 @@ For local web/proxy work:
 OCEAN_SURFACE_BIND=127.0.0.1:18790 OCEAN_SURFACE_AUTH=off ./run-surface.sh
 ```
 
-For LAN/tailnet access, keep the default bind and provide both Basic auth
+For LAN/tailnet access, keep the default bind and provide both operator-login
 environment variables. `trunk serve` exercises the bundle alone, not the
 release proxy or daemon reverse-proxy path.
 
@@ -345,7 +619,114 @@ cwd-authoritative rule.
 styles/deck.css.
 
 **Frozen gates:** `cargo fmt --check`, `cargo clippy -p ocean-surface-ui
---target wasm32-unknown-unknown -- -D warnings`, `cargo check -p
+--target wasm32-unknown-unknown -- -D warnings`, `cargo clippy -p
+ocean-surface-ui --all-targets -- -D warnings`, `cargo check -p
 ocean-surface-ui --target wasm32-unknown-unknown`, `cargo check -p
 ocean-surface-proxy`, `cargo test -p ocean-surface-ui --target
 wasm32-unknown-unknown --no-run`, `cargo test -p ocean-surface-ui`.
+
+**Both clippy invocations are required and neither replaces the other.** The
+wasm32 one is the target the release lane actually denies warnings on, so it is
+the one whose verdict can stop a bundle promoting. It builds the bin without
+`cfg(test)`, which makes every `mod tests` block invisible to it — and this
+crate's tests are where most changes land. The `--all-targets` one is the only
+thing in this list that lints test code, and it runs on the host because
+`--all-targets` on wasm32 has nothing to add: `cargo test --target
+wasm32-unknown-unknown --no-run` already proves the test code compiles there.
+
+## Guard Tests — Controls the Compiler Does Not Hold
+
+`crates/ocean-surface-ui` is a BINARY crate (`src/main.rs` + `fn main()`, no
+`[lib]`). An integration test in `tests/` therefore cannot import a single item
+from it, cannot mount a component, and cannot press anything. Every guard in
+that directory is a source scanner because that is the only lever available —
+do not spend time looking for a way to call a component.
+
+**The toolkit is shared: `tests/common/mod.rs`.** A subdirectory `mod.rs`, not
+a top-level file, because cargo compiles each top-level `tests/*.rs` as its own
+binary and a subdirectory is not a target. It carries `repo_root`, `read` (repo
+root-relative, for `styles/`), `src` (crate `src/`-relative), `view_source`
+(the half of a module a release build compiles), `without_whitespace`, and
+`all_rust_src`. It is `#![allow(dead_code)]` because inclusion is per-binary:
+each guard calls only some helpers, and an uncalled `pub fn` in a test binary
+is a `dead_code` warning the gate's `-D warnings` turns into a failure. That is
+the right trade here, but it is a trade: these helpers previously sat inline in
+`dead_selector_removal.rs` and `ci_failure_trigger_control.rs` with no allow, so
+one that lost its last caller announced itself. After the move, an orphaned
+helper is silent forever — prune by reading, not by waiting for the gate.
+Consumers: `ci_failure_trigger_control.rs`, `dead_selector_removal.rs`,
+`unheld_room_controls.rs`.
+
+**`tests/unheld_room_controls.rs`** pins six room controls that measurement
+proves nothing else holds. The failure it exists for: a reviewer deletes a
+control, every gate stays green, and a landed daemon route goes back to being
+unreachable — #165 deleted the create panel's CI-failure checkbox and the
+Response Policy summary line and the full suite plus the wasm check said
+nothing.
+
+**Measure before you pin. This is the lane's discipline, not a suggestion.**
+Some controls ARE compiler-held and a guard on one is maintenance that buys
+nothing. Apply the deletion for real, run the gate, pin only what stays green.
+Measured at `4ed9a7c`:
+
+| Control | Result |
+|---|---|
+| `room_summary.rs` summary rail `open` button | GREEN — pinned |
+| `room_repo.rs` unbind ARMING click | GREEN — pinned |
+| `room_workspace_panel.rs` destroy ARMING click | GREEN — pinned |
+| `room_workspace_panel.rs` exec purge-all ARMING click | GREEN — pinned |
+| `rooms_workspace.rs` both rosters' remove ARMING click | GREEN — pinned |
+| `room_redeem.rs` join button's `on:click` (markup kept) | GREEN — pinned |
+| `room_summary.rs` summarize RUN button | RED — compiler-held |
+| `room_workspace_panel.rs` `provision` button | RED — compiler-held |
+| `room_redeem.rs` join button's MARKUP | RED — held by an in-file test |
+| `room_workspace_panel.rs` `expose` button * | RED — compiler-held |
+| `room_workspace_panel.rs` port row's `close` button * | RED — compiler-held |
+
+\* Measured on the commit that ADDED these two controls, not at `4ed9a7c`
+where neither existed. Same method, later tree.
+
+The split is not where intuition puts it, and the pairs are the lesson. In one
+panel `provision` is held (`variant Provision is never constructed`) while
+`destroy`'s arm is not. In one component the summarize RUN button is held
+(deleting it takes `SummarizeRequest`, `summarize_url`, `classify_summarize`
+and `SummarizeOutcome` dead with it) while the `open` button that is the only
+door to it is not.
+
+**The shape that hides** is the arming half of a two-click confirm. Deleting
+the arm leaves the confirm branch standing, so the enum variant is still
+constructed, the fire method is still called, and the signal is still read and
+reset. Nothing is unreferenced; nothing warns. What is gone is the only way to
+reach the confirm — the destructive verb stays fully implemented and
+permanently unpressable.
+
+**Two rules a guard here must satisfy.**
+
+1. *Name the CALL SITE, not the literal.* A bare-literal assert is satisfied by
+   the module's own test module quoting it. Measured in this tree:
+   `state.confirm_destroy.set(true)` occurs 5x in `room_workspace_panel.rs` and
+   once outside `#[cfg(test)]`; `state.confirm_purge.set(Some(PurgeTarget::
+   All))` occurs 3x and once. So every needle carries its `on:click=` prefix
+   AND every scan runs over `view_source`. Either alone is insufficient.
+2. *Verify with a RENAME as well as a deletion.* A guard that only catches
+   deletion lets the control be renamed to anything. All six here were checked
+   both ways.
+
+**Budget the mutation runs; they are not free.** The guard reads `src/` at
+RUNTIME, but cargo builds every bin target of the package before it will run an
+integration test — it has to, for `CARGO_BIN_EXE_*` — so every `cargo test
+--test unheld_room_controls` against a mutated `src/` pays a full `Compiling
+ocean-surface-ui`, measured at ~30s in this tree. The mutation therefore MUST
+compile: append `this is not rust at all !!!` to any module and the run dies at
+`error: could not compile ocean-surface-ui (bin "ocean-surface-ui")` having
+executed no test at all. That same rebuild is what makes the RED rows above
+legible — a compiler-held control announces itself as a build error, not as a
+guard that passed.
+
+**A control measured as compiler-held is a finding, not a failure.** Record it
+and move on — but record it, because the hold has a shelf life. The rail rows
+in `ci_failure_trigger_control.rs` were compiler-held until a flag table
+elsewhere started constructing the same variants; that guard exists because the
+hold evaporated.
+
+**Frozen gates:** the same seven listed under File Preview Deep-Link.

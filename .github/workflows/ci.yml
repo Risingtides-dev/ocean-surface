@@ -42,8 +42,13 @@ jobs:
       # The workspace has four crates with very different build profiles:
       #   * ocean-surface-proxy — native axum binary (the only default member).
       #     Builds/tests/lints fine headless. This is the real CI target.
-      #   * ocean-surface-ui    — wasm-only Leptos CSR app. A native build is
-      #     meaningless; it is checked against wasm32-unknown-unknown instead.
+      #   * ocean-surface-ui    — wasm-only Leptos CSR app. Its shipped ARTIFACT
+      #     is wasm, so it is *checked* against wasm32-unknown-unknown. Its
+      #     TESTS run natively and always could: they are pure-logic predicates,
+      #     serde wire-shape round-trips, and source assertions — no DOM, no
+      #     browser, no wasm. This note previously read "a native build is
+      #     meaningless", which conflated build with test and left 796
+      #     assertions (every rooms gate among them) enforced by nothing.
       #   * ocean-gui           — native GPUI desktop face (gpui + livekit/
       #     libwebrtc + rfd/GTK + wry). A full *build* of this
       #     crate links GPUI's blade/Vulkan renderer and the prebuilt libwebrtc
@@ -75,9 +80,14 @@ jobs:
       - name: Test (ocean-surface-proxy)
         run: cargo test -p ocean-surface-proxy
 
-      # ocean-surface-ui: wasm-only — check + clippy against the wasm target.
+      # ocean-surface-ui: wasm artifact is checked against wasm32; the tests
+      # run natively. Both are required — the wasm check alone cannot fail on a
+      # broken assertion, only on a broken compile.
       - name: Check (ocean-surface-ui, wasm32)
         run: cargo check -p ocean-surface-ui --target wasm32-unknown-unknown
+
+      - name: Test (ocean-surface-ui)
+        run: cargo test -p ocean-surface-ui
 
       # Clippy with -D warnings: all style/correctness lints are hard errors,
       # matching ocean-os (OCEAN-309). Pre-existing warnings fixed in OCEAN-325.
@@ -87,14 +97,20 @@ jobs:
       - name: Clippy (ocean-surface-ui, wasm32)
         run: cargo clippy -p ocean-surface-ui --target wasm32-unknown-unknown -- -D warnings
 
+      # The wasm32 pass above builds the bin WITHOUT cfg(test), so every
+      # `mod tests` block is invisible to it — and this crate's changes land
+      # mostly in those blocks. This host pass is the only lint in the repo
+      # that sees them. Host rather than wasm32 because `cargo test --target
+      # wasm32-unknown-unknown --no-run` already proves the test code compiles
+      # there; what was missing was a lint, not a second compile.
+      - name: Clippy (ocean-surface-ui, host, all targets)
+        run: cargo clippy -p ocean-surface-ui --all-targets -- -D warnings
+
       # Formatting gate — closes the OCEAN-195 fmt deferral. The one-time
       # `cargo fmt --all` sweep was landed in OCEAN-324; this step enforces it
       # going forward. Any unformatted commit will fail CI here.
       - name: Fmt check
         run: cargo fmt --all -- --check
-
-      - name: Surface deployment contract
-        run: node scripts/surface-auto-deploy.test.mjs
 
   # ----------------------------------------------------------------------
   # ocean-gui (GPUI native desktop face) — `cargo check` only, SEPARATE job.
@@ -181,3 +197,186 @@ jobs:
       # any GPU/render-dependent integration tests from the headless gate.
       - name: Test (ocean-gui, lib only)
         run: cargo test -p ocean-gui --lib
+
+  # The scripts/*.test.mjs guards. Each pins a mechanism whose failure does not
+  # look like itself: delete the `events.md merge=union` line and a wave starts
+  # raising conflicts nobody can source; let the side panel's stylesheet list
+  # drift and the panel renders unstyled; stop checking the wasm magic word in
+  # the service worker and one corrupt cached response bricks the page across
+  # reloads. That indirection is exactly why they cannot be hand-run — three of
+  # these four were, and the merge-driver guard's own header said so.
+  #
+  # The fourth hung off the end of the 30-minute Rust `check` job, where it
+  # could not fail until cargo had passed and a node assertion was reported as
+  # a Rust build failure. It costs a second and shares nothing with that build.
+  #
+  # A named step per guard rather than one `node --test scripts/*.test.mjs`:
+  # the job is seconds either way, and a red step should name the mechanism
+  # that broke without anyone opening the log.
+  #
+  # No install step — the repo has no root manifest for `npm ci` to read, and
+  # nothing here reaches outside it: node: builtins, plus one RELATIVE import,
+  # events-merge-driver.test.mjs -> ./check-ledger.mjs, which is deliberate.
+  # That guard reads the merged text through the checker's own `openEntries`
+  # rather than a private copy of the rule, so the two cannot drift apart on
+  # what closes an entry. Node is pinned for the reason the ledger job pins it.
+  # scripts/check-ledger.test.mjs and check-ledger-order.test.mjs are absent
+  # on purpose: they run in `ledger`,
+  # next to the checker it proves.
+  guards:
+    name: script guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # No fetch-depth: 0 here. The merge-driver guard builds its own scratch
+      # repo rather than reading this one's history, and the deploy guard is
+      # handed its revision instead of resolving one, so depth 1 is enough.
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: The events.md union merge driver keeps parallel appends apart
+        run: node scripts/events-merge-driver.test.mjs
+
+      # No order constraint between this step and the deploy guard below; the
+      # one reason there was for the current order is gone. That guard used to
+      # invoke the auto-deploy script with OCEAN_SURFACE_REPO unset, so the rail
+      # defaulted to the checkout the script lives in and its promote path
+      # `rm -rf`'d extension/dist and refilled it from a fixture bundle. This
+      # step reads no CSS in either state and calls the bundle unbuilt either
+      # way, so the order never gated a verdict — what it bought was an honest
+      # message, since going second would have had this step send a reader to
+      # scripts/build-extension.sh over a directory the job had just conjured.
+      #
+      # #184 removed the side effect rather than the order: all five of that
+      # guard's child invocations now aim at a repo stub under the tmpdir it
+      # already makes, and its closing assertion fingerprints dist/ and
+      # extension/dist either side of the run and requires them unchanged. That
+      # assertion is what keeps this paragraph true — drop the
+      # OCEAN_SURFACE_REPO override and "Deployment promotion stays atomic"
+      # goes red, in this job, before anyone rereads this comment. So these
+      # four steps may be reordered freely.
+      - name: The side panel links every stylesheet the build copies
+        run: node scripts/extension-inventory.test.mjs
+
+      - name: The service worker rejects a corrupt cached wasm
+        run: node scripts/sw-wasm-magic.test.mjs
+
+      - name: Deployment promotion stays atomic
+        run: node scripts/surface-auto-deploy.test.mjs
+
+  # A code PR must carry its events.md ledger entry in the same diff. Ledger
+  # discipline slipped three consecutive waves in the automated loop that
+  # works this repo, and the land phase had to append the missing entries
+  # afterwards from disposable worktrees — a machine check beats a fourth
+  # reminder. Mirrors the ocean-bedrock guard (its PR #50) and the ocean-os one
+  # (its PR #415). Like the build jobs above, deliberately NOT a required status
+  # check: red is information, not a lock, so a fast merge stays fast.
+  ledger:
+    name: events.md entry
+    # No event condition on the job. Only the diff step below needs a base
+    # branch to compare against; the parse check after it needs none and is
+    # just as meaningful on push-to-main, because a merge folds a separator
+    # exactly the way a rebase does — and this is the repo that gives events.md
+    # the union merge driver, so a merge is precisely where the folds come from.
+    # One job rather than two so both checks share a checkout.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # The three-dot diff below resolves the merge-base with the base
+          # branch, which a shallow checkout cannot see.
+          fetch-depth: 0
+
+      # scripts/check-ledger.mjs imports only node: builtins, and this repo has
+      # no root node manifest for `npm ci` to read even if it needed one — but
+      # with no install step it also has no node it can name. Pinned at 22 to
+      # match the sibling repos rather than inherited from whatever the runner
+      # image ships this month, since a floating runtime under a gate is how a
+      # gate starts failing for reasons that have nothing to do with the ledger.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Require an events.md entry alongside code changes
+        # Only a PR has a base to diff against; on push-to-main the entry
+        # either merged with the code or the moment to catch it is gone.
+        if: github.event_name == 'pull_request'
+        # Three-dot = merge-base diff: only what this PR adds, not what main
+        # gained since the branch was cut. GITHUB_BASE_REF is runner-set on
+        # pull_request events, so no token and no extra permissions.
+        #
+        # The guarded set is this check's own judgment of what ships behavior
+        # in THIS repo, not a list copied from AGENTS.md: crates/ and styles/
+        # are the app (stylesheets live at the repo root here, not under the
+        # crate), index.html is trunk's entry point, and scripts/ ops/ deploy/
+        # extension/ vscode-extension/ .github/ all change how it builds or
+        # ships. Left out: docs/, mockups/, design-systems/, local_plans/,
+        # audit/, legacy-voice/, public/, the root manifests, and events.md
+        # itself — none of which has ever shipped behavior alone here.
+        run: |
+          changed="$(git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD")"
+          guarded="$(printf '%s\n' "$changed" \
+            | grep -E '^(crates|styles|scripts|ops|deploy|extension|vscode-extension|\.github)/|^index\.html$' || true)"
+          if [ -n "$guarded" ] && ! printf '%s\n' "$changed" | grep -qFx 'events.md'; then
+            echo "This PR changes code but carries no events.md ledger entry:"
+            printf '%s\n' "$guarded" | sed 's/^/  /'
+            echo ""
+            echo "Append an entry to the repo-root events.md in this PR:"
+            echo "time [HH:MM] [MM-DD-YY] (24-hour), agent, worktree (branch"
+            echo "when not on main), type, area, then one plain-prose"
+            echo "paragraph on what changed and why."
+            exit 1
+          fi
+
+      # The checker is a verbatim port of ocean-bedrock's, and bedrock proves it
+      # against a real union merge in a git harness. The merge-driver test in
+      # scripts/ does the same here, though only against a scratch repo it
+      # builds itself, and the `guards` job above runs it on every PR. These are
+      # the same assertions made pure over the text, so a port that drifted here
+      # fails before it can call a folded ledger clean.
+      - name: Test the ledger checker
+        run: node --test scripts/check-ledger.test.mjs
+
+      # The diff step proves an entry EXISTS; this one proves the ledger it was
+      # appended to is still readable. The union merge driver this repo gives
+      # events.md keeps a line both sides added only once, so while every entry
+      # closed with the same bare `___` rule, each extra parallel append ate the
+      # separator the two entries shared and the second entry's `time:` header
+      # landed directly under the first entry's prose: two entries fused, with
+      # no conflict and nothing a merge check could see. 22 of the 269 entries
+      # here were open when this landed and were repaired in the same commit —
+      # 18 in the abutting shape that fold left, 4 written without a rule at
+      # all. A rule now carries its own entry's `HH:MM` and worktree, so two
+      # appends no longer share a line and xdiff has nothing to fold — but the
+      # rules already in events.md are bare and identical to one another, and an
+      # append-only ledger carries them forever. The check asks whether an entry
+      # closes, not how it came to be open. Exit 1 names the open entries by
+      # line, 2 means the check could not run at all — an unreadable path, or a
+      # ledger that lost its contents.
+      #
+      # Never `--fix` here. The repair is a non-append edit to a file under
+      # `merge=union`, and CI rewriting the ledger nobody reviewed is worse than
+      # the fold.
+      - name: The ledger still parses
+        run: node scripts/check-ledger.mjs events.md
+
+      # The parse check reads a `time:` header only as far as the word, so five
+      # entries sat at the TOP of events.md newest-first for months while it
+      # called the file clean. This one reads the clock. Entries land in MERGE
+      # order, not clock order — two slices of one wave land whichever way
+      # their PRs merged — so the rule is a band, not a sort: an entry more
+      # than a day out of place (a prepend, a backdate) is red, a descent of
+      # hours is a ledger doing its job. Same exit codes as the parse check,
+      # and no `--fix` exists: moving an entry is a decision, made by hand.
+      - name: Test the ledger order checker
+        run: node --test scripts/check-ledger-order.test.mjs
+      - name: The ledger still grows at the end
+        run: node scripts/check-ledger-order.mjs events.md

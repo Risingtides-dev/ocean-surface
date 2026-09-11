@@ -150,6 +150,10 @@
   --floor-ink: #11131A;
 
   /* ── Borders ──────────────────────────────────────────────────── */
+  /* Scrim behind a modal or slide-over. A colour, so it lives here and not in
+     the sheet that happens to draw the overlay. */
+  --overlay: rgba(6, 6, 6, 0.72);
+
   --border-subtle: rgba(255, 255, 255, 0.06);
   --border: rgba(255, 255, 255, 0.10);
   --border-strong: rgba(255, 255, 255, 0.20);
@@ -168,6 +172,8 @@
   --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.40);
   --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.55);
   --shadow-lg: 0 24px 64px rgba(0, 0, 0, 0.65);
+  --shadow-popover: 0 10px 28px rgba(0, 0, 0, 0.45);
+  --scrim: rgba(0, 0, 0, 0.35);
   --glow-brand: 0 0 32px rgba(0, 215, 215, 0.28);
 
   /* ── Material — molded from the digital ocean ─────────────────── */

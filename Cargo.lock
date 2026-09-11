@@ -5207,6 +5207,7 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
+ "futures-util",
  "getrandom 0.3.4",
  "libc",
  "reqwest",
@@ -5215,6 +5216,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+ "tokio-stream",
  "tower",
  "tower-http",
  "tracing",
@@ -5225,6 +5227,7 @@ dependencies = [
 name = "ocean-surface-ui"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "console_error_panic_hook",
  "console_log",
  "futures-util",

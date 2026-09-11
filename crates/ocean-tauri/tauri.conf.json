@@ -16,7 +16,7 @@
         "title": "Ocean Desktop",
         "width": 1280,
         "height": 800,
-        "minWidth": 720,
+        "minWidth": 650,
         "minHeight": 480,
         "resizable": true,
         "decorations": true,

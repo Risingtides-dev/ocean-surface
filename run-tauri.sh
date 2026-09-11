@@ -21,6 +21,10 @@ export CARGO_HOME="$HOME/.cargo"
 unset NO_COLOR
 
 DAEMON="${OCEAN_DAEMON_URL:-http://127.0.0.1:4780}"
+# Dev serves the bundle this script just built, not the rail's promoted
+# release (the shell's default when OCEAN_SURFACE_DIST is unset). Cmd+R in
+# the app re-reads dist/ after another `trunk build` — no Rust rebuild.
+SURFACE_DIST="${OCEAN_SURFACE_DIST:-$REPO/dist}"
 
 echo "==> building wasm bundle (trunk)"
 ( cd "$REPO" && trunk build --release )
@@ -46,10 +50,12 @@ for w in "${wasm_files[@]}"; do
 done
 
 echo "==> daemon: $DAEMON"
-echo "==> launching Tauri (loads $REPO/dist as frontendDist)"
+echo "==> surface bundle: $SURFACE_DIST (live; embedded dist/ is the fallback)"
+echo "==> launching Tauri"
 
 # The Tauri crate is standalone — run from its own dir so its Cargo.lock applies.
 cd "$REPO/crates/ocean-tauri"
 exec env \
   OCEAN_DAEMON_URL="$DAEMON" \
+  OCEAN_SURFACE_DIST="$SURFACE_DIST" \
   cargo tauri dev

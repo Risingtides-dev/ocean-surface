@@ -13,10 +13,11 @@
      content's intrinsic height. */
   flex: 0 0 auto;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
   grid-template-areas:
-    "input input input"
-    "orb controls action";
+    "attachments attachments attachments attachments"
+    "input input input input"
+    "attach orb controls action";
   align-items: center;
   column-gap: 8px;
   row-gap: 4px;
@@ -489,6 +490,127 @@
 /* The orb speaks through color and its tooltip; a permanent caption under
    it is knob noise. */
 .voice-hint { display: none; }
+
+/* ── context attachments ───────────────────────────────────────────────── */
+
+.ocean-composer__file-input {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.ocean-composer__attach {
+  grid-area: attach;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--ctl-h);
+  height: var(--ctl-h);
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-elevated);
+  color: var(--fg-3);
+  cursor: pointer;
+  transition:
+    transform var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
+}
+
+.ocean-composer__attach:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.ocean-composer__attach:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.ocean-composer__attach:active {
+  transform: scale(0.985);
+}
+
+.ocean-composer__attachments {
+  grid-area: attachments;
+  display: flex;
+  min-width: 0;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 0 2px 2px;
+  scrollbar-width: thin;
+}
+
+.ocean-composer__attachment {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  min-width: 0;
+  max-width: min(280px, 72vw);
+  height: 26px;
+  gap: 6px;
+  padding: 0 5px 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-hover);
+  color: var(--fg-2);
+  font-size: 11px;
+}
+
+.ocean-composer__attachment-kind {
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.ocean-composer__attachment-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ocean-composer__attachment button {
+  appearance: none;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--fg-3);
+  cursor: pointer;
+}
+
+.ocean-composer__attachment button:hover {
+  background: var(--bg-active);
+  color: var(--fg);
+}
+
+.ocean-composer__attachment button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.ocean-composer__attachment .icon {
+  width: 12px;
+  height: 12px;
+}
 
 /* ── text composer ────────────────────────────────────────────────────── */
 

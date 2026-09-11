@@ -152,14 +152,27 @@ fn touch_focused_fields_carry_the_16px_anti_zoom_floor() {
     // Every field a phone user actually focuses, mapped to the stylesheet that
     // co-locates its coarse-pointer floor. Each must reach >= 16px so focusing
     // it never triggers the iOS zoom-and-shift (TASK-41).
+    //
+    // The three Rooms entries here used to name `.rooms-panel__create-input`,
+    // `.rooms-composer__input` and `.rooms-addagent__input` in panels.css.
+    // Those classes are emitted by nothing: the shipped Rooms surface is
+    // `rooms_workspace.rs`, which renders `.rooms-workspace__*`. So the guard
+    // was pinning a floor under fields no phone user can focus, while the
+    // fields they DO focus — the room-name/redeem input, the composer, the
+    // add-agent select and the three agent-builder controls — carried their
+    // floor in styles/rooms-workspace.css with nothing asserting it. Deleting
+    // that live rule passed every gate.
+    //
+    // The Rooms half of this table is NOT hand-maintained — see
+    // `every_rooms_text_entry_control_is_in_the_anti_zoom_floor`, which derives
+    // it from the view source. A hand-written list is how the second half of
+    // the same miss survived: the six composer/room controls were floored while
+    // the right rail's eight sat at 11-13px.
     let fields: &[(&str, &str)] = &[
         ("compact.css", ".ocean-composer__input"),
         ("island.css", ".island-search__input"),
         ("island.css", ".island-recall__input"),
         ("panels.css", ".sessions-create__input"),
-        ("panels.css", ".rooms-panel__create-input"),
-        ("panels.css", ".rooms-composer__input"),
-        ("panels.css", ".rooms-addagent__input"),
         ("deck.css", ".palette-input"),
     ];
     for (file, selector) in fields {
@@ -190,5 +203,107 @@ fn viewport_meta_declares_interactive_widget_resizes_content() {
         "viewport meta must set interactive-widget=resizes-content so the soft \
          keyboard resizes the content box instead of overlaying the composer \
          (TASK-41); found: {meta}",
+    );
+}
+
+/// Every `rooms-workspace__*` class on a text-entry element in the shipped
+/// view source, paired with whether it opens a keyboard.
+///
+/// The attribute region is bounded by tracking `(){}[]` depth, because a
+/// Leptos attribute value is a Rust expression and can hold `>` — `->` in a
+/// closure signature, a turbofish, a comparison. Scanning to the first bare
+/// `>` would cut an element short and silently drop its class.
+fn rooms_text_entry_classes() -> Vec<String> {
+    let mut found = Vec::new();
+    let mut stack = vec![std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src"
+    ))];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read_dir src") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap_or_default();
+            // Production half only: a fixture quoting markup is not a control.
+            let view = source
+                .split_once("#[cfg(test)]")
+                .map_or(&source[..], |h| h.0);
+            for tag in ["<input", "<select", "<textarea"] {
+                let mut from = 0usize;
+                while let Some(rel) = view[from..].find(tag) {
+                    let at = from + rel;
+                    let body = &view[at + tag.len()..];
+                    let mut depth = 0i32;
+                    let mut end = body.len();
+                    for (i, c) in body.char_indices() {
+                        match c {
+                            '(' | '{' | '[' => depth += 1,
+                            ')' | '}' | ']' => depth -= 1,
+                            '>' if depth == 0 => {
+                                end = i;
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                    let attrs = &body[..end];
+                    // A file picker opens a chooser, never the keyboard, so it
+                    // cannot trigger the focus zoom this floor exists for.
+                    if !attrs.contains("type=\"file\"") {
+                        if let Some(c) = attrs.find("rooms-workspace__") {
+                            let class: String = attrs[c..]
+                                .chars()
+                                .take_while(|ch| {
+                                    ch.is_ascii_lowercase() || *ch == '-' || *ch == '_'
+                                })
+                                .collect();
+                            found.push(class);
+                        }
+                    }
+                    from = at + tag.len();
+                }
+            }
+        }
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// The anti-zoom floor must cover EVERY text-entry control the rooms surface
+/// renders, derived from the source rather than from a list someone remembered
+/// to update.
+///
+/// Codex caught the gap this closes on #198: the repointed guard named six
+/// controls and claimed to cover "every field a phone user focuses", while
+/// `__invite-input`, `__repo-input`, the three artifact editor fields,
+/// `__authority-select` and the two compute-panel inputs rendered in the
+/// mobile right rail at 11-13px. Focusing any of them still force-zoomed the
+/// page, with this file asserting that none could.
+#[test]
+fn every_rooms_text_entry_control_is_in_the_anti_zoom_floor() {
+    let classes = rooms_text_entry_classes();
+    assert!(
+        classes.len() >= 10,
+        "the scanner found only {} rooms text-entry controls, which means it \
+         stopped matching the markup rather than that the surface shrank: {classes:?}",
+        classes.len(),
+    );
+    let css = read_style("rooms-workspace.css");
+    let missing: Vec<_> = classes
+        .iter()
+        .filter(|class| coarse_font_size_px(&css, &format!(".{class}")).is_none_or(|px| px < 16))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these rooms controls open a keyboard on a phone but carry no 16px \
+         coarse-pointer floor in styles/rooms-workspace.css, so focusing one \
+         force-zooms the page: {missing:?}",
     );
 }
