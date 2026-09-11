@@ -1178,6 +1178,35 @@ fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
                 .delete(proxy_agent_delete),
         )
         .route("/v1/fs/dirs", get(proxy_fs_dirs))
+        // Routes the surface has always called and the daemon has always
+        // served, which this table simply never carried. In the shipped PWA
+        // `daemon_url` is empty, so every one of these was same-origin, missed
+        // the allow-list, and fell through to ServeDir — a 404 with an empty
+        // body that each caller decodes as "nothing here". See
+        // `every_surface_v1_path_is_routed` for the guard that keeps this
+        // table honest from here on.
+        .route("/v1/fs/file", get(proxy_fs_file))
+        .route("/v1/agent/history/search", get(proxy_history_search))
+        .route("/v1/requests", get(proxy_requests))
+        .route("/v1/repo/github/{project_id}/pulls", get(proxy_repo_github))
+        .route(
+            "/v1/repo/github/{project_id}/pulls/{number}",
+            get(proxy_repo_github),
+        )
+        .route(
+            "/v1/repo/github/{project_id}/pulls/{number}/reviews",
+            get(proxy_repo_github),
+        )
+        .route(
+            "/v1/repo/github/{project_id}/head-sha/{sha}/checks",
+            get(proxy_repo_github),
+        )
+        .route(
+            "/v1/repo/github/{project_id}/commits",
+            get(proxy_repo_github),
+        )
+        .route("/v1/browser/screencast", get(proxy_browser_screencast))
+        .route("/v1/browser/input", post(proxy_browser_input))
         .route(
             "/v1/projects",
             get(proxy_projects_list).post(proxy_projects_create),
@@ -2416,6 +2445,91 @@ async fn proxy_agent_delete(
         Bytes::new(),
     )
     .await
+}
+
+/// Build `path` plus the caller's query string, owned, so no borrow of the
+/// request is held across the forward's await (the future must stay `Send`).
+///
+/// The plain [`proxy_get_json`] drops the query, which is silent breakage for
+/// any route whose meaning lives in it (`?path=`, `?q=`, `?state=`).
+fn path_with_query(path: &str, req: &Request) -> String {
+    match req.uri().query() {
+        Some(qs) => format!("{path}?{qs}"),
+        None => path.to_string(),
+    }
+}
+
+/// Reverse-proxy GET /v1/agent/history/search?q=&limit= (transcript search).
+/// Without it the search box fell through to ServeDir → 404 → empty result
+/// list, indistinguishable from "no matches".
+async fn proxy_history_search(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+) -> impl IntoResponse {
+    let daemon = resolved_daemon(&state, &req);
+    let path = path_with_query("/v1/agent/history/search", &req);
+    proxy_get_json(&state, &daemon, &path).await
+}
+
+/// Reverse-proxy GET /v1/fs/file?path=<path> (single file read). Sibling of
+/// `/v1/fs/dirs`, which was routed while this one was not — so the tree listed
+/// but every file in it opened empty.
+async fn proxy_fs_file(State(state): State<Arc<AppState>>, req: Request) -> impl IntoResponse {
+    let daemon = resolved_daemon(&state, &req);
+    let path = path_with_query("/v1/fs/file", &req);
+    proxy_get_json(&state, &daemon, &path).await
+}
+
+/// Reverse-proxy GET /v1/requests (the request queue). `/v1/requests/{id}/cancel`
+/// was routed without the list it cancels from.
+async fn proxy_requests(State(state): State<Arc<AppState>>, req: Request) -> impl IntoResponse {
+    let daemon = resolved_daemon(&state, &req);
+    let path = path_with_query("/v1/requests", &req);
+    proxy_get_json(&state, &daemon, &path).await
+}
+
+/// Reverse-proxy the daemon's read-only GitHub projections
+/// (`/v1/repo/github/{project_id}/...`). One handler for the whole family: the
+/// daemon owns every path below the prefix, the proxy only carries it.
+///
+/// The GitHub deck rendered permanently blank on web without this — the
+/// surface's `.ok()?` turned a ServeDir 404 into `None`, which the deck draws
+/// as "no pull requests" rather than as an error.
+async fn proxy_repo_github(State(state): State<Arc<AppState>>, req: Request) -> impl IntoResponse {
+    let daemon = resolved_daemon(&state, &req);
+    let path = path_with_query(req.uri().path(), &req);
+    proxy_get_json(&state, &daemon, &path).await
+}
+
+/// Reverse-proxy GET /v1/browser/screencast — the live SSE screencast of the
+/// agent's Chrome. Streaming, so it takes the untimed client and
+/// `sse_stream_response`: a buffered forward would hold every frame until the
+/// stream closed, which for a screencast is forever.
+async fn proxy_browser_screencast(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+) -> impl IntoResponse {
+    let daemon = resolved_daemon(&state, &req);
+    let url = format!(
+        "{}{}",
+        daemon.base(),
+        path_with_query("/v1/browser/screencast", &req)
+    );
+    match state.http.get(&url).send().await {
+        Ok(resp) => sse_stream_response(resp, stream_ends_on_switch(&state, &daemon)),
+        Err(err) => device_unreachable(&daemon, &err),
+    }
+}
+
+/// Reverse-proxy POST /v1/browser/input — one pointer/keyboard event into the
+/// agent's Chrome. Pairs with the screencast above; without it the view
+/// streamed but every click was dropped.
+async fn proxy_browser_input(
+    State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
+    body: Bytes,
+) -> impl IntoResponse {
+    proxy_post_json(&state, &daemon, "/v1/browser/input", body).await
 }
 
 /// Reverse-proxy GET /v1/fs/dirs?path=<path> (filesystem directory listing).
@@ -4741,6 +4855,126 @@ mod tests {
     /// forwards forever — but three buffered handlers (stt, tts, observatory
     /// snapshot/replay) were left on the untimed client, so the bug it
     /// claimed to close stayed open for them. The inverse mistake is worse:
+    /// Every `/v1` path the SURFACE builds must be carried by this table.
+    ///
+    /// In the shipped PWA `daemon_url` is empty, so every daemon call is
+    /// same-origin and lands here. A path this table does not carry falls
+    /// through to `ServeDir` and answers 404 with an EMPTY BODY — which every
+    /// caller on the surface decodes as "nothing here", not as an error. The
+    /// feature does not fail loudly; it renders blank.
+    ///
+    /// That has shipped three times already (see the agents-POST, rooms-404
+    /// and rooms-PATCH notes on the route table above), each time found by a
+    /// person staring at an empty pane. This is the guard that was missing:
+    /// it reads the surface's own URL builders and fails HERE, at
+    /// `cargo test`, instead of in production.
+    ///
+    /// Paths are compared with `{param}` segments wildcarded, because the
+    /// surface interpolates values where the router declares parameters.
+    #[test]
+    fn every_surface_v1_path_is_routed() {
+        // Runtime-assembled so this test's own text cannot satisfy the scan.
+        let route_call = format!(".{}(", "route");
+        let proxy_src = include_str!("main.rs");
+
+        // What this table carries. Paths may sit on the `.route(` line or the
+        // line after it, so scan forward from each call for the first literal.
+        let mut routed: Vec<String> = Vec::new();
+        for (idx, _) in proxy_src.match_indices(route_call.as_str()) {
+            let tail = &proxy_src[idx..];
+            let Some(open) = tail.find('"') else { continue };
+            let Some(close) = tail[open + 1..].find('"') else {
+                continue;
+            };
+            let path = &tail[open + 1..open + 1 + close];
+            if path.starts_with("/v1") {
+                routed.push(path.to_string());
+            }
+        }
+        assert!(
+            routed.len() > 20,
+            "route scan found only {} /v1 routes — the scan itself is broken, \
+             not the table",
+            routed.len()
+        );
+
+        // What the surface asks for. Scanned from CODE lines only — a `///`
+        // or `//` line mentioning a route in prose is documentation, not a
+        // call, and scraping it produces fragments like `/v1/...` that match
+        // nothing. Only fully-formed literal paths count: a builder whose
+        // first segment is interpolated tells us nothing about the route.
+        let surface_src = include_str!("../../ocean-surface-ui/src/daemon.rs");
+        let browser_src = include_str!("../../ocean-surface-ui/src/workspace_browser.rs");
+
+        let wildcard = |p: &str| -> String {
+            let mut out = String::new();
+            let mut depth = 0usize;
+            for ch in p.chars() {
+                match ch {
+                    '{' => {
+                        depth += 1;
+                        if depth == 1 {
+                            out.push('*');
+                        }
+                    }
+                    '}' => depth = depth.saturating_sub(1),
+                    c if depth == 0 => out.push(c),
+                    _ => {}
+                }
+            }
+            out.trim_end_matches('/').to_string()
+        };
+
+        let carries = |want: &str| -> bool {
+            routed.iter().any(|r| {
+                let r = wildcard(r);
+                if r == want {
+                    return true;
+                }
+                // `/v1/rooms/persistent/*` (from `{*rest}`) covers everything
+                // beneath it.
+                r.ends_with('*') && want.starts_with(r.trim_end_matches('*'))
+            })
+        };
+
+        let mut missing: Vec<String> = Vec::new();
+        for src in [surface_src, browser_src] {
+            for line in src.lines() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") {
+                    continue;
+                }
+                for (idx, _) in line.match_indices("/v1/") {
+                    let tail = &line[idx..];
+                    let end = tail
+                        .find(|c: char| !(c.is_ascii_alphanumeric() || "/_-{}".contains(c)))
+                        .unwrap_or(tail.len());
+                    let raw = &tail[..end];
+                    // `{}`/`{name}` are interpolation points, not path text;
+                    // wildcard them. A trailing interpolation means the path
+                    // continues past what we can see, so require a literal
+                    // segment after the last one.
+                    let want = wildcard(raw);
+                    if want.matches('/').count() < 2 || want.ends_with('*') {
+                        continue;
+                    }
+                    if !carries(&want) && !missing.contains(&want) {
+                        missing.push(want);
+                    }
+                }
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "the surface calls {} /v1 path(s) this proxy does not route. On web \
+             each answers 404 with an empty body and renders as blank, not as \
+             an error. Add a route (and a handler) for each:\n  {}",
+            missing.len(),
+            missing.join("\n  ")
+        );
+    }
+
     /// moving an SSE tail onto the timed client would SEVER live event
     /// streams mid-session.
     ///
@@ -4757,6 +4991,9 @@ mod tests {
             "async fn proxy_control_events",
             "async fn proxy_events",
             "async fn proxy_observatory",
+            // The agent's Chrome screencast is SSE: a buffered forward would
+            // hold every frame until the stream closed, which is never.
+            "async fn proxy_browser_screencast",
         ];
 
         // Collect the handler each untimed use falls inside.
