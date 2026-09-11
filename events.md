@@ -7420,3 +7420,42 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+
+time:      21:35 09-11-26
+agent:     claude
+worktree:  fix/proxy-route-parity
+type:      bug-report
+area:      backend
+
+Six route families the surface has always called and the daemon has always
+served were missing from the proxy's allow-list, so on web they were dead. In
+the shipped PWA daemon_url is empty and every call is same-origin, which means
+an unrouted path does not reach the daemon at all: it falls through to ServeDir
+and answers 404 with an empty body. Every caller on the surface decodes that as
+absence rather than failure, so the features did not fail loudly, they rendered
+blank. The GitHub deck was the clearest case, where fetch_gh_pulls' .ok()? turns
+the 404 into None and the deck draws None as no pull requests. Also missing:
+/v1/fs/file, whose sibling /v1/fs/dirs was routed, so the tree listed while
+every file in it opened empty; /v1/agent/history/search, where search returned
+an empty result set indistinguishable from no matches; /v1/requests, whose
+per-id cancel route was carried without the list it cancels from; and the
+browser pair, screencast and input, which is the agent's Chrome view and the
+clicks into it. The screencast is SSE and takes the untimed client with
+sse_stream_response, because a buffered forward holds every frame until the
+stream closes, which for a screencast is never; the repo's existing
+untimed-client guard caught that omission during the work and named the fix in
+its own failure message. Voice was checked and is not a gap: with a proxy
+present the surface uses /api/stt and /api/tts, and the /v1/voice paths are the
+no-proxy route. The route additions are the smaller half of this change. The
+proxy's own comments record this class shipping three times before, each found
+by a person staring at an empty pane, so the actual deliverable is
+every_surface_v1_path_is_routed, which reads the surface's URL builders out of
+its source, wildcards interpolated segments, honours the rooms catch-all, and
+fails at cargo test naming each unrouted path. It scans code lines only:
+scraping doc prose produced fragments like /v1/... that match nothing, which is
+how the first version of the guard failed. Mutation checked by deleting the
+fs/file route, which it names, and the whole github family, which it names as
+three paths. Gates: 85 proxy tests, proxy clippy -D warnings all targets, wasm
+clippy on the untouched surface crate, fmt, and the ledger checker.
+
+_________________________________________________________________________________ 21:35 fix/proxy-route-parity
