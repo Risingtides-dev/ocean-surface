@@ -7459,3 +7459,49 @@ three paths. Gates: 85 proxy tests, proxy clippy -D warnings all targets, wasm
 clippy on the untouched surface crate, fmt, and the ledger checker.
 
 _________________________________________________________________________________ 21:35 fix/proxy-route-parity
+
+time:      18:04 09-23-26
+agent:     claude
+worktree:  fix/proxy-route-parity
+type:      bug-report
+area:      backend
+
+Codex reviewed the route-parity PR and all three of its findings held, one of
+them a security regression this PR introduced. The GitHub handler forwarded the
+request's own path. Axum matches %2e%2e as an ordinary project_id or sha
+capture, but the URL parser the forward goes through reads %2e%2e as .. and
+collapses it, so a request for /v1/repo/github/%2e%2e/pulls reached the daemon
+as /v1/repo/pulls, and the head-sha and reviews shapes collapsed the same way.
+That was confirmed end to end against a stub daemon that records every path it
+receives, before any fix. The reach was small, GET only and bounded under
+/v1/repo, but it is an escape from the proxy's allow-list and it is exactly the
+class TASK-71 closed in the rooms catch-all; every other path-forwarding handler
+already calls has_dot_segment and this one did not. The handler now rebuilds
+the upstream path from the matched route template, refusing any capture that
+decodes to a dot segment and percent-encoding every other capture into its
+slot, so what is forwarded always has the shape of a template registered in
+build_app. Re-encoding alone could not fix it, because %2E is a dot to that
+parser too. The other two findings were about the new parity guard being
+weaker than it claimed. It inventoried routes from the whole file, so the stub
+daemons in the test module counted: /v1/permissions and /v1/agent/events are
+registered by fixtures, and deleting either production route left the guard
+green. It is now bounded to the production build_app body, exactly as the
+neighbouring upstream-resolution guard already was. And it read only two of
+the eighteen UI modules that build /v1 paths, so deleting the observatory
+snapshot route left it green too. It now walks every UI source at test time.
+Widening the scan surfaced three hits and all three were false: a percent-encoded
+livekit room id and a bedrock.invalid URL, both inside test modules, and
+OpenAI's own /v1/realtime/calls. So the scanner skips test-module spans and
+absolute URLs with a literal host. It skips the SPANS rather than cutting at
+the first marker, because daemon.rs and voice/realtime.rs put #[cfg(test)] on
+a single fn long before their test module, and deck/repo.rs keeps its whole
+production GitHub component between two test modules; cutting at the first
+marker would have silently stopped reading most of daemon.rs. The two voice
+paths the surface uses only when no proxy is present are listed in NOT_PROXIED
+with that reason. Both of Codex's own examples, deleting the production
+permissions route and deleting the observatory snapshot route, now fail the
+guard and name the module that builds the path. Gates: 86 proxy tests, proxy
+clippy -D warnings all targets, wasm clippy on the untouched surface crate,
+fmt, and the ledger checker.
+
+_________________________________________________________________________________ 18:04 fix/proxy-route-parity
