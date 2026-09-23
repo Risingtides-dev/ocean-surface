@@ -1178,6 +1178,35 @@ fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
                 .delete(proxy_agent_delete),
         )
         .route("/v1/fs/dirs", get(proxy_fs_dirs))
+        // Routes the surface has always called and the daemon has always
+        // served, which this table simply never carried. In the shipped PWA
+        // `daemon_url` is empty, so every one of these was same-origin, missed
+        // the allow-list, and fell through to ServeDir — a 404 with an empty
+        // body that each caller decodes as "nothing here". See
+        // `every_surface_v1_path_is_routed` for the guard that keeps this
+        // table honest from here on.
+        .route("/v1/fs/file", get(proxy_fs_file))
+        .route("/v1/agent/history/search", get(proxy_history_search))
+        .route("/v1/requests", get(proxy_requests))
+        .route("/v1/repo/github/{project_id}/pulls", get(proxy_repo_github))
+        .route(
+            "/v1/repo/github/{project_id}/pulls/{number}",
+            get(proxy_repo_github),
+        )
+        .route(
+            "/v1/repo/github/{project_id}/pulls/{number}/reviews",
+            get(proxy_repo_github),
+        )
+        .route(
+            "/v1/repo/github/{project_id}/head-sha/{sha}/checks",
+            get(proxy_repo_github),
+        )
+        .route(
+            "/v1/repo/github/{project_id}/commits",
+            get(proxy_repo_github),
+        )
+        .route("/v1/browser/screencast", get(proxy_browser_screencast))
+        .route("/v1/browser/input", post(proxy_browser_input))
         .route(
             "/v1/projects",
             get(proxy_projects_list).post(proxy_projects_create),
@@ -2416,6 +2445,146 @@ async fn proxy_agent_delete(
         Bytes::new(),
     )
     .await
+}
+
+/// Build `path` plus the caller's query string, owned, so no borrow of the
+/// request is held across the forward's await (the future must stay `Send`).
+///
+/// The plain [`proxy_get_json`] drops the query, which is silent breakage for
+/// any route whose meaning lives in it (`?path=`, `?q=`, `?state=`).
+fn path_with_query(path: &str, req: &Request) -> String {
+    match req.uri().query() {
+        Some(qs) => format!("{path}?{qs}"),
+        None => path.to_string(),
+    }
+}
+
+/// Reverse-proxy GET /v1/agent/history/search?q=&limit= (transcript search).
+/// Without it the search box fell through to ServeDir → 404 → empty result
+/// list, indistinguishable from "no matches".
+async fn proxy_history_search(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+) -> impl IntoResponse {
+    let daemon = resolved_daemon(&state, &req);
+    let path = path_with_query("/v1/agent/history/search", &req);
+    proxy_get_json(&state, &daemon, &path).await
+}
+
+/// Reverse-proxy GET /v1/fs/file?path=<path> (single file read). Sibling of
+/// `/v1/fs/dirs`, which was routed while this one was not — so the tree listed
+/// but every file in it opened empty.
+async fn proxy_fs_file(State(state): State<Arc<AppState>>, req: Request) -> impl IntoResponse {
+    let daemon = resolved_daemon(&state, &req);
+    let path = path_with_query("/v1/fs/file", &req);
+    proxy_get_json(&state, &daemon, &path).await
+}
+
+/// Reverse-proxy GET /v1/requests (the request queue). `/v1/requests/{id}/cancel`
+/// was routed without the list it cancels from.
+async fn proxy_requests(State(state): State<Arc<AppState>>, req: Request) -> impl IntoResponse {
+    let daemon = resolved_daemon(&state, &req);
+    let path = path_with_query("/v1/requests", &req);
+    proxy_get_json(&state, &daemon, &path).await
+}
+
+/// Reverse-proxy the daemon's read-only GitHub projections
+/// (`/v1/repo/github/{project_id}/...`). One handler for the whole family.
+///
+/// The GitHub deck rendered permanently blank on web without this — the
+/// surface's `.ok()?` turned a ServeDir 404 into `None`, which the deck draws
+/// as "no pull requests" rather than as an error.
+///
+/// The upstream path is REBUILT from the matched route template, never copied
+/// from the request. Axum matches `%2e%2e` as an ordinary `{project_id}` or
+/// `{sha}` capture, but the URL parser the forward goes through reads `%2e%2e`
+/// as `..` and collapses it: forwarding the request's own path let
+/// `/v1/repo/github/%2e%2e/pulls` reach the daemon as `/v1/repo/pulls`, a
+/// route this table never allowed (TASK-71, again). Dot segments are refused
+/// outright — re-encoding cannot help, since `%2E` is `.` to that parser too —
+/// and every other capture is re-encoded into its slot, so the forwarded path
+/// always has exactly the shape of a template registered below.
+async fn proxy_repo_github(
+    State(state): State<Arc<AppState>>,
+    matched: axum::extract::MatchedPath,
+    Path(captures): Path<std::collections::HashMap<String, String>>,
+    req: Request,
+) -> impl IntoResponse {
+    let daemon = resolved_daemon(&state, &req);
+    let Some(path) = rebuild_from_template(matched.as_str(), &captures) else {
+        return (StatusCode::BAD_REQUEST, "invalid path").into_response();
+    };
+    let path = path_with_query(&path, &req);
+    proxy_get_json(&state, &daemon, &path).await
+}
+
+/// Fill a route template's `{name}` slots from DECODED captures, refusing any
+/// capture that is a dot segment and percent-encoding the rest. `None` means
+/// "do not forward": a dot segment, or a slot with no capture to fill it.
+fn rebuild_from_template(
+    template: &str,
+    captures: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    let mut out = String::with_capacity(template.len() + 16);
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let close = rest[open..].find('}')? + open;
+        let value = captures.get(&rest[open + 1..close])?;
+        if matches!(value.as_str(), "." | "..") {
+            return None;
+        }
+        out.push_str(&encode_path_segment(value));
+        rest = &rest[close + 1..];
+    }
+    out.push_str(rest);
+    Some(out)
+}
+
+/// Strict single-segment percent-encoding: RFC 3986 unreserved characters pass,
+/// every other byte becomes `%XX`. A `/` or `\` in a capture therefore stays
+/// inside its one segment instead of restructuring the forwarded path.
+fn encode_path_segment(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+/// Reverse-proxy GET /v1/browser/screencast — the live SSE screencast of the
+/// agent's Chrome. Streaming, so it takes the untimed client and
+/// `sse_stream_response`: a buffered forward would hold every frame until the
+/// stream closed, which for a screencast is forever.
+async fn proxy_browser_screencast(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+) -> impl IntoResponse {
+    let daemon = resolved_daemon(&state, &req);
+    let url = format!(
+        "{}{}",
+        daemon.base(),
+        path_with_query("/v1/browser/screencast", &req)
+    );
+    match state.http.get(&url).send().await {
+        Ok(resp) => sse_stream_response(resp, stream_ends_on_switch(&state, &daemon)),
+        Err(err) => device_unreachable(&daemon, &err),
+    }
+}
+
+/// Reverse-proxy POST /v1/browser/input — one pointer/keyboard event into the
+/// agent's Chrome. Pairs with the screencast above; without it the view
+/// streamed but every click was dropped.
+async fn proxy_browser_input(
+    State(state): State<Arc<AppState>>,
+    Extension(daemon): Extension<ResolvedDaemon>,
+    body: Bytes,
+) -> impl IntoResponse {
+    proxy_post_json(&state, &daemon, "/v1/browser/input", body).await
 }
 
 /// Reverse-proxy GET /v1/fs/dirs?path=<path> (filesystem directory listing).
@@ -4741,6 +4910,207 @@ mod tests {
     /// forwards forever — but three buffered handlers (stt, tts, observatory
     /// snapshot/replay) were left on the untimed client, so the bug it
     /// claimed to close stayed open for them. The inverse mistake is worse:
+    /// Every `/v1` path the SURFACE builds must be carried by this table.
+    ///
+    /// In the shipped PWA `daemon_url` is empty, so every daemon call is
+    /// same-origin and lands here. A path this table does not carry falls
+    /// through to `ServeDir` and answers 404 with an EMPTY BODY — which every
+    /// caller on the surface decodes as "nothing here", not as an error. The
+    /// feature does not fail loudly; it renders blank.
+    ///
+    /// That has shipped three times already (see the agents-POST, rooms-404
+    /// and rooms-PATCH notes on the route table above), each time found by a
+    /// person staring at an empty pane. This is the guard that was missing:
+    /// it reads the surface's own URL builders and fails HERE, at
+    /// `cargo test`, instead of in production.
+    ///
+    /// Paths are compared with `{param}` segments wildcarded, because the
+    /// surface interpolates values where the router declares parameters.
+    #[test]
+    fn every_surface_v1_path_is_routed() {
+        // What this table carries — the PRODUCTION router only. The file also
+        // holds stub daemons in its test module that register `/v1/...` paths
+        // of their own; counting those would let a production route be deleted
+        // while a fixture that happens to register the same path kept this
+        // guard green. Bounded exactly as
+        // `every_daemon_route_resolves_its_upstream_through_one_resolver` is.
+        let src = include_str!("main.rs");
+        let production = src
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production half of the module");
+        let router = production
+            .split_once("fn build_app(")
+            .expect("build_app")
+            .1
+            .split_once("\n}\n")
+            .expect("end of build_app")
+            .0;
+        let mut routed: Vec<String> = Vec::new();
+        for chunk in router.split(".route(").skip(1) {
+            let path = chunk
+                .split_once('"')
+                .and_then(|(_, rest)| rest.split_once('"'))
+                .map(|(path, _)| path)
+                .unwrap_or_default();
+            if path.starts_with("/v1") {
+                routed.push(path.to_string());
+            }
+        }
+        assert!(
+            routed.len() > 20,
+            "route scan found only {} /v1 routes in build_app — the scan itself \
+             is broken, not the table",
+            routed.len()
+        );
+
+        // Paths the surface builds that deliberately bypass this proxy. Each
+        // needs a reason; an entry without one is a hole, not an exemption.
+        const NOT_PROXIED: &[(&str, &str)] = &[
+            (
+                "/v1/voice/stt",
+                "no-proxy route: with a proxy present the surface calls /api/stt",
+            ),
+            (
+                "/v1/voice/tts",
+                "no-proxy route: with a proxy present the surface calls /api/tts",
+            ),
+        ];
+
+        // What the surface asks for: EVERY Rust source in the UI crate, walked
+        // at test time so a module added tomorrow is covered without editing
+        // this list. Only code lines count — a `//` line naming a route is
+        // documentation, and scraping it yields fragments like `/v1/...`.
+        let ui_src =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../ocean-surface-ui/src");
+        let mut files = Vec::new();
+        let mut stack = vec![ui_src.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read UI source dir") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    files.push(path);
+                }
+            }
+        }
+        assert!(
+            files.len() > 20,
+            "found only {} UI sources under {} — the walk is broken",
+            files.len(),
+            ui_src.display()
+        );
+
+        let wildcard = |p: &str| -> String {
+            let mut out = String::new();
+            let mut depth = 0usize;
+            for ch in p.chars() {
+                match ch {
+                    '{' => {
+                        depth += 1;
+                        if depth == 1 {
+                            out.push('*');
+                        }
+                    }
+                    '}' => depth = depth.saturating_sub(1),
+                    c if depth == 0 => out.push(c),
+                    _ => {}
+                }
+            }
+            out.trim_end_matches('/').to_string()
+        };
+        let carries = |want: &str| -> bool {
+            routed.iter().any(|r| {
+                let r = wildcard(r);
+                // `/v1/rooms/persistent/*` (from `{*rest}`) covers everything
+                // beneath it.
+                r == want || (r.ends_with('*') && want.starts_with(r.trim_end_matches('*')))
+            })
+        };
+
+        let mut missing: Vec<String> = Vec::new();
+        for file in &files {
+            let text = std::fs::read_to_string(file).expect("read UI source");
+            let rel = file
+                .strip_prefix(&ui_src)
+                .unwrap_or(file)
+                .display()
+                .to_string();
+            let lines: Vec<&str> = text.lines().collect();
+            // Skip `#[cfg(test)] mod … { … }` SPANS, not everything after the
+            // first marker: `daemon.rs` and `voice/realtime.rs` put
+            // `#[cfg(test)]` on a single fn long before their test module, and
+            // `deck/repo.rs` keeps production code BETWEEN two test modules. A
+            // column-0 closing brace ends the span — `cargo fmt --check` is a
+            // CI gate, so that shape holds.
+            let mut in_test_mod = false;
+            for (n, line) in lines.iter().enumerate() {
+                if in_test_mod {
+                    if *line == "}" {
+                        in_test_mod = false;
+                    }
+                    continue;
+                }
+                if *line == "#[cfg(test)]" {
+                    let next = lines[n + 1..].iter().find(|l| !l.trim().is_empty());
+                    if next.is_some_and(|l| {
+                        let l = l.trim_start();
+                        l.starts_with("mod ")
+                            || l.starts_with("pub mod ")
+                            || l.starts_with("pub(crate) mod ")
+                    }) {
+                        in_test_mod = true;
+                        continue;
+                    }
+                }
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                for (idx, _) in line.match_indices("/v1/") {
+                    // An absolute URL with a literal host is some other
+                    // service's API (OpenAI Realtime's `/v1/realtime/calls`),
+                    // not a daemon path. A templated host (`{base}`, `{host}`)
+                    // is still ours and is still checked.
+                    let before = &line[..idx];
+                    if let Some(scheme) = before.rfind("://") {
+                        let host = &before[scheme + 3..];
+                        if !host.is_empty() && !host.contains(['{', '"', ' ']) {
+                            continue;
+                        }
+                    }
+                    let tail = &line[idx..];
+                    let end = tail
+                        .find(|c: char| !(c.is_ascii_alphanumeric() || "/_-{}".contains(c)))
+                        .unwrap_or(tail.len());
+                    let want = wildcard(&tail[..end]);
+                    // A trailing interpolation means the path continues past
+                    // what is visible here; too short means a prose fragment.
+                    if want.matches('/').count() < 2 || want.ends_with('*') {
+                        continue;
+                    }
+                    if carries(&want) || NOT_PROXIED.iter().any(|(p, _)| *p == want) {
+                        continue;
+                    }
+                    let hit = format!("{want}  ({rel})");
+                    if !missing.contains(&hit) {
+                        missing.push(hit);
+                    }
+                }
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "the surface calls {} /v1 path(s) this proxy does not route. On web \
+             each answers 404 with an empty body and renders as blank, not as \
+             an error. Route each in build_app, or — only if it deliberately \
+             bypasses the proxy — add it to NOT_PROXIED with the reason:\n  {}",
+            missing.len(),
+            missing.join("\n  ")
+        );
+    }
+
     /// moving an SSE tail onto the timed client would SEVER live event
     /// streams mid-session.
     ///
@@ -4757,6 +5127,9 @@ mod tests {
             "async fn proxy_control_events",
             "async fn proxy_events",
             "async fn proxy_observatory",
+            // The agent's Chrome screencast is SSE: a buffered forward would
+            // hold every frame until the stream closed, which is never.
+            "async fn proxy_browser_screencast",
         ];
 
         // Collect the handler each untimed use falls inside.
@@ -6732,6 +7105,92 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
         (format!("http://{addr}"), handle)
+    }
+
+    /// A stub daemon that records the path of every request it receives, so a
+    /// test can assert what the proxy actually FORWARDED rather than what it
+    /// was sent. Its fallback answers everything, which is the point: a path
+    /// that escaped the allow-list must show up here instead of 404ing quietly.
+    async fn spawn_recording_daemon() -> (
+        String,
+        Arc<std::sync::Mutex<Vec<String>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rec = seen.clone();
+        let app = Router::new().fallback(move |uri: axum::http::Uri| {
+            let rec = rec.clone();
+            async move {
+                rec.lock()
+                    .expect("record lock")
+                    .push(uri.path().to_string());
+                Json(json!({ "ok": true }))
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stub daemon");
+        let addr = listener.local_addr().expect("stub addr");
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), seen, handle)
+    }
+
+    /// TASK-71 again, for the GitHub family. Axum matches `%2e%2e` as an
+    /// ordinary `{project_id}` or `{sha}` capture, but the URL parser the
+    /// forward goes through treats `%2e%2e` as `..` and collapses it — so
+    /// forwarding the request's own path let `/v1/repo/github/%2e%2e/pulls`
+    /// arrive upstream as `/v1/repo/pulls`, a route this proxy never allowed.
+    /// Refused at the proxy, nothing reaches the daemon; the legitimate shape
+    /// still arrives intact.
+    #[tokio::test]
+    async fn github_routes_refuse_dot_segments_before_they_collapse_upstream() {
+        let dist = tempfile::tempdir().expect("tempdir");
+        let (daemon, seen, _handle) = spawn_recording_daemon().await;
+        let mut state = multi_user_state();
+        {
+            let inner = Arc::get_mut(&mut state).expect("sole owner");
+            inner.users[0].devices = vec![device("mini", &daemon)];
+        }
+        let app = build_app(state, dist.path());
+
+        for uri in [
+            "/v1/repo/github/%2e%2e/pulls",
+            "/v1/repo/github/%2E%2E/pulls",
+            "/v1/repo/github/.%2e/commits",
+            "/v1/repo/github/p1/head-sha/%2e%2e/checks",
+            "/v1/repo/github/%2e%2e/pulls/%2e%2e/reviews",
+        ] {
+            let resp = as_user(&app, "tok-ocean", "GET", uri).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "{uri} must be refused at the proxy"
+            );
+        }
+        assert!(
+            seen.lock().expect("seen").is_empty(),
+            "a dot-segment request reached the daemon as: {:?}",
+            seen.lock().expect("seen")
+        );
+
+        let ok = as_user(
+            &app,
+            "tok-ocean",
+            "GET",
+            "/v1/repo/github/p1/pulls?state=open",
+        )
+        .await;
+        assert_eq!(
+            ok.status(),
+            StatusCode::OK,
+            "the real shape must still pass"
+        );
+        assert_eq!(
+            seen.lock().expect("seen").as_slice(),
+            ["/v1/repo/github/p1/pulls".to_string()],
+        );
     }
 
     async fn body_text(response: Response) -> String {
