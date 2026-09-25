@@ -95,6 +95,11 @@ struct AttachmentsListBody {
     error: Option<String>,
     #[serde(default)]
     code: Option<String>,
+    /// ocean-os marks every "room not open" 404 with this (DoD 1.10), whatever
+    /// `code` the route carries, so the sentence does not depend on which of
+    /// `unknown_room` / `room_not_found` / no code at all that route sends.
+    #[serde(default)]
+    room_not_open: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,6 +110,9 @@ struct UploadResultBody {
     error: Option<String>,
     #[serde(default)]
     code: Option<String>,
+    /// The daemon's "room not open" marker; see the struct above.
+    #[serde(default)]
+    room_not_open: bool,
 }
 
 // ---- Pure helpers -----------------------------------------------------------
@@ -243,6 +251,9 @@ fn kind_glyph(content_type: &str) -> &'static str {
     }
 }
 
+/// What every "room not open" refusal reads as, however the daemon spells it.
+const ROOM_NOT_OPEN: &str = "That room is no longer open.";
+
 /// Turn a refusal into something an operator can act on.
 ///
 /// The daemon's typed `code` is the input, not its prose: the codes are stable
@@ -250,7 +261,17 @@ fn kind_glyph(content_type: &str) -> &'static str {
 /// particular has to say what actually happened — the control was live because
 /// this identity may write, but the id it carried belongs to an agent — or the
 /// operator reads a permission bug into a working gate.
-fn upload_failure_message(status: u16, code: Option<&str>, error: Option<&str>) -> String {
+fn upload_failure_message(
+    status: u16,
+    code: Option<&str>,
+    error: Option<&str>,
+    room_not_open: bool,
+) -> String {
+    // `room_not_open` first: the current daemon marks the case explicitly; the
+    // `unknown_room` arm below stays for a daemon that predates the marker.
+    if room_not_open {
+        return ROOM_NOT_OPEN.to_string();
+    }
     match code {
         Some("attachment_too_large") => format!(
             "The room refused that file: the limit is {}.",
@@ -259,7 +280,7 @@ fn upload_failure_message(status: u16, code: Option<&str>, error: Option<&str>) 
         Some("forged_attachment_author") => {
             "An agent's file is written by the daemon, not uploaded on its behalf.".to_string()
         }
-        Some("unknown_room") => "That room is no longer open.".to_string(),
+        Some("unknown_room") => ROOM_NOT_OPEN.to_string(),
         Some("invalid_request") => "The room refused that file's name or type.".to_string(),
         _ => match error {
             Some(text) if !text.is_empty() => format!("Upload failed: {text}"),
@@ -402,6 +423,7 @@ impl RoomAttachmentsState {
                             status,
                             body.code.as_deref(),
                             body.error.as_deref(),
+                            body.room_not_open,
                         )),
                         Err(err) => Err(format!("Files decode error: {err}")),
                     }
@@ -467,6 +489,7 @@ impl RoomAttachmentsState {
                                         status,
                                         body.code.as_deref(),
                                         body.error.as_deref(),
+                                        body.room_not_open,
                                     )),
                                     Err(err) => Err(format!("Upload decode error: {err}")),
                                 }
@@ -858,21 +881,24 @@ mod tests {
 
     #[test]
     fn typed_refusals_read_as_the_rule_they_are() {
-        assert!(upload_failure_message(413, Some("attachment_too_large"), None).contains("8.0 MB"));
-        let forged = upload_failure_message(403, Some("forged_attachment_author"), None);
+        assert!(
+            upload_failure_message(413, Some("attachment_too_large"), None, false)
+                .contains("8.0 MB")
+        );
+        let forged = upload_failure_message(403, Some("forged_attachment_author"), None, false);
         assert!(forged.contains("daemon"), "{forged}");
         // An untyped failure still says something, and never swallows the
         // server's own words when it has them.
         assert_eq!(
-            upload_failure_message(500, None, Some("disk on fire")),
+            upload_failure_message(500, None, Some("disk on fire"), false),
             "Upload failed: disk on fire"
         );
         assert_eq!(
-            upload_failure_message(500, None, None),
+            upload_failure_message(500, None, None, false),
             "Upload failed (500)."
         );
         assert_eq!(
-            upload_failure_message(500, None, Some("")),
+            upload_failure_message(500, None, Some(""), false),
             "Upload failed (500)."
         );
     }
@@ -1035,5 +1061,57 @@ mod tests {
         assert!(!body.ok);
         assert_eq!(body.code.as_deref(), Some("attachment_too_large"));
         assert_eq!(body.error.as_deref(), Some("too big"));
+    }
+
+    #[test]
+    fn a_room_not_open_marker_reads_as_a_closed_room_whatever_the_code() {
+        // The current daemon marks every "room not open" 404 with
+        // `room_not_open: true` (DoD 1.10). Upload keeps `unknown_room`; the
+        // list route now sends `room_not_found`. Both must read the same way.
+        let list: AttachmentsListBody = serde_json::from_str(
+            r#"{"ok":false,"code":"room_not_found","error":"room 'r' is not open","room_not_open":true}"#,
+        )
+        .expect("decode");
+        assert!(list.room_not_open);
+        assert_eq!(
+            upload_failure_message(
+                404,
+                list.code.as_deref(),
+                list.error.as_deref(),
+                list.room_not_open
+            ),
+            "That room is no longer open."
+        );
+        let upload: UploadResultBody = serde_json::from_str(
+            r#"{"ok":false,"code":"unknown_room","error":"x","room_not_open":true}"#,
+        )
+        .expect("decode");
+        assert_eq!(
+            upload_failure_message(
+                404,
+                upload.code.as_deref(),
+                upload.error.as_deref(),
+                upload.room_not_open
+            ),
+            "That room is no longer open."
+        );
+    }
+
+    #[test]
+    fn an_older_daemons_unknown_room_without_the_marker_still_reads_as_closed() {
+        let body: UploadResultBody =
+            serde_json::from_str(r#"{"ok":false,"code":"unknown_room","error":"x"}"#)
+                .expect("decode");
+        assert!(!body.room_not_open);
+        assert_eq!(
+            upload_failure_message(404, body.code.as_deref(), body.error.as_deref(), false),
+            "That room is no longer open."
+        );
+        // And the marker alone decides nothing when it is absent: an unrelated
+        // 404 still reports its own prose.
+        assert_eq!(
+            upload_failure_message(404, None, Some("no such route"), false),
+            "Upload failed: no such route"
+        );
     }
 }
