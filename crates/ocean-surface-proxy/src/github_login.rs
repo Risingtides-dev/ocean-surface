@@ -242,8 +242,19 @@ impl GithubLogin {
             // being unavailable, which must not tell an active member to go
             // accept an invite. A pending invite answers 200 with state
             // "pending", which is also not a member yet.
+            // GitHub also answers an exhausted rate limit with 403, marked by
+            // `x-ratelimit-remaining: 0`; that is an outage, not a refusal.
+            let rate_limited = membership
+                .headers()
+                .get("x-ratelimit-remaining")
+                .is_some_and(|value| value.as_bytes() == b"0");
             match membership.status() {
                 status if status.is_success() => {}
+                status if rate_limited => {
+                    return Err(Refusal::Upstream(format!(
+                        "org membership rate-limited: {status}"
+                    )));
+                }
                 reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::FORBIDDEN => {
                     return Err(Refusal::NotInOrg(login));
                 }
@@ -546,10 +557,24 @@ mod tests {
                     match member {
                         "outage" => (
                             StatusCode::SERVICE_UNAVAILABLE,
+                            [("x-ratelimit-remaining", "10")],
                             Json(json!({"message": "unavailable"})),
                         ),
-                        "active" | "pending" => (StatusCode::OK, Json(json!({"state": member}))),
-                        _ => (StatusCode::NOT_FOUND, Json(json!({"message": "Not Found"}))),
+                        "ratelimited" => (
+                            StatusCode::FORBIDDEN,
+                            [("x-ratelimit-remaining", "0")],
+                            Json(json!({"message": "API rate limit exceeded"})),
+                        ),
+                        "active" | "pending" => (
+                            StatusCode::OK,
+                            [("x-ratelimit-remaining", "10")],
+                            Json(json!({"state": member})),
+                        ),
+                        _ => (
+                            StatusCode::NOT_FOUND,
+                            [("x-ratelimit-remaining", "10")],
+                            Json(json!({"message": "Not Found"})),
+                        ),
                     }
                 }),
             );
@@ -817,18 +842,20 @@ mod tests {
 
     #[tokio::test]
     async fn a_github_outage_is_a_retryable_502_not_a_membership_refusal() {
-        let base = stub_github("outage").await;
-        let app = app(state(
-            Some(&base),
-            vec![roster_user("ecfromthedc", Some(202), "ec-token")],
-        ));
-        let response = get_with_cookie(
-            app,
-            "/auth/github/callback?code=good&state=n",
-            "__Host-ocean_gh_state=n",
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        for kind in ["outage", "ratelimited"] {
+            let base = stub_github(kind).await;
+            let app = app(state(
+                Some(&base),
+                vec![roster_user("ecfromthedc", Some(202), "ec-token")],
+            ));
+            let response = get_with_cookie(
+                app,
+                "/auth/github/callback?code=good&state=n",
+                "__Host-ocean_gh_state=n",
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{kind}");
+        }
     }
 
     #[tokio::test]
