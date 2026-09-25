@@ -7420,3 +7420,13 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+
+time:      [18:11] [09-25-26]
+agent:     [claude] [opus 5.5]
+worktree:  docs/rooms-product-truth
+type:      review
+area:      frontend
+
+Rooms DoD 5.4: rewrote the stale parts of docs/OCEAN_ROOMS_PRODUCT.md against the code. Access states are now the five RoomAccessState wire values (local, connecting, live, recovering, revoked, matching ocean-os room-wire.json) with the real composer/banner gates from rooms_workspace.rs, not Local/Remote/None; opening is GET .../snapshot?before_seq=u64::MAX&limit=1000 with prev_seq/has_more backward paging, the /transcript after_seq/next_seq catch-up and the /events?after_seq tail over room_message, room_access and room_read_cursor, not GET {key}; the message POST body is author_id/author_kind/body/thread_parent_seq with mentions carried in the text, not mention_ids; the surface posts no agent turns (the daemon wakes agents off the trigger policy, now including on_build_failure/on_ci_failure and the unwired on_component_event/on_schedule); agents join via the room_agent_authorization.rs ceremony, not the participants route; invites and redeem are documented from room_invite.rs and room_redeem.rs instead of "future"; timestamps are local HH:MM with local day separators from room_messages.rs, not relative; the rail list is .rooms-workspace__left-list, not the deleted .rooms-panel__list; attachments exist. Added tests/rooms_product_doc_truth.rs, which fails if the doc names an access state outside RoomAccessState's variants (read from rooms.rs) or a .rooms-* class that no stylesheet defines and no Rust source emits; mutation-checked with a Remote bullet, a backticked Remote in access prose, .rooms-panel__list and a truncated live class, each red, then reverted. Gates: ocean-surface-ui tests, clippy -D warnings, fmt, both ledger checks.
+
+_________________________________________________________________________________ 18:11 docs/rooms-product-truth
