@@ -38,6 +38,8 @@ use sha2::{Digest, Sha256};
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
+mod github_login;
+
 const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:4780";
 const DEFAULT_LIVEKIT_ROOM_ID: &str = "project:surface-main";
 const DEFAULT_VOICE_PROFILE: &str = "leo";
@@ -124,6 +126,9 @@ struct AppState {
     /// browser never receives it; exact Rooms authority mutations are the only
     /// forwards that attach it to the upstream request.
     operator_key_path: PathBuf,
+    /// "Continue with GitHub", when configured. `None` leaves the password
+    /// form as the only way in, byte-for-byte as before.
+    github: Option<github_login::GithubLogin>,
 }
 
 impl AppState {
@@ -254,7 +259,12 @@ struct ProxyDevice {
 #[derive(Clone)]
 struct ProxyUser {
     username: String,
-    password: String,
+    /// Absent for a GitHub-only entry: that person cannot use the password
+    /// form at all, rather than matching an empty password.
+    password: Option<String>,
+    /// The GitHub login that signs in as this entry, compared
+    /// case-insensitively. See `github_login`.
+    github: Option<String>,
     /// Every machine this person may attach to, in roster order. NEVER empty:
     /// an entry carrying only the legacy single `daemon_url` (or nothing at
     /// all) is normalized on load into exactly one device named after its
@@ -286,6 +296,7 @@ impl std::fmt::Debug for ProxyUser {
         f.debug_struct("ProxyUser")
             .field("username", &self.username)
             .field("password", &"[redacted]")
+            .field("github", &self.github)
             .field("devices", &self.devices)
             .field("session_token", &"[redacted]")
             .finish()
@@ -337,7 +348,12 @@ struct DeviceFileEntry {
 #[derive(Deserialize)]
 struct UserFileEntry {
     username: String,
-    password: String,
+    /// Optional once `github` is set; at least one of the two is required.
+    #[serde(default)]
+    password: Option<String>,
+    /// GitHub login that may sign in as this entry via "Continue with GitHub".
+    #[serde(default)]
+    github: Option<String>,
     /// Optional legacy single machine: falls back to OCEAN_DAEMON_URL, so a
     /// single-machine entry needs only a username and password. Normalized
     /// into a one-device roster on load; mutually exclusive with `devices`.
@@ -401,18 +417,38 @@ fn load_users(
 
     let mut users = Vec::new();
     for entry in entries {
-        if entry.username.trim().is_empty() || entry.password.trim().is_empty() {
+        let password = entry
+            .password
+            .clone()
+            .filter(|password| !password.trim().is_empty());
+        let github = entry
+            .github
+            .as_deref()
+            .map(str::trim)
+            .filter(|login| !login.is_empty())
+            .map(str::to_string);
+        if entry.username.trim().is_empty() || (password.is_none() && github.is_none()) {
             anyhow::bail!(
-                "{}: every user needs a username and password",
+                "{}: every user needs a username and a password or a github login",
                 path.display()
             );
         }
         let devices = devices_for_entry(path, &entry, default_daemon_url)?;
-        let session_token =
-            derive_user_session_token(&entry.username, &entry.password, secret_path)?;
+        // A password entry keeps its existing derivation, so adding a `github`
+        // field to it does not sign anybody out.
+        let session_token = match (&password, &github) {
+            (Some(password), _) => {
+                derive_user_session_token(&entry.username, password, secret_path)?
+            }
+            (None, Some(login)) => {
+                derive_github_session_token(&entry.username, login, secret_path)?
+            }
+            (None, None) => unreachable!("rejected above"),
+        };
         users.push(ProxyUser {
             username: entry.username,
-            password: entry.password,
+            password,
+            github,
             devices,
             session_token,
         });
@@ -593,6 +629,25 @@ fn derive_user_session_token(
     secret_path: &FsPath,
 ) -> anyhow::Result<String> {
     derive_session_token(Some(&(user.to_string(), pass.to_string())), secret_path)
+}
+
+/// Session token for a GitHub-only roster entry. Domain-separated from the
+/// password form so no username/password pair can ever derive the same token,
+/// and bound to the GitHub login so remapping an entry signs its old sessions
+/// out.
+fn derive_github_session_token(
+    user: &str,
+    github_login: &str,
+    secret_path: &FsPath,
+) -> anyhow::Result<String> {
+    let secret = load_or_create_session_secret(secret_path)?;
+    let mut digest = Sha256::new();
+    digest.update(secret.as_bytes());
+    digest.update(b"\0github-user\0");
+    digest.update(user.as_bytes());
+    digest.update(b"\0login\0");
+    digest.update(github_login.to_ascii_lowercase().as_bytes());
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest.finalize()))
 }
 
 fn derive_session_token(
@@ -1029,6 +1084,15 @@ async fn main() -> anyhow::Result<()> {
     // Multi-user roster. Absent file -> empty -> single-user behaviour is
     // unchanged, which is what keeps this additive for existing deployments.
     let users = load_users(&daemon_url, &session_secret_path(), &users_file_path())?;
+    let github = if auth_disabled {
+        None
+    } else {
+        github_login::GithubLogin::from_env()?
+    };
+    if let Some(github) = github.as_ref() {
+        let mapped = users.iter().filter(|u| u.github.is_some()).count();
+        tracing::info!(org = ?github.org(), mapped, "GitHub sign-in enabled");
+    }
     if users.is_empty() {
         tracing::info!("single-operator mode (no users file)");
     } else {
@@ -1087,6 +1151,7 @@ async fn main() -> anyhow::Result<()> {
         maps_map_id,
         observer_token_path,
         operator_key_path,
+        github,
     });
 
     let app = build_app(state, &dist);
@@ -1111,6 +1176,8 @@ fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
         .route("/csp-report", post(csp_report))
         .route("/login", get(login_page).post(login_submit))
         .route("/logout", post(logout))
+        .route(github_login::START_PATH, get(github_login::start))
+        .route(github_login::CALLBACK_PATH, get(github_login::callback))
         .route("/api/config", get(config))
         // Which machines the signed-in person can attach to, and which one
         // this session is on. Both are login-gated (`/api/` is never a public
@@ -1308,6 +1375,8 @@ fn is_public_boot_asset(path: &str) -> bool {
     }
 
     path == "/login"
+        || path == github_login::START_PATH
+        || path == github_login::CALLBACK_PATH
         || path == "/health"
         || path == "/csp-report"
         || path == "/manifest.webmanifest"
@@ -1632,7 +1701,7 @@ fn request_is_https(headers: &HeaderMap, secure_cookie: bool) -> bool {
             .is_some_and(|value| value.eq_ignore_ascii_case("https"))
 }
 
-fn login_html(error: bool) -> Html<String> {
+fn login_html(error: bool, github_button: &str) -> Html<String> {
     let error_message = if error {
         "<p class=\"error\" role=\"alert\">That username or password was not accepted.</p>"
     } else {
@@ -1642,8 +1711,8 @@ fn login_html(error: bool) -> Html<String> {
         r##"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#060606"><title>Sign in · Ocean</title>
 <style>
-*{{box-sizing:border-box}}html,body{{min-height:100%;margin:0}}body{{display:grid;place-items:center;background:#060606;color:#fafcff;font:15px Poppins,system-ui,-apple-system,sans-serif;padding:calc(24px + env(safe-area-inset-top)) 24px calc(24px + env(safe-area-inset-bottom))}}main{{width:min(100%,380px);padding:32px;border:1px solid #272b31;border-radius:24px;background:#0d0f12;box-shadow:0 24px 80px #000}}img{{display:block;width:72px;height:72px;margin:0 auto 20px}}h1{{margin:0;text-align:center;font-size:28px}}.sub{{color:#aab2bd;text-align:center;margin:8px 0 28px}}label{{display:block;color:#d6dbe2;font-size:13px;margin:16px 0 7px}}input{{width:100%;border:1px solid #343a43;border-radius:12px;background:#08090b;color:#fafcff;padding:13px 14px;font:inherit;outline:none}}input:focus{{border-color:#00d7d7;box-shadow:0 0 0 3px #00d7d722}}button{{width:100%;border:0;border-radius:12px;margin-top:22px;padding:13px;background:#00d7d7;color:#03181a;font:600 15px inherit;cursor:pointer}}.error{{border:1px solid #673b3b;border-radius:10px;background:#251414;color:#ffb9b9;padding:10px 12px;font-size:13px}}.note{{color:#77818d;text-align:center;font-size:12px;margin:18px 0 0}}
-</style></head><body><main><img src="/brand/master-1024.png" alt=""><h1>Ocean</h1><p class="sub">Sign in to your private surface.</p>{error_message}<form method="post" action="/login"><label for="username">Username</label><input id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="256"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required maxlength="256"><button type="submit">Continue</button></form><p class="note">Credentials stay between this device and your Ocean proxy.</p></main></body></html>"##
+*{{box-sizing:border-box}}html,body{{min-height:100%;margin:0}}body{{display:grid;place-items:center;background:#060606;color:#fafcff;font:15px Poppins,system-ui,-apple-system,sans-serif;padding:calc(24px + env(safe-area-inset-top)) 24px calc(24px + env(safe-area-inset-bottom))}}main{{width:min(100%,380px);padding:32px;border:1px solid #272b31;border-radius:24px;background:#0d0f12;box-shadow:0 24px 80px #000}}img{{display:block;width:72px;height:72px;margin:0 auto 20px}}h1{{margin:0;text-align:center;font-size:28px}}.sub{{color:#aab2bd;text-align:center;margin:8px 0 28px}}label{{display:block;color:#d6dbe2;font-size:13px;margin:16px 0 7px}}input{{width:100%;border:1px solid #343a43;border-radius:12px;background:#08090b;color:#fafcff;padding:13px 14px;font:inherit;outline:none}}input:focus{{border-color:#00d7d7;box-shadow:0 0 0 3px #00d7d722}}button{{width:100%;border:0;border-radius:12px;margin-top:22px;padding:13px;background:#00d7d7;color:#03181a;font:600 15px inherit;cursor:pointer}}.error{{border:1px solid #673b3b;border-radius:10px;background:#251414;color:#ffb9b9;padding:10px 12px;font-size:13px}}.note{{color:#77818d;text-align:center;font-size:12px;margin:18px 0 0}}.gh{{display:block;text-align:center;text-decoration:none;border:1px solid #343a43;border-radius:12px;padding:13px;background:#fafcff;color:#060606;font-weight:600}}.or{{color:#77818d;text-align:center;font-size:12px;margin:18px 0 0}}
+</style></head><body><main><img src="/brand/master-1024.png" alt=""><h1>Ocean</h1><p class="sub">Sign in to your private surface.</p>{error_message}{github_button}<form method="post" action="/login"><label for="username">Username</label><input id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="256"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required maxlength="256"><button type="submit">Continue</button></form><p class="note">Credentials stay between this device and your Ocean proxy.</p></main></body></html>"##
     ))
 }
 
@@ -1651,7 +1720,7 @@ async fn login_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> R
     if state.basic_auth.is_none() || has_valid_session(&state, &headers) {
         return Redirect::to("/").into_response();
     }
-    login_html(false).into_response()
+    login_html(false, github_login::login_button(&state)).into_response()
 }
 
 async fn login_submit(
@@ -1671,8 +1740,14 @@ async fn login_submit(
     let mut matched: Option<&ProxyUser> = None;
     for user in &state.users {
         let user_ok = constant_time_eq(form.username.as_bytes(), user.username.as_bytes());
-        let pass_ok = constant_time_eq(form.password.as_bytes(), user.password.as_bytes());
-        if user_ok & pass_ok {
+        // A GitHub-only entry has no password to match; compare against a
+        // throwaway so the loop still costs the same per entry.
+        let (want_pass, has_password) = match user.password.as_deref() {
+            Some(password) => (password, true),
+            None => ("\u{0}no-password", false),
+        };
+        let pass_ok = constant_time_eq(form.password.as_bytes(), want_pass.as_bytes());
+        if user_ok & pass_ok & has_password {
             matched = Some(user);
         }
     }
@@ -1684,12 +1759,20 @@ async fn login_submit(
         let pass_ok = constant_time_eq(form.password.as_bytes(), want_pass.as_bytes());
         if !(user_ok & pass_ok) {
             tokio::time::sleep(std::time::Duration::from_millis(750)).await;
-            return (StatusCode::UNAUTHORIZED, login_html(true)).into_response();
+            return (
+                StatusCode::UNAUTHORIZED,
+                login_html(true, github_login::login_button(&state)),
+            )
+                .into_response();
         }
         state.session_token.clone()
     } else {
         tokio::time::sleep(std::time::Duration::from_millis(750)).await;
-        return (StatusCode::UNAUTHORIZED, login_html(true)).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            login_html(true, github_login::login_button(&state)),
+        )
+            .into_response();
     };
 
     let secure = if request_is_https(&headers, state.secure_cookie) {
@@ -3730,6 +3813,7 @@ mod tests {
             secure_cookie: true,
             observer_token_path: PathBuf::from("/not-used-in-auth-tests"),
             operator_key_path: PathBuf::from("/not-used-in-auth-tests"),
+            github: None,
         })
     }
 
@@ -3742,7 +3826,8 @@ mod tests {
     fn user(name: &str, pass: &str, daemon: &str, token: &str) -> ProxyUser {
         ProxyUser {
             username: name.to_string(),
-            password: pass.to_string(),
+            password: Some(pass.to_string()),
+            github: None,
             devices: vec![device(&device_name_from_url(daemon), daemon)],
             session_token: token.to_string(),
         }
@@ -4131,6 +4216,51 @@ mod tests {
     }
 
     #[test]
+    fn github_entries_load_and_keep_password_sessions_stable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let secret = dir.path().join("secret");
+        let write = |body: &str| {
+            let users = dir.path().join("users.json");
+            std::fs::write(&users, body).unwrap();
+            std::fs::set_permissions(&users, std::fs::Permissions::from_mode(0o600)).unwrap();
+            users
+        };
+
+        let before = load_users(
+            "http://default:4780",
+            &secret,
+            &write(r#"[{"username":"a","password":"p"}]"#),
+        )
+        .expect("load");
+        let after = load_users(
+            "http://default:4780",
+            &secret,
+            &write(
+                r#"[{"username":"a","password":"p","github":" Risingtides-dev "},
+                    {"username":"b","github":"ecfromthedc"}]"#,
+            ),
+        )
+        .expect("load");
+        // Adding a GitHub login to a password entry signs nobody out.
+        assert_eq!(before[0].session_token, after[0].session_token);
+        assert_eq!(after[0].github.as_deref(), Some("Risingtides-dev"));
+        // A GitHub-only entry has no password and its own token.
+        assert!(after[1].password.is_none());
+        assert_ne!(after[1].session_token, after[0].session_token);
+
+        let err = load_users(
+            "http://default:4780",
+            &secret,
+            &write(r#"[{"username":"c","password":"  ","github":""}]"#),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("password or a github login"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn a_world_readable_users_file_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
         let users = dir.path().join("users.json");
@@ -4479,6 +4609,7 @@ mod tests {
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used-in-config-tests"),
             operator_key_path: PathBuf::from("/not-used-in-config-tests"),
+            github: None,
         };
 
         let payload = config_payload(&state, None);
@@ -4563,6 +4694,7 @@ mod tests {
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
             operator_key_path: PathBuf::from("/not-used"),
+            github: None,
         });
         let app = build_app(state, dist.path());
 
@@ -4648,6 +4780,7 @@ mod tests {
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
             operator_key_path: PathBuf::from("/not-used"),
+            github: None,
         });
         let app = build_app(state, dist.path());
 
@@ -4852,6 +4985,7 @@ mod tests {
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
             operator_key_path: PathBuf::from("/not-used"),
+            github: None,
         });
         let app = build_app(state, dist.path());
 
@@ -4949,6 +5083,7 @@ mod tests {
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
             operator_key_path: PathBuf::from("/not-used"),
+            github: None,
         });
         let app = build_app(state, dist.path());
 
@@ -5053,6 +5188,7 @@ mod tests {
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
             operator_key_path: PathBuf::from("/not-used"),
+            github: None,
         });
         let app = build_app(state, dist.path());
 
@@ -5117,6 +5253,7 @@ mod tests {
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
             operator_key_path: PathBuf::from("/not-used"),
+            github: None,
         });
         let app = build_app(state, dist.path());
 
@@ -5201,6 +5338,7 @@ mod tests {
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
             operator_key_path: PathBuf::from("/not-used"),
+            github: None,
         });
         let app = build_app(state, dist.path());
 
@@ -5276,6 +5414,7 @@ mod tests {
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
             operator_key_path: PathBuf::from("/not-used"),
+            github: None,
         });
         let app = build_app(state, dist.path());
 
@@ -6237,6 +6376,7 @@ mod tests {
             secure_cookie: false,
             observer_token_path: PathBuf::from("/not-used"),
             operator_key_path: PathBuf::from("/not-used"),
+            github: None,
         })
     }
 

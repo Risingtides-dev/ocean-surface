@@ -7420,3 +7420,13 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+
+time:      [14:39] [09-25-26]
+agent:     [claude]
+worktree:  feat/github-login
+type:      feature-request
+area:      backend
+
+Added "Continue with GitHub" to the surface proxy, milestone M1 of the ocean-os web identity and node linking program (docs/specs/2026-09-25-ocean-web-identity-and-node-linking-program.md), so coworkers sign in at ocean.agentsworld.org with their GitHub account instead of a hand-issued password. New crates/ocean-surface-proxy/src/github_login.rs runs the OAuth App flow: /auth/github sets a single-use SameSite=Lax state cookie and redirects to GitHub (read:org only when OCEAN_SURFACE_GITHUB_ORG is set), /auth/github/callback checks state in constant time, exchanges the code, reads the login, requires an active org membership, and maps it case-insensitively to a users.json entry's new github field; it then issues that entry's existing derived session cookie from a same-origin meta-refresh page, because a redirect chain started on github.com would withhold the SameSite=Strict cookie. Roster entries may now carry a password, a github login, or both; adding github to a password entry keeps its token, a GitHub-only entry derives a domain-separated token and can never match the password form. Disabled with no client id (button hidden, routes 404). The GitHub token is dropped after the callback and no provider credential enters the proxy. Nine new tests drive the real router against a stub GitHub (state mismatch, rejected code, non-member, pending invite, unknown account, happy path through /api/config). Gates: cargo test -p ocean-surface-proxy 93 passed, clippy -D warnings, fmt. Live enablement still needs the OAuth App created and the three env vars set on the operator's proxy.
+
+_________________________________________________________________________________ 14:39 feat/github-login
