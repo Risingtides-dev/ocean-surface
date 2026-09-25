@@ -46,9 +46,10 @@ use crate::{
 /// The anti-CSRF `state` round-trip cookie. SameSite=Lax, not Strict: the
 /// callback is a top-level navigation FROM github.com, and a Strict cookie is
 /// not sent on it — the state check would fail for everyone. Under HTTPS it
-/// carries the `__Secure-` prefix so a sibling subdomain cannot plant one.
+/// carries the `__Host-` prefix (Secure, `Path=/`, no `Domain`), the only form
+/// a sibling `*.agentsworld.org` host cannot plant.
 const STATE_COOKIE: &str = "ocean_gh_state";
-const SECURE_STATE_COOKIE: &str = "__Secure-ocean_gh_state";
+const HOST_STATE_COOKIE: &str = "__Host-ocean_gh_state";
 /// Ten minutes to finish a GitHub consent screen is generous; the cookie is
 /// single-use either way.
 const STATE_MAX_AGE_SECONDS: u64 = 600;
@@ -289,12 +290,12 @@ pub(crate) async fn start(State(state): State<Arc<AppState>>, headers: HeaderMap
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let secure = secure_suffix(&state, &headers);
-    let name = state_cookie_name(secure);
+    let (name, path) = state_cookie(secure);
     let mut response = Redirect::to(&github.authorize_url(&nonce)).into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
         format!(
-            "{name}={nonce}; Path={START_PATH}; HttpOnly; SameSite=Lax; \
+            "{name}={nonce}; Path={path}; HttpOnly; SameSite=Lax; \
              Max-Age={STATE_MAX_AGE_SECONDS}{secure}"
         )
         .parse()
@@ -310,14 +311,14 @@ pub(crate) struct CallbackQuery {
     error: Option<String>,
 }
 
-/// `__Secure-` requires the Secure attribute, so the prefix is only usable
-/// when the cookie is set over HTTPS; plain-HTTP local development keeps the
-/// bare name.
-fn state_cookie_name(secure: &str) -> &'static str {
+/// Name and path of the state cookie. `__Host-` requires Secure and
+/// `Path=/`, so it is only usable over HTTPS; plain-HTTP local development
+/// keeps the bare name scoped to the GitHub routes.
+fn state_cookie(secure: &str) -> (&'static str, &'static str) {
     if secure.is_empty() {
-        STATE_COOKIE
+        (STATE_COOKIE, START_PATH)
     } else {
-        SECURE_STATE_COOKIE
+        (HOST_STATE_COOKIE, "/")
     }
 }
 
@@ -336,9 +337,8 @@ pub(crate) async fn callback(
         return StatusCode::NOT_FOUND.into_response();
     };
     let secure = secure_suffix(&state, &headers);
-    let name = state_cookie_name(secure);
-    let clear_state =
-        format!("{name}=; Path={START_PATH}; HttpOnly; SameSite=Lax; Max-Age=0{secure}");
+    let (name, path) = state_cookie(secure);
+    let clear_state = format!("{name}=; Path={path}; HttpOnly; SameSite=Lax; Max-Age=0{secure}");
 
     let outcome = async {
         if query.error.is_some() {
@@ -608,13 +608,13 @@ mod tests {
         let cookies = set_cookies(&response);
         let state_cookie = cookies
             .iter()
-            .find(|c| c.starts_with("__Secure-ocean_gh_state="))
+            .find(|c| c.starts_with("__Host-ocean_gh_state="))
             .expect("state cookie");
         assert!(state_cookie.contains("SameSite=Lax"), "{state_cookie}");
         assert!(state_cookie.contains("HttpOnly"));
         assert!(state_cookie.contains("Secure"));
         let nonce = state_cookie
-            .trim_start_matches("__Secure-ocean_gh_state=")
+            .trim_start_matches("__Host-ocean_gh_state=")
             .split(';')
             .next()
             .unwrap();
@@ -669,9 +669,9 @@ mod tests {
             vec![roster_user("ecfromthedc", Some(202), "ec-token")],
         ));
         // The last case is a bare-named cookie with the RIGHT value: under HTTPS
-        // only the `__Secure-` name counts, so one planted from a sibling
-        // subdomain (which cannot set that prefix without Secure) is ignored.
-        for cookie in ["__Secure-ocean_gh_state=aaaa", "", "ocean_gh_state=bbbb"] {
+        // only the `__Host-` name counts, and a sibling subdomain can never
+        // set that one (it forbids `Domain`), so a planted cookie is ignored.
+        for cookie in ["__Host-ocean_gh_state=aaaa", "", "ocean_gh_state=bbbb"] {
             let response = get_with_cookie(
                 app.clone(),
                 "/auth/github/callback?code=good&state=bbbb",
@@ -702,7 +702,7 @@ mod tests {
         let response = get_with_cookie(
             app.clone(),
             "/auth/github/callback?code=good&state=nonce-1",
-            "__Secure-ocean_gh_state=nonce-1",
+            "__Host-ocean_gh_state=nonce-1",
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -716,7 +716,7 @@ mod tests {
         assert!(session.contains("SameSite=Strict"));
         assert!(cookies
             .iter()
-            .any(|c| c.starts_with("__Secure-ocean_gh_state=;") && c.contains("Max-Age=0")));
+            .any(|c| c.starts_with("__Host-ocean_gh_state=;") && c.contains("Max-Age=0")));
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -748,7 +748,7 @@ mod tests {
             let response = get_with_cookie(
                 app,
                 "/auth/github/callback?code=good&state=n",
-                "__Secure-ocean_gh_state=n",
+                "__Host-ocean_gh_state=n",
             )
             .await;
             assert_eq!(
@@ -772,7 +772,7 @@ mod tests {
         let response = get_with_cookie(
             app,
             "/auth/github/callback?code=reused&state=n",
-            "__Secure-ocean_gh_state=n",
+            "__Host-ocean_gh_state=n",
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
