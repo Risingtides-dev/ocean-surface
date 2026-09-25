@@ -140,10 +140,12 @@ Setup, once:
 Org membership is checked at sign-in only. The session cookie that follows is
 the entry's derived 30-day token, so **removing someone from the org does not
 end a session they already hold: remove their whole roster entry and restart
-the proxy to revoke.** Removing only `github_id` is enough for a GitHub-only
-entry, but an entry that also has a `password` derives its session token from
-that password, so its existing sessions — including GitHub-issued ones — and
-the password form both survive until the password is rotated too. The proxy keeps the GitHub
+the proxy to revoke.** Always remove the WHOLE entry: a GitHub-only entry left
+with neither `password` nor `github_id` is invalid and the proxy refuses to
+load the roster at all (every user goes offline), and an entry that also has a
+`password` derives its session token from that password, so removing only
+`github_id` leaves its sessions — GitHub-issued ones included — and the
+password form alive. The proxy keeps the GitHub
 access token only for the length of the callback and never stores it. With no client id the button does not render and
 `/auth/github` answers 404. The program this belongs to is
 `ocean-os/docs/specs/2026-09-25-ocean-web-identity-and-node-linking-program.md`

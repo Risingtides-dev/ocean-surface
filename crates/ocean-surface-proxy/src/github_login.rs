@@ -237,29 +237,18 @@ impl GithubLogin {
             .send()
             .await
             .map_err(|e| Refusal::Upstream(format!("org membership: {e}")))?;
-            // 404 is "not a member we can see"; 403 is the org refusing this
-            // OAuth app. Both are authorization answers. A 429 or 5xx is GitHub
-            // being unavailable, which must not tell an active member to go
-            // accept an invite. A pending invite answers 200 with state
-            // "pending", which is also not a member yet.
-            // GitHub also answers an exhausted rate limit with 403, marked by
-            // `x-ratelimit-remaining: 0`; that is an outage, not a refusal.
-            let rate_limited = membership
-                .headers()
-                .get("x-ratelimit-remaining")
-                .is_some_and(|value| value.as_bytes() == b"0");
+            // Only a 404 means "not a member we can see". A 403 is ambiguous —
+            // GitHub's primary AND secondary rate limits answer 403 (the
+            // secondary one without touching `x-ratelimit-remaining`), and so
+            // does an org that has not approved this OAuth app — so it is never
+            // read as "go accept the invite": it gets its own retryable answer
+            // naming both causes. 429/5xx are GitHub being unavailable. A
+            // pending invite answers 200 with state "pending", also not a
+            // member yet.
             match membership.status() {
                 status if status.is_success() => {}
-                // Only a 403 can be GitHub's exhausted-quota answer; a 404 that
-                // happens to spend the last request is still a real answer.
-                reqwest::StatusCode::FORBIDDEN if rate_limited => {
-                    return Err(Refusal::Upstream(
-                        "org membership rate-limited: 403 with no quota left".to_string(),
-                    ));
-                }
-                reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::FORBIDDEN => {
-                    return Err(Refusal::NotInOrg(login));
-                }
+                reqwest::StatusCode::NOT_FOUND => return Err(Refusal::NotInOrg(login)),
+                reqwest::StatusCode::FORBIDDEN => return Err(Refusal::MembershipCheckRefused),
                 status => {
                     return Err(Refusal::Upstream(format!("org membership: {status}")));
                 }
@@ -289,6 +278,9 @@ enum Refusal {
     CodeRejected,
     Denied,
     NotInOrg(String),
+    /// GitHub answered the membership check 403: a rate limit, or the org has
+    /// not approved this OAuth app. Retryable; never "accept the invite".
+    MembershipCheckRefused,
     NotOnRoster(String),
     Upstream(String),
 }
@@ -448,6 +440,12 @@ fn refusal_message(refusal: &Refusal, org: Option<&str>) -> (StatusCode, String)
                 html_escape(org.unwrap_or("the organization"))
             ),
         ),
+        Refusal::MembershipCheckRefused => (
+            StatusCode::BAD_GATEWAY,
+            "GitHub would not confirm your organization membership right now. Try again in a \
+             minute; if it keeps happening, the organization may need to approve this app."
+                .into(),
+        ),
         Refusal::NotOnRoster(login) => (
             StatusCode::FORBIDDEN,
             format!(
@@ -566,6 +564,11 @@ mod tests {
                             StatusCode::NOT_FOUND,
                             [("x-ratelimit-remaining", "0")],
                             Json(json!({"message": "Not Found"})),
+                        ),
+                        "secondary-limit" => (
+                            StatusCode::FORBIDDEN,
+                            [("x-ratelimit-remaining", "4000")],
+                            Json(json!({"message": "You have exceeded a secondary rate limit"})),
                         ),
                         "ratelimited" => (
                             StatusCode::FORBIDDEN,
@@ -856,7 +859,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_github_outage_is_a_retryable_502_not_a_membership_refusal() {
-        for kind in ["outage", "ratelimited"] {
+        for kind in ["outage", "ratelimited", "secondary-limit"] {
             let base = stub_github(kind).await;
             let app = app(state(
                 Some(&base),
