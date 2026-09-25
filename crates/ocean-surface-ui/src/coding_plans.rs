@@ -354,13 +354,8 @@ pub fn logout_outcome(label: &str, removed: bool, device: &str) -> Notice {
     }
 }
 
-fn provider_path(base: &str, provider: &str, tail: &str) -> String {
-    format!(
-        "{}/v1/auth/providers/{}{}",
-        base.trim_end_matches('/'),
-        encode_segment(provider),
-        tail
-    )
+fn provider_path(provider: &str, tail: &str) -> String {
+    format!("/v1/auth/providers/{}{}", encode_segment(provider), tail)
 }
 
 /// Path-segment encoding for ids the daemon minted; they are expected to be
@@ -416,6 +411,10 @@ pub struct CodingPlansState {
     pub device: RwSignal<String>,
     /// Retires poll loops and stale list replies.
     generation: RwSignal<u64>,
+    /// Attempt ids this panel stopped watching on its own bounds (time or
+    /// failure limit). The list still reports them pending, and re-adopting
+    /// one would restart the very loop the bound just ended.
+    retired: RwSignal<Vec<String>>,
 }
 
 impl CodingPlansState {
@@ -431,6 +430,7 @@ impl CodingPlansState {
             base,
             device,
             generation: RwSignal::new(0),
+            retired: RwSignal::new(Vec::new()),
         }
     }
 
@@ -480,7 +480,10 @@ impl CodingPlansState {
                         rows.iter().find_map(|row| {
                             let login = row.login.as_ref()?;
                             (AttemptState::parse(&login.state) == AttemptState::Pending
-                                && !login.attempt_id.is_empty())
+                                && !login.attempt_id.is_empty()
+                                && !self
+                                    .retired
+                                    .with_untracked(|ids| ids.contains(&login.attempt_id)))
                             .then(|| ActiveAttempt {
                                 provider: row.provider.clone(),
                                 label: row.display_label(),
@@ -563,8 +566,7 @@ impl CodingPlansState {
         self.attempt.set(Some(attempt.clone()));
         let base = self.base.get_untracked();
         spawn_local(async move {
-            let url = provider_path(
-                &base,
+            let path = provider_path(
                 &attempt.provider,
                 &format!("/login/{}", encode_segment(&attempt.attempt_id)),
             );
@@ -574,7 +576,7 @@ impl CodingPlansState {
                 if !self.current(claimed) || !self.open.get_untracked() {
                     return;
                 }
-                let result = get_json::<LoginAttempt>(gloo_net::http::Request::get(&url)).await;
+                let result = get_json::<LoginAttempt>(&base, "GET", &path).await;
                 if !self.current(claimed) {
                     return;
                 }
@@ -605,6 +607,7 @@ impl CodingPlansState {
                     Err(error) => {
                         failures += 1;
                         if failures >= POLL_FAILURE_LIMIT {
+                            self.retire(&attempt.attempt_id);
                             let device = self.device.get_untracked();
                             self.finish(Notice::err(error_message(&error, &device)));
                             return;
@@ -613,10 +616,19 @@ impl CodingPlansState {
                 }
             }
             if self.current(claimed) {
+                self.retire(&attempt.attempt_id);
                 self.finish(Notice::err(format!(
                     "Stopped waiting for {} sign-in. If you finished it, reopen this panel.",
                     attempt.label
                 )));
+            }
+        });
+    }
+
+    fn retire(self, attempt_id: &str) {
+        self.retired.update(|ids| {
+            if !ids.iter().any(|id| id == attempt_id) {
+                ids.push(attempt_id.to_string());
             }
         });
     }
@@ -641,12 +653,11 @@ impl CodingPlansState {
         let base = self.base.get_untracked();
         let claimed = self.generation.get_untracked();
         spawn_local(async move {
-            let url = provider_path(
-                &base,
+            let path = provider_path(
                 &attempt.provider,
                 &format!("/login/{}", encode_segment(&attempt.attempt_id)),
             );
-            if let Err(error) = send(gloo_net::http::Request::delete(&url)).await {
+            if let Err(error) = send(&base, "DELETE", &path).await {
                 log::debug!("cancel sign-in: {}", error.error);
             }
             if self.current(claimed) {
@@ -670,8 +681,8 @@ impl CodingPlansState {
         let base = self.base.get_untracked();
         let claimed = self.generation.get_untracked();
         spawn_local(async move {
-            let url = provider_path(&base, &provider, "/logout");
-            let result = get_json::<LogoutResult>(gloo_net::http::Request::post(&url)).await;
+            let path = provider_path(&provider, "/logout");
+            let result = get_json::<LogoutResult>(&base, "POST", &path).await;
             if !self.current(claimed) {
                 return;
             }
@@ -689,47 +700,74 @@ impl CodingPlansState {
 
 // ── transport ─────────────────────────────────────────────────────
 
-async fn read_error(response: gloo_net::http::Response) -> ApiError {
+/// The ONE seam every coding-plan request takes, like the Room-agent
+/// ceremony's: in the Tauri shell it goes through `daemon_operator_request`,
+/// which attaches the operator key natively against its own allowlist; in the
+/// browser it is a same-origin fetch the Surface proxy attaches the key to.
+/// The extension has neither and never shows the panel (`supported`).
+async fn call(base: &str, method: &str, path: &str) -> Result<(u16, String), ApiError> {
+    if crate::host::running_in_tauri() {
+        return crate::host::daemon_operator_request(method, path, "")
+            .await
+            .map(|reply| (reply.status, reply.body))
+            .ok_or_else(ApiError::transport);
+    }
+    let url = format!("{}{path}", base.trim_end_matches('/'));
+    let request = match method {
+        "POST" => gloo_net::http::Request::post(&url),
+        "DELETE" => gloo_net::http::Request::delete(&url),
+        _ => gloo_net::http::Request::get(&url),
+    };
+    let response = request.send().await.map_err(|_| ApiError::transport())?;
     let status = response.status();
-    let mut error = response.json::<ApiError>().await.unwrap_or_default();
-    error.status = status;
-    error
+    let body = response.text().await.map_err(|_| ApiError::transport())?;
+    Ok((status, body))
 }
 
-async fn get_json<T: serde::de::DeserializeOwned>(
-    request: gloo_net::http::RequestBuilder,
-) -> Result<T, ApiError> {
-    let response = request.send().await.map_err(|_| ApiError::transport())?;
-    if !response.ok() {
-        return Err(read_error(response).await);
+/// Decode a reply: a non-2xx is the daemon's `{error, …}` body with its status.
+fn decode<T: serde::de::DeserializeOwned>(status: u16, body: &str) -> Result<T, ApiError> {
+    if !(200..300).contains(&status) {
+        let mut error = serde_json::from_str::<ApiError>(body).unwrap_or_default();
+        error.status = status;
+        return Err(error);
     }
-    let status = response.status();
-    response.json::<T>().await.map_err(|_| ApiError {
+    serde_json::from_str::<T>(body).map_err(|_| ApiError {
         status,
         error: "unreadable".into(),
         ..ApiError::default()
     })
 }
 
-async fn send(request: gloo_net::http::RequestBuilder) -> Result<(), ApiError> {
-    let response = request.send().await.map_err(|_| ApiError::transport())?;
-    if response.ok() {
-        Ok(())
-    } else {
-        Err(read_error(response).await)
-    }
+async fn get_json<T: serde::de::DeserializeOwned>(
+    base: &str,
+    method: &str,
+    path: &str,
+) -> Result<T, ApiError> {
+    let (status, body) = call(base, method, path).await?;
+    decode(status, &body)
+}
+
+async fn send(base: &str, method: &str, path: &str) -> Result<(), ApiError> {
+    get_json::<serde_json::Value>(base, method, path)
+        .await
+        .map(|_| ())
 }
 
 async fn fetch_providers(base: &str) -> Result<Vec<ProviderRow>, ApiError> {
-    let url = format!("{}/v1/auth/providers", base.trim_end_matches('/'));
-    get_json::<ProvidersResponse>(gloo_net::http::Request::get(&url))
+    get_json::<ProvidersResponse>(base, "GET", "/v1/auth/providers")
         .await
         .map(|body| body.providers)
 }
 
 async fn post_login(base: &str, provider: &str) -> Result<LoginStarted, ApiError> {
-    let url = provider_path(base, provider, "/login");
-    get_json::<LoginStarted>(gloo_net::http::Request::post(&url)).await
+    get_json::<LoginStarted>(base, "POST", &provider_path(provider, "/login")).await
+}
+
+/// Whether this host can reach the coding-plan routes at all: the browser PWA
+/// (the proxy attaches the key) and the Tauri shell (it does, natively). The
+/// Chrome extension has no privileged transport, so it never offers the panel.
+pub fn supported() -> bool {
+    crate::host::room_authority_mutations_supported()
 }
 
 /// Open a blank tab synchronously, inside the click, so a popup blocker lets
@@ -1251,11 +1289,11 @@ mod tests {
     #[test]
     fn paths_encode_what_the_daemon_minted() {
         assert_eq!(
-            provider_path("https://ocean.example/", "claude", "/login"),
-            "https://ocean.example/v1/auth/providers/claude/login"
+            provider_path("claude", "/login"),
+            "/v1/auth/providers/claude/login"
         );
         assert_eq!(
-            provider_path("", "co dex", &format!("/login/{}", encode_segment("a/b"))),
+            provider_path("co dex", &format!("/login/{}", encode_segment("a/b"))),
             "/v1/auth/providers/co%20dex/login/a%2Fb"
         );
     }

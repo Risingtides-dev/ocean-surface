@@ -1794,6 +1794,29 @@ struct OperatorReplyDto {
     body: String,
 }
 
+/// The five coding-plan routes (web identity M3; ocean-os spec §9) this shell
+/// forwards with the operator key — the same shapes the Surface proxy's
+/// `coding_plans` allowlist names, and nothing else under `/v1/auth`.
+fn coding_plan_route(method: &str, path: &str) -> bool {
+    let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    if segments.len() < 3 || segments[..3] != ["v1", "auth", "providers"] {
+        return false;
+    }
+    let segment = |value: &str| {
+        !value.is_empty()
+            && value.len() <= 64
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    };
+    match (method, &segments[3..]) {
+        ("GET", []) => true,
+        ("POST", [provider, "login" | "logout"]) => segment(provider),
+        ("GET" | "DELETE", [provider, "login", attempt]) => segment(provider) && segment(attempt),
+        _ => false,
+    }
+}
+
 /// Forward one Room-agent authority mutation to the supervised daemon with the
 /// operator credential attached. Errors are human-readable and credential-free.
 #[tauri::command]
@@ -1802,14 +1825,14 @@ async fn daemon_operator_request(
     path: String,
     body: Option<String>,
 ) -> Result<OperatorReplyDto, String> {
-    if method != "POST" && method != "DELETE" {
+    if method != "POST" && method != "DELETE" && method != "GET" {
         return Err("unsupported operator request method".to_owned());
     }
     if !forwardable_operator_path(&path) {
         return Err("operator request path is not a forwardable daemon route".to_owned());
     }
-    if !room_agent_authority_mutation(&method, &path) {
-        return Err("not a room authority mutation route".to_owned());
+    if !room_agent_authority_mutation(&method, &path) && !coding_plan_route(&method, &path) {
+        return Err("not an operator route this shell forwards".to_owned());
     }
     let url = format!("{}{path}", daemon_url_from_env().trim_end_matches('/'));
     // Belt and braces, and the half that matters more than the pre-check:
@@ -1834,10 +1857,10 @@ async fn daemon_operator_request(
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|error| format!("operator transport unavailable: {error}"))?;
-    let request = if method == "DELETE" {
-        client.delete(&url)
-    } else {
-        client.post(&url)
+    let request = match method.as_str() {
+        "DELETE" => client.delete(&url),
+        "GET" => client.get(&url),
+        _ => client.post(&url),
     }
     .header("content-type", "application/json")
     .header("X-Ocean-Operator", key)
@@ -1862,6 +1885,33 @@ mod operator_transport_tests {
     };
 
     const ROOM: &str = "/v1/rooms/persistent/team-blue/agents";
+
+    #[test]
+    fn coding_plan_routes_are_exactly_the_five_contract_shapes() {
+        use super::coding_plan_route;
+        for (method, path) in [
+            ("GET", "/v1/auth/providers"),
+            ("POST", "/v1/auth/providers/claude/login"),
+            ("POST", "/v1/auth/providers/codex/logout"),
+            ("GET", "/v1/auth/providers/claude/login/0a1b"),
+            ("DELETE", "/v1/auth/providers/claude/login/0a1b"),
+        ] {
+            assert!(coding_plan_route(method, path), "{method} {path}");
+        }
+        for (method, path) in [
+            ("POST", "/v1/auth/providers"),
+            ("GET", "/v1/auth/providers/claude/logout"),
+            ("DELETE", "/v1/auth/providers/claude/logout"),
+            ("POST", "/v1/auth/providers/claude/login/x"),
+            ("GET", "/v1/auth/other"),
+            ("GET", "/v1/rooms/persistent/team/agents"),
+            ("POST", "/v1/auth/providers/%2e%2e/login"),
+        ] {
+            assert!(!coding_plan_route(method, path), "{method} {path}");
+        }
+        // A GET never widens the room ceremony: its routes stay POST/DELETE.
+        assert!(!room_agent_authority_mutation("GET", ROOM));
+    }
 
     #[test]
     fn the_allowlist_admits_exactly_the_six_ceremony_routes() {
