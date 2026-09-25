@@ -729,4 +729,11 @@ in `ci_failure_trigger_control.rs` were compiler-held until a flag table
 elsewhere started constructing the same variants; that guard exists because the
 hold evaporated.
 
+**`tests/unheld_coding_plans_controls.rs`** pins the header overflow's
+`Coding plans` row (web identity M3, `src/coding_plans.rs`). It and the ⌘K
+`coding-plans` command both call `CodingPlansState::show`, so deleting either
+alone is GREEN; the overflow row is pinned because it is the only door on a
+phone. The panel mount and the row's Sign in / Sign out arming clicks measured
+RED (compiler-held).
+
 **Frozen gates:** the same seven listed under File Preview Deep-Link.

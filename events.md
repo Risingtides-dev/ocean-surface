@@ -7420,3 +7420,13 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+
+time:      [15:19] [09-25-26]
+agent:     [claude]
+worktree:  feat/coding-plans
+type:      feature-request
+area:      frontend
+
+Web identity M3, Surface side: a Coding plans panel, reached from the header menu and Cmd-K, shows the selected device's Claude and Codex subscription logins and lets its owner sign in or out without the TUI. The proxy gains crates/ocean-surface-proxy/src/coding_plans.rs, an exact five-shape allowlist for the daemon's operator-only /v1/auth/providers routes (contract in ocean-os spec §9, landed as ocean-os #474). It is reached through a resolver-bound handler in main.rs, attaches only the selected device's own operator key server side, and builds the upstream request fresh so browser Cookie, Origin, Referer and forged operator headers never reach the daemon; a test drives every shape through the real router against a stub daemon. The UI module crates/ocean-surface-ui/src/coding_plans.rs renders per-provider status with source hints, opens the sign-in tab before the POST resolves so popup blockers allow it (host.rs open_external_url for Tauri), polls the attempt every 2s with bounded stop conditions, confirms sign-out, hides sign-out for environment-sourced logins, states the same-machine requirement by device name, and turns every error code into a sentence. A guard test pins the header-menu row, the only way in on a phone. Gates: proxy 86 tests plus clippy, ui 1425 tests plus wasm clippy, fmt, and trunk release build. Not checked live against a running daemon.
+
+_________________________________________________________________________________ 15:19 feat/coding-plans

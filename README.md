@@ -198,7 +198,28 @@ that is unreachable — or to one the roster no longer has — answers `503
 {"error":"device_unavailable","reason":…,"device":…}`, which is what the picker
 shows.
 
-## Roadmap
+## Coding plans — your machine's Claude and Codex logins
+
+The selected device's subscription logins are reachable from the browser
+through five exact routes the proxy forwards to that device's daemon
+(`crates/ocean-surface-proxy/src/coding_plans.rs`; contract in §9 of
+`ocean-os/docs/specs/2026-09-25-ocean-web-identity-and-node-linking-program.md`):
+
+| Route | Answers |
+|---|---|
+| `GET /v1/auth/providers` | per-provider status (`signed_in` / `expired` / `signed_out`), never a token |
+| `POST /v1/auth/providers/{provider}/login` | starts a browser login: `attempt_id`, `authorize_url` |
+| `GET` / `DELETE /v1/auth/providers/{provider}/login/{attempt_id}` | poll / cancel |
+| `POST /v1/auth/providers/{provider}/logout` | removes that provider's credential from the machine |
+
+The daemon requires its operator key on all of them. The proxy attaches the
+**selected device's own** key server side — never another machine's, never to
+the browser — and builds the upstream request fresh, so the browser's Cookie,
+Origin and Referer never reach the daemon. A device with no operator key
+configured answers `503 operator_credential_unavailable`. Finishing a login
+needs a browser on the machine that runs the daemon, because Claude and Codex
+redirect to that machine's `localhost`.
+
 
 - Done: web/PWA chat, SSE transcript, model picker, session picker, proxy,
   voice STT/TTS, Chrome extension bootstrap, provider-backed STT/TTS moved

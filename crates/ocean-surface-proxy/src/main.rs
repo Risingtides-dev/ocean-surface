@@ -38,6 +38,8 @@ use sha2::{Digest, Sha256};
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
+mod coding_plans;
+
 const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:4780";
 const DEFAULT_LIVEKIT_ROOM_ID: &str = "project:surface-main";
 const DEFAULT_VOICE_PROFILE: &str = "leo";
@@ -1245,6 +1247,15 @@ fn build_app(state: Arc<AppState>, dist: &std::path::Path) -> Router {
         // real council same-origin (e.g. POST /v1/longhouse/demo). The resulting
         // council events arrive back on /v1/agent/events as
         // extension=="longhouse" frames, which the surface now captures natively.
+        // Web identity M3: the selected device's coding-plan logins, operator
+        // key attached server side. Exact shapes; see `coding_plans`.
+        .route("/v1/auth/providers", get(proxy_coding_plans))
+        .route(
+            "/v1/auth/providers/{*rest}",
+            get(proxy_coding_plans)
+                .post(proxy_coding_plans)
+                .delete(proxy_coding_plans),
+        )
         .route(
             "/v1/longhouse/{*rest}",
             get(proxy_longhouse).post(proxy_longhouse),
@@ -2811,6 +2822,13 @@ fn percent_encode_path_segment(value: &str) -> String {
         }
     }
     encoded
+}
+
+/// The selected device's coding-plan routes (web identity M3); the allowlist
+/// and operator-key handling live in [`coding_plans`].
+async fn proxy_coding_plans(State(state): State<Arc<AppState>>, req: Request) -> Response {
+    let daemon = resolved_daemon(&state, &req);
+    coding_plans::forward(&state, daemon, req).await
 }
 
 /// Reverse-proxy the daemon's `/v1/longhouse/*` control endpoints (e.g.
@@ -5574,6 +5592,96 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
         (format!("http://{addr}"), requests, handle)
+    }
+
+    #[tokio::test]
+    async fn coding_plan_routes_forward_only_the_server_side_key() {
+        async fn echo(headers: HeaderMap, req_method: axum::http::Method) -> Json<Value> {
+            Json(json!({
+                "method": req_method.as_str(),
+                "operator": headers.get("x-ocean-operator").and_then(|v| v.to_str().ok()),
+                "cookie": headers.contains_key(header::COOKIE),
+                "origin": headers.contains_key(header::ORIGIN),
+            }))
+        }
+        let upstream = Router::new()
+            .route("/v1/auth/providers", get(echo))
+            .route("/v1/auth/providers/{p}/login", post(echo))
+            .route("/v1/auth/providers/{p}/logout", post(echo))
+            .route("/v1/auth/providers/{p}/login/{a}", get(echo).delete(echo));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+
+        let credential_dir = tempfile::tempdir().expect("credential tempdir");
+        let key_path = credential_dir.path().join("operator.key");
+        std::fs::write(&key_path, "proxy-owned-authority\n").unwrap();
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let mut state = auth_test_state();
+        let inner = Arc::get_mut(&mut state).expect("sole state owner");
+        inner.daemon_url = format!("http://{addr}");
+        inner.operator_key_path = key_path;
+        let dist = tempfile::tempdir().expect("dist tempdir");
+        let app = build_app(state, dist.path());
+
+        for (method, uri) in [
+            ("GET", "/v1/auth/providers"),
+            ("POST", "/v1/auth/providers/claude/login"),
+            ("GET", "/v1/auth/providers/claude/login/abc123"),
+            ("DELETE", "/v1/auth/providers/claude/login/abc123"),
+            ("POST", "/v1/auth/providers/codex/logout"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header(header::COOKIE, "ocean_session=test-session")
+                        .header("x-ocean-operator", "browser-forged")
+                        .header(header::ORIGIN, "https://evil.example")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{method} {uri}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let seen: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(seen["method"], method);
+            assert_eq!(seen["operator"], "proxy-owned-authority", "{method} {uri}");
+            assert_eq!(seen["cookie"], false);
+            assert_eq!(seen["origin"], false);
+        }
+
+        // Outside the five shapes: refused here, never forwarded.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/v1/auth/providers/claude/login/abc")
+                    .header(header::COOKIE, "ocean_session=test-session")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(response.status().is_client_error());
+
+        // And the whole lane stays behind the login.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/auth/providers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

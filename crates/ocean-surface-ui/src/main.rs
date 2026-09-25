@@ -14,6 +14,7 @@ mod app;
 mod attachments;
 mod call;
 mod canvas;
+mod coding_plans;
 mod components;
 mod council;
 mod daemon;
