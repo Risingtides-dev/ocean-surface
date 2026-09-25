@@ -1262,3 +1262,62 @@
   font-size: 11px;
   font-weight: 500;
 }
+
+/* Coding plans panel (web identity M3) — reuses devices-panel; tokens only. */
+
+/* The summary is a read-out, not a button: no hover shift, no pointer. */
+.coding-plans__summary {
+  cursor: default;
+}
+
+.coding-plans__summary:hover {
+  background: var(--bg-elevated);
+  border-color: var(--border-subtle);
+}
+
+.coding-plans__row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.coding-plans__actions {
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* Status text mirrors the dot instead of the accent "current" colour. */
+.coding-plans__status[data-status="ok"] {
+  color: var(--ok);
+}
+
+.coding-plans__status[data-status="degraded"] {
+  color: var(--warn);
+}
+
+.coding-plans__status[data-status="unknown"] {
+  color: var(--fg-3);
+}
+
+.coding-plans__waiting,
+.coding-plans__confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.coding-plans__waiting-line {
+  margin: 0;
+}
+
+.coding-plans__link {
+  display: inline-grid;
+  place-items: center;
+  text-decoration: none;
+}
+
+@media (pointer: coarse) {
+  .coding-plans__actions .swipedeck-btn {
+    min-height: 44px;
+  }
+}

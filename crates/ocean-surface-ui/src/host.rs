@@ -239,6 +239,26 @@ fn classify_link_target(href: &str) -> LinkTarget {
     }
 }
 
+/// Hand an `http(s)` URL to the OS default browser from the native shell.
+/// `false` off-Tauri (the caller opens its own tab there), for any URL the
+/// link classifier would not treat as external, and when the shell refuses.
+pub async fn open_external_url(url: &str) -> bool {
+    if !running_in_tauri() || classify_link_target(url) != LinkTarget::External {
+        return false;
+    }
+    let args = Object::new();
+    if Reflect::set(&args, &JsValue::from_str("url"), &JsValue::from_str(url)).is_err() {
+        return false;
+    }
+    match tauri_invoke("open_external_url", &args).await {
+        Ok(_) => true,
+        Err(err) => {
+            log::warn!("native opener: open_external_url rejected: {err:?}");
+            false
+        }
+    }
+}
+
 /// Intercept a rendered Markdown link inside the native shell and hand it to
 /// the OS default browser. WKWebView does not reliably honor `target="_blank"`
 /// for these dynamically injected anchors — but only *external* links are

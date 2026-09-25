@@ -1618,6 +1618,9 @@ pub fn App() -> impl IntoView {
         rooms,
     };
     devices.recheck_on_focus(device_attach.clone());
+    // Coding plans (web identity M3): the selected machine's Claude/Codex
+    // subscription logins. Opened from the header overflow and ⌘K.
+    let coding_plans = crate::coding_plans::CodingPlansState::new(daemon.url, devices.selected);
 
     // Context deck (north star): the WEB/EXTENSION reveal rail. At most ONE
     // panel revealed at a time, reveal-on-intent via ⌘K commands, never
@@ -1868,6 +1871,19 @@ pub fn App() -> impl IntoView {
             enabled: always,
             run: Callback::new(move |_| toggle_rooms()),
         });
+        // Hosts with no privileged transport (the Chrome extension) never
+        // offer a panel whose every request the daemon would refuse.
+        if crate::coding_plans::supported() {
+            registry.register(Command {
+                id: "coding-plans",
+                title: "Coding plans".into(),
+                hint: Some("Claude and Codex sign-in on this machine".into()),
+                scope: CommandScope::App,
+                slash: None,
+                enabled: always,
+                run: Callback::new(move |_| coding_plans.show()),
+            });
+        }
         registry.register(Command {
             id: "open-council",
             title: "Open Council Stage".into(),
@@ -2781,6 +2797,19 @@ pub fn App() -> impl IntoView {
                                     "Devices"
                                 </button>
                             </Show>
+                            <Show when=crate::coding_plans::supported>
+                            <button
+                                class="ocean-more__item"
+                                type="button"
+                                role="menuitem"
+                                on:click=move |_| {
+                                    if let Some(d) = more_ref.get() { let _ = d.remove_attribute("open"); }
+                                    coding_plans.show();
+                                }
+                            >
+                                "Coding plans"
+                            </button>
+                            </Show>
                         </div>
                     </details>
                     // Workspace pane collapse toggle (Tauri shell only). Slim
@@ -3373,6 +3402,9 @@ pub fn App() -> impl IntoView {
             // consumes its own Escape rather than joining the reveal rail's
             // close-exactly-one chain.
             <crate::devices::DevicePicker state=devices attach=device_attach.clone() />
+            <Show when=crate::coding_plans::supported>
+                <crate::coding_plans::CodingPlansPanel state=coding_plans />
+            </Show>
 
             // Council/quorum observability deck (OCEAN-96). Native workflow
             // stage now lives inside the surface instead of an iframe.
