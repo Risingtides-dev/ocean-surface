@@ -123,7 +123,14 @@ next slot without resizing or repacking existing modules. Modules pack
 grid-adjacent into one connected facility — corridors, doorway partitions, and
 the tall boundary envelope derive from present slots only. Furnishings are
 static architecture; actor, tool, attention, status, room lighting, and
-topology treatments come only from real reducer state. Animation is truthful:
+topology treatments come only from real reducer state. The replay rail never
+requests `snapshot?at=<past cursor>`: the daemon snapshots only its current
+watermark and answers an earlier `at` with `409 snapshot_not_historical`. A
+scrub rebuilds the past client-side — empty state with the slot registry kept,
+`/v1/observatory/replay` paged from the earliest retained cursor through the
+target, folded by the same reducer (`observatory/replay.rs`). Pruned history
+or a skipped event reads as incomplete; a replay the daemon cannot serve reads
+as "replay unavailable", never as offline. Animation is truthful:
 typing/blink/wave and screen activity render recorded phases, the one-shot
 walk-in visualizes a live admission event, and reduced motion stops the loop.
 The web proxy reads the daemon-minted mode-0600 observer token immediately

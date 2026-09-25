@@ -6,6 +6,10 @@ use wasm_bindgen_futures::spawn_local;
 
 use super::domain::{EventEnvelope, IntegrityState, ObservatorySnapshot, ObservatoryState};
 use super::reducer::{apply, from_snapshot_preserving_slots};
+use super::replay::{
+    apply_fetch_error, classify_http_error, finish_replay, fold_replay_page, replay_base,
+    replay_path, replay_start, FetchError, ReplayPage, MAX_REPLAY_PAGES,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConnectionState {
@@ -14,6 +18,8 @@ pub enum ConnectionState {
     Live,
     Resyncing,
     Offline,
+    /// The live stream is paused while the rail shows a past cursor.
+    Replay,
 }
 
 impl ConnectionState {
@@ -23,6 +29,7 @@ impl ConnectionState {
             Self::Live => "live",
             Self::Resyncing => "resyncing",
             Self::Offline => "offline",
+            Self::Replay => "replay",
         }
     }
 }
@@ -60,7 +67,7 @@ impl ObservatoryClient {
                 }
                 self.connection.set(ConnectionState::Connecting);
                 let base = base_url.get_untracked();
-                if let Err(error) = self.fetch_snapshot(&base, None).await {
+                if let Err(error) = self.fetch_snapshot(&base).await {
                     self.fail(error);
                     gloo_timers::future::TimeoutFuture::new(2_000).await;
                     continue;
@@ -70,7 +77,9 @@ impl ObservatoryClient {
                 let mut source = match EventSource::new(&stream_url) {
                     Ok(source) => source,
                     Err(error) => {
-                        self.fail(format!("event stream unavailable: {error}"));
+                        self.fail(FetchError::Network(format!(
+                            "event stream unavailable: {error}"
+                        )));
                         gloo_timers::future::TimeoutFuture::new(2_000).await;
                         continue;
                     }
@@ -78,7 +87,9 @@ impl ObservatoryClient {
                 let message = match source.subscribe("message") {
                     Ok(stream) => stream,
                     Err(error) => {
-                        self.fail(format!("event stream unavailable: {error}"));
+                        self.fail(FetchError::Network(format!(
+                            "event stream unavailable: {error}"
+                        )));
                         gloo_timers::future::TimeoutFuture::new(2_000).await;
                         continue;
                     }
@@ -86,7 +97,9 @@ impl ObservatoryClient {
                 let reset = match source.subscribe("reset") {
                     Ok(stream) => stream,
                     Err(error) => {
-                        self.fail(format!("reset stream unavailable: {error}"));
+                        self.fail(FetchError::Network(format!(
+                            "reset stream unavailable: {error}"
+                        )));
                         gloo_timers::future::TimeoutFuture::new(2_000).await;
                         continue;
                     }
@@ -131,7 +144,7 @@ impl ObservatoryClient {
                 source.close();
                 if needs_snapshot {
                     self.connection.set(ConnectionState::Resyncing);
-                    let _ = self.fetch_snapshot(&base, None).await;
+                    let _ = self.fetch_snapshot(&base).await;
                 } else {
                     self.connection.set(ConnectionState::Offline);
                     self.state.update(|state| {
@@ -152,7 +165,7 @@ impl ObservatoryClient {
         let base = base_url.get_untracked();
         spawn_local(async move {
             self.connection.set(ConnectionState::Resyncing);
-            if let Err(error) = self.fetch_snapshot(&base, None).await {
+            if let Err(error) = self.fetch_snapshot(&base).await {
                 self.fail(error);
             } else {
                 self.connection.set(ConnectionState::Live);
@@ -160,34 +173,99 @@ impl ObservatoryClient {
         });
     }
 
-    pub fn snapshot_at(self, base_url: RwSignal<String>, cursor: u64) {
+    /// Show the floor as it was at `target`. The daemon snapshots only its
+    /// current watermark (`409 snapshot_not_historical` otherwise), so the
+    /// past is rebuilt by folding `/v1/observatory/replay` pages through
+    /// `target` with the live reducer. Stops the live stream; a newer scrub,
+    /// Live, or close cancels this one.
+    pub fn replay_to(self, base_url: RwSignal<String>, target: u64) {
         let base = base_url.get_untracked();
+        let generation = self
+            .generation
+            .try_update(|generation| {
+                *generation = generation.wrapping_add(1);
+                *generation
+            })
+            .unwrap_or(0);
         spawn_local(async move {
             self.loading.set(true);
-            if let Err(error) = self.fetch_snapshot(&base, Some(cursor)).await {
-                self.fail(error);
+            self.connection.set(ConnectionState::Replay);
+            match self.fold_replay(&base, target, generation).await {
+                Ok(Some(state)) => {
+                    self.state.set(state);
+                    self.loading.set(false);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    if self.generation.get_untracked() == generation {
+                        self.fail(error);
+                    }
+                }
             }
         });
     }
 
-    async fn fetch_snapshot(&self, base: &str, cursor: Option<u64>) -> Result<(), String> {
+    /// `Ok(None)` when superseded by a newer generation.
+    async fn fold_replay(
+        &self,
+        base: &str,
+        target: u64,
+        generation: u64,
+    ) -> Result<Option<ObservatoryState>, FetchError> {
+        let previous = self.state.get_untracked();
+        let mut state = replay_base(&previous);
+        let mut after = replay_start(previous.earliest_cursor);
+        let mut pages = 0;
+        while after < target {
+            if pages == MAX_REPLAY_PAGES {
+                return Err(FetchError::ReplayUnavailable(format!(
+                    "more than {MAX_REPLAY_PAGES} replay pages to reach cursor {target}"
+                )));
+            }
+            pages += 1;
+            let response = Request::get(&endpoint(base, &replay_path(after, target)))
+                .send()
+                .await
+                .map_err(|error| FetchError::Network(format!("replay unavailable: {error}")))?;
+            if !response.ok() {
+                let status = response.status();
+                let detail = response.text().await.unwrap_or_default();
+                return Err(classify_http_error(status, &detail, true));
+            }
+            let page = response
+                .json::<ReplayPage>()
+                .await
+                .map_err(|error| FetchError::Invalid(format!("replay page invalid: {error}")))?;
+            if self.generation.get_untracked() != generation {
+                return Ok(None);
+            }
+            state = fold_replay_page(state, &page, target);
+            match page.next_after {
+                Some(next) if page.has_more && !page.complete && next > after => after = next,
+                _ => break,
+            }
+        }
+        if self.generation.get_untracked() != generation {
+            return Ok(None);
+        }
+        Ok(Some(finish_replay(state, target)))
+    }
+
+    async fn fetch_snapshot(&self, base: &str) -> Result<(), FetchError> {
         self.loading.set(true);
-        let path = cursor
-            .map(|cursor| format!("/v1/observatory/snapshot?at={cursor}"))
-            .unwrap_or_else(|| "/v1/observatory/snapshot".to_owned());
-        let response = Request::get(&endpoint(base, &path))
+        let response = Request::get(&endpoint(base, "/v1/observatory/snapshot"))
             .send()
             .await
-            .map_err(|error| format!("snapshot unavailable: {error}"))?;
+            .map_err(|error| FetchError::Network(format!("snapshot unavailable: {error}")))?;
         if !response.ok() {
             let status = response.status();
             let detail = response.text().await.unwrap_or_default();
-            return Err(format!("snapshot unavailable ({status}): {detail}"));
+            return Err(classify_http_error(status, &detail, false));
         }
         let snapshot = response
             .json::<ObservatorySnapshot>()
             .await
-            .map_err(|error| format!("snapshot invalid: {error}"))?;
+            .map_err(|error| FetchError::Invalid(format!("snapshot invalid: {error}")))?;
         // Preserve the session-local slot registry across refreshes, resyncs,
         // and replay scrubbing so existing cubicles never move.
         let previous = self.state.get_untracked();
@@ -197,12 +275,19 @@ impl ObservatoryClient {
         Ok(())
     }
 
-    fn fail(&self, error: String) {
-        self.connection.set(ConnectionState::Offline);
+    /// Record a failed fetch. Only a genuine connection loss reads as
+    /// offline; `409 snapshot_not_historical` and other replay-range answers
+    /// mean history is unavailable while the daemon stays reachable.
+    fn fail(&self, error: FetchError) {
         self.loading.set(false);
+        let mut disconnected = true;
         self.state.update(|state| {
-            state.integrity = IntegrityState::Disconnected;
-            state.last_error = Some(error);
+            disconnected = apply_fetch_error(state, &error);
+        });
+        self.connection.set(if disconnected {
+            ConnectionState::Offline
+        } else {
+            ConnectionState::Replay
         });
     }
 }

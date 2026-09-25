@@ -7420,3 +7420,13 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+
+time:      [16:53] [09-25-26]
+agent:     [claude] [opus 5.5]
+worktree:  fix/observatory-replay-scrubber
+type:      bug-report
+area:      frontend
+
+Ocean Floor's replay scrubber asked the daemon for `/v1/observatory/snapshot?at=<earlier cursor>`, which ocean-os #486 (Observatory Gate 1 repair G1) now refuses with 409 snapshot_not_historical because the projection cannot reconstruct past state; the adapter's fail() turned that into Disconnected, so every scrub made the floor read "offline". The scrubber now rebuilds the past the way manifest §7.1–7.3 intends: a new pure module `observatory/replay.rs` starts from an empty state that keeps the session-local slot registry, pages `/v1/observatory/replay?after=&through=&limit=1000` from the earliest retained cursor through the target (following next_after/has_more/complete, capped at 200 pages, cancelled by a newer scrub or Live), stamps each event with the page meta's authority ids, and folds it with the existing live reducer, so the historical view and the live view share one state model. The result is labelled with two new IntegrityState variants: Historical (exact rebuild, no uncertainty veil, "Press Live to resume") and ReplayUnavailable; pruned history or an unparseable skipped event reads as incomplete rather than silently omitted. Fetch errors are now typed (FetchError): a 409 snapshot_not_historical and replay-range answers (400/404/405/409/410/501 on the replay route) map to "historical replay unavailable" with the connection in a new Replay state, while only transport failures and other server errors still read as offline. Refresh while replaying now resumes the live stream instead of relabelling a paused view as live. Eight unit tests cover the wire decode, the fold at a target cursor, slot preservation, gap and pruned labelling, and the 409 mapping. Gates: ocean-surface-ui 1328 tests, wasm and all-targets clippy -D warnings, fmt, both ledger checks.
+
+_________________________________________________________________________________ 16:53 fix/observatory-replay-scrubber
