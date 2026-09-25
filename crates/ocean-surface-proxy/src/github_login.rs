@@ -182,7 +182,7 @@ impl GithubLogin {
             state: String,
         }
 
-        let token: TokenResponse = http
+        let response = http
             .post(format!("{}/login/oauth/access_token", self.oauth_base))
             .header(header::ACCEPT, "application/json")
             .header(header::USER_AGENT, USER_AGENT)
@@ -194,7 +194,15 @@ impl GithubLogin {
             ])
             .send()
             .await
-            .map_err(|e| Refusal::Upstream(format!("token exchange: {e}")))?
+            .map_err(|e| Refusal::Upstream(format!("token exchange: {e}")))?;
+        // A 429 or 5xx is GitHub being unavailable: retryable, not a used code.
+        if !response.status().is_success() {
+            return Err(Refusal::Upstream(format!(
+                "token exchange: {}",
+                response.status()
+            )));
+        }
+        let token: TokenResponse = response
             .json()
             .await
             .map_err(|e| Refusal::Upstream(format!("token exchange body: {e}")))?;
@@ -511,9 +519,20 @@ mod tests {
                 "/login/oauth/access_token",
                 post(|body: String| async move {
                     if body.contains("code=good") {
-                        Json(json!({"access_token": "gho_stub", "token_type": "bearer"}))
+                        (
+                            StatusCode::OK,
+                            Json(json!({"access_token": "gho_stub", "token_type": "bearer"})),
+                        )
+                    } else if body.contains("code=busy") {
+                        (
+                            StatusCode::TOO_MANY_REQUESTS,
+                            Json(json!({"error": "rate_limited"})),
+                        )
                     } else {
-                        Json(json!({"error": "bad_verification_code"}))
+                        (
+                            StatusCode::OK,
+                            Json(json!({"error": "bad_verification_code"})),
+                        )
                     }
                 }),
             )
@@ -806,6 +825,22 @@ mod tests {
         let response = get_with_cookie(
             app,
             "/auth/github/callback?code=good&state=n",
+            "__Host-ocean_gh_state=n",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_token_exchange_is_a_retryable_502() {
+        let base = stub_github("active").await;
+        let app = app(state(
+            Some(&base),
+            vec![roster_user("ecfromthedc", Some(202), "ec-token")],
+        ));
+        let response = get_with_cookie(
+            app,
+            "/auth/github/callback?code=busy&state=n",
             "__Host-ocean_gh_state=n",
         )
         .await;
