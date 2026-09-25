@@ -3711,6 +3711,77 @@ mod tests {
             .layer(middleware::from_fn(wasm_headers))
     }
 
+    /// ocean-os ROADMAP (Observatory): end-to-end event resume through the
+    /// proxy. A browser reconnecting the Observatory tail sends
+    /// `Last-Event-ID`; the proxy must hand that exact cursor to the daemon
+    /// (with the server-side observer token, never the browser's) so the
+    /// daemon's durable replay resumes where the client left off.
+    #[tokio::test]
+    async fn observatory_tail_resume_forwards_last_event_id_to_the_daemon() {
+        async fn echo(headers: HeaderMap) -> Response {
+            let body = format!(
+                "id: 1\ndata: {}\n\n",
+                json!({
+                    "last_event_id": headers.get("last-event-id").and_then(|v| v.to_str().ok()),
+                    "authorization": headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()),
+                    "cookie": headers.contains_key(header::COOKIE),
+                })
+            );
+            ([(header::CONTENT_TYPE, "text/event-stream")], body).into_response()
+        }
+        let upstream = Router::new().route("/v1/observatory/events", get(echo));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+
+        let credential_dir = tempfile::tempdir().expect("tempdir");
+        let token_path = credential_dir.path().join("observatory-token");
+        std::fs::write(&token_path, "server-side-observer\n").unwrap();
+        std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let mut state = auth_test_state();
+        let inner = Arc::get_mut(&mut state).expect("sole state owner");
+        inner.daemon_url = format!("http://{addr}");
+        inner.observer_token_path = token_path;
+        let dist = tempfile::tempdir().expect("dist tempdir");
+        let app = build_app(state, dist.path());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/observatory/events")
+                    .header(header::COOKIE, "ocean_session=test-session")
+                    .header(header::AUTHORIZATION, "Bearer browser-forged")
+                    .header("last-event-id", "1842")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        let data = text
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("one data frame");
+        let seen: Value = serde_json::from_str(data).unwrap();
+        assert_eq!(
+            seen["last_event_id"], "1842",
+            "resume cursor reaches the daemon"
+        );
+        assert_eq!(
+            seen["authorization"], "Bearer server-side-observer",
+            "the daemon sees the server-side token, never the browser's"
+        );
+        assert_eq!(seen["cookie"], false);
+        assert!(
+            text.contains("id: 1"),
+            "event ids pass through for the next resume"
+        );
+    }
+
     fn auth_test_state() -> Arc<AppState> {
         Arc::new(AppState {
             http: reqwest::Client::new(),
