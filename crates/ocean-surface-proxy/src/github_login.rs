@@ -229,10 +229,19 @@ impl GithubLogin {
             .send()
             .await
             .map_err(|e| Refusal::Upstream(format!("org membership: {e}")))?;
-            // 404/403 both mean "not a member we can see" — a pending invite
-            // answers 200 with state "pending", which is also not a member yet.
-            if !membership.status().is_success() {
-                return Err(Refusal::NotInOrg(login));
+            // 404 is "not a member we can see"; 403 is the org refusing this
+            // OAuth app. Both are authorization answers. A 429 or 5xx is GitHub
+            // being unavailable, which must not tell an active member to go
+            // accept an invite. A pending invite answers 200 with state
+            // "pending", which is also not a member yet.
+            match membership.status() {
+                status if status.is_success() => {}
+                reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::FORBIDDEN => {
+                    return Err(Refusal::NotInOrg(login));
+                }
+                status => {
+                    return Err(Refusal::Upstream(format!("org membership: {status}")));
+                }
             }
             let state = membership
                 .json::<MembershipResponse>()
@@ -516,6 +525,10 @@ mod tests {
                 "/user/memberships/orgs/{org}",
                 get(move || async move {
                     match member {
+                        "outage" => (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(json!({"message": "unavailable"})),
+                        ),
                         "active" | "pending" => (StatusCode::OK, Json(json!({"state": member}))),
                         _ => (StatusCode::NOT_FOUND, Json(json!({"message": "Not Found"}))),
                     }
@@ -781,6 +794,22 @@ mod tests {
                 .iter()
                 .any(|c| c.starts_with("ocean_session=")));
         }
+    }
+
+    #[tokio::test]
+    async fn a_github_outage_is_a_retryable_502_not_a_membership_refusal() {
+        let base = stub_github("outage").await;
+        let app = app(state(
+            Some(&base),
+            vec![roster_user("ecfromthedc", Some(202), "ec-token")],
+        ));
+        let response = get_with_cookie(
+            app,
+            "/auth/github/callback?code=good&state=n",
+            "__Host-ocean_gh_state=n",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     }
 
     #[tokio::test]
