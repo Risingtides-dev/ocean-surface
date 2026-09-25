@@ -107,6 +107,50 @@ built artifacts, and immutable deployed releases are left untouched.
 > surface LaunchAgents. Re-verify supervision with
 > `launchctl list | grep -i ocean` instead of assuming process state.
 
+## Continue with GitHub
+
+The login page can offer **Continue with GitHub** next to the password form.
+GitHub proves who is at the browser; `users.json` still decides what they may
+reach. A roster entry signs in through GitHub when it carries a `github_id`:
+that person's **numeric** GitHub account id (`gh api users/<login> --jq .id`).
+The id, never the login, is matched, because a login can be renamed and then
+registered by someone else; the optional `github` field is a label for humans
+and is never consulted. An entry may have a `password`, a `github_id`, or both;
+a GitHub-only entry cannot use the password form at all, and two entries may
+not share an id. Adding `github_id` to an existing password entry does not
+sign that person out.
+
+```json
+{ "username": "ecfromthedc", "github": "ecfromthedc", "github_id": 12345678, "devices": [ … ] }
+```
+
+Setup, once:
+
+1. Create a GitHub OAuth App (owned by the `KINGMAKER-SYSTEMS` org so the org
+   does not have to approve a third-party app) with the callback URL
+   `https://ocean.agentsworld.org/auth/github/callback`.
+2. Write its client secret to `~/.config/ocean-surface/github-client-secret`,
+   mode 0600 (override: `OCEAN_SURFACE_GITHUB_CLIENT_SECRET_FILE`).
+3. Set in the proxy's environment: `OCEAN_SURFACE_GITHUB_CLIENT_ID=<client id>`,
+   `OCEAN_SURFACE_PUBLIC_URL=https://ocean.agentsworld.org`, and
+   `OCEAN_SURFACE_GITHUB_ORG=KINGMAKER-SYSTEMS`. With an org set, sign-in asks
+   for `read:org` and admits only an **active** member (a pending invite is
+   refused); without one, the roster mapping alone decides.
+
+Org membership is checked at sign-in only. The session cookie that follows is
+the entry's derived 30-day token, so **removing someone from the org does not
+end a session they already hold: remove their whole roster entry and restart
+the proxy to revoke.** Always remove the WHOLE entry: a GitHub-only entry left
+with neither `password` nor `github_id` is invalid and the proxy refuses to
+load the roster at all (every user goes offline), and an entry that also has a
+`password` derives its session token from that password, so removing only
+`github_id` leaves its sessions — GitHub-issued ones included — and the
+password form alive. The proxy keeps the GitHub
+access token only for the length of the callback and never stores it. With no client id the button does not render and
+`/auth/github` answers 404. The program this belongs to is
+`ocean-os/docs/specs/2026-09-25-ocean-web-identity-and-node-linking-program.md`
+(M1).
+
 ## Devices — reaching your own machines from one login
 
 A person's roster entry in `~/.config/ocean-surface/users.json` may carry a
