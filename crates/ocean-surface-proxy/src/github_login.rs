@@ -253,9 +253,9 @@ impl GithubLogin {
                 // Only a 403 can be GitHub's exhausted-quota answer; a 404 that
                 // happens to spend the last request is still a real answer.
                 reqwest::StatusCode::FORBIDDEN if rate_limited => {
-                    return Err(Refusal::Upstream(format!(
-                        "org membership rate-limited: {status}"
-                    )));
+                    return Err(Refusal::Upstream(
+                        "org membership rate-limited: 403 with no quota left".to_string(),
+                    ));
                 }
                 reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::FORBIDDEN => {
                     return Err(Refusal::NotInOrg(login));
