@@ -655,7 +655,15 @@ the right trade here, but it is a trade: these helpers previously sat inline in
 one that lost its last caller announced itself. After the move, an orphaned
 helper is silent forever — prune by reading, not by waiting for the gate.
 Consumers: `ci_failure_trigger_control.rs`, `dead_selector_removal.rs`,
-`unheld_room_controls.rs`.
+`rooms_product_doc_truth.rs`, `unheld_room_controls.rs`.
+
+**`tests/rooms_product_doc_truth.rs`** holds `docs/OCEAN_ROOMS_PRODUCT.md` to
+the code (Rooms DoD 5.4): every access state it names must be one of
+`RoomAccessState`'s five variants (read from `src/rooms.rs`), its
+`### Access States` list must be exactly those five, and every `.rooms-*` class
+it names must be defined in `styles/` or emitted from `src/` as a whole class
+name. Edit the doc and this guard together; a new backticked non-state word on
+a line mentioning access goes in `ACCESS_LINE_NON_STATES`.
 
 **`tests/unheld_room_controls.rs`** pins six room controls that measurement
 proves nothing else holds. The failure it exists for: a reviewer deletes a
