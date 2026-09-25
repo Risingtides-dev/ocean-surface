@@ -453,6 +453,21 @@ impl CodingPlansState {
         self.confirm_logout.set(None);
     }
 
+    /// Forget everything that described the machine being left: its rows, its
+    /// load phase, its attempt, its notices. A device switch must never leave
+    /// the previous machine's plans on screen under the new machine's name,
+    /// with live Sign in / Sign out buttons that would act on the new one.
+    pub fn forget_device(self) {
+        self.bump();
+        self.providers.set(Vec::new());
+        self.phase.set(LoadPhase::Idle);
+        self.attempt.set(None);
+        self.busy.set(None);
+        self.confirm_logout.set(None);
+        self.notice.set(None);
+        self.retired.set(Vec::new());
+    }
+
     fn bump(self) -> u64 {
         let next = self.generation.get_untracked().wrapping_add(1);
         self.generation.set(next);
@@ -657,17 +672,27 @@ impl CodingPlansState {
                 &attempt.provider,
                 &format!("/login/{}", encode_segment(&attempt.attempt_id)),
             );
-            if let Err(error) = send(&base, "DELETE", &path).await {
-                log::debug!("cancel sign-in: {}", error.error);
+            let result = send(&base, "DELETE", &path).await;
+            if !self.current(claimed) {
+                return;
             }
-            if self.current(claimed) {
-                self.notice.set(Some(attempt_outcome(
-                    &attempt.label,
-                    AttemptState::Cancelled,
-                    None,
-                )));
-                self.refresh();
-            }
+            let notice = match result {
+                Ok(()) => attempt_outcome(&attempt.label, AttemptState::Cancelled, None),
+                Err(error) => {
+                    // The daemon still holds the attempt. Never claim a
+                    // cancellation that did not happen, and never re-adopt the
+                    // attempt this click asked to stop watching.
+                    self.retire(&attempt.attempt_id);
+                    let device = self.device.get_untracked();
+                    Notice::err(format!(
+                        "Couldn't cancel {} sign-in. {}",
+                        attempt.label,
+                        error_message(&error, &device)
+                    ))
+                }
+            };
+            self.notice.set(Some(notice));
+            self.refresh();
         });
     }
 
@@ -801,13 +826,16 @@ pub fn CodingPlansPanel(state: CodingPlansState) -> impl IntoView {
             }
         }
     });
-    // A device switch while the panel is open describes the machine we left.
+    // A device switch — panel open or closed — forgets the machine we left,
+    // and an open panel reloads for the new one.
     Effect::new(move |previous: Option<String>| {
         let now = state.device.get();
         if let Some(previous) = previous {
-            if previous != now && state.open.get_untracked() {
-                state.close();
-                state.show();
+            if previous != now {
+                state.forget_device();
+                if state.open.get_untracked() {
+                    state.show();
+                }
             }
         }
         now
@@ -1284,6 +1312,37 @@ mod tests {
             serde_json::from_str(r#"{"ok":true,"provider":"codex","removed":true}"#)
                 .expect("logout");
         assert!(logout.removed);
+    }
+
+    /// A device switch forgets the machine being left: no rows, no attempt,
+    /// no retired ids, no notice — nothing that could render under the new
+    /// machine's name or act on it.
+    #[test]
+    fn forgetting_a_device_clears_everything_that_described_it() {
+        let state =
+            CodingPlansState::new(RwSignal::new(String::new()), RwSignal::new("studio".into()));
+        state
+            .providers
+            .set(vec![serde_json::from_str::<ProviderRow>(
+                r#"{"provider":"claude"}"#,
+            )
+            .unwrap()]);
+        state.phase.set(LoadPhase::Loading);
+        state.busy.set(Some("claude".into()));
+        state.notice.set(Some(Notice::err("old".into())));
+        state.retire("attempt-1");
+        let before = state.generation.get_untracked();
+        state.forget_device();
+        assert!(state.providers.get_untracked().is_empty());
+        assert_eq!(state.phase.get_untracked(), LoadPhase::Idle);
+        assert!(state.busy.get_untracked().is_none());
+        assert!(state.notice.get_untracked().is_none());
+        assert!(state.retired.get_untracked().is_empty());
+        assert_ne!(
+            state.generation.get_untracked(),
+            before,
+            "in-flight replies are retired"
+        );
     }
 
     #[test]
