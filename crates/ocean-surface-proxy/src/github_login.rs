@@ -292,6 +292,7 @@ pub(crate) async fn start(State(state): State<Arc<AppState>>, headers: HeaderMap
     let secure = secure_suffix(&state, &headers);
     let (name, path) = state_cookie(secure);
     let mut response = Redirect::to(&github.authorize_url(&nonce)).into_response();
+    no_store(&mut response);
     response.headers_mut().insert(
         header::SET_COOKIE,
         format!(
@@ -385,7 +386,18 @@ pub(crate) async fn callback(
             .parse()
             .expect("expired state cookie must be a valid header"),
     );
+    no_store(&mut response);
     response
+}
+
+/// Both OAuth responses set a cookie; no cache may keep them. The
+/// `static_cache_headers` layer says the same for every `/auth/` path — this
+/// holds even if that layer is reordered or its classification drifts.
+fn no_store(response: &mut Response) {
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store, private"),
+    );
 }
 
 fn refusal_message(refusal: &Refusal, org: Option<&str>) -> (StatusCode, String) {
@@ -600,6 +612,10 @@ mod tests {
             .await
             .unwrap();
         assert!(response.status().is_redirection(), "{}", response.status());
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "no-store, private"
+        );
         let location = response.headers()[header::LOCATION].to_str().unwrap();
         assert!(location.starts_with("https://gh.test/login/oauth/authorize?client_id=client-123"));
         assert!(location
@@ -706,6 +722,11 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "no-store, private",
+            "a response carrying a session cookie must never be cached"
+        );
         let cookies = set_cookies(&response);
         let session = cookies
             .iter()

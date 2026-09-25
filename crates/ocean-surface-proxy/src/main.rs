@@ -1970,7 +1970,16 @@ async fn static_cache_headers(req: Request, next: Next) -> Response {
 
     let mut resp = next.run(req).await;
 
-    let value = if path == "/sw.js"
+    // Sign-in responses carry Set-Cookie (a session, or the OAuth state). A
+    // shared cache or CDN in front of the proxy must never store one and
+    // replay it to the next person who requests the same URL.
+    let value = if path.starts_with("/auth/") {
+        resp.headers_mut().insert(
+            header::PRAGMA,
+            axum::http::HeaderValue::from_static("no-cache"),
+        );
+        "no-store, private"
+    } else if path == "/sw.js"
         || path == "/login"
         || path == "/logout"
         || path == "/"
