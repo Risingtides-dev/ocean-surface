@@ -2,7 +2,8 @@
 //!
 //! A GitHub OAuth App proves WHO is at the browser; the roster still decides
 //! WHAT they may reach. A GitHub account maps to exactly one roster entry by
-//! that entry's `github` field, and the session it earns is the same derived
+//! that entry's numeric `github_id` — never the login, which its owner can
+//! rename and a stranger can then register — and the session it earns is the same derived
 //! cookie a password login earns for that entry, so every route behind the
 //! gate sees one kind of signed-in person regardless of how they got in.
 //!
@@ -44,8 +45,10 @@ use crate::{
 
 /// The anti-CSRF `state` round-trip cookie. SameSite=Lax, not Strict: the
 /// callback is a top-level navigation FROM github.com, and a Strict cookie is
-/// not sent on it — the state check would fail for everyone.
+/// not sent on it — the state check would fail for everyone. Under HTTPS it
+/// carries the `__Secure-` prefix so a sibling subdomain cannot plant one.
 const STATE_COOKIE: &str = "ocean_gh_state";
+const SECURE_STATE_COOKIE: &str = "__Secure-ocean_gh_state";
 /// Ten minutes to finish a GitHub consent screen is generous; the cookie is
 /// single-use either way.
 const STATE_MAX_AGE_SECONDS: u64 = 600;
@@ -160,16 +163,17 @@ impl GithubLogin {
         )
     }
 
-    /// Exchange the callback code and return the GitHub login it belongs to,
+    /// Exchange the callback code and return the GitHub account it belongs to,
     /// after the org check when one is configured. The access token lives only
     /// for the length of this call.
-    async fn identify(&self, http: &reqwest::Client, code: &str) -> Result<String, Refusal> {
+    async fn identify(&self, http: &reqwest::Client, code: &str) -> Result<Account, Refusal> {
         #[derive(Deserialize)]
         struct TokenResponse {
             access_token: Option<String>,
         }
         #[derive(Deserialize)]
         struct UserResponse {
+            id: u64,
             login: String,
         }
         #[derive(Deserialize)]
@@ -211,11 +215,10 @@ impl GithubLogin {
         if !user.status().is_success() {
             return Err(Refusal::Upstream(format!("user lookup: {}", user.status())));
         }
-        let login = user
+        let UserResponse { id, login } = user
             .json::<UserResponse>()
             .await
-            .map_err(|e| Refusal::Upstream(format!("user body: {e}")))?
-            .login;
+            .map_err(|e| Refusal::Upstream(format!("user body: {e}")))?;
 
         if let Some(org) = self.org.as_deref() {
             let membership = api(format!(
@@ -239,8 +242,14 @@ impl GithubLogin {
                 return Err(Refusal::NotInOrg(login));
             }
         }
-        Ok(login)
+        Ok(Account { id, login })
     }
+}
+
+/// The GitHub account a callback proved. `login` is for messages only.
+struct Account {
+    id: u64,
+    login: String,
 }
 
 #[derive(Debug)]
@@ -280,11 +289,12 @@ pub(crate) async fn start(State(state): State<Arc<AppState>>, headers: HeaderMap
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let secure = secure_suffix(&state, &headers);
+    let name = state_cookie_name(secure);
     let mut response = Redirect::to(&github.authorize_url(&nonce)).into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
         format!(
-            "{STATE_COOKIE}={nonce}; Path={START_PATH}; HttpOnly; SameSite=Lax; \
+            "{name}={nonce}; Path={START_PATH}; HttpOnly; SameSite=Lax; \
              Max-Age={STATE_MAX_AGE_SECONDS}{secure}"
         )
         .parse()
@@ -300,14 +310,20 @@ pub(crate) struct CallbackQuery {
     error: Option<String>,
 }
 
-/// The roster entry this GitHub login belongs to. GitHub logins are
-/// case-insensitive, so the match is too.
-fn roster_user_for<'a>(state: &'a AppState, login: &str) -> Option<&'a ProxyUser> {
-    state.users.iter().find(|user| {
-        user.github
-            .as_deref()
-            .is_some_and(|mapped| mapped.eq_ignore_ascii_case(login))
-    })
+/// `__Secure-` requires the Secure attribute, so the prefix is only usable
+/// when the cookie is set over HTTPS; plain-HTTP local development keeps the
+/// bare name.
+fn state_cookie_name(secure: &str) -> &'static str {
+    if secure.is_empty() {
+        STATE_COOKIE
+    } else {
+        SECURE_STATE_COOKIE
+    }
+}
+
+/// The roster entry this GitHub account id belongs to.
+fn roster_user_for(state: &AppState, id: u64) -> Option<&ProxyUser> {
+    state.users.iter().find(|user| user.github_id == Some(id))
 }
 
 /// `GET /auth/github/callback` — GitHub's redirect back.
@@ -320,24 +336,25 @@ pub(crate) async fn callback(
         return StatusCode::NOT_FOUND.into_response();
     };
     let secure = secure_suffix(&state, &headers);
+    let name = state_cookie_name(secure);
     let clear_state =
-        format!("{STATE_COOKIE}=; Path={START_PATH}; HttpOnly; SameSite=Lax; Max-Age=0{secure}");
+        format!("{name}=; Path={START_PATH}; HttpOnly; SameSite=Lax; Max-Age=0{secure}");
 
     let outcome = async {
         if query.error.is_some() {
             return Err(Refusal::Denied);
         }
-        let expected = cookie_value(&headers, STATE_COOKIE).unwrap_or_default();
+        let expected = cookie_value(&headers, name).unwrap_or_default();
         let presented = query.state.as_deref().unwrap_or_default();
         if expected.is_empty() || !constant_time_eq(expected.as_bytes(), presented.as_bytes()) {
             return Err(Refusal::StateMismatch);
         }
         let code = query.code.as_deref().filter(|c| !c.is_empty());
         let code = code.ok_or(Refusal::CodeRejected)?;
-        let login = github.identify(&state.http_json, code).await?;
-        roster_user_for(&state, &login)
+        let account = github.identify(&state.http_json, code).await?;
+        roster_user_for(&state, account.id)
             .map(|user| (user.username.clone(), user.session_token.clone()))
-            .ok_or(Refusal::NotOnRoster(login))
+            .ok_or(Refusal::NotOnRoster(account.login))
     }
     .await;
 
@@ -481,7 +498,7 @@ mod tests {
             )
             .route(
                 "/user",
-                get(|| async { Json(json!({"login": "EcFromTheDC"})) }),
+                get(|| async { Json(json!({"id": 202, "login": "ecfromthedc"})) }),
             )
             .route(
                 "/user/memberships/orgs/{org}",
@@ -498,11 +515,11 @@ mod tests {
         format!("http://{addr}")
     }
 
-    fn roster_user(name: &str, github: Option<&str>, token: &str) -> ProxyUser {
+    fn roster_user(name: &str, github_id: Option<u64>, token: &str) -> ProxyUser {
         ProxyUser {
             username: name.into(),
             password: None,
-            github: github.map(str::to_string),
+            github_id,
             devices: vec![ProxyDevice {
                 name: "studio".into(),
                 daemon_url: "http://127.0.0.1:1".into(),
@@ -591,13 +608,13 @@ mod tests {
         let cookies = set_cookies(&response);
         let state_cookie = cookies
             .iter()
-            .find(|c| c.starts_with("ocean_gh_state="))
+            .find(|c| c.starts_with("__Secure-ocean_gh_state="))
             .expect("state cookie");
         assert!(state_cookie.contains("SameSite=Lax"), "{state_cookie}");
         assert!(state_cookie.contains("HttpOnly"));
         assert!(state_cookie.contains("Secure"));
         let nonce = state_cookie
-            .trim_start_matches("ocean_gh_state=")
+            .trim_start_matches("__Secure-ocean_gh_state=")
             .split(';')
             .next()
             .unwrap();
@@ -649,9 +666,12 @@ mod tests {
         let base = stub_github("active").await;
         let app = app(state(
             Some(&base),
-            vec![roster_user("ecfromthedc", Some("ecfromthedc"), "ec-token")],
+            vec![roster_user("ecfromthedc", Some(202), "ec-token")],
         ));
-        for cookie in ["ocean_gh_state=aaaa", ""] {
+        // The last case is a bare-named cookie with the RIGHT value: under HTTPS
+        // only the `__Secure-` name counts, so one planted from a sibling
+        // subdomain (which cannot set that prefix without Secure) is ignored.
+        for cookie in ["__Secure-ocean_gh_state=aaaa", "", "ocean_gh_state=bbbb"] {
             let response = get_with_cookie(
                 app.clone(),
                 "/auth/github/callback?code=good&state=bbbb",
@@ -675,14 +695,14 @@ mod tests {
         let app = app(state(
             Some(&base),
             vec![
-                roster_user("smaths", Some("Risingtides-dev"), "smaths-token"),
-                roster_user("ecfromthedc", Some("ecfromthedc"), "ec-token"),
+                roster_user("smaths", Some(101), "smaths-token"),
+                roster_user("ecfromthedc", Some(202), "ec-token"),
             ],
         ));
         let response = get_with_cookie(
             app.clone(),
             "/auth/github/callback?code=good&state=nonce-1",
-            "ocean_gh_state=nonce-1",
+            "__Secure-ocean_gh_state=nonce-1",
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -691,12 +711,12 @@ mod tests {
             .iter()
             .find(|c| c.starts_with("ocean_session="))
             .expect("session cookie");
-        // Case-insensitive match on the GitHub login picks the right person.
+        // The account id, not roster order, picks the person.
         assert!(session.starts_with("ocean_session=ec-token;"), "{session}");
         assert!(session.contains("SameSite=Strict"));
         assert!(cookies
             .iter()
-            .any(|c| c.starts_with("ocean_gh_state=;") && c.contains("Max-Age=0")));
+            .any(|c| c.starts_with("__Secure-ocean_gh_state=;") && c.contains("Max-Age=0")));
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -716,26 +736,25 @@ mod tests {
 
     #[tokio::test]
     async fn non_members_pending_invites_and_unknown_accounts_are_refused() {
-        for (member, roster_login) in [
-            ("none", "ecfromthedc"),
-            ("pending", "ecfromthedc"),
-            ("active", "someone-else"),
-        ] {
+        // "active" with a different id is the renamed-login case: the stub
+        // still answers login "ecfromthedc", but the roster holds another
+        // account's id, and the login is never consulted.
+        for (member, roster_id) in [("none", 202), ("pending", 202), ("active", 999)] {
             let base = stub_github(member).await;
             let app = app(state(
                 Some(&base),
-                vec![roster_user("ecfromthedc", Some(roster_login), "ec-token")],
+                vec![roster_user("ecfromthedc", Some(roster_id), "ec-token")],
             ));
             let response = get_with_cookie(
                 app,
                 "/auth/github/callback?code=good&state=n",
-                "ocean_gh_state=n",
+                "__Secure-ocean_gh_state=n",
             )
             .await;
             assert_eq!(
                 response.status(),
                 StatusCode::FORBIDDEN,
-                "{member}/{roster_login}"
+                "{member}/{roster_id}"
             );
             assert!(!set_cookies(&response)
                 .iter()
@@ -748,12 +767,12 @@ mod tests {
         let base = stub_github("active").await;
         let app = app(state(
             Some(&base),
-            vec![roster_user("ecfromthedc", Some("ecfromthedc"), "ec-token")],
+            vec![roster_user("ecfromthedc", Some(202), "ec-token")],
         ));
         let response = get_with_cookie(
             app,
             "/auth/github/callback?code=reused&state=n",
-            "ocean_gh_state=n",
+            "__Secure-ocean_gh_state=n",
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -763,7 +782,7 @@ mod tests {
     async fn a_github_only_entry_cannot_use_the_password_form() {
         let app = app(state(
             Some("https://gh.test"),
-            vec![roster_user("ecfromthedc", Some("ecfromthedc"), "ec-token")],
+            vec![roster_user("ecfromthedc", Some(202), "ec-token")],
         ));
         for password in ["", "\u{0}no-password"] {
             let response = app

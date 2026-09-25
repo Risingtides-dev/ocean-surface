@@ -262,9 +262,10 @@ struct ProxyUser {
     /// Absent for a GitHub-only entry: that person cannot use the password
     /// form at all, rather than matching an empty password.
     password: Option<String>,
-    /// The GitHub login that signs in as this entry, compared
-    /// case-insensitively. See `github_login`.
-    github: Option<String>,
+    /// The numeric GitHub account id that signs in as this entry. The id, not
+    /// the login: a login can be renamed and then registered by someone else,
+    /// an id is never reused. See `github_login`.
+    github_id: Option<u64>,
     /// Every machine this person may attach to, in roster order. NEVER empty:
     /// an entry carrying only the legacy single `daemon_url` (or nothing at
     /// all) is normalized on load into exactly one device named after its
@@ -296,7 +297,7 @@ impl std::fmt::Debug for ProxyUser {
         f.debug_struct("ProxyUser")
             .field("username", &self.username)
             .field("password", &"[redacted]")
-            .field("github", &self.github)
+            .field("github_id", &self.github_id)
             .field("devices", &self.devices)
             .field("session_token", &"[redacted]")
             .finish()
@@ -351,9 +352,13 @@ struct UserFileEntry {
     /// Optional once `github` is set; at least one of the two is required.
     #[serde(default)]
     password: Option<String>,
-    /// GitHub login that may sign in as this entry via "Continue with GitHub".
+    /// Numeric GitHub account id (`gh api users/<login> --jq .id`) that may
+    /// sign in as this entry via "Continue with GitHub".
     #[serde(default)]
-    github: Option<String>,
+    github_id: Option<u64>,
+    /// The GitHub login, for the humans reading this file. Never matched on.
+    #[serde(default, rename = "github")]
+    _github_label: Option<String>,
     /// Optional legacy single machine: falls back to OCEAN_DAEMON_URL, so a
     /// single-machine entry needs only a username and password. Normalized
     /// into a one-device roster on load; mutually exclusive with `devices`.
@@ -421,34 +426,36 @@ fn load_users(
             .password
             .clone()
             .filter(|password| !password.trim().is_empty());
-        let github = entry
-            .github
-            .as_deref()
-            .map(str::trim)
-            .filter(|login| !login.is_empty())
-            .map(str::to_string);
-        if entry.username.trim().is_empty() || (password.is_none() && github.is_none()) {
+        let github_id = entry.github_id;
+        if entry.username.trim().is_empty() || (password.is_none() && github_id.is_none()) {
             anyhow::bail!(
-                "{}: every user needs a username and a password or a github login",
+                "{}: every user needs a username and a password or a github_id",
                 path.display()
+            );
+        }
+        if github_id.is_some()
+            && password.is_none()
+            && entry.password.as_deref().is_some_and(|p| !p.is_empty())
+        {
+            tracing::warn!(
+                user = %entry.username,
+                "blank password ignored; this entry signs in with GitHub only"
             );
         }
         let devices = devices_for_entry(path, &entry, default_daemon_url)?;
         // A password entry keeps its existing derivation, so adding a `github`
         // field to it does not sign anybody out.
-        let session_token = match (&password, &github) {
+        let session_token = match (&password, github_id) {
             (Some(password), _) => {
                 derive_user_session_token(&entry.username, password, secret_path)?
             }
-            (None, Some(login)) => {
-                derive_github_session_token(&entry.username, login, secret_path)?
-            }
+            (None, Some(id)) => derive_github_session_token(&entry.username, id, secret_path)?,
             (None, None) => unreachable!("rejected above"),
         };
         users.push(ProxyUser {
             username: entry.username,
             password,
-            github,
+            github_id,
             devices,
             session_token,
         });
@@ -460,6 +467,16 @@ fn load_users(
     for u in &users {
         if !seen.insert(u.username.clone()) {
             anyhow::bail!("{}: duplicate username '{}'", path.display(), u.username);
+        }
+    }
+    // One GitHub account signing in as two people would make the callback's
+    // choice order-dependent, the same reason duplicate usernames are refused.
+    let mut seen_ids = std::collections::BTreeSet::new();
+    for u in &users {
+        if let Some(id) = u.github_id {
+            if !seen_ids.insert(id) {
+                anyhow::bail!("{}: github_id {id} is on two entries", path.display());
+            }
         }
     }
     Ok(users)
@@ -633,11 +650,11 @@ fn derive_user_session_token(
 
 /// Session token for a GitHub-only roster entry. Domain-separated from the
 /// password form so no username/password pair can ever derive the same token,
-/// and bound to the GitHub login so remapping an entry signs its old sessions
-/// out.
+/// and bound to the GitHub account id so remapping an entry signs its old
+/// sessions out.
 fn derive_github_session_token(
     user: &str,
-    github_login: &str,
+    github_id: u64,
     secret_path: &FsPath,
 ) -> anyhow::Result<String> {
     let secret = load_or_create_session_secret(secret_path)?;
@@ -645,8 +662,8 @@ fn derive_github_session_token(
     digest.update(secret.as_bytes());
     digest.update(b"\0github-user\0");
     digest.update(user.as_bytes());
-    digest.update(b"\0login\0");
-    digest.update(github_login.to_ascii_lowercase().as_bytes());
+    digest.update(b"\0id\0");
+    digest.update(github_id.to_string().as_bytes());
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest.finalize()))
 }
 
@@ -1090,7 +1107,7 @@ async fn main() -> anyhow::Result<()> {
         github_login::GithubLogin::from_env()?
     };
     if let Some(github) = github.as_ref() {
-        let mapped = users.iter().filter(|u| u.github.is_some()).count();
+        let mapped = users.iter().filter(|u| u.github_id.is_some()).count();
         tracing::info!(org = ?github.org(), mapped, "GitHub sign-in enabled");
     }
     if users.is_empty() {
@@ -3827,7 +3844,7 @@ mod tests {
         ProxyUser {
             username: name.to_string(),
             password: Some(pass.to_string()),
-            github: None,
+            github_id: None,
             devices: vec![device(&device_name_from_url(daemon), daemon)],
             session_token: token.to_string(),
         }
@@ -4236,14 +4253,14 @@ mod tests {
             "http://default:4780",
             &secret,
             &write(
-                r#"[{"username":"a","password":"p","github":" Risingtides-dev "},
-                    {"username":"b","github":"ecfromthedc"}]"#,
+                r#"[{"username":"a","password":"p","github":"Risingtides-dev","github_id":101},
+                    {"username":"b","github":"ecfromthedc","github_id":202}]"#,
             ),
         )
         .expect("load");
         // Adding a GitHub login to a password entry signs nobody out.
         assert_eq!(before[0].session_token, after[0].session_token);
-        assert_eq!(after[0].github.as_deref(), Some("Risingtides-dev"));
+        assert_eq!(after[0].github_id, Some(101));
         // A GitHub-only entry has no password and its own token.
         assert!(after[1].password.is_none());
         assert_ne!(after[1].session_token, after[0].session_token);
@@ -4251,13 +4268,18 @@ mod tests {
         let err = load_users(
             "http://default:4780",
             &secret,
-            &write(r#"[{"username":"c","password":"  ","github":""}]"#),
+            &write(r#"[{"username":"c","password":"  ","github":"only-a-label"}]"#),
         )
         .unwrap_err();
-        assert!(
-            err.to_string().contains("password or a github login"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("password or a github_id"), "{err}");
+
+        let err = load_users(
+            "http://default:4780",
+            &secret,
+            &write(r#"[{"username":"a","github_id":7},{"username":"b","github_id":7}]"#),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("two entries"), "{err}");
     }
 
     #[test]

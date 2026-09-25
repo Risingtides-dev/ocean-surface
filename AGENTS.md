@@ -59,8 +59,8 @@ shell at the `dist/` it just built; after another `trunk build`, Cmd+R in the
 app re-reads it without a Rust rebuild).
 
 The public proxy login contract is username/password — or, when configured,
-"Continue with GitHub" mapped to a roster entry's `github` field and gated on
-active org membership (`crates/ocean-surface-proxy/src/github_login.rs`,
+"Continue with GitHub" mapped to a roster entry's numeric `github_id` (never
+the renameable login) and gated on active org membership (`crates/ocean-surface-proxy/src/github_login.rs`,
 setup in `ops/README.md`) — to the same HttpOnly, SameSite=Strict session
 cookie. GitHub's OAuth state rides a SameSite=Lax cookie and the callback lands
 by same-origin meta refresh, because a cross-site redirect chain would withhold
