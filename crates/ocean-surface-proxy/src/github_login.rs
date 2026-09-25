@@ -250,7 +250,9 @@ impl GithubLogin {
                 .is_some_and(|value| value.as_bytes() == b"0");
             match membership.status() {
                 status if status.is_success() => {}
-                status if rate_limited => {
+                // Only a 403 can be GitHub's exhausted-quota answer; a 404 that
+                // happens to spend the last request is still a real answer.
+                reqwest::StatusCode::FORBIDDEN if rate_limited => {
                     return Err(Refusal::Upstream(format!(
                         "org membership rate-limited: {status}"
                     )));
@@ -560,6 +562,11 @@ mod tests {
                             [("x-ratelimit-remaining", "10")],
                             Json(json!({"message": "unavailable"})),
                         ),
+                        "none-last-request" => (
+                            StatusCode::NOT_FOUND,
+                            [("x-ratelimit-remaining", "0")],
+                            Json(json!({"message": "Not Found"})),
+                        ),
                         "ratelimited" => (
                             StatusCode::FORBIDDEN,
                             [("x-ratelimit-remaining", "0")],
@@ -817,7 +824,14 @@ mod tests {
         // "active" with a different id is the renamed-login case: the stub
         // still answers login "ecfromthedc", but the roster holds another
         // account's id, and the login is never consulted.
-        for (member, roster_id) in [("none", 202), ("pending", 202), ("active", 999)] {
+        // "none-last-request": a 404 carrying an exhausted quota header is
+        // still a real non-member answer, not an outage.
+        for (member, roster_id) in [
+            ("none", 202),
+            ("none-last-request", 202),
+            ("pending", 202),
+            ("active", 999),
+        ] {
             let base = stub_github(member).await;
             let app = app(state(
                 Some(&base),
