@@ -7420,3 +7420,13 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+
+time:      [17:20] [09-25-26]
+agent:     [claude]
+worktree:  test/observatory-resume-contract
+type:      testing
+area:      backend
+
+Contract test for the ocean-os ROADMAP item on end-to-end Observatory event resume through the Surface proxy. proxy_observatory already forwarded a browser's Last-Event-ID to the daemon's /v1/observatory/events tail, but nothing pinned it. observatory_tail_resume_forwards_last_event_id_to_the_daemon drives the real router against a stub daemon and asserts four things: the exact resume cursor arrives, the daemon sees only the server-side observer token (a forged browser Authorization is replaced), the session cookie never crosses, and event ids pass through for the next resume. It was mutation-checked to fail with the forwarding line removed. ocean-surface-proxy 85 tests, clippy -D warnings.
+
+_________________________________________________________________________________ 17:20 test/observatory-resume-contract
