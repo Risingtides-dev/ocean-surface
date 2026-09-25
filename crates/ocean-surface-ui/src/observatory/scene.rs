@@ -900,7 +900,7 @@ fn draw_station(
         draw_completion_crate(context, x + 37.0, y - 7.0, palette);
     }
 
-    if integrity != IntegrityState::Live {
+    if integrity.veils_floor() {
         context.set_global_alpha(if faded { 0.28 } else { 0.46 });
         context.set_fill_style_str(&palette.ink);
         context.fill_rect(x - 58.0, y - 88.0, 116.0, 116.0);

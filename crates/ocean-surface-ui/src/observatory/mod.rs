@@ -3,6 +3,7 @@ pub mod domain;
 pub mod inspector;
 pub mod layout;
 pub mod reducer;
+pub mod replay;
 pub mod scene;
 
 use leptos::prelude::*;
@@ -40,6 +41,17 @@ pub fn OceanFloor(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
             selected.set(None);
         }
     });
+
+    // Refresh from a replayed past resumes the live stream; a snapshot alone
+    // would relabel the paused view as live without tailing new events.
+    let refresh_or_resume = move || {
+        if replay.get_untracked() {
+            replay.set(false);
+            client.connect(base_url);
+        } else {
+            client.refresh(base_url);
+        }
+    };
 
     let daemon_for_transcript = daemon.clone();
     let open_transcript = Callback::new(move |session_id: String| {
@@ -124,7 +136,7 @@ pub fn OceanFloor(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                 <div class="ocean-floor__integrity" role="status">
                     <strong>{move || client.state.get().integrity.label()}</strong>
                     <span>{move || client.state.get().last_error.unwrap_or_else(|| "Requesting a fresh snapshot.".into())}</span>
-                    <button type="button" on:click=move |_| client.refresh(base_url)>"Refresh"</button>
+                    <button type="button" on:click=move |_| refresh_or_resume()>"Refresh"</button>
                 </div>
             </Show>
 
@@ -180,11 +192,11 @@ pub fn OceanFloor(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                         let value = event_target_value(&event).parse::<u64>().unwrap_or_default();
                         replay.set(true);
                         client.stop();
-                        client.snapshot_at(base_url, value);
+                        client.replay_to(base_url, value);
                     }
                 />
                 <output>{move || client.state.get().cursor}</output>
-                <button type="button" on:click=move |_| client.refresh(base_url)>"Refresh"</button>
+                <button type="button" on:click=move |_| refresh_or_resume()>"Refresh"</button>
             </footer>
 
             <Show when=move || client.loading.get() && client.state.get().nodes.is_empty()>

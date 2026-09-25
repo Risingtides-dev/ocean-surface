@@ -358,6 +358,10 @@ pub enum IntegrityState {
     Gap,
     Stale,
     Disconnected,
+    /// A past cursor rebuilt from recorded replay events; not live.
+    Historical,
+    /// The daemon is reachable but cannot serve the requested history.
+    ReplayUnavailable,
 }
 
 impl IntegrityState {
@@ -367,7 +371,15 @@ impl IntegrityState {
             Self::Gap => "incomplete",
             Self::Stale => "resyncing",
             Self::Disconnected => "offline",
+            Self::Historical => "replay",
+            Self::ReplayUnavailable => "replay unavailable",
         }
+    }
+
+    /// Whether the floor should be veiled as uncertain. A cleanly rebuilt
+    /// historical view is exact, so it is not.
+    pub fn veils_floor(self) -> bool {
+        !matches!(self, Self::Live | Self::Historical)
     }
 }
 
