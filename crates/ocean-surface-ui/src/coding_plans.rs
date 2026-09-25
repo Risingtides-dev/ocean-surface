@@ -411,6 +411,10 @@ pub struct CodingPlansState {
     pub device: RwSignal<String>,
     /// Retires poll loops and stale list replies.
     generation: RwSignal<u64>,
+    /// Latest provider-list request. Every refresh takes a new ticket, so a
+    /// slower earlier GET (say, one sent before a sign-out) can never land
+    /// after a newer one and repaint rows the daemon has since changed.
+    refresh_ticket: RwSignal<u64>,
     /// Attempt ids this panel stopped watching on its own bounds (time or
     /// failure limit). The list still reports them pending, and re-adopting
     /// one would restart the very loop the bound just ended.
@@ -430,6 +434,7 @@ impl CodingPlansState {
             base,
             device,
             generation: RwSignal::new(0),
+            refresh_ticket: RwSignal::new(0),
             retired: RwSignal::new(Vec::new()),
         }
     }
@@ -480,13 +485,18 @@ impl CodingPlansState {
 
     pub fn refresh(self) {
         let claimed = self.generation.get_untracked();
+        let ticket = self.refresh_ticket.get_untracked().wrapping_add(1);
+        self.refresh_ticket.set(ticket);
         let base = self.base.get_untracked();
         if self.providers.get_untracked().is_empty() {
             self.phase.set(LoadPhase::Loading);
         }
         spawn_local(async move {
             let result = fetch_providers(&base).await;
-            if !self.current(claimed) || !self.open.get_untracked() {
+            if !self.current(claimed)
+                || !self.open.get_untracked()
+                || self.refresh_ticket.get_untracked() != ticket
+            {
                 return;
             }
             match result {
@@ -554,6 +564,13 @@ impl CodingPlansState {
                     };
                     if !opened {
                         log::debug!("sign-in tab not opened; the panel offers a link instead");
+                    }
+                    // The native open above awaits an IPC round trip; the panel
+                    // may have closed or switched devices meanwhile, and a
+                    // watch installed now would strand a waiting state no poll
+                    // ever clears.
+                    if !self.current(claimed) || !self.open.get_untracked() {
+                        return;
                     }
                     self.watch(ActiveAttempt {
                         provider,
