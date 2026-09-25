@@ -7420,3 +7420,13 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+
+time:      [16:26] [09-25-26]
+agent:     [claude]
+worktree:  feat/room-wire-vendor
+type:      feature-request
+area:      frontend
+
+Rooms DoD 5.8, surface half. ocean-os now publishes docs/contracts/room-wire.json (SSE event names, access states, message and participant kinds, /snapshot and /transcript keys, and the not-open answer) held equal to its router; this vendors it at crates/ocean-surface-ui/tests/fixtures/ocean-os-room-wire/ with vendored-from.json recording ocean-os b497df1 and the copy's sha256, adds scripts/vendor-ocean-os-room-wire.mjs (node builtins only; refreshes from $OCEAN_OS_DIR, default ../ocean-os, optionally at --ref; --check exits 1 on drift or a hand-edited copy, --source reads a fetched file), and adds a step to CI's script guards job that curls the artifact from ocean-os main and runs --check, failing with the refresh command. src/room_wire_contract_tests.rs, a #[path] child of rooms so it reaches the private envelopes, include_str!s the copy and proves every access state, message kind and participant kind decodes (and round-trips, and labels the roster chip with its wire word), every surface variant is in the contract by exhaustive match, the tail both subscribes to and decodes every SSE event, and RoomSnapshotResponse and TranscriptResponse accept a body of exactly the contract keys; a contract value the surface has not ruled on fails naming it, measured by adding a participant kind, an SSE event and a transcript key (three reds, restored). The #480 follow-up: attachments.rs, room_artifacts.rs and room_summary.rs bodies decode room_not_open, and their error mappers say "That room is no longer open." on the marker first while keeping the unknown_room arm for older daemons, with unit tests on each classifier. AGENTS.md Rooms Contract records the vendoring rule. Gates: ocean-surface-ui 1423 tests, clippy wasm32 and host all-targets -D warnings, fmt, both ledger checks, vendor --check against ocean-os origin/main and against the HTTPS copy.
+
+_________________________________________________________________________________ 16:26 feat/room-wire-vendor

@@ -6953,3 +6953,9 @@ mod tests {
         assert_eq!(room_attention_badge(Some(&unread_only)), "99+");
     }
 }
+
+// Rooms DoD 5.8: the decoders above cover ocean-os's vendored room wire
+// contract. A child module so it can reach the private envelopes.
+#[cfg(test)]
+#[path = "room_wire_contract_tests.rs"]
+mod room_wire_contract_tests;

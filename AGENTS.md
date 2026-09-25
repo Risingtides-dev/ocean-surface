@@ -381,6 +381,20 @@ Web surface session UI:
 - An empty hydrated transcript has no resume cursor. Surface omits
   `after_seq` until it owns a real room sequence, preserving the daemon's
   zero-based first row.
+- The room wire is a vendored contract (Rooms DoD 5.8). ocean-os publishes
+  `docs/contracts/room-wire.json` (SSE event names, access states, message and
+  participant kinds, `/snapshot` and `/transcript` keys, the not-open answer)
+  and holds it equal to its router; this repo keeps a copy under
+  `crates/ocean-surface-ui/tests/fixtures/ocean-os-room-wire/` with its source
+  commit in `vendored-from.json`. `src/room_wire_contract_tests.rs` proves the
+  decoders cover every value, and CI's `script guards` job fetches ocean-os
+  `main` and fails when the copy is stale. Refresh with
+  `node scripts/vendor-ocean-os-room-wire.mjs --ref origin/main` (ocean-os at
+  `$OCEAN_OS_DIR`, default `../ocean-os`), never by hand — `--check` also
+  compares the copy with its recorded sha256. Every "room not open" 404 now
+  carries `room_not_open: true`; the attachment, artifact and summary error
+  mappers key on that marker first and keep the `unknown_room` arm for older
+  daemons.
 - Mention notifications are raised from the LIVE TAIL only, by the same
   `room_markdown` tokeniser that paints the highlight, so what notifies is what
   shows. Hydration and the load-older backfill never notify — history arriving
