@@ -2184,11 +2184,75 @@ async fn select_device(
     response
 }
 
+/// True when a request body may be forwarded to a daemon route that parses
+/// JSON: it is empty (whitespace only), or it is declared `application/json`
+/// (or a `+json` type), parameters and case ignored.
+///
+/// The JSON forwarders used to stamp `application/json` on WHATEVER arrived.
+/// A browser sends `text/plain`, `application/x-www-form-urlencoded` and
+/// `multipart/form-data` — and a typeless Blob — without a CORS preflight, so
+/// that upgrade turned a cross-site `<form enctype=text/plain>` or `no-cors`
+/// fetch into a well-formed JSON call to a route that otherwise demands a
+/// preflighted request. Refusing it (415) rather than forwarding the original
+/// type keeps one rule for every daemon extractor, lenient or not. The PWA is
+/// unaffected: every JSON write it makes goes through gloo's `.json()` or sets
+/// `content-type: application/json` itself, and its bodiless POSTs (close,
+/// cancel, retry) are empty. Raw-bytes lanes (attachment upload, `/api/stt`)
+/// never come through here.
+fn json_body_acceptable(content_type: Option<&str>, body: &[u8]) -> bool {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return true;
+    }
+    let Some(declared) = content_type else {
+        return false;
+    };
+    let essence = declared
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    essence == "application/json"
+        || (essence.starts_with("application/") && essence.ends_with("+json"))
+}
+
+fn json_content_type_required() -> Response {
+    (
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        [(header::CONTENT_TYPE, "application/json")],
+        Bytes::from_static(br#"{"ok":false,"error":"json_content_type_required"}"#),
+    )
+        .into_response()
+}
+
+/// A buffered request body bound for a JSON daemon route, admitted only when
+/// [`json_body_acceptable`] says so. Same body limit as the `Bytes` extractor
+/// it wraps.
+struct JsonForward(Bytes);
+
+impl<S: Send + Sync> axum::extract::FromRequest<S> for JsonForward {
+    type Rejection = Response;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let declared = req
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .map(|value| value.to_str().unwrap_or_default().to_owned());
+        let body = Bytes::from_request(req, state)
+            .await
+            .map_err(IntoResponse::into_response)?;
+        if !json_body_acceptable(declared.as_deref(), &body) {
+            return Err(json_content_type_required());
+        }
+        Ok(JsonForward(body))
+    }
+}
+
 /// Reverse-proxy POST /v1/agent/turns to the local daemon.
 async fn proxy_turns(
     State(state): State<Arc<AppState>>,
     Extension(daemon): Extension<ResolvedDaemon>,
-    body: Bytes,
+    JsonForward(body): JsonForward,
 ) -> impl IntoResponse {
     let Some(url) = upstream_url(&daemon, "/v1/agent/turns", None) else {
         return upstream_path_rewritten();
@@ -2219,7 +2283,7 @@ async fn proxy_turns(
 async fn proxy_sessions_post(
     State(state): State<Arc<AppState>>,
     Extension(daemon): Extension<ResolvedDaemon>,
-    body: Bytes,
+    JsonForward(body): JsonForward,
 ) -> impl IntoResponse {
     let Some(url) = upstream_url(&daemon, "/v1/agent/sessions", None) else {
         return upstream_path_rewritten();
@@ -2371,7 +2435,7 @@ async fn proxy_agents(
 async fn proxy_agent_create(
     State(state): State<Arc<AppState>>,
     Extension(daemon): Extension<ResolvedDaemon>,
-    body: Bytes,
+    JsonForward(body): JsonForward,
 ) -> impl IntoResponse {
     proxy_post_json(&state, &daemon, "/v1/agents", body).await
 }
@@ -2406,7 +2470,7 @@ async fn proxy_agent_update(
     State(state): State<Arc<AppState>>,
     Extension(daemon): Extension<ResolvedDaemon>,
     Path(name): Path<String>,
-    body: Bytes,
+    JsonForward(body): JsonForward,
 ) -> Response {
     let Some(path) = agent_daemon_path(&name) else {
         return (StatusCode::BAD_REQUEST, "invalid path").into_response();
@@ -2467,7 +2531,7 @@ async fn proxy_model_get(
 async fn proxy_model_set(
     State(state): State<Arc<AppState>>,
     Extension(daemon): Extension<ResolvedDaemon>,
-    body: Bytes,
+    JsonForward(body): JsonForward,
 ) -> impl IntoResponse {
     proxy_post_json(&state, &daemon, "/v1/model", body).await
 }
@@ -2484,7 +2548,7 @@ async fn proxy_projects_list(
 async fn proxy_projects_create(
     State(state): State<Arc<AppState>>,
     Extension(daemon): Extension<ResolvedDaemon>,
-    body: Bytes,
+    JsonForward(body): JsonForward,
 ) -> impl IntoResponse {
     proxy_post_json(&state, &daemon, "/v1/projects", body).await
 }
@@ -2506,7 +2570,7 @@ async fn proxy_project_patch(
     State(state): State<Arc<AppState>>,
     Extension(daemon): Extension<ResolvedDaemon>,
     Path(id): Path<String>,
-    body: Bytes,
+    JsonForward(body): JsonForward,
 ) -> impl IntoResponse {
     let Some(path) = daemon_path_with_segment("/v1/projects/", &id, "") else {
         return invalid_path();
@@ -2537,7 +2601,7 @@ async fn proxy_project_delete(
 async fn proxy_component_event(
     State(state): State<Arc<AppState>>,
     Extension(daemon): Extension<ResolvedDaemon>,
-    body: Bytes,
+    JsonForward(body): JsonForward,
 ) -> impl IntoResponse {
     proxy_post_json(&state, &daemon, "/v1/component/event", body).await
 }
@@ -2546,7 +2610,7 @@ async fn proxy_component_event(
 async fn proxy_call_place(
     State(state): State<Arc<AppState>>,
     Extension(daemon): Extension<ResolvedDaemon>,
-    body: Bytes,
+    JsonForward(body): JsonForward,
 ) -> impl IntoResponse {
     proxy_post_json(&state, &daemon, CALL_PLACE_DAEMON_PATH, body).await
 }
@@ -2555,7 +2619,7 @@ async fn proxy_call_place(
 async fn proxy_realtime_client_secret(
     State(state): State<Arc<AppState>>,
     Extension(daemon): Extension<ResolvedDaemon>,
-    body: Bytes,
+    JsonForward(body): JsonForward,
 ) -> impl IntoResponse {
     proxy_post_json(&state, &daemon, "/v1/voice/realtime/client-secret", body).await
 }
@@ -2566,7 +2630,7 @@ async fn proxy_session_message_append(
     State(state): State<Arc<AppState>>,
     Extension(daemon): Extension<ResolvedDaemon>,
     Path(id): Path<String>,
-    body: Bytes,
+    JsonForward(body): JsonForward,
 ) -> impl IntoResponse {
     let Some(path) = daemon_path_with_segment("/v1/agent/sessions/", &id, "/messages") else {
         return invalid_path();
@@ -2579,7 +2643,7 @@ async fn proxy_livekit_token(
     State(state): State<Arc<AppState>>,
     Extension(daemon): Extension<ResolvedDaemon>,
     Path(room_id): Path<String>,
-    body: Bytes,
+    JsonForward(body): JsonForward,
 ) -> impl IntoResponse {
     if has_dot_segment(&room_id) {
         return invalid_path();
@@ -2924,6 +2988,10 @@ async fn proxy_longhouse(State(state): State<Arc<AppState>>, req: Request) -> im
     let Some(url) = upstream_url(&daemon, &path, req.uri().query()) else {
         return upstream_path_rewritten();
     };
+    let declared_type = req
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .map(|value| value.to_str().unwrap_or_default().to_owned());
     // buffer the (small) body so we can forward it on POST
     // TASK-73: a body over the cap previously became an EMPTY forwarded
     // request via unwrap_or_default() — a truncation that presents upstream as
@@ -2934,6 +3002,10 @@ async fn proxy_longhouse(State(state): State<Arc<AppState>>, req: Request) -> im
             return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
         }
     };
+    if method == axum::http::Method::POST && !json_body_acceptable(declared_type.as_deref(), &body)
+    {
+        return json_content_type_required();
+    }
     let builder = if method == axum::http::Method::POST {
         state
             .http_json
@@ -3453,6 +3525,15 @@ async fn proxy_rooms_persistent(
             return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
         }
     };
+    // A JSON lane never upgrades a browser's text/plain, form or typeless
+    // body into JSON (see `json_body_acceptable`). The upload lane is raw
+    // bytes by contract and forwards its own declared type instead.
+    if method != axum::http::Method::GET
+        && shape != RoomsPersistentShape::AttachmentUpload
+        && !json_body_acceptable(declared_type.as_deref(), &body)
+    {
+        return json_content_type_required();
+    }
     // Body half of the actor binding. An attachment upload is raw bytes the
     // daemon never parses — its uploader rides `?uploader_id=`, checked above.
     if mutating && shape != RoomsPersistentShape::AttachmentUpload {
@@ -3688,7 +3769,7 @@ async fn proxy_permission_decision(
     State(state): State<Arc<AppState>>,
     Extension(daemon): Extension<ResolvedDaemon>,
     Path(id): Path<String>,
-    body: Bytes,
+    JsonForward(body): JsonForward,
 ) -> impl IntoResponse {
     let Some(path) = daemon_path_with_segment("/v1/permissions/", &id, "/decision") else {
         return invalid_path();

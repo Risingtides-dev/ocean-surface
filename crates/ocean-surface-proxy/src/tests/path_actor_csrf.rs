@@ -922,7 +922,10 @@ async fn single_operator_and_auth_off_keep_their_constant_identity() {
                 r#"{"author_id":"anyone","body":"hi"}"#,
             ),
         ] {
-            let mut builder = Request::builder().method(method).uri(uri);
+            let mut builder = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::CONTENT_TYPE, "application/json");
             if let Some(token) = cookie {
                 builder = builder.header(header::COOKIE, format!("{SESSION_COOKIE}={token}"));
             }
@@ -937,12 +940,21 @@ async fn single_operator_and_auth_off_keep_their_constant_identity() {
 // ── M-B: auth-off CSRF across every mutating family ──────────────────────
 
 fn from_source(method: &str, uri: &str, source: Option<(&str, &str)>) -> Request<Body> {
+    from_source_typed(method, uri, source, "text/plain")
+}
+
+fn from_source_typed(
+    method: &str,
+    uri: &str,
+    source: Option<(&str, &str)>,
+    content_type: &str,
+) -> Request<Body> {
     let mut builder = Request::builder()
         .method(method)
         .uri(uri)
         .header(header::HOST, "127.0.0.1:8790")
-        // What a cross-site form can send: no preflight, any body.
-        .header(header::CONTENT_TYPE, "text/plain");
+        // `text/plain` is what a cross-site form can send: no preflight.
+        .header(header::CONTENT_TYPE, content_type);
     if let Some((name, value)) = source {
         builder = builder.header(name, value);
     }
@@ -1044,7 +1056,12 @@ async fn auth_off_admits_same_origin_and_headerless_exactly_as_the_authority_pol
             None,
         ] {
             let before = seen(&log).len();
-            let (status, body) = send(&app, from_source(method, uri, source)).await;
+            // The same-origin PWA sends JSON as JSON.
+            let (status, body) = send(
+                &app,
+                from_source_typed(method, uri, source, "application/json"),
+            )
+            .await;
             assert_ne!(
                 status,
                 StatusCode::FORBIDDEN,
@@ -1111,5 +1128,122 @@ async fn auth_on_leaves_cross_site_defence_to_the_strict_session_cookie() {
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert!(seen(&log).is_empty());
+    upstream.abort();
+}
+
+// ── JSON lanes do not upgrade a browser's no-preflight body into JSON ─────
+
+/// Every JSON forward the proxy has, as the verb the route is registered for.
+const JSON_LANES: &[(&str, &str)] = &[
+    ("POST", "/v1/agent/turns"),
+    ("POST", "/v1/agent/sessions"),
+    ("POST", "/v1/agents"),
+    ("PUT", "/v1/agents/helper"),
+    ("POST", "/v1/model"),
+    ("POST", "/v1/projects"),
+    ("PATCH", "/v1/projects/p1"),
+    ("POST", "/v1/component/event"),
+    ("POST", "/v1/calls/place"),
+    ("POST", "/v1/voice/realtime/client-secret"),
+    ("POST", "/v1/agent/sessions/s1/messages"),
+    ("POST", "/v1/rooms/main/livekit-token"),
+    ("POST", "/v1/permissions/p1/decision"),
+    ("POST", "/v1/longhouse/demo"),
+    ("POST", "/v1/rooms/persistent"),
+    ("POST", "/v1/rooms/persistent/team/messages"),
+    ("PATCH", "/v1/rooms/persistent/team"),
+    ("POST", "/v1/rooms/persistent/team/agents/bootstrap"),
+    ("POST", "/v1/rooms/persistent/team/workspace/exec"),
+];
+
+fn typed(method: &str, uri: &str, content_type: Option<&str>, body: &str) -> Request<Body> {
+    let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(content_type) = content_type {
+        builder = builder.header(header::CONTENT_TYPE, content_type);
+    }
+    builder.body(Body::from(body.to_string())).unwrap()
+}
+
+#[tokio::test]
+async fn a_no_preflight_body_is_never_forwarded_as_json() {
+    let (daemon_url, log, upstream) = spawn_recorder().await;
+    let credential_dir = tempfile::tempdir().expect("credential tempdir");
+    let key_path = write_operator_key(credential_dir.path());
+    // Auth-off, headerless: the CSRF gate admits these, so this rule alone
+    // is what stands between them and the daemon.
+    let (app, _dist) = app_for(auth_off_state(&daemon_url, key_path));
+
+    for (method, uri) in JSON_LANES {
+        for content_type in [
+            Some("text/plain"),
+            Some("text/plain;charset=UTF-8"),
+            Some("application/x-www-form-urlencoded"),
+            Some("multipart/form-data; boundary=x"),
+            Some("application/jsonx"),
+            Some("text/json"),
+            // a typeless Blob is also sent without a preflight
+            None,
+        ] {
+            let (status, text) =
+                send(&app, typed(method, uri, content_type, r#"{"prompt":"x"}"#)).await;
+            assert_eq!(
+                status,
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "{method} {uri} {content_type:?}"
+            );
+            assert_eq!(error_code(&text), "json_content_type_required");
+        }
+    }
+    assert!(seen(&log).is_empty(), "{:?}", seen(&log));
+
+    // What the PWA sends still goes through: JSON as JSON (any case, with
+    // parameters, or a +json type) and an empty body whatever it declares.
+    for (method, uri) in JSON_LANES {
+        for (content_type, body) in [
+            (Some("application/json"), r#"{"prompt":"x"}"#),
+            (Some("Application/JSON; charset=utf-8"), r#"{"prompt":"x"}"#),
+            (Some("application/merge-patch+json"), r#"{"prompt":"x"}"#),
+            (None, ""),
+            (Some("text/plain"), ""),
+        ] {
+            let before = seen(&log).len();
+            let (status, text) = send(&app, typed(method, uri, content_type, body)).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{method} {uri} {content_type:?} {text}"
+            );
+            assert_eq!(
+                seen(&log).len(),
+                before + 1,
+                "{method} {uri} {content_type:?}"
+            );
+        }
+    }
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn raw_byte_lanes_keep_their_own_type() {
+    let (daemon_url, log, upstream) = spawn_recorder().await;
+    let (app, _dist) = app_for(auth_off_state(&daemon_url, PathBuf::from("/not-used")));
+
+    // The attachment upload is raw bytes: the PWA sends a typeless
+    // ArrayBuffer, and any declared type is the file's own.
+    for content_type in [None, Some("text/plain"), Some("image/png")] {
+        let before = seen(&log).len();
+        let (status, text) = send(
+            &app,
+            typed(
+                "POST",
+                "/v1/rooms/persistent/team/attachments?uploader_id=surface-operator&filename=a",
+                content_type,
+                "not json at all",
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{content_type:?} {text}");
+        assert_eq!(seen(&log).len(), before + 1);
+    }
     upstream.abort();
 }

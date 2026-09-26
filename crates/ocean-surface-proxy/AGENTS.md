@@ -138,6 +138,28 @@ Not bound, on purpose:
     `user:pass@` URL — the proxy never challenges, so only by hand) is sent
     on cross-site requests regardless of SameSite.
 
+## JSON lanes take JSON, not whatever arrived
+
+Every forwarder to a JSON daemon route (turns, sessions, agents, model,
+projects, component event, calls, realtime client-secret, session messages,
+livekit token, permission decision, longhouse POST, and every rooms-persistent
+non-GET except the attachment upload) admits a body only when it is empty or
+declared `application/json` / `application/*+json` (case and parameters
+ignored). Anything else — `text/plain`, a form or multipart type, or NO type
+(a typeless Blob) — is refused `415
+{"ok":false,"error":"json_content_type_required"}`. Those are exactly the
+bodies a browser sends cross-origin without a CORS preflight; the forwarders
+used to stamp `application/json` on them, which made JSON-only daemon routes
+reachable by a plain `<form>` or `no-cors` fetch. This is defence in depth
+behind the auth-off gate and, in auth-on, the answer to a same-site page.
+Handlers take the `JsonForward` extractor; the two manual forwarders call
+`json_body_acceptable` directly. Never add a JSON forward that takes a bare
+`Bytes` body. The PWA sends every JSON write via gloo `.json()` or an explicit
+`content-type: application/json`, and its bodiless POSTs are empty, so it is
+unaffected. Raw-bytes lanes keep their own types: the attachment upload
+forwards the declared type (the PWA sends a typeless ArrayBuffer), and
+`/api/stt` forwards audio as octet-stream.
+
 ## Fail-closed side effects worth knowing
 
 - A hand-written raw request target containing bytes the URL parser
