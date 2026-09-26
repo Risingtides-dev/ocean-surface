@@ -7420,3 +7420,13 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+
+time:      [17:38] [09-26-26]
+agent:     [claude] [opus 5.5]
+worktree:  feat/vendor-remaining-wire-contracts
+type:      feature-request
+area:      testing
+
+Surface half of ocean-os's remaining wire contracts, mirroring #225's room-wire scheme. Vendored session-wire, voice-wire, component-wire and observatory-wire byte-for-byte from ocean-os 5d22ad05 at crates/ocean-surface-ui/tests/fixtures/ocean-os-<name>/ with vendored-from.json (repo, path, commit, sha256); scripts/vendor-ocean-os-wire-contracts.mjs is #225's script generalised over --contract (same --check/--ref/--source flags and exit codes, hand-edit detection by sha256), and a script-guards CI step curls all four from ocean-os main and runs --check. src/wire_contract_support.rs adds a serde name probe, a comment/literal-aware source scanner and route-shape helpers; session_wire_contract_tests.rs and voice_wire_contract_tests.rs are #[path] children of daemon.rs, component_ and observatory_wire_contract_tests.rs hang off main.rs, and the proxy's wire_contract_tests.rs includes the support file by path and pins every verb it registers on a published path plus the /api/stt, /api/tts, client-secret, handoff and Observatory relays. 37 tests, each mutation-checked red by changing one Surface literal or serde name. Verified the typed StreamGap from ocean-os #523 decodes, marks the reducer Gap and triggers the adapter's snapshot resync. Drift recorded in KNOWN_UNPUBLISHED_* lists (each asserted still unpublished): surface-tauri is not a known client_type so Tauri sessions run the daemon's CLI harness profile; session-create sends an unpublished title and reads unpublished title/workspace_root; turns send an unpublished canvas the daemon drops; the /v1/agent/events error reset frame is not handled; the /v1/events subscription relies on unpublished frame names and payload fields; eleven daemon routes daemon.rs calls are unpublished; the proxy registers GET /v1/model and POST /v1/agents, unpublished verbs. No Surface code changed. Gates: fmt, proxy build/test (86)/clippy, UI wasm check, UI test (1355), clippy wasm32 and host all-targets -D warnings, wasm test --no-run, four script guards, both ledger checks, trunk build.
+
+_________________________________________________________________________________ 17:38 feat/vendor-remaining-wire-contracts

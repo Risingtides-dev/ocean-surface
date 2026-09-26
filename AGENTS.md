@@ -438,6 +438,30 @@ Web surface session UI:
 **Frozen gates:** the same seven listed under File Preview Deep-Link, plus
 `cargo test -p ocean-surface-proxy`.
 
+## Vendored Wire Contracts
+
+ocean-os publishes its wire facts under `docs/contracts/` and holds each file
+equal to its code. This repo keeps byte-for-byte copies under
+`crates/ocean-surface-ui/tests/fixtures/ocean-os-<name>/` with the source
+commit and sha256 in `vendored-from.json`: `room-wire` via
+`scripts/vendor-ocean-os-room-wire.mjs` (#225), and `session-wire`,
+`voice-wire`, `component-wire` and `observatory-wire` via
+`node scripts/vendor-ocean-os-wire-contracts.mjs --ref origin/main`
+(`$OCEAN_OS_DIR`, default `../ocean-os`). Refresh with the script, never by
+hand; `--check` also compares each copy with its recorded sha256, and CI's
+`script guards` job runs it against ocean-os `main`.
+
+The `*_wire_contract_tests.rs` modules hold Surface inside them: a decoder
+knows every published variant it claims to handle and needs nothing
+unpublished, and every encoder body is a subset of the published request
+fields. Session and voice tests are `#[path]` children of `daemon.rs` (the wire
+types are private there); component and Observatory tests hang off `main.rs`;
+the proxy's `wire_contract_tests.rs` includes the UI's
+`wire_contract_support.rs` by path and pins every verb it registers on a
+published path. Drift that already exists is named in a `KNOWN_UNPUBLISHED_*`
+list next to the check, and each entry is asserted still unpublished, so an
+ocean-os publish forces its removal and anything not on a list fails.
+
 ## Workspace Map
 
 | Path | Role |

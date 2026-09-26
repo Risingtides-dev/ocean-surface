@@ -53,6 +53,17 @@ mod widget;
 mod workspace;
 mod workspace_browser;
 
+// Surface held inside ocean-os's vendored wire contracts
+// (tests/fixtures/ocean-os-*-wire/, refreshed by
+// scripts/vendor-ocean-os-wire-contracts.mjs). The session and voice halves
+// are children of `daemon`, which owns their private wire types.
+#[cfg(test)]
+mod component_wire_contract_tests;
+#[cfg(test)]
+mod observatory_wire_contract_tests;
+#[cfg(test)]
+mod wire_contract_support;
+
 use app::App;
 use widget::{float_mode_active, FloatingApp};
 

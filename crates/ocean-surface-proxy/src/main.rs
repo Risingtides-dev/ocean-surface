@@ -7315,3 +7315,8 @@ mod tests {
         }
     }
 }
+
+// The daemon routes this proxy relays stay on ocean-os's published paths and
+// verbs (the vendored session, voice and Observatory wire contracts).
+#[cfg(test)]
+mod wire_contract_tests;
