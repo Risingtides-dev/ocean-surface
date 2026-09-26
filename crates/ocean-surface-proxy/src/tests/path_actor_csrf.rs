@@ -1247,3 +1247,92 @@ async fn raw_byte_lanes_keep_their_own_type() {
     }
     upstream.abort();
 }
+
+#[tokio::test]
+async fn auth_off_host_check_reads_host_and_uri_authority_both() {
+    let (daemon_url, log, upstream) = spawn_recorder().await;
+    let (app, _dist) = app_for(auth_off_state(&daemon_url, PathBuf::from("/not-used")));
+
+    // Either one naming a foreign authority is enough to refuse; a check that
+    // preferred one could be steered by the other.
+    for (host, uri) in [
+        (
+            Some("127.0.0.1:8790"),
+            "http://evil.example/v1/rooms/persistent",
+        ),
+        (
+            Some("attacker.example"),
+            "http://127.0.0.1:8790/v1/rooms/persistent",
+        ),
+        (None, "http://evil.example:8790/v1/rooms/persistent"),
+    ] {
+        let mut builder = Request::builder().method("GET").uri(uri);
+        if let Some(host) = host {
+            builder = builder.header(header::HOST, host);
+        }
+        let (status, text) = send(&app, builder.body(Body::empty()).unwrap()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{host:?} {uri}");
+        assert_eq!(
+            error_code(&text),
+            "non_loopback_host_refused",
+            "{host:?} {uri}"
+        );
+    }
+
+    // An unreadable Host is not an absent one.
+    let (status, text) = send(
+        &app,
+        Request::builder()
+            .method("GET")
+            .uri("/v1/rooms/persistent")
+            .header(header::HOST, HeaderValue::from_bytes(b"\xff\xfe").unwrap())
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(error_code(&text), "non_loopback_host_refused");
+    assert!(seen(&log).is_empty(), "{:?}", seen(&log));
+
+    // Both loopback: admitted.
+    let (status, _) = send(
+        &app,
+        Request::builder()
+            .method("GET")
+            .uri("http://localhost:8790/v1/rooms/persistent")
+            .header(header::HOST, "127.0.0.1:8790")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Over a real socket: an HTTP/1.1 absolute-form target with a loopback
+    // Host header, which hyper hands to the router with the URI authority set.
+    let (addr, proxy) = serve(app).await;
+    let mut stream = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("connect proxy");
+    stream
+        .write_all(
+            format!(
+                "GET http://evil.example/v1/rooms/persistent HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("write absolute-form request");
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.expect("read response");
+    let text = String::from_utf8_lossy(&raw);
+    assert!(text.starts_with("HTTP/1.1 403"), "{text}");
+    assert!(text.contains("non_loopback_host_refused"), "{text}");
+    assert_eq!(
+        seen(&log).len(),
+        1,
+        "only the both-loopback request: {:?}",
+        seen(&log)
+    );
+    proxy.abort();
+    upstream.abort();
+}

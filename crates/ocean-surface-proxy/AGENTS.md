@@ -101,6 +101,20 @@ Not bound, on purpose:
   anyone, INCLUDING the room's owner, which flips `owner_present` and with it
   what the authority ceremony will admit. Closing it needs the daemon to take
   a caller identity on these routes; the proxy can then bind it here.
+- **Known gap (daemon / authz work):** the target-only authority actions —
+  revoke (`DELETE {key}/agents/{id}`), suspend, resume and reauthorize
+  (`POST {key}/agents/{id}/{action}`) — carry no identity at all (their
+  bodies are a `decision_id` and policy fields), and the proxy injects the
+  operator key on them. So in multi-user mode ANY signed-in roster user can
+  revoke or suspend any agent binding in any room. There is nothing here to
+  bind. The real fix is to authenticate the member lane (Rooms DoD 3.1), or
+  for the proxy to confirm the session user is the room's owner before it
+  injects the key.
+- **Deliberate outage:** an auth-off proxy reached through a tunnel or
+  `tailscale serve` (anything that arrives with a non-loopback Host or URI
+  authority) now answers `403 non_loopback_host_refused` on everything. That
+  is the DNS-rebinding fix below working as intended; non-local access is
+  auth-on only.
 - Routes with no client identity at all (create, PATCH room, invites,
   redeem, read-cursor, outbox retry, register agents) — nothing to bind.
 
@@ -117,9 +131,12 @@ Not bound, on purpose:
   reachable without a CORS preflight (a `<form>` or `no-cors` fetch), the
   forwarders stamp `application/json` on whatever body arrives, and close
   needs no body at all. `/csp-report`, `/login`, `/logout` are outside it.
-- Auth-off, every request (reads and static files too): the request's
-  authority (Host header, or the HTTP/2 URI authority) must be loopback —
-  `localhost`, `127.0.0.0/8`, `::1` — or it is refused `403
+- Auth-off, every request (reads and static files too): EVERY authority the
+  request names — the Host header AND the URI authority (HTTP/2
+  `:authority`, or an HTTP/1.1 absolute-form target like `GET http://evil/…`)
+  — must be loopback; one non-loopback name is enough to refuse, and an
+  unreadable (non-UTF-8) Host counts as non-loopback. Loopback means
+  `localhost`, `127.0.0.0/8`, `::1`; otherwise it is refused `403
   {"ok":false,"error":"non_loopback_host_refused"}`. Auth-off binds loopback
   only, so a non-loopback Host means a DNS-rebinding page (same-origin with
   the name it rebound, so no Origin check sees it) that could otherwise read

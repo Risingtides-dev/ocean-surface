@@ -3104,16 +3104,24 @@ fn is_loopback_authority(host: &str) -> bool {
             .is_ok_and(|address| address.is_loopback())
 }
 
-/// The authority a request was addressed to: the Host header, or (HTTP/2)
-/// the request URI's authority. `None` when the request names neither —
-/// an HTTP/1.0 client or an in-process test — which is not a browser: a
-/// browser always sends one, and a DNS-rebinding page sends ITS name.
-fn request_authority(req: &Request) -> Option<String> {
-    req.headers()
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned)
-        .or_else(|| req.uri().authority().map(|a| a.as_str().to_owned()))
+/// Every authority a request names: its Host header AND its URI authority
+/// (HTTP/2 `:authority`, or an HTTP/1.1 absolute-form target such as
+/// `GET http://evil/v1/... HTTP/1.1`). Both are returned rather than one
+/// preferred, because the two can disagree and a check that reads only one
+/// can be steered by the other. A Host header that is not valid UTF-8 is
+/// returned as the empty string, which no loopback test accepts — unreadable
+/// is not the same as absent. Empty when the request names neither (HTTP/1.0,
+/// in-process tests), which is not a browser: a browser always sends one,
+/// and a DNS-rebinding page sends ITS name.
+fn request_authorities(req: &Request) -> Vec<String> {
+    let mut authorities = Vec::with_capacity(2);
+    if let Some(host) = req.headers().get(header::HOST) {
+        authorities.push(host.to_str().unwrap_or_default().to_owned());
+    }
+    if let Some(authority) = req.uri().authority() {
+        authorities.push(authority.as_str().to_owned());
+    }
+    authorities
 }
 
 /// Auth-off cross-site gate for every state-changing proxied request.
@@ -3147,7 +3155,9 @@ async fn auth_off_cross_site_gate(
 ) -> Response {
     let auth_off = state.basic_auth.is_none();
     if auth_off
-        && request_authority(&req).is_some_and(|authority| !is_loopback_authority(&authority))
+        && request_authorities(&req)
+            .iter()
+            .any(|authority| !is_loopback_authority(authority))
     {
         return (
             StatusCode::FORBIDDEN,
