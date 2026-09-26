@@ -7487,3 +7487,26 @@ tests + clippy -D warnings; ui wasm32 check, 1411 native tests, wasm32 and host
 clippy -D warnings; fmt --check; ocean-gui check (default and livekit), clippy
 -D warnings and 416 lib tests; all four script guards; both ledger checks.
 _________________________________________________________________________________ 08:20 chore/dependabot-bumps
+
+time:      [08:26] [09-26-26]
+agent:     [claude] [opus 5.5]
+worktree:  chore/dependabot-bumps
+type:      issues
+area:      infra
+
+Looked at the two git2 0.20.4 unsoundness advisories in crates/ocean-tauri/
+Cargo.lock and left them alone. RUSTSEC-2026-0183 is a null slice in
+Remote::list() when a remote advertises no refs. RUSTSEC-2026-0184 is null
+Signature pointers from BlameHunk after Blame::blame_buffer(). Both are fixed
+only in git2 >= 0.21.0, and 0.20.4 is the last 0.20 release, so the only fix is
+a breaking 0.x bump. That means editing ocean-tauri's `git2 = "0.20"`
+requirement and the code, which is outside this lockfile-only PR. The system
+library is not the blocker: git2 0.21.0 keeps libgit2-sys ^0.18.4 and the crate
+builds with vendored-libgit2. Neither unsound API is reachable. ocean-tauri is
+git2's only dependent in that lock, since nothing in the Tauri stack uses it,
+and its one git caller, the repo_state command, only calls
+Repository::discover, find_branch, statuses and a revwalk. It never touches
+Remote or Blame. The lock is unchanged, so there was no Tauri build check to
+run. A follow-up can take git2 0.21 with a Cargo.toml bump and a rerun of
+ocean-tauri's tests.
+_________________________________________________________________________________ 08:26 chore/dependabot-bumps
