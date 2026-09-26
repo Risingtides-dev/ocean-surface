@@ -295,7 +295,9 @@ Web surface session UI:
   boundary. In auth-off mode, a mutation carrying Origin or Referer must name
   the exact loopback Host; reject it before credential lookup otherwise, while
   retaining headerless localhost CLI clients. That rule now covers EVERY
-  non-GET/HEAD request under `/v1/` and `/api/`, not only these six. Auth-off startup is refused on
+  non-GET/HEAD request under `/v1/` and `/api/`, not only these six, and
+  auth-off refuses any request addressed to a non-loopback Host. In
+  multi-user mode the bodies' `owner_member_id` must be the signed-in user. Auth-off startup is refused on
   non-loopback binds. The Tauri shell now owns the equivalent privileged
   transport this rule required: its `daemon_operator_request` command takes a
   method and a PATH (never a URL, never a header), re-checks both against a

@@ -3001,15 +3001,7 @@ fn auth_off_room_mutation_source_allowed(headers: &HeaderMap) -> bool {
     else {
         return false;
     };
-    let Ok(authority) = host.parse::<axum::http::uri::Authority>() else {
-        return false;
-    };
-    let authority_host = authority.host().trim_matches(['[', ']']);
-    let loopback = authority_host.eq_ignore_ascii_case("localhost")
-        || authority_host
-            .parse::<IpAddr>()
-            .is_ok_and(|address| address.is_loopback());
-    if !loopback {
+    if !is_loopback_authority(host) {
         return false;
     }
 
@@ -3027,6 +3019,31 @@ fn auth_off_room_mutation_source_allowed(headers: &HeaderMap) -> bool {
     })
 }
 
+/// True when `host` (a Host header or URI authority, port optional) names
+/// this machine: `localhost`, or a loopback IPv4/IPv6 literal.
+fn is_loopback_authority(host: &str) -> bool {
+    let Ok(authority) = host.parse::<axum::http::uri::Authority>() else {
+        return false;
+    };
+    let authority_host = authority.host().trim_matches(['[', ']']);
+    authority_host.eq_ignore_ascii_case("localhost")
+        || authority_host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+/// The authority a request was addressed to: the Host header, or (HTTP/2)
+/// the request URI's authority. `None` when the request names neither —
+/// an HTTP/1.0 client or an in-process test — which is not a browser: a
+/// browser always sends one, and a DNS-rebinding page sends ITS name.
+fn request_authority(req: &Request) -> Option<String> {
+    req.headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+        .or_else(|| req.uri().authority().map(|a| a.as_str().to_owned()))
+}
+
 /// Auth-off cross-site gate for every state-changing proxied request.
 ///
 /// With auth off there is no session secret, so an ambient browser request
@@ -3039,6 +3056,13 @@ fn auth_off_room_mutation_source_allowed(headers: &HeaderMap) -> bool {
 /// — the same Origin/Referer policy, headerless clients still admitted — to
 /// every non-GET/HEAD request in the proxied namespaces.
 ///
+/// Before that, EVERY auth-off request — reads and static files included —
+/// must be addressed to a loopback authority (`403 non_loopback_host_refused`).
+/// Auth-off binds loopback only, so the one way a non-loopback Host arrives is
+/// a browser whose page resolved an attacker's name to 127.0.0.1 (DNS
+/// rebinding): the Origin check cannot see that — the page IS same-origin
+/// with the name it rebound — and without this it could read every GET.
+///
 /// Auth-on mode is not gated here: its session cookie is `SameSite=Strict`,
 /// so a cross-site request arrives without it and the auth gate answers 401.
 /// `/csp-report`, `/login` and `/logout` sit outside both namespaces on
@@ -3049,9 +3073,20 @@ async fn auth_off_cross_site_gate(
     req: Request,
     next: Next,
 ) -> Response {
+    let auth_off = state.basic_auth.is_none();
+    if auth_off
+        && request_authority(&req).is_some_and(|authority| !is_loopback_authority(&authority))
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            [(header::CONTENT_TYPE, "application/json")],
+            Bytes::from_static(br#"{"ok":false,"error":"non_loopback_host_refused"}"#),
+        )
+            .into_response();
+    }
     let method = req.method();
     let path = req.uri().path();
-    let guarded = state.basic_auth.is_none()
+    let guarded = auth_off
         && method != axum::http::Method::GET
         && method != axum::http::Method::HEAD
         && (path.starts_with("/v1/") || path.starts_with("/api/"));
@@ -3072,22 +3107,46 @@ async fn auth_off_cross_site_gate(
     next.run(req).await
 }
 
-/// Query keys the daemon's rooms member lane reads as the ACTING identity:
-/// `?actor_id=` (close, attachment delete, workspace commands) and
-/// `?uploader_id=` (attachment upload).
-const MEMBER_LANE_QUERY_ACTORS: [&str; 2] = ["actor_id", "uploader_id"];
+/// Query keys the daemon's rooms routes read as the ACTING identity:
+/// `?actor_id=` (close, attachment delete, and the workspace lane's READS and
+/// commands — `gate_workspace_call` gates both on it) and `?uploader_id=`
+/// (attachment upload). No other rooms GET takes an identity in its query
+/// (list, transcript, snapshot and events take cursors only), so the query
+/// binding runs on every method.
+const BOUND_QUERY_ACTORS: [&str; 2] = ["actor_id", "uploader_id"];
 
-/// Top-level JSON body keys the member lane reads as the acting identity:
-/// `author_id` (post, artifact create/amend), `invoked_by` (agent invoke),
-/// `requested_by` (summarize). A join's `id` is handled separately because
-/// `id` means something else in other bodies (an artifact's own id).
-const MEMBER_LANE_BODY_ACTORS: [&str; 3] = ["author_id", "invoked_by", "requested_by"];
+/// Top-level JSON body keys the daemon's rooms routes read as a person's
+/// identity: `author_id` (post, artifact create/amend), `invoked_by` (agent
+/// invoke), `requested_by` (summarize), `owner_member_id` (the authority
+/// routes' bootstrap and authorize — the proxy injects the operator key there,
+/// so an unbound owner made ANY roster user a room's owner), and `owner_id`
+/// (an agent join, which writes `room_agent_owners`). A join's `id` is handled
+/// separately because `id` means something else in other bodies (an
+/// artifact's own id). `agent_member_id` is a TARGET, never bound.
+const BOUND_BODY_ACTORS: [&str; 5] = [
+    "author_id",
+    "invoked_by",
+    "requested_by",
+    "owner_member_id",
+    "owner_id",
+];
 
 fn actor_mismatch() -> Response {
     (
         StatusCode::FORBIDDEN,
         [(header::CONTENT_TYPE, "application/json")],
         Bytes::from_static(br#"{"ok":false,"code":"actor_mismatch","error":"actor_mismatch"}"#),
+    )
+        .into_response()
+}
+
+fn duplicate_identity_field() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        [(header::CONTENT_TYPE, "application/json")],
+        Bytes::from_static(
+            br#"{"ok":false,"code":"duplicate_identity_field","error":"duplicate_identity_field"}"#,
+        ),
     )
         .into_response()
 }
@@ -3099,7 +3158,50 @@ fn actor_mismatch() -> Response {
 /// identity past a first that matches.
 fn query_actor_mismatch(url: &reqwest::Url, actor: &str) -> bool {
     url.query_pairs()
-        .any(|(key, value)| MEMBER_LANE_QUERY_ACTORS.contains(&key.as_ref()) && value != actor)
+        .any(|(key, value)| BOUND_QUERY_ACTORS.contains(&key.as_ref()) && value != actor)
+}
+
+/// Every top-level key of a JSON object body, duplicates included and escapes
+/// decoded, or `None` when the body is not exactly one JSON object.
+/// `serde_json::Value` keeps only the LAST of a repeated key, so it cannot
+/// answer "was this key sent twice".
+fn top_level_keys(body: &[u8]) -> Option<Vec<String>> {
+    struct Keys;
+    impl<'de> serde::de::Visitor<'de> for Keys {
+        type Value = Vec<String>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a JSON object")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut keys = Vec::new();
+            while let Some(key) = map.next_key::<String>()? {
+                map.next_value::<serde::de::IgnoredAny>()?;
+                keys.push(key);
+            }
+            Ok(keys)
+        }
+    }
+    let mut de = serde_json::Deserializer::from_slice(body);
+    let keys = serde::Deserializer::deserialize_map(&mut de, Keys).ok()?;
+    de.end().ok()?;
+    Some(keys)
+}
+
+/// True when a bound identity key, a join's `id`, or `kind` (which decides
+/// whether a join's `id` is bound) appears more than once. Which copy a parser
+/// keeps is the parser's business; the proxy's check must not depend on the
+/// daemon's structs happening to refuse duplicates.
+fn body_has_duplicate_identity(body: &[u8]) -> bool {
+    let Some(keys) = top_level_keys(body) else {
+        return false;
+    };
+    let watched = |key: &str| BOUND_BODY_ACTORS.contains(&key) || key == "id" || key == "kind";
+    keys.iter()
+        .enumerate()
+        .any(|(index, key)| watched(key) && keys[index + 1..].iter().any(|other| other == key))
 }
 
 /// True when a rooms-persistent JSON body names an acting identity other than
@@ -3108,8 +3210,6 @@ fn query_actor_mismatch(url: &reqwest::Url, actor: &str) -> bool {
 /// Fails CLOSED on a non-blank body that is not a JSON object: the daemon
 /// would refuse it anyway, so a legitimate client loses nothing, and a body
 /// this parser cannot read is a body whose identity it cannot vouch for.
-/// Duplicate keys need no special case — the daemon's derived structs refuse
-/// a duplicate field outright.
 fn body_actor_mismatch(path: &str, body: &[u8], actor: &str) -> bool {
     if body.iter().all(u8::is_ascii_whitespace) {
         return false;
@@ -3122,12 +3222,13 @@ fn body_actor_mismatch(path: &str, body: &[u8], actor: &str) -> bool {
             .get(key)
             .is_some_and(|value| value.as_str() != Some(actor))
     };
-    if MEMBER_LANE_BODY_ACTORS.iter().any(|key| names_other(key)) {
+    if BOUND_BODY_ACTORS.iter().any(|key| names_other(key)) {
         return true;
     }
     // A join (`POST {key}/participants`) adds the body's `id` to the roster
-    // as whoever it says. Agent rows are exempt: an agent id names a
-    // daemon-validated folder, not a person, and is never the caller.
+    // as whoever it says. Agent rows are exempt from THIS field only: an agent
+    // id names a daemon-validated folder, not a person — but the agent's
+    // `owner_id` is a person, and is bound above like every other.
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     let is_join = segments.len() == 5 && segments[4] == "participants";
     let joins_as_agent = fields.get("kind").and_then(Value::as_str) == Some("agent");
@@ -3304,48 +3405,13 @@ async fn proxy_rooms_persistent(
     // when the session names a roster user, every identity the daemon's
     // member lane reads must BE that user. Query first — it needs no body.
     let session_actor = session_user(&state, req.headers()).map(|user| user.username.clone());
-    let mutating = method != axum::http::Method::GET && method != axum::http::Method::HEAD;
-    if mutating {
-        if let Some(actor) = session_actor.as_deref() {
-            if query_actor_mismatch(&url, actor) {
-                return actor_mismatch();
-            }
+    // Every method: the workspace lane gates its READS on `?actor_id=`.
+    if let Some(actor) = session_actor.as_deref() {
+        if query_actor_mismatch(&url, actor) {
+            return actor_mismatch();
         }
     }
-    let operator_key = if authority_mutation {
-        let Some(key_path) = room_operator_key_path(&daemon) else {
-            tracing::warn!(
-                daemon = %daemon.base(),
-                "room authorization has no credential for resolved daemon"
-            );
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                [(header::CONTENT_TYPE, "application/json")],
-                Bytes::from_static(br#"{"ok":false,"error":"operator_credential_unavailable"}"#),
-            )
-                .into_response();
-        };
-        match read_room_operator_key(&key_path) {
-            Ok(key) => Some(key),
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    path = %key_path.display(),
-                    "room operator credential unavailable"
-                );
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    [(header::CONTENT_TYPE, "application/json")],
-                    Bytes::from_static(
-                        br#"{"ok":false,"error":"operator_credential_unavailable"}"#,
-                    ),
-                )
-                    .into_response();
-            }
-        }
-    } else {
-        None
-    };
+    let mutating = method != axum::http::Method::GET && method != axum::http::Method::HEAD;
     if shape == RoomsPersistentShape::EventsTail {
         let mut upstream = state.http.get(url);
         if let Some(last_id) = req.headers().get("last-event-id") {
@@ -3391,11 +3457,50 @@ async fn proxy_rooms_persistent(
     // daemon never parses — its uploader rides `?uploader_id=`, checked above.
     if mutating && shape != RoomsPersistentShape::AttachmentUpload {
         if let Some(actor) = session_actor.as_deref() {
+            if body_has_duplicate_identity(&body) {
+                return duplicate_identity_field();
+            }
             if body_actor_mismatch(&path, &body, actor) {
                 return actor_mismatch();
             }
         }
     }
+    // The operator key is read LAST, after every refusal above: a request the
+    // proxy is going to refuse never touches the credential.
+    let operator_key = if authority_mutation {
+        let Some(key_path) = room_operator_key_path(&daemon) else {
+            tracing::warn!(
+                daemon = %daemon.base(),
+                "room authorization has no credential for resolved daemon"
+            );
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::CONTENT_TYPE, "application/json")],
+                Bytes::from_static(br#"{"ok":false,"error":"operator_credential_unavailable"}"#),
+            )
+                .into_response();
+        };
+        match read_room_operator_key(&key_path) {
+            Ok(key) => Some(key),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path = %key_path.display(),
+                    "room operator credential unavailable"
+                );
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    Bytes::from_static(
+                        br#"{"ok":false,"error":"operator_credential_unavailable"}"#,
+                    ),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        None
+    };
     let builder = if method == axum::http::Method::GET {
         state.http_json.get(url)
     } else {

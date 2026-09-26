@@ -39,9 +39,18 @@ the parse-and-compare.
 ## Operator key
 
 Injected only on the six room-agent authority shapes
-(`room_agent_authority_mutation`), and only AFTER `upstream_url` has
-accepted the path — a path the parser would rewrite never reaches the key
-read. Browser `X-Ocean-Operator`, Cookie, Origin and Referer never cross.
+(`room_agent_authority_mutation`), and read only AFTER every refusal —
+`upstream_url`, the actor binding, the duplicate-key check — so a request the
+proxy refuses never touches the credential. Browser `X-Ocean-Operator`,
+Cookie, Origin and Referer never cross.
+
+Holding the key does not make the caller the room's owner: in multi-user mode
+the authority bodies' `owner_member_id` (bootstrap, authorize) is bound to the
+session user like every member-lane identity below. Before that binding, any
+signed-in roster user could bootstrap a local room naming someone else as
+owner, and the first bootstrap WRITES the owner. Consequence for the surface:
+only the room's owner can authorize an agent from their own session (the
+authorize body carries the daemon-resolved owner from the preview).
 
 ## Member-lane actor binding (rooms-persistent)
 
@@ -51,21 +60,31 @@ Trust chain, top to bottom:
    roster user via `session_user`. That username is exactly what
    `/api/config` publishes as `user_id`, and the surface uses it as the room
    identity.
-2. For every non-GET/HEAD request under `/v1/rooms/persistent`, when (1)
-   resolved a user, every identity the daemon's member lane reads must equal
-   that username, or the proxy answers `403
-   {"ok":false,"code":"actor_mismatch","error":"actor_mismatch"}` before
-   forwarding. Refused, never rewritten. The fields, from ocean-os
-   `room_routes()`:
-   - query `actor_id` (close, attachment delete, workspace commands) and
-     `uploader_id` (attachment upload) — decoded as the daemon's `Query`
-     decodes them, every occurrence;
-   - JSON body `author_id` (post, artifact create/amend), `invoked_by`
-     (agent invoke), `requested_by` (summarize);
+2. For requests under `/v1/rooms/persistent`, when (1) resolved a user,
+   every identity the daemon reads must equal that username, or the proxy
+   answers `403 {"ok":false,"code":"actor_mismatch","error":"actor_mismatch"}`
+   before forwarding. Refused, never rewritten. The fields, from ocean-os
+   `room_routes()` / `room_agent_authority.rs`:
+   - query `actor_id` (close, attachment delete, and the workspace lane —
+     `gate_workspace_call` gates READS on it too) and `uploader_id`
+     (attachment upload), decoded as the daemon's `Query` decodes them, every
+     occurrence, on EVERY method including GET. No other rooms GET reads an
+     identity from its query (list/transcript/snapshot/events take cursors);
+   - JSON body (non-GET/HEAD) `author_id` (post, artifact create/amend),
+     `invoked_by` (agent invoke), `requested_by` (summarize),
+     `owner_member_id` (authority bootstrap/authorize) and `owner_id` (an
+     agent join — it writes `room_agent_owners`, which authority's
+     `target_proof` trusts);
    - a join's (`POST {key}/participants`) body `id`, unless `kind` is
-     `agent` (an agent id names a daemon-validated folder, not the caller).
-   A non-blank body that is not a JSON object is refused (fail closed); the
-   daemon would refuse it anyway. The raw-bytes upload body is not parsed.
+     `agent` (an agent id names a daemon-validated folder, not the caller —
+     its `owner_id` is still bound).
+   `agent_member_id` and the path ids of the authority routes are TARGETS and
+   are not bound. A non-blank body that is not a JSON object is refused (fail
+   closed); the daemon would refuse it anyway. A body that repeats any bound
+   key, `id`, or `kind` (escaped spellings included) is refused `400
+   {"ok":false,"code":"duplicate_identity_field",...}` — the check must not
+   depend on which copy a parser keeps. The raw-bytes upload body is not
+   parsed.
 3. The daemon then roster-checks the (now session-bound) identity as before.
 
 Not bound, on purpose:
@@ -74,15 +93,18 @@ Not bound, on purpose:
   an empty `user_id`, the surface uses the constant `surface-operator`, and
   there is no person to bind to. A roster deployment's legacy operator login
   (the `OCEAN_SURFACE_USER` credential, not a roster entry) is the same case.
-- `DELETE {key}/participants/{id}` (leave AND the roster's remove-member)
-  and `DELETE {key}/members/{id}` carry a TARGET, not an actor; the surface
+- **Known gap (daemon work):** `DELETE {key}/participants/{id}` (leave AND
+  the roster's remove-member) and `DELETE {key}/members/{id}` carry a TARGET,
+  not an actor, and the daemon reads no caller identity on them. The surface
   uses the first to remove other participants, so the proxy cannot tell a
-  spoofed leave from a legitimate remove. The daemon has no caller identity
-  for these routes; closing that is daemon work.
+  spoofed leave from a legitimate remove: any signed-in user can remove
+  anyone, INCLUDING the room's owner, which flips `owner_present` and with it
+  what the authority ceremony will admit. Closing it needs the daemon to take
+  a caller identity on these routes; the proxy can then bind it here.
 - Routes with no client identity at all (create, PATCH room, invites,
   redeem, read-cursor, outbox retry, register agents) — nothing to bind.
 
-## Cross-site requests
+## Cross-site requests and hosts
 
 - Auth-off (loopback-only, `OCEAN_SURFACE_AUTH=off`): `auth_off_cross_site_gate`
   runs `auth_off_room_mutation_source_allowed` on EVERY non-GET/HEAD request
@@ -95,6 +117,32 @@ Not bound, on purpose:
   reachable without a CORS preflight (a `<form>` or `no-cors` fetch), the
   forwarders stamp `application/json` on whatever body arrives, and close
   needs no body at all. `/csp-report`, `/login`, `/logout` are outside it.
+- Auth-off, every request (reads and static files too): the request's
+  authority (Host header, or the HTTP/2 URI authority) must be loopback —
+  `localhost`, `127.0.0.0/8`, `::1` — or it is refused `403
+  {"ok":false,"error":"non_loopback_host_refused"}`. Auth-off binds loopback
+  only, so a non-loopback Host means a DNS-rebinding page (same-origin with
+  the name it rebound, so no Origin check sees it) that could otherwise read
+  every GET. A request naming no authority at all (HTTP/1.0, in-process tests)
+  is admitted; a browser always names one. Auth-off behind a tunnel or
+  `tailscale serve` now answers 403 — use auth-on for any non-local access,
+  as the root contract already requires.
 - Auth-on: no Origin check. The session cookie is `SameSite=Strict`, so a
   cross-site request arrives unauthenticated and the auth gate answers 401.
-  Keep it Strict; relaxing it to Lax reopens every POST above.
+  Keep it Strict; relaxing it to Lax reopens every POST above. Two residual
+  edges, recorded, not closed:
+  - SameSite is about the SITE (registrable domain), not the origin: a page
+    on another `*.agentsworld.org` host is same-site and its requests DO
+    carry the cookie. Any host under that domain is inside this boundary.
+  - A Basic credential a browser has cached for this origin (typed into a
+    `user:pass@` URL — the proxy never challenges, so only by hand) is sent
+    on cross-site requests regardless of SameSite.
+
+## Fail-closed side effects worth knowing
+
+- A hand-written raw request target containing bytes the URL parser
+  re-encodes (non-ASCII, spaces, etc.) is refused `upstream_path_rewritten`
+  rather than forwarded re-encoded. Browsers already percent-encode these, so
+  only hand-built clients notice.
+- Room keys and ids containing a backslash (`\`, `%5C`) are unreachable
+  through the proxy.

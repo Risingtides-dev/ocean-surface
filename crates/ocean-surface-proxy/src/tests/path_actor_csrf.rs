@@ -12,12 +12,15 @@
 //! re-encoded so a decoded `%2F` cannot become a second segment.
 //!
 //! M-A — actor binding. With a roster user signed in, every identity the
-//! daemon's rooms member lane reads (`?actor_id=`, `?uploader_id=`,
-//! `author_id`, `invoked_by`, `requested_by`, a join's `id`) must be that
-//! user, or the proxy answers `403 actor_mismatch` before the daemon sees it.
+//! daemon's rooms routes read (`?actor_id=` and `?uploader_id=` on every
+//! method; `author_id`, `invoked_by`, `requested_by`, `owner_member_id`,
+//! `owner_id`, a non-agent join's `id` in bodies) must be that user, or the
+//! proxy answers `403 actor_mismatch` before the daemon sees it. A body that
+//! repeats one of those keys (or `id`/`kind`) is `400 duplicate_identity_field`.
 //!
 //! M-B — auth-off CSRF. Every non-GET/HEAD request under `/v1/` and `/api/`
-//! now meets the Origin/Referer policy the six authority routes had alone.
+//! now meets the Origin/Referer policy the six authority routes had alone,
+//! and every auth-off request must name a loopback Host (DNS rebinding).
 //!
 //! The upstream here is a recorder that answers 200 to ANY request and keeps
 //! what it received, so "refused" is proven by an empty log rather than by
@@ -626,7 +629,12 @@ async fn the_actor_check_cannot_be_smuggled_past() {
         // a JSON escape decodes to the same string serde gives the daemon
         (
             "/v1/rooms/persistent/team/messages",
-            r#"{"author_id":"bob","body":"hi"}"#,
+            r#"{"author_id":"\u0062ob","body":"hi"}"#,
+        ),
+        // ...in the KEY too: `author\u005fid` is `author_id` to serde
+        (
+            "/v1/rooms/persistent/team/messages",
+            r#"{"author\u005fid":"bob","body":"hi"}"#,
         ),
         // a non-string identity is not this user
         ("/v1/rooms/persistent/team/messages", r#"{"author_id":7}"#),
@@ -644,7 +652,23 @@ async fn the_actor_check_cannot_be_smuggled_past() {
     }
     assert!(seen(&log).is_empty(), "{:?}", seen(&log));
 
-    // Not identities: an artifact's own `id`, and an agent join's `id`.
+    // An agent join's `id` is a folder, not a person — but its `owner_id` IS a
+    // person, and naming someone else writes them into `room_agent_owners`.
+    let (status, text) = send(
+        &app,
+        as_alice(
+            "POST",
+            "/v1/rooms/persistent/team/participants",
+            r#"{"id":"helper","display_name":"Helper","kind":"agent","owner_id":"bob"}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(error_code(&text), "actor_mismatch");
+    assert!(seen(&log).is_empty(), "{:?}", seen(&log));
+
+    // Not identities: an artifact's own `id`, an agent join's `id` (owned by
+    // the caller, or unowned), and an authorize body's `agent_member_id`.
     for (uri, body) in [
         (
             "/v1/rooms/persistent/team/artifacts",
@@ -652,21 +676,216 @@ async fn the_actor_check_cannot_be_smuggled_past() {
         ),
         (
             "/v1/rooms/persistent/team/participants",
-            r#"{"id":"helper","display_name":"Helper","kind":"agent","owner_id":"bob"}"#,
+            r#"{"id":"helper","display_name":"Helper","kind":"agent","owner_id":"alice"}"#,
+        ),
+        (
+            "/v1/rooms/persistent/team/participants",
+            r#"{"id":"helper","display_name":"Helper","kind":"agent"}"#,
         ),
     ] {
         let (status, _) = send(&app, as_alice("POST", uri, body)).await;
         assert_eq!(status, StatusCode::OK, "{uri} {body}");
     }
 
-    // Reads are not actions: a GET naming someone else still reads.
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn reads_that_gate_on_actor_id_are_bound_too() {
+    let (daemon_url, log, upstream) = spawn_recorder().await;
+    let (app, _dist) = app_for(roster_state(&daemon_url));
+
+    // The daemon's workspace lane uses `?actor_id=` as its membership gate
+    // for reads as well as commands, so a read as bob is bob's read.
+    for uri in [
+        "/v1/rooms/persistent/team/workspace?actor_id=bob",
+        "/v1/rooms/persistent/team/workspace/files/read?actor_id=bob&path=a.txt",
+        "/v1/rooms/persistent/team/workspace/files/list?path=.&actor_id=bob",
+        "/v1/rooms/persistent/team/workspace/files/read?actor_id=alice&actor_id=bob",
+    ] {
+        let (status, text) = send(&app, as_alice("GET", uri, "")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{uri}");
+        assert_eq!(error_code(&text), "actor_mismatch", "{uri}");
+    }
+    assert!(seen(&log).is_empty(), "{:?}", seen(&log));
+
+    // Alice's own reads, and reads that carry no identity at all, still read.
+    for uri in [
+        "/v1/rooms/persistent/team/workspace?actor_id=alice",
+        "/v1/rooms/persistent/team/workspace/files/read?actor_id=alice&path=a.txt",
+        "/v1/rooms/persistent/team/transcript?after_seq=3",
+    ] {
+        let (status, _) = send(&app, as_alice("GET", uri, "")).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+    }
+    assert_eq!(seen(&log).len(), 3);
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn the_authority_routes_owner_is_the_session_user() {
+    let (daemon_url, log, upstream) = spawn_recorder().await;
+    let credential_dir = tempfile::tempdir().expect("credential tempdir");
+    let key_path = write_operator_key(credential_dir.path());
+    let mut state = roster_state(&daemon_url);
+    Arc::get_mut(&mut state).unwrap().operator_key_path = key_path;
+    let (app, _dist) = app_for(state);
+
+    // Probe-confirmed: bootstrap naming bob was forwarded WITH the key, and
+    // the first bootstrap writes whoever it names as the room's local owner.
+    for (uri, body) in [
+        (
+            "/v1/rooms/persistent/team/agents/bootstrap",
+            r#"{"owner_member_id":"bob","agent_package_id":"researcher"}"#,
+        ),
+        (
+            "/v1/rooms/persistent/team/agents",
+            r#"{"agent_member_id":"researcher","agent_package_id":"researcher","owner_member_id":"bob","decision_id":"d1"}"#,
+        ),
+    ] {
+        let (status, text) = send(&app, as_alice("POST", uri, body)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{uri}");
+        assert_eq!(error_code(&text), "actor_mismatch", "{uri}");
+    }
+    assert!(seen(&log).is_empty(), "{:?}", seen(&log));
+
+    for (uri, body) in [
+        (
+            "/v1/rooms/persistent/team/agents/bootstrap",
+            r#"{"owner_member_id":"alice","agent_package_id":"researcher"}"#,
+        ),
+        (
+            "/v1/rooms/persistent/team/agents",
+            r#"{"agent_member_id":"researcher","agent_package_id":"researcher","owner_member_id":"alice","decision_id":"d1"}"#,
+        ),
+        // The status-change bodies carry a decision id and no identity.
+        (
+            "/v1/rooms/persistent/team/agents/researcher/suspend",
+            r#"{"decision_id":"d2"}"#,
+        ),
+    ] {
+        let before = seen(&log).len();
+        let (status, _) = send(&app, as_alice("POST", uri, body)).await;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        let got = &seen(&log)[before];
+        assert_eq!(got.operator.as_deref(), Some(OPERATOR_KEY), "{uri}");
+    }
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn a_bound_key_sent_twice_is_refused_whichever_copy_matches() {
+    let (daemon_url, log, upstream) = spawn_recorder().await;
+    let (app, _dist) = app_for(roster_state(&daemon_url));
+
+    for (uri, body) in [
+        (
+            "/v1/rooms/persistent/team/messages",
+            r#"{"author_id":"alice","author_id":"bob","body":"hi"}"#,
+        ),
+        (
+            "/v1/rooms/persistent/team/messages",
+            r#"{"author_id":"bob","author_id":"alice","body":"hi"}"#,
+        ),
+        // the same key, spelled once plainly and once escaped
+        (
+            "/v1/rooms/persistent/team/messages",
+            r#"{"author_id":"alice","author\u005fid":"alice","body":"hi"}"#,
+        ),
+        (
+            "/v1/rooms/persistent/team/agents/bootstrap",
+            r#"{"owner_member_id":"alice","owner_member_id":"alice","agent_package_id":"r"}"#,
+        ),
+        (
+            "/v1/rooms/persistent/team/participants",
+            r#"{"id":"alice","id":"bob","display_name":"A"}"#,
+        ),
+        // `kind` decides whether a join's `id` is bound
+        (
+            "/v1/rooms/persistent/team/participants",
+            r#"{"id":"bob","kind":"agent","kind":"human","display_name":"B"}"#,
+        ),
+    ] {
+        let (status, text) = send(&app, as_alice("POST", uri, body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(error_code(&text), "duplicate_identity_field", "{body}");
+    }
+    assert!(seen(&log).is_empty(), "{:?}", seen(&log));
+
+    // A repeated key that is not an identity is the daemon's to judge.
     let (status, _) = send(
         &app,
         as_alice(
-            "GET",
-            "/v1/rooms/persistent/team/attachments?actor_id=bob",
-            "",
+            "POST",
+            "/v1/rooms/persistent/team/messages",
+            r#"{"author_id":"alice","body":"a","body":"b"}"#,
         ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn auth_off_refuses_a_rebound_host_on_every_request() {
+    let (daemon_url, log, upstream) = spawn_recorder().await;
+    let (app, _dist) = app_for(auth_off_state(&daemon_url, PathBuf::from("/not-used")));
+
+    // A page that rebound its own name to 127.0.0.1 is same-origin with
+    // itself, so no Origin check sees it; its Host header gives it away.
+    for (method, uri) in [
+        ("GET", "/v1/rooms/persistent"),
+        ("GET", "/v1/rooms/persistent/team/transcript"),
+        ("GET", "/v1/agent/sessions"),
+        ("GET", "/api/config"),
+        ("GET", "/"),
+        ("POST", "/v1/agent/turns"),
+    ] {
+        for host in ["attacker.example", "attacker.example:8790", "10.0.0.5:8790"] {
+            let (status, text) = send(
+                &app,
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header(header::HOST, host)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri} {host}");
+            assert_eq!(error_code(&text), "non_loopback_host_refused");
+        }
+    }
+    assert!(seen(&log).is_empty(), "{:?}", seen(&log));
+
+    // Every loopback spelling still works, and so does a request with no Host.
+    for host in [
+        Some("127.0.0.1:8790"),
+        Some("localhost:8790"),
+        Some("[::1]:8790"),
+        None,
+    ] {
+        let mut builder = Request::builder().method("GET").uri("/v1/rooms/persistent");
+        if let Some(host) = host {
+            builder = builder.header(header::HOST, host);
+        }
+        let (status, _) = send(&app, builder.body(Body::empty()).unwrap()).await;
+        assert_eq!(status, StatusCode::OK, "{host:?}");
+    }
+
+    // Auth-on is not host-gated: a tunnel or tailnet name is how it is reached.
+    let mut on = roster_state(&daemon_url);
+    Arc::get_mut(&mut on).unwrap().users.clear();
+    let (on_app, _d) = app_for(on);
+    let (status, _) = send(
+        &on_app,
+        Request::builder()
+            .method("GET")
+            .uri("/v1/rooms/persistent")
+            .header(header::HOST, "surface.example")
+            .header(header::COOKIE, format!("{SESSION_COOKIE}=test-session"))
+            .body(Body::empty())
+            .unwrap(),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
