@@ -67,6 +67,17 @@ that does not produce a clear answer — transport error, non-2xx, non-JSON,
 {"ok":false,"code":"owner_lookup_failed",...}`. Single-operator and auth-off
 do no lookup and are unchanged.
 
+Consequence for federated rooms: there `room_owner_proof` is the Bedrock
+credential's `local_human_member_id`, an opaque server-issued id that never
+equals a roster username, so in multi-user mode **every roster user gets
+`not_room_owner` on all six authority actions in a federated room** (and an
+uncredentialed federated room admits only a bootstrap the daemon then refuses
+with `RoomNotLocal`). This is fail-closed on purpose: the daemon models one
+human principal per federated room and the proxy cannot know which roster user
+that is. Federated-room authority stays reachable through single-operator
+mode, auth-off, the legacy operator login, and the Tauri shell; mapping a
+roster user to a federated member id is follow-up work.
+
 The check-then-forward window is acceptable because the owner is write-once
 from every browser-reachable route: the daemon inserts the `owner` row in
 `room_local_roles` only when none exists and refuses a bootstrap naming a
