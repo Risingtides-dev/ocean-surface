@@ -7420,3 +7420,118 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+time:      [08:05] [09-26-26]
+agent:     [claude] [opus 5.5]
+worktree:  chore/dependabot-bumps
+type:      issues
+area:      infra
+
+Cleared the Dependabot alerts on main that a lockfile bump can clear, and wrote
+down why the other two can't be cleared. canvas-web package-lock: every @tiptap/*
+package moved together 3.25.0 -> 3.31.3. They pin each other through exact peer
+ranges, so they had to move as a set. That fixes GHSA-j95f-988m-3j2f (ReDoS) and
+GHSA-cp6q-959q-f8rh (__proto__ attribute injection). nanoid went 3.3.17 -> 3.3.19
+for GHSA-2v37-7h3g-55p8. Both are pulled in by tldraw 5.0.1 and postcss, and both
+stay inside the existing ^ ranges. The tiptap and nanoid entries were
+re-resolved in place: a named `npm update` split starter-kit into a nested
+3.31.3 copy that sat beside a 3.25.0 top-level core. After the bump, npm ci,
+tsc + vite build, and npm audit (0 vulnerabilities) all pass. Nothing builds
+canvas-web in CI and its dist/ is not committed. Root Cargo.lock: quinn-proto
+0.11.14 -> 0.11.15 with --precise (GHSA-4w2j-m93h-cj5j). reqwest names it only
+behind http3, so `cargo tree --workspace --all-features --target all` shows no
+path to it and it is never compiled. The bump only moves the lock entry. Not
+fixed: grid 0.18.0 (GHSA-38c5-483c-4qqp) reaches the tree only through gpui
+0.2.2 -> taffy =0.9.0 -> grid ^0.18, and 0.2.2 is the newest gpui published, so
+there is no semver path. The only user is the abandoned ocean-gui, and the
+overflow in expand_rows needs rows*cols to wrap usize. Also not fixed: glib
+0.18.5 in crates/ocean-tauri/Cargo.lock (GHSA-wrw7-89jp-8q8g). Every published
+tauri, including 3.0.0-alpha.2, and every wry still requires gtk ^0.18, so
+there is no Tauri upgrade to take. glib only builds for Linux targets, and a
+macOS `cargo tree -i glib` is empty. No Ocean code and no crate in the
+tauri/wry/tao/muda/tray-icon/webkit2gtk/gtk sources calls array_iter_str or
+VariantStrIter, so the unsound iterator is unreachable. ocean-tauri's lock is
+unchanged. No code changes. Gates: proxy build + 84 tests + clippy -D warnings;
+ui wasm32 check, 1411 native tests across 20 binaries, wasm32 and host clippy
+-D warnings; fmt --check; ocean-gui check default and --features livekit,
+clippy -D warnings and 416 lib tests; all four script guards; both ledger
+checks and their test suites.
+_________________________________________________________________________________ 08:05 chore/dependabot-bumps
+
+time:      [08:20] [09-26-26]
+agent:     [claude] [opus 5.5]
+worktree:  chore/dependabot-bumps
+type:      issues
+area:      infra
+
+The coordinator asked for the cargo-deny findings from the Dependabot sweep to
+go into the same PR, so the root Cargo.lock got more --precise bumps. h2 0.4.14
+-> 0.4.16 (RUSTSEC-2026-0258). rustls 0.23.40 -> 0.23.45 (RUSTSEC-2026-0285),
+which forced rustls-webpki 0.103.13 -> 0.103.15. crossbeam-epoch 0.9.18 ->
+0.9.20 (RUSTSEC-2026-0204). anyhow 1.0.102 -> 1.0.103, which fixes the
+downcast_mut unsoundness (RUSTSEC-2026-0190). spin 0.9.8, which was yanked,
+-> 0.9.9. quick-xml 0.39.4 -> 0.41.0 (RUSTSEC-2026-0194 and -0195): 0.41 is a
+breaking 0.x release, and the only thing pulling in 0.39 was wayland-scanner
+0.31.10. wayland-scanner 0.31.11 requires quick-xml ^0.41 and is a
+semver-compatible patch, so bumping it with --precise moved quick-xml without
+swapping any dependency. It is used only by ocean-gui's Linux Wayland path. The
+quick-xml 0.30.0 entry left in the lock is outside the advisory range and no
+dependency path reaches it. After the bumps, `cargo deny --workspace check
+advisories` reports only unmaintained crates: async-std, instant, paste,
+proc-macro-error2, rustls-pemfile, rustybuzz, ttf-parser. None of the bumped
+crates is in crates/ocean-tauri/Cargo.lock at a vulnerable version: it already
+had anyhow 1.0.103 and quick-xml 0.41.0 and has no h2, rustls, crossbeam-epoch
+or spin. That lock is unchanged, so no Tauri build check was needed. Separately,
+cargo deny on it reports two git2 0.20.4 unsoundness advisories, left for a
+separate change. No code changes. Gates rerun, all green: proxy build + 84
+tests + clippy -D warnings; ui wasm32 check, 1411 native tests, wasm32 and host
+clippy -D warnings; fmt --check; ocean-gui check (default and livekit), clippy
+-D warnings and 416 lib tests; all four script guards; both ledger checks.
+_________________________________________________________________________________ 08:20 chore/dependabot-bumps
+
+time:      [08:26] [09-26-26]
+agent:     [claude] [opus 5.5]
+worktree:  chore/dependabot-bumps
+type:      issues
+area:      infra
+
+Looked at the two git2 0.20.4 unsoundness advisories in crates/ocean-tauri/
+Cargo.lock and left them alone. RUSTSEC-2026-0183 is a null slice in
+Remote::list() when a remote advertises no refs. RUSTSEC-2026-0184 is null
+Signature pointers from BlameHunk after Blame::blame_buffer(). Both are fixed
+only in git2 >= 0.21.0, and 0.20.4 is the last 0.20 release, so the only fix is
+a breaking 0.x bump. That means editing ocean-tauri's `git2 = "0.20"`
+requirement and the code, which is outside this lockfile-only PR. The system
+library is not the blocker: git2 0.21.0 keeps libgit2-sys ^0.18.4 and the crate
+builds with vendored-libgit2. Neither unsound API is reachable. ocean-tauri is
+git2's only dependent in that lock, since nothing in the Tauri stack uses it,
+and its one git caller, the repo_state command, only calls
+Repository::discover, find_branch, statuses and a revwalk. It never touches
+Remote or Blame. The lock is unchanged, so there was no Tauri build check to
+run. A follow-up can take git2 0.21 with a Cargo.toml bump and a rerun of
+ocean-tauri's tests.
+_________________________________________________________________________________ 08:26 chore/dependabot-bumps
+
+time:      [08:40] [09-26-26]
+agent:     [claude] [opus 5.5]
+worktree:  chore/dependabot-bumps
+type:      issues
+area:      backend
+
+The coordinator reversed the 08:26 call: git2 now gets its breaking bump inside
+this PR. In crates/ocean-tauri/Cargo.toml, `git2` goes 0.20 -> 0.21 with
+vendored-libgit2 kept. The lock moves git2 0.20.4 -> 0.21.0 on the same
+libgit2-sys 0.18.5+1.9.4. 0.21 no longer turns on ssh/https by default, so
+libssh2-sys, openssl-sys and openssl-probe drop out of the lock. repo_state
+only opens local repositories, so nothing used them. Two 0.21 API changes
+reached repo_state's helpers. Reference::shorthand() now returns
+Result<&str> instead of Option, and repo_ahead_behind matches Ok/Err. Commit::summary() now
+returns Result<Option<&str>>, and repo_recent_commits reads it with
+.ok().flatten(). In both cases a non-UTF-8 value still falls back as it did
+before. The pinned 1.97.0 toolchain and the crate's rust-version 1.82 were both
+fine, and the vendored libgit2 built cleanly. `cargo deny check advisories` on
+the ocean-tauri lock no longer reports RUSTSEC-2026-0183 or -0184; only the
+unmaintained proc-macro-error and unic-* remain. Tauri gates, run with a dist/
+stub that was removed afterwards: check --all-targets, build, fmt --check,
+clippy --all-targets -D warnings, and 48 tests including both repo_state tests.
+Surface CI does not gate ocean-tauri.
+_________________________________________________________________________________ 08:40 chore/dependabot-bumps
