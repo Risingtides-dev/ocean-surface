@@ -13281,3 +13281,12 @@ mod tests {
         );
     }
 }
+
+// The session and voice wire decoders/encoders above stay inside ocean-os's
+// vendored contracts. Children so they can reach the private wire types.
+#[cfg(test)]
+#[path = "session_wire_contract_tests.rs"]
+mod session_wire_contract_tests;
+#[cfg(test)]
+#[path = "voice_wire_contract_tests.rs"]
+mod voice_wire_contract_tests;
