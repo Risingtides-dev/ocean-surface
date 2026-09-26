@@ -74,6 +74,116 @@ async fn spawn_recorder() -> (String, Log, tokio::task::JoinHandle<()>) {
     (format!("http://{addr}"), log, handle)
 }
 
+/// How the recorder answers the proxy's owner lookup (`GET {key}/agents`).
+#[derive(Clone, Debug)]
+enum OwnerReply {
+    Owner(Option<&'static str>),
+    Status(u16),
+    /// A failing status whose body nonetheless names alice: the status alone
+    /// must decide.
+    FailingStatusNamingAlice,
+    Garbage,
+    NotOk,
+    NonStringOwner,
+}
+
+#[derive(Default)]
+struct Lookups {
+    count: usize,
+    /// Whether ANY lookup carried an operator key — none may.
+    keyed: bool,
+}
+
+type OwnerControl = Arc<Mutex<OwnerReply>>;
+
+/// The recorder, plus an owner lookup it answers from `OwnerControl` and
+/// counts separately, so `seen` still holds only the forwards.
+async fn spawn_owner_recorder(
+    reply: OwnerReply,
+) -> (
+    String,
+    Log,
+    OwnerControl,
+    Arc<Mutex<Lookups>>,
+    tokio::task::JoinHandle<()>,
+) {
+    type Shared = (Log, OwnerControl, Arc<Mutex<Lookups>>);
+    async fn handle(
+        axum::extract::State((log, owner, lookups)): axum::extract::State<Shared>,
+        req: Request<Body>,
+    ) -> Response {
+        let path = req.uri().path().to_string();
+        let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+        let operator = req
+            .headers()
+            .get("x-ocean-operator")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        if req.method() == axum::http::Method::GET
+            && segments.len() == 5
+            && segments[2] == "persistent"
+            && segments[4] == "agents"
+        {
+            let mut seen_lookups = lookups.lock().unwrap();
+            seen_lookups.count += 1;
+            seen_lookups.keyed |= operator.is_some();
+            drop(seen_lookups);
+            let reply = owner.lock().unwrap().clone();
+            return match reply {
+                OwnerReply::Owner(owner) => Json(json!({
+                    "ok": true,
+                    "owner_member_id": owner,
+                    "owner_eligible": owner.is_some(),
+                    "bindings": [],
+                }))
+                .into_response(),
+                OwnerReply::Status(code) => (
+                    StatusCode::from_u16(code).unwrap(),
+                    Json(json!({"ok": false, "error": "room_not_found"})),
+                )
+                    .into_response(),
+                OwnerReply::FailingStatusNamingAlice => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"ok": true, "owner_member_id": "alice"})),
+                )
+                    .into_response(),
+                OwnerReply::Garbage => "<html>not json</html>".into_response(),
+                OwnerReply::NotOk => {
+                    Json(json!({"ok": false, "owner_member_id": "alice"})).into_response()
+                }
+                OwnerReply::NonStringOwner => {
+                    Json(json!({"ok": true, "owner_member_id": ["alice"]})).into_response()
+                }
+            };
+        }
+        log.lock().unwrap().push(Seen {
+            method: req.method().to_string(),
+            target: req
+                .uri()
+                .path_and_query()
+                .map(|pq| pq.as_str().to_string())
+                .unwrap_or_default(),
+            operator,
+        });
+        Json(json!({ "ok": true })).into_response()
+    }
+    let log: Log = Arc::new(Mutex::new(Vec::new()));
+    let owner: OwnerControl = Arc::new(Mutex::new(reply));
+    let lookups = Arc::new(Mutex::new(Lookups::default()));
+    let app =
+        Router::new()
+            .fallback(handle)
+            .with_state((log.clone(), owner.clone(), lookups.clone()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind owner recorder");
+    let addr = listener.local_addr().expect("owner recorder addr");
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), log, owner, lookups, handle)
+}
+
 fn seen(log: &Log) -> Vec<Seen> {
     log.lock().unwrap().clone()
 }
@@ -724,7 +834,8 @@ async fn reads_that_gate_on_actor_id_are_bound_too() {
 
 #[tokio::test]
 async fn the_authority_routes_owner_is_the_session_user() {
-    let (daemon_url, log, upstream) = spawn_recorder().await;
+    let (daemon_url, log, _owner, _lookups, upstream) =
+        spawn_owner_recorder(OwnerReply::Owner(Some("alice"))).await;
     let credential_dir = tempfile::tempdir().expect("credential tempdir");
     let key_path = write_operator_key(credential_dir.path());
     let mut state = roster_state(&daemon_url);
@@ -1334,5 +1445,223 @@ async fn auth_off_host_check_reads_host_and_uri_authority_both() {
         seen(&log)
     );
     proxy.abort();
+    upstream.abort();
+}
+
+// ── Operator key lent only to the room's owner (multi-user) ───────────────
+
+/// The six authority shapes with bodies that pass every earlier check for
+/// alice, so the owner gate is the only thing that can refuse them.
+const AUTHORITY_ACTIONS: &[(&str, &str, &str)] = &[
+    (
+        "POST",
+        "/v1/rooms/persistent/team/agents/bootstrap",
+        r#"{"owner_member_id":"alice","agent_package_id":"researcher"}"#,
+    ),
+    (
+        "POST",
+        "/v1/rooms/persistent/team/agents",
+        r#"{"agent_member_id":"researcher","agent_package_id":"researcher","owner_member_id":"alice","decision_id":"d1"}"#,
+    ),
+    (
+        "POST",
+        "/v1/rooms/persistent/team/agents/researcher/reauthorize",
+        r#"{"decision_id":"d2"}"#,
+    ),
+    (
+        "POST",
+        "/v1/rooms/persistent/team/agents/researcher/suspend",
+        r#"{"decision_id":"d3"}"#,
+    ),
+    (
+        "POST",
+        "/v1/rooms/persistent/team/agents/researcher/resume",
+        r#"{"decision_id":"d4"}"#,
+    ),
+    (
+        "DELETE",
+        "/v1/rooms/persistent/team/agents/researcher",
+        r#"{"decision_id":"d5"}"#,
+    ),
+];
+
+fn roster_state_with_key(daemon_url: &str, key_path: PathBuf) -> Arc<AppState> {
+    let mut state = roster_state(daemon_url);
+    Arc::get_mut(&mut state).unwrap().operator_key_path = key_path;
+    state
+}
+
+#[tokio::test]
+async fn the_owner_gets_every_authority_action_with_the_key() {
+    let (daemon_url, log, _owner, lookups, upstream) =
+        spawn_owner_recorder(OwnerReply::Owner(Some("alice"))).await;
+    let credential_dir = tempfile::tempdir().expect("credential tempdir");
+    let key_path = write_operator_key(credential_dir.path());
+    let (app, _dist) = app_for(roster_state_with_key(&daemon_url, key_path));
+
+    for (index, (method, uri, body)) in AUTHORITY_ACTIONS.iter().enumerate() {
+        let (status, text) = send(&app, as_alice(method, uri, body)).await;
+        assert_eq!(status, StatusCode::OK, "{method} {uri} {text}");
+        let forwarded = seen(&log);
+        assert_eq!(forwarded.len(), index + 1, "{method} {uri}");
+        assert_eq!(&forwarded[index].target, uri);
+        assert_eq!(forwarded[index].operator.as_deref(), Some(OPERATOR_KEY));
+    }
+    let lookups = lookups.lock().unwrap();
+    assert_eq!(
+        lookups.count,
+        AUTHORITY_ACTIONS.len(),
+        "one lookup per action"
+    );
+    assert!(
+        !lookups.keyed,
+        "the owner lookup never carries the operator key"
+    );
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn a_non_owner_is_refused_every_authority_action_before_the_key_is_read() {
+    let (daemon_url, log, _owner, _lookups, upstream) =
+        spawn_owner_recorder(OwnerReply::Owner(Some("bob"))).await;
+    // No key file at all: had the key been read, the answer would be 503
+    // operator_credential_unavailable. 403 proves the refusal came first.
+    let missing = PathBuf::from("/nonexistent/ocean-surface-test/operator.key");
+    let (app, _dist) = app_for(roster_state_with_key(&daemon_url, missing));
+
+    for (method, uri, body) in AUTHORITY_ACTIONS {
+        let (status, text) = send(&app, as_alice(method, uri, body)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri} {text}");
+        assert_eq!(error_code(&text), "not_room_owner", "{method} {uri}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap()["code"],
+            "not_room_owner"
+        );
+    }
+    assert!(seen(&log).is_empty(), "{:?}", seen(&log));
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn an_ownerless_room_admits_only_the_first_bootstrap() {
+    let (daemon_url, log, owner, _lookups, upstream) =
+        spawn_owner_recorder(OwnerReply::Owner(None)).await;
+    let credential_dir = tempfile::tempdir().expect("credential tempdir");
+    let key_path = write_operator_key(credential_dir.path());
+    let (app, _dist) = app_for(roster_state_with_key(&daemon_url, key_path));
+
+    // Nothing to revoke or suspend in a room nobody owns yet.
+    for (method, uri, body) in &AUTHORITY_ACTIONS[1..] {
+        let (status, text) = send(&app, as_alice(method, uri, body)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}");
+        assert_eq!(error_code(&text), "not_room_owner", "{method} {uri}");
+    }
+    assert!(seen(&log).is_empty(), "{:?}", seen(&log));
+
+    // The first bootstrap goes through, naming its caller (the body binding
+    // already refuses any other owner) — the daemon makes alice the owner.
+    let (method, uri, body) = AUTHORITY_ACTIONS[0];
+    let (status, _) = send(&app, as_alice(method, uri, body)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(seen(&log).len(), 1);
+    assert_eq!(seen(&log)[0].operator.as_deref(), Some(OPERATOR_KEY));
+    // ...and a first bootstrap naming someone else never reaches the lookup.
+    let (status, text) = send(
+        &app,
+        as_alice(
+            "POST",
+            uri,
+            r#"{"owner_member_id":"bob","agent_package_id":"researcher"}"#,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(error_code(&text), "actor_mismatch");
+
+    // Once the daemon records alice, the rest of the ceremony is hers.
+    *owner.lock().unwrap() = OwnerReply::Owner(Some("alice"));
+    let (method, uri, body) = AUTHORITY_ACTIONS[3];
+    let (status, _) = send(&app, as_alice(method, uri, body)).await;
+    assert_eq!(status, StatusCode::OK);
+    // ...and bob, arriving second, is not the owner of anything.
+    let (status, text) = send(
+        &app,
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::COOKIE, format!("{SESSION_COOKIE}=tok-bob"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(error_code(&text), "not_room_owner");
+    assert_eq!(seen(&log).len(), 2);
+    upstream.abort();
+}
+
+#[tokio::test]
+async fn an_owner_lookup_that_does_not_answer_fails_closed() {
+    let missing = PathBuf::from("/nonexistent/ocean-surface-test/operator.key");
+    for reply in [
+        OwnerReply::Status(404),
+        OwnerReply::Status(500),
+        OwnerReply::FailingStatusNamingAlice,
+        OwnerReply::Garbage,
+        OwnerReply::NotOk,
+        OwnerReply::NonStringOwner,
+    ] {
+        let (daemon_url, log, _owner, _lookups, upstream) =
+            spawn_owner_recorder(reply.clone()).await;
+        let (app, _dist) = app_for(roster_state_with_key(&daemon_url, missing.clone()));
+        for (method, uri, body) in AUTHORITY_ACTIONS {
+            let (status, text) = send(&app, as_alice(method, uri, body)).await;
+            assert_eq!(status, StatusCode::BAD_GATEWAY, "{reply:?} {method} {uri}");
+            assert_eq!(error_code(&text), "owner_lookup_failed", "{reply:?}");
+        }
+        assert!(seen(&log).is_empty(), "{reply:?}: {:?}", seen(&log));
+        upstream.abort();
+    }
+
+    // A daemon that is not there at all.
+    let (app, _dist) = app_for(roster_state_with_key("http://127.0.0.1:9", missing));
+    let (method, uri, body) = AUTHORITY_ACTIONS[3];
+    let (status, text) = send(&app, as_alice(method, uri, body)).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(error_code(&text), "owner_lookup_failed");
+}
+
+#[tokio::test]
+async fn single_operator_and_auth_off_never_look_the_owner_up() {
+    let (daemon_url, log, _owner, lookups, upstream) =
+        spawn_owner_recorder(OwnerReply::Owner(Some("somebody-else"))).await;
+    let credential_dir = tempfile::tempdir().expect("credential tempdir");
+    let key_path = write_operator_key(credential_dir.path());
+
+    let (off_app, _d1) = app_for(auth_off_state(&daemon_url, key_path.clone()));
+    let mut single = auth_test_state();
+    {
+        let inner = Arc::get_mut(&mut single).unwrap();
+        inner.daemon_url = daemon_url.clone();
+        inner.operator_key_path = key_path;
+    }
+    let (single_app, _d2) = app_for(single);
+
+    for (app, cookie) in [(&off_app, None), (&single_app, Some("test-session"))] {
+        for (method, uri, _) in AUTHORITY_ACTIONS {
+            let mut builder = Request::builder()
+                .method(*method)
+                .uri(*uri)
+                .header(header::CONTENT_TYPE, "application/json");
+            if let Some(token) = cookie {
+                builder = builder.header(header::COOKIE, format!("{SESSION_COOKIE}={token}"));
+            }
+            let (status, text) = send(app, builder.body(Body::from("{}")).unwrap()).await;
+            assert_eq!(status, StatusCode::OK, "{cookie:?} {method} {uri} {text}");
+        }
+    }
+    assert_eq!(seen(&log).len(), 2 * AUTHORITY_ACTIONS.len());
+    assert_eq!(lookups.lock().unwrap().count, 0);
     upstream.abort();
 }

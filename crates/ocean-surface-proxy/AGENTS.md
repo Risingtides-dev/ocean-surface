@@ -40,8 +40,8 @@ the parse-and-compare.
 
 Injected only on the six room-agent authority shapes
 (`room_agent_authority_mutation`), and read only AFTER every refusal —
-`upstream_url`, the actor binding, the duplicate-key check — so a request the
-proxy refuses never touches the credential. Browser `X-Ocean-Operator`,
+`upstream_url`, the actor binding, the duplicate-key check, the owner gate —
+so a request the proxy refuses never touches the credential. Browser `X-Ocean-Operator`,
 Cookie, Origin and Referer never cross.
 
 Holding the key does not make the caller the room's owner: in multi-user mode
@@ -51,6 +51,36 @@ signed-in roster user could bootstrap a local room naming someone else as
 owner, and the first bootstrap WRITES the owner. Consequence for the surface:
 only the room's owner can authorize an agent from their own session (the
 authorize body carries the daemon-resolved owner from the preview).
+
+**Owner gate (multi-user).** The key is room-agnostic authority, so before
+lending it on ANY of the six shapes the proxy asks the daemon who owns the
+room — `GET {key}/agents` without the key (an inspection route), whose
+`owner_member_id` is `room_owner_proof`, the function every daemon authority
+decision (`target_proof`) uses — and refuses unless it is the session user:
+`403 {"ok":false,"code":"not_room_owner","error":"not_room_owner"}`. This is
+what covers the target-only actions (revoke, suspend, resume, reauthorize),
+which carry no identity to bind. A room with no owner yet admits only the
+first bootstrap, whose `owner_member_id` is already bound to the caller, so
+whoever bootstraps becomes the owner exactly as the daemon expects. Any lookup
+that does not produce a clear answer — transport error, non-2xx, non-JSON,
+`ok` not true, a non-string owner — fails closed: `502
+{"ok":false,"code":"owner_lookup_failed",...}`. Single-operator and auth-off
+do no lookup and are unchanged.
+
+The check-then-forward window is acceptable because the owner is write-once
+from every browser-reachable route: the daemon inserts the `owner` row in
+`room_local_roles` only when none exists and refuses a bootstrap naming a
+different owner (`LocalRoomOwnerConflict`), so two users racing the first
+bootstrap cannot both win, and an existing owner changes only through the
+operator-only retirement lane, which this proxy never lends its key to.
+
+The UI does not yet know this: its bindings panel gates the revoke/suspend/
+resume controls on the ROOM's `owner_eligible`, not on "you are the owner",
+and the room model carries no owner signal, so a non-owner still sees the
+controls and gets `not_room_owner` when they press one. Hiding them needs the
+bindings response's `owner_member_id` decoded and compared to the identity —
+left for a UI slice, because federated rooms name a daemon-local member id that
+need not equal the single-operator `surface-operator` identity.
 
 ## Member-lane actor binding (rooms-persistent)
 
@@ -101,15 +131,6 @@ Not bound, on purpose:
   anyone, INCLUDING the room's owner, which flips `owner_present` and with it
   what the authority ceremony will admit. Closing it needs the daemon to take
   a caller identity on these routes; the proxy can then bind it here.
-- **Known gap (daemon / authz work):** the target-only authority actions —
-  revoke (`DELETE {key}/agents/{id}`), suspend, resume and reauthorize
-  (`POST {key}/agents/{id}/{action}`) — carry no identity at all (their
-  bodies are a `decision_id` and policy fields), and the proxy injects the
-  operator key on them. So in multi-user mode ANY signed-in roster user can
-  revoke or suspend any agent binding in any room. There is nothing here to
-  bind. The real fix is to authenticate the member lane (Rooms DoD 3.1), or
-  for the proxy to confirm the session user is the room's owner before it
-  injects the key.
 - **Deliberate outage:** an auth-off proxy reached through a tunnel or
   `tailscale serve` (anything that arrives with a non-loopback Host or URI
   authority) now answers `403 non_loopback_host_refused` on everything. That

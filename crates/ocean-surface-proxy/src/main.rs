@@ -3317,6 +3317,97 @@ fn body_actor_mismatch(path: &str, body: &[u8], actor: &str) -> bool {
     is_join && !joins_as_agent && names_other("id")
 }
 
+fn not_room_owner() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        [(header::CONTENT_TYPE, "application/json")],
+        Bytes::from_static(br#"{"ok":false,"code":"not_room_owner","error":"not_room_owner"}"#),
+    )
+        .into_response()
+}
+
+fn owner_lookup_failed() -> Response {
+    (
+        StatusCode::BAD_GATEWAY,
+        [(header::CONTENT_TYPE, "application/json")],
+        Bytes::from_static(
+            br#"{"ok":false,"code":"owner_lookup_failed","error":"owner_lookup_failed"}"#,
+        ),
+    )
+        .into_response()
+}
+
+/// What the daemon says about a room's owner: `Some(None)` is a room with no
+/// owner yet, `None` is a lookup that did not produce an answer.
+async fn room_owner(
+    state: &AppState,
+    daemon: &ResolvedDaemon,
+    path: &str,
+) -> Option<Option<String>> {
+    // `path` passed `has_dot_segment` and `upstream_url` already, and is an
+    // authority shape, so segment 3 is a non-empty room key exactly as the
+    // client encoded it — the same key the forward will address.
+    let key = path.trim_start_matches('/').split('/').nth(3)?;
+    let url = upstream_url(daemon, &format!("/v1/rooms/persistent/{key}/agents"), None)?;
+    // No operator key: the binding list is an inspection route, credential-
+    // free by contract.
+    let response = state.http_json.get(url).send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body: Value = response.json().await.ok()?;
+    if body.get("ok").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    match body.get("owner_member_id") {
+        None | Some(Value::Null) => Some(None),
+        Some(Value::String(owner)) => Some(Some(owner.clone())),
+        Some(_) => None,
+    }
+}
+
+/// Refuse an authority mutation unless the session user is the room's owner.
+///
+/// The owner comes from `GET {key}/agents`, whose `owner_member_id` is the
+/// daemon's `room_owner_proof` — the same function `target_proof` and every
+/// authority decision use (the Local room's `owner` row in
+/// `room_local_roles`, or a federated room's local human member). A room with
+/// no owner admits exactly one thing: the first bootstrap, whose
+/// `owner_member_id` the body binding has already pinned to this user, so
+/// whoever bootstraps becomes the owner as the daemon expects.
+///
+/// Fails closed: no answer is `502 owner_lookup_failed`, never a pass.
+///
+/// Check-then-act is acceptable here because the owner is write-once from
+/// every browser-reachable route: the daemon inserts the owner row only when
+/// none exists and refuses a bootstrap naming a different owner
+/// (`LocalRoomOwnerConflict`), so two users racing the first bootstrap cannot
+/// both win, and an existing owner can be replaced only by the operator-only
+/// retirement lane, which this proxy never lends its key to. The window
+/// between this read and the forward therefore cannot hand the room to
+/// someone else.
+async fn room_owner_refusal(
+    state: &AppState,
+    daemon: &ResolvedDaemon,
+    method: &axum::http::Method,
+    path: &str,
+    actor: &str,
+) -> Option<Response> {
+    let Some(owner) = room_owner(state, daemon, path).await else {
+        return Some(owner_lookup_failed());
+    };
+    let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    let first_bootstrap = method == axum::http::Method::POST
+        && segments.len() == 6
+        && segments[4] == "agents"
+        && segments[5] == "bootstrap";
+    match owner {
+        Some(owner) if owner == actor => None,
+        None if first_bootstrap => None,
+        _ => Some(not_room_owner()),
+    }
+}
+
 /// Which persistent-rooms request this is, because three of the shapes under
 /// one wildcard route cannot be forwarded the same way.
 ///
@@ -3553,6 +3644,18 @@ async fn proxy_rooms_persistent(
             }
             if body_actor_mismatch(&path, &body, actor) {
                 return actor_mismatch();
+            }
+        }
+    }
+    // Holding the operator key is room-agnostic authority, so in multi-user
+    // mode the proxy lends it only to the room's owner. Target-only actions
+    // (revoke, suspend, resume, reauthorize) carry no identity to bind at all;
+    // this is what stops any roster user revoking any room's agents.
+    if authority_mutation {
+        if let Some(actor) = session_actor.as_deref() {
+            if let Some(refusal) = room_owner_refusal(&state, &daemon, &method, &path, actor).await
+            {
+                return refusal;
             }
         }
     }

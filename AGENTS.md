@@ -297,7 +297,10 @@ Web surface session UI:
   retaining headerless localhost CLI clients. That rule now covers EVERY
   non-GET/HEAD request under `/v1/` and `/api/`, not only these six, and
   auth-off refuses any request addressed to a non-loopback Host. In
-  multi-user mode the bodies' `owner_member_id` must be the signed-in user.
+  multi-user mode the bodies' `owner_member_id` must be the signed-in user,
+  and the key is lent on any of the six only after the daemon's
+  `GET {key}/agents` names that user as the room's owner (an ownerless room
+  admits only the first bootstrap).
   JSON forwards refuse a non-empty body not declared as JSON (415) instead of
   relabelling a browser's text/plain or form body as JSON. Auth-off startup is refused on
   non-loopback binds. The Tauri shell now owns the equivalent privileged
