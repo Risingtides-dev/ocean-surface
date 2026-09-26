@@ -271,7 +271,11 @@ Web surface session UI:
   answers with an empty body
   that the surface can only report as a JSON decode error. Adding an
   `/v1/agents/{name}` route requires the `has_dot_segment` guard —
-  percent-encoding does not neutralise `..`, because `.` is unreserved.
+  percent-encoding does not neutralise `..`, because `.` is unreserved. Every
+  forward also goes through `upstream_url`, which refuses a URL whose parsed
+  path differs from the approved one (`\` parses as `/`); the proxy's own
+  boundary rules, including the Rooms member-lane actor binding, live in
+  `crates/ocean-surface-proxy/AGENTS.md`.
 - Agent participants are selected from daemon-owned `/v1/agents` identities and
   remain subject to daemon authorization and admission. The surface never mints
   a participant from free text or calls the legacy bare `add_agent` path: a
@@ -290,7 +294,8 @@ Web surface session UI:
   `X-Ocean-Operator`, Cookie, Origin, and Referer headers never cross that
   boundary. In auth-off mode, a mutation carrying Origin or Referer must name
   the exact loopback Host; reject it before credential lookup otherwise, while
-  retaining headerless localhost CLI clients. Auth-off startup is refused on
+  retaining headerless localhost CLI clients. That rule now covers EVERY
+  non-GET/HEAD request under `/v1/` and `/api/`, not only these six. Auth-off startup is refused on
   non-loopback binds. The Tauri shell now owns the equivalent privileged
   transport this rule required: its `daemon_operator_request` command takes a
   method and a PATH (never a URL, never a header), re-checks both against a
