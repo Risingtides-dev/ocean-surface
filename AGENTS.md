@@ -361,7 +361,21 @@ Web surface session UI:
   their copy. `200 {closed:true}` and the `404 room_not_open` of a room that
   already closed BOTH land in the audit view: success re-hydrates through
   `Rooms::open_room`, the one path that reads `closed` and starts no tail, and
-  never flips signals beside it. A cut response says the room may have closed.
+  never flips signals beside it. An answer lost on the way back says the room
+  MAY have closed and to try again (a retry of a landed close reads as
+  already-closed): the browser's own transport error, the proxy's `503
+  device_unavailable` with `reason: "unreachable"` — which is how
+  `device_unreachable` reports ANY upstream reqwest error, including the 120s
+  forward timeout and a reset after the daemon committed — and a gateway's
+  502/504. `503 reason: "unknown_device"` is the proxy refusing before any
+  daemon was addressed, so it reads as a plain failure. `room_not_open`
+  counts only on a 404. The fire path re-checks `close_offered` at dispatch
+  (`dispatch_check`). The modal traps Tab (`tab_trap`), holds focus on itself
+  while both buttons are disabled in flight, and after a close hands focus to
+  the audit view's back control (`refocus_action`) whenever focus has fallen
+  to `<body>` in the re-hydrated closed admission — keyed on the back button's
+  NodeRef, because the header rebuilds more than once while it hydrates. Its copy notes that an operator-enabled room retention deletes the
+  closed record after the window.
 - An invite code is a bearer grant to the room. A minted one arrives in the
   RESPONSE body and lives in one signal and the open panel's DOM; a redeemed
   one goes in the REQUEST body. Never a log line, never an error sentence, and

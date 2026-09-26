@@ -3614,6 +3614,7 @@ pub fn RoomsWorkspace(
                                         <button
                                             class="rooms-workspace__center-back"
                                             type="button"
+                                            node_ref=close_control.back_ref()
                                             title="Back to room list"
                                             aria-label="Close current room"
                                             on:click=move |_| rooms.close_room()

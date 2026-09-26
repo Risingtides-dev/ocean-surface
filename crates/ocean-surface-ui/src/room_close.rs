@@ -97,6 +97,103 @@ pub(crate) fn close_offered(
         })
 }
 
+/// The dispatch-time re-check: the same rule as [`close_offered`], asked again
+/// at the moment `fire` would send, because identity or roster can move
+/// between opening the dialog and pressing it. `Err` is the sentence shown
+/// instead of sending.
+pub(crate) fn dispatch_check(
+    closed: bool,
+    identity_authoritative: bool,
+    identity_id: &str,
+    room: Option<&Room>,
+) -> Result<(), String> {
+    if close_offered(closed, identity_authoritative, identity_id, room) {
+        Ok(())
+    } else {
+        Err(
+            "You can no longer close this room from here \u{2014} you are not on its roster \
+             as a person, or it has already closed."
+                .to_string(),
+        )
+    }
+}
+
+/// Where Tab goes inside the modal. `Keep` is first, `Fire` is last; anything
+/// else focused inside the dialog (the dialog itself) counts as neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DialogFocus {
+    Keep,
+    Fire,
+    Other,
+}
+
+/// What a Tab press inside the modal does. `None` lets the browser move focus
+/// natively (it is already between the two ends); `Some` is a move this code
+/// makes after preventing the default, so focus never leaves an
+/// `aria-modal` dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrapMove {
+    /// Focus the first control (`Keep room open`).
+    First,
+    /// Focus the last control (`Close room`).
+    Last,
+    /// Both controls are disabled while a close is in flight; hold focus on
+    /// the dialog itself rather than letting it fall to `<body>`.
+    Hold,
+}
+
+pub(crate) fn tab_trap(shift: bool, focused: DialogFocus, in_flight: bool) -> Option<TrapMove> {
+    if in_flight {
+        return Some(TrapMove::Hold);
+    }
+    match (shift, focused) {
+        (true, DialogFocus::Keep | DialogFocus::Other) => Some(TrapMove::Last),
+        (false, DialogFocus::Fire | DialogFocus::Other) => Some(TrapMove::First),
+        _ => None,
+    }
+}
+
+/// What the post-close focus effect should do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Refocus {
+    /// No close pending in this admission (or it was superseded): forget it.
+    Clear,
+    /// The closed admission has hydrated and focus is lost: take it.
+    Focus,
+    /// Not yet — still hydrating, or focus is somewhere the reader put it.
+    Wait,
+}
+
+/// `pending` is the generation of the admission a successful close re-opened;
+/// `generation` is the current one. A different generation means the reader
+/// opened or left a room since, and the hand-off no longer applies.
+pub(crate) fn refocus_action(
+    pending: Option<u64>,
+    generation: u64,
+    closed: bool,
+    focus_lost: bool,
+) -> Refocus {
+    match pending {
+        None => Refocus::Wait,
+        Some(pending) if pending != generation => Refocus::Clear,
+        Some(_) if closed && focus_lost => Refocus::Focus,
+        Some(_) => Refocus::Wait,
+    }
+}
+
+/// Is keyboard focus nowhere — on `<body>` or on no element at all?
+fn focus_is_lost() -> bool {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return false;
+    };
+    match document.active_element() {
+        None => true,
+        Some(active) => document
+            .body()
+            .is_some_and(|body| AsRef::<web_sys::Element>::as_ref(&body) == &active),
+    }
+}
+
 /// Whether closing leaves copies of this room elsewhere. Any access state but
 /// `Local` means the room is federated, and the daemon's close is a LOCAL
 /// statement that tells Bedrock nothing. `None` (no projection yet) is not
@@ -135,6 +232,11 @@ pub(crate) struct CloseReply {
     code: Option<String>,
     #[serde(default)]
     error: Option<String>,
+    /// The PROXY's own `device_unavailable` refusals carry this:
+    /// `unreachable` is its upstream reqwest error (timeout, reset, refused);
+    /// `unknown_device` is a session naming a machine no longer in the roster.
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 /// What a close request came to.
@@ -159,6 +261,7 @@ pub(crate) fn classify_close(status: u16, body: Option<CloseReply>) -> CloseOutc
         // (or a proxy that does not carry it); anything else is unreadable.
         return match status {
             404 | 405 => CloseOutcome::Refused(route_absent_sentence()),
+            502 | 504 => CloseOutcome::Refused(uncertain_sentence(&format!("HTTP {status}"))),
             _ => CloseOutcome::Refused(format!(
                 "The close reply could not be read (HTTP {status}). The room may or may not \
                  have closed \u{2014} try again: a room that already closed says so."
@@ -168,6 +271,20 @@ pub(crate) fn classify_close(status: u16, body: Option<CloseReply>) -> CloseOutc
     if (200..300).contains(&status) && body.ok && body.closed {
         return CloseOutcome::Closed;
     }
+    // A hop between here and the daemon lost the answer. The proxy turns ANY
+    // upstream reqwest error into `503 device_unavailable / unreachable` —
+    // including its 120s forward timeout and a reset after the daemon had
+    // already committed the close — and a gateway in front of it answers
+    // 502/504 for the same class. None of those says the close did not
+    // happen. `503 unknown_device` does: the proxy refused before any daemon
+    // was addressed, so it falls through to the plain failure below.
+    let proxy_unreachable =
+        status == 503 && body.reason.as_deref().map(str::trim) == Some("unreachable");
+    if proxy_unreachable || status == 502 || status == 504 {
+        return CloseOutcome::Refused(uncertain_sentence(&format!("HTTP {status}")));
+    }
+    // Status AND marker: `room_not_open` on anything but the daemon's flat 404
+    // is not the not-open answer, whatever else carried it.
     if status == 404 && body.room_not_open {
         return CloseOutcome::AlreadyClosed;
     }
@@ -224,11 +341,13 @@ fn route_absent_sentence() -> String {
         .to_string()
 }
 
-/// The transport failed before any reply. The daemon commits the close before
-/// it answers, so a cut response can hide a close that happened.
-fn cut_sentence(err: &str) -> String {
+/// The answer was lost on the way back — the browser's transport failed, or a
+/// hop in front of the daemon (proxy, gateway) gave up on it. The daemon
+/// commits the close before it answers, so a lost answer can hide a close
+/// that happened.
+fn uncertain_sentence(what: &str) -> String {
     format!(
-        "The request was cut ({err}). The room may have closed without this screen hearing \
+        "The request was cut ({what}). The room may have closed without this screen hearing \
          back \u{2014} try again: a room that already closed says so."
     )
 }
@@ -254,6 +373,20 @@ pub struct RoomCloseState {
     trigger_ref: NodeRef<leptos::html::Button>,
     /// The dialog's safe choice, focused when it opens.
     keep_ref: NodeRef<leptos::html::Button>,
+    /// The dialog's firing control, the last stop of the focus trap.
+    fire_ref: NodeRef<leptos::html::Button>,
+    /// The dialog element, which holds focus while both buttons are disabled.
+    dialog_ref: NodeRef<leptos::html::Div>,
+    /// The menu's only item, focused when the menu opens so Escape reaches it.
+    item_ref: NodeRef<leptos::html::Button>,
+    /// The header's back control, bound by `rooms_workspace.rs`; where focus
+    /// lands after a close.
+    back_ref: NodeRef<leptos::html::Button>,
+    /// Set after a successful close to the generation of the re-hydrating
+    /// admission; focus moves to the audit view once that admission reads
+    /// `closed`. Deliberately NOT cleared by `reset`, which that very
+    /// admission triggers.
+    refocus_for: RwSignal<Option<u64>>,
 }
 
 impl RoomCloseState {
@@ -265,6 +398,11 @@ impl RoomCloseState {
             error: RwSignal::new(None),
             trigger_ref: NodeRef::new(),
             keep_ref: NodeRef::new(),
+            fire_ref: NodeRef::new(),
+            dialog_ref: NodeRef::new(),
+            item_ref: NodeRef::new(),
+            back_ref: NodeRef::new(),
+            refocus_for: RwSignal::new(None),
         }
     }
 
@@ -275,6 +413,12 @@ impl RoomCloseState {
         self.confirm.set(false);
         self.in_flight.set(false);
         self.error.set(None);
+    }
+
+    /// The NodeRef the header's back control binds, so focus can land there
+    /// after a close.
+    pub fn back_ref(&self) -> NodeRef<leptos::html::Button> {
+        self.back_ref
     }
 
     /// Dismiss the dialog without closing anything. Refused while a close is
@@ -291,6 +435,45 @@ impl RoomCloseState {
         }
     }
 
+    /// Keep Tab inside the modal ([`tab_trap`]).
+    fn trap_tab(&self, ev: &web_sys::KeyboardEvent) {
+        let active = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.active_element());
+        let is = |el: Option<web_sys::HtmlButtonElement>| {
+            el.zip(active.as_ref())
+                .is_some_and(|(el, active)| AsRef::<web_sys::Element>::as_ref(&el) == active)
+        };
+        let focused = if is(self.keep_ref.get_untracked()) {
+            DialogFocus::Keep
+        } else if is(self.fire_ref.get_untracked()) {
+            DialogFocus::Fire
+        } else {
+            DialogFocus::Other
+        };
+        let Some(step) = tab_trap(ev.shift_key(), focused, self.in_flight.get_untracked()) else {
+            return;
+        };
+        ev.prevent_default();
+        match step {
+            TrapMove::First => {
+                if let Some(keep) = self.keep_ref.get_untracked() {
+                    let _ = keep.focus();
+                }
+            }
+            TrapMove::Last => {
+                if let Some(fire) = self.fire_ref.get_untracked() {
+                    let _ = fire.focus();
+                }
+            }
+            TrapMove::Hold => {
+                if let Some(dialog) = self.dialog_ref.get_untracked() {
+                    let _ = dialog.focus();
+                }
+            }
+        }
+    }
+
     /// Fire the close for the open room.
     fn fire(&self, rooms: Rooms) {
         if self.in_flight.get_untracked() {
@@ -300,19 +483,13 @@ impl RoomCloseState {
             return;
         };
         let actor = rooms.identity_id.get_untracked();
-        // Re-checked at dispatch, not only at render: identity or roster can
-        // move between opening the dialog and pressing it.
-        if !close_offered(
+        if let Err(sentence) = dispatch_check(
             rooms.closed.get_untracked(),
             rooms.identity_authoritative.get_untracked(),
             &actor,
             rooms.open_room.get_untracked().as_ref(),
         ) {
-            self.error.set(Some(
-                "You can no longer close this room from here \u{2014} you are not on its roster \
-                 as a person, or it has already closed."
-                    .to_string(),
-            ));
+            self.error.set(Some(sentence));
             return;
         }
         let url = room_close_url(&rooms.url.get_untracked(), &key, &actor);
@@ -320,9 +497,20 @@ impl RoomCloseState {
         let me = *self;
         self.in_flight.set(true);
         self.error.set(None);
+        // Both buttons disable while in flight, which would drop focus to
+        // `<body>`; the dialog itself holds it instead.
+        if let Some(dialog) = self.dialog_ref.get_untracked() {
+            let _ = dialog.focus();
+        }
         spawn_local(async move {
             let outcome = post_close(&url).await;
+            let closed = matches!(outcome, CloseOutcome::Closed | CloseOutcome::AlreadyClosed);
             if !rooms.room_is_current(generation, &key) {
+                // The reader moved on, but the room DID close: the rail
+                // still lists it until it is told.
+                if closed {
+                    rooms.fetch_rooms_silent();
+                }
                 return;
             }
             me.in_flight.set(false);
@@ -336,8 +524,16 @@ impl RoomCloseState {
                     // generation (retiring the live tail), reads `/snapshot`'s
                     // `closed: true`, and starts no tail on it.
                     rooms.open_room(key);
+                    // The dialog that held focus is gone; hand it to the audit
+                    // view once that admission has hydrated.
+                    me.refocus_for.set(Some(rooms.generation_snapshot()));
                 }
-                CloseOutcome::Refused(sentence) => me.error.set(Some(sentence)),
+                CloseOutcome::Refused(sentence) => {
+                    me.error.set(Some(sentence));
+                    if let Some(keep) = me.keep_ref.get_untracked() {
+                        let _ = keep.focus();
+                    }
+                }
             }
         });
     }
@@ -358,7 +554,7 @@ async fn post_close(url: &str) -> CloseOutcome {
             let body = resp.json::<CloseReply>().await.ok();
             classify_close(status, body)
         }
-        Err(err) => CloseOutcome::Refused(cut_sentence(&err.to_string())),
+        Err(err) => CloseOutcome::Refused(uncertain_sentence(&err.to_string())),
     }
 }
 
@@ -393,6 +589,38 @@ pub fn RoomCloseControl(rooms: Rooms, state: RoomCloseState) -> impl IntoView {
     Effect::new(move |_| {
         if let Some(keep) = state.keep_ref.get() {
             let _ = keep.focus();
+        }
+    });
+
+    // Focus the menu item when the menu mounts, so Escape and Enter reach it.
+    Effect::new(move |_| {
+        if let Some(item) = state.item_ref.get() {
+            let _ = item.focus();
+        }
+    });
+
+    // After a close the dialog is gone and focus falls to `<body>`. Hand it to
+    // the header's back control — the audit view's first control. Keyed on
+    // the back button's NodeRef, not a timer: the header is rebuilt more than
+    // once while the closed room hydrates, and each rebuild drops focus again,
+    // so each newly mounted back button re-checks. It acts only while focus is
+    // LOST, so it never takes focus from somewhere the reader put it.
+    Effect::new(move |_| {
+        let back = state.back_ref.get();
+        let action = refocus_action(
+            state.refocus_for.get(),
+            rooms.generation_snapshot_reactive(),
+            rooms.closed.get(),
+            focus_is_lost(),
+        );
+        match action {
+            Refocus::Clear => state.refocus_for.set(None),
+            Refocus::Focus => {
+                if let Some(back) = back {
+                    let _ = back.focus();
+                }
+            }
+            Refocus::Wait => {}
         }
     });
 
@@ -445,6 +673,7 @@ pub fn RoomCloseControl(rooms: Rooms, state: RoomCloseState) -> impl IntoView {
                                     class="rooms-workspace__room-menu-item rooms-workspace__room-menu-item--danger"
                                     type="button"
                                     role="menuitem"
+                                    node_ref=state.item_ref
                                     on:click=move |_| {
                                         state.menu.set(false);
                                         state.error.set(None);
@@ -471,10 +700,16 @@ pub fn RoomCloseControl(rooms: Rooms, state: RoomCloseState) -> impl IntoView {
                                 aria-modal="true"
                                 aria-labelledby="rooms-close-title"
                                 aria-describedby="rooms-close-desc"
+                                tabindex="-1"
+                                node_ref=state.dialog_ref
                                 on:keydown=move |ev| {
-                                    if ev.key() == "Escape" {
-                                        ev.prevent_default();
-                                        state.dismiss();
+                                    match ev.key().as_str() {
+                                        "Escape" => {
+                                            ev.prevent_default();
+                                            state.dismiss();
+                                        }
+                                        "Tab" => state.trap_tab(&ev),
+                                        _ => {}
                                     }
                                 }
                             >
@@ -488,6 +723,11 @@ pub fn RoomCloseControl(rooms: Rooms, state: RoomCloseState) -> impl IntoView {
                                      messages arrive. The transcript, roster and files stay \
                                      readable as a closed record, and the transcript will say \
                                      you closed it."
+                                </p>
+                                <p class="rooms-workspace__close-note">
+                                    "If the daemon's operator has turned on room retention, \
+                                     that closed record is deleted once the retention window \
+                                     passes."
                                 </p>
                                 {move || {
                                     local_only.get().then(|| view! {
@@ -518,6 +758,7 @@ pub fn RoomCloseControl(rooms: Rooms, state: RoomCloseState) -> impl IntoView {
                                     <button
                                         class="rooms-workspace__close-fire"
                                         type="button"
+                                        node_ref=state.fire_ref
                                         disabled=move || state.in_flight.get()
                                         on:click=move |_| state.fire(rooms)
                                     >
@@ -748,16 +989,140 @@ mod tests {
             "{sentence}"
         );
 
-        let CloseOutcome::Refused(sentence) = classify_close(502, None) else {
-            panic!("an unreadable 502 is a refusal");
+        let CloseOutcome::Refused(sentence) = classify_close(500, None) else {
+            panic!("an unreadable 500 is a refusal");
         };
         assert!(sentence.contains("may or may not"), "{sentence}");
     }
 
     #[test]
     fn a_cut_response_does_not_claim_nothing_happened() {
-        let sentence = cut_sentence("NetworkError");
+        let sentence = uncertain_sentence("NetworkError");
         assert!(sentence.contains("may have closed"), "{sentence}");
+    }
+
+    fn uncertain(outcome: CloseOutcome) -> bool {
+        matches!(outcome, CloseOutcome::Refused(sentence) if sentence.contains("may have closed"))
+    }
+
+    #[test]
+    fn the_proxy_losing_the_daemon_answer_is_uncertain_not_failed() {
+        // `device_unreachable`: any upstream reqwest error, including the 120s
+        // forward timeout and a reset after the daemon committed the close.
+        let unreachable = || {
+            reply(serde_json::json!({
+                "ok": false, "error": "device_unavailable",
+                "reason": "unreachable", "device": "studio",
+            }))
+        };
+        assert!(uncertain(classify_close(503, unreachable())));
+        // A gateway in front of the proxy losing the answer, with or without
+        // a JSON body.
+        for status in [502, 504] {
+            assert!(uncertain(classify_close(status, None)), "{status} bare");
+            assert!(
+                uncertain(classify_close(
+                    status,
+                    reply(serde_json::json!({ "ok": false, "error": "bad gateway" }))
+                )),
+                "{status} with body"
+            );
+        }
+    }
+
+    #[test]
+    fn a_proxy_refusal_before_any_daemon_is_a_plain_failure() {
+        // `unknown_device`: the proxy refused before addressing a daemon, so
+        // nothing can have closed.
+        let outcome = classify_close(
+            503,
+            reply(serde_json::json!({
+                "ok": false, "error": "device_unavailable",
+                "reason": "unknown_device", "device": "gone",
+            })),
+        );
+        let CloseOutcome::Refused(sentence) = outcome else {
+            panic!("unknown_device is a refusal");
+        };
+        assert!(!sentence.contains("may have closed"), "{sentence}");
+        assert!(sentence.contains("HTTP 503"), "{sentence}");
+    }
+
+    #[test]
+    fn room_not_open_counts_only_on_the_daemon_404() {
+        for status in [403, 500, 200] {
+            let body = reply(serde_json::json!({
+                "ok": false, "room_not_open": true, "error": "x",
+            }));
+            assert_ne!(
+                classify_close(status, body),
+                CloseOutcome::AlreadyClosed,
+                "{status} carrying room_not_open is not the not-open answer"
+            );
+        }
+    }
+
+    // ── dispatch re-check ─────────────────────────────────────────────────
+
+    #[test]
+    fn the_dispatch_check_refuses_what_the_render_gate_would_refuse() {
+        let human = room(vec![participant("alice", RoomParticipantKind::Human)]);
+        let agent = room(vec![participant("alice", RoomParticipantKind::Agent)]);
+        assert_eq!(dispatch_check(false, true, "alice", Some(&human)), Ok(()));
+        for (closed, authoritative, id, room) in [
+            (true, true, "alice", Some(&human)),
+            (false, false, "alice", Some(&human)),
+            (false, true, "bob", Some(&human)),
+            (false, true, "alice", Some(&agent)),
+            (false, true, "alice", None),
+        ] {
+            let refused = dispatch_check(closed, authoritative, id, room)
+                .expect_err("a close the daemon would refuse must not be sent");
+            assert!(refused.contains("no longer close"), "{refused}");
+        }
+    }
+
+    // ── post-close focus ──────────────────────────────────────────────────
+
+    #[test]
+    fn focus_moves_to_the_audit_view_only_when_it_was_lost_in_that_admission() {
+        assert_eq!(refocus_action(Some(4), 4, true, true), Refocus::Focus);
+        assert_eq!(
+            refocus_action(Some(4), 4, false, true),
+            Refocus::Wait,
+            "still hydrating: the audit view is not there yet"
+        );
+        assert_eq!(
+            refocus_action(Some(4), 4, true, false),
+            Refocus::Wait,
+            "focus the reader placed is never taken"
+        );
+        assert_eq!(
+            refocus_action(Some(4), 5, true, true),
+            Refocus::Clear,
+            "another room opened since: the hand-off is stale"
+        );
+        assert_eq!(refocus_action(None, 4, true, true), Refocus::Wait);
+    }
+
+    // ── focus trap ────────────────────────────────────────────────────────
+
+    #[test]
+    fn tab_never_leaves_the_modal() {
+        use DialogFocus::*;
+        assert_eq!(tab_trap(false, Fire, false), Some(TrapMove::First));
+        assert_eq!(tab_trap(true, Keep, false), Some(TrapMove::Last));
+        assert_eq!(tab_trap(false, Other, false), Some(TrapMove::First));
+        assert_eq!(tab_trap(true, Other, false), Some(TrapMove::Last));
+        // Between the two ends the browser's own move is already inside.
+        assert_eq!(tab_trap(false, Keep, false), None);
+        assert_eq!(tab_trap(true, Fire, false), None);
+        // In flight both are disabled; focus stays on the dialog.
+        for focused in [Keep, Fire, Other] {
+            for shift in [false, true] {
+                assert_eq!(tab_trap(shift, focused, true), Some(TrapMove::Hold));
+            }
+        }
     }
 
     // ── the federation note ───────────────────────────────────────────────
