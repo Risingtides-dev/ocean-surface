@@ -6054,6 +6054,50 @@ mod tests {
         );
     }
 
+    /// DoD 1.5 as one reader's session, through the decision and the
+    /// near-bottom measure the Effect feeds it: open at the newest page, scroll
+    /// up, keep reading through live appends without being moved, return to
+    /// latest, and follow again.
+    #[test]
+    fn a_scrolled_reader_is_never_yanked_and_return_to_latest_re_pins() {
+        let (scroll_height, client_height) = (4_000, 600);
+        let at =
+            |scroll_top| transcript_is_near_bottom(scroll_height, scroll_top, client_height, 120);
+        let bottom = scroll_height - client_height;
+
+        // Hydration: the first fill pins, wherever the element happens to sit.
+        assert_eq!(
+            transcript_pass_action(200, 0, true, at(0), false, false),
+            TranscriptPassAction::PinAndQueue
+        );
+        // Following: an append at the bottom pins again.
+        assert_eq!(
+            transcript_pass_action(201, 200, true, at(bottom), false, false),
+            TranscriptPassAction::PinAndQueue
+        );
+        // Scrolled up past the threshold: every live append raises the jump,
+        // and none of them pins.
+        let reading = bottom - 121;
+        assert!(!at(reading));
+        for len in 202..=205 {
+            assert_eq!(
+                transcript_pass_action(len, len - 1, true, at(reading), false, false),
+                TranscriptPassAction::RaiseJump,
+                "append {len} must not move a reader who scrolled up",
+            );
+        }
+        // Within the threshold of the bottom is still following — a reader a
+        // few pixels off the end is not someone reading history.
+        assert!(at(bottom - 119));
+        // Return to latest puts `scroll_top` at the bottom; the next append
+        // takes the pin arm again.
+        assert_eq!(
+            transcript_pass_action(206, 205, true, at(bottom), false, false),
+            TranscriptPassAction::PinAndQueue,
+            "after return-to-latest the follow re-pins",
+        );
+    }
+
     /// The signal the arm above turns on. A prepend is the only write that
     /// lowers the oldest `seq`, and reading the seq rather than the row count is
     /// what stops a page that was entirely already painted — `prepend_transcript_page`

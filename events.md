@@ -7420,3 +7420,31 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+
+time:      [10:54] [09-26-26]
+agent:     [claude] [opus 5.5]
+worktree:  test/rooms-dod-1-5-1-6
+type:      review
+area:      testing
+
+Audited ocean-surface acceptance coverage for Rooms DoD 1.5 (read history) and
+1.6 (see every room) against ocean-os origin/main's real paging contract, and
+closed what was open. One bug fixed: since ocean-os 28cf94c9 the room list
+mints an opaque keyset cursor (ocean-room-list:v1:[updated_at,id]) that stays
+exact when the room it names moves, but every 8-second silent poll on a paged
+rail swapped it for the bare key of the rail's last row, which the daemon
+resolves at that room's CURRENT updated_at; one message in the boundary room
+before the next "load more rooms" press then returned only rooms already on
+screen, retired the affordance, and stranded every room past 200 until an
+interactive refresh. retained_tail_cursor now keeps the parked cursor while
+the rail still ends on the same room and re-derives a key only when the
+boundary moved. New tests: an in-module ListDaemon (keyset order, limit 100,
+both cursor forms, percent-decoding) walks 250 rooms through the real decode
+path with a poll and a boundary message between presses; a return-to-latest
+sequence test; and tests/room_history_follow.rs pinning the RaiseJump arm
+(no scroll write), the pin, the jump button and scroll handler, the shared 120px
+threshold, and the module's three programmatic scroll writes. Every new test
+mutation-checked RED. Not done here: orphaned thread replies still render
+nowhere on main; open PR #197 carries that fix and was not duplicated.
+
+_________________________________________________________________________________ 10:54 test/rooms-dod-1-5-1-6
