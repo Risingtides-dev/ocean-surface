@@ -1068,9 +1068,10 @@ fn repo_ahead_behind(repo: &Repository) -> (usize, usize) {
         Ok(h) if h.is_branch() => h,
         _ => return (0, 0),
     };
+    // git2 0.21: shorthand() is Result<&str> (Err on non-UTF-8), was Option.
     let branch_name = match head.shorthand() {
-        Some(n) => n,
-        None => return (0, 0),
+        Ok(n) => n,
+        Err(_) => return (0, 0),
     };
     let branch = match repo.find_branch(branch_name, git2::BranchType::Local) {
         Ok(b) => b,
@@ -1161,7 +1162,8 @@ fn repo_recent_commits(repo: &Repository, n: usize) -> Vec<CommitInfoDto> {
         };
         let oid_str = oid.to_string();
         let id_short = oid_str[..7.min(oid_str.len())].to_string();
-        let summary = commit.summary().unwrap_or("").to_string();
+        // git2 0.21: summary() is Result<Option<&str>> (Err on non-UTF-8).
+        let summary = commit.summary().ok().flatten().unwrap_or("").to_string();
         let author = commit.author().name().unwrap_or("").to_string();
         let when_epoch = commit.time().seconds();
 

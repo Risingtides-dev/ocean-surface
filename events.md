@@ -7510,3 +7510,28 @@ Remote or Blame. The lock is unchanged, so there was no Tauri build check to
 run. A follow-up can take git2 0.21 with a Cargo.toml bump and a rerun of
 ocean-tauri's tests.
 _________________________________________________________________________________ 08:26 chore/dependabot-bumps
+
+time:      [08:40] [09-26-26]
+agent:     [claude] [opus 5.5]
+worktree:  chore/dependabot-bumps
+type:      issues
+area:      backend
+
+The coordinator reversed the 08:26 call: git2 now gets its breaking bump inside
+this PR. In crates/ocean-tauri/Cargo.toml, `git2` goes 0.20 -> 0.21 with
+vendored-libgit2 kept. The lock moves git2 0.20.4 -> 0.21.0 on the same
+libgit2-sys 0.18.5+1.9.4. 0.21 no longer turns on ssh/https by default, so
+libssh2-sys, openssl-sys and openssl-probe drop out of the lock. repo_state
+only opens local repositories, so nothing used them. Two 0.21 API changes
+reached repo_state's helpers. Reference::shorthand() now returns
+Result<&str> instead of Option, and repo_ahead_behind matches Ok/Err. Commit::summary() now
+returns Result<Option<&str>>, and repo_recent_commits reads it with
+.ok().flatten(). In both cases a non-UTF-8 value still falls back as it did
+before. The pinned 1.97.0 toolchain and the crate's rust-version 1.82 were both
+fine, and the vendored libgit2 built cleanly. `cargo deny check advisories` on
+the ocean-tauri lock no longer reports RUSTSEC-2026-0183 or -0184; only the
+unmaintained proc-macro-error and unic-* remain. Tauri gates, run with a dist/
+stub that was removed afterwards: check --all-targets, build, fmt --check,
+clippy --all-targets -D warnings, and 48 tests including both repo_state tests.
+Surface CI does not gate ocean-tauri.
+_________________________________________________________________________________ 08:40 chore/dependabot-bumps
