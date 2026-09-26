@@ -177,6 +177,31 @@ fn the_redeem_button_is_wired_and_not_just_rendered() {
     );
 }
 
+/// Closing a room is irreversible, so the control is two doors deep: the
+/// header's `⋯` opens a menu, and the menu's `Close room…` item ARMS the
+/// confirmation dialog whose `Close room` button fires. Both doors are the
+/// shape that hides. Measured on the commit that added them: deleting either
+/// `on:click` leaves `cargo clippy -p ocean-surface-ui --target
+/// wasm32-unknown-unknown -- -D warnings` green, because `state.menu` and
+/// `state.confirm` are still read by the renders they gate and still reset by
+/// `reset`/`dismiss`, and `fire` is still called from the dialog's button. The
+/// daemon's `POST .../close` would be implemented, mounted and unreachable.
+#[test]
+fn the_room_header_offers_both_doors_to_the_close_confirmation() {
+    let view = without_whitespace(&view_source("room_close.rs"));
+    assert!(
+        view.contains("on:click=move|_|state.menu.update(|open|*open=!*open)"),
+        "the header `⋯` is the only way to the menu that holds `Close room…`",
+    );
+    assert!(
+        view.contains(
+            "on:click=move|_|{state.menu.set(false);state.error.set(None);state.confirm.set(true);}"
+        ),
+        "the menu item is the only click that arms the close confirmation; \
+         without it the confirm branch stands and can never be reached",
+    );
+}
+
 // ---- Measured and already held: recorded, deliberately not pinned -----------
 //
 // Each of these was mutated the same way and the gate went RED on its own, so
@@ -213,3 +238,15 @@ fn the_redeem_button_is_wired_and_not_just_rendered() {
 //     `the_view_renders_the_control_the_stylesheet_dresses`, which scans for
 //     the class literal. Held by a test rather than the compiler — and only
 //     against deletion, which is why the handler gets the assertion above.
+//
+//   room_close.rs + rooms_workspace.rs — the `RoomCloseControl` MOUNT and the
+//     dialog's `Close room` button.
+//     Deleting the mount fails the wasm clippy with `function close_offered is
+//     never used`, `function classify_close is never used`, `enum
+//     CloseOutcome is never used` and eleven more: the component is the only
+//     thing keeping the module alive. Deleting the fire button's `on:click`
+//     fails it with `function room_close_url is never used`, `struct
+//     CloseReply is never constructed`, `enum CloseOutcome is never used`,
+//     `function classify_close is never used` and more: that button is the
+//     only caller of `RoomCloseState::fire`, which alone keeps the request
+//     pipeline alive. Both held.

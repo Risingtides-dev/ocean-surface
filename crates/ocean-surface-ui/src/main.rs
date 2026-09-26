@@ -33,6 +33,7 @@ mod palette;
 mod place_call;
 mod room_agent_authorization;
 mod room_artifacts;
+mod room_close;
 mod room_invite;
 mod room_markdown;
 mod room_messages;
