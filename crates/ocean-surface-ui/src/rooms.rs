@@ -448,8 +448,11 @@ struct RoomsListResponse {
     /// daemon from a current daemon authoritatively reporting no attention.
     #[serde(default)]
     attention: Option<Vec<RoomAttentionWire>>,
-    /// The room key to replay as `?cursor=` for the following page (OCEAN-250).
-    /// The daemon sends the key deliberately without `skip_serializing_if`, so
+    /// The opaque cursor to replay as `?cursor=` for the following page
+    /// (OCEAN-250). Since ocean-os `28cf94c9` the daemon mints it as a keyset
+    /// boundary (`ocean-room-list:v1:["<updated_at>","<id>"]`) that does not
+    /// move when the room it names does; a bare room key is still accepted as
+    /// the legacy form. Replayed unchanged, never parsed. The daemon sends the key deliberately without `skip_serializing_if`, so
     /// a single-page answer carries `"next_cursor": null` rather than omitting
     /// it — but a daemon predating that route sends neither this nor
     /// `has_more`, and `#[serde(default)]` is what keeps its body decoding
@@ -1345,6 +1348,11 @@ impl Rooms {
                     // rail holds several — see `rooms_after_first_page`.
                     let retain_paged_tail = matches!(mode, RoomsFetchMode::Silent)
                         && me.rooms_paged_beyond_first.get_untracked();
+                    // Where the rail ended BEFORE this poll, so a retaining poll
+                    // can tell whether its boundary moved.
+                    let rail_ended_at = me
+                        .list
+                        .with_untracked(|rail| rail.last().map(|room| room.id.clone()));
                     let rooms = rooms_after_first_page(
                         &me.list.get_untracked(),
                         success.rooms,
@@ -1360,13 +1368,17 @@ impl Rooms {
                     me.list.set(rooms);
                     if retain_paged_tail {
                         // A poll that kept a paged tail keeps its POSITION in the
-                        // list, and re-derives the key that names it. Parking the
-                        // first page's cursor here would rewind paging every 8
-                        // seconds; replaying the old key is the opposite failure,
-                        // and `retained_tail_cursor` explains it.
+                        // list, and re-derives the key that names it only if the
+                        // boundary moved. Parking the first page's cursor here
+                        // would rewind paging every 8 seconds; replaying a moved
+                        // key is the opposite failure, and `retained_tail_cursor`
+                        // explains it.
                         let parked = me.rooms_next_cursor.get_untracked();
-                        me.rooms_next_cursor
-                            .set(retained_tail_cursor(parked, rail_ends_at.as_deref()));
+                        me.rooms_next_cursor.set(retained_tail_cursor(
+                            parked,
+                            rail_ended_at.as_deref(),
+                            rail_ends_at.as_deref(),
+                        ));
                     } else {
                         me.rooms_paged_beyond_first.set(false);
                         me.rooms_next_cursor.set(success.next_cursor);
@@ -3186,11 +3198,12 @@ async fn fetch_rooms_page(url: &str) -> Result<RoomsListSuccess, String> {
 
 /// The room-list route, with the paging cursor as one query-component value.
 ///
-/// A cursor is a room KEY, and a room key is operator-supplied text that has
-/// already survived one round trip through a JSON body — so it goes through the
-/// same [`encode`] every room key in this module's paths goes through, which
-/// percent-encodes everything outside RFC 3986's unreserved set and therefore
-/// cannot leak an `&` or a `=` into the query it is a value in.
+/// A cursor is either the daemon's opaque keyset boundary — which carries
+/// `:`, `[`, `"` and `,` — or a legacy room key, which is operator-supplied
+/// text. Both go through the same [`encode`] every room key in this module's
+/// paths goes through, which percent-encodes everything outside RFC 3986's
+/// unreserved set and therefore cannot leak an `&` or a `=` into the query it
+/// is a value in.
 fn rooms_list_url(base: &str, cursor: Option<&str>) -> String {
     match cursor {
         Some(cursor) => format!("{base}/v1/rooms/persistent?cursor={}", encode(cursor)),
@@ -3206,8 +3219,9 @@ fn rooms_list_url(base: &str, cursor: Option<&str>) -> String {
 /// predates OCEAN-250 answers neither field, so `#[serde(default)]` gives
 /// `false` and such a rail offers no second page at all, which is precisely
 /// what it did before this function existed. `last_room_key` is the fallback
-/// for a `has_more` page naming no cursor: the daemon's cursor IS the key of
-/// the last room it served, so the page carries its own cursor in its rows and
+/// for a `has_more` page naming no cursor: the daemon still accepts the key of
+/// the last room it served as a (legacy) cursor, so the page carries its own
+/// cursor in its rows and
 /// dropping the pair would strand every room behind it. An EMPTY `has_more`
 /// page has neither, and stops rather than replaying the cursor that produced
 /// it forever.
@@ -3244,30 +3258,43 @@ fn rooms_next_page_cursor(grew: bool, page_cursor: Option<String>) -> Option<Str
 }
 
 /// Where a RETAINING poll leaves the rail's paging boundary: the position is
-/// kept, and the KEY that names it is re-derived from the rail's own last row.
+/// kept, and the cursor that names it is kept too unless the boundary MOVED.
 ///
-/// A cursor is a room KEY, and the daemon resolves its place in the order from
-/// that room's CURRENT `updated_at` — it looks the anchor row up per request
-/// (`SELECT updated_at, id FROM rooms WHERE id = ?1`) and pages from wherever
-/// that row now sits. So the one thing a parked key cannot survive is a message
-/// arriving in the room it names: `updated_at DESC` puts that room at the FRONT,
-/// and a press replaying its key asks for the hundred rooms behind the newest
-/// one — every one of them already on screen. [`rooms_next_page_cursor`] then
-/// retires the affordance for a page that added nothing, and the rooms past the
-/// real boundary are unreachable until an interactive refresh. On a rail that
-/// polls every 8 seconds and keeps its key for the life of the paging session,
-/// that is not a race; it is the expected outcome of any activity in one room.
+/// Two cursor forms reach this function. The daemon mints an opaque keyset
+/// boundary (`ocean-room-list:v1:[updated_at, id]`, ocean-os `28cf94c9`) that
+/// stays exact when the room it names later moves. A bare room key — the
+/// legacy form, and the only one this function can mint itself — is resolved
+/// from that room's CURRENT `updated_at` on every request, so a message in the
+/// room it names moves the boundary to the FRONT and a press replaying it asks
+/// for the hundred rooms behind the newest one, every one already on screen.
+/// [`rooms_next_page_cursor`] then retires the affordance for a page that added
+/// nothing, and the rooms past the real boundary are unreachable until an
+/// interactive refresh.
 ///
-/// The rail's own last row is the boundary, and it is stable under exactly the
-/// event that moves the old one: a tail room with new activity is by definition
-/// in the fresh first page, deduped out of the tail by [`append_rooms_page`],
-/// and the row behind it becomes the last — which is where the loaded pages
-/// genuinely end.
+/// So the parked cursor is replaced only when the rail's last row changed
+/// under this poll — a tail room with new activity is by definition in the
+/// fresh first page, deduped out of the tail by [`append_rooms_page`], and the
+/// row behind it becomes the last, which is where the loaded pages genuinely
+/// end and which only a room key can name. When the last row is the one it was,
+/// the parked cursor still names it, and trading the daemon's stable boundary
+/// for a key would open exactly the window above: on a rail that polls every
+/// 8 seconds, every poll would downgrade the cursor, and one message in the
+/// boundary room before the next press would strand the rooms behind it.
 ///
 /// `None` in, `None` out. A rail that had already reached the end of the list
 /// must not grow the affordance back merely because a poll ran.
-fn retained_tail_cursor(parked: Option<String>, last_listed_room: Option<&str>) -> Option<String> {
-    parked.and(last_listed_room.map(str::to_owned))
+fn retained_tail_cursor(
+    parked: Option<String>,
+    rail_ended_at: Option<&str>,
+    last_listed_room: Option<&str>,
+) -> Option<String> {
+    let parked = parked?;
+    let last = last_listed_room?;
+    if rail_ended_at == Some(last) {
+        Some(parked)
+    } else {
+        Some(last.to_owned())
+    }
 }
 
 /// The rail after a FIRST-page read.
@@ -6782,33 +6809,256 @@ mod tests {
         );
     }
 
-    /// A retaining poll keeps its POSITION in the list and re-derives the key.
+    /// A retaining poll keeps its POSITION in the list and re-derives the key
+    /// when — and only when — the boundary moved.
     #[test]
     fn a_retaining_poll_re_derives_the_boundary_rather_than_replaying_its_key() {
         assert_eq!(
-            retained_tail_cursor(Some("room-200".into()), Some("room-199")),
+            retained_tail_cursor(Some("room-200".into()), Some("room-200"), Some("room-199")),
             Some("room-199".to_string()),
             "the rail's own last row is where the loaded pages end; the key the \
              poll was holding is only where they ended when it was parked",
         );
         assert_eq!(
-            retained_tail_cursor(None, Some("room-199")),
+            retained_tail_cursor(None, Some("room-199"), Some("room-199")),
             None,
             "a rail that had already reached the end of the list must not grow \
              the affordance back merely because a poll ran",
         );
         assert_eq!(
-            retained_tail_cursor(Some("room-200".into()), None),
+            retained_tail_cursor(Some("room-200".into()), Some("room-200"), None),
             None,
             "and an empty rail has no boundary to name",
         );
     }
 
+    /// DoD 1.6, against the daemon's REAL cursor. Since ocean-os `28cf94c9` the
+    /// list mints `ocean-room-list:v1:[updated_at, id]`, a keyset boundary that
+    /// stays exact when the room it names moves. A poll whose boundary did not
+    /// move must keep it: trading it for the bare key the surface can mint
+    /// reopens the window in which one message in the boundary room strands
+    /// every room behind it.
+    #[test]
+    fn an_unmoved_boundary_keeps_the_daemons_keyset_cursor() {
+        let minted = r#"ocean-room-list:v1:["2026-09-01T00:00:00Z","room-200"]"#.to_string();
+        assert_eq!(
+            retained_tail_cursor(Some(minted.clone()), Some("room-200"), Some("room-200")),
+            Some(minted),
+            "the rail still ends on the room the daemon's cursor names, so that \
+             cursor is still exactly where the next page starts",
+        );
+    }
+
+    /// A miniature of ocean-store's `list_page`, faithful in the two ways that
+    /// decide paging: keyset order `updated_at DESC, id ASC` with a `limit` of
+    /// 100, and two cursor forms — the minted keyset boundary, which carries the
+    /// `(updated_at, id)` it was minted at, and a legacy bare room key, which
+    /// is looked up at the room's CURRENT `updated_at` on every request.
+    struct ListDaemon {
+        /// `(id, updated_at)`; `updated_at` is a sortable integer standing in for
+        /// the store's RFC 3339 text.
+        rooms: Vec<(String, u64)>,
+    }
+
+    impl ListDaemon {
+        const PREFIX: &'static str = "ocean-room-list:v1:";
+        const LIMIT: usize = 100;
+
+        fn with_rooms(count: u64) -> Self {
+            Self {
+                rooms: (1..=count)
+                    .map(|n| (format!("room-{n:03}"), 10_000 - n))
+                    .collect(),
+            }
+        }
+
+        fn touch(&mut self, id: &str, at: u64) {
+            let room = self.rooms.iter_mut().find(|(room, _)| room == id).unwrap();
+            room.1 = at;
+        }
+
+        fn ordered(&self) -> Vec<(String, u64)> {
+            let mut rooms = self.rooms.clone();
+            rooms.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            rooms
+        }
+
+        /// The request's `?cursor=` value, percent-decoded the way the daemon's
+        /// query extractor decodes it — so the URL the surface builds is on the
+        /// path, not just the cursor string.
+        fn cursor_from_url(url: &str) -> Option<String> {
+            let raw = url.split_once("?cursor=")?.1;
+            let bytes = raw.as_bytes();
+            let mut out = Vec::new();
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i] == b'%' {
+                    out.push(u8::from_str_radix(&raw[i + 1..i + 3], 16).unwrap());
+                    i += 3;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            Some(String::from_utf8(out).unwrap())
+        }
+
+        /// One `GET /v1/rooms/persistent` body, as JSON.
+        fn page(&self, url: &str) -> serde_json::Value {
+            let ordered = self.ordered();
+            let anchor = Self::cursor_from_url(url).and_then(|cursor| {
+                match cursor.strip_prefix(Self::PREFIX) {
+                    Some(minted) => {
+                        let (at, id): (u64, String) = serde_json::from_str(minted).unwrap();
+                        Some((at, id))
+                    }
+                    None => ordered
+                        .iter()
+                        .find(|(id, _)| *id == cursor)
+                        .map(|(id, at)| (*at, id.clone())),
+                }
+            });
+            let after: Vec<&(String, u64)> = ordered
+                .iter()
+                .filter(|(id, at)| match &anchor {
+                    Some((a_at, a_id)) => *at < *a_at || (*at == *a_at && id > a_id),
+                    None => true,
+                })
+                .collect();
+            let has_more = after.len() > Self::LIMIT;
+            let kept = &after[..after.len().min(Self::LIMIT)];
+            let next_cursor = has_more.then(|| {
+                let (id, at) = kept.last().unwrap();
+                format!("{}{}", Self::PREFIX, serde_json::json!([at, id]))
+            });
+            serde_json::json!({
+                "ok": true,
+                "rooms": kept.iter().map(|(id, _)| serde_json::json!({
+                    "id": id, "name": id, "participants": [],
+                    "created_at": "", "updated_at": "",
+                })).collect::<Vec<_>>(),
+                "read_states": [],
+                "attention": [],
+                "next_cursor": next_cursor,
+                "has_more": has_more,
+            })
+        }
+
+        /// The body through the rail's own decode and cursor rule — the same
+        /// two steps `fetch_rooms_page` runs on a response.
+        fn fetch(&self, url: &str) -> (Vec<Room>, Option<String>) {
+            let body: RoomsListResponse =
+                serde_json::from_value(self.page(url)).expect("list body decodes");
+            assert!(body.ok);
+            let cursor = rooms_page_cursor(
+                body.has_more,
+                body.next_cursor.as_deref(),
+                body.rooms.last().map(|room| room.id.as_str()),
+            );
+            (body.rooms, cursor)
+        }
+    }
+
+    /// A "load more rooms" press, as `load_more_rooms` runs it after the await.
+    fn press(daemon: &ListDaemon, rail: &mut Vec<Room>, parked: &mut Option<String>) {
+        let cursor = parked.clone().expect("the affordance is on screen");
+        let (page, page_cursor) = daemon.fetch(&rooms_list_url("http://d", Some(&cursor)));
+        let grown = append_rooms_page(rail, page);
+        let grew = grown.len() > rail.len();
+        *rail = grown;
+        *parked = rooms_next_page_cursor(grew, page_cursor);
+    }
+
+    /// The 8-second silent poll on a paged rail, as `fetch_rooms_with_mode`
+    /// runs it: ONE first-page read, the tail kept, the boundary re-derived.
+    fn silent_poll(daemon: &ListDaemon, rail: &mut Vec<Room>, parked: &mut Option<String>) {
+        let rail_ended_at = rail.last().map(|room| room.id.clone());
+        let (page, _) = daemon.fetch(&rooms_list_url("http://d", None));
+        *rail = rooms_after_first_page(rail, page, true);
+        let rail_ends_at = rail.last().map(|room| room.id.clone());
+        *parked = retained_tail_cursor(
+            parked.take(),
+            rail_ended_at.as_deref(),
+            rail_ends_at.as_deref(),
+        );
+    }
+
+    /// DoD 1.6 end to end: the rail reaches every one of 250 rooms through the
+    /// daemon's 100-room pages, decoding `next_cursor` and `has_more` off the
+    /// wire, with the unread poll running between presses — and the room the
+    /// cursor names receiving a message in the gap, which is the one ordinary
+    /// event that used to end the paging at 200.
+    #[test]
+    fn the_rail_pages_past_the_first_hundred_rooms_to_the_last_one() {
+        let mut daemon = ListDaemon::with_rooms(250);
+
+        let (first, mut parked) = daemon.fetch(&rooms_list_url("http://d", None));
+        let mut rail = first;
+        assert_eq!(rail.len(), 100, "the daemon's default page");
+        assert!(
+            parked
+                .as_deref()
+                .is_some_and(|c| c.starts_with(ListDaemon::PREFIX)),
+            "a `has_more` page parks the daemon's own minted cursor",
+        );
+
+        press(&daemon, &mut rail, &mut parked);
+        assert_eq!(rail.len(), 200, "the first press is the second hundred");
+        assert_eq!(rail.last().map(|room| room.id.as_str()), Some("room-200"));
+
+        // The poll runs with nothing moved; then the boundary room is spoken in
+        // before the next press.
+        silent_poll(&daemon, &mut rail, &mut parked);
+        assert_eq!(rail.len(), 200);
+        daemon.touch("room-200", 20_000);
+
+        press(&daemon, &mut rail, &mut parked);
+        let ids: HashSet<&str> = rail.iter().map(|room| room.id.as_str()).collect();
+        assert_eq!(
+            ids.len(),
+            250,
+            "every room is reachable, none listed twice; a poll that had traded \
+             the minted boundary for the key `room-200` would have asked for the \
+             rooms behind the NEWEST room, added nothing, and retired the \
+             affordance with rooms 201-250 never listed",
+        );
+        assert!(
+            rail.iter().any(|room| room.id == "room-250"),
+            "the last room in the list is on the rail",
+        );
+        assert_eq!(
+            parked, None,
+            "`has_more: false` on the final page takes the affordance away",
+        );
+    }
+
+    /// The other half of the retained boundary: when the boundary room moves
+    /// BEFORE the poll, the poll sees it leave the tail and re-derives the key
+    /// from the row that now ends the rail. Paging still reaches every room.
+    #[test]
+    fn a_boundary_that_moves_before_the_poll_is_re_derived_and_paging_completes() {
+        let mut daemon = ListDaemon::with_rooms(250);
+        let (first, mut parked) = daemon.fetch(&rooms_list_url("http://d", None));
+        let mut rail = first;
+        press(&daemon, &mut rail, &mut parked);
+
+        daemon.touch("room-200", 20_000);
+        silent_poll(&daemon, &mut rail, &mut parked);
+        assert_eq!(rail.first().map(|room| room.id.as_str()), Some("room-200"));
+        assert_eq!(rail.last().map(|room| room.id.as_str()), Some("room-199"));
+        assert_eq!(parked.as_deref(), Some("room-199"));
+
+        press(&daemon, &mut rail, &mut parked);
+        let ids: HashSet<&str> = rail.iter().map(|room| room.id.as_str()).collect();
+        assert_eq!(ids.len(), 250);
+        assert_eq!(parked, None);
+    }
+
     /// The failure the re-derivation exists for, run end to end through the two
     /// helpers that decide it.
     ///
-    /// A cursor is a room KEY, and the daemon resolves its position from that
-    /// room's CURRENT `updated_at`. So a message in the room the cursor names
+    /// A legacy cursor is a room KEY, and the daemon resolves its position from
+    /// that room's CURRENT `updated_at`. So a message in the room the cursor names
     /// moves the boundary to the front of the list with it — and on a rail that
     /// polls every 8 seconds and keeps its key for the life of the paging
     /// session, that is not a race but the expected outcome of any activity in
@@ -6840,7 +7090,11 @@ mod tests {
         );
 
         assert_eq!(
-            retained_tail_cursor(parked, merged.last().map(|room| room.id.as_str())),
+            retained_tail_cursor(
+                parked,
+                Some("room-200"),
+                merged.last().map(|room| room.id.as_str())
+            ),
             Some("room-199".to_string()),
             "replaying `room-200` would ask the daemon for the hundred rooms \
              behind the NEWEST room — the first page over again — and a page \
