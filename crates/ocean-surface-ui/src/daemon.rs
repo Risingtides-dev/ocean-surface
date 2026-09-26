@@ -31,6 +31,10 @@ use serde_json::{json, Value};
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
+use crate::agent_events_reset::{
+    decide_agent_stream_error, describe_reset, reset_frame_data, AgentStreamErrorAction,
+    AgentStreamItem, AGENT_EVENTS_RESET_EVENT,
+};
 use crate::canvas::CanvasContext;
 use crate::model::{Block, ComponentPlacement, Role, ToolStatus, Turn};
 
@@ -822,10 +826,12 @@ pub enum AgentEvent {
 /// the build if an `AgentEvent` variant has no matching entry here, so drift
 /// surfaces at `cargo test` rather than as a silent runtime drop.
 ///
-/// NOTE: the daemon also emits an out-of-band `error` frame on broadcast lag /
-/// serialize failure (`Event::default().event("error")`). It is deliberately
-/// NOT subscribed here — it is not an `AgentEvent` and carries no transcript
-/// state; the per-name subscription simply ignores it.
+/// NOTE: the daemon also emits an out-of-band `event: error` RESET frame
+/// (published `agent_events_error`: `live_lag`, `anchor_unavailable`,
+/// `malformed_anchor`). It is not an `AgentEvent`, so it is not listed here; the
+/// stream loop in `connect` subscribes to it separately and resyncs on it — see
+/// `crate::agent_events_reset` for why its name collides with gloo's
+/// connection-error signal and how the two are told apart.
 ///
 /// FOLLOW-UP (needs a daemon change, #54-sequenced): the robust fix is for the
 /// daemon to emit every frame under a single SSE name (e.g. the default
@@ -3045,6 +3051,20 @@ impl Daemon {
                     gloo_timers::future::TimeoutFuture::new(2_000).await;
                     continue;
                 }
+                // The daemon's reset frame (`event: error`). It also trips every
+                // subscription's gloo `ConnectionError`, all queued in the same
+                // synchronous DOM dispatch, so this stream is polled FIRST below
+                // and the frame is read before any of those errors.
+                let reset_sub = match es.subscribe(AGENT_EVENTS_RESET_EVENT) {
+                    Ok(s) => s,
+                    Err(err) => {
+                        let err = format!("sse subscribe reset frame error: {err}");
+                        log::error!("{err}");
+                        status.set(concise_error(&err));
+                        gloo_timers::future::TimeoutFuture::new(2_000).await;
+                        continue;
+                    }
+                };
 
                 if !await_event_source_open(&es).await {
                     status.set("agent stream did not open".into());
@@ -3069,14 +3089,37 @@ impl Daemon {
                     generation,
                     false,
                 ));
-                let mut stream = futures_util::stream::select_all(subs);
-                while let Some(msg) = stream.next().await {
+                let mut stream = futures_util::stream::select_with_strategy(
+                    reset_sub.map(AgentStreamItem::Reset),
+                    futures_util::stream::select_all(subs).map(AgentStreamItem::Event),
+                    |_: &mut ()| futures_util::stream::PollNext::Left,
+                );
+                while let Some(item) = stream.next().await {
                     if sse_generation.get_untracked() != generation {
                         break;
                     }
 
-                    let Ok((_event_name, msg)) = msg else {
-                        break;
+                    let msg = match item {
+                        AgentStreamItem::Reset(Ok((_, frame))) => {
+                            match decide_agent_stream_error(reset_frame_data(&frame).as_deref()) {
+                                // A plain transport `Event` also reaches this
+                                // listener; gloo's `ConnectionError` below
+                                // keeps handling it exactly as before.
+                                AgentStreamErrorAction::Transport => continue,
+                                // Leave the connection once: the reconnect
+                                // path re-commits the projection and opens a
+                                // fresh EventSource with no stale anchor.
+                                AgentStreamErrorAction::Resync(cause) => {
+                                    log::warn!(
+                                        "agent stream reset by daemon, resyncing: {}",
+                                        describe_reset(&cause)
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                        AgentStreamItem::Reset(Err(_)) | AgentStreamItem::Event(Err(_)) => break,
+                        AgentStreamItem::Event(Ok((_event_name, msg))) => msg,
                     };
 
                     // Tunnels/proxies can reconnect or replay a frame around

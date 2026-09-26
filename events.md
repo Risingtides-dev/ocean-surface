@@ -7420,3 +7420,13 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+
+time:      [18:52] [09-26-26]
+agent:     [claude] [opus 5.5]
+worktree:  fix/agent-events-reset-frame
+type:      bug-report
+area:      frontend
+
+Surface now handles the daemon's `event: error` reset frame on GET /v1/agent/events (published `agent_events_error`: live_lag, anchor_unavailable, malformed_anchor, reset_required) on purpose instead of by accident. #233's contract pins reported the frame as silently dropped. Reading gloo-net 0.6.0 and replaying the frame through a spec EventSource shows what actually happens: the named frame reaches every "error" listener as a MessageEvent with readyState OPEN, so gloo's per-subscription listener turns it into a ConnectionError, and the loop in `connect` broke and reconnected without ever decoding the frame. A real transport drop is a plain Event fired while readyState is CONNECTING, which gloo ignores so the browser can auto-reconnect with Last-Event-ID. New src/agent_events_reset.rs holds the pure decision (`decide_agent_stream_error`: no data means transport, data means resync, and malformed data or an unknown code resyncs to fail safe), the published-shape decoder, and `reset_frame_data`, which tells the two events apart with an `instanceof MessageEvent` check. In daemon.rs, `connect` subscribes to "error" and polls that stream first (select_with_strategy, Left). A reset frame breaks out of the connection once and takes the existing reconnect path: commit_session_projection, then a fresh EventSource with no stale anchor, so an anchor code cannot loop. A transport error is left to the existing gloo handling. The AGENT_EVENT_NAMES note that claimed the frame was ignored is corrected. Tests: 4 unit tests on the decision and a new guard, tests/unheld_agent_stream_reset.rs, with 4 tests. All 11 mutations went red; the guard's table records which ones are compiler-held. #233 records the gap as a comment, not a KNOWN_UNPUBLISHED entry, so it should turn that comment into an assertion once both land.
+
+_________________________________________________________________________________ 18:52 fix/agent-events-reset-frame
