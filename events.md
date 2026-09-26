@@ -7456,3 +7456,12 @@ area:      backend
 
 Knox delta-review follow-up on #230. The auth-off Host check used to take the Host header and fall back to the URI authority only when Host was absent. A request that paired Host: 127.0.0.1 with an absolute-form target (GET http://evil/... HTTP/1.1) or an HTTP/2 :authority naming another host therefore passed on the Host alone. The new request_authorities returns both, and the check refuses if EITHER one is non-loopback. It also treats a non-UTF-8 Host as non-loopback, since before it counted as absent. One new test covers both disagreement directions, a URI-only authority, an unreadable Host, an all-loopback control, and a real-TCP absolute-form probe. Five mutations (Host preferred, URI ignored, unreadable Host treated as absent, all instead of any, check off) are all killed. The proxy AGENTS.md now records two "not bound" entries. The first is that revoke, suspend, resume and reauthorize carry no identity yet get the operator key, so any roster user can revoke or suspend any binding; that is daemon/authz work, via DoD 3.1 member-lane auth or an owner check before key injection. The second is that auth-off behind a tunnel or tailscale serve now answers 403 by design. Gates: fmt, proxy clippy --all-targets -D warnings, proxy 104 tests, ui tests.
 _________________________________________________________________________________ 07:36 fix/proxy-path-actor-csrf
+
+time:      [07:56] [09-26-26]
+agent:     [claude] [opus 5.5]
+worktree:  fix/proxy-path-actor-csrf
+type:      docs
+area:      infra
+
+Paired the ocean-os #510 Host guard with the roster tooling. That daemon now answers only loopback, its own bind IP, and names listed in OCEAN_ALLOWED_HOSTS, so a device added by a *.ts.net MagicDNS name would get 421 host_not_allowed on every proxied call and show as unhealthy in the picker. ops/README.md "On each device" now says to start that daemon with OCEAN_ALLOWED_HOSTS set to the name. ops/add-device.sh prints the same reminder when it is given a name. Names are classified with python ipaddress on the parsed host, following the file's own no-shell-glob rule. A smoke run against a throwaway roster showed the note for a ts.net name and none for a 100.64 IP.
+_________________________________________________________________________________ 07:56 fix/proxy-path-actor-csrf

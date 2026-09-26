@@ -180,6 +180,14 @@ launchctl kickstart -k gui/$(id -u)/dev.risingtides.ocean-surface-proxy
 CGNAT range, a `*.ts.net` name, or loopback) unless `--allow-public` is passed.
 The proxy re-reads the roster at startup, so kick the LaunchAgent after an edit.
 
+The daemon answers only to loopback, its own bind IP, and the names listed in
+`OCEAN_ALLOWED_HOSTS` (DNS-rebinding guard, ocean-os #510). A `daemon_url` given
+as a tailnet IP needs nothing extra. If it is a name (a `*.ts.net` MagicDNS
+name, say), start the daemon on that device with
+`OCEAN_ALLOWED_HOSTS=<that name>`, or every call from the proxy gets
+`421 host_not_allowed` and the device shows as unhealthy in the picker.
+`ops/add-device.sh` prints this reminder when it is given a name.
+
 > **The tailnet ACL is the whole boundary — say it out loud.** The Ocean daemon
 > has no authentication of its own; its security model is that it listens on
 > loopback and only local processes can reach it (`OCEAN_BIND`, default
