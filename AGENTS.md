@@ -655,7 +655,14 @@ the right trade here, but it is a trade: these helpers previously sat inline in
 one that lost its last caller announced itself. After the move, an orphaned
 helper is silent forever — prune by reading, not by waiting for the gate.
 Consumers: `ci_failure_trigger_control.rs`, `dead_selector_removal.rs`,
-`unheld_room_controls.rs`.
+`unheld_room_controls.rs`, `unheld_agent_stream_reset.rs`.
+
+**`tests/unheld_agent_stream_reset.rs`** pins the `/v1/agent/events` reset-frame
+wiring in `Daemon::connect`: the daemon's `event: error` frame shares its name
+with the DOM connection-error event, so gloo reports it as a `ConnectionError`.
+`src/agent_events_reset.rs` tells the two apart, and a reset frame leaves the
+connection once and takes the reconnect path. Its table records what the
+compiler holds.
 
 **`tests/unheld_room_controls.rs`** pins six room controls that measurement
 proves nothing else holds. The failure it exists for: a reviewer deletes a

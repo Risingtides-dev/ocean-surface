@@ -9,6 +9,7 @@
 
 use leptos::prelude::*;
 
+mod agent_events_reset;
 mod agents;
 mod app;
 mod attachments;
