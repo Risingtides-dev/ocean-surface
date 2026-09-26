@@ -7420,3 +7420,39 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+time:      [08:05] [09-26-26]
+agent:     [claude] [opus 5.5]
+worktree:  chore/dependabot-bumps
+type:      issues
+area:      infra
+
+Cleared the Dependabot alerts on main that a lockfile bump can clear, and wrote
+down why the other two can't be cleared. canvas-web package-lock: every @tiptap/*
+package moved together 3.25.0 -> 3.31.3. They pin each other through exact peer
+ranges, so they had to move as a set. That fixes GHSA-j95f-988m-3j2f (ReDoS) and
+GHSA-cp6q-959q-f8rh (__proto__ attribute injection). nanoid went 3.3.17 -> 3.3.19
+for GHSA-2v37-7h3g-55p8. Both are pulled in by tldraw 5.0.1 and postcss, and both
+stay inside the existing ^ ranges. The tiptap and nanoid entries were
+re-resolved in place: a named `npm update` split starter-kit into a nested
+3.31.3 copy that sat beside a 3.25.0 top-level core. After the bump, npm ci,
+tsc + vite build, and npm audit (0 vulnerabilities) all pass. Nothing builds
+canvas-web in CI and its dist/ is not committed. Root Cargo.lock: quinn-proto
+0.11.14 -> 0.11.15 with --precise (GHSA-4w2j-m93h-cj5j). reqwest names it only
+behind http3, so `cargo tree --workspace --all-features --target all` shows no
+path to it and it is never compiled. The bump only moves the lock entry. Not
+fixed: grid 0.18.0 (GHSA-38c5-483c-4qqp) reaches the tree only through gpui
+0.2.2 -> taffy =0.9.0 -> grid ^0.18, and 0.2.2 is the newest gpui published, so
+there is no semver path. The only user is the abandoned ocean-gui, and the
+overflow in expand_rows needs rows*cols to wrap usize. Also not fixed: glib
+0.18.5 in crates/ocean-tauri/Cargo.lock (GHSA-wrw7-89jp-8q8g). Every published
+tauri, including 3.0.0-alpha.2, and every wry still requires gtk ^0.18, so
+there is no Tauri upgrade to take. glib only builds for Linux targets, and a
+macOS `cargo tree -i glib` is empty. No Ocean code and no crate in the
+tauri/wry/tao/muda/tray-icon/webkit2gtk/gtk sources calls array_iter_str or
+VariantStrIter, so the unsound iterator is unreachable. ocean-tauri's lock is
+unchanged. No code changes. Gates: proxy build + 84 tests + clippy -D warnings;
+ui wasm32 check, 1411 native tests across 20 binaries, wasm32 and host clippy
+-D warnings; fmt --check; ocean-gui check default and --features livekit,
+clippy -D warnings and 416 lib tests; all four script guards; both ledger
+checks and their test suites.
+_________________________________________________________________________________ 08:05 chore/dependabot-bumps
