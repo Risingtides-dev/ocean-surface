@@ -271,7 +271,11 @@ Web surface session UI:
   answers with an empty body
   that the surface can only report as a JSON decode error. Adding an
   `/v1/agents/{name}` route requires the `has_dot_segment` guard —
-  percent-encoding does not neutralise `..`, because `.` is unreserved.
+  percent-encoding does not neutralise `..`, because `.` is unreserved. Every
+  forward also goes through `upstream_url`, which refuses a URL whose parsed
+  path differs from the approved one (`\` parses as `/`); the proxy's own
+  boundary rules, including the Rooms member-lane actor binding, live in
+  `crates/ocean-surface-proxy/AGENTS.md`.
 - Agent participants are selected from daemon-owned `/v1/agents` identities and
   remain subject to daemon authorization and admission. The surface never mints
   a participant from free text or calls the legacy bare `add_agent` path: a
@@ -290,7 +294,15 @@ Web surface session UI:
   `X-Ocean-Operator`, Cookie, Origin, and Referer headers never cross that
   boundary. In auth-off mode, a mutation carrying Origin or Referer must name
   the exact loopback Host; reject it before credential lookup otherwise, while
-  retaining headerless localhost CLI clients. Auth-off startup is refused on
+  retaining headerless localhost CLI clients. That rule now covers EVERY
+  non-GET/HEAD request under `/v1/` and `/api/`, not only these six, and
+  auth-off refuses any request addressed to a non-loopback Host. In
+  multi-user mode the bodies' `owner_member_id` must be the signed-in user,
+  and the key is lent on any of the six only after the daemon's
+  `GET {key}/agents` names that user as the room's owner (an ownerless room
+  admits only the first bootstrap).
+  JSON forwards refuse a non-empty body not declared as JSON (415) instead of
+  relabelling a browser's text/plain or form body as JSON. Auth-off startup is refused on
   non-loopback binds. The Tauri shell now owns the equivalent privileged
   transport this rule required: its `daemon_operator_request` command takes a
   method and a PATH (never a URL, never a header), re-checks both against a

@@ -7420,3 +7420,66 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+
+time:      [07:05] [09-26-26]
+agent:     [claude] [opus 5.5]
+worktree:  fix/proxy-path-actor-csrf
+type:      bug-report
+area:      backend
+
+Security fix for three pre-existing proxy holes an independent review found. H1: every path guard judged the client's path split on '/', then reqwest's URL parser read '\' as '/' and collapsed dot segments, and hyper accepts a raw '\' in the request target, so DELETE .../agents/x\..\..\close reached the daemon as DELETE .../close carrying the operator key (same for participants\bob and close/reauthorize). has_dot_segment now refuses '\' and %5C in any case, and every forwarder builds its URL through new upstream_url, which parses it and refuses (400 upstream_path_rewritten) unless the parsed path equals the approved one, before the operator key is read; the reqwest::Url it returns is what gets sent. Captured {id} segments (sessions, agent sessions, projects, session messages, permission decision, cancel) are dot-checked and re-encoded instead of formatted raw, livekit-token is dot-checked, and longhouse forwards its raw path instead of the decoded capture. M-A: with a roster user signed in, rooms-persistent non-GET requests whose member-lane identity (query actor_id/uploader_id, body author_id/invoked_by/requested_by, a non-agent join's id — field list read off ocean-os room_routes()) is not the session user get 403 actor_mismatch; single-operator and auth-off are unchanged, and leave/remove-member stays unbound because the surface uses that route to remove others. M-B: the auth-off Origin/Referer policy the six authority routes had now gates every non-GET/HEAD under /v1/ and /api/ (403 cross_site_mutation_refused; authority routes keep cross_site_operator_mutation_refused); auth-on stays on the SameSite=Strict cookie, now asserted. The trust chain is written down in the new crates/ocean-surface-proxy/AGENTS.md. 13 new tests in src/tests/path_actor_csrf.rs (backslash/%5C/mixed over oneshot and real TCP, keyed and unkeyed, upstream recorder proves nothing normalised or keyed arrives; every member-lane route; CSRF across 23 mutating routes); 23/23 guard mutations killed. PR #229's close tests pass unchanged on this branch. Gates: fmt, proxy clippy --all-targets -D warnings, proxy 97 tests, ui tests.
+_________________________________________________________________________________ 07:05 fix/proxy-path-actor-csrf
+
+time:      [07:25] [09-26-26]
+agent:     [claude] [opus 5.5]
+worktree:  fix/proxy-path-actor-csrf
+type:      bug-report
+area:      backend
+
+Knox review follow-ups on #230, same branch. Five changes. (1) The authority bodies' owner_member_id (bootstrap and authorize, per ocean-os room_agent_authority.rs) is now bound to the session user in multi-user mode, so the proxy's operator key no longer lets any roster user bootstrap a room naming someone else as owner. (2) An agent join's owner_id is bound too; the agent-id exemption now covers only the id. (3) The ?actor_id=/?uploader_id= binding runs on every method, because the daemon's workspace lane gates reads on actor_id. No other rooms GET reads an identity from its query. (4) A body that repeats a bound key, id, or kind is refused as 400 duplicate_identity_field, and the operator key is now read only after every refusal. (5) Auth-off refuses any request whose Host is not loopback (403 non_loopback_host_refused), which closes DNS-rebinding reads; requests with no Host still pass. The proxy AGENTS.md now records the leave/remove-member gap (daemon work), the SameSite same-site and cached-Basic edges, and the raw non-ASCII fail-closed behavior. Five new tests; 30/30 guard mutations killed. #229's close tests still pass on top. Gates: fmt, proxy clippy --all-targets -D warnings, proxy 101 tests, ui tests.
+_________________________________________________________________________________ 07:25 fix/proxy-path-actor-csrf
+
+time:      [07:30] [09-26-26]
+agent:     [claude] [opus 5.5]
+worktree:  fix/proxy-path-actor-csrf
+type:      bug-report
+area:      backend
+
+Third follow-up on #230, from the daemon PR's reviewer. The proxy's JSON forwarders stamped application/json on whatever body arrived, so a browser's text/plain, form or typeless-Blob body, all of which are sent without a CORS preflight, reached JSON-only daemon routes as well-formed JSON calls. That has been defense in depth behind the auth-off gate since the earlier commits, and it is the remaining exposure to same-site pages in auth-on. Every JSON forward now admits a body only when it is empty or declared application/json or application/*+json, ignoring case and parameters. Anything else, including no content type, gets 415 json_content_type_required. The JSON forwards covered are turns, sessions, agents, model, projects, component event, calls, realtime client-secret, session messages, livekit token, permission decision, longhouse POST, and every rooms-persistent non-GET except the attachment upload. I chose refusal over forwarding the original type because checking the UI showed every PWA JSON write already goes through gloo .json() or sets application/json explicitly, and its bodiless POSTs are empty. Raw-bytes lanes are unchanged: the attachment upload still forwards its own declared type, and the PWA sends it as a typeless ArrayBuffer. Handlers use a new JsonForward extractor, and longhouse and rooms call json_body_acceptable directly. The rule is documented in the proxy AGENTS.md. There are 2 new tests covering 19 lanes, 7 refused content types and 5 admitted shapes, plus the raw upload; 40/40 guard mutations were killed. #229's close tests still pass on top. Gates: fmt, proxy clippy --all-targets -D warnings, proxy 103 tests, ui tests.
+_________________________________________________________________________________ 07:30 fix/proxy-path-actor-csrf
+
+time:      [07:36] [09-26-26]
+agent:     [claude] [opus 5.5]
+worktree:  fix/proxy-path-actor-csrf
+type:      bug-report
+area:      backend
+
+Knox delta-review follow-up on #230. The auth-off Host check used to take the Host header and fall back to the URI authority only when Host was absent. A request that paired Host: 127.0.0.1 with an absolute-form target (GET http://evil/... HTTP/1.1) or an HTTP/2 :authority naming another host therefore passed on the Host alone. The new request_authorities returns both, and the check refuses if EITHER one is non-loopback. It also treats a non-UTF-8 Host as non-loopback, since before it counted as absent. One new test covers both disagreement directions, a URI-only authority, an unreadable Host, an all-loopback control, and a real-TCP absolute-form probe. Five mutations (Host preferred, URI ignored, unreadable Host treated as absent, all instead of any, check off) are all killed. The proxy AGENTS.md now records two "not bound" entries. The first is that revoke, suspend, resume and reauthorize carry no identity yet get the operator key, so any roster user can revoke or suspend any binding; that is daemon/authz work, via DoD 3.1 member-lane auth or an owner check before key injection. The second is that auth-off behind a tunnel or tailscale serve now answers 403 by design. Gates: fmt, proxy clippy --all-targets -D warnings, proxy 104 tests, ui tests.
+_________________________________________________________________________________ 07:36 fix/proxy-path-actor-csrf
+
+time:      [07:56] [09-26-26]
+agent:     [claude] [opus 5.5]
+worktree:  fix/proxy-path-actor-csrf
+type:      docs
+area:      infra
+
+Paired the ocean-os #510 Host guard with the roster tooling. That daemon now answers only loopback, its own bind IP, and names listed in OCEAN_ALLOWED_HOSTS, so a device added by a *.ts.net MagicDNS name would get 421 host_not_allowed on every proxied call and show as unhealthy in the picker. ops/README.md "On each device" now says to start that daemon with OCEAN_ALLOWED_HOSTS set to the name. ops/add-device.sh prints the same reminder when it is given a name. Names are classified with python ipaddress on the parsed host, following the file's own no-shell-glob rule. A smoke run against a throwaway roster showed the note for a ts.net name and none for a 100.64 IP.
+_________________________________________________________________________________ 07:56 fix/proxy-path-actor-csrf
+
+time:      [08:34] [09-26-26]
+agent:     [claude] [opus 5.5]
+worktree:  fix/proxy-path-actor-csrf
+type:      bug-report
+area:      backend
+
+Closed the remaining #230 authority gap. Revoke, suspend, resume and reauthorize carry no identity, yet the proxy injected the operator key on them, so any signed-in roster user could revoke or suspend any agent binding in any room. In multi-user mode the proxy now asks the daemon who owns the room before it lends the key on ANY of the six authority shapes. It does this with a keyless GET {key}/agents; that response's owner_member_id comes from room_owner_proof, the same function target_proof and every authority decision use. Anyone who is not the owner gets 403 not_room_owner. An ownerless room admits only the first bootstrap, whose owner is already bound to the caller, so the first-owner flow is unchanged. Any unclear lookup (transport error, non-2xx, non-JSON, ok not true, non-string owner) fails closed as 502 owner_lookup_failed. The operator key is read only after the gate. The check-then-forward window is acceptable because the owner row is write-once from every browser-reachable route: the daemon inserts it only when none exists and refuses a conflicting bootstrap (LocalRoomOwnerConflict), and only the operator-only retirement lane can change it. Single-operator and auth-off do no lookup. UI note: the bindings panel gates its controls on the room's owner_eligible rather than "you are the owner", and the room model has no owner signal, so a non-owner still sees the controls and gets not_room_owner. That is recorded in the proxy AGENTS.md; the UI is unchanged. Five new tests cover owner allowed on all six actions, non-owner refused before the key is read, the ownerless first-bootstrap flow, fail-closed lookups, and single-operator/auth-off doing no lookup. The full suite's 53/53 mutations are killed. #229's close tests still pass on top. Gates: fmt, proxy clippy --all-targets -D warnings, proxy 109 tests, ui tests.
+_________________________________________________________________________________ 08:34 fix/proxy-path-actor-csrf
+
+time:      [08:37] [09-26-26]
+agent:     [claude] [opus 5.5]
+worktree:  fix/proxy-path-actor-csrf
+type:      docs
+area:      backend
+
+Knox delta review of the #230 owner gate approved it with no bypass, but it flagged one consequence the docs did not state. In a federated room the owner room_owner_proof returns is the Bedrock credential's local_human_member_id, an opaque id that never matches a roster username. So in multi-user mode every roster user gets not_room_owner on all six authority actions there. The proxy AGENTS.md "Owner gate" paragraph now says so plainly. It records why the gate fails closed (one human principal per federated room; the proxy cannot map roster users to it), lists which paths still reach federated authority, and names roster-to-member mapping as follow-up work.
+_________________________________________________________________________________ 08:37 fix/proxy-path-actor-csrf

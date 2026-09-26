@@ -157,6 +157,23 @@ Bind it to the machine's tailnet address, or pass --allow-public if you have
 another boundary in front of it and mean this."
 fi
 
+# A daemon that checks Host (ocean-os #510) answers only loopback, its own bind
+# IP, and names listed in OCEAN_ALLOWED_HOSTS. An IP literal needs nothing; a
+# name does, or every call from this proxy gets 421 host_not_allowed.
+HOST_KIND="$(python3 - "$HOST" <<'PY'
+import ipaddress, sys
+try:
+    ipaddress.ip_address(sys.argv[1])
+    print("ip")
+except ValueError:
+    print("name")
+PY
+)"
+if [ "$HOST_KIND" = "name" ]; then
+  echo "add-device: note: '$HOST' is a name. On the device, start the daemon with" >&2
+  echo "add-device:       OCEAN_ALLOWED_HOSTS=$HOST so it answers to that name." >&2
+fi
+
 for path in "$OBSERVER_TOKEN" "$OPERATOR_KEY"; do
   [ -z "$path" ] && continue
   case "$path" in
