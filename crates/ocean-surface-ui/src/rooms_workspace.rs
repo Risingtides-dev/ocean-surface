@@ -1889,6 +1889,11 @@ pub fn RoomsWorkspace(
     // and publish the room twice over one intent.
     let invite = crate::room_invite::RoomInviteState::new(&rooms);
 
+    // The header's close control (Rooms DoD 4.3). Same scope rule: the header
+    // is rebuilt on every `open_room` write, and a close's in-flight flag
+    // rebuilt by one would re-enable the button during its own request.
+    let close_control = crate::room_close::RoomCloseState::new();
+
     // The other half of that door: redeeming a code someone else minted. Not
     // scoped to a room at all — you redeem to GET one — so it lives at this
     // scope for the plainer reason that the left rail's create block is
@@ -3600,6 +3605,12 @@ pub fn RoomsWorkspace(
                                                 </button>
                                             }.into_any()
                                         }}
+                                        // Closing the room for everyone. Renders only for
+                                        // a viewer the daemon's member lane would accept.
+                                        <crate::room_close::RoomCloseControl
+                                            rooms=rooms
+                                            state=close_control
+                                        />
                                         <button
                                             class="rooms-workspace__center-back"
                                             type="button"

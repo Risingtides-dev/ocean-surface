@@ -344,6 +344,24 @@ Web surface session UI:
   the room list and opens a room only when exactly one appeared. The panel
   mounts in the left rail, because someone holding a code has no room open and
   may have no rooms at all.
+- `room_close.rs` owns closing a room (DoD 4.3): `POST
+  /v1/rooms/persistent/{key}/close?actor_id=<me>`, the daemon's MEMBER lane
+  only, on every host. The operator lane (`X-Ocean-Operator`) is deliberately
+  NOT roster-checked, so the proxy never injects its key here — close is not
+  one of the six authority routes, and adding it would let anyone signed in to
+  the proxy close a room they are not in; the Tauri operator transport is not
+  used for the same reason. `close_offered` mirrors the daemon's member rule
+  exactly — room open, identity authoritative and non-empty after trimming, on
+  `Room.participants`, and not an `Agent` or `System` row (`Human`, `Bot`,
+  `Tool` pass) — and the header `⋯` does not render for anyone it refuses.
+  The daemon stays the authority. The verb is two doors deep (`⋯` →
+  `Close room…` arms a modal whose focused default is `Keep room open`), and
+  the modal states irreversibility, that agent turns are cancelled, and — for
+  any non-`Local` access state — that closing is local and other nodes keep
+  their copy. `200 {closed:true}` and the `404 room_not_open` of a room that
+  already closed BOTH land in the audit view: success re-hydrates through
+  `Rooms::open_room`, the one path that reads `closed` and starts no tail, and
+  never flips signals beside it. A cut response says the room may have closed.
 - An invite code is a bearer grant to the room. A minted one arrives in the
   RESPONSE body and lives in one signal and the open panel's DOM; a redeemed
   one goes in the REQUEST body. Never a log line, never an error sentence, and
@@ -657,7 +675,7 @@ helper is silent forever — prune by reading, not by waiting for the gate.
 Consumers: `ci_failure_trigger_control.rs`, `dead_selector_removal.rs`,
 `unheld_room_controls.rs`.
 
-**`tests/unheld_room_controls.rs`** pins six room controls that measurement
+**`tests/unheld_room_controls.rs`** pins eight room controls that measurement
 proves nothing else holds. The failure it exists for: a reviewer deletes a
 control, every gate stays green, and a landed daemon route goes back to being
 unreachable — #165 deleted the create panel's CI-failure checkbox and the
@@ -677,11 +695,14 @@ Measured at `4ed9a7c`:
 | `room_workspace_panel.rs` exec purge-all ARMING click | GREEN — pinned |
 | `rooms_workspace.rs` both rosters' remove ARMING click | GREEN — pinned |
 | `room_redeem.rs` join button's `on:click` (markup kept) | GREEN — pinned |
+| `room_close.rs` header `⋯` click and `Close room…` ARMING click * | GREEN — pinned |
 | `room_summary.rs` summarize RUN button | RED — compiler-held |
 | `room_workspace_panel.rs` `provision` button | RED — compiler-held |
 | `room_redeem.rs` join button's MARKUP | RED — held by an in-file test |
 | `room_workspace_panel.rs` `expose` button * | RED — compiler-held |
 | `room_workspace_panel.rs` port row's `close` button * | RED — compiler-held |
+| `room_close.rs` dialog `Close room` fire button * | RED — compiler-held |
+| `rooms_workspace.rs` `RoomCloseControl` mount * | RED — compiler-held |
 
 \* Measured on the commit that ADDED these two controls, not at `4ed9a7c`
 where neither existed. Same method, later tree.
