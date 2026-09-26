@@ -7456,3 +7456,34 @@ ui wasm32 check, 1411 native tests across 20 binaries, wasm32 and host clippy
 clippy -D warnings and 416 lib tests; all four script guards; both ledger
 checks and their test suites.
 _________________________________________________________________________________ 08:05 chore/dependabot-bumps
+
+time:      [08:20] [09-26-26]
+agent:     [claude] [opus 5.5]
+worktree:  chore/dependabot-bumps
+type:      issues
+area:      infra
+
+The coordinator asked for the cargo-deny findings from the Dependabot sweep to
+go into the same PR, so the root Cargo.lock got more --precise bumps. h2 0.4.14
+-> 0.4.16 (RUSTSEC-2026-0258). rustls 0.23.40 -> 0.23.45 (RUSTSEC-2026-0285),
+which forced rustls-webpki 0.103.13 -> 0.103.15. crossbeam-epoch 0.9.18 ->
+0.9.20 (RUSTSEC-2026-0204). anyhow 1.0.102 -> 1.0.103, which fixes the
+downcast_mut unsoundness (RUSTSEC-2026-0190). spin 0.9.8, which was yanked,
+-> 0.9.9. quick-xml 0.39.4 -> 0.41.0 (RUSTSEC-2026-0194 and -0195): 0.41 is a
+breaking 0.x release, and the only thing pulling in 0.39 was wayland-scanner
+0.31.10. wayland-scanner 0.31.11 requires quick-xml ^0.41 and is a
+semver-compatible patch, so bumping it with --precise moved quick-xml without
+swapping any dependency. It is used only by ocean-gui's Linux Wayland path. The
+quick-xml 0.30.0 entry left in the lock is outside the advisory range and no
+dependency path reaches it. After the bumps, `cargo deny --workspace check
+advisories` reports only unmaintained crates: async-std, instant, paste,
+proc-macro-error2, rustls-pemfile, rustybuzz, ttf-parser. None of the bumped
+crates is in crates/ocean-tauri/Cargo.lock at a vulnerable version: it already
+had anyhow 1.0.103 and quick-xml 0.41.0 and has no h2, rustls, crossbeam-epoch
+or spin. That lock is unchanged, so no Tauri build check was needed. Separately,
+cargo deny on it reports two git2 0.20.4 unsoundness advisories, left for a
+separate change. No code changes. Gates rerun, all green: proxy build + 84
+tests + clippy -D warnings; ui wasm32 check, 1411 native tests, wasm32 and host
+clippy -D warnings; fmt --check; ocean-gui check (default and livekit), clippy
+-D warnings and 416 lib tests; all four script guards; both ledger checks.
+_________________________________________________________________________________ 08:20 chore/dependabot-bumps
