@@ -152,12 +152,12 @@ fn the_press_is_one_page_and_keeps_the_guards_a_press_needs() {
          first has not moved yet",
     );
     assert!(
-        body.contains("leturl=rooms_list_url(&base,Some(&cursor));"),
+        body.contains("leturl=rooms_list_url(&base,Some(cursor.as_str()));"),
         "one page, through the same builder the first read uses, with the \
-         cursor as an encoded query value",
+         typed cursor replayed as an encoded query value",
     );
     assert!(
-        body.contains("ifme.rooms_next_cursor.get_untracked().as_deref()!=Some(cursor.as_str()){"),
+        body.contains("ifme.rooms_next_cursor.get_untracked().as_ref()!=Some(&cursor){"),
         "the page lands after an await, and an interactive refresh during one \
          re-parks the rail on its own first-page cursor — appending page N \
          onto a rail that has gone back to page one lists rooms that refresh \
@@ -231,12 +231,22 @@ fn the_unread_poll_reads_one_page_and_keeps_the_pages_it_did_not_read() {
     );
     assert!(
         rooms.contains(
-            "letparked=me.rooms_next_cursor.get_untracked();me.rooms_next_cursor.set(retained_tail_cursor(parked,rail_ends_at.as_deref()));"
+            "letrail_ended_at=me.list.with_untracked(|rail|rail.last().map(|room|room.id.clone()));letrooms=rooms_after_first_page("
         ),
-        "a poll that KEPT a tail keeps its position and re-derives the key: a \
-         cursor is a room key whose place the daemon resolves from that room's \
-         current `updated_at`, so a message in the room it names moves the \
-         boundary to the front of the list and strands every page behind it",
+        "where the rail ended BEFORE the poll is read before the poll's page \
+         is merged — afterwards it is gone, and the poll could no longer tell \
+         whether its boundary moved",
+    );
+    assert!(
+        rooms.contains(
+            "letparked=me.rooms_next_cursor.get_untracked();me.rooms_next_cursor.set(retained_tail_cursor(parked,rail_ended_at.as_deref(),rail_ends_at.as_deref(),));"
+        ),
+        "a poll that KEPT a tail keeps its position, keeps the daemon's minted \
+         keyset cursor while the rail still ends on the room it names, and \
+         re-derives a key only when that room moved: a bare key is resolved \
+         from the room's current `updated_at`, so a message in the room it \
+         names moves the boundary to the front of the list and strands every \
+         page behind it",
     );
     assert!(
         rooms.contains("letget_url=rooms_list_url(&base,None);"),
