@@ -7420,3 +7420,13 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+
+time:      [13:20] [09-29-26]
+agent:     [ocean] [rooms-pm]
+worktree:  [test/rooms-tauri-acceptance-scaffold]
+type:      merge
+area:      workflow
+
+Restacked the isolated Rooms Tauri acceptance scaffold onto current Surface main, preserving the dedicated webdriver shell and offline Stage0 runner while taking the current native room-authorization transport and append-only ledger contract. The two stale-line conflicts were resolved in crates/ocean-tauri/src/lib.rs and events.md; verification is recorded with the merge checkpoint rather than reviving the branch's obsolete pre-ledger entry.
+
+_________________________________________________________________________________ 13:20 test/rooms-tauri-acceptance-scaffold
