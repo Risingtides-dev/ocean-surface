@@ -105,6 +105,11 @@ struct SummarizeBody {
     artifact: Option<RoomArtifact>,
     #[serde(default)]
     error: Option<String>,
+    /// ocean-os marks every "room not open" 404 with this (DoD 1.10), whatever
+    /// `code` the route carries, so the sentence does not depend on which of
+    /// `unknown_room` / `room_not_found` / no code at all that route sends.
+    #[serde(default)]
+    room_not_open: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -117,6 +122,9 @@ struct ArtifactBody {
     code: Option<String>,
     #[serde(default)]
     error: Option<String>,
+    /// The daemon's "room not open" marker; see the struct above.
+    #[serde(default)]
+    room_not_open: bool,
 }
 
 // ---- Pure helpers -----------------------------------------------------------
@@ -158,6 +166,7 @@ fn classify_summarize(status: u16, body: SummarizeBody) -> SummarizeOutcome {
             status,
             body.code.as_deref(),
             body.error.as_deref(),
+            body.room_not_open,
         ));
     }
     match (body.summarized, body.artifact) {
@@ -198,6 +207,7 @@ fn classify_read(status: u16, body: ArtifactBody) -> SummaryRead {
         status,
         body.code.as_deref(),
         body.error.as_deref(),
+        body.room_not_open,
     ))
 }
 
@@ -212,6 +222,9 @@ fn summary_note(code: Option<&str>) -> String {
     }
 }
 
+/// What every "room not open" refusal reads as, however the daemon spells it.
+const ROOM_NOT_OPEN: &str = "That room is no longer open.";
+
 /// Turn a refusal into something an operator can act on.
 ///
 /// The daemon's typed `code` is the input, not its prose, which is written for
@@ -219,7 +232,17 @@ fn summary_note(code: Option<&str>) -> String {
 /// as bugs: `at_capacity` is a busy daemon and is worth retrying, while
 /// `forged_artifact_author` fires on a live control held by a permitted
 /// identity — the id it carried simply belongs to an agent.
-fn summary_failure_message(status: u16, code: Option<&str>, error: Option<&str>) -> String {
+fn summary_failure_message(
+    status: u16,
+    code: Option<&str>,
+    error: Option<&str>,
+    room_not_open: bool,
+) -> String {
+    // `room_not_open` first: the current daemon marks the case explicitly; the
+    // `unknown_room` arm below stays for a daemon that predates the marker.
+    if room_not_open {
+        return ROOM_NOT_OPEN.to_string();
+    }
     match code {
         Some("at_capacity") => {
             "The daemon is at its concurrent-turn limit. Try again shortly.".to_string()
@@ -234,7 +257,7 @@ fn summary_failure_message(status: u16, code: Option<&str>, error: Option<&str>)
             "The summary model took too long. Try again \u{2014} a shorter room answers faster."
                 .to_string()
         }
-        Some("unknown_room") => "That room is no longer open.".to_string(),
+        Some("unknown_room") => ROOM_NOT_OPEN.to_string(),
         Some("invalid_request") => "The room refused that summarize request.".to_string(),
         _ => match error {
             Some(text) if !text.is_empty() => format!("Summarize failed: {text}"),
@@ -958,28 +981,28 @@ mod tests {
 
     #[test]
     fn every_refusal_says_something_an_operator_can_act_on() {
-        let busy = summary_failure_message(429, Some("at_capacity"), None);
+        let busy = summary_failure_message(429, Some("at_capacity"), None, false);
         assert!(busy.contains("Try again"), "retryable: {busy}");
-        let forged = summary_failure_message(403, Some("forged_artifact_author"), None);
+        let forged = summary_failure_message(403, Some("forged_artifact_author"), None, false);
         assert!(forged.contains("daemon"), "{forged}");
         assert!(forged.contains("roster"), "{forged}");
-        let provider = summary_failure_message(502, Some("summary_provider_error"), None);
+        let provider = summary_failure_message(502, Some("summary_provider_error"), None, false);
         assert!(provider.contains("model"), "{provider}");
         // 504, not a 502 variant: the daemon's timeout arm is its own status.
-        let timeout = summary_failure_message(504, Some("summary_timeout"), None);
+        let timeout = summary_failure_message(504, Some("summary_timeout"), None, false);
         assert!(timeout.contains("Try again"), "{timeout}");
         // An untyped failure still says something, and never swallows the
         // server's own words when it has them.
         assert_eq!(
-            summary_failure_message(500, None, Some("disk on fire")),
+            summary_failure_message(500, None, Some("disk on fire"), false),
             "Summarize failed: disk on fire"
         );
         assert_eq!(
-            summary_failure_message(500, None, None),
+            summary_failure_message(500, None, None, false),
             "Summarize failed (500)."
         );
         assert_eq!(
-            summary_failure_message(500, None, Some("")),
+            summary_failure_message(500, None, Some(""), false),
             "Summarize failed (500)."
         );
     }
@@ -1268,5 +1291,25 @@ mod tests {
             Some(4)
         );
         assert_eq!(state.error.get_untracked().as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn a_room_not_open_marker_reads_as_a_closed_room_on_summarize_and_read() {
+        let marked = r#"{"ok":false,"code":"room_not_found","error":"room 'r' is not open","room_not_open":true}"#;
+        assert_eq!(
+            classify_read(404, artifact_body(marked)),
+            Err("That room is no longer open.".to_string())
+        );
+        match classify_summarize(404, summarize_body(marked)) {
+            SummarizeOutcome::Failure(message) => {
+                assert_eq!(message, "That room is no longer open.")
+            }
+            _ => panic!("a room that is not open must be a failure"),
+        }
+        // An older daemon's `unknown_room` code without the marker still maps.
+        assert_eq!(
+            summary_failure_message(404, Some("unknown_room"), None, false),
+            "That room is no longer open."
+        );
     }
 }

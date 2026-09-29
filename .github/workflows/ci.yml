@@ -220,6 +220,8 @@ jobs:
   # That guard reads the merged text through the checker's own `openEntries`
   # rather than a private copy of the rule, so the two cannot drift apart on
   # what closes an entry. Node is pinned for the reason the ledger job pins it.
+  # One step does reach outside the repo, and only to read: the room wire
+  # contract check fetches ocean-os's public artifact over HTTPS (see it below).
   # scripts/check-ledger.test.mjs and check-ledger-order.test.mjs are absent
   # on purpose: they run in `ledger`,
   # next to the checker it proves.
@@ -268,6 +270,23 @@ jobs:
 
       - name: Deployment promotion stays atomic
         run: node scripts/surface-auto-deploy.test.mjs
+
+      # Rooms DoD 5.8, surface half. ocean-os publishes the room wire facts at
+      # docs/contracts/room-wire.json and holds them equal to its router; this
+      # repo vendors a copy that room_wire_contract_tests.rs checks the Rooms
+      # decoders against. Both repos are public, so the current artifact is
+      # one unauthenticated fetch — a daemon-side contract change goes red
+      # here, naming the refresh script, instead of surfacing as a room that
+      # silently drops a frame or mislabels a state.
+      - name: The vendored ocean-os room wire contract matches ocean-os main
+        run: |
+          curl -fsSL --retry 3 \
+            https://raw.githubusercontent.com/Risingtides-dev/ocean-os/main/docs/contracts/room-wire.json \
+            -o "$RUNNER_TEMP/room-wire.json"
+          node scripts/vendor-ocean-os-room-wire.mjs --check --source "$RUNNER_TEMP/room-wire.json" || {
+            echo "::error::ocean-os changed docs/contracts/room-wire.json. Run 'node scripts/vendor-ocean-os-room-wire.mjs --ref origin/main' against an ocean-os checkout (OCEAN_OS_DIR, default ../ocean-os) and make 'cargo test -p ocean-surface-ui room_wire' pass."
+            exit 1
+          }
 
   # A code PR must carry its events.md ledger entry in the same diff. Ledger
   # discipline slipped three consecutive waves in the automated loop that

@@ -102,6 +102,11 @@ struct ListBody {
     code: Option<String>,
     #[serde(default)]
     error: Option<String>,
+    /// ocean-os marks every "room not open" 404 with this (DoD 1.10), whatever
+    /// `code` the route carries, so the sentence does not depend on which of
+    /// `unknown_room` / `room_not_found` / no code at all that route sends.
+    #[serde(default)]
+    room_not_open: bool,
 }
 
 /// The reply shape shared by the single read and both writes. `expected_version`
@@ -121,6 +126,9 @@ struct ArtifactBody {
     expected_version: Option<u64>,
     #[serde(default)]
     actual_version: Option<u64>,
+    /// The daemon's "room not open" marker; see the struct above.
+    #[serde(default)]
+    room_not_open: bool,
 }
 
 // ---- Pure helpers -----------------------------------------------------------
@@ -181,6 +189,7 @@ fn classify_write(status: u16, body: ArtifactBody) -> WriteOutcome {
         status,
         body.code.as_deref(),
         body.error.as_deref(),
+        body.room_not_open,
     ))
 }
 
@@ -205,6 +214,7 @@ fn classify_read(status: u16, body: ArtifactBody) -> Result<Option<RoomArtifact>
         status,
         body.code.as_deref(),
         body.error.as_deref(),
+        body.room_not_open,
     ))
 }
 
@@ -216,8 +226,12 @@ fn classify_list(status: u16, body: ListBody) -> Result<Vec<RoomArtifact>, Strin
         status,
         body.code.as_deref(),
         body.error.as_deref(),
+        body.room_not_open,
     ))
 }
+
+/// What every "room not open" refusal reads as, however the daemon spells it.
+const ROOM_NOT_OPEN: &str = "That room is no longer open.";
 
 /// Turn a refusal into something an operator can act on.
 ///
@@ -226,7 +240,17 @@ fn classify_list(status: u16, body: ListBody) -> Result<Vec<RoomArtifact>, Strin
 /// browser through `room_store_error_response`, which sends `error` prose and NO
 /// `code` at all. So the fallback arm is not a formality here — it is the arm
 /// most real failures land in, and it must read as a sentence.
-fn artifact_failure_message(status: u16, code: Option<&str>, error: Option<&str>) -> String {
+fn artifact_failure_message(
+    status: u16,
+    code: Option<&str>,
+    error: Option<&str>,
+    room_not_open: bool,
+) -> String {
+    // `room_not_open` first: the current daemon marks the case explicitly; the
+    // `unknown_room` arm below stays for a daemon that predates the marker.
+    if room_not_open {
+        return ROOM_NOT_OPEN.to_string();
+    }
     match code {
         // The daemon gates create on the roster kind: an agent's artifact is
         // daemon-authored. Said about an artifact rather than a summary, but in
@@ -240,7 +264,7 @@ fn artifact_failure_message(status: u16, code: Option<&str>, error: Option<&str>
         Some("artifact_version_conflict") => {
             "Someone else changed this artifact. Re-read it and try again.".to_string()
         }
-        Some("unknown_room") => "That room is no longer open.".to_string(),
+        Some("unknown_room") => ROOM_NOT_OPEN.to_string(),
         _ => match error {
             // `invalid_request` is the daemon's whole error string on a create
             // this side should have refused first, and echoing the token at an
@@ -2087,5 +2111,29 @@ mod tests {
             .find('}')
             .unwrap_or_else(|| panic!("`{selector}` is unterminated"));
         &css[open..open + close]
+    }
+
+    #[test]
+    fn a_room_not_open_marker_reads_as_a_closed_room_on_every_classifier() {
+        // The daemon now marks the unknown-room 404 with `room_not_open: true`
+        // and `code: room_not_found` where it used to send no code at all.
+        let marked = r#"{"ok":false,"code":"room_not_found","error":"room 'r' is not open","room_not_open":true}"#;
+        assert_eq!(
+            classify_read(404, artifact_body(marked)),
+            Err("That room is no longer open.".to_string())
+        );
+        assert_eq!(
+            classify_list(404, list_body(marked)),
+            Err("That room is no longer open.".to_string())
+        );
+        match classify_write(404, artifact_body(marked)) {
+            WriteOutcome::Failure(message) => assert_eq!(message, "That room is no longer open."),
+            _ => panic!("a room that is not open must be a failure"),
+        }
+        // An older daemon's `unknown_room` code without the marker still maps.
+        assert_eq!(
+            artifact_failure_message(404, Some("unknown_room"), None, false),
+            "That room is no longer open."
+        );
     }
 }
