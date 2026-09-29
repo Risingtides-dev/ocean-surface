@@ -236,7 +236,7 @@ fn a_prepended_page_anchors_the_scroll_instead_of_reading_as_an_append() {
 
     assert!(
         workspace.contains(
-            "matchtranscript_pass_action(len,prev_len,el.is_some(),near_bottom,grew_at_front,anchor.is_some(),){"
+            "matchtranscript_pass_action(len,prev_len,el.is_some(),follow_pinned,grew_at_front,anchor.is_some(),){"
         ),
         "the pass must be told whether its growth arrived at the front — without \
          it a prepend is indistinguishable from a tail append and takes the \

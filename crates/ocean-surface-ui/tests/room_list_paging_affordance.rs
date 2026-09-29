@@ -152,12 +152,12 @@ fn the_press_is_one_page_and_keeps_the_guards_a_press_needs() {
          first has not moved yet",
     );
     assert!(
-        body.contains("leturl=rooms_list_url(&base,Some(&cursor));"),
+        body.contains("leturl=rooms_list_url(&base,Some(cursor.as_str()));"),
         "one page, through the same builder the first read uses, with the \
-         cursor as an encoded query value",
+         typed cursor replayed as an encoded query value",
     );
     assert!(
-        body.contains("ifme.rooms_next_cursor.get_untracked().as_deref()!=Some(cursor.as_str()){"),
+        body.contains("ifme.rooms_next_cursor.get_untracked().as_ref()!=Some(&cursor){"),
         "the page lands after an await, and an interactive refresh during one \
          re-parks the rail on its own first-page cursor — appending page N \
          onto a rail that has gone back to page one lists rooms that refresh \

@@ -969,7 +969,7 @@ fn transcript_pass_action(
     len: usize,
     prev_len: usize,
     measured: bool,
-    near_bottom: bool,
+    follow_pinned: bool,
     grew_at_front: bool,
     anchored: bool,
 ) -> TranscriptPassAction {
@@ -988,7 +988,7 @@ fn transcript_pass_action(
     if grew_at_front && anchored {
         return TranscriptPassAction::AnchorOlder;
     }
-    if prev_len == 0 || near_bottom {
+    if prev_len == 0 || follow_pinned {
         return TranscriptPassAction::PinAndQueue;
     }
     if len > prev_len {
@@ -2158,6 +2158,10 @@ pub fn RoomsWorkspace(
     // this is not read-cursor "unread" state).
     let transcript = rooms.transcript;
     let new_below = RwSignal::new(false);
+    // Scroll intent captured before a render changes `scroll_height`. Reading
+    // post-render geometry alone misclassifies a reader who was pinned when a
+    // tall/batched append lands more than 120px below the old viewport.
+    let transcript_follow_pinned = RwSignal::new(true);
     let pending_read_advance = RwSignal::new(None::<ReadAdvanceRequest>);
     let refresh_handle = RwSignal::new(None::<IntervalHandle>);
     // `(scroll_height, scroll_top)` as the "load older" press left them, which
@@ -2186,29 +2190,29 @@ pub fn RoomsWorkspace(
         let metrics = el
             .as_ref()
             .map(|el| (el.scroll_height(), el.scroll_top(), el.client_height()));
-        let near_bottom = metrics.is_some_and(|(scroll_height, scroll_top, client_height)| {
-            transcript_is_near_bottom(scroll_height, scroll_top, client_height, 120)
-        });
         // Untracked because two arms below CLEAR this signal; tracking what the
         // pass writes would re-enter the pass. Its presence is also the only
         // evidence a prepend was asked for — the hydration walk prepends four
         // more pages after the first fill, and those must stay on the pin.
+        let follow_pinned = transcript_follow_pinned.get_untracked();
         let anchor = older_anchor.get_untracked();
         match transcript_pass_action(
             len,
             prev_len,
             el.is_some(),
-            near_bottom,
+            follow_pinned,
             grew_at_front,
             anchor.is_some(),
         ) {
             TranscriptPassAction::Reset => {
                 // Generation reset / room switch: nothing below.
+                transcript_follow_pinned.set(true);
                 new_below.set(false);
                 pending_read_advance.set(None);
                 older_anchor.set(None);
             }
             TranscriptPassAction::PinAndQueue => {
+                transcript_follow_pinned.set(true);
                 let (scroll_height, _, client_height) = metrics.unwrap_or_default();
                 if let Some(el) = el.clone() {
                     request_animation_frame(move || el.set_scroll_top(el.scroll_height()));
@@ -2221,7 +2225,7 @@ pub fn RoomsWorkspace(
                     // pin above produces; a transcript that fits its measured
                     // viewport never fires one and marks read here instead.
                     transcript_read_hydrated(first_fill, scroll_height, client_height),
-                    near_bottom,
+                    follow_pinned,
                     rooms.open_room.get().is_some(),
                     &rooms.transcript.get_untracked(),
                     access.as_ref(),
@@ -3668,12 +3672,14 @@ pub fn RoomsWorkspace(
                                     node_ref=list_ref
                                     on:scroll=move |_| {
                                         if let Some(el) = list_ref.get() {
-                                            if transcript_is_near_bottom(
+                                            let at_bottom = transcript_is_near_bottom(
                                                 el.scroll_height(),
                                                 el.scroll_top(),
                                                 el.client_height(),
                                                 120,
-                                            ) {
+                                            );
+                                            transcript_follow_pinned.set(at_bottom);
+                                            if at_bottom {
                                                 new_below.set(false);
                                                 queue_bottom_read_advance();
                                             }
@@ -3957,6 +3963,7 @@ pub fn RoomsWorkspace(
                                             if let Some(el) = list_ref.get() {
                                                 el.set_scroll_top(el.scroll_height());
                                             }
+                                            transcript_follow_pinned.set(true);
                                             new_below.set(false);
                                             queue_bottom_read_advance();
                                         }
@@ -5964,6 +5971,26 @@ mod tests {
         assert_eq!(
             transcript_pass_action(5, 0, false, true, false, false),
             TranscriptPassAction::Hold
+        );
+    }
+
+    /// A tall/batched append can move the post-render bottom farther than the
+    /// 120px threshold even though the reader was pinned immediately before it.
+    /// The pass follows captured intent, not geometry already changed by the
+    /// append; a reader whose scroll event captured `false` still gets the jump.
+    #[test]
+    fn tall_append_preserves_pre_append_follow_intent() {
+        assert!(transcript_is_near_bottom(1_000, 500, 500, 120));
+        assert!(!transcript_is_near_bottom(1_500, 500, 500, 120));
+        assert_eq!(
+            transcript_pass_action(6, 5, true, true, false, false),
+            TranscriptPassAction::PinAndQueue,
+            "the reader was pinned before the 500px append changed scroll_height",
+        );
+        assert_eq!(
+            transcript_pass_action(6, 5, true, false, false, false),
+            TranscriptPassAction::RaiseJump,
+            "a reader already scrolled up must never be yanked",
         );
     }
 

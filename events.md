@@ -7448,3 +7448,13 @@ mutation-checked RED. Not done here: orphaned thread replies still render
 nowhere on main; open PR #197 carries that fix and was not duplicated.
 
 _________________________________________________________________________________ 10:54 test/rooms-dod-1-5-1-6
+
+time:      [16:52] [09-29-26]
+agent:     [ocean] [rooms-pm]
+worktree:  [pm/rooms-232-fix]
+type:      fix
+area:      frontend
+
+Closed PR #232's review findings: room-list pagination now carries daemon-issued opaque cursors separately from legacy bare-key fallbacks, preserving immutable keyset boundaries across successive tail-room moves, while transcript live-follow records pre-render pinned intent so a tall or batched append cannot incorrectly strand a reader behind the jump affordance. Added paging, tall-append, and source-wiring regressions for both contracts.
+
+_________________________________________________________________________________ 16:52 pm/rooms-232-fix

@@ -83,7 +83,7 @@ fn the_transcript_scrolls_itself_in_exactly_three_places() {
     );
     assert!(
         workspace.contains(
-            "TranscriptPassAction::PinAndQueue=>{let(scroll_height,_,client_height)=metrics.unwrap_or_default();ifletSome(el)=el.clone(){request_animation_frame(move||el.set_scroll_top(el.scroll_height()));}new_below.set(false);"
+            "TranscriptPassAction::PinAndQueue=>{transcript_follow_pinned.set(true);let(scroll_height,_,client_height)=metrics.unwrap_or_default();ifletSome(el)=el.clone(){request_animation_frame(move||el.set_scroll_top(el.scroll_height()));}new_below.set(false);"
         ),
         "the pin: a first fill (which is what opens a room at its newest \
          message) and an at-bottom reader follow the tail, and the \
@@ -103,7 +103,7 @@ fn return_to_latest_scrolls_to_the_newest_row_and_re_pins() {
     let workspace = workspace();
     assert!(
         workspace.contains(
-            "{move||new_below.get().then(||view!{<buttontype=\"button\"class=\"rooms-workspace__jump-new\"on:click=move|_|{ifletSome(el)=list_ref.get(){el.set_scroll_top(el.scroll_height());}new_below.set(false);queue_bottom_read_advance();}>"
+            "{move||new_below.get().then(||view!{<buttontype=\"button\"class=\"rooms-workspace__jump-new\"on:click=move|_|{ifletSome(el)=list_ref.get(){el.set_scroll_top(el.scroll_height());}transcript_follow_pinned.set(true);new_below.set(false);queue_bottom_read_advance();}>"
         ),
         "the \"↓ New messages\" control renders while appends are waiting \
          below, scrolls to the newest row, clears itself, and marks what it \
@@ -111,18 +111,17 @@ fn return_to_latest_scrolls_to_the_newest_row_and_re_pins() {
     );
     assert!(
         workspace.contains(
-            "on:scroll=move|_|{ifletSome(el)=list_ref.get(){iftranscript_is_near_bottom(el.scroll_height(),el.scroll_top(),el.client_height(),120,){new_below.set(false);queue_bottom_read_advance();}}}"
+            "on:scroll=move|_|{ifletSome(el)=list_ref.get(){letat_bottom=transcript_is_near_bottom(el.scroll_height(),el.scroll_top(),el.client_height(),120,);transcript_follow_pinned.set(at_bottom);ifat_bottom{new_below.set(false);queue_bottom_read_advance();}}}"
         ),
         "scrolling back down by hand is the same return: the affordance \
          clears the moment the reader is at the bottom",
     );
     assert!(
         workspace.contains(
-            "letnear_bottom=metrics.is_some_and(|(scroll_height,scroll_top,client_height)|{transcript_is_near_bottom(scroll_height,scroll_top,client_height,120)});"
+            "letfollow_pinned=transcript_follow_pinned.get_untracked();letanchor=older_anchor.get_untracked();matchtranscript_pass_action(len,prev_len,el.is_some(),follow_pinned,"
         ),
-        "the pass that decides pin-or-jump measures \"at the bottom\" with the \
-         SAME threshold the scroll handler clears the affordance at — otherwise \
-         a reader the handler calls returned is still `RaiseJump` to the \
-         Effect, and the follow never re-pins",
+        "the pass that decides pin-or-jump must consume the reader's scroll \
+         intent captured before the append changes layout; post-render geometry \
+         alone misclassifies a pinned reader after a tall/batched append",
     );
 }

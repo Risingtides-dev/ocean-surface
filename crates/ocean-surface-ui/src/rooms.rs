@@ -844,7 +844,7 @@ pub struct Rooms {
     /// Where the rail's NEXT page of rooms starts, or `None` when the rooms on
     /// screen are every room the daemon will address from here (OCEAN-250).
     /// The one condition the rail's "load more rooms" affordance renders on.
-    rooms_next_cursor: RwSignal<Option<String>>,
+    rooms_next_cursor: RwSignal<Option<RoomListCursor>>,
     /// Whether a page-of-rooms press is still in flight, so the affordance can
     /// say so and refuse a second one against a cursor the first has not moved.
     rooms_more_in_flight: RwSignal<bool>,
@@ -1103,13 +1103,36 @@ enum RoomsFetchMode {
     Silent,
 }
 
+/// A room-list cursor together with the authority that produced it.
+///
+/// The daemon's value is opaque and must be replayed byte-for-byte: it captures
+/// an immutable keyset boundary even when the room at that boundary later
+/// moves. `LegacyFallback` is the bare last-room key the surface synthesizes
+/// only for an older daemon that reports `has_more` without `next_cursor`; that
+/// key is resolved at request time and therefore has to follow a moved rail
+/// boundary. Keeping the provenance in the type prevents either rule from
+/// depending on parsing an opaque cursor's contents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RoomListCursor {
+    Opaque(String),
+    LegacyFallback(String),
+}
+
+impl RoomListCursor {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Opaque(cursor) | Self::LegacyFallback(cursor) => cursor,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RoomsListSuccess {
     rooms: Vec<Room>,
     read_summaries: HashMap<String, RoomReadSummary>,
     /// The cursor this page named, already reduced by [`rooms_page_cursor`] —
     /// `None` means the daemon said this page is the end of the list.
-    next_cursor: Option<String>,
+    next_cursor: Option<RoomListCursor>,
 }
 
 impl Rooms {
@@ -1434,14 +1457,14 @@ impl Rooms {
         let me = *self;
         self.rooms_more_in_flight.set(true);
         spawn_local(async move {
-            let url = rooms_list_url(&base, Some(&cursor));
+            let url = rooms_list_url(&base, Some(cursor.as_str()));
             let result = fetch_rooms_page(&url).await;
             // The page landed after an await, and an interactive refresh during
             // one re-parks the rail on its own first-page cursor. Appending page
             // N onto a rail that has gone back to page one would list rooms the
             // operator's refresh deliberately dropped, so the read is discarded
             // unless the rail is still parked exactly where this request read.
-            if me.rooms_next_cursor.get_untracked().as_deref() != Some(cursor.as_str()) {
+            if me.rooms_next_cursor.get_untracked().as_ref() != Some(&cursor) {
                 me.rooms_more_in_flight.set(false);
                 return;
             }
@@ -3229,15 +3252,18 @@ fn rooms_page_cursor(
     has_more: bool,
     next_cursor: Option<&str>,
     last_room_key: Option<&str>,
-) -> Option<String> {
+) -> Option<RoomListCursor> {
     if !has_more {
         return None;
     }
-    next_cursor
+    if let Some(cursor) = next_cursor
         .map(str::trim)
         .filter(|cursor| !cursor.is_empty())
-        .or(last_room_key)
-        .map(str::to_owned)
+    {
+        Some(RoomListCursor::Opaque(cursor.to_owned()))
+    } else {
+        last_room_key.map(|key| RoomListCursor::LegacyFallback(key.to_owned()))
+    }
 }
 
 /// Where the NEXT press resumes after one that has already been merged.
@@ -3250,50 +3276,40 @@ fn rooms_page_cursor(
 /// page's cursor would leave a control that is permanently pressable and
 /// permanently inert. There is no such thing here as a press that changes
 /// nothing — it either grows the rail or takes the affordance away.
-fn rooms_next_page_cursor(grew: bool, page_cursor: Option<String>) -> Option<String> {
+fn rooms_next_page_cursor(
+    grew: bool,
+    page_cursor: Option<RoomListCursor>,
+) -> Option<RoomListCursor> {
     if !grew {
         return None;
     }
     page_cursor
 }
 
-/// Where a RETAINING poll leaves the rail's paging boundary: the position is
-/// kept, and the cursor that names it is kept too unless the boundary MOVED.
+/// Where a RETAINING poll leaves the rail's paging boundary.
 ///
-/// Two cursor forms reach this function. The daemon mints an opaque keyset
-/// boundary (`ocean-room-list:v1:[updated_at, id]`, ocean-os `28cf94c9`) that
-/// stays exact when the room it names later moves. A bare room key — the
-/// legacy form, and the only one this function can mint itself — is resolved
-/// from that room's CURRENT `updated_at` on every request, so a message in the
-/// room it names moves the boundary to the FRONT and a press replaying it asks
-/// for the hundred rooms behind the newest one, every one already on screen.
-/// [`rooms_next_page_cursor`] then retires the affordance for a page that added
-/// nothing, and the rooms past the real boundary are unreachable until an
-/// interactive refresh.
-///
-/// So the parked cursor is replaced only when the rail's last row changed
-/// under this poll — a tail room with new activity is by definition in the
-/// fresh first page, deduped out of the tail by [`append_rooms_page`], and the
-/// row behind it becomes the last, which is where the loaded pages genuinely
-/// end and which only a room key can name. When the last row is the one it was,
-/// the parked cursor still names it, and trading the daemon's stable boundary
-/// for a key would open exactly the window above: on a rail that polls every
-/// 8 seconds, every poll would downgrade the cursor, and one message in the
-/// boundary room before the next press would strand the rooms behind it.
+/// A daemon-issued opaque cursor captures an immutable keyset position, so it
+/// is always preserved byte-for-byte even if one or several rooms at the rail's
+/// tail move into the freshly polled first page. A `LegacyFallback` is only a
+/// bare room key; the daemon resolves it against the room's current timestamp,
+/// so that weaker cursor must be re-derived from the rail when its tail changes.
 ///
 /// `None` in, `None` out. A rail that had already reached the end of the list
 /// must not grow the affordance back merely because a poll ran.
 fn retained_tail_cursor(
-    parked: Option<String>,
+    parked: Option<RoomListCursor>,
     rail_ended_at: Option<&str>,
     last_listed_room: Option<&str>,
-) -> Option<String> {
+) -> Option<RoomListCursor> {
     let parked = parked?;
+    if matches!(parked, RoomListCursor::Opaque(_)) {
+        return Some(parked);
+    }
     let last = last_listed_room?;
     if rail_ended_at == Some(last) {
         Some(parked)
     } else {
-        Some(last.to_owned())
+        Some(RoomListCursor::LegacyFallback(last.to_owned()))
     }
 }
 
@@ -6677,7 +6693,7 @@ mod tests {
     fn the_list_cursor_stops_on_the_daemons_word_and_falls_back_to_the_last_row() {
         assert_eq!(
             rooms_page_cursor(true, Some("room-100"), Some("room-100")),
-            Some("room-100".to_string()),
+            Some(RoomListCursor::Opaque("room-100".to_string())),
             "the ordinary page: the daemon named where the next one starts",
         );
         assert_eq!(
@@ -6694,13 +6710,13 @@ mod tests {
         );
         assert_eq!(
             rooms_page_cursor(true, None, Some("room-100")),
-            Some("room-100".to_string()),
+            Some(RoomListCursor::LegacyFallback("room-100".to_string())),
             "the daemon's cursor IS the key of the last room it served, so a \
              page naming none still carries its own cursor in its rows",
         );
         assert_eq!(
             rooms_page_cursor(true, Some("   "), Some("room-100")),
-            Some("room-100".to_string()),
+            Some(RoomListCursor::LegacyFallback("room-100".to_string())),
             "and a blank one is not a cursor",
         );
         assert_eq!(
@@ -6715,12 +6731,12 @@ mod tests {
     #[test]
     fn a_page_that_adds_no_room_ends_the_paging_rather_than_re_offering_itself() {
         assert_eq!(
-            rooms_next_page_cursor(true, Some("room-200".into())),
-            Some("room-200".to_string()),
+            rooms_next_page_cursor(true, Some(RoomListCursor::Opaque("room-200".into())),),
+            Some(RoomListCursor::Opaque("room-200".to_string())),
             "a page that grew the rail leaves the next press where it ended",
         );
         assert_eq!(
-            rooms_next_page_cursor(false, Some("room-100".into())),
+            rooms_next_page_cursor(false, Some(RoomListCursor::Opaque("room-100".into())),),
             None,
             "the daemon falls back to its FIRST page when the cursor names a \
              room that has since closed, so a press can answer with nothing but \
@@ -6814,8 +6830,12 @@ mod tests {
     #[test]
     fn a_retaining_poll_re_derives_the_boundary_rather_than_replaying_its_key() {
         assert_eq!(
-            retained_tail_cursor(Some("room-200".into()), Some("room-200"), Some("room-199")),
-            Some("room-199".to_string()),
+            retained_tail_cursor(
+                Some(RoomListCursor::LegacyFallback("room-200".into())),
+                Some("room-200"),
+                Some("room-199"),
+            ),
+            Some(RoomListCursor::LegacyFallback("room-199".to_string())),
             "the rail's own last row is where the loaded pages end; the key the \
              poll was holding is only where they ended when it was parked",
         );
@@ -6826,7 +6846,11 @@ mod tests {
              the affordance back merely because a poll ran",
         );
         assert_eq!(
-            retained_tail_cursor(Some("room-200".into()), Some("room-200"), None),
+            retained_tail_cursor(
+                Some(RoomListCursor::LegacyFallback("room-200".into())),
+                Some("room-200"),
+                None,
+            ),
             None,
             "and an empty rail has no boundary to name",
         );
@@ -6842,8 +6866,12 @@ mod tests {
     fn an_unmoved_boundary_keeps_the_daemons_keyset_cursor() {
         let minted = r#"ocean-room-list:v1:["2026-09-01T00:00:00Z","room-200"]"#.to_string();
         assert_eq!(
-            retained_tail_cursor(Some(minted.clone()), Some("room-200"), Some("room-200")),
-            Some(minted),
+            retained_tail_cursor(
+                Some(RoomListCursor::Opaque(minted.clone())),
+                Some("room-200"),
+                Some("room-200"),
+            ),
+            Some(RoomListCursor::Opaque(minted)),
             "the rail still ends on the room the daemon's cursor names, so that \
              cursor is still exactly where the next page starts",
         );
@@ -6946,7 +6974,7 @@ mod tests {
 
         /// The body through the rail's own decode and cursor rule — the same
         /// two steps `fetch_rooms_page` runs on a response.
-        fn fetch(&self, url: &str) -> (Vec<Room>, Option<String>) {
+        fn fetch(&self, url: &str) -> (Vec<Room>, Option<RoomListCursor>) {
             let body: RoomsListResponse =
                 serde_json::from_value(self.page(url)).expect("list body decodes");
             assert!(body.ok);
@@ -6960,9 +6988,9 @@ mod tests {
     }
 
     /// A "load more rooms" press, as `load_more_rooms` runs it after the await.
-    fn press(daemon: &ListDaemon, rail: &mut Vec<Room>, parked: &mut Option<String>) {
+    fn press(daemon: &ListDaemon, rail: &mut Vec<Room>, parked: &mut Option<RoomListCursor>) {
         let cursor = parked.clone().expect("the affordance is on screen");
-        let (page, page_cursor) = daemon.fetch(&rooms_list_url("http://d", Some(&cursor)));
+        let (page, page_cursor) = daemon.fetch(&rooms_list_url("http://d", Some(cursor.as_str())));
         let grown = append_rooms_page(rail, page);
         let grew = grown.len() > rail.len();
         *rail = grown;
@@ -6971,7 +6999,7 @@ mod tests {
 
     /// The 8-second silent poll on a paged rail, as `fetch_rooms_with_mode`
     /// runs it: ONE first-page read, the tail kept, the boundary re-derived.
-    fn silent_poll(daemon: &ListDaemon, rail: &mut Vec<Room>, parked: &mut Option<String>) {
+    fn silent_poll(daemon: &ListDaemon, rail: &mut Vec<Room>, parked: &mut Option<RoomListCursor>) {
         let rail_ended_at = rail.last().map(|room| room.id.clone());
         let (page, _) = daemon.fetch(&rooms_list_url("http://d", None));
         *rail = rooms_after_first_page(rail, page, true);
@@ -6996,9 +7024,9 @@ mod tests {
         let mut rail = first;
         assert_eq!(rail.len(), 100, "the daemon's default page");
         assert!(
-            parked
-                .as_deref()
-                .is_some_and(|c| c.starts_with(ListDaemon::PREFIX)),
+            parked.as_ref().is_some_and(
+                |c| matches!(c, RoomListCursor::Opaque(raw) if raw.starts_with(ListDaemon::PREFIX))
+            ),
             "a `has_more` page parks the daemon's own minted cursor",
         );
 
@@ -7032,11 +7060,11 @@ mod tests {
         );
     }
 
-    /// The other half of the retained boundary: when the boundary room moves
-    /// BEFORE the poll, the poll sees it leave the tail and re-derives the key
-    /// from the row that now ends the rail. Paging still reaches every room.
+    /// The daemon's opaque cursor survives successive boundary-room moves before
+    /// the next press. Downgrading after either poll would reopen the same race
+    /// when the newly named bare-key boundary moves again.
     #[test]
-    fn a_boundary_that_moves_before_the_poll_is_re_derived_and_paging_completes() {
+    fn two_boundary_moves_before_the_next_press_keep_the_opaque_cursor() {
         let mut daemon = ListDaemon::with_rooms(250);
         let (first, mut parked) = daemon.fetch(&rooms_list_url("http://d", None));
         let mut rail = first;
@@ -7046,11 +7074,23 @@ mod tests {
         silent_poll(&daemon, &mut rail, &mut parked);
         assert_eq!(rail.first().map(|room| room.id.as_str()), Some("room-200"));
         assert_eq!(rail.last().map(|room| room.id.as_str()), Some("room-199"));
-        assert_eq!(parked.as_deref(), Some("room-199"));
+
+        daemon.touch("room-199", 21_000);
+        silent_poll(&daemon, &mut rail, &mut parked);
+        assert_eq!(rail.first().map(|room| room.id.as_str()), Some("room-199"));
+        assert_eq!(rail.last().map(|room| room.id.as_str()), Some("room-198"));
+        assert!(matches!(
+            parked.as_ref(),
+            Some(RoomListCursor::Opaque(cursor)) if cursor.starts_with(ListDaemon::PREFIX)
+        ));
 
         press(&daemon, &mut rail, &mut parked);
         let ids: HashSet<&str> = rail.iter().map(|room| room.id.as_str()).collect();
-        assert_eq!(ids.len(), 250);
+        assert_eq!(
+            ids.len(),
+            250,
+            "both boundary moves still leave every room reachable"
+        );
         assert_eq!(parked, None);
     }
 
@@ -7069,7 +7109,7 @@ mod tests {
         let rail: Vec<Room> = (1..=200)
             .map(|n| listed_room(&format!("room-{n:03}")))
             .collect();
-        let parked = Some("room-200".to_string());
+        let parked = Some(RoomListCursor::LegacyFallback("room-200".to_string()));
 
         // `room-200` receives a message. `updated_at DESC` puts it first, so the
         // poll's one page opens with it and drops the page's former last row.
@@ -7095,7 +7135,7 @@ mod tests {
                 Some("room-200"),
                 merged.last().map(|room| room.id.as_str())
             ),
-            Some("room-199".to_string()),
+            Some(RoomListCursor::LegacyFallback("room-199".to_string())),
             "replaying `room-200` would ask the daemon for the hundred rooms \
              behind the NEWEST room — the first page over again — and a page \
              that adds nothing retires the affordance, leaving rooms 201-250 \
