@@ -571,3 +571,60 @@
     animation: none;
   }
 }
+
+/* ═══════════════════════════════════════════════════════════════════
+   Device chip — which machine this session is attached to
+   ═══════════════════════════════════════════════════════════════════
+
+   Sits in the status cluster, reading like the status chip beside it rather
+   than as another button: a person needs to know which of their machines they
+   are on at a glance, and needs a way to change it — not a permanent control.
+   Absent entirely until the proxy names a machine, so single-device and
+   off-proxy hosts keep the header they have. */
+.ocean-device-chip {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 200px;
+  padding: 0 8px;
+  height: var(--ctl-h-sm);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--fg-3);
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.ocean-device-chip:hover {
+  background: var(--bg-elevated);
+  border-color: var(--border);
+  color: var(--fg);
+}
+
+.ocean-device-chip:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 2px;
+}
+
+.ocean-device-chip__dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+}
+
+.ocean-device-chip__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

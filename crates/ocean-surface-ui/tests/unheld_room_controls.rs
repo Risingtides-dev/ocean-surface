@@ -199,6 +199,15 @@ fn the_redeem_button_is_wired_and_not_just_rendered() {
 //     construction site outside the test module. Note how narrow that hold is:
 //     the day anything else constructs the variant, it is gone.
 //
+//   room_workspace_panel.rs — the `expose` button and each row's `close`.
+//     Deleting expose fails with `variant Expose is never constructed`,
+//     `function parse_port is never used`, `method take_port_submission is
+//     never used`; deleting close fails with `variant Close is never
+//     constructed` plus four `unused variable` errors, because stripping the
+//     only control in `port_row` orphans every parameter the row takes for it.
+//     Both holds are the `provision` hold's shape and just as narrow: one
+//     construction site each, outside the test module.
+//
 //   room_redeem.rs — the redeem button's MARKUP.
 //     Deleting the whole `<button>` fails `cargo test` on that module's own
 //     `the_view_renders_the_control_the_stylesheet_dresses`, which scans for

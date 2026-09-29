@@ -21,12 +21,39 @@ POST /v1/rooms/persistent
 { "key": "my-room", "name": "My Room", "workspace_root": "/path/to/project" }
 ```
 
-The `key` is a free-form identifier (sluggish: lower-kebab). `workspace_root` is
-optional — when set, agent turns in this room resolve their project and `cwd` from
-it. The creating human is automatically added as a `RoomParticipant { kind: Human }`.
+The `key` is a free-form identifier (sluggish: lower-kebab). The creating human is
+automatically added as a `RoomParticipant { kind: Human }`.
+
+`workspace_root` is the folder the room's work happens in, and it is resolved on
+the machine running the **daemon** — not in the browser, which cannot see that
+filesystem. It must be an absolute path that already exists there; the daemon
+canonicalizes it and refuses anything else with `400 { "ok": false, "error":
+"invalid_workspace_root" }`. The surface's create form carries a field for it,
+and leaving that field empty creates the room **unbound**.
+
+An unbound room is not a room with a missing convenience: **agent turns in it
+fail closed.** The daemon resolves a room-bound turn's project and `cwd` from
+the room's `workspace_root`, and with none stored it refuses every turn with
+`503 workspace_unavailable` before the agent sees the message — so an @mention
+in an unbound room does nothing, however its trigger policy is set.
+
+A room can also be bound, rebound, or unbound after creation:
+
+```
+PATCH /v1/rooms/persistent/{key}
+{ "workspace_root": "/path/to/project" }   # bind or rebind
+{ "workspace_root": null }                 # unbind
+```
+
+An absent field leaves the binding unchanged, so a rename can never silently
+unbind a working room. The surface renders this beside the room's trigger
+toggles, with an explicit notice while the room is unbound, because that is the
+condition which makes every trigger above it inert. The bind control requires an
+`ocean-os` daemon carrying `workspace_root` on `RoomUpdateRequest`; create-time
+binding works against any daemon that has the field on `RoomCreateRequest`.
 
 The daemon responds with a `Room` entity including the full participant roster,
-timestamps, and trigger policy.
+timestamps, trigger policy, and `workspace_root`.
 
 ### 2. Joining a Room
 
@@ -153,20 +180,113 @@ agent's participant id.
 
 ### Browsing Rooms
 
-The rooms panel is a flex column listing all rooms the daemon knows about:
+The rooms rail is a flex column listing rooms ONE PAGE at a time:
 
 ```
-GET /v1/rooms/persistent?limit=50&cursor=<opaque>
+GET /v1/rooms/persistent            -> { ok, rooms, read_states, attention, next_cursor, has_more }
+GET /v1/rooms/persistent?cursor=<room key>
 ```
 
-Each room card shows:
-- Room name and key
-- Participant count (human/agent breakdown)
-- Last activity timestamp
-- A join/open affordance
+The daemon has paged this route since OCEAN-250. It orders rooms
+`updated_at DESC, id ASC` and answers at most `limit` of them —
+the surface sends no `limit`, so it takes the store default of 100 —
+with `has_more` and a `next_cursor` that is the KEY of the last room on the
+page. Replaying that key as `?cursor=` returns the rooms strictly after it in
+that order. Both fields are decoded with serde defaults, so a daemon predating
+the route (which sends neither) reads as a single complete page and the rail
+behaves exactly as it did before.
+
+Each room row shows:
+- Room name, behind a `#` channel glyph
+- A compact unread count, or `@N` when the authenticated reader has unread
+  mentions, from the list's daemon-derived `attention` projection
+- Open-room selection state (`aria-selected`, roving tabindex across the rows)
+
+`attention` is sparse, ordered with and bounded to the returned room page. Each
+row carries `{room_id, latest_seq, read_seq, unread_count, mention_count}` and
+is derived by the daemon from its credential-bound local member plus durable
+transcript/read-cursor state. Surface does not parse message text to guess who
+was mentioned. Omission from a present projection is authoritative zero; an
+absent projection means an older daemon, where the rail falls back to
+`read_states` for a binary unread indicator and claims no mention knowledge.
+
+**The end of the loaded list carries a `Load more rooms` press.** It renders on
+the parked cursor and on nothing else: a rail already holding every room the
+daemon will address parks `None` and grows no control, so the row's presence is
+itself the statement that there are more rooms. The press fetches ONE page,
+appends the rooms the rail does not already list, and re-parks. Every press
+either adds rooms or removes the affordance — a page that adds nothing (which is
+what the daemon's fallback to page one produces when the cursor names a room
+that has since closed) ends the paging rather than re-offering itself.
+
+**Unread refresh polls one page, not every page.** The rail re-reads the list
+every 8 seconds to keep the unread dots honest. That poll issues exactly one
+request no matter how many pages are loaded: the daemon's order puts every room
+with new activity on the first page, so the first page is where unread changes
+are. On a rail that has paged, the fresh first page leads and the pages already
+loaded are kept behind it, minus any room the fresh page just promoted. The
+trade is that a room closed on the daemon while it sits below the fold stays on
+screen until an interactive refresh (opening the panel, creating a room,
+redeeming an invite) replaces the rail with a fresh first page.
+
+**The paging boundary is re-derived on every retaining poll, never replayed.** A
+cursor is a room KEY, and the daemon resolves its place in the order from that
+room's *current* `updated_at` — it looks the anchor row up per request. So a
+message arriving in the room the cursor names moves that room to the front of
+`updated_at DESC` and takes the boundary with it: a press replaying the old key
+would ask for the rooms behind the *newest* room, get back a page of rooms
+already on screen, and — since a page that adds nothing retires the affordance —
+strand every room past the real boundary until an interactive refresh. The rail's
+own last row is the boundary instead, and it survives exactly the event that
+moves the parked key: a room with new activity is by definition in the fresh
+first page, deduped out of the tail, and the row behind it becomes the last.
 
 `.rooms-panel__list` keeps `min-height: 0` with vertical overflow — long room
 lists scroll instead of pushing status/actions outside the viewport.
+
+### Roster
+
+The members rail lists the open room's participants: avatar, display name, and
+a kind badge, with a two-step confirm behind every remove. A federated room's
+rail is the access projection's safe member list instead, carrying role, actor
+type, a presence dot, and a `yours` chip on agents the caller owns.
+
+**Agent ownership renders (2026-09-02).** Each agent row in the LOCAL roster
+says which worker owns it — `owned by <name>`, with the rail's own presence dot
+for whether that worker is still in the room — or `unclaimed` when no ownership
+row names it. The rows come from `agent_owners` on
+`GET /v1/rooms/persistent/{key}/snapshot` (ocean-os#437), decoded as an optional
+array with a serde default so a daemon that predates the field still opens rooms
+AND stays distinguishable from one that answers an empty list. A closed room's
+audit view shows the same ownership, because closing retains the roster and the
+ownership rows and the snapshot IS that audit view — a frozen room still says
+who owned what and whether they were present when it froze.
+
+`unclaimed` is only ever said on the daemon's authority. An `agent_owners` array
+that is present but empty is the daemon answering that nobody owns anything
+here; an ABSENT array — a daemon predating ocean-os#437, which may hold durable
+ownership rows it cannot project — is no answer at all, and the rail renders no
+ownership line rather than badging every agent in every room. The same silence
+covers the moment after a binding mutation, before the re-read lands.
+
+Ownership is re-read after the mutations that change it. The daemon's store
+inserts an ownership row as part of creating an agent participant, so a
+first-agent bootstrap or an authorization leaves the room owned in the database
+and stale on screen; both now trigger a roster-only re-read
+(`/snapshot?before_seq=0&limit=1`, which the contract defines as a terminal
+empty page while the daemon still resolves `agent_owners` from the room's own
+lock). It invalidates before it asks, so a re-read that never answers degrades
+to silence rather than to a stale claim, and it costs no transcript — the
+operator's loaded history is not thrown away to learn who owns an agent.
+
+Two further limits are deliberate. Presence is the daemon's `owner_present`
+narrowed by the roster on screen: join, leave and remove replace the room record
+from routes that carry no `agent_owners`, so a worker who left after hydration is
+never badged present while the rail no longer shows them. And the FEDERATED rail
+renders no ownership at all — the daemon joins ownership rows to local
+`participants` ids, while a federated row's `member_id` is a bedrock-minted
+binding id in a different namespace, so matching one against the other would
+mark every federated agent unclaimed rather than say nothing.
 
 ### Transcript Rendering
 

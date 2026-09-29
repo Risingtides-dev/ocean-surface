@@ -197,6 +197,14 @@
     white-space: nowrap;
   }
 
+  /* The device chip keeps its dot and name on a phone — which machine you are
+     driving is exactly the thing a small screen must not drop — but the name
+     gets a hard cap so it can never push the overflow control off the bar. */
+  .ocean-surface .ocean-device-chip {
+    flex: 0 1 auto;
+    max-width: 108px;
+  }
+
   /* Controls: compact height, capped chip widths ---------------------- */
   .ocean-surface .ocean-sessions-trigger,
   .ocean-surface .ocean-thinking,

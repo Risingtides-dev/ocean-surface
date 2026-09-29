@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -9,6 +9,18 @@ const script = join(repo, 'deploy', 'ocean-surface-auto-deploy.sh');
 const proxyPlist = readFileSync(join(repo, 'deploy', 'dev.risingtides.ocean-surface-proxy.plist'), 'utf8');
 const deployPlist = readFileSync(join(repo, 'deploy', 'dev.risingtides.ocean-surface-auto-deploy.plist'), 'utf8');
 const root = mkdtempSync(join(tmpdir(), 'ocean-surface-promote-'));
+// The rail resolves OCEAN_SURFACE_REPO to its own checkout when unset, and its
+// promote path `rm -rf`s $REPO/dist and $REPO/extension/dist before refilling
+// them from the bundle it was handed. A --promote here carries fixtures, not a
+// build, so a run without this stub deleted the developer's trunk output and
+// left a 5-byte wasm behind — the guard destroying the tree it guards. Every
+// invocation below therefore aims the rail at scratch.
+const repoStub = join(root, 'repo-stub');
+mkdirSync(join(repoStub, 'extension'), { recursive: true });
+// rebuild_extension returns early unless extension/sidepanel.html exists, and a
+// bare stub would silently skip the ~35 lines of hash-stripping and copying it
+// runs under `set -e` on every real promotion.
+writeFileSync(join(repoStub, 'extension', 'sidepanel.html'), '<!doctype html>');
 
 function validBundle(path) {
   mkdirSync(path, { recursive: true });
@@ -17,13 +29,28 @@ function validBundle(path) {
   writeFileSync(join(path, 'ocean-surface-ui.js'), '// wasm-bindgen glue');
 }
 
+// Entry name + size for every file under a build directory, or null when the
+// directory is absent — enough to catch both halves of that damage: bytes
+// replaced in a checkout that has a build, and directories conjured in one
+// that does not.
+function buildTrees() {
+  return [join(repo, 'dist'), join(repo, 'extension', 'dist')].map((dir) => {
+    if (!existsSync(dir)) return null;
+    return readdirSync(dir, { recursive: true })
+      .sort()
+      .map((entry) => `${entry} ${statSync(join(dir, entry)).size}`);
+  });
+}
+
+const buildTreesBefore = buildTrees();
+
 try {
   const state = join(root, 'state');
   const staged = join(root, 'staged');
   validBundle(staged);
 
   execFileSync(script, ['--promote', staged, 'abc123'], {
-    env: { ...process.env, OCEAN_SURFACE_STATE_DIR: state, OCEAN_SURFACE_NO_RESTART: '1' },
+    env: { ...process.env, OCEAN_SURFACE_REPO: repoStub, OCEAN_SURFACE_STATE_DIR: state, OCEAN_SURFACE_NO_RESTART: '1' },
     stdio: 'pipe',
   });
 
@@ -34,7 +61,7 @@ try {
   const staged2 = join(root, 'staged2');
   validBundle(staged2);
   execFileSync(script, ['--promote', staged2, 'def456'], {
-    env: { ...process.env, OCEAN_SURFACE_STATE_DIR: state, OCEAN_SURFACE_NO_RESTART: '1' },
+    env: { ...process.env, OCEAN_SURFACE_REPO: repoStub, OCEAN_SURFACE_STATE_DIR: state, OCEAN_SURFACE_NO_RESTART: '1' },
     stdio: 'pipe',
   });
   assert.equal(readlinkSync(join(state, 'current')), 'releases/def456', 'a second promotion must replace the current symlink');
@@ -45,7 +72,7 @@ try {
   mkdirSync(bad, { recursive: true });
   writeFileSync(join(bad, 'index.html'), '<h1>broken</h1>');
   const failed = spawnSync(script, ['--promote', bad, 'broken'], {
-    env: { ...process.env, OCEAN_SURFACE_STATE_DIR: state, OCEAN_SURFACE_NO_RESTART: '1' },
+    env: { ...process.env, OCEAN_SURFACE_REPO: repoStub, OCEAN_SURFACE_STATE_DIR: state, OCEAN_SURFACE_NO_RESTART: '1' },
     encoding: 'utf8',
   });
 
@@ -56,15 +83,20 @@ try {
   const noOpState = join(root, 'noop-state');
   const mainRevision = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
   execFileSync(script, ['--promote', staged, mainRevision], {
-    env: { ...process.env, OCEAN_SURFACE_STATE_DIR: noOpState, OCEAN_SURFACE_NO_RESTART: '1' },
+    env: { ...process.env, OCEAN_SURFACE_REPO: repoStub, OCEAN_SURFACE_STATE_DIR: noOpState, OCEAN_SURFACE_NO_RESTART: '1' },
     stdio: 'pipe',
   });
   mkdirSync(join(noOpState, 'auto-deploy.lock'));
   writeFileSync(join(noOpState, 'auto-deploy.lock', 'pid'), '99999999\n');
+  // The full rail, handed its revision through OCEAN_SURFACE_TARGET_REV so it
+  // never resolves one itself: no invocation in this file needs the checkout.
+  // The stub is also the fail-closed choice — should the marker written above
+  // ever stop matching HEAD, `git worktree add` errors out against a non-repo
+  // instead of cutting a worktree and building inside someone's checkout.
   const noOp = spawnSync(script, [], {
     env: {
       ...process.env,
-      OCEAN_SURFACE_REPO: repo,
+      OCEAN_SURFACE_REPO: repoStub,
       OCEAN_SURFACE_STATE_DIR: noOpState,
       OCEAN_SURFACE_NO_RESTART: '1',
       OCEAN_SURFACE_TARGET_REV: mainRevision,
@@ -107,6 +139,12 @@ try {
   assert.ok(proxyPlist.includes('/Users/risingtidesdev/.config/ocean-surface/bin/ocean-surface-proxy.sh'));
   assert.ok(deployPlist.includes('/Users/risingtidesdev/.config/ocean-surface/bin/ocean-surface-auto-deploy.sh'));
   assert.ok(!`${proxyPlist}\n${deployPlist}`.includes('/dev/ocean-surface/deploy/ocean-surface-'));
+
+  assert.deepEqual(
+    buildTrees(),
+    buildTreesBefore,
+    'running this guard must leave the checkout\'s dist/ and extension/dist untouched',
+  );
 
   console.log('ALL PASS: surface atomic deployment promotion (24 assertions)');
 } finally {

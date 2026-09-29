@@ -48,14 +48,27 @@
 //! What the room SERVES is member-visible on the same read: the status
 //! body carries a `ports` list beside the projection, exactly like
 //! `secrets` — port, preview URL, exposure time, only rows still open.
-//! It is a LIST and nothing more here. A preview URL is the compute
-//! driver's word relayed through Bedrock, so it passes the room link
-//! allowlist before it may become an anchor and stays plain text
-//! otherwise. Exposing and closing a port are member verbs on Bedrock
-//! (`permission: 'write'`, no owner check) that the daemon deliberately
-//! NARROWS to the owner, because a preview URL publishes the room's
-//! compute to anyone holding it — so when controls land here the gate to
-//! describe is the daemon's, not Bedrock's.
+//! A preview URL is the compute driver's word relayed through Bedrock, so
+//! it passes the room link allowlist before it may become an anchor and
+//! stays plain text otherwise. The list is no longer the whole story: the
+//! daemon's allowlist opened the pair that changes it, and the controls
+//! below fire them —
+//!
+//!   POST /v1/rooms/persistent/{key}/workspace/ports       → expose one
+//!   POST /v1/rooms/persistent/{key}/workspace/ports/close → close one
+//!
+//! Both are member verbs on Bedrock (`permission: 'write'`, no owner
+//! check) that the daemon deliberately NARROWS to the owner, because a
+//! preview URL publishes the room's compute to anyone holding it — so the
+//! gate this panel describes is the daemon's, not Bedrock's, and the copy
+//! beside the control says what pressing it publishes. Both send
+//! `{"port"}` as a JSON NUMBER and nothing else: expose's upstream body is
+//! strict deny-extra, and close is a POST leaf only because cors.rs
+//! advertises no DELETE — the daemon lifts `port` out of that body into
+//! the upstream path, so a body key it cannot prove is an integer never
+//! becomes a path segment. WHICH ports a room may expose stays Bedrock's
+//! policy (its floor, its reserved list), answered by Bedrock and relayed;
+//! this side gates only the SHAPE the daemon would refuse locally anyway.
 //!
 //! Members RUN commands on the same lane — the daemon's allowlist exec
 //! row is a member act (write-gated, attributed, never owner-gated):
@@ -134,7 +147,10 @@ use leptos::prelude::*;
 use serde::{Deserialize, Deserializer};
 use wasm_bindgen_futures::spawn_local;
 
-use crate::rooms::{encode, RoomMessage, RoomMessageKind, Rooms};
+use crate::rooms::{
+    encode, FederatedRoomRole, RoomAccessProjection, RoomAccessState, RoomMessage, RoomMessageKind,
+    Rooms,
+};
 use crate::rooms_workspace::room_is_federated;
 
 /// The open panel's fallback tick. The marker wake is the primary refresh
@@ -371,6 +387,25 @@ struct WorkspaceBody {
     /// `[]` is "none exposed".
     #[serde(default)]
     ports: Option<Vec<PortRow>>,
+    /// The port an expose or close reply echoes. Presence is what success
+    /// means on both port lanes — a refusal body on this wire is
+    /// `{ok, error, details}` and never names a port — and the two lanes
+    /// then read their own field beside it.
+    #[serde(default)]
+    port: Option<u64>,
+    /// The expose reply's minted preview URL. The same relayed
+    /// compute-driver string the status list carries, and it earns no
+    /// different trust for arriving on a reply: `port_href` gates it into
+    /// the row a moment later, and this side never links it.
+    #[serde(default)]
+    preview_url: Option<String>,
+    /// The close reply's account of the preview ROUTE. Taking it down is
+    /// best-effort upstream (a driver that will not answer must never wedge
+    /// the close), so `false` is a port that stopped being advertised while
+    /// its URL may still be serving — the one outcome that must never read
+    /// as "closed".
+    #[serde(default)]
+    route_removed: Option<bool>,
     /// The purge reply's row count — how many execs had their tails
     /// blanked. Presence is what success means on that lane; the `exec_id`
     /// echoed beside it is not read here.
@@ -460,6 +495,26 @@ fn destroy_url(base: &str, key: &str, actor: &str) -> String {
 fn secrets_set_url(base: &str, key: &str, actor: &str) -> String {
     format!(
         "{base}/v1/rooms/persistent/{}/workspace/secrets/set?actor_id={}",
+        encode(key),
+        encode(actor),
+    )
+}
+
+/// The owner's port verbs. Two POST leaves, not a POST and a DELETE: the
+/// daemon's CORS never advertises DELETE to this origin, so close rides a
+/// POST leaf whose `port` the daemon lifts out of the body and into the
+/// upstream path itself.
+fn ports_expose_url(base: &str, key: &str, actor: &str) -> String {
+    format!(
+        "{base}/v1/rooms/persistent/{}/workspace/ports?actor_id={}",
+        encode(key),
+        encode(actor),
+    )
+}
+
+fn ports_close_url(base: &str, key: &str, actor: &str) -> String {
+    format!(
+        "{base}/v1/rooms/persistent/{}/workspace/ports/close?actor_id={}",
         encode(key),
         encode(actor),
     )
@@ -1007,6 +1062,219 @@ fn port_href(row: &PortRow) -> Option<String> {
         .filter(|url| crate::room_markdown::scheme_allowed(url))
 }
 
+/// The two port verbs, each carrying the port it acts on: the busy signal
+/// holds one of these, so the row being closed can say so while every other
+/// control disables, and the reply's sentence knows which verb it answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PortCommand {
+    Expose(u64),
+    Close(u64),
+}
+
+impl PortCommand {
+    fn port(self) -> u64 {
+        match self {
+            PortCommand::Expose(port) | PortCommand::Close(port) => port,
+        }
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            PortCommand::Expose(_) => "expose",
+            PortCommand::Close(_) => "close",
+        }
+    }
+}
+
+/// The composed port, or `None` when what is typed is not one at all.
+///
+/// This gates the SHAPE the daemon proves for itself (`port_path_segment`:
+/// an integer in 1..=65535) and deliberately not Bedrock's POLICY — its
+/// 1024 floor and its reserved list are answered upstream and relayed, so
+/// re-deciding them here would only give the two copies somewhere to drift
+/// apart. What it does buy is that no submit composes a body the daemon
+/// would refuse locally, which is a refusal with nothing to teach.
+fn parse_port(input: &str) -> Option<u64> {
+    let port: u64 = input.trim().parse().ok()?;
+    (1..=u64::from(u16::MAX)).contains(&port).then_some(port)
+}
+
+/// A client-side affordance gate only; the daemon remains authoritative. Local
+/// rooms are owner-operated by construction. A federated room can expose the
+/// controls only when the safe access projection identifies this browser's
+/// own member row as Owner. Unknown, transitional, revoked, and ordinary
+/// member projections cannot dispatch a guaranteed refusal.
+fn can_manage_ports(access: Option<&RoomAccessProjection>) -> bool {
+    let Some(access) = access else { return false };
+    match access.state {
+        RoomAccessState::Local => true,
+        RoomAccessState::Live => access.self_member_id.as_deref().is_some_and(|self_id| {
+            access.members.iter().any(|member| {
+                member.member_id == self_id && member.role_in_room == FederatedRoomRole::Owner
+            })
+        }),
+        RoomAccessState::Connecting | RoomAccessState::Recovering | RoomAccessState::Revoked => {
+            false
+        }
+    }
+}
+
+/// The sentence a typed port answer earns — states, not faults, like the
+/// verbs this rides beside. `workspace_not_owner_principal` gets its own
+/// wording rather than the lifecycle's: the gate is the same daemon row,
+/// but "provision or destroy" is the wrong fact to state at a port.
+/// `invalid_request` is the one code here this side answers for the daemon
+/// rather than relaying, so what makes that safe is worth stating. It is
+/// reachable only on close — the leaf whose body becomes a path — and NOT
+/// because `parse_port` caught the bad shape first: close never calls
+/// `parse_port`, its port comes from `row.port` on a server-listed row, so the
+/// daemon's port check is unreachable by construction rather than by a gate
+/// this side runs. The daemon spends the same code on a call asserting no room
+/// participant, where "A port must be a whole number." would be the wrong
+/// sentence; that arm is closed here because the `actor` closure gates on
+/// `identity_resolved()`, so no call reaches the wire without one. Both holds
+/// are structural and neither is pinned by a test — if either changes, this
+/// sentence starts lying, which is why the lifecycle and secrets lanes relay
+/// the daemon's own text for this code and only ports invents one.
+fn port_state_sentence(code: &str) -> Option<String> {
+    let sentence = match code {
+        // One sentence for both verbs: a workspace destroyed under a
+        // standing list answers this to a CLOSE too, and "exposing needs a
+        // workspace" would then be the wrong fact.
+        "workspace_absent" => "Ports need a workspace \u{2014} provision one first.",
+        "workspace_provisioning" => {
+            "The workspace is still provisioning \u{2014} try again once it's ready."
+        }
+        "workspace_failed" => {
+            "The workspace failed to provision \u{2014} provision it again first."
+        }
+        "workspace_not_owner_principal" => "Only the room owner can expose or close a port.",
+        "room_not_federated" => "This room has no Bedrock workspace.",
+        // Bedrock keeps a small reserved list (the sandbox control plane
+        // holds one); the number it names is on screen already, so the
+        // sentence only has to say what to do about it.
+        "port_reserved" => "That port is reserved by the room runtime \u{2014} serve on another.",
+        "invalid_request" => "A port must be a whole number.",
+        _ => return None,
+    };
+    Some(sentence.to_string())
+}
+
+/// The landed-expose sentence. The URL itself stays OUT of it: the same
+/// relayed driver string earns an anchor only through `port_href`, and the
+/// re-read that follows puts it in the list as one — so the note points at
+/// the row rather than printing a second, unlinked copy. A reply that
+/// minted no URL promises none.
+fn expose_sentence(port: u64, preview_url: Option<&str>) -> String {
+    match preview_url.filter(|url| !url.is_empty()) {
+        Some(_) => format!("Port {port} is open \u{2014} its preview URL is in the list above."),
+        None => format!("Port {port} is open."),
+    }
+}
+
+/// The landed-close sentence. Truth over comfort, the discipline
+/// `destroy_sentence` holds over a failed flush: Bedrock takes the preview
+/// route down best-effort and closes the row either way, so a `false` here
+/// is a URL that may still be serving what the room stopped advertising —
+/// and letting that read as "closed" is the exact lie Bedrock's own comment
+/// says this reply exists to prevent. It offers no retry, deliberately: the
+/// row is gone whatever the route did, so a second close would only answer
+/// "not currently exposed" and read as if the first had worked.
+fn close_sentence(port: u64, route_removed: Option<bool>) -> String {
+    if route_removed == Some(false) {
+        return format!(
+            "Port {port} is no longer listed, but its preview route could not be taken \
+             down \u{2014} the URL may still be serving what the room stopped advertising."
+        );
+    }
+    format!("Port {port} is closed.")
+}
+
+/// The stated-as-fact sentence for a daemon that predates the port leaves —
+/// the same voice every other lane's "not available yet" uses.
+fn port_unavailable_sentence(command: PortCommand) -> String {
+    match command {
+        PortCommand::Expose(_) => "Exposing a port isn't available on this deployment yet.",
+        PortCommand::Close(_) => "Closing a port isn't available on this deployment yet.",
+    }
+    .to_string()
+}
+
+/// Map a port reply. Success is the echoed port — a refusal on this wire is
+/// `{ok, error, details}` and never names one — and each verb then reads its
+/// own field beside it.
+///
+/// The two uncoded arms carry the lane's real judgement. A 404 is the
+/// deployment's "not yet" on expose, where nothing else 404s; on CLOSE it is
+/// also Bedrock's "Port 8080 is not currently exposed.", which is a STATE
+/// (rule 1) and arrives with a body, so the body tells the two apart and its
+/// own sentence is relayed unframed — it already says exactly the right
+/// thing, and prefixing it would only make an answer read as a stumble. An
+/// uncoded 400 on either verb is Bedrock's port POLICY — its 1024 floor,
+/// its deny-extra body — which is likewise a fix-and-retry state rather than
+/// a fault, and is relayed because the floor is Bedrock's to move.
+fn classify_port(
+    command: PortCommand,
+    status: u16,
+    body: Option<WorkspaceBody>,
+) -> LifecycleOutcome {
+    let noun = command.noun();
+    let Some(body) = body else {
+        if status == 404 {
+            return LifecycleOutcome::Unavailable;
+        }
+        return LifecycleOutcome::Failure(format!(
+            "The {noun} reply could not be read ({status})."
+        ));
+    };
+    // The echoed port is the success discriminator because no refusal on this
+    // wire carries one — Bedrock answers `{ok, error, details}` and the daemon
+    // `{ok, code, error[, leaf]}`. The status is checked FIRST anyway so the
+    // discriminator fails CLOSED: a future producer adding `port` to a refusal
+    // body would otherwise render "Port N is open." over a 4xx.
+    if status < 300 {
+        if let Some(port) = body.port {
+            return LifecycleOutcome::Landed(match command {
+                PortCommand::Expose(_) => expose_sentence(port, body.preview_url.as_deref()),
+                PortCommand::Close(_) => close_sentence(port, body.route_removed),
+            });
+        }
+    }
+    match body.refusal_code() {
+        Some("workspace_route_not_allowed") => LifecycleOutcome::Unavailable,
+        Some(code) => {
+            if let Some(sentence) = port_state_sentence(code) {
+                return LifecycleOutcome::State(sentence);
+            }
+            LifecycleOutcome::Failure(
+                failure_sentence(code)
+                    .or_else(|| body.error.clone())
+                    .unwrap_or_else(|| format!("The {noun} failed ({status}).")),
+            )
+        }
+        None if status == 404 => match command {
+            PortCommand::Expose(_) => LifecycleOutcome::Unavailable,
+            PortCommand::Close(port) => LifecycleOutcome::State(
+                body.error
+                    .filter(|error| !error.is_empty())
+                    .unwrap_or_else(|| format!("Port {port} is not currently exposed.")),
+            ),
+        },
+        None if status == 400 => LifecycleOutcome::State(
+            body.error
+                .filter(|error| !error.is_empty())
+                .map(|error| format!("That port was refused: {error}"))
+                .unwrap_or_else(|| format!("That port was refused ({status}).")),
+        ),
+        None => LifecycleOutcome::Failure(
+            body.error
+                .filter(|error| !error.is_empty())
+                .map(|error| format!("The {noun} was refused: {error}"))
+                .unwrap_or_else(|| format!("The {noun} failed ({status}).")),
+        ),
+    }
+}
+
 /// The sentence a typed exec answer earns — the workspace that isn't
 /// ready to run anything, and the daemon's own body cap. States, not
 /// faults: the command survives in the form for the retry each one
@@ -1478,6 +1746,7 @@ enum PanelLane {
     Secrets,
     Exec,
     ExecPurge,
+    Ports,
 }
 
 /// Whether a lane's successful read clears the standing error: only the one
@@ -1556,6 +1825,19 @@ pub struct RoomWorkspacePanelState {
     secrets_note: RwSignal<Option<String>>,
     /// A secrets set is in flight — blocks re-submit while Bedrock writes.
     secrets_busy: RwSignal<bool>,
+    /// The port being composed for exposure, as typed. Kept as text, not a
+    /// number: what the operator wrote is what the disabled predicate and
+    /// `parse_port` judge, and a half-typed "80" must not become a submit.
+    port_input: RwSignal<String>,
+    /// The ports lane's calm sentence — the landed port, or the typed state
+    /// that answered instead. Its own slot, like every verb's beside it.
+    ports_note: RwSignal<Option<String>>,
+    /// The port verb in flight, if any. Carries its port so the row being
+    /// closed can label itself while every other control on the lane
+    /// disables — both verbs run container work under the daemon's command
+    /// budget, and a second one mid-flight would be a race over the same
+    /// route.
+    ports_busy: RwSignal<Option<PortCommand>>,
     /// The command being composed. Not sensitive — it becomes a readable
     /// history row the moment it lands — and it survives every outcome but
     /// a landed run, so a refusal is a retry, not a retype.
@@ -1613,6 +1895,9 @@ impl RoomWorkspacePanelState {
             secret_value: RwSignal::new(String::new()),
             secrets_note: RwSignal::new(None),
             secrets_busy: RwSignal::new(false),
+            port_input: RwSignal::new(String::new()),
+            ports_note: RwSignal::new(None),
+            ports_busy: RwSignal::new(None),
             exec_command: RwSignal::new(String::new()),
             exec_note: RwSignal::new(None),
             exec_busy: RwSignal::new(false),
@@ -1684,6 +1969,9 @@ impl RoomWorkspacePanelState {
         self.secret_value.set(String::new());
         self.secrets_note.set(None);
         self.secrets_busy.set(false);
+        self.port_input.set(String::new());
+        self.ports_note.set(None);
+        self.ports_busy.set(None);
         self.exec_command.set(String::new());
         self.exec_note.set(None);
         self.exec_busy.set(false);
@@ -1872,6 +2160,7 @@ impl RoomWorkspacePanelState {
         self.error.set(None);
         self.note.set(None);
         self.secrets_note.set(None);
+        self.ports_note.set(None);
         self.purge_note.set(None);
         self.panel.set(true);
         self.files_path.set(WORKSPACE_ROOT_PATH.to_string());
@@ -2055,6 +2344,76 @@ impl RoomWorkspacePanelState {
             }
             LifecycleOutcome::Failure(error) => {
                 self.error.set(Some((PanelLane::Secrets, error)));
+            }
+        }
+    }
+
+    /// Take the composed port, or nothing when what is typed is not one.
+    /// The text stays in its signal either way — like the command beside
+    /// it and unlike the secret value, only a landed expose spends the
+    /// form, so a refused port is a retype of one digit, not of all four.
+    fn take_port_submission(&self) -> Option<u64> {
+        self.port_input.with_untracked(|input| parse_port(input))
+    }
+
+    /// Fire an owner port verb. Same shape as `run_lifecycle`, re-read
+    /// included and for the same reason: the reply never moves the view,
+    /// and the ports list the status read carries IS what a landed expose
+    /// or close changed. Both DO mint a transcript marker upstream
+    /// (`room.workspace.port_exposed` / `port_closed`, both on the daemon's
+    /// ingest allowlist), so every other member's panel wakes on its own —
+    /// this read is the actor's own list amending now instead of after the
+    /// SSE round trip.
+    fn run_port(&self, rooms: Rooms, command: PortCommand, key: String, actor: String) {
+        let base = self.base();
+        let me = *self;
+        let generation = rooms.generation_snapshot();
+        self.ports_busy.set(Some(command));
+        self.ports_note.set(None);
+        self.error.set(None);
+        spawn_local(async move {
+            let url = match command {
+                PortCommand::Expose(_) => ports_expose_url(&base, &key, &actor),
+                PortCommand::Close(_) => ports_close_url(&base, &key, &actor),
+            };
+            let result = post_port(command, &url).await;
+            let current = rooms.room_is_current(generation, &key);
+            // A typed state re-reads too: "not currently exposed" means the
+            // list on screen is already stale about that row, exactly as a
+            // vanished exec means it for the purge beside this.
+            let refresh = port_refresh_needed(&result.outcome, result.refresh_after);
+            me.publish_port(command, result.outcome, current);
+            if current && refresh {
+                refresh_lanes(me, &base, &key, &actor, true, false, false).await;
+            }
+        });
+    }
+
+    /// Publish a completed port verb — but only into the room that started
+    /// it. A landed expose spends the form; a typed state keeps the port
+    /// for the retry it invites, like the forms beside this one. Close
+    /// composes nothing, so it has nothing to spend.
+    fn publish_port(&self, command: PortCommand, outcome: LifecycleOutcome, room_is_current: bool) {
+        if !room_is_current {
+            return;
+        }
+        self.ports_busy.set(None);
+        match outcome {
+            LifecycleOutcome::Landed(sentence) => {
+                if matches!(command, PortCommand::Expose(_)) {
+                    self.port_input.set(String::new());
+                }
+                self.ports_note.set(Some(sentence));
+            }
+            LifecycleOutcome::State(sentence) => {
+                self.ports_note.set(Some(sentence));
+            }
+            LifecycleOutcome::Unavailable => {
+                self.ports_note
+                    .set(Some(port_unavailable_sentence(command)));
+            }
+            LifecycleOutcome::Failure(error) => {
+                self.error.set(Some((PanelLane::Ports, error)));
             }
         }
     }
@@ -2354,6 +2713,61 @@ async fn post_exec(url: &str, command: &str) -> LifecycleOutcome {
     }
 }
 
+/// A port POST. `{"port"}` alone on both leaves — expose because its
+/// upstream body is strict deny-extra, close because the daemon lifts that
+/// one key into the upstream path and forwards a DELETE with no body at
+/// all. It rides as a JSON NUMBER, not a string: the daemon proves the
+/// value with `as_u64` before it may become a path segment, and a string
+/// would be refused there having taught nobody anything.
+fn port_refresh_needed(outcome: &LifecycleOutcome, transport_ambiguous: bool) -> bool {
+    transport_ambiguous
+        || matches!(
+            outcome,
+            LifecycleOutcome::Landed(_) | LifecycleOutcome::State(_)
+        )
+}
+
+struct PortPostResult {
+    outcome: LifecycleOutcome,
+    /// True only when transport failed after dispatch and status must settle
+    /// whether the upstream command landed.
+    refresh_after: bool,
+}
+
+async fn post_port(command: PortCommand, url: &str) -> PortPostResult {
+    match Request::post(url)
+        .header("content-type", "application/json")
+        .json(&serde_json::json!({ "port": command.port() }))
+    {
+        Ok(request) => match request.send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.json::<WorkspaceBody>().await.ok();
+                PortPostResult {
+                    outcome: classify_port(command, status, body),
+                    refresh_after: false,
+                }
+            }
+            // Both verbs drive the compute driver — a first expose can pay
+            // for a cold container start — so a cut connection says nothing
+            // about whether the route came up or down. The refreshed list
+            // is what settles it.
+            Err(err) => PortPostResult {
+                outcome: LifecycleOutcome::Failure(format!(
+                    "The request was cut ({err}) \u{2014} the {} may or may not have landed; \
+                     the refreshed list above will say.",
+                    command.noun()
+                )),
+                refresh_after: true,
+            },
+        },
+        Err(err) => PortPostResult {
+            outcome: LifecycleOutcome::Failure(format!("Workspace request encode error: {err}")),
+            refresh_after: false,
+        },
+    }
+}
+
 /// The purge POST. `{}` means every finished row; a named row rides as
 /// `{"exec_id"}` — validated upstream strict deny-extra, and nothing else
 /// is ever composed here (the daemon would strip an `actor_member_id` as
@@ -2586,7 +3000,7 @@ pub fn RoomWorkspacePanel(rooms: Rooms, state: RoomWorkspacePanelState) -> impl 
                                         _ => ().into_any(),
                                     }}
                                     {move || lifecycle_section(state, rooms, actor)}
-                                    {move || ports_section(state)}
+                                    {move || ports_section(state, rooms, actor)}
                                     {move || secrets_section(state, rooms, actor)}
                                     {move || files_section(state, actor)}
                                     {move || exec_section(state, rooms, actor)}
@@ -2991,25 +3405,38 @@ fn lifecycle_section(
 }
 
 /// What the room is serving on, under the lifecycle verbs: the status
-/// body's open-ports list, when the Bedrock in front of us sends one. A
-/// read and only a read: the daemon's allowlist carried no expose or close
-/// leaf when this landed, and a button posting to a route that does not
-/// exist is worse than no button. The pair is owner-gated at the daemon
-/// when it arrives, so the controls that follow say so.
+/// body's open-ports list, and the two verbs that change it. The copy says
+/// what pressing expose actually does, because nothing else in the product
+/// does: the preview URL is a routing label, not a credential, and that
+/// world-readability is the whole reason the daemon narrows a pair Bedrock
+/// gates at member write down to the room owner. Rendered for every member
+/// all the same — the daemon's typed refusal is the authorization answer,
+/// same as the verbs above.
 ///
 /// The whole section is conditional on the list EXISTING: a Bedrock that
-/// predates `ports` makes no claim at all here, while `[]` is Bedrock
-/// saying none are open and says so in words.
-fn ports_section(state: RoomWorkspacePanelState) -> AnyView {
+/// predates `ports` makes no claim at all here — and predates the routes
+/// too, so it earns no controls either — while `[]` is Bedrock saying none
+/// are open and says so in words.
+fn ports_section(
+    state: RoomWorkspacePanelState,
+    rooms: Rooms,
+    actor: impl Fn() -> Option<(String, String)> + Copy + 'static,
+) -> AnyView {
     let view = state.view.get();
     let Some(rows) = port_rows(view.as_ref()).map(<[PortRow]>::to_vec) else {
         return ().into_any();
     };
+    // Read once for the whole section: both verbs drive the compute driver,
+    // so one in flight disables every control here, and the row it names
+    // says which.
+    let busy = state.ports_busy.get();
+    let can_manage = can_manage_ports(rooms.access.get().as_ref());
     view! {
         <div class="rooms-workspace__compute-ports-title">"Exposed ports"</div>
         <div class="rooms-workspace__compute-ports-copy">
             "A preview URL is a routing label, not a credential: whatever the room \
-             serves on that port is served to anyone holding it."
+             serves on that port is served to anyone holding it. Exposing and closing \
+             are the room owner's calls."
         </div>
         {if rows.is_empty() {
             view! {
@@ -3021,26 +3448,84 @@ fn ports_section(state: RoomWorkspacePanelState) -> AnyView {
         } else {
             view! {
                 <ul class="rooms-workspace__compute-ports-list">
-                    {rows.into_iter().map(port_row).collect::<Vec<_>>()}
+                    {rows
+                        .into_iter()
+                        .map(|row| port_row(state, rooms, actor, busy, can_manage, row))
+                        .collect::<Vec<_>>()}
                 </ul>
             }
             .into_any()
         }}
+        {state.ports_note.get().map(|note| view! {
+            <div class="rooms-workspace__compute-note">{note}</div>
+        })}
+        <div class="rooms-workspace__compute-ports-form">
+            <input
+                class="rooms-workspace__compute-port-input"
+                type="text"
+                inputmode="numeric"
+                placeholder="5173"
+                aria-label="Port to expose"
+                autocomplete="off"
+                spellcheck="false"
+                disabled=busy.is_some() || !can_manage
+                prop:value=move || state.port_input.get()
+                on:input=move |ev| state.port_input.set(event_target_value(&ev))
+            />
+            <button
+                class="rooms-workspace__compute-run"
+                type="button"
+                title="Publish what the room serves on this port at a preview URL"
+                // The parse is the gate, not emptiness: a port this side
+                // already knows the daemon would refuse locally teaches
+                // nobody anything by being sent.
+                disabled=move || {
+                    !can_manage
+                        || state.ports_busy.get().is_some()
+                        || state.port_input.with(|input| parse_port(input)).is_none()
+                }
+                on:click=move |_| {
+                    let Some(port) = state.take_port_submission() else { return };
+                    let Some((key, actor_id)) = actor() else { return };
+                    state.run_port(rooms, PortCommand::Expose(port), key, actor_id);
+                }
+            >
+                {if matches!(busy, Some(PortCommand::Expose(_))) {
+                    "exposing\u{2026}"
+                } else {
+                    "expose"
+                }}
+            </button>
+        </div>
     }
     .into_any()
 }
 
-/// One open port: the number, the preview URL it answers on, and when it
-/// was exposed. The URL is linked only when it clears the room link
-/// allowlist (`port_href`) and is printed as plain text when it does not,
-/// so a driver string this surface will not trust is still readable.
-fn port_row(row: PortRow) -> AnyView {
+/// One open port: the number, the preview URL it answers on, when it was
+/// exposed, and the verb that takes it down. The URL is linked only when it
+/// clears the room link allowlist (`port_href`) and is printed as plain text
+/// when it does not, so a driver string this surface will not trust is still
+/// readable.
+///
+/// Close fires on ONE click, unlike the destroy and take-back confirms it
+/// sits near: Bedrock derives the preview token from the room and port
+/// rather than minting it, so re-exposing restores the SAME URL — nothing
+/// here is discarded and nothing is un-published for good.
+fn port_row(
+    state: RoomWorkspacePanelState,
+    rooms: Rooms,
+    actor: impl Fn() -> Option<(String, String)> + Copy + 'static,
+    busy: Option<PortCommand>,
+    can_manage: bool,
+    row: PortRow,
+) -> AnyView {
     let href = port_href(&row);
+    let port = row.port;
     let shown = row.preview_url.filter(|url| !url.is_empty());
     view! {
         <li class="rooms-workspace__compute-ports-row">
             <span class="rooms-workspace__compute-ports-row-port">
-                {row.port.to_string()}
+                {port.to_string()}
             </span>
             {match (href, shown) {
                 (Some(href), Some(text)) => view! {
@@ -3065,6 +3550,22 @@ fn port_row(row: PortRow) -> AnyView {
                     {format!("exposed {at}")}
                 </span>
             })}
+            <button
+                class="rooms-workspace__compute-port-close"
+                type="button"
+                title="Stop serving this port at its preview URL"
+                disabled=busy.is_some() || !can_manage
+                on:click=move |_| {
+                    let Some((key, actor_id)) = actor() else { return };
+                    state.run_port(rooms, PortCommand::Close(port), key, actor_id);
+                }
+            >
+                {if busy == Some(PortCommand::Close(port)) {
+                    "closing\u{2026}"
+                } else {
+                    "close"
+                }}
+            </button>
         </li>
     }
     .into_any()
@@ -3442,6 +3943,9 @@ mod tests {
             secret_value: RwSignal::new(String::new()),
             secrets_note: RwSignal::new(None),
             secrets_busy: RwSignal::new(false),
+            port_input: RwSignal::new(String::new()),
+            ports_note: RwSignal::new(None),
+            ports_busy: RwSignal::new(None),
             exec_command: RwSignal::new(String::new()),
             exec_note: RwSignal::new(None),
             exec_busy: RwSignal::new(false),
@@ -4970,6 +5474,329 @@ mod tests {
         }]));
         assert!(!view_flip(Some(&ready(None)), &open));
         assert!(!view_flip(Some(&open), &ready(Some(Vec::new()))));
+    }
+
+    #[test]
+    fn port_controls_follow_the_safe_self_owner_projection() {
+        let local: RoomAccessProjection = serde_json::from_value(serde_json::json!({
+            "state": "local"
+        }))
+        .unwrap();
+        assert!(can_manage_ports(Some(&local)));
+        assert!(!can_manage_ports(None));
+
+        let access = |role: &str, state: &str, self_id: Option<&str>| {
+            serde_json::from_value::<RoomAccessProjection>(serde_json::json!({
+                "state": state,
+                "self_member_id": self_id,
+                "members": [{
+                    "member_id": "self",
+                    "actor_type": "user",
+                    "role_in_room": role,
+                    "display_name": "Operator",
+                    "joined_at": "2026-08-31T00:00:00Z",
+                    "local_binding_available": true
+                }]
+            }))
+            .unwrap()
+        };
+        assert!(can_manage_ports(Some(&access(
+            "owner",
+            "live",
+            Some("self")
+        ))));
+        assert!(!can_manage_ports(Some(&access(
+            "member",
+            "live",
+            Some("self")
+        ))));
+        assert!(!can_manage_ports(Some(&access(
+            "owner",
+            "live",
+            Some("other")
+        ))));
+        assert!(!can_manage_ports(Some(&access(
+            "owner",
+            "recovering",
+            Some("self")
+        ))));
+    }
+
+    #[test]
+    fn an_ambiguous_port_transport_always_refreshes_the_list() {
+        let failure = LifecycleOutcome::Failure("cut".into());
+        assert!(port_refresh_needed(&failure, true));
+        assert!(!port_refresh_needed(&failure, false));
+        assert!(port_refresh_needed(
+            &LifecycleOutcome::Landed("open".into()),
+            false
+        ));
+        assert!(port_refresh_needed(
+            &LifecycleOutcome::State("already closed".into()),
+            false
+        ));
+    }
+
+    #[test]
+    fn the_port_urls_assert_the_actor() {
+        assert_eq!(
+            ports_expose_url("http://d", "team room", "user@host"),
+            "http://d/v1/rooms/persistent/team%20room/workspace/ports?actor_id=user%40host"
+        );
+        // Close is a POST leaf, not a wire DELETE: cors.rs advertises no
+        // DELETE to this origin, so the daemon takes the port out of the
+        // body and builds the upstream path itself.
+        assert_eq!(
+            ports_close_url("http://d", "team room", "user@host"),
+            "http://d/v1/rooms/persistent/team%20room/workspace/ports/close\
+             ?actor_id=user%40host"
+        );
+    }
+
+    /// The submit gate is the DAEMON's shape check (`port_path_segment`:
+    /// an integer in 1..=65535), never Bedrock's policy. 80 composes fine
+    /// here and is refused upstream with the floor Bedrock owns — which is
+    /// the point: one copy of that number, and it lives where it can move.
+    #[test]
+    fn the_port_gate_is_the_daemons_shape_not_bedrocks_policy() {
+        assert_eq!(parse_port("5173"), Some(5173));
+        assert_eq!(parse_port("  8080  "), Some(8080));
+        assert_eq!(parse_port("1"), Some(1));
+        assert_eq!(parse_port("65535"), Some(65535));
+        // Bedrock's floor and its reserved list are upstream answers, so a
+        // port under 1024 and the reserved 3000 both still compose.
+        assert_eq!(parse_port("80"), Some(80));
+        assert_eq!(parse_port("3000"), Some(3000));
+        for refused in [
+            "", "  ", "0", "65536", "99999", "8080.0", "-1", "8o80", "80 80",
+        ] {
+            assert_eq!(parse_port(refused), None, "must not compose {refused:?}");
+        }
+    }
+
+    /// The landed replies. Expose echoes `{port, preview_url}` at 201 and
+    /// close `{ok, port, route_removed}` at 200 — the echoed port is what
+    /// success means, since a refusal on this wire names none.
+    #[test]
+    fn a_port_reply_lands_on_its_echoed_port() {
+        assert_eq!(
+            classify_port(
+                PortCommand::Expose(5173),
+                201,
+                Some(body(
+                    r#"{"port": 5173, "preview_url": "https://p5173.example.com/"}"#
+                ))
+            ),
+            LifecycleOutcome::Landed(
+                "Port 5173 is open \u{2014} its preview URL is in the list above.".to_string()
+            )
+        );
+        // A driver that minted no URL is still an open port; the sentence
+        // promises no link the list cannot show.
+        assert_eq!(
+            classify_port(
+                PortCommand::Expose(5173),
+                201,
+                Some(body(r#"{"port": 5173}"#))
+            ),
+            LifecycleOutcome::Landed("Port 5173 is open.".to_string())
+        );
+        assert_eq!(
+            classify_port(
+                PortCommand::Close(5173),
+                200,
+                Some(body(r#"{"ok": true, "port": 5173, "route_removed": true}"#))
+            ),
+            LifecycleOutcome::Landed("Port 5173 is closed.".to_string())
+        );
+    }
+
+    /// The one outcome that must never read as "closed": Bedrock takes the
+    /// preview route down best-effort — a driver that will not answer must
+    /// not wedge the close — and closes the row either way. `false` is a
+    /// URL that may still be serving what the room stopped advertising,
+    /// the same truth-over-comfort rule `destroy_sentence` holds over a
+    /// flush that failed.
+    #[test]
+    fn a_close_whose_route_survived_says_so() {
+        let stuck = classify_port(
+            PortCommand::Close(8080),
+            200,
+            Some(body(
+                r#"{"ok": true, "port": 8080, "route_removed": false,
+                    "route_removed_reason": "unexpose_failed"}"#,
+            )),
+        );
+        let LifecycleOutcome::Landed(sentence) = stuck else {
+            panic!("expected Landed, got {stuck:?}");
+        };
+        assert!(
+            sentence.contains("may still be serving"),
+            "a surviving route must not read as closed: {sentence}"
+        );
+        assert!(!sentence.contains("is closed"));
+    }
+
+    /// Every refusal reads as the state it is: the workspace that cannot
+    /// serve yet, the daemon's owner gate in ports words rather than the
+    /// lifecycle's, Bedrock's reserved list, and the daemon's own shape
+    /// refusal. The identity-map refusal stays a failure in words, and a
+    /// route-less daemon is said plainly in each verb's voice.
+    #[test]
+    fn port_states_classify_totally() {
+        let absent = body(
+            r#"{"error": "This room has no workspace. Provision one first.",
+                "details": {"code": "workspace_absent"}}"#,
+        );
+        assert_eq!(
+            classify_port(PortCommand::Expose(5173), 409, Some(absent)),
+            LifecycleOutcome::State(
+                "Ports need a workspace \u{2014} provision one first.".to_string()
+            )
+        );
+        // The gate is the same daemon row destroy's is, but "provision or
+        // destroy" is the wrong fact to state at a port.
+        let gated = body(r#"{"ok": false, "code": "workspace_not_owner_principal"}"#);
+        assert_eq!(
+            classify_port(PortCommand::Expose(5173), 403, Some(gated)),
+            LifecycleOutcome::State("Only the room owner can expose or close a port.".to_string())
+        );
+        let reserved = body(
+            r#"{"error": "Port 3000 is reserved; serve on another port.",
+                "details": {"code": "port_reserved"}}"#,
+        );
+        assert_eq!(
+            classify_port(PortCommand::Expose(3000), 400, Some(reserved)),
+            LifecycleOutcome::State(
+                "That port is reserved by the room runtime \u{2014} serve on another.".to_string()
+            )
+        );
+        // The daemon's own local refusal on the leaf whose body becomes a
+        // path — unreachable past `parse_port`, and total anyway.
+        let shape = body(
+            r#"{"ok": false, "code": "invalid_request",
+                "error": "this workspace call must name its port as an integer in 1-65535"}"#,
+        );
+        assert_eq!(
+            classify_port(PortCommand::Close(0), 400, Some(shape)),
+            LifecycleOutcome::State("A port must be a whole number.".to_string())
+        );
+        let unmapped = body(r#"{"ok": false, "code": "workspace_actor_unmapped"}"#);
+        assert_eq!(
+            classify_port(PortCommand::Expose(5173), 403, Some(unmapped)),
+            LifecycleOutcome::Failure(
+                "Your identity doesn't map to this room's compute service.".to_string()
+            )
+        );
+        assert_eq!(
+            classify_port(PortCommand::Expose(5173), 404, None),
+            LifecycleOutcome::Unavailable
+        );
+        let coded = body(
+            r#"{"ok": false, "code": "workspace_route_not_allowed",
+                             "leaf": "ports/close"}"#,
+        );
+        assert_eq!(
+            classify_port(PortCommand::Close(5173), 404, Some(coded)),
+            LifecycleOutcome::Unavailable
+        );
+    }
+
+    /// The uncoded arms, which is where this lane's judgement actually
+    /// lives. Bedrock's port POLICY arrives as a bare 400 — its floor is
+    /// its own to move, so the sentence is relayed rather than restated —
+    /// and closing a port that is not open arrives as a bare 404, which on
+    /// THAT verb is a state (rule 1) and already reads as one, so it
+    /// relays unframed. The same bare 404 on expose can only be a
+    /// deployment without the leaf.
+    /// The echoed port is the success discriminator, and it is safe today only
+    /// because no refusal on this wire carries one: Bedrock answers
+    /// `{ok, error, details}` and the daemon `{ok, code, error[, leaf]}`. That
+    /// is a fact about two OTHER repos, so the discriminator is made to fail
+    /// CLOSED rather than to rest on it — a refusal that grew a `port` key
+    /// must still read as a refusal, not as "Port N is open."
+    #[test]
+    fn a_refusal_carrying_a_port_is_still_a_refusal() {
+        let forged = body(r#"{"ok": false, "code": "port_reserved", "port": 3000}"#);
+        assert_eq!(
+            classify_port(PortCommand::Expose(3000), 409, Some(forged)),
+            LifecycleOutcome::State(
+                "That port is reserved by the room runtime \u{2014} serve on another.".to_string()
+            )
+        );
+        // And with no code to fall back on, a Failure — never a Landed.
+        let bare = body(r#"{"ok": false, "error": "nope", "port": 3000}"#);
+        assert!(matches!(
+            classify_port(PortCommand::Close(3000), 500, Some(bare)),
+            LifecycleOutcome::Failure(_)
+        ));
+    }
+
+    #[test]
+    fn the_uncoded_port_refusals_read_as_states() {
+        let floor = body(
+            r#"{"ok": false,
+                             "error": "port must be an integer between 1024 and 65535."}"#,
+        );
+        assert_eq!(
+            classify_port(PortCommand::Expose(80), 400, Some(floor)),
+            LifecycleOutcome::State(
+                "That port was refused: port must be an integer between 1024 and 65535."
+                    .to_string()
+            )
+        );
+        let not_open = body(r#"{"ok": false, "error": "Port 8080 is not currently exposed."}"#);
+        assert_eq!(
+            classify_port(PortCommand::Close(8080), 404, Some(not_open)),
+            LifecycleOutcome::State("Port 8080 is not currently exposed.".to_string())
+        );
+        // Bedrock names the port; a daemon that answered a body-less 404
+        // does not, so the fallback names it here.
+        assert_eq!(
+            classify_port(
+                PortCommand::Close(8080),
+                404,
+                Some(body(r#"{"ok": false}"#))
+            ),
+            LifecycleOutcome::State("Port 8080 is not currently exposed.".to_string())
+        );
+        // Nothing on the expose path 404s but a missing leaf.
+        assert_eq!(
+            classify_port(
+                PortCommand::Expose(8080),
+                404,
+                Some(body(r#"{"ok": false}"#))
+            ),
+            LifecycleOutcome::Unavailable
+        );
+        // A fault is still a fault: an upstream 5xx with no code is not a
+        // state to retype, and says so.
+        assert_eq!(
+            classify_port(
+                PortCommand::Expose(8080),
+                502,
+                Some(body(
+                    r#"{"ok": false, "error": "the room workspace could not be reached"}"#
+                ))
+            ),
+            LifecycleOutcome::Failure(
+                "The expose was refused: the room workspace could not be reached".to_string()
+            )
+        );
+    }
+
+    /// A daemon predating the leaves is said in each verb's own voice —
+    /// the reads' "not available yet", never an error.
+    #[test]
+    fn a_daemon_without_the_port_leaves_says_so_per_verb() {
+        assert_eq!(
+            port_unavailable_sentence(PortCommand::Expose(5173)),
+            "Exposing a port isn't available on this deployment yet."
+        );
+        assert_eq!(
+            port_unavailable_sentence(PortCommand::Close(5173)),
+            "Closing a port isn't available on this deployment yet."
+        );
     }
 
     /// A secrets-only change is not a flip: the silent status refresh a

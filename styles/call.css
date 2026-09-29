@@ -1043,8 +1043,9 @@
    chat transcript + composer for this stage (app.rs gates on
    `rooms.open_key` alone). Text-first — persistent rooms are daemon-native
    and need zero LiveKit; the compact call strip above is the optional audio
-   upgrade. Panel-scale leaf classes (rooms-msg, rooms-chip, rooms-composer,
-   rooms-addagent, rooms-mention-hint) are reused and re-scaled here. */
+   upgrade. This block used to re-scale the leaf classes of the rooms panel in
+   styles/panels.css; that panel was never rendered and its rules are gone, so
+   the re-scales went with them (see tests/dead_selector_removal.rs). */
 .room-stage {
   flex: 1 1 auto;
   min-height: 0;
@@ -1162,16 +1163,6 @@
   color: var(--fg-2);
 }
 
-/* Reused panel leaf blocks, de-panelled: the stage supplies its own gutters. */
-.room-stage .rooms-addagent {
-  padding: 0;
-  border-bottom: none;
-}
-
-.room-stage .rooms-policy-summary {
-  margin: 0;
-}
-
 .room-stage__transcript {
   flex: 1 1 auto;
   display: flex;
@@ -1183,24 +1174,6 @@
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
   background: var(--bg-raised);
-}
-
-.room-stage .rooms-outbox {
-  flex: 0 0 auto;
-}
-
-/* Stage-scale message overrides (the panel rendered these smaller). */
-.room-stage .rooms-msg {
-  padding: 10px 0;
-}
-
-.room-stage .rooms-msg__author {
-  font-size: 12px;
-}
-
-.room-stage .rooms-msg__body {
-  font-size: 14px;
-  line-height: 1.6;
 }
 
 .room-stage__empty {
@@ -1217,20 +1190,6 @@
   flex-direction: column;
   gap: 6px;
   flex: 0 0 auto;
-}
-
-.room-stage .rooms-mention-hint {
-  padding: 0;
-}
-
-.room-stage .rooms-composer {
-  padding: 0;
-  border-top: none;
-}
-
-.room-stage .rooms-panel__status {
-  padding: 4px 2px 0;
-  border-top: none;
 }
 
 @keyframes ocean-tide-in {

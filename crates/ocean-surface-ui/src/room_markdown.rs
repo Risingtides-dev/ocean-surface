@@ -11,6 +11,19 @@
 //! open room's daemon-provided participant roster. Unresolved tokens stay
 //! plain text — no fabricated identity affordances.
 //!
+//! NOTIFICATION RULE: [`mentions_member`] answers "does this body mention
+//! one of these ids" by running the SAME tokenizer, so what raises an OS
+//! notification is exactly what paints highlighted on screen — a body that
+//! notifies and does not highlight (or the reverse) is a bug in one of two
+//! copies of the grammar, and there is only one. Two consequences worth
+//! naming, both of them the highlighting rules and not a separate policy:
+//! an `@id` inside backticks is code, not a mention, so it does not notify;
+//! and a trailing `.`/`-`/`_` is trimmed only until the id resolves, so
+//! `@bob.` mentions `bob` while `@bobby` does not. The rules about WHEN a
+//! mention is allowed to notify — live-tail rows only, never the member's
+//! own, only off-focus — belong to the caller in `rooms.rs`; this module
+//! only answers whether the text mentions them.
+//!
 //! Grammar (deliberately lite, single pass, no nesting):
 //! `**bold**`, `*italic*`, `` `code` ``, `[label](https://…)`,
 //! bare `https://…` autolinks, `@member-id`.
@@ -160,6 +173,66 @@ fn autolink_boundary(prev: Option<char>) -> bool {
     prev.is_none_or(|c| c.is_ascii_whitespace() || matches!(c, '(' | '[' | '<' | '{'))
 }
 
+/// Trailing punctuation belongs to the sentence, not to the URL — except a
+/// bracket the URL opened itself, as in `…/Ocean_(disambiguation)`. So peel a
+/// closer only while it outnumbers its opener inside the candidate: that keeps
+/// the wiki link whole and still unwraps `(https://ocean.dev/a)`, which
+/// `autolink_boundary` accepting `(` makes the common case. The closers here
+/// have to mirror that opener set or a URL written inside `[…]` keeps a
+/// bracket in its href; `<` and `>` need no entry because the terminator scan
+/// already stops on them.
+fn trim_autolink_tail(candidate: &str) -> &str {
+    let mut url = candidate;
+    loop {
+        url = url.trim_end_matches(['.', ',', ';', ':', '!', '?']);
+        let (closer, opener) = match url.chars().last() {
+            Some(')') => (')', '('),
+            Some(']') => (']', '['),
+            Some('}') => ('}', '{'),
+            _ => return url,
+        };
+        if url.matches(closer).count() <= url.matches(opener).count() {
+            return url;
+        }
+        url = &url[..url.len() - 1];
+    }
+}
+
+/// Byte offset of the `)` that closes `[label](href)`: the first one that is
+/// not answering a `(` the href opened itself. Same balance rule as
+/// `trim_autolink_tail`, moved onto the terminator scan rather than a trailing
+/// trim, so `https://ocean.dev/a(b)` survives instead of being cut at its own
+/// inner closer. `None` when no closer balances, which is the caller's "there
+/// was no closer at all" signal and leaves the bracket untokenized. Scanning
+/// bytes is safe because both brackets are ASCII, so a returned offset never
+/// lands inside a multi-byte character.
+///
+/// A space ends the scan the same way, because balancing alone has no bound:
+/// one unmatched `(` in the href would otherwise let the scan run past the URL
+/// and eat the rest of the sentence into the href, and a transcript must never
+/// swallow words the user typed. CommonMark bounds a bare destination the same
+/// way — no spaces — and declining here leaves the prose intact: the brackets
+/// go literal and the bare-URL path picks the URL up. Only the space, not
+/// `is_ascii_whitespace`: a tab or newline in an href has to reach the scheme
+/// gate so the whole `[…](…)` renders as one literal run.
+fn balanced_href_end(raw: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (offset, byte) in raw.bytes().enumerate() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                if depth == 0 {
+                    return Some(offset);
+                }
+                depth -= 1;
+            }
+            b' ' => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
 fn flush(out: &mut Vec<MdSpan>, text: &mut String) {
     if !text.is_empty() {
         out.push(MdSpan::Text(std::mem::take(text)));
@@ -224,8 +297,7 @@ pub fn tokenize(body: &str, members: &HashSet<String>) -> Vec<MdSpan> {
                 let after = &rest[close + 1..];
                 if !label.is_empty() && after.starts_with('(') {
                     if let Some(raw) = after.strip_prefix('(') {
-                        let end = raw.find(')').unwrap_or(raw.len());
-                        if end < raw.len() {
+                        if let Some(end) = balanced_href_end(raw) {
                             let href = &raw[..end];
                             let consumed = close + 1 + 1 + end + 1;
                             if !href.is_empty() && scheme_allowed(href) {
@@ -261,7 +333,7 @@ pub fn tokenize(body: &str, members: &HashSet<String>) -> Vec<MdSpan> {
             let end = rest
                 .find(|ch: char| ch.is_whitespace() || matches!(ch, '<' | '>' | '"'))
                 .unwrap_or(rest.len());
-            let url = rest[..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')']);
+            let url = trim_autolink_tail(&rest[..end]);
             let scheme_len = if rest
                 .get(..8)
                 .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
@@ -313,6 +385,23 @@ pub fn tokenize(body: &str, members: &HashSet<String>) -> Vec<MdSpan> {
     out
 }
 
+/// True when `body` mentions at least one id in `ids`, by the exact rule that
+/// paints a mention highlighted.
+///
+/// Pass the reader's OWN ids — `Rooms::identity_id` and the access
+/// projection's `self_member_id` — not the whole roster: the tokenizer
+/// resolves `@id` against whatever set it is handed, so handing it two ids
+/// asks precisely "was I named". Pure, so the predicate is table-tested on the
+/// native target without a DOM.
+pub fn mentions_member(body: &str, ids: &HashSet<String>) -> bool {
+    if ids.is_empty() {
+        return false;
+    }
+    tokenize(body, ids)
+        .iter()
+        .any(|span| matches!(span, MdSpan::Mention(_)))
+}
+
 /// Render a message body reactively against the room's member-id set.
 /// Every span becomes text nodes inside fixed elements — no HTML path.
 pub fn body_view(body: String, members: Memo<HashSet<String>>) -> impl IntoView {
@@ -350,6 +439,56 @@ mod tests {
 
     fn members(ids: &[&str]) -> HashSet<String> {
         ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The mention predicate is the notification trigger, so its table is the
+    /// table of what does and does not ping a reader. Every row is a rule the
+    /// highlighter already had — there is no second grammar.
+    #[test]
+    fn mentions_member_answers_exactly_what_the_highlighter_paints() {
+        let me = members(&["bob"]);
+        for (body, expected, why) in [
+            ("hey @bob look at this", true, "a plain mention"),
+            ("@bob", true, "a mention alone"),
+            ("@bob.", true, "trailing sentence punctuation is trimmed"),
+            ("(@bob)", true, "a bracketed mention still resolves"),
+            ("cc @bob and @carol", true, "one resolving id among several"),
+            ("hey @bobby", false, "a longer id is a different member"),
+            ("hey @carol", false, "someone else was named"),
+            (
+                "email bob@example.com",
+                false,
+                "an address is not a mention",
+            ),
+            ("`@bob`", false, "an @id inside code is code"),
+            ("no mention here", false, "no @ at all"),
+            ("@", false, "a bare @ names nobody"),
+            // The grammar is single-pass with no nesting, so the bold arm
+            // takes `@bob` as literal text and the highlighter paints no
+            // mention. The notifier agrees, because it is the same pass.
+            (
+                "**@bob**",
+                false,
+                "emphasis swallows the mention, as on screen",
+            ),
+        ] {
+            assert_eq!(mentions_member(body, &me), expected, "{body:?} — {why}",);
+        }
+    }
+
+    /// Both of the reader's ids count, and an unresolved reader is never
+    /// mentioned by anything.
+    #[test]
+    fn mentions_member_reads_every_id_the_reader_owns_and_no_others() {
+        let both = members(&["bob", "member-7"]);
+        assert!(mentions_member("ping @member-7", &both));
+        assert!(mentions_member("ping @bob", &both));
+        assert!(!mentions_member("ping @member-8", &both));
+        // An unresolved identity has no ids, so nothing can name it — not even
+        // a body that is nothing but an `@`.
+        let none = members(&[]);
+        assert!(!mentions_member("ping @bob", &none));
+        assert!(!mentions_member("@", &none));
     }
 
     #[test]
@@ -461,6 +600,133 @@ mod tests {
     }
 
     #[test]
+    fn labeled_link_href_keeps_a_paren_it_opened_itself() {
+        for (body, href) in [
+            ("[x](https://ocean.dev/a(b))", "https://ocean.dev/a(b)"),
+            (
+                "[x](https://ocean.dev/a(b(c))d)",
+                "https://ocean.dev/a(b(c))d",
+            ),
+            (
+                "[x](https://en.wikipedia.org/wiki/Ocean_(disambiguation))",
+                "https://en.wikipedia.org/wiki/Ocean_(disambiguation)",
+            ),
+        ] {
+            assert_eq!(
+                tokenize(body, &members(&[])),
+                vec![MdSpan::Link {
+                    href: href.into(),
+                    label: "x".into()
+                }],
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn labeled_link_still_ends_at_the_first_unbalanced_closer() {
+        assert_eq!(
+            tokenize("[x](https://ocean.dev/a)b", &members(&[])),
+            vec![
+                MdSpan::Link {
+                    href: "https://ocean.dev/a".into(),
+                    label: "x".into()
+                },
+                MdSpan::Text("b".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn labeled_link_href_end_is_a_byte_offset() {
+        // The scan hands the caller an offset it slices `raw` with, and the
+        // arm's `consumed` arithmetic is byte-counted too — a char index would
+        // cut inside one of these characters.
+        assert_eq!(
+            tokenize("[é](https://ocean.dev/é(b))ø", &members(&[])),
+            vec![
+                MdSpan::Link {
+                    href: "https://ocean.dev/é(b)".into(),
+                    label: "é".into()
+                },
+                MdSpan::Text("ø".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn labeled_link_with_no_balanced_closer_is_not_a_labeled_link() {
+        // An unterminated href leaves the arm entirely, exactly as an absent
+        // `)` always has. The bracket text is literal; the bare-URL path then
+        // picks the tail up on its own, which is why this is not one Text run.
+        for body in ["[x](https://ocean.dev/a", "[x](https://ocean.dev/a(b)"] {
+            let spans = tokenize(body, &members(&[]));
+            assert_eq!(spans.len(), 2, "{body}");
+            assert_eq!(spans[0], MdSpan::Text("[x](".into()), "{body}");
+            let href = body.strip_prefix("[x](").expect("literal prefix");
+            assert_eq!(
+                spans[1],
+                MdSpan::Link {
+                    href: href.into(),
+                    label: href.into()
+                },
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn labeled_link_scan_stops_at_a_space_instead_of_eating_the_sentence() {
+        // Balancing on its own is unbounded: one unmatched `(` in the href and
+        // the scan would run to a `)` further down the sentence, absorbing the
+        // words — and any markup between them — into the href. Nothing typed
+        // may leave the transcript, so the space ends the scan and the whole
+        // bracket form declines.
+        assert_eq!(
+            tokenize(
+                "[docs](https://ocean.dev/a(b) and **ship** it)",
+                &members(&[])
+            ),
+            vec![
+                MdSpan::Text("[docs](".into()),
+                MdSpan::Link {
+                    href: "https://ocean.dev/a(b)".into(),
+                    label: "https://ocean.dev/a(b)".into()
+                },
+                MdSpan::Text(" and ".into()),
+                MdSpan::Bold("ship".into()),
+                MdSpan::Text(" it)".into()),
+            ]
+        );
+        // Same bound on the literal-text fallback, where the href the widened
+        // scan would have built fails the scheme gate rather than passing it.
+        assert_eq!(
+            tokenize("[a](http://x.dev/y(z) **bold** ) tail", &members(&[])),
+            vec![
+                MdSpan::Text("[a](".into()),
+                MdSpan::Link {
+                    href: "http://x.dev/y(z)".into(),
+                    label: "http://x.dev/y(z)".into()
+                },
+                MdSpan::Text(" ".into()),
+                MdSpan::Bold("bold".into()),
+                MdSpan::Text(" ) tail".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn balanced_parens_do_not_smuggle_an_href_past_the_scheme_gate() {
+        for body in ["[x](javascript:alert((1)))", "[x](ftp://ocean.dev/a(b))"] {
+            assert_eq!(
+                tokenize(body, &members(&[])),
+                vec![MdSpan::Text(body.into())],
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
     fn bare_url_autolinks_and_trims_trailing_punctuation() {
         let spans = tokenize("see https://ocean.dev/a, ok", &members(&[]));
         assert_eq!(
@@ -472,6 +738,97 @@ mod tests {
                     label: "https://ocean.dev/a".into()
                 },
                 MdSpan::Text(", ok".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn bare_url_keeps_a_bracket_it_opened_itself() {
+        for url in [
+            "https://en.wikipedia.org/wiki/Ocean_(disambiguation)",
+            "https://ocean.dev/a[i]",
+            "https://ocean.dev/a{i}",
+        ] {
+            assert_eq!(
+                tokenize(&format!("see {url} ok"), &members(&[])),
+                vec![
+                    MdSpan::Text("see ".into()),
+                    MdSpan::Link {
+                        href: url.into(),
+                        label: url.into()
+                    },
+                    MdSpan::Text(" ok".into()),
+                ],
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn bare_url_inside_a_bracket_pair_leaves_the_closer_as_text() {
+        // Every opener `autolink_boundary` starts a link after has to have its
+        // closer peeled back off, or the wrapper ends up in the href.
+        for (open, close) in [('(', ')'), ('[', ']'), ('{', '}')] {
+            let body = format!("{open}https://ocean.dev/a{close}");
+            assert_eq!(
+                tokenize(&body, &members(&[])),
+                vec![
+                    MdSpan::Text(open.to_string()),
+                    MdSpan::Link {
+                        href: "https://ocean.dev/a".into(),
+                        label: "https://ocean.dev/a".into()
+                    },
+                    MdSpan::Text(close.to_string()),
+                ],
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn sentence_punctuation_after_a_balanced_bracket_still_trims() {
+        let url = "https://en.wikipedia.org/wiki/Ocean_(disambiguation)";
+        assert_eq!(
+            tokenize(&format!("see {url}."), &members(&[])),
+            vec![
+                MdSpan::Text("see ".into()),
+                MdSpan::Link {
+                    href: url.into(),
+                    label: url.into()
+                },
+                MdSpan::Text(".".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn punctuation_uncovered_by_a_peel_is_trimmed_too() {
+        // The period is behind the wrapper paren, so it only becomes the tail
+        // once that paren is off — the strip has to run again after a peel.
+        assert_eq!(
+            tokenize("(see https://ocean.dev/a.)", &members(&[])),
+            vec![
+                MdSpan::Text("(see ".into()),
+                MdSpan::Link {
+                    href: "https://ocean.dev/a".into(),
+                    label: "https://ocean.dev/a".into()
+                },
+                MdSpan::Text(".)".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_wrapping_peels_every_unmatched_closer() {
+        assert_eq!(
+            tokenize("see ((https://ocean.dev/a)) ok", &members(&[])),
+            vec![
+                MdSpan::Text("see ((".into()),
+                MdSpan::Link {
+                    href: "https://ocean.dev/a".into(),
+                    label: "https://ocean.dev/a".into()
+                },
+                MdSpan::Text(")) ok".into()),
             ]
         );
     }

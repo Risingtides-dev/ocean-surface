@@ -889,9 +889,12 @@ async fn post_artifact<T: Serialize>(url: &str, payload: &T) -> WriteOutcome {
 /// compare-and-swap story — lives in the panel.
 ///
 /// `writes_allowed` is supplied by the workspace rather than recomputed here so
-/// this control and the composer can never disagree about the same room's access
-/// projection. `members` is the same roster memo the transcript renders against,
-/// so an `@id` means the same thing in an artifact as in a message.
+/// one place holds the ruling for every rail. It is deliberately NOT the
+/// composer's gate: a create or an amend lands in this daemon's store and is
+/// never enqueued for a peer, so a link that is down or coming back does not
+/// hold it (see `local_store_write_gate`). `members` is the same roster memo the
+/// transcript renders against, so an `@id` means the same thing in an artifact
+/// as in a message.
 #[component]
 pub fn RoomArtifacts(
     rooms: Rooms,
@@ -911,8 +914,9 @@ pub fn RoomArtifacts(
 
     // Identity is deliberately NOT part of this predicate. `identity_resolved`
     // reads its signals untracked, so a control disabled on it would never
-    // re-enable when bootstrap answers; the composer gates on access here and
-    // refuses on identity at the action, and these controls do the same.
+    // re-enable when bootstrap answers; the composer gates on access at the
+    // control and refuses on identity at the action, and these controls do the
+    // same — with their own access gate, not the composer's.
     let can_write = move || {
         writes_allowed.get()
             && !state.saving.get()

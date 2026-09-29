@@ -551,6 +551,7 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
             trigger_policy: None,
+            workspace_root: None,
         }
     }
 

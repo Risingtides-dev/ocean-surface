@@ -15,10 +15,12 @@ use wasm_bindgen::JsCast;
 use crate::room_messages;
 use crate::rooms::{
     CreateResolution, FederatedActorType, FederatedRoomMemberProjection, FederatedRoomRole,
-    MemberPresence, OutboxItemState, Room, RoomAccessProjection, RoomAccessState, RoomMessage,
-    RoomMessageKind, RoomParticipant, RoomParticipantKind, RoomReadCursorProjection,
+    MemberPresence, OutboxItemState, Room, RoomAccessProjection, RoomAccessState, RoomAgentOwner,
+    RoomMessage, RoomMessageKind, RoomParticipant, RoomParticipantKind, RoomReadCursorProjection,
     RoomTriggerPolicy, Rooms,
 };
+
+use crate::rooms::{create_workspace_root, room_is_unbound, workspace_draft_should_reseed};
 
 // ── Production helpers (testable directly, called from Effects) ─
 
@@ -189,50 +191,89 @@ fn trigger_row_dead_here(
     }
 }
 
-/// Whether the trigger policy accepts a write under this access projection —
-/// the rail-local counterpart of [`access_allows_writes`], and deliberately
-/// more permissive than it.
+/// The access a room created from the left rail has on its first day:
+/// `Local`, by construction. `POST /v1/rooms/persistent` carries a key, a
+/// name and a trigger policy and nothing else — there is no federation
+/// anywhere in that body — so the room the daemon writes is local until
+/// someone federates it later.
 ///
-/// The two gates ask different questions. [`access_allows_writes`] asks "can
-/// this write reach a peer?", which is the right question for the composer: a
-/// message that never leaves is a lie about what was said. The trigger policy
-/// is not that kind of write. It is a field on a row in THIS daemon's store,
+/// Built explicitly rather than handing [`trigger_row_dead_here`] the `None`
+/// a room-in-creation literally has. `None` there means "access unknown", and
+/// deliberately yields no note at all; wiring the create rows to it would
+/// compile, pass every test, and annotate nothing. A room being created is
+/// not unknown — it is Local, and saying so is this function's whole job.
+fn creating_room_access() -> RoomAccessProjection {
+    RoomAccessProjection {
+        state: RoomAccessState::Local,
+        last_confirmed_global_sequence: None,
+        members: Vec::new(),
+        self_member_id: None,
+        outbox: Vec::new(),
+    }
+}
+
+/// The note a create-time trigger row carries, or `None` when the flag is
+/// live in the room this form is about to make. Delegates to
+/// [`trigger_row_dead_here`] — the one authority the right rail's rows and its
+/// summary already share — against [`creating_room_access`], so the create
+/// panel and the panel two rails over can never disagree about which flags a
+/// Local room can fire.
+///
+/// The ruling, since a Local room may federate later and a build-failure tick
+/// made here would be dead now and live then: note AND disable, the treatment
+/// the right rail's own rows get, not a sentence calling these defaults a
+/// federated room will re-judge. "Later" already has a control — the right
+/// rail's row goes live the moment the room does, and that is where the
+/// decision belongs. Arming a flag at create time that the rail two panels
+/// over will immediately grey out and explain stores a contradiction on day
+/// one to buy a preference the room can express any time it actually
+/// federates.
+fn create_trigger_row_dead_here(toggle: TriggerToggle) -> Option<&'static str> {
+    trigger_row_dead_here(toggle, Some(&creating_room_access()))
+}
+
+/// Whether the trigger policy accepts a write under this access projection —
+/// this rail's name for [`local_store_write_gate`], and the section where that
+/// ruling was first made.
+///
+/// The trigger policy is a field on a row in THIS daemon's store:
 /// `PATCH /v1/rooms/persistent/{key}` carries no access check of any kind, and
 /// both readers of the policy — the local post path and the federation
 /// bridge's ingest — read it back from that same store. A link that is down or
 /// coming back cannot make the write unlandable; it only delays the events the
-/// policy governs. So `Connecting` and `Recovering` keep this rail writable,
-/// and the loss they used to cause was the sharpest one available: a room
-/// stuck `Recovering` while every mention woke an agent gave the operator no
-/// way to turn `on_mention` off, at precisely the moment they wanted to.
-///
-/// `Revoked` stays held. The daemon would accept that PATCH too, but the
-/// operator has been removed from the room, and offering to configure a room
-/// you no longer stand in is offering an action that cannot mean anything to
-/// you again. Unknown access stays held for the weaker version of the same
-/// reason: it may yet resolve to `Revoked`, and a row that flips to disabled
-/// once the projection lands is worse than one that waits for it.
-///
-/// Matched exhaustively without a wildcard on purpose — a new access state
-/// must be ruled on here rather than quietly inheriting "writable".
+/// policy governs. The loss the composer's gate caused here was the sharpest
+/// one available: a room stuck `Recovering` while every mention woke an agent
+/// gave the operator no way to turn `on_mention` off, at precisely the moment
+/// they wanted to.
 fn trigger_policy_accepts_writes(access: Option<&RoomAccessProjection>) -> bool {
-    match access.map(|projection| projection.state) {
-        Some(
-            RoomAccessState::Local
-            | RoomAccessState::Connecting
-            | RoomAccessState::Live
-            | RoomAccessState::Recovering,
-        ) => true,
-        Some(RoomAccessState::Revoked) | None => false,
-    }
+    local_store_write_gate(access)
 }
 
-/// Whether a trigger row accepts a flip: the policy must be writable under
-/// this access at all (see [`trigger_policy_accepts_writes`] — this rail's own
-/// gate, not the composer's) and the flag must be one that can actually fire
-/// here (see [`trigger_row_dead_here`]).
-fn trigger_row_is_editable(toggle: TriggerToggle, access: Option<&RoomAccessProjection>) -> bool {
-    trigger_policy_accepts_writes(access) && trigger_row_dead_here(toggle, access).is_none()
+/// Whether a trigger row accepts a flip, and in which direction. The policy
+/// must be writable under this access at all (see
+/// [`trigger_policy_accepts_writes`] — this rail's own gate, not the
+/// composer's), and a flag that cannot fire here (see
+/// [`trigger_row_dead_here`]) may still be turned OFF.
+///
+/// The direction is what `checked` carries, and splitting on it is the whole
+/// point. "This flag's event can never reach this room" is a reason to refuse
+/// ARMING the flag; it is never a reason to refuse disarming one that is
+/// already armed. Under a single gate it did both, and a room that stored
+/// `on_thread_reply: true` and then federated rendered that row checked,
+/// greyed, noted `local rooms only`, and listed as on by [`trigger_summary`] —
+/// with no control anywhere that could clear it. The stored contradiction
+/// outlived every session that looked at it.
+///
+/// An admitted un-tick re-renders the section from `open_room` with `checked`
+/// false, and the row goes held-in-both-directions again. That is the state
+/// this exists to reach, not a row that has come back to life.
+fn trigger_row_is_editable(
+    toggle: TriggerToggle,
+    checked: bool,
+    access: Option<&RoomAccessProjection>,
+) -> bool {
+    trigger_policy_accepts_writes(access)
+        && (checked || trigger_row_dead_here(toggle, access).is_none())
 }
 
 /// One editable trigger row in the right rail. `checked` is a plain bool on
@@ -243,6 +284,12 @@ fn trigger_row_is_editable(toggle: TriggerToggle, access: Option<&RoomAccessProj
 /// flip reads the room's policy fresh at event time — not from the render that
 /// drew the box — so two quick flips compose instead of the second
 /// resurrecting the first's pre-state.
+///
+/// `checked` is also the direction the gate is asked about: a dead flag that
+/// is stored on is the one case where a dead row still takes a click. If that
+/// un-tick is REFUSED the row stays enabled, because `checked` is still the
+/// true it rendered from — which is what lets the operator put back the flag
+/// the daemon would not let them clear.
 fn trigger_toggle_row(
     rooms: Rooms,
     toggle: TriggerToggle,
@@ -250,10 +297,13 @@ fn trigger_toggle_row(
     checked: bool,
     access: Option<&RoomAccessProjection>,
 ) -> impl IntoView {
-    // Both read the projection the enclosing section already holds, so the
-    // note and the disabled state can never disagree about this room.
+    // Both read the projection the enclosing section already holds, but they
+    // ask different things of it: the note follows the access reading alone,
+    // while the hold follows access AND the direction of the flip. So on one
+    // row they part company on purpose — a dead flag stored ON renders noted
+    // and still clickable, because that click is the un-tick.
     let dead_here = trigger_row_dead_here(toggle, access);
-    let editable = trigger_row_is_editable(toggle, access);
+    let editable = trigger_row_is_editable(toggle, checked, access);
     view! {
         <label class="rooms-workspace__trigger">
             <input
@@ -271,6 +321,154 @@ fn trigger_toggle_row(
                         event_target_checked(&ev),
                     ));
                 }
+            />
+            <span class="rooms-workspace__trigger-label">{label}</span>
+            {dead_here.map(|note| view! {
+                <span class="rooms-workspace__trigger-note">{note}</span>
+            })}
+        </label>
+    }
+}
+
+/// The open room's workspace binding: the unbound notice, the folder it is
+/// bound to when it has one, and the bind/unbind control.
+///
+/// This sits with the trigger rows because it is the precondition for all of
+/// them. A trigger decides WHETHER the room's agents are woken; the binding
+/// decides whether a woken turn can run at all — the daemon resolves the
+/// turn's project and `cwd` from the room's `workspace_root`, and with none
+/// stored it refuses with `workspace_unavailable` before the agent sees the
+/// message. So an unbound room can have every trigger checked and still do
+/// nothing, which is exactly the state the notice names.
+///
+/// Gated on [`trigger_policy_accepts_writes`], the same gate the rows above
+/// take, because it is the same PATCH to the same route under the same
+/// authority. Deliberately NOT gated on a locally-inferred room owner: this
+/// repo's contract is that owner authority is server-derived and never guessed
+/// from a participant projection, and the daemon's PATCH applies no owner check
+/// of its own — inventing one here would be a lock on the surface only.
+fn workspace_binding_section(rooms: Rooms, access: Option<&RoomAccessProjection>) -> impl IntoView {
+    let access_writable = trigger_policy_accepts_writes(access);
+    let draft = RwSignal::new(String::new());
+    // Which room the draft was last seeded for. Identity, not content — see
+    // `workspace_draft_should_reseed`: this effect must read `open_room` to
+    // find the stored value, so it re-runs on every write to that signal, and
+    // re-seeding on each one would wipe a path mid-type when an unrelated
+    // PATCH lands.
+    let seeded_for: RwSignal<Option<String>> = RwSignal::new(None);
+    // Seeded from the stored binding so the field opens showing what it will
+    // change, and a rebind is an edit rather than a retype.
+    Effect::new(move |_: Option<()>| {
+        let open = rooms.open_room.get();
+        let id = open.as_ref().map(|room| room.id.clone());
+        if !workspace_draft_should_reseed(seeded_for.get_untracked().as_deref(), id.as_deref()) {
+            return;
+        }
+        draft.set(
+            open.and_then(|room| room.workspace_root)
+                .unwrap_or_default(),
+        );
+        seeded_for.set(id);
+    });
+    let unbound = move || rooms.open_room.get().as_ref().is_some_and(room_is_unbound);
+    let bound_to = move || {
+        rooms
+            .open_room
+            .get()
+            .and_then(|room| room.workspace_root)
+            .filter(|root| !root.trim().is_empty())
+    };
+    let in_flight = move || rooms.workspace_update_in_flight.get();
+    view! {
+        <div class="rooms-workspace__workspace-binding">
+            {move || unbound().then(|| view! {
+                <div class="rooms-workspace__workspace-unbound" role="note">
+                    "No workspace folder is bound. Agents in this room cannot run \
+                     until one is — every turn is refused before it starts."
+                </div>
+            })}
+            {move || bound_to().map(|root| view! {
+                <div class="rooms-workspace__workspace-bound">
+                    <span class="rooms-workspace__workspace-bound-label">"Workspace"</span>
+                    <code class="rooms-workspace__workspace-bound-path">{root}</code>
+                </div>
+            })}
+            // A soft-closed room is a frozen audit view — the daemon writes an
+            // OPEN room only, so a bind there is a guaranteed 404. Closing is
+            // read reactively because a room can close under an open panel;
+            // the access projection alone does not say so, since a closed room
+            // keeps whatever access state it had.
+            {move || (access_writable && !rooms.closed.get()).then(|| view! {
+                <div class="rooms-workspace__workspace-controls">
+                    <input
+                        class="rooms-workspace__workspace-input"
+                        type="text"
+                        aria-label="Workspace folder on the daemon host"
+                        placeholder="/absolute/path/to/project"
+                        prop:value=move || draft.get()
+                        on:input=move |ev| draft.set(event_target_value(&ev))
+                        disabled=in_flight
+                    />
+                    <button
+                        class="rooms-workspace__workspace-bind"
+                        type="button"
+                        // An empty field has nothing to bind: unbinding is the
+                        // other button, so this one never doubles as it.
+                        disabled=move || in_flight() || draft.get().trim().is_empty()
+                        on:click=move |_| {
+                            rooms.set_open_room_workspace(
+                                create_workspace_root(&draft.get_untracked()),
+                            );
+                        }
+                    >
+                        "Bind"
+                    </button>
+                    <button
+                        class="rooms-workspace__workspace-unbind"
+                        type="button"
+                        disabled=move || in_flight() || unbound()
+                        on:click=move |_| rooms.set_open_room_workspace(None)
+                    >
+                        "Unbind"
+                    </button>
+                </div>
+            })}
+            <span class="rooms-workspace__workspace-help">
+                "The folder is resolved on the machine running the daemon, not in \
+                 this browser. It must be an absolute path that already exists there."
+            </span>
+            {move || rooms.workspace_update_status.get().map(|status| view! {
+                <div class="rooms-workspace__workspace-error" role="alert">
+                    {status.message()}
+                </div>
+            })}
+        </div>
+    }
+}
+
+/// One trigger row in the left rail's create form. The mirror of
+/// [`trigger_toggle_row`] for a room that does not exist yet: there is no
+/// policy to PATCH, so the flip lands in a local signal the submit reads, and
+/// the row is held either while the create POST is in flight or permanently,
+/// because the flag cannot fire in the Local room this form makes.
+///
+/// The note and the hold both come from [`create_trigger_row_dead_here`], the
+/// same single read the right rail's rows make, so a row can never be greyed
+/// out with nothing to explain it — or explained while still clickable.
+fn create_trigger_row(
+    toggle: TriggerToggle,
+    label: &'static str,
+    flag: RwSignal<bool>,
+    pending_create: RwSignal<bool>,
+) -> impl IntoView {
+    let dead_here = create_trigger_row_dead_here(toggle);
+    view! {
+        <label class="rooms-workspace__trigger">
+            <input
+                type="checkbox"
+                prop:checked=move || flag.get()
+                on:change=move |ev| flag.set(event_target_checked(&ev))
+                disabled=move || dead_here.is_some() || pending_create.get()
             />
             <span class="rooms-workspace__trigger-label">{label}</span>
             {dead_here.map(|note| view! {
@@ -343,6 +541,63 @@ pub(crate) fn access_allows_writes(access: Option<&RoomAccessProjection>) -> boo
         access.map(|a| a.state),
         Some(RoomAccessState::Local) | Some(RoomAccessState::Live)
     )
+}
+
+/// Whether the composer may send into the OPEN room: the access gate above,
+/// AND the room not being the daemon's frozen soft-closed audit view.
+///
+/// Two axes, and neither implies the other. Closing a room stamps `closed_at`
+/// and leaves its access row untouched, so a frozen room projects whatever it
+/// projected while live — `Local` with no access row, an unchanged `Live` when
+/// federated — and `access_allows_writes` waves through every send into either
+/// shape, each of which `POST .../messages` answers 404. Asking both here
+/// rather than at each site is why `post_message` and the
+/// four `disabled=` bindings cannot drift into disagreeing about what a dead
+/// composer is: a room that refuses the send must be a room whose input is
+/// visibly shut, or the refusal reads as the message being swallowed.
+pub(crate) fn composer_writes_allowed(
+    access: Option<&RoomAccessProjection>,
+    room_closed: bool,
+) -> bool {
+    access_allows_writes(access) && !room_closed
+}
+
+/// Whether a write that lands in THIS daemon's local store may proceed under
+/// this access projection — the rail-local counterpart of
+/// [`access_allows_writes`], and deliberately more permissive than it.
+///
+/// The two gates ask different questions. [`access_allows_writes`] asks "can
+/// this write reach a peer?", which is the right question for the composer and
+/// for anything that mints or drives federation: a message that never leaves is
+/// a lie about what was said. Most of what the right rail writes is not that
+/// kind of write. The trigger policy, a summarize run, an artifact and an
+/// attachment all land through the daemon's own store handle and announce
+/// themselves on the local event stream; ocean-os enqueues none of them to the
+/// federation outbox — a federated room's summary is documented local-only, the
+/// artifact routes write through `with_rooms` and publish a local wake, and the
+/// attachment module names the outbox nowhere at all. A link that is down or
+/// coming back cannot make such a write unlandable, so `Connecting` and
+/// `Recovering` keep these rails writable.
+///
+/// `Revoked` stays held. The daemon would accept those writes too, but the
+/// operator has been removed from the room, and offering to configure a room
+/// you no longer stand in is offering an action that cannot mean anything to
+/// you again. Unknown access stays held for the weaker version of the same
+/// reason: it may yet resolve to `Revoked`, and a control that flips to
+/// disabled once the projection lands is worse than one that waits for it.
+///
+/// Matched exhaustively without a wildcard on purpose — a new access state
+/// must be ruled on here rather than quietly inheriting "writable".
+fn local_store_write_gate(access: Option<&RoomAccessProjection>) -> bool {
+    match access.map(|projection| projection.state) {
+        Some(
+            RoomAccessState::Local
+            | RoomAccessState::Connecting
+            | RoomAccessState::Live
+            | RoomAccessState::Recovering,
+        ) => true,
+        Some(RoomAccessState::Revoked) | None => false,
+    }
 }
 
 /// Whether this room federates through Bedrock at all. Only a federated room
@@ -418,16 +673,55 @@ fn ledger_mark_view(access: Option<&RoomAccessProjection>, message: &RoomMessage
 /// Extracts the shared `HH:MM` prefix for `Z`, fractional-second, and offset
 /// variants without converting timezones or localizing; invalid/non-canonical
 /// input passes through unchanged.
-/// The client's current UTC day key (`YYYY-MM-DD`), matching the daemon's
-/// ISO-8601 UTC timestamps, for humanizing day separators.
+/// The member's current day key (`YYYY-MM-DD`) in THEIR zone, for humanizing
+/// day separators to "Today" / "Yesterday".
+///
+/// `Date::to_iso_string()` is UTC and this read it, so between local midnight
+/// and UTC midnight — every evening, for every member west of Greenwich —
+/// "Today" was tomorrow's date and today's rows were labelled with a bare
+/// date. `get_full_year`/`get_month`/`get_date` are the LOCAL getters, and
+/// `get_month` is 0-based.
 fn today_day_key() -> String {
-    js_sys::Date::new_0()
-        .to_iso_string()
-        .as_string()
-        .unwrap_or_default()
-        .chars()
-        .take(10)
-        .collect()
+    let now = js_sys::Date::new_0();
+    format!(
+        "{:04}-{:02}-{:02}",
+        now.get_full_year(),
+        now.get_month() + 1,
+        now.get_date(),
+    )
+}
+
+/// Minutes to ADD to a UTC instant to reach the member's wall clock.
+///
+/// Read for the instant itself, not for "now": a transcript that spans a DST
+/// change has rows on both sides of it, and one offset for the whole list
+/// would render half of them an hour out. `getTimezoneOffset` reports
+/// `utc - local`, which is why the sign is flipped here — `room_messages`
+/// works in minutes to add.
+///
+/// `0` for a wire value the browser will not parse. That is not a guess about
+/// the zone: the pure formatter rejects the same value and the caller falls
+/// back to showing the raw wire string, so the offset is never applied to it.
+fn viewer_utc_offset_minutes(ts: &str) -> i64 {
+    let minutes = js_sys::Date::new(&wasm_bindgen::JsValue::from_str(ts)).get_timezone_offset();
+    if minutes.is_nan() {
+        0
+    } else {
+        -(minutes as i64)
+    }
+}
+
+/// The clock a member reads on a transcript row: their own wall time for the
+/// instant the daemon recorded.
+///
+/// The full RFC 3339 wire value stays on the row's `datetime`, `title` and
+/// `aria-label` — the instant is what a machine and a screen reader want, and
+/// it is unambiguous. Only the visible text is localized. A wire value the
+/// formatter will not accept passes through unchanged rather than becoming a
+/// plausible wrong time.
+fn local_clock_time(full: &str) -> String {
+    room_messages::local_clock_time(full, viewer_utc_offset_minutes(full))
+        .unwrap_or_else(|| full.to_string())
 }
 
 /// Whether to show the "No messages yet" empty state in the transcript.
@@ -611,6 +905,25 @@ enum TranscriptPassAction {
     /// Content appended below a scrolled-up reader: raise the jump
     /// affordance instead of yanking them.
     RaiseJump,
+    /// An older page the operator ASKED for landed in FRONT of the painted
+    /// rows: hold the reader on the rows they were looking at, and touch
+    /// nothing else.
+    ///
+    /// Neither of the growth arms is right for a requested prepend.
+    /// `RaiseJump` would raise "↓ New messages" over rows that arrived above,
+    /// which is a lie about where they are; `PinAndQueue` would throw the
+    /// reader to the bottom of a transcript they just asked to see the top of.
+    /// And the read advance is deliberately not re-queued: the durable
+    /// candidate is the NEWEST row (or the access projection's confirmed
+    /// sequence), and a prepend moves neither.
+    ///
+    /// Only a REQUESTED prepend takes this arm, which is why the decision needs
+    /// the anchor as an input rather than reading `grew_at_front` alone. The
+    /// hydration walk prepends too — up to four more pages after the first fill
+    /// — and those pages answer nothing the reader did. Holding position
+    /// through them leaves a long room open on its oldest loaded page, which is
+    /// exactly what ocean-surface#190 fixed; they keep taking `PinAndQueue`.
+    AnchorOlder,
     /// Nothing to do. Critically, `Hold` never writes: a pass triggered by a
     /// non-transcript dependency (an access projection) while the reader is
     /// scrolled up must not mark read, must not raise the jump affordance,
@@ -618,20 +931,62 @@ enum TranscriptPassAction {
     Hold,
 }
 
+/// What one transcript pass hands the next: how many rows it saw, and the `seq`
+/// of the oldest. The pair travels together because a pass that declines to
+/// consume the first-fill state (see below) must decline to consume the other
+/// half too — carrying a fresh oldest beside a stale length would let the next
+/// pass conclude that nothing arrived in front of rows it never measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct TranscriptPassState {
+    len: usize,
+    oldest_seq: Option<u64>,
+}
+
+/// Whether this pass's rows arrived in FRONT of the ones already painted.
+///
+/// The transcript is ascending by `seq` and only ever grows at one end per
+/// write, so a fallen oldest `seq` is a prepend and nothing else. Reading the
+/// seq rather than counting rows is what makes that true: a page whose rows were
+/// all already painted prepends nothing and must read as no movement at all,
+/// which a length comparison alone cannot say.
+///
+/// A first fill answers false — there were no rows to arrive in front of — which
+/// is what keeps it on the `PinAndQueue` path that opens a room at its newest
+/// message.
+fn transcript_grew_at_front(prev_oldest_seq: Option<u64>, oldest_seq: Option<u64>) -> bool {
+    match (prev_oldest_seq, oldest_seq) {
+        (Some(previous), Some(current)) => current < previous,
+        _ => false,
+    }
+}
+
 /// `measured` is whether the transcript element exists *and* reports a real
 /// viewport; an unmeasured pass holds so the fill state stays intact for the
-/// first pass that can actually measure.
+/// first pass that can actually measure. `anchored` is whether a press parked
+/// the scroll geometry this prepend is owed against — the one thing that
+/// separates history the operator asked for from history that merely arrived.
 fn transcript_pass_action(
     len: usize,
     prev_len: usize,
     measured: bool,
     near_bottom: bool,
+    grew_at_front: bool,
+    anchored: bool,
 ) -> TranscriptPassAction {
     if len == 0 {
         return TranscriptPassAction::Reset;
     }
     if !measured {
         return TranscriptPassAction::Hold;
+    }
+    // Ahead of the at-bottom pin, because a REQUESTED prepend that lands while
+    // the reader happens to sit at the bottom is still a prepend: pinning would
+    // be harmless there but re-queueing the read advance on rows that arrived
+    // above the paint is not the claim this Effect should be making. Unasked
+    // prepends — every page of the hydration walk — fall past this and keep the
+    // pin that opens a room at its newest message.
+    if grew_at_front && anchored {
+        return TranscriptPassAction::AnchorOlder;
     }
     if prev_len == 0 || near_bottom {
         return TranscriptPassAction::PinAndQueue;
@@ -915,40 +1270,6 @@ fn thread_panel_subtitle(reply_count: usize, root_author_display: &str) -> Strin
     )
 }
 
-/// Row timestamp: show only the canonical wire clock (HH:MM) for RFC3339
-/// timestamps while preserving the full wire value for machine-readable and
-/// accessible render paths. Accepts only ASCII canonical structure at the
-/// byte positions we actually rely on, never panics on Unicode/invalid input,
-/// and returns the original string unchanged when the wire value is not the
-/// expected RFC3339 shape.
-fn canonical_wire_clock_time(full: &str) -> String {
-    let bytes = full.as_bytes();
-    let is_digit = |idx: usize| bytes.get(idx).is_some_and(|b| b.is_ascii_digit());
-
-    if bytes.len() < 16
-        || !full.is_ascii()
-        || !is_digit(0)
-        || !is_digit(1)
-        || !is_digit(2)
-        || !is_digit(3)
-        || bytes[4] != b'-'
-        || !is_digit(5)
-        || !is_digit(6)
-        || bytes[7] != b'-'
-        || !is_digit(8)
-        || !is_digit(9)
-        || bytes[10] != b'T'
-        || !is_digit(11)
-        || !is_digit(12)
-        || bytes[13] != b':'
-        || !is_digit(14)
-        || !is_digit(15)
-    {
-        return full.to_string();
-    }
-
-    full[11..16].to_string()
-}
 fn avatar_identity_class(author_id: &str) -> &'static str {
     const HUES: [&str; 5] = [
         "rooms-workspace__msg-avatar--hue0",
@@ -1012,6 +1333,68 @@ fn participant_kind_label(kind: RoomParticipantKind) -> &'static str {
 /// because federated rosters are bedrock-authoritative.
 fn participant_removable(participant_id: &str, identity_id: &str) -> bool {
     participant_id != identity_id
+}
+
+/// What the members rail says about ONE agent row's ownership — see
+/// [`agent_ownership`] for how it is decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AgentOwnership {
+    /// A worker owns this agent. `owner` is their roster display name where the
+    /// roster still carries them and their raw participant id otherwise, which
+    /// is the only name a room can give for a worker who has left.
+    Owned { owner: String, present: bool },
+    /// The daemon answered, and no ownership row names this agent: nobody has
+    /// claimed it. The rail says so rather than saying nothing, because an
+    /// agent with no badge is indistinguishable from one whose badge simply did
+    /// not render.
+    Unclaimed,
+    /// The surface has no answer to give — hydration has not landed, a binding
+    /// mutation has just invalidated what it held, or the daemon predates
+    /// `agent_owners` and cannot project ownership it may well hold. Renders
+    /// NOTHING. Saying `unclaimed` here would be a claim about the room made
+    /// entirely out of the surface's own ignorance, and on a pre-field daemon
+    /// it would be that claim about every agent in every room.
+    Unknown,
+}
+
+/// Map one Agent roster row to its ownership. Both lists are the Local roster's
+/// own: `owners` keys on `RoomParticipant::id` (the daemon joins the ownership
+/// row to `participants` on exactly that column), so this is a lookup in one
+/// namespace and never a guess across two.
+///
+/// `present` is the daemon's `owner_present` NARROWED by the roster the reader
+/// is looking at. The daemon computes the flag as "is `owner_id` still on this
+/// roster" at hydration; the roster then moves under the surface — a join,
+/// leave or remove replaces `Room::participants` from a route that carries no
+/// `agent_owners` at all — so a worker who left after hydration is gone from
+/// the rail while their flag beside them is one read stale. Requiring both
+/// keeps the rail self-consistent: no row is ever badged as a present owner
+/// while the rail does not show them. The other direction is left alone —
+/// a daemon that says absent is believed, because a same-id row appearing
+/// later is not evidence the original binding survived.
+fn agent_ownership(
+    owners: Option<&[RoomAgentOwner]>,
+    participants: &[RoomParticipant],
+    agent_id: &str,
+) -> AgentOwnership {
+    // No answer at all is its own state and never `Unclaimed`: the caller
+    // holding `None` has not been told anything about this room's ownership,
+    // and absence of an answer is not an answer of absence.
+    let Some(owners) = owners else {
+        return AgentOwnership::Unknown;
+    };
+    let Some(row) = owners.iter().find(|owner| owner.agent_id == agent_id) else {
+        return AgentOwnership::Unclaimed;
+    };
+    let on_roster = participants
+        .iter()
+        .find(|participant| participant.id == row.owner_id);
+    AgentOwnership::Owned {
+        owner: on_roster
+            .map(|participant| participant.display_name.clone())
+            .unwrap_or_else(|| row.owner_id.clone()),
+        present: row.owner_present && on_roster.is_some(),
+    }
 }
 
 /// Whether a federated roster row is the caller's own membership. `None`
@@ -1138,6 +1521,39 @@ fn mention_roster(
             .collect(),
         None => Vec::new(),
     }
+}
+
+/// The roster subset that can be selected as a new mention target.
+///
+/// Humans remain mentionable and every roster member still renders in the
+/// room. Agent candidates, however, require a currently Active local binding;
+/// an unauthorized/suspended/stale/revoked compatibility participant is never
+/// offered as clickable execution intent. Federated access must also project
+/// the local binding as available.
+fn mentionable_roster(
+    local_participants: &[RoomParticipant],
+    access: Option<&RoomAccessProjection>,
+    active_agent_member_ids: &std::collections::HashSet<String>,
+) -> Vec<RoomParticipant> {
+    mention_roster(local_participants, access)
+        .into_iter()
+        .filter(|participant| {
+            if participant.kind != RoomParticipantKind::Agent {
+                return true;
+            }
+            if !active_agent_member_ids.contains(&participant.id) {
+                return false;
+            }
+            match access {
+                Some(access) if access.state != RoomAccessState::Local => access
+                    .members
+                    .iter()
+                    .find(|member| member.member_id == participant.id)
+                    .is_some_and(|member| member.local_binding_available == Some(true)),
+                _ => true,
+            }
+        })
+        .collect()
 }
 
 /// Rank roster candidates for a mention partial: id prefix first, then
@@ -1267,6 +1683,143 @@ fn is_thread_open(selected_thread_root_seq: Option<u64>, root_seq: u64) -> bool 
     selected_thread_root_seq == Some(root_seq)
 }
 
+/// Where a pending room open came from.
+///
+/// The two sources are owed different things, which is the whole reason this
+/// is not a bare key. A persisted restore is a convenience: it loses every
+/// race with a user action and degrades silently when the room is gone,
+/// because nobody asked for it in this session. An `ocean://room/<key>` deep
+/// link is something a person just asked for out loud — from a message, a
+/// bookmark, another app — so it wins the race and, when the key names no
+/// room this daemon has, it has to say so rather than appear to do nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RoomOpenSource {
+    Persisted,
+    DeepLink,
+}
+
+/// A room open waiting on the fetched room list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingRoomOpen {
+    pub key: String,
+    pub source: RoomOpenSource,
+    /// For a deep link, the `Rooms::list_settled` value observed when the
+    /// request was queued: the entry resolves only once a room-list fetch has
+    /// settled AFTER that, so the answer never comes out of a stale list.
+    /// `None` for a persisted restore, which keeps its existing behaviour of
+    /// answering as soon as any list has loaded — it reports nothing, so a
+    /// stale answer costs nothing to say.
+    pub awaiting_settle: Option<u64>,
+}
+
+impl PendingRoomOpen {
+    fn persisted(key: String) -> Self {
+        Self {
+            key,
+            source: RoomOpenSource::Persisted,
+            awaiting_settle: None,
+        }
+    }
+
+    fn deep_link(key: String, settled_at: u64) -> Self {
+        Self {
+            key,
+            source: RoomOpenSource::DeepLink,
+            awaiting_settle: Some(settled_at),
+        }
+    }
+}
+
+/// May a pending open be resolved against the room list yet?
+///
+/// The two sources wait on different things, and the difference is the whole
+/// point. A persisted restore waits on `rooms_loaded` — "a list has loaded" —
+/// because it answers silently and a stale answer is free. A deep link waits
+/// for `list_settled` to move past the value it recorded, because it answers
+/// OUT LOUD: `rooms_loaded` is set by any settled fetch, success or failure,
+/// is never cleared, and lives on an App-scope handle that outlives the
+/// workspace, so it is equally true of a list fetched ten minutes ago and of
+/// an empty list left by a failed fetch. Answering "no room named X" out of
+/// either is a lie about a room that exists.
+pub(crate) fn room_open_is_ready(
+    pending: &PendingRoomOpen,
+    rooms_loaded: bool,
+    list_settled: u64,
+) -> bool {
+    match pending.awaiting_settle {
+        None => rooms_loaded,
+        // Wrapping-safe: the counter wraps at u64::MAX and `!=` is the only
+        // comparison that survives it.
+        Some(seen) => list_settled != seen,
+    }
+}
+
+/// What a pending room open resolves to once the room list has loaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RoomOpenOutcome {
+    /// Open this key.
+    Open(String),
+    /// Do nothing, and say nothing.
+    Drop,
+    /// The key names no room in the fetched list, and someone asked out loud.
+    Unknown(String),
+}
+
+/// Resolve a pending room open against live daemon state. Pure so the whole
+/// policy — including the two asymmetries between the sources — is testable
+/// without a browser.
+pub(crate) fn room_open_outcome(
+    pending: &PendingRoomOpen,
+    open_key: Option<&str>,
+    key_is_known: bool,
+) -> RoomOpenOutcome {
+    match pending.source {
+        RoomOpenSource::Persisted => {
+            // A user action that opened any room first wins, and a room that
+            // is no longer in the list degrades to nothing.
+            if open_key.is_some() || !key_is_known {
+                RoomOpenOutcome::Drop
+            } else {
+                RoomOpenOutcome::Open(pending.key.clone())
+            }
+        }
+        RoomOpenSource::DeepLink => {
+            if open_key == Some(pending.key.as_str()) {
+                // Already showing exactly what was asked for; reopening would
+                // only throw away a hydrated transcript.
+                RoomOpenOutcome::Drop
+            } else if key_is_known {
+                RoomOpenOutcome::Open(pending.key.clone())
+            } else {
+                RoomOpenOutcome::Unknown(pending.key.clone())
+            }
+        }
+    }
+}
+
+/// Left-rail status for a deep link naming a room this daemon does not have.
+///
+/// The `rooms ` prefix is load-bearing: it is what routes the line to the
+/// room-list status lane rather than the open-transcript one, and in this case
+/// there is no open transcript to put it under.
+///
+/// Only say this when a room-list fetch has actually settled successfully —
+/// see [`room_open_is_ready`]. Said out of a stale or failed-empty list, it
+/// names a room the person is looking at in another client as missing.
+pub(crate) fn unknown_deep_link_room_status(key: &str) -> String {
+    format!("rooms — no room named {key} here")
+}
+
+/// Left-rail status for a deep link whose room list could not be fetched.
+///
+/// Distinct from the unknown-key line on purpose: "this room does not exist"
+/// and "I could not find out whether it exists" are different facts, and
+/// reporting the first when the second is true sends someone hunting for a
+/// room they have.
+pub(crate) fn unreachable_deep_link_room_status(key: &str) -> String {
+    format!("rooms — could not load the room list to open {key}")
+}
+
 // ── Component ─────────────────────────────────────────────────────────
 
 /// Full-screen Slack-style rooms workspace.
@@ -1303,6 +1856,7 @@ pub fn RoomsWorkspace(
     // roster update that arrives over SSE), so form state owned by it would be
     // discarded mid-sentence and take a half-written system prompt with it.
     let agent_builder = crate::agents::AgentBuilderState::new(&rooms);
+    let room_agent_authority = crate::room_agent_authorization::RoomAgentAuthorizationState::new();
 
     // Room context files. Same reasoning as the agent builder above: an
     // in-flight upload flag rebuilt by a roster SSE update would re-enable the
@@ -1402,8 +1956,11 @@ pub fn RoomsWorkspace(
     // still be in the fetched list, the thread root must be in the
     // transcript — a stale restore silently degrades, never errors.
     let restored_view = load_view_state();
-    let pending_room_restore =
-        RwSignal::new(restored_view.as_ref().map(|(room_key, _)| room_key.clone()));
+    let pending_room_restore: RwSignal<Option<PendingRoomOpen>> = RwSignal::new(
+        restored_view
+            .as_ref()
+            .map(|(room_key, _)| PendingRoomOpen::persisted(room_key.clone())),
+    );
     let pending_thread_restore = RwSignal::new(
         restored_view.and_then(|(room_key, thread)| thread.map(|root_seq| (room_key, root_seq))),
     );
@@ -1470,7 +2027,11 @@ pub fn RoomsWorkspace(
             .get()
             .map(|room| room.participants)
             .unwrap_or_default();
-        let roster = mention_roster(&local_participants, rooms.access.get().as_ref());
+        let roster = mentionable_roster(
+            &local_participants,
+            rooms.access.get().as_ref(),
+            &room_agent_authority.active_agent_member_ids(),
+        );
         mention_suggestions(&roster, &partial)
     });
     let thread_mention_items = Memo::new(move |_| {
@@ -1482,7 +2043,11 @@ pub fn RoomsWorkspace(
             .get()
             .map(|room| room.participants)
             .unwrap_or_default();
-        let roster = mention_roster(&local_participants, rooms.access.get().as_ref());
+        let roster = mentionable_roster(
+            &local_participants,
+            rooms.access.get().as_ref(),
+            &room_agent_authority.active_agent_member_ids(),
+        );
         mention_suggestions(&roster, &partial)
     });
 
@@ -1505,7 +2070,11 @@ pub fn RoomsWorkspace(
             .get_untracked()
             .map(|room| room.participants)
             .unwrap_or_default();
-        let roster = mention_roster(&local_participants, rooms.access.get_untracked().as_ref());
+        let roster = mentionable_roster(
+            &local_participants,
+            rooms.access.get_untracked().as_ref(),
+            &room_agent_authority.active_agent_member_ids_untracked(),
+        );
         let Some(pick) = mention_suggestion_at(&roster, &partial, idx) else {
             mention_ctx.set(None);
             mention_active.set(0);
@@ -1546,7 +2115,11 @@ pub fn RoomsWorkspace(
             .get_untracked()
             .map(|room| room.participants)
             .unwrap_or_default();
-        let roster = mention_roster(&local_participants, rooms.access.get_untracked().as_ref());
+        let roster = mentionable_roster(
+            &local_participants,
+            rooms.access.get_untracked().as_ref(),
+            &room_agent_authority.active_agent_member_ids_untracked(),
+        );
         let Some(pick) = mention_suggestion_at(&roster, &partial, idx) else {
             thread_mention_ctx.set(None);
             thread_mention_active.set(0);
@@ -1587,8 +2160,14 @@ pub fn RoomsWorkspace(
     let new_below = RwSignal::new(false);
     let pending_read_advance = RwSignal::new(None::<ReadAdvanceRequest>);
     let refresh_handle = RwSignal::new(None::<IntervalHandle>);
-    Effect::new(move |prev: Option<usize>| {
-        let len = transcript.with(|t| t.len());
+    // `(scroll_height, scroll_top)` as the "load older" press left them, which
+    // is the one moment they can be read: the page arrives asynchronously, and
+    // whether this Effect runs before or after the `<For>` writes those rows to
+    // the DOM is not something a scanner in this crate can prove either way. A
+    // press always overwrites — the anchor belongs to the newest one.
+    let older_anchor = RwSignal::new(None::<(i32, i32)>);
+    Effect::new(move |prev: Option<TranscriptPassState>| {
+        let (len, oldest_seq) = transcript.with(|t| (t.len(), t.first().map(|m| m.seq)));
         let open_key = rooms.open_key.get();
         // Track the access projection. For a `Live` room the durable candidate
         // is `last_confirmed_global_sequence`, which routinely lands *after*
@@ -1599,8 +2178,10 @@ pub fn RoomsWorkspace(
         // (`prev_len > 0`), so it only queues through the `PinAndQueue` arm,
         // which requires a measured, genuinely at-bottom transcript.
         let access = rooms.access.get();
-        let prev_len = prev.unwrap_or(0);
+        let previous = prev.unwrap_or_default();
+        let prev_len = previous.len;
         let first_fill = prev_len == 0;
+        let grew_at_front = transcript_grew_at_front(previous.oldest_seq, oldest_seq);
         let el = list_ref.get();
         let metrics = el
             .as_ref()
@@ -1608,11 +2189,24 @@ pub fn RoomsWorkspace(
         let near_bottom = metrics.is_some_and(|(scroll_height, scroll_top, client_height)| {
             transcript_is_near_bottom(scroll_height, scroll_top, client_height, 120)
         });
-        match transcript_pass_action(len, prev_len, el.is_some(), near_bottom) {
+        // Untracked because two arms below CLEAR this signal; tracking what the
+        // pass writes would re-enter the pass. Its presence is also the only
+        // evidence a prepend was asked for — the hydration walk prepends four
+        // more pages after the first fill, and those must stay on the pin.
+        let anchor = older_anchor.get_untracked();
+        match transcript_pass_action(
+            len,
+            prev_len,
+            el.is_some(),
+            near_bottom,
+            grew_at_front,
+            anchor.is_some(),
+        ) {
             TranscriptPassAction::Reset => {
                 // Generation reset / room switch: nothing below.
                 new_below.set(false);
                 pending_read_advance.set(None);
+                older_anchor.set(None);
             }
             TranscriptPassAction::PinAndQueue => {
                 let (scroll_height, _, client_height) = metrics.unwrap_or_default();
@@ -1637,6 +2231,28 @@ pub fn RoomsWorkspace(
                 new_below.set(true);
                 pending_read_advance.set(None);
             }
+            TranscriptPassAction::AnchorOlder => {
+                // Rows landing above the viewport push everything the reader
+                // was looking at down by exactly the height they add, so the
+                // scroll position has to move by the same amount to leave the
+                // view where it was. The frame callback is the first point that
+                // can measure the growth: it runs after the DOM holds the new
+                // rows, whereas this Effect may not.
+                if let (Some(el), Some((anchored_height, anchored_top))) = (el.clone(), anchor) {
+                    request_animation_frame(move || {
+                        let grown = el.scroll_height() - anchored_height;
+                        if grown > 0 {
+                            el.set_scroll_top(anchored_top + grown);
+                        }
+                    });
+                }
+                // One anchor per press, consumed here whether or not the frame
+                // callback above was scheduled. An anchor kept past the page it
+                // was taken for would be applied to some later prepend against
+                // a height that no longer exists — and would route the walk's
+                // remaining pages here too.
+                older_anchor.set(None);
+            }
             TranscriptPassAction::Hold => {}
         }
         // Single open-none clear: this Effect already tracks `open_key`, so it
@@ -1650,11 +2266,11 @@ pub fn RoomsWorkspace(
         // hydration (see `transcript_read_hydrated`).
         let viewport_measured = metrics.is_some_and(|(_, _, client_height)| client_height > 0);
         if len == 0 {
-            0
+            TranscriptPassState::default()
         } else if viewport_measured {
-            len
+            TranscriptPassState { len, oldest_seq }
         } else {
-            prev_len
+            previous
         }
     });
 
@@ -1760,26 +2376,58 @@ pub fn RoomsWorkspace(
     });
 
     // ── View-state restore + persist ──────────────────────────────────
-    // Reopen the persisted room once the fetched list confirms it still
-    // exists. One-shot: a user action that opens any room first wins.
+    // An `ocean://room/<key>` deep link joins the SAME one-shot queue the
+    // persisted restore uses, and replaces whatever is sitting in it. That is
+    // what makes an early link work: the queue already waits for the fetched
+    // room list, so a link arriving during a cold launch — while the list is
+    // still in flight, which is the normal case when the OS starts the app to
+    // handle the URL — is held rather than lost. `request_deep_link_room`
+    // sets the signal (and kicks a silent refresh); this is the only consumer,
+    // and it clears it in the same pass. The `list_settled` value recorded
+    // here is what the entry waits to move past, so its answer comes from a
+    // list fetched after the link arrived rather than from whatever the handle
+    // was carrying — see `room_open_is_ready`.
     Effect::new(move |_| {
-        let Some(want_key) = pending_room_restore.get() else {
+        let Some(key) = rooms.deep_link_room.get() else {
             return;
         };
-        if !rooms.rooms_loaded.get() {
+        rooms.deep_link_room.set(None);
+        let settled_at = rooms.list_settled.get_untracked();
+        pending_room_restore.set(Some(PendingRoomOpen::deep_link(key, settled_at)));
+    });
+
+    // Resolve the queued open once the fetched list confirms what exists.
+    // One-shot either way: a persisted restore loses to a user action and
+    // degrades silently, a deep link wins and reports an unknown key.
+    Effect::new(move |_| {
+        let Some(pending) = pending_room_restore.get() else {
+            return;
+        };
+        if !room_open_is_ready(&pending, rooms.rooms_loaded.get(), rooms.list_settled.get()) {
             return;
         }
         pending_room_restore.set(None);
-        if rooms.open_key.get_untracked().is_some() {
+        // A settle that could not answer must not be read as an answer: a
+        // deep link waited for THIS fetch, and if it failed the list it would
+        // be checked against is the stale or empty one the failure left.
+        if pending.awaiting_settle.is_some() && rooms.rooms_error.get_untracked().is_some() {
+            rooms
+                .status
+                .set(unreachable_deep_link_room_status(&pending.key));
             return;
         }
-        if rooms
+        let open_key = rooms.open_key.get_untracked();
+        let key_is_known = rooms
             .list
             .get_untracked()
             .iter()
-            .any(|room| room.id == want_key)
-        {
-            rooms.open_room(want_key);
+            .any(|room| room.id == pending.key);
+        match room_open_outcome(&pending, open_key.as_deref(), key_is_known) {
+            RoomOpenOutcome::Open(key) => rooms.open_room(key),
+            RoomOpenOutcome::Drop => {}
+            RoomOpenOutcome::Unknown(key) => {
+                rooms.status.set(unknown_deep_link_room_status(&key));
+            }
         }
     });
 
@@ -1831,6 +2479,10 @@ pub fn RoomsWorkspace(
     let create_on_thread_reply = RwSignal::new(false);
     let create_on_build_failure = RwSignal::new(false);
     let create_on_ci_failure = RwSignal::new(false);
+    // The workspace folder the new room binds to, on the DAEMON's host. Empty
+    // leaves the room unbound — which is what every room this form made used
+    // to be, and an unbound room's agent turns all fail closed.
+    let create_workspace = RwSignal::new(String::new());
     let create_room = move || {
         // Prevent concurrent dispatch: if a create is already in flight,
         // ignore the keypress. The Effect clears pending_create when the
@@ -1850,6 +2502,7 @@ pub fn RoomsWorkspace(
                 create_on_build_failure.get_untracked(),
                 create_on_ci_failure.get_untracked(),
             ),
+            create_workspace_root(&create_workspace.get_untracked()),
         );
         if op_id == 0 {
             // Synchronous rejection — empty name or slug. Don't set
@@ -1888,6 +2541,9 @@ pub fn RoomsWorkspace(
                 create_on_thread_reply.set(false);
                 create_on_build_failure.set(false);
                 create_on_ci_failure.set(false);
+                // Same rule for the workspace field: it was part of this
+                // draft, and the next room chooses its own folder.
+                create_workspace.set(String::new());
                 pending_create.set(false);
             }
             CreateResolution::KeepDraft => {
@@ -1947,7 +2603,10 @@ pub fn RoomsWorkspace(
         if !message_send_admitted(
             send_in_flight.get_untracked(),
             thread_send_in_flight.get_untracked(),
-            access_allows_writes(rooms.access.get_untracked().as_ref()),
+            composer_writes_allowed(
+                rooms.access.get_untracked().as_ref(),
+                rooms.closed.get_untracked(),
+            ),
             &draft,
         ) {
             return;
@@ -1976,7 +2635,10 @@ pub fn RoomsWorkspace(
         if !message_send_admitted(
             thread_send_in_flight.get_untracked(),
             send_in_flight.get_untracked(),
-            access_allows_writes(rooms.access.get_untracked().as_ref()),
+            composer_writes_allowed(
+                rooms.access.get_untracked().as_ref(),
+                rooms.closed.get_untracked(),
+            ),
             &draft,
         ) {
             return;
@@ -2107,7 +2769,7 @@ pub fn RoomsWorkspace(
                                                             )
                                                         }>
                                                             {if is_system {
-                                                                view! { <crate::icons::Spark /> }.into_any()
+                                                                "S".into_any()
                                                             } else {
                                                                 reply.author_id.chars().take(2).collect::<String>().to_uppercase().into_any()
                                                             }}
@@ -2121,7 +2783,7 @@ pub fn RoomsWorkspace(
                                                                     aria-label=full_ts.clone()
                                                                     title=full_ts.clone()
                                                                 >
-                                                                    {canonical_wire_clock_time(&full_ts)}
+                                                                    {local_clock_time(&full_ts)}
                                                                 </time>
                                                                 {move || ledger_mark_view(
                                                                     rooms.access.get().as_ref(),
@@ -2194,9 +2856,10 @@ pub fn RoomsWorkspace(
                                                             .get_untracked()
                                                             .map(|room| room.participants)
                                                             .unwrap_or_default();
-                                                        let roster = mention_roster(
+                                                        let roster = mentionable_roster(
                                                             &local_participants,
                                                             rooms.access.get_untracked().as_ref(),
+                                                            &room_agent_authority.active_agent_member_ids_untracked(),
                                                         );
                                                         let selection = ev
                                                             .target()
@@ -2246,7 +2909,7 @@ pub fn RoomsWorkspace(
                                                     }
                                                 }
                                                 on:blur=move |_| thread_mention_ctx.set(None)
-                                                disabled=move || !access_allows_writes(rooms.access.get().as_ref())
+                                                disabled=move || !composer_writes_allowed(rooms.access.get().as_ref(), rooms.closed.get())
                                             />
                                             {move || {
                                                 let items = thread_mention_items.get();
@@ -2322,7 +2985,10 @@ pub fn RoomsWorkspace(
                                                 disabled=move || {
                                                     thread_send_in_flight.get()
                                                         || thread_composer.get().trim().is_empty()
-                                                        || !access_allows_writes(rooms.access.get().as_ref())
+                                                        || !composer_writes_allowed(
+                                                            rooms.access.get().as_ref(),
+                                                            rooms.closed.get(),
+                                                        )
                                                 }
                                             >
                                                 {move || if thread_send_in_flight.get() { "Sending…" } else { "Reply" }}
@@ -2612,6 +3278,8 @@ pub fn RoomsWorkspace(
                                             let key_tab = key.clone();
                                             let key_sel = key.clone();
                                             let key_unread = key.clone();
+                                            let key_attention_label = key.clone();
+                                            let key_attention_badge = key.clone();
                                             let active = move || rooms.open_key.get().as_deref() == Some(&*key);
                                             let selected =
                                                 move || rooms.open_key.get().as_deref() == Some(&*key_sel);
@@ -2635,6 +3303,20 @@ pub fn RoomsWorkspace(
                                                     )
                                                 })
                                             };
+                                            let attention_label = Memo::new(move |_| {
+                                                rooms.read_summaries.with(|summaries| {
+                                                    crate::rooms::room_attention_aria_label(
+                                                        summaries.get(&key_attention_label),
+                                                    )
+                                                })
+                                            });
+                                            let attention_badge = Memo::new(move |_| {
+                                                rooms.read_summaries.with(|summaries| {
+                                                    crate::rooms::room_attention_badge(
+                                                        summaries.get(&key_attention_badge),
+                                                    )
+                                                })
+                                            });
                                             view! {
                                                 <button
                                                     class="rooms-workspace__room"
@@ -2645,6 +3327,22 @@ pub fn RoomsWorkspace(
                                                     aria-selected=move || selected().to_string()
                                                     tabindex=move || if is_tab_stop() { "0" } else { "-1" }
                                                     on:click=move |_| {
+                                                        // Ask for notification permission HERE, from
+                                                        // a real click. Browsers require transient
+                                                        // user activation for
+                                                        // `Notification.requestPermission()`, and an
+                                                        // arriving SSE frame is not that — so the
+                                                        // mention notifier's own request is refused
+                                                        // for a fresh browser user and the feature
+                                                        // could never turn on. Entering a room is
+                                                        // the honest moment to ask: it is a gesture,
+                                                        // and it is when being mentioned starts
+                                                        // being possible. Called synchronously,
+                                                        // before anything async, so the activation
+                                                        // is still live. Already-decided permissions
+                                                        // resolve without prompting, so this does
+                                                        // not nag on every open.
+                                                        crate::host::prime_notification_permission();
                                                         rooms.open_room(key2.clone());
                                                         show_left_rail.set(false);
                                                     }
@@ -2657,14 +3355,37 @@ pub fn RoomsWorkspace(
                                                         <span
                                                             class="rooms-workspace__room-unread"
                                                             role="img"
-                                                            aria-label="Unread messages"
-                                                        ></span>
+                                                            aria-label=move || attention_label.get()
+                                                        >
+                                                            {move || attention_badge.get()}
+                                                        </span>
                                                     </Show>
                                                 </button>
                                             }
                                         }
                                     />
                                 </div>
+                                // The end of the list is where "there is more of
+                                // it" has to be said, and it scrolls with the
+                                // list because it names a position in it. The
+                                // daemon pages this route at 100 rooms; without
+                                // this the rail stopped there and said nothing.
+                                {move || rooms.more_rooms_available().then(|| view! {
+                                    <button
+                                        class="rooms-workspace__load-more-rooms"
+                                        type="button"
+                                        disabled=move || rooms.more_rooms_in_flight()
+                                        on:click=move |_| {
+                                            rooms.load_more_rooms();
+                                        }
+                                    >
+                                        {move || if rooms.more_rooms_in_flight() {
+                                            "Loading more rooms…"
+                                        } else {
+                                            "Load more rooms"
+                                        }}
+                                    </button>
+                                })}
                             }.into_any()
                         }
                     }}
@@ -2707,57 +3428,78 @@ pub fn RoomsWorkspace(
                         disabled=move || pending_create.get()
                     />
                     // Auto-wake flags for the room being created. Only the
-                    // four live flags get a control; see TriggerToggle.
+                    // four live flags get a control; see TriggerToggle. A row
+                    // whose flag cannot fire in a Local room — which is the
+                    // only kind this form makes — is held and says which kind
+                    // it needs, so the form cannot arm on day one exactly the
+                    // flag the right rail will grey out on day one.
                     <div
                         class="rooms-workspace__create-triggers"
                         role="group"
                         aria-label="Auto-wake triggers for the new room"
                     >
-                        <label class="rooms-workspace__trigger">
-                            <input
-                                type="checkbox"
-                                prop:checked=move || create_on_mention.get()
-                                on:change=move |ev| {
-                                    create_on_mention.set(event_target_checked(&ev))
-                                }
-                                disabled=move || pending_create.get()
-                            />
-                            <span class="rooms-workspace__trigger-label">"@mention"</span>
-                        </label>
-                        <label class="rooms-workspace__trigger">
-                            <input
-                                type="checkbox"
-                                prop:checked=move || create_on_thread_reply.get()
-                                on:change=move |ev| {
-                                    create_on_thread_reply.set(event_target_checked(&ev))
-                                }
-                                disabled=move || pending_create.get()
-                            />
-                            <span class="rooms-workspace__trigger-label">"thread reply"</span>
-                        </label>
-                        <label class="rooms-workspace__trigger">
-                            <input
-                                type="checkbox"
-                                prop:checked=move || create_on_build_failure.get()
-                                on:change=move |ev| {
-                                    create_on_build_failure.set(event_target_checked(&ev))
-                                }
-                                disabled=move || pending_create.get()
-                            />
-                            <span class="rooms-workspace__trigger-label">"build failure"</span>
-                        </label>
-                        <label class="rooms-workspace__trigger">
-                            <input
-                                type="checkbox"
-                                prop:checked=move || create_on_ci_failure.get()
-                                on:change=move |ev| {
-                                    create_on_ci_failure.set(event_target_checked(&ev))
-                                }
-                                disabled=move || pending_create.get()
-                            />
-                            <span class="rooms-workspace__trigger-label">"CI failure"</span>
-                        </label>
+                        {create_trigger_row(
+                            TriggerToggle::Mention,
+                            "@mention",
+                            create_on_mention,
+                            pending_create,
+                        )}
+                        {create_trigger_row(
+                            TriggerToggle::ThreadReply,
+                            "thread reply",
+                            create_on_thread_reply,
+                            pending_create,
+                        )}
+                        {create_trigger_row(
+                            TriggerToggle::BuildFailure,
+                            "build failure",
+                            create_on_build_failure,
+                            pending_create,
+                        )}
+                        {create_trigger_row(
+                            TriggerToggle::CiFailure,
+                            "CI failure",
+                            create_on_ci_failure,
+                            pending_create,
+                        )}
                     </div>
+                    // The folder the room's agents will actually run in. Its
+                    // own field rather than a trigger row because it is not a
+                    // flag: without it every trigger above is armed to wake an
+                    // agent that then fails closed on the daemon with
+                    // `workspace_unavailable`. The path is resolved on the
+                    // DAEMON's host — the browser cannot see that filesystem,
+                    // so nothing here validates it and the helper text says
+                    // whose machine it means.
+                    <label class="rooms-workspace__create-workspace">
+                        <span class="rooms-workspace__create-workspace-label">
+                            "Workspace folder on the daemon host"
+                        </span>
+                        <input
+                            class="rooms-workspace__left-input"
+                            type="text"
+                            aria-label="Workspace folder on the daemon host"
+                            aria-describedby="rooms-create-workspace-help"
+                            placeholder="/absolute/path/to/project"
+                            prop:value=move || create_workspace.get()
+                            on:input=move |ev| create_workspace.set(event_target_value(&ev))
+                            on:keydown=move |ev| {
+                                if ev.key() == "Enter" {
+                                    ev.prevent_default();
+                                    create_room();
+                                }
+                            }
+                            disabled=move || pending_create.get()
+                        />
+                        <span
+                            class="rooms-workspace__create-workspace-help"
+                            id="rooms-create-workspace-help"
+                        >
+                            "An absolute path that must already exist on the machine \
+                             running the daemon. Leave it empty to create the room \
+                             unbound — its agents cannot run until a folder is bound."
+                        </span>
+                    </label>
                 </div>
 
                 // The other way into a room: a code someone else minted. A
@@ -2938,14 +3680,58 @@ pub fn RoomsWorkspace(
                                         }
                                     }
                                 >
+                                    // The edge of what is loaded. Hydration
+                                    // opens a room at its newest page and walks
+                                    // back a bounded number of pages; past that
+                                    // the oldest row on screen would otherwise
+                                    // read as the first message in the room.
+                                    // Inside the scroll container and above the
+                                    // rows on purpose — it marks a position in
+                                    // the log, so it has to sit at that
+                                    // position and scroll with it, unlike the
+                                    // jump affordance below, which is a
+                                    // viewport-fixed control.
+                                    {move || rooms.older_transcript_available().then(|| view! {
+                                        <button
+                                            type="button"
+                                            class="rooms-workspace__load-older"
+                                            disabled=move || rooms.older_transcript_in_flight()
+                                            on:click=move |_| {
+                                                // Read BEFORE the request, because
+                                                // the rows it brings back land
+                                                // above these very numbers.
+                                                if let Some(el) = list_ref.get() {
+                                                    older_anchor.set(Some((
+                                                        el.scroll_height(),
+                                                        el.scroll_top(),
+                                                    )));
+                                                }
+                                                rooms.load_older_transcript_page();
+                                            }
+                                        >
+                                            {move || if rooms.older_transcript_in_flight() {
+                                                "Loading older messages…"
+                                            } else {
+                                                "\u{2191} Load older messages"
+                                            }}
+                                        </button>
+                                    })}
                                     <For
                                         // Pair each root with its predecessor so
                                         // density decisions (grouping, gap headers,
-                                        // day separators) are derived per row. The
-                                        // transcript is append-only under one
-                                        // generation, so a cached keyed child never
-                                        // sees its predecessor change; generation
-                                        // reset rebuilds the whole list.
+                                        // day separators) are derived per row — which
+                                        // is why the predecessor is half the key. The
+                                        // transcript grows at BOTH ends: an older page
+                                        // gives the row that was oldest a predecessor
+                                        // it did not have, and `day_separator_label`
+                                        // answers `Some` unconditionally against
+                                        // `None`, so a child cached under `seq` alone
+                                        // would keep a day divider and an ungrouped
+                                        // header under a same-day row that now sits
+                                        // directly above it. Keying the pair rebuilds
+                                        // exactly that one seam row; every other row's
+                                        // predecessor is unchanged, so a tail append
+                                        // still caches the whole list.
                                         each=move || {
                                             let roots = partition_thread_messages(&rooms.transcript.get(), 0).roots;
                                             std::iter::once(None)
@@ -2953,13 +3739,23 @@ pub fn RoomsWorkspace(
                                                 .zip(roots.clone())
                                                 .collect::<Vec<_>>()
                                         }
-                                        key=|(_, m): &(Option<RoomMessage>, RoomMessage)| m.seq
+                                        key=|(prev, m): &(Option<RoomMessage>, RoomMessage)| {
+                                            (prev.as_ref().map(|p| p.seq), m.seq)
+                                        }
                                         children=move |(prev, m): (Option<RoomMessage>, RoomMessage)| {
                                             let is_system = room_messages::is_compact_system_row(&m);
                                             let media = crate::transcript_media::marker_media_view(rooms, &m);
                                             let full_ts = m.created_at.clone();
                                             let root_seq = m.seq;
-                                            let day_label = room_messages::day_separator_label(prev.as_ref(), &m)
+                                            // Every density decision below that
+                                            // turns on a DAY turns on the member's
+                                            // day, so each reads the offset in
+                                            // force at the instant of the row it
+                                            // is asking about — the resolver is
+                                            // passed down, never one row's answer
+                                            // applied to its neighbour. A pair
+                                            // straddling a DST change has two.
+                                            let day_label = room_messages::day_separator_label(prev.as_ref(), &m, viewer_utc_offset_minutes)
                                                 .map(|d| room_messages::humanize_day_label(&d, &today_day_key()));
                                             // A long silence gets a time header —
                                             // unless a day separator already marks
@@ -2969,10 +3765,10 @@ pub fn RoomsWorkspace(
                                                     .as_ref()
                                                     .map(|p| room_messages::needs_gap_header(p, &m))
                                                     .unwrap_or(false))
-                                            .then(|| canonical_wire_clock_time(&full_ts));
+                                            .then(|| local_clock_time(&full_ts));
                                             let grouped = prev
                                                 .as_ref()
-                                                .map(|p| room_messages::is_grouped(p, &m))
+                                                .map(|p| room_messages::is_grouped(p, &m, viewer_utc_offset_minutes))
                                                 .unwrap_or(false);
                                             // Cloned for the ledger mark, which
                                             // re-reads reactively: the access
@@ -3000,7 +3796,7 @@ pub fn RoomsWorkspace(
                                                         )
                                                     }>
                                                         {if is_system {
-                                                            view! { <crate::icons::Spark /> }.into_any()
+                                                            "S".into_any()
                                                         } else {
                                                             m.author_id.chars().take(2).collect::<String>().to_uppercase().into_any()
                                                         }}
@@ -3016,7 +3812,7 @@ pub fn RoomsWorkspace(
                                                                 aria-label=full_ts.clone()
                                                                 title=full_ts.clone()
                                                             >
-                                                                {canonical_wire_clock_time(&full_ts)}
+                                                                {local_clock_time(&full_ts)}
                                                             </time>
                                                             {move || ledger_mark_view(
                                                                 rooms.access.get().as_ref(),
@@ -3171,11 +3967,20 @@ pub fn RoomsWorkspace(
 
                                 // Federation outbox is explicitly outside the
                                 // confirmed transcript. Pending items are
-                                // informational; only failed items can retry.
+                                // informational; only failed items can retry,
+                                // and only while the room is open. A closed
+                                // room keeps the outbox on screen — it is part
+                                // of the frozen record — and loses the button:
+                                // the daemon's retry gates on the room
+                                // EXISTING, not on `closed_at`, so a press
+                                // here would answer 202 and requeue a
+                                // federated send rather than fail the way
+                                // every other write into a closed room does.
                                 {move || {
                                     let outbox = rooms.access.get()
                                         .map(|access| access.outbox)
                                         .unwrap_or_default();
+                                    let room_closed = rooms.closed.get();
                                     if outbox.is_empty() {
                                         ().into_any()
                                     } else {
@@ -3192,6 +3997,7 @@ pub fn RoomsWorkspace(
                                                     key=|item| item.client_event_id.clone()
                                                     children=move |item| {
                                                         let failed = item.state == OutboxItemState::Failed;
+                                                        let can_retry = failed && !room_closed;
                                                         let body = item.payload.get("body")
                                                             .and_then(|body| body.as_str())
                                                             .unwrap_or("Message awaiting confirmation")
@@ -3208,7 +4014,7 @@ pub fn RoomsWorkspace(
                                                                 <span class="rooms-workspace__outbox-body">
                                                                     {body}
                                                                 </span>
-                                                                {if failed {
+                                                                {if can_retry {
                                                                     view! {
                                                                         <button
                                                                             class="rooms-workspace__outbox-retry"
@@ -3233,6 +4039,31 @@ pub fn RoomsWorkspace(
 
                                 // Composer + status line
                                 <div class="rooms-workspace__composer">
+                                    // Why the input below is dead. It belongs
+                                    // here and not in the status line: that
+                                    // line carries transient errors and is
+                                    // cleared by the next one, while this is
+                                    // the room's permanent condition. Without
+                                    // it a closed room is a composer that
+                                    // simply does not respond, which reads as
+                                    // the app being broken rather than the
+                                    // room being finished.
+                                    {move || {
+                                        if !rooms.closed.get() {
+                                            return ().into_any();
+                                        }
+                                        view! {
+                                            <div
+                                                class="rooms-workspace__composer-closed"
+                                                role="status"
+                                            >
+                                                "This room is closed. You are reading a frozen \
+                                                 audit view of its transcript — nothing can be \
+                                                 posted to it and no new messages will arrive."
+                                            </div>
+                                        }
+                                        .into_any()
+                                    }}
                                     <form
                                         class="rooms-workspace__composer-row"
                                         on:submit=move |ev| {
@@ -3284,9 +4115,10 @@ pub fn RoomsWorkspace(
                                                         .get_untracked()
                                                         .map(|room| room.participants)
                                                         .unwrap_or_default();
-                                                    let roster = mention_roster(
+                                                    let roster = mentionable_roster(
                                                         &local_participants,
                                                         rooms.access.get_untracked().as_ref(),
+                                                        &room_agent_authority.active_agent_member_ids_untracked(),
                                                     );
                                                     let selection = ev
                                                         .target()
@@ -3336,7 +4168,7 @@ pub fn RoomsWorkspace(
                                                 }
                                             }
                                             on:blur=move |_| mention_ctx.set(None)
-                                            disabled=move || !access_allows_writes(rooms.access.get().as_ref())
+                                            disabled=move || !composer_writes_allowed(rooms.access.get().as_ref(), rooms.closed.get())
                                         />
                                         {move || {
                                             let items = mention_items.get();
@@ -3409,7 +4241,10 @@ pub fn RoomsWorkspace(
                                             disabled=move || {
                                                 send_in_flight.get()
                                                     || composer.get().trim().is_empty()
-                                                    || !access_allows_writes(rooms.access.get().as_ref())
+                                                    || !composer_writes_allowed(
+                                                        rooms.access.get().as_ref(),
+                                                        rooms.closed.get(),
+                                                    )
                                             }
                                         >
                                             {move || if send_in_flight.get() { "Sending…" } else { "Send" }}
@@ -3507,7 +4342,6 @@ pub fn RoomsWorkspace(
                                     let participants = rooms.open_room.get()
                                         .map(|r| r.participants)
                                         .unwrap_or_default();
-                                    let show_add_agent = RwSignal::new(false);
                                     view! {
                                         {if participants.is_empty() {
                                             view! {
@@ -3529,6 +4363,7 @@ pub fn RoomsWorkspace(
                                                     key=|p: &RoomParticipant| p.id.clone()
                                                     children=move |p: RoomParticipant| {
                                                         let pid = p.id.clone();
+                                                        let owner_row_id = p.id.clone();
                                                         let display = p.display_name.clone();
                                                         let kind = p.kind;
                                                         view! {
@@ -3612,6 +4447,58 @@ pub fn RoomsWorkspace(
                                                                         }.into_any()
                                                                     }
                                                                 }}
+                                                                // Second line, on agent rows only: which
+                                                                // worker owns this agent, in the rail's own
+                                                                // presence-dot language, or "unclaimed" when
+                                                                // no ownership row names it. Reads BOTH
+                                                                // signals live — `agent_owners` arrives with
+                                                                // hydration while `open_room` is replaced by
+                                                                // every join/leave/remove, and the owner's
+                                                                // display name comes from the second.
+                                                                // Ungated on `closed`: a frozen room's
+                                                                // audit view is the one whose reader can no
+                                                                // longer ask anyone who owned what.
+                                                                {move || {
+                                                                    if kind != RoomParticipantKind::Agent {
+                                                                        return ().into_any();
+                                                                    }
+                                                                    let participants = rooms.open_room.get()
+                                                                        .map(|r| r.participants)
+                                                                        .unwrap_or_default();
+                                                                    match rooms.agent_owners.with(|owners| {
+                                                                        agent_ownership(owners.as_deref(), &participants, &owner_row_id)
+                                                                    }) {
+                                                                        AgentOwnership::Owned { owner, present } => {
+                                                                            let dot_label = if present {
+                                                                                format!("{owner} is in the room")
+                                                                            } else {
+                                                                                format!("{owner} has left the room")
+                                                                            };
+                                                                            view! {
+                                                                                <span class="rooms-workspace__member-owner">
+                                                                                    <span
+                                                                                        class="rooms-workspace__member-presence"
+                                                                                        class:rooms-workspace__member-presence--live=present
+                                                                                        class:rooms-workspace__member-presence--unavailable=!present
+                                                                                        role="img"
+                                                                                        aria-label=dot_label
+                                                                                    ></span>
+                                                                                    {format!("owned by {owner}")}
+                                                                                </span>
+                                                                            }.into_any()
+                                                                        }
+                                                                        AgentOwnership::Unclaimed => view! {
+                                                                            <span class="rooms-workspace__member-owner rooms-workspace__member-owner--unclaimed">
+                                                                                "unclaimed"
+                                                                            </span>
+                                                                        }.into_any(),
+                                                                        // Nothing, and that is the point: the
+                                                                        // surface has not been told who owns
+                                                                        // this agent, which is not the same as
+                                                                        // being told nobody does.
+                                                                        AgentOwnership::Unknown => ().into_any(),
+                                                                    }
+                                                                }}
                                                             </div>
                                                         }
                                                     }
@@ -3620,74 +4507,6 @@ pub fn RoomsWorkspace(
                                             }.into_any()
                                         }}
 
-                                        <button
-                                            class="rooms-workspace__addagent"
-                                            type="button"
-                                            title="Add an agent participant"
-                                            aria-controls="rooms-workspace-agent-picker"
-                                            aria-expanded=move || show_add_agent.get().to_string()
-                                            on:click=move |_| show_add_agent.update(|v: &mut bool| *v = !*v)
-                                        >
-                                            "+ agent"
-                                        </button>
-                                        {move || {
-                                            if show_add_agent.get() {
-                                                view! {
-                                                    <div
-                                                        id="rooms-workspace-agent-picker"
-                                                        class="rooms-workspace__addagent-picker"
-                                                    >
-                                                        <select
-                                                            class="rooms-workspace__addagent-select"
-                                                            aria-label="Choose an agent to add"
-                                                            on:change=move |ev| {
-                                                                let val = event_target_value(&ev);
-                                                                if !val.is_empty() {
-                                                                    rooms.add_agent(val);
-                                                                    show_add_agent.set(false);
-                                                                }
-                                                            }
-                                                        >
-                                                            <option value="" selected=true>
-                                                                "-- pick an agent --"
-                                                            </option>
-                                                            <For
-                                                                each=move || rooms.available_agents.get()
-                                                                key=|id: &String| id.clone()
-                                                                children=move |id: String| {
-                                                                    let v = id.clone();
-                                                                    view! {
-                                                                        <option value=v>{id}</option>
-                                                                    }
-                                                                }
-                                                            />
-                                                        </select>
-                                                        // The picker above only ADDS an agent that
-                                                        // already exists on disk. This authors one
-                                                        // in place — or edits one, or deletes one —
-                                                        // then refreshes that same picker so the
-                                                        // operator's next click puts it in the room
-                                                        // (or stops offering a folder that no longer
-                                                        // exists). No curl, no leaving the room to
-                                                        // write a folder by hand. `available_agents`
-                                                        // is reused as the edit target list rather
-                                                        // than fetched twice.
-                                                        <crate::agents::AgentBuilder
-                                                            state=agent_builder
-                                                            agents=rooms.available_agents
-                                                            on_saved=Callback::new(move |_name: String| {
-                                                                rooms.fetch_agents();
-                                                            })
-                                                            on_deleted=Callback::new(move |_name: String| {
-                                                                rooms.fetch_agents();
-                                                            })
-                                                        />
-                                                    </div>
-                                                }.into_any()
-                                            } else {
-                                                ().into_any()
-                                            }
-                                        }}
                                     }.into_any()
                                 }
                                 Some(ref access)
@@ -3925,6 +4744,11 @@ pub fn RoomsWorkspace(
                                 }
                             }
                     }}
+                    <crate::room_agent_authorization::RoomAgentAuthorizationPanel
+                        rooms=rooms
+                        state=room_agent_authority
+                        agent_builder=agent_builder
+                    />
                 </div>
 
                 // How a second person reaches this room: mint an invite code.
@@ -3934,6 +4758,10 @@ pub fn RoomsWorkspace(
                 // owns a mint's in-flight state. Unlike the repo section it
                 // renders for a Local room too: minting is how a Local room
                 // becomes federated, so hiding it there hides the only door.
+                // It keeps the COMPOSER's gate, and is one of the two rails
+                // that should: a mint registers this room with the federation
+                // control plane, so a code minted over a link that is down is
+                // a code no second person can ever redeem.
                 <crate::room_invite::RoomInvite
                     rooms=rooms
                     state=invite
@@ -4010,6 +4838,13 @@ pub fn RoomsWorkspace(
                                     </div>
                                 })
                             }}
+                            // Directly under the four triggers, because this is
+                            // the condition that makes all four inert: a room
+                            // with no bound workspace refuses every agent turn
+                            // before it starts, so a checked @mention row above
+                            // an unbound room promises a wake that cannot
+                            // happen.
+                            {workspace_binding_section(rooms, access.as_ref())}
                         </div>
                     }.into_any()
                 }}
@@ -4018,11 +4853,16 @@ pub fn RoomsWorkspace(
                 // was handed. A sibling of the roster for the same reason as
                 // the files below — that closure re-runs on every access
                 // change, and this section owns a run's in-flight state.
+                // A run reads this room's own transcript and amends the one
+                // `room-summary` artifact in this daemon's store — ocean-os
+                // documents a federated room's summary as local-only and never
+                // enqueues it — so the rail takes the local-store gate and
+                // stays usable while the link is coming back.
                 <crate::room_summary::RoomSummary
                     rooms=rooms
                     state=summary
                     writes_allowed=Signal::derive(move || {
-                        access_allows_writes(rooms.access.get().as_ref())
+                        local_store_write_gate(rooms.access.get().as_ref())
                     })
                     members=member_ids
                 />
@@ -4032,12 +4872,15 @@ pub fn RoomsWorkspace(
                 // it owns a write's in-flight state and an open editor. The
                 // rail holds only the compact list; reading and writing happen
                 // in the panel it opens, because 220px is not a measure prose
-                // can be edited at.
+                // can be edited at. Create and amend both land through the
+                // daemon's own store handle and announce themselves on the
+                // local event stream, with no outbox row anywhere on either
+                // path, so this rail takes the local-store gate too.
                 <crate::room_artifacts::RoomArtifacts
                     rooms=rooms
                     state=artifacts
                     writes_allowed=Signal::derive(move || {
-                        access_allows_writes(rooms.access.get().as_ref())
+                        local_store_write_gate(rooms.access.get().as_ref())
                     })
                     members=member_ids
                 />
@@ -4045,18 +4888,25 @@ pub fn RoomsWorkspace(
                 // Room context files. A sibling of the roster, not a child of
                 // the closure above: that closure re-runs on every access
                 // change, and this section owns an upload's in-flight state.
+                // An upload writes bytes and a row on THIS host and nothing
+                // else — the daemon's attachment module names the federation
+                // outbox nowhere — so the local-store gate again.
                 <crate::attachments::RoomAttachments
                     rooms=rooms
                     state=attachments
                     writes_allowed=Signal::derive(move || {
-                        access_allows_writes(rooms.access.get().as_ref())
+                        local_store_write_gate(rooms.access.get().as_ref())
                     })
                 />
 
                 // The room's bound repo — see, clone and build it from the
                 // room. A sibling for the same reason as its neighbours, and
                 // it renders NOTHING for a Local room: no Bedrock workspace
-                // exists there, and a refusal would read as breakage.
+                // exists there, and a refusal would read as breakage. The
+                // other rail that keeps the COMPOSER's gate, and the clearest
+                // case for it: every command here — bind, clone, build, CI —
+                // is executed by a Bedrock container, so a link that is down
+                // is a command that cannot run at all.
                 <crate::room_repo::RoomRepo
                     rooms=rooms
                     state=repo
@@ -4183,7 +5033,7 @@ pub fn RoomsWorkspace(
                                                 )
                                             }>
                                                 {if root_is_system {
-                                                    view! { <crate::icons::Spark /> }.into_any()
+                                                    "S".into_any()
                                                 } else {
                                                     root.author_id.chars().take(2).collect::<String>().to_uppercase().into_any()
                                                 }}
@@ -4197,7 +5047,7 @@ pub fn RoomsWorkspace(
                                                         aria-label=full_ts.clone()
                                                         title=full_ts.clone()
                                                     >
-                                                        {canonical_wire_clock_time(&full_ts)}
+                                                        {local_clock_time(&full_ts)}
                                                     </time>
                                                     // The enclosing closure re-runs on access
                                                     // changes, so this needs no closure of its own.
@@ -4459,10 +5309,12 @@ mod tests {
                 None,
                 "{state:?}"
             );
-            assert!(
-                trigger_row_is_editable(TriggerToggle::Mention, Some(&access)),
-                "{state:?}"
-            );
+            for checked in [false, true] {
+                assert!(
+                    trigger_row_is_editable(TriggerToggle::Mention, checked, Some(&access)),
+                    "{state:?} checked={checked}"
+                );
+            }
         }
     }
 
@@ -4478,10 +5330,13 @@ mod tests {
             trigger_row_dead_here(TriggerToggle::ThreadReply, Some(&local)),
             None
         );
-        assert!(trigger_row_is_editable(
-            TriggerToggle::ThreadReply,
-            Some(&local)
-        ));
+        for checked in [false, true] {
+            assert!(trigger_row_is_editable(
+                TriggerToggle::ThreadReply,
+                checked,
+                Some(&local)
+            ));
+        }
 
         let live = test_access(RoomAccessState::Live);
         assert_eq!(
@@ -4490,6 +5345,7 @@ mod tests {
         );
         assert!(!trigger_row_is_editable(
             TriggerToggle::ThreadReply,
+            false,
             Some(&live)
         ));
     }
@@ -4509,6 +5365,7 @@ mod tests {
         );
         assert!(!trigger_row_is_editable(
             TriggerToggle::BuildFailure,
+            false,
             Some(&local)
         ));
 
@@ -4517,10 +5374,13 @@ mod tests {
             trigger_row_dead_here(TriggerToggle::BuildFailure, Some(&live)),
             None
         );
-        assert!(trigger_row_is_editable(
-            TriggerToggle::BuildFailure,
-            Some(&live)
-        ));
+        for checked in [false, true] {
+            assert!(trigger_row_is_editable(
+                TriggerToggle::BuildFailure,
+                checked,
+                Some(&live)
+            ));
+        }
     }
 
     /// A red CI check reaches a room the same way a build failure does and
@@ -4538,6 +5398,7 @@ mod tests {
         );
         assert!(!trigger_row_is_editable(
             TriggerToggle::CiFailure,
+            false,
             Some(&local)
         ));
 
@@ -4546,9 +5407,65 @@ mod tests {
             trigger_row_dead_here(TriggerToggle::CiFailure, Some(&live)),
             None
         );
-        assert!(trigger_row_is_editable(
-            TriggerToggle::CiFailure,
-            Some(&live)
+        for checked in [false, true] {
+            assert!(trigger_row_is_editable(
+                TriggerToggle::CiFailure,
+                checked,
+                Some(&live)
+            ));
+        }
+    }
+
+    /// The asymmetry the three tests above are now only half of, and the bug
+    /// this pass closes. A flag is stored on a room, the room changes kind,
+    /// and the flag is suddenly one whose event can never reach it: a room
+    /// created Local with `on_thread_reply` that later federates, or one
+    /// created with the workspace-marker flags that never does. The row
+    /// renders CHECKED — `trigger_toggle_row` draws it from the stored policy
+    /// — greyed, noted, and [`trigger_summary`] lists it as on, deliberately,
+    /// because hiding it would only invert the contradiction. Under one gate
+    /// the un-tick was refused along with the tick and there was no control
+    /// anywhere in the app that could clear the flag.
+    ///
+    /// So the two directions part company. A dead row that is on takes the
+    /// un-tick; a dead row that is off still refuses the tick, which is the
+    /// half of the old gate that was always right — arming a flag this room
+    /// can never fire stores the same contradiction on purpose.
+    #[test]
+    fn a_dead_flag_that_is_stored_on_can_still_be_turned_off() {
+        let dead_pairings = [
+            (TriggerToggle::ThreadReply, RoomAccessState::Live),
+            (TriggerToggle::BuildFailure, RoomAccessState::Local),
+            (TriggerToggle::CiFailure, RoomAccessState::Local),
+        ];
+        for (toggle, state) in dead_pairings {
+            let access = test_access(state);
+            assert!(
+                trigger_row_dead_here(toggle, Some(&access)).is_some(),
+                "{toggle:?} in {state:?} must be the dead pairing this pins"
+            );
+
+            assert!(
+                trigger_row_is_editable(toggle, true, Some(&access)),
+                "{toggle:?} stored on in {state:?} must accept the un-tick — \
+                 otherwise the stored flag can never be cleared"
+            );
+            assert!(
+                !trigger_row_is_editable(toggle, false, Some(&access)),
+                "{toggle:?} off in {state:?} must still refuse the tick"
+            );
+        }
+
+        // And the write gate still leads. A `Revoked` room refuses both
+        // directions on every flag, stored-on ones included: the operator has
+        // been removed, so there is no edit left to offer them — see
+        // [`a_revoked_room_holds_every_trigger_row`], which pins the same
+        // ordering from the other side.
+        let revoked = test_access(RoomAccessState::Revoked);
+        assert!(!trigger_row_is_editable(
+            TriggerToggle::ThreadReply,
+            true,
+            Some(&revoked)
         ));
     }
 
@@ -4556,7 +5473,10 @@ mod tests {
     /// would take the PATCH — `room_update` has no access check — but the
     /// operator has been removed from this room, so a control that still
     /// worked would be offering an action that cannot mean anything to them
-    /// again. The federated NOTE survives being held: `Revoked` is non-Local,
+    /// again. Both directions, so a flag stored on is held too: the un-tick
+    /// [`a_dead_flag_that_is_stored_on_can_still_be_turned_off`] admits
+    /// elsewhere is an edit like any other, and this is the state that offers
+    /// none. The federated NOTE survives being held: `Revoked` is non-Local,
     /// so `on_thread_reply` is still dead here for its own reason.
     #[test]
     fn a_revoked_room_holds_every_trigger_row() {
@@ -4567,10 +5487,12 @@ mod tests {
             TriggerToggle::BuildFailure,
             TriggerToggle::CiFailure,
         ] {
-            assert!(
-                !trigger_row_is_editable(toggle, Some(&access)),
-                "{toggle:?}"
-            );
+            for checked in [false, true] {
+                assert!(
+                    !trigger_row_is_editable(toggle, checked, Some(&access)),
+                    "{toggle:?} checked={checked}"
+                );
+            }
         }
         assert_eq!(
             trigger_row_dead_here(TriggerToggle::ThreadReply, Some(&access)),
@@ -4591,8 +5513,9 @@ mod tests {
     /// daemon's own store and the PATCH that writes it never leaves the
     /// machine. `Connecting` and `Recovering` therefore keep every row whose
     /// event can fire in a federated room — and `on_thread_reply` stays held
-    /// there on the pre-existing, unrelated grounds that the bridge can never
-    /// construct that event, note and all.
+    /// there — against being ARMED, the direction that would store a flag
+    /// this room can never fire — on the pre-existing, unrelated grounds that
+    /// the bridge can never construct that event, note and all.
     ///
     /// This is the capability the gate used to take away: a room stuck
     /// `Recovering` while every mention woke an agent, and no way to stop it.
@@ -4601,20 +5524,22 @@ mod tests {
         for state in [RoomAccessState::Connecting, RoomAccessState::Recovering] {
             let access = test_access(state);
 
+            for checked in [false, true] {
+                assert!(
+                    trigger_row_is_editable(TriggerToggle::Mention, checked, Some(&access)),
+                    "{state:?} checked={checked}"
+                );
+                assert!(
+                    trigger_row_is_editable(TriggerToggle::BuildFailure, checked, Some(&access)),
+                    "{state:?} checked={checked}"
+                );
+                assert!(
+                    trigger_row_is_editable(TriggerToggle::CiFailure, checked, Some(&access)),
+                    "{state:?} checked={checked}"
+                );
+            }
             assert!(
-                trigger_row_is_editable(TriggerToggle::Mention, Some(&access)),
-                "{state:?}"
-            );
-            assert!(
-                trigger_row_is_editable(TriggerToggle::BuildFailure, Some(&access)),
-                "{state:?}"
-            );
-            assert!(
-                trigger_row_is_editable(TriggerToggle::CiFailure, Some(&access)),
-                "{state:?}"
-            );
-            assert!(
-                !trigger_row_is_editable(TriggerToggle::ThreadReply, Some(&access)),
+                !trigger_row_is_editable(TriggerToggle::ThreadReply, false, Some(&access)),
                 "{state:?}"
             );
 
@@ -4688,7 +5613,12 @@ mod tests {
             TriggerToggle::CiFailure,
         ] {
             assert_eq!(trigger_row_dead_here(toggle, None), None, "{toggle:?}");
-            assert!(!trigger_row_is_editable(toggle, None), "{toggle:?}");
+            for checked in [false, true] {
+                assert!(
+                    !trigger_row_is_editable(toggle, checked, None),
+                    "{toggle:?} checked={checked}"
+                );
+            }
         }
     }
 
@@ -4742,6 +5672,16 @@ mod tests {
             row.contains(&["trigger_row", "_is_editable"].concat()),
             "the trigger row must consult the per-row gate"
         );
+        // And it must hand the gate its OWN `checked`. The direction argument
+        // is a degree of freedom the old two-argument gate did not have: a
+        // literal `true` there compiles, takes every unit test above green
+        // with it — they all call the gate directly — and re-arms every dead
+        // row in the browser, which is the half of the gate that was right.
+        assert!(
+            row.contains(&["trigger_row", "_is_editable(toggle, checked, access)"].concat()),
+            "the trigger row must pass its own `checked` to the per-row gate \
+             — a literal there decides the direction for every row at once"
+        );
         let disabled = row
             .find("disabled=")
             .map(|at| row[at..].lines().next().unwrap_or_default())
@@ -4772,6 +5712,107 @@ mod tests {
             "the per-row gate must NOT take the composer's write gate — that \
              holds the whole rail through `Connecting`/`Recovering`, where the \
              policy write lands in the local store regardless"
+        );
+    }
+
+    // ── create rows: the room this form makes is Local ─────────────
+
+    /// `POST /v1/rooms/persistent` has no federation in its body, so the room
+    /// the create rail makes is Local on day one. Judging the create rows
+    /// against that access — rather than against nothing — is what lets the
+    /// two workspace-marker flags say why they are held, in the same words
+    /// the right rail will use on the very same room a second later.
+    #[test]
+    fn a_created_room_is_local_and_its_dead_flags_say_so() {
+        assert_eq!(creating_room_access().state, RoomAccessState::Local);
+
+        assert_eq!(create_trigger_row_dead_here(TriggerToggle::Mention), None);
+        assert_eq!(
+            create_trigger_row_dead_here(TriggerToggle::ThreadReply),
+            None
+        );
+        assert_eq!(
+            create_trigger_row_dead_here(TriggerToggle::BuildFailure),
+            Some("federated rooms only")
+        );
+        assert_eq!(
+            create_trigger_row_dead_here(TriggerToggle::CiFailure),
+            Some("federated rooms only")
+        );
+    }
+
+    /// The trap this slice exists to avoid, pinned as a difference. A room
+    /// being created has no `RoomAccessProjection`, so the obvious wiring is
+    /// `trigger_row_dead_here(toggle, None)` — and that is the one reading
+    /// which annotates NOTHING, because unknown access deliberately makes no
+    /// claim (see [`an_unknown_access_state_claims_nothing_about_any_flag`]).
+    /// It compiles, it passes, and it ships silence. A room in creation is not
+    /// unknown; it is Local, and the two answers must not be allowed to
+    /// converge by someone "simplifying" the explicit projection away.
+    #[test]
+    fn create_rows_are_not_judged_against_unknown_access() {
+        for toggle in [TriggerToggle::BuildFailure, TriggerToggle::CiFailure] {
+            assert_eq!(trigger_row_dead_here(toggle, None), None, "{toggle:?}");
+            assert!(
+                create_trigger_row_dead_here(toggle).is_some(),
+                "{toggle:?} must be annotated at create time, not silently \
+                 armed — passing `None` access here notes nothing"
+            );
+        }
+    }
+
+    /// The pure helpers above only prove the create rail answers correctly if
+    /// it asks. Pin that it asks, and that every row asks through the one
+    /// helper — the same source-scan guard the right rail's row carries, for
+    /// the same reason: a checkbox is reachable only from a browser, so a row
+    /// that quietly goes back to longhand markup takes every one of these
+    /// tests green with it.
+    #[test]
+    fn the_create_trigger_rows_are_wired_to_the_created_rooms_access() {
+        let markup = include_str!("rooms_workspace.rs");
+
+        let group_class = ["rooms-workspace_", "_create-triggers"].concat();
+        let group = markup
+            .find(&format!("class=\"{group_class}\""))
+            .expect("the create-triggers group must be emitted from this file");
+        let group = &markup[group..];
+        let group = &group[..group.find("</div>").expect("the group must close")];
+        assert_eq!(
+            group
+                .matches(&format!("{}(", ["create_trigger", "_row"].concat()))
+                .count(),
+            4,
+            "every create trigger row must render through the shared helper — \
+             longhand markup here is a row that cannot carry its note"
+        );
+
+        let row_at = markup
+            .find(&format!("fn {}(", ["create_trigger", "_row"].concat()))
+            .expect("the create row must render from this file");
+        let row = &markup[row_at..];
+        let row = &row[..row.find("\nfn ").unwrap_or(row.len())];
+        assert!(
+            row.contains(&["create_trigger_row", "_dead_here"].concat()),
+            "the create row must judge its flag against the room it is making"
+        );
+        let disabled = row
+            .find("disabled=")
+            .map(|at| row[at..].lines().next().unwrap_or_default())
+            .expect("the create checkbox must carry a disabled binding");
+        assert!(
+            disabled.contains("dead_here"),
+            "`disabled=` must consult the dead-here note — on its own, \
+             `pending_create` arms a flag the created room can never fire"
+        );
+        // The right rail's row holds its own note by compiling: `dead_here`
+        // has no other reader there, so deleting the span is an unused-binding
+        // error under the release lane. Here `disabled=` reads it too, so the
+        // span can be deleted with everything still green — leaving a greyed
+        // box that explains nothing, which is this slice inverted.
+        assert!(
+            row.contains(&["rooms-workspace_", "_trigger-note"].concat()),
+            "the create row must still render the note span — the hold is \
+             only half the product, and nothing but this line notices it going"
         );
     }
 
@@ -4890,40 +5931,151 @@ mod tests {
     fn transcript_pass_action_covers_append_reset_and_unchanged_reruns() {
         // Room switch / generation reset.
         assert_eq!(
-            transcript_pass_action(0, 5, true, true),
+            transcript_pass_action(0, 5, true, true, false, false),
             TranscriptPassAction::Reset
         );
         // First fill, regardless of the measured scroll position.
         assert_eq!(
-            transcript_pass_action(5, 0, true, false),
+            transcript_pass_action(5, 0, true, false, false, false),
             TranscriptPassAction::PinAndQueue
         );
         // Access arrives after the fill, reader still at the bottom: requeue.
         assert_eq!(
-            transcript_pass_action(5, 5, true, true),
+            transcript_pass_action(5, 5, true, true, false, false),
             TranscriptPassAction::PinAndQueue
         );
         // Access arrives after the fill, reader scrolled up: hold.
         assert_eq!(
-            transcript_pass_action(5, 5, true, false),
+            transcript_pass_action(5, 5, true, false, false, false),
             TranscriptPassAction::Hold
         );
         // Append below a scrolled-up reader keeps the jump affordance.
         assert_eq!(
-            transcript_pass_action(6, 5, true, false),
+            transcript_pass_action(6, 5, true, false, false, false),
             TranscriptPassAction::RaiseJump
         );
         // Append while at the bottom pins and queues.
         assert_eq!(
-            transcript_pass_action(6, 5, true, true),
+            transcript_pass_action(6, 5, true, true, false, false),
             TranscriptPassAction::PinAndQueue
         );
         // No transcript element yet: hold, so the first-fill state survives
         // for the pass that can actually measure.
         assert_eq!(
-            transcript_pass_action(5, 0, false, true),
+            transcript_pass_action(5, 0, false, true, false, false),
             TranscriptPassAction::Hold
         );
+    }
+
+    /// A REQUESTED older page landing in front of the paint is neither of the
+    /// growth cases the two existing arms describe, and both of them are wrong
+    /// for it.
+    ///
+    /// `RaiseJump` is what a scrolled-up reader got before this arm existed —
+    /// the same `len > prev_len` a tail append produces — so pressing "load
+    /// older" raised "↓ New messages" over rows that had arrived ABOVE.
+    /// `PinAndQueue` is the other direction of the same mistake: it throws a
+    /// reader who happened to be at the bottom down to it again, having just
+    /// asked to see the top.
+    #[test]
+    fn an_older_page_anchors_instead_of_jumping_or_pinning() {
+        // Scrolled-up reader — the press's own case.
+        assert_eq!(
+            transcript_pass_action(200, 5, true, false, true, true),
+            TranscriptPassAction::AnchorOlder
+        );
+        // At the bottom, where the arm order is what decides it.
+        assert_eq!(
+            transcript_pass_action(200, 5, true, true, true, true),
+            TranscriptPassAction::AnchorOlder
+        );
+        // An unmeasured element still holds: there is nothing to anchor
+        // against, and the pass that can measure will see the same prepend
+        // because this one refuses to consume the state.
+        assert_eq!(
+            transcript_pass_action(200, 5, false, false, true, true),
+            TranscriptPassAction::Hold
+        );
+        // A room switch beats everything, prepend or not.
+        assert_eq!(
+            transcript_pass_action(0, 200, true, false, true, true),
+            TranscriptPassAction::Reset
+        );
+    }
+
+    /// The anchor is what makes a prepend a REQUEST, and a prepend without one
+    /// has to keep the behaviour ocean-surface#190 landed.
+    ///
+    /// `backfill_open_transcript` prepends up to four more pages after the
+    /// first fill, and every one of them raises `grew_at_front`. Routing those
+    /// to `AnchorOlder` reintroduces #190 through a different mechanism: that
+    /// arm holds nothing when there is no anchor to hold against, so
+    /// `scroll_top` stays where it was while rows land above it and the reader
+    /// drifts backwards by a page per walk step. `.rooms-workspace__transcript`
+    /// is a plain `overflow-y: auto` column and the Tauri host is WebKit, which
+    /// has no `overflow-anchor`, so nothing below this decision catches it.
+    ///
+    /// The knock-on is the second-order half: a hydration that ends scrolled up
+    /// makes the access projection's re-entry pass (`len == prev_len`,
+    /// `near_bottom` now false) take `Hold` instead of `PinAndQueue`, so the
+    /// read advance that re-entry exists to queue is never queued at all.
+    #[test]
+    fn an_unasked_prepend_keeps_the_pin_that_opens_a_room_at_its_newest_page() {
+        // The hydration walk's pages: at the bottom, because the first fill's
+        // pin put the reader there, and unanchored because no press parked
+        // geometry for them.
+        assert_eq!(
+            transcript_pass_action(200, 5, true, true, true, false),
+            TranscriptPassAction::PinAndQueue
+        );
+        assert_eq!(
+            transcript_pass_action(400, 200, true, true, true, false),
+            TranscriptPassAction::PinAndQueue
+        );
+        // A walk page landing after the reader scrolled away keeps the pre-#190
+        // answer too: this is not the decision that changes it.
+        assert_eq!(
+            transcript_pass_action(400, 200, true, false, true, false),
+            TranscriptPassAction::RaiseJump
+        );
+        // And a parked anchor alone decides nothing, so a press whose page has
+        // not landed yet cannot divert the appends that arrive while it flies.
+        assert_eq!(
+            transcript_pass_action(6, 5, true, true, false, true),
+            TranscriptPassAction::PinAndQueue
+        );
+        assert_eq!(
+            transcript_pass_action(6, 5, true, false, false, true),
+            TranscriptPassAction::RaiseJump
+        );
+        assert_eq!(
+            transcript_pass_action(5, 5, true, false, false, true),
+            TranscriptPassAction::Hold
+        );
+    }
+
+    /// The signal the arm above turns on. A prepend is the only write that
+    /// lowers the oldest `seq`, and reading the seq rather than the row count is
+    /// what stops a page that was entirely already painted — `prepend_transcript_page`
+    /// keeps only rows strictly older than the oldest painted — from being
+    /// mistaken for one that moved the view.
+    #[test]
+    fn only_a_fallen_oldest_seq_reads_as_a_prepend() {
+        assert!(transcript_grew_at_front(Some(4001), Some(3801)));
+        assert!(!transcript_grew_at_front(Some(4001), Some(4001)));
+        assert!(
+            !transcript_grew_at_front(Some(4001), Some(4200)),
+            "a rising oldest seq is not a prepend; nothing in this module \
+             produces one, and reading it as history arriving would anchor the \
+             reader against a page that never came",
+        );
+        assert!(
+            !transcript_grew_at_front(None, Some(4001)),
+            "the first fill has no rows to arrive in front of — it must stay on \
+             the pin path that opens a room at its newest message",
+        );
+        assert!(!transcript_grew_at_front(Some(4001), None));
+        assert!(!transcript_grew_at_front(None, None));
     }
 
     /// L2 regression, end to end through the production decision path: a
@@ -4940,7 +6092,7 @@ mod tests {
         // Fill: `Live` access with no confirmed sequence yet.
         let mut live = test_access(RoomAccessState::Live);
         assert_eq!(
-            transcript_pass_action(transcript.len(), 0, true, near_bottom),
+            transcript_pass_action(transcript.len(), 0, true, near_bottom, false, false),
             TranscriptPassAction::PinAndQueue
         );
         assert_eq!(
@@ -4959,7 +6111,14 @@ mod tests {
         // The confirmed global sequence arrives; the transcript did not change.
         live.last_confirmed_global_sequence = Some(44);
         assert_eq!(
-            transcript_pass_action(transcript.len(), transcript.len(), true, near_bottom),
+            transcript_pass_action(
+                transcript.len(),
+                transcript.len(),
+                true,
+                near_bottom,
+                false,
+                false
+            ),
             TranscriptPassAction::PinAndQueue
         );
         assert_eq!(
@@ -4982,7 +6141,14 @@ mod tests {
 
         // Same arrival while the reader is scrolled up marks nothing.
         assert_eq!(
-            transcript_pass_action(transcript.len(), transcript.len(), true, false),
+            transcript_pass_action(
+                transcript.len(),
+                transcript.len(),
+                true,
+                false,
+                false,
+                false
+            ),
             TranscriptPassAction::Hold
         );
     }
@@ -5337,6 +6503,388 @@ mod tests {
         }
     }
 
+    /// The rail-local gate stated per state, and stated as a difference from
+    /// the composer's so the divergence is pinned rather than re-derived from
+    /// two matrices. They part company on exactly the two non-terminal states:
+    /// a write that has to reach a peer cannot land while the link is down or
+    /// coming back, and a write that lands in this daemon's store is untouched
+    /// by either.
+    #[test]
+    fn every_access_state_pins_the_local_store_write_gate() {
+        // Unknown access is the one place the two gates must never diverge:
+        // nothing is known about the room yet, and a control that flips to
+        // disabled once the projection lands is worse than one that waits.
+        assert!(!local_store_write_gate(None));
+        assert!(!access_allows_writes(None));
+
+        let cases = [
+            (RoomAccessState::Local, true),
+            (RoomAccessState::Connecting, true),
+            (RoomAccessState::Live, true),
+            (RoomAccessState::Recovering, true),
+            (RoomAccessState::Revoked, false),
+        ];
+        for (state, writable) in cases {
+            let access = test_access(state);
+            assert_eq!(local_store_write_gate(Some(&access)), writable, "{state:?}");
+
+            let diverges = matches!(
+                state,
+                RoomAccessState::Connecting | RoomAccessState::Recovering
+            );
+            assert_eq!(
+                local_store_write_gate(Some(&access)) != access_allows_writes(Some(&access)),
+                diverges,
+                "{state:?}"
+            );
+        }
+    }
+
+    /// The half of this module a release build compiles. Every source scan
+    /// below runs over it, never over the whole file: this module's own
+    /// fixtures quote rail markup, and a scan reading them would find its own
+    /// literals instead of the view's.
+    fn rail_view_source() -> &'static str {
+        include_str!("rooms_workspace.rs")
+            .split_once("#[cfg(test)]")
+            .expect("this module carries its unit tests at the bottom")
+            .0
+    }
+
+    /// The ATTRIBUTE REGION of one mounted rail, anchored to the tag it names.
+    ///
+    /// The window this replaced was `markup[at..]` truncated at the first
+    /// `/>`, which is the rail's own close only for as long as every rail
+    /// self-closes. Nothing held that. A rail that grows children — the
+    /// component gains a `children` prop, the mount becomes `<Rail …>…</Rail>`
+    /// — pushes the first `/>` into the NEXT rail, and the guard then reads
+    /// the neighbour's `writes_allowed=` while reporting on the rail it names.
+    ///
+    /// Measured, not argued (the mutation is preserved as
+    /// `a_rail_that_stops_self_closing_is_read_off_its_neighbour`): giving
+    /// `RoomSummary` a `children` prop, mounting it non-self-closing, and
+    /// replacing its gate with a hardcoded `Signal::derive(move || true)` —
+    /// a rail that writes no matter what the room's access projection says —
+    /// left `each_rail_takes_the_gate_its_write_destination_earns` GREEN,
+    /// along with all 1313 tests across 14 binaries and the wasm32 clippy
+    /// lane. It read `local_store_write_gate` out of `RoomArtifacts`.
+    ///
+    /// So: `Err` rather than a guess whenever the region cannot be bounded to
+    /// the named rail. A guard that cannot see its subject must say so, not
+    /// report on its neighbour.
+    fn rail_attribute_window<'a>(view: &'a str, tag: &str) -> Result<&'a str, String> {
+        let mut from = 0usize;
+        let at = loop {
+            let rel = view[from..]
+                .find(tag)
+                .ok_or_else(|| format!("{tag} must be mounted from this file"))?;
+            let at = from + rel;
+            // `<crate::x::Foo` is a prefix of `<crate::x::FooBar` too, so only
+            // a following separator makes this the element open it names.
+            match view[at + tag.len()..].chars().next() {
+                None => break at,
+                Some(c) if c.is_whitespace() || c == '/' || c == '>' => break at,
+                Some(_) => from = at + tag.len(),
+            }
+        };
+
+        // Bound the region at the end of THIS rail's opening tag, and ask
+        // whether that tag self-closes — never whether some `/>` exists ahead.
+        //
+        // An earlier revision took the first `/>` unless a `<crate::` mount
+        // came first. Codex caught what that misses: give the rail a child and
+        // make it a self-closing HTML element — `<input … />` — and the first
+        // `/>` is the CHILD's while the next mount is absent or later, so the
+        // window is returned as if it were the rail's. If that child names the
+        // expected gate anywhere (a `disabled=` reading it, say) while the
+        // rail's own `writes_allowed` is hardcoded, every assertion downstream
+        // still passes: the same silent green this guard exists to end.
+        //
+        // A Leptos attribute value is a Rust expression and can hold `>` — a
+        // closure's `->`, a turbofish, a comparison — so the scan tracks
+        // bracket depth and string literals rather than taking the first `>`.
+        let body = &view[at + tag.len()..];
+        let mut depth = 0i32;
+        let mut in_str = false;
+        let mut escaped = false;
+        let mut end = None;
+        for (i, c) in body.char_indices() {
+            if in_str {
+                match c {
+                    '\\' if !escaped => escaped = true,
+                    '"' if !escaped => in_str = false,
+                    _ => escaped = false,
+                }
+                continue;
+            }
+            match c {
+                '"' => in_str = true,
+                '(' | '{' | '[' => depth += 1,
+                ')' | '}' | ']' => depth -= 1,
+                '>' if depth == 0 => {
+                    end = Some(i);
+                    break;
+                }
+                _ => {}
+            }
+            if depth < 0 {
+                break;
+            }
+        }
+        let Some(end) = end else {
+            return Err(format!("{tag}'s opening tag does not close in this file"));
+        };
+
+        match body[..end].trim_end().strip_suffix('/') {
+            Some(attrs) => Ok(attrs),
+            None => Err(format!(
+                "{tag} does not self-close — its opening tag ends `>`, so it \
+                 has children. A window bounded by a `/>` ahead would run \
+                 into a DESCENDANT's or a NEIGHBOUR's `writes_allowed=` and \
+                 report it as this rail's. Re-anchor this guard to the rail's \
+                 own closing tag before landing markup that gives it children."
+            )),
+        }
+    }
+
+    /// The flaw the anchored window closes, kept executable.
+    ///
+    /// Two rails. The first has children and no `/>` of its own inside them,
+    /// exactly as a Leptos mount looks once its component gains a `children`
+    /// prop; its gate is hardcoded open, which is the defect the guard exists
+    /// to catch. The second is an ordinary self-closing rail carrying the
+    /// needle the guard hunts for.
+    ///
+    /// Fake module paths on purpose: `rail_view_source` stops at
+    /// `#[cfg(test)]`, but a fixture naming a real rail would still be a
+    /// literal in this file that a future whole-file scan could read.
+    #[test]
+    fn a_rail_that_stops_self_closing_is_read_off_its_neighbour() {
+        let local = ["local_store", "_write_gate"].concat();
+        let peer = ["access_allows", "_writes"].concat();
+        let alpha = ["<crate::fixture_alpha", "::RailAlpha"].concat();
+        let beta = ["<crate::fixture_beta", "::RailBeta"].concat();
+        let markup = format!(
+            "\
+                {alpha}
+                    rooms=rooms
+                    writes_allowed=Signal::derive(move || true)
+                >
+                    <span class=\"lead\"></span>
+                </{alpha}>
+
+                {beta}
+                    rooms=rooms
+                    writes_allowed=Signal::derive(move || {{
+                        {local}(rooms.access.get().as_ref())
+                    }})
+                />",
+            alpha = alpha,
+            beta = beta,
+            local = local,
+        );
+
+        // What the window did before it was anchored: first `/>` wins. Alpha's
+        // children carry none, so the window runs through Alpha's close, on
+        // through Beta's attributes, and stops at BETA's `/>`.
+        let at = markup.find(&alpha).expect("fixture mounts alpha");
+        let naive = &markup[at..][..markup[at..].find("/>").expect("fixture closes")];
+        // All three of the guard's assertions pass over that window while
+        // Alpha's gate ignores access entirely — the silent green.
+        assert!(naive.contains("writes_allowed="));
+        assert!(
+            naive.contains(local.as_str()),
+            "the unanchored window satisfies `{local}` from the NEIGHBOUR: \
+             that is the whole defect"
+        );
+        assert!(!naive.contains(peer.as_str()));
+
+        // Anchored: refused, loudly, naming the rail.
+        let why = rail_attribute_window(&markup, &alpha)
+            .expect_err("an unanchored window must be refused, not guessed at");
+        assert!(why.contains(&alpha) && why.contains("does not self-close"));
+
+        // And an ordinary self-closing rail still reads exactly its own
+        // attributes — never a character of its neighbour's.
+        let window = rail_attribute_window(&markup, &beta).expect("beta self-closes");
+        assert!(window.contains(local.as_str()));
+        assert!(
+            !window.contains("RailAlpha") && !window.contains("move || true"),
+            "a rail's window must not reach back over its neighbour either"
+        );
+
+        // The real view has to keep satisfying the anchor, or the guard above
+        // is asserting on nothing.
+        for tag in [
+            ["<crate::room_summary", "::RoomSummary"].concat(),
+            ["<crate::room_repo", "::RoomRepo"].concat(),
+        ] {
+            assert!(
+                rail_attribute_window(rail_view_source(), &tag).is_ok(),
+                "{tag} must still be anchorable in the live view"
+            );
+        }
+    }
+
+    /// The case a `<crate::`-lookahead bound misses, found by Codex on #199.
+    ///
+    /// A rail with children whose FIRST child is a self-closing HTML element
+    /// puts a `/>` ahead of any neighbouring mount. Bounding on "the first
+    /// `/>` unless a mount comes first" therefore returns `Ok` on a window
+    /// that is not the rail's — and if the child names the wanted gate while
+    /// the rail's own is hardcoded, all three assertions pass. Asking whether
+    /// the rail's OWN opening tag self-closes is what actually decides it.
+    #[test]
+    fn a_self_closing_child_does_not_pass_for_the_rail_s_own_close() {
+        let local = ["local_store", "_write_gate"].concat();
+        let peer = ["access_allows", "_writes"].concat();
+        let gamma = ["<crate::fixture_gamma", "::RailGamma"].concat();
+        let markup = format!(
+            "\
+                {gamma}
+                    rooms=rooms
+                    writes_allowed=Signal::derive(move || true)
+                >
+                    <input
+                        class=\"lead\"
+                        disabled=Signal::derive(move || !{local}(access))
+                    />
+                </{gamma}>",
+        );
+
+        // The bound this replaced: first `/>` wins unless `<crate::` precedes
+        // it. Here neither guard fires — the `/>` is the CHILD's and there is
+        // no next mount at all — so the window came back as the rail's.
+        let at = markup.find(&gamma).expect("fixture mounts gamma");
+        let body = &markup[at + gamma.len()..];
+        let naive_end = body.find("/>").expect("the child self-closes");
+        assert!(
+            body.find("<crate::").is_none_or(|n| naive_end < n),
+            "the old bound accepted this window",
+        );
+        let naive = &body[..naive_end];
+        // And every assertion the guard makes passes over it, while the rail's
+        // own gate ignores access entirely.
+        assert!(naive.contains("writes_allowed="));
+        assert!(
+            naive.contains(local.as_str()),
+            "the wanted gate is satisfied by the CHILD: the silent green",
+        );
+        assert!(!naive.contains(peer.as_str()));
+
+        // Anchored on the rail's own opening tag: refused, and it says why.
+        let why = rail_attribute_window(&markup, &gamma)
+            .expect_err("a rail with children must be refused");
+        assert!(why.contains(&gamma) && why.contains("does not self-close"));
+    }
+
+    /// The opening tag's end is found by bracket depth, not by the first `>`,
+    /// because a Leptos attribute value is a Rust expression that can hold one.
+    #[test]
+    fn an_attribute_expression_holding_an_angle_bracket_does_not_end_the_tag() {
+        let local = ["local_store", "_write_gate"].concat();
+        let delta = ["<crate::fixture_delta", "::RailDelta"].concat();
+        let markup = format!(
+            "\
+                {delta}
+                    rooms=rooms
+                    writes_allowed=Signal::derive(move || -> bool {{
+                        {local}(rooms.access.get().as_ref())
+                    }})
+                    title=\"a > b\"
+                />",
+        );
+        let window = rail_attribute_window(&markup, &delta)
+            .expect("a closure's `->` and a quoted `>` must not end the tag");
+        assert!(
+            window.contains(local.as_str()) && window.contains("title="),
+            "the window must reach the whole attribute list, not stop at the \
+             first `>` inside an expression or a string: {window:?}",
+        );
+    }
+
+    /// Which gate a rail takes is a `Signal::derive` inside the view, so no
+    /// unit test of the predicates can reach it: both gates stay pure and
+    /// correct, and every test above stays green while a section is wired to
+    /// the wrong one. Read the source and assert on it instead, the way the
+    /// trigger section's guard does, with the needles concatenated at runtime
+    /// so this test's own literals cannot stand in for the code it scans.
+    ///
+    /// The ruling is per rail, so the table states it once. Summary, artifacts
+    /// and attachments all write through the daemon's own store handle with no
+    /// outbox row on any path, and take the local gate. Invite mints
+    /// federation and repo drives a Bedrock container, so both keep the
+    /// composer's — a code nobody can redeem and a build nothing can run are
+    /// not writes a down link merely delays.
+    #[test]
+    fn each_rail_takes_the_gate_its_write_destination_earns() {
+        let local = ["local_store", "_write_gate"].concat();
+        let peer = ["access_allows", "_writes"].concat();
+
+        let sections = [
+            (["<crate::room_summary", "::RoomSummary"].concat(), true),
+            (["<crate::room_artifacts", "::RoomArtifacts"].concat(), true),
+            (["<crate::attachments", "::RoomAttachments"].concat(), true),
+            (["<crate::room_invite", "::RoomInvite"].concat(), false),
+            (["<crate::room_repo", "::RoomRepo"].concat(), false),
+        ];
+
+        for (tag, writes_land_locally) in sections {
+            let section = rail_attribute_window(rail_view_source(), &tag)
+                .unwrap_or_else(|why| panic!("{why}"));
+            assert!(
+                section.contains("writes_allowed="),
+                "{tag} must carry a write gate"
+            );
+
+            let (wanted, refused) = if writes_land_locally {
+                (&local, &peer)
+            } else {
+                (&peer, &local)
+            };
+            assert!(
+                section.contains(wanted.as_str()),
+                "{tag} must take `{wanted}`"
+            );
+            assert!(
+                !section.contains(refused.as_str()),
+                "{tag} must not take `{refused}` — which gate a rail takes IS \
+                 its ruling on whether its write has to reach a peer"
+            );
+        }
+    }
+
+    /// Three sibling files carried a sentence this ruling falsifies: that the
+    /// control and the composer can never disagree about the same room's
+    /// access projection. They can now, and on purpose. A stale sentence there
+    /// is worse than none — it is the argument a future reader would use to
+    /// wire the rail back to the composer's gate — so pin both halves: the
+    /// claim is gone, and the gate that replaced it is NAMED beside the prop
+    /// that carries it. The second needle is the gate's identifier rather than
+    /// a sentence, because a prose needle breaks on the next doc rewrap and
+    /// this guard has to survive one.
+    #[test]
+    fn no_moved_rail_still_claims_it_cannot_disagree_with_the_composer() {
+        let stale = ["composer can never disagree", " about the same room"].concat();
+        let ruling = ["local_store", "_write_gate"].concat();
+        for (name, source) in [
+            ("room_summary.rs", include_str!("room_summary.rs")),
+            ("room_artifacts.rs", include_str!("room_artifacts.rs")),
+            ("attachments.rs", include_str!("attachments.rs")),
+        ] {
+            assert!(
+                !source.contains(&stale),
+                "{name} still claims this control and the composer can never \
+                 disagree — they now do, in `Connecting` and `Recovering`"
+            );
+            assert!(
+                source.contains(&ruling),
+                "{name} must name the gate it actually takes, so a revert to \
+                 the composer's leaves a doc that reads as wrong"
+            );
+        }
+    }
+
     // ── roster remove control ─────────────────────────────────────────
 
     #[test]
@@ -5556,11 +7104,6 @@ mod tests {
     }
 
     #[test]
-    fn canonical_wire_clock_time_extracts_hhmm_from_rfc3339_z() {
-        assert_eq!(canonical_wire_clock_time("2026-07-25T03:43:12Z"), "03:43");
-    }
-
-    #[test]
     fn transcript_bottom_threshold_matches_follow_contract() {
         assert!(transcript_is_near_bottom(1000, 810, 100, 120));
         assert!(!transcript_is_near_bottom(1000, 700, 100, 120));
@@ -5611,43 +7154,6 @@ mod tests {
                 Some(&test_access(RoomAccessState::Connecting))
             ),
             None
-        );
-    }
-
-    #[test]
-    fn canonical_wire_clock_time_extracts_hhmm_from_rfc3339_fractional() {
-        assert_eq!(
-            canonical_wire_clock_time("2026-07-25T03:43:12.987Z"),
-            "03:43"
-        );
-    }
-
-    #[test]
-    fn canonical_wire_clock_time_extracts_hhmm_from_rfc3339_offset() {
-        assert_eq!(
-            canonical_wire_clock_time("2026-07-25T03:43:12+07:00"),
-            "03:43"
-        );
-    }
-
-    #[test]
-    fn canonical_wire_clock_time_passthrough_short_string() {
-        assert_eq!(canonical_wire_clock_time("abc"), "abc");
-    }
-
-    #[test]
-    fn canonical_wire_clock_time_passthrough_noncanonical_separator() {
-        assert_eq!(
-            canonical_wire_clock_time("2026-07-25 03:43:12Z"),
-            "2026-07-25 03:43:12Z"
-        );
-    }
-
-    #[test]
-    fn canonical_wire_clock_time_passthrough_unicode_without_panic() {
-        assert_eq!(
-            canonical_wire_clock_time("２０２６-07-25T03:43:12Z"),
-            "２０２６-07-25T03:43:12Z"
         );
     }
 
@@ -5703,18 +7209,306 @@ mod tests {
         assert_eq!(roster_presence_count(&members), 2);
     }
 
+    fn roster_row(id: &str, display_name: &str, kind: RoomParticipantKind) -> RoomParticipant {
+        RoomParticipant {
+            id: id.into(),
+            kind,
+            display_name: display_name.into(),
+        }
+    }
+
+    /// The four answers the rail can give an agent row, on one roster.
+    ///
+    /// The unclaimed arm is the one the slice exists for. Before it, an agent
+    /// nobody owns and an agent whose owner the surface never decoded rendered
+    /// identically — as a bare row — so a reader could not tell an unclaimed
+    /// worker-less agent from a rail that simply had nothing to say. It is a
+    /// distinct variant rather than an empty label for that reason.
+    #[test]
+    fn agent_ownership_names_the_owner_or_says_unclaimed() {
+        let participants = vec![
+            roster_row("alice", "Alice", RoomParticipantKind::Human),
+            roster_row("researcher", "Researcher", RoomParticipantKind::Agent),
+            roster_row("scribe", "Scribe", RoomParticipantKind::Agent),
+            roster_row("drifter", "Drifter", RoomParticipantKind::Agent),
+        ];
+        let owners = vec![
+            RoomAgentOwner {
+                agent_id: "researcher".into(),
+                owner_id: "alice".into(),
+                owner_present: true,
+            },
+            // The binding outlives the worker: `bob` is gone from the roster,
+            // and the daemon says so rather than dropping the row.
+            RoomAgentOwner {
+                agent_id: "scribe".into(),
+                owner_id: "bob".into(),
+                owner_present: false,
+            },
+        ];
+
+        assert_eq!(
+            agent_ownership(Some(&owners), &participants, "researcher"),
+            AgentOwnership::Owned {
+                owner: "Alice".into(),
+                present: true,
+            },
+            "an owner still on the roster is named by their DISPLAY name — the \
+             participant id is a key, not something a reader recognises",
+        );
+        assert_eq!(
+            agent_ownership(Some(&owners), &participants, "scribe"),
+            AgentOwnership::Owned {
+                owner: "bob".into(),
+                present: false,
+            },
+            "a departed owner keeps their row: the ownership happened. The raw \
+             id is the only name left once the roster no longer carries them",
+        );
+        assert_eq!(
+            agent_ownership(Some(&owners), &participants, "drifter"),
+            AgentOwnership::Unclaimed,
+            "no ownership row names this agent, and the rail must SAY that \
+             rather than render nothing",
+        );
+        assert_eq!(
+            agent_ownership(Some(&[]), &participants, "researcher"),
+            AgentOwnership::Unclaimed,
+            "an AUTHORITATIVE empty list is the daemon saying nobody owns \
+             anything in this room, which is unclaimed for every agent in it — \
+             never a present owner",
+        );
+    }
+
+    /// No answer is its own state, and the rail renders NOTHING for it.
+    ///
+    /// Codex found this on #195: a bare `Vec` with `#[serde(default)]` makes a
+    /// daemon predating ocean-os#437 — which omits the key and may hold durable
+    /// ownership rows it simply cannot project — indistinguishable from a
+    /// current daemon answering `[]`. Every agent in every room on such a
+    /// daemon would wear an `unclaimed` badge the surface has no evidence for.
+    /// It is the same provenance rule the older-history edge draws between
+    /// `ReachedBeginning` and `Unknown`: an absent answer is not a negative one.
+    ///
+    /// `None` also covers the window a binding mutation opens — the refresh
+    /// invalidates before it asks, so a refresh that never answers degrades to
+    /// silence rather than to a stale claim.
+    #[test]
+    fn no_answer_renders_nothing_and_is_never_unclaimed() {
+        let participants = vec![
+            roster_row("alice", "Alice", RoomParticipantKind::Human),
+            roster_row("researcher", "Researcher", RoomParticipantKind::Agent),
+        ];
+
+        assert_eq!(
+            agent_ownership(None, &participants, "researcher"),
+            AgentOwnership::Unknown,
+            "a daemon that said nothing about ownership has not said that \
+             nobody owns this agent",
+        );
+        assert_ne!(
+            agent_ownership(None, &participants, "researcher"),
+            agent_ownership(Some(&[]), &participants, "researcher"),
+            "no answer and an authoritative empty answer must not be the same \
+             value — collapsing them is the defect this test exists for",
+        );
+    }
+
+    /// `owner_present` is the daemon's answer NARROWED by the roster in front
+    /// of the reader. The daemon computes it at hydration as "is `owner_id`
+    /// still on this roster"; the roster then moves under the surface, because
+    /// join/leave/remove replace `Room::participants` from routes that carry no
+    /// `agent_owners` at all. So a `true` beside a worker the rail no longer
+    /// shows is one read stale, and rendering it would badge a present owner
+    /// the reader cannot find in the rail three pixels above.
+    ///
+    /// The other direction is deliberately NOT symmetric: a daemon that says
+    /// absent stays absent even when a same-id row is back on the roster. A
+    /// participant id is reusable and a rejoin is not evidence the original
+    /// binding survived.
+    #[test]
+    fn a_present_flag_never_outlives_the_owner_leaving_the_rail() {
+        let owners = vec![RoomAgentOwner {
+            agent_id: "researcher".into(),
+            owner_id: "alice".into(),
+            owner_present: true,
+        }];
+        let with_alice = vec![
+            roster_row("alice", "Alice", RoomParticipantKind::Human),
+            roster_row("researcher", "Researcher", RoomParticipantKind::Agent),
+        ];
+        let without_alice = vec![roster_row(
+            "researcher",
+            "Researcher",
+            RoomParticipantKind::Agent,
+        )];
+
+        assert_eq!(
+            agent_ownership(Some(&owners), &with_alice, "researcher"),
+            AgentOwnership::Owned {
+                owner: "Alice".into(),
+                present: true,
+            },
+        );
+        assert_eq!(
+            agent_ownership(Some(&owners), &without_alice, "researcher"),
+            AgentOwnership::Owned {
+                owner: "alice".into(),
+                present: false,
+            },
+            "removed after hydration: the ownership stands, the presence does \
+             not, and the name falls back to the id the row carries",
+        );
+
+        let absent_flag = vec![RoomAgentOwner {
+            agent_id: "researcher".into(),
+            owner_id: "alice".into(),
+            owner_present: false,
+        }];
+        assert_eq!(
+            agent_ownership(Some(&absent_flag), &with_alice, "researcher"),
+            AgentOwnership::Owned {
+                owner: "Alice".into(),
+                present: false,
+            },
+            "a rejoining id does not resurrect a presence the daemon denied",
+        );
+    }
+
+    /// Roster order is the daemon's (`ORDER BY p.position`) and the lookup must
+    /// not depend on it: two agents owned by two workers resolve to their own
+    /// owners whichever way round the rows arrive. A `find` on the wrong field
+    /// — or a positional zip of owners onto agents, which is the shortcut this
+    /// shape invites — passes with one row and swaps the owners here.
+    #[test]
+    fn two_owned_agents_do_not_borrow_each_others_owners() {
+        let participants = vec![
+            roster_row("alice", "Alice", RoomParticipantKind::Human),
+            roster_row("bob", "Bob", RoomParticipantKind::Human),
+            roster_row("researcher", "Researcher", RoomParticipantKind::Agent),
+            roster_row("scribe", "Scribe", RoomParticipantKind::Agent),
+        ];
+        let owners = vec![
+            RoomAgentOwner {
+                agent_id: "scribe".into(),
+                owner_id: "bob".into(),
+                owner_present: true,
+            },
+            RoomAgentOwner {
+                agent_id: "researcher".into(),
+                owner_id: "alice".into(),
+                owner_present: true,
+            },
+        ];
+
+        assert_eq!(
+            agent_ownership(Some(&owners), &participants, "researcher"),
+            AgentOwnership::Owned {
+                owner: "Alice".into(),
+                present: true,
+            },
+        );
+        assert_eq!(
+            agent_ownership(Some(&owners), &participants, "scribe"),
+            AgentOwnership::Owned {
+                owner: "Bob".into(),
+                present: true,
+            },
+        );
+    }
+
     #[test]
     fn room_timestamp_markup_preserves_full_wire_datetime_and_visible_clock() {
-        let ts = "2026-07-25T03:43:12.987+07:00";
-        let clock = canonical_wire_clock_time(ts);
+        // (Kept under its original name so this hunk stays clear of the tests
+        // other open PRs append above it; the clock it checks is now local.)
+        // The two halves of a row's time, and the reason they differ.
+        //
+        // `datetime`, `aria-label` and `title` carry the daemon's wire value
+        // VERBATIM — an unambiguous instant, which is what a machine and a
+        // screen reader want, and what keeps the row quotable across zones. The
+        // visible text is the member's own wall clock for that same instant.
+        // Localizing the attributes too would throw away the only unambiguous
+        // value on the row; localizing NEITHER is what this slice fixed.
+        let ts = "2026-07-25T03:43:12.987Z";
+        // What the view's `local_clock_time` computes once the browser
+        // supplies the offset; the wrapper needs a DOM, the arithmetic does
+        // not. -240 is America/New_York in summer.
+        let clock = room_messages::local_clock_time(ts, -240).expect("canonical wire value");
         let markup = format!(
             "<time class=\"rooms-workspace__msg-time\" datetime=\"{ts}\" aria-label=\"{ts}\" title=\"{ts}\">{clock}</time>"
         );
         assert!(markup.contains("<time"));
-        assert!(markup.contains("datetime=\"2026-07-25T03:43:12.987+07:00\""));
-        assert!(markup.contains("aria-label=\"2026-07-25T03:43:12.987+07:00\""));
-        assert!(markup.contains("title=\"2026-07-25T03:43:12.987+07:00\""));
-        assert!(markup.ends_with(">03:43</time>"));
+        assert!(markup.contains("datetime=\"2026-07-25T03:43:12.987Z\""));
+        assert!(markup.contains("aria-label=\"2026-07-25T03:43:12.987Z\""));
+        assert!(markup.contains("title=\"2026-07-25T03:43:12.987Z\""));
+        // 03:43Z is the previous evening in New York. The attributes still
+        // say 03:43Z; the member reads 23:43.
+        assert!(markup.ends_with(">23:43</time>"));
+    }
+
+    /// Which formatter a row's visible clock takes is a call inside the view,
+    /// so no unit test can reach it: `room_messages::local_clock_time` stays
+    /// pure and correct while a row prints bytes 11..16 of the wire string.
+    /// That WAS the defect — every row rendered Greenwich's hour under the
+    /// member's name — and re-introducing it is an edit that compiles and
+    /// passes every other test in this file. Read the source and assert on
+    /// it, with the needles concatenated at runtime so this test's own
+    /// literals cannot stand in for the code it scans, and over the
+    /// production half of the file only.
+    #[test]
+    fn every_transcript_row_clock_reads_the_member_s_local_formatter() {
+        // The production half only: this module's fixtures quote row markup,
+        // and a whole-file scan would find its own literals.
+        let view = include_str!("rooms_workspace.rs")
+            .split_once("#[cfg(test)]")
+            .expect("this module carries its unit tests at the bottom")
+            .0;
+        let call = ["{local_clock", "_time(&full_ts)}"].concat();
+
+        // Three rows render a clock: the main transcript row, the thread
+        // panel's reply, and the thread panel's root. All three, or one of
+        // them is quietly still on the wire's hour.
+        assert_eq!(
+            view.matches(call.as_str()).count(),
+            3,
+            "every `<time>` in the transcript must render `{call}`",
+        );
+
+        // The conversation-gap header is a clock too, and takes the same one.
+        assert!(
+            view.contains(&["then(|| local_clock", "_time(&full_ts))"].concat()),
+            "the conversation-gap header is a clock and takes the local one",
+        );
+
+        // The slicing formatter this replaced is gone rather than merely
+        // unused, and nothing renders the raw wire value as visible text.
+        assert!(
+            !view.contains(&["canonical_wire", "_clock_time"].concat()),
+            "the UTC-slicing formatter must not come back — it renders \
+             Greenwich's hour under the member's name",
+        );
+        assert!(
+            !view.contains("{full_ts}") && !view.contains("{full_ts.clone()}"),
+            "the wire value belongs on datetime/title/aria-label, never as \
+             the visible clock",
+        );
+
+        // "Today"/"Yesterday" is a day comparison, so its clock is local too.
+        // `to_iso_string` is UTC, and reading it made "Today" mean tomorrow
+        // every evening west of Greenwich.
+        let at = view
+            .find(&["fn today_day", "_key() -> String {"].concat())
+            .expect("today_day_key is a production fn");
+        let body = &view[at..][..view[at..].find("\n}").expect("fn closes")];
+        assert!(
+            !body.contains(&["to_iso", "_string"].concat()),
+            "today_day_key must read the LOCAL date getters, not the UTC ISO \
+             string",
+        );
+        assert!(
+            body.contains("get_full_year") && body.contains("get_date"),
+            "today_day_key must build its key from the local getters",
+        );
     }
 
     // ── Mention autosuggest helpers ──
@@ -5836,6 +7630,63 @@ mod tests {
             );
         }
         assert!(mention_roster(&local, None).is_empty());
+    }
+
+    #[test]
+    fn mention_candidates_exclude_agents_without_active_local_authority() {
+        let local = vec![
+            part("human", "Human", RoomParticipantKind::Human),
+            part("active-agent", "Active", RoomParticipantKind::Agent),
+            part("compat-agent", "Compatibility", RoomParticipantKind::Agent),
+        ];
+        let access = test_access(RoomAccessState::Local);
+        let active = std::collections::HashSet::from(["active-agent".to_owned()]);
+        assert_eq!(
+            mentionable_roster(&local, Some(&access), &active),
+            vec![
+                part("human", "Human", RoomParticipantKind::Human),
+                part("active-agent", "Active", RoomParticipantKind::Agent),
+            ]
+        );
+        // Roster rendering remains unchanged for historical attribution.
+        assert_eq!(mention_roster(&local, Some(&access)), local);
+    }
+
+    #[test]
+    fn federated_mention_candidates_require_available_active_binding() {
+        let mut access = test_access(RoomAccessState::Live);
+        access.members = vec![
+            FederatedRoomMemberProjection {
+                member_id: "available".into(),
+                owner_member_id: None,
+                actor_type: FederatedActorType::Agent,
+                role_in_room: FederatedRoomRole::Member,
+                display_name: "Available".into(),
+                public_agent_descriptor: None,
+                joined_at: String::new(),
+                derived_presence: None,
+                local_binding_available: Some(true),
+            },
+            FederatedRoomMemberProjection {
+                member_id: "projection-denied".into(),
+                owner_member_id: None,
+                actor_type: FederatedActorType::Agent,
+                role_in_room: FederatedRoomRole::Member,
+                display_name: "Denied".into(),
+                public_agent_descriptor: None,
+                joined_at: String::new(),
+                derived_presence: None,
+                local_binding_available: Some(false),
+            },
+        ];
+        let active = std::collections::HashSet::from([
+            "available".to_owned(),
+            "projection-denied".to_owned(),
+        ]);
+        assert_eq!(
+            mentionable_roster(&[], Some(&access), &active),
+            vec![part("available", "Available", RoomParticipantKind::Agent)]
+        );
     }
 
     #[test]
@@ -6186,19 +8037,6 @@ mod tests {
     }
 
     // ── Behavioral: composer draft preservation (production helper) ──
-
-    #[test]
-    fn canonical_wire_clock_time_strips_redundant_date_for_rfc3339() {
-        assert_eq!(canonical_wire_clock_time("2026-06-05T12:34:56Z"), "12:34");
-        // Non-canonical inputs fall back to the full string — never lie.
-        assert_eq!(canonical_wire_clock_time(""), "");
-        assert_eq!(canonical_wire_clock_time("12:34"), "12:34");
-        assert_eq!(canonical_wire_clock_time("2026-06-05T12"), "2026-06-05T12");
-        assert_eq!(
-            canonical_wire_clock_time("2026-06-05 12:34"),
-            "2026-06-05 12:34"
-        );
-    }
 
     #[test]
     fn avatar_identity_is_deterministic_and_bounded() {
@@ -6817,5 +8655,138 @@ mod tests {
     #[test]
     fn option_dom_id_is_prefix_stable() {
         assert_eq!(room_option_dom_id("r1"), "rooms-opt-r1");
+    }
+
+    // ── pending room open (persisted restore vs ocean://room/<key>) ──────
+
+    fn persisted(key: &str) -> PendingRoomOpen {
+        PendingRoomOpen::persisted(key.to_string())
+    }
+
+    fn deep_link(key: &str) -> PendingRoomOpen {
+        PendingRoomOpen::deep_link(key.to_string(), 7)
+    }
+
+    /// The persisted restore's behaviour is unchanged by the deep link
+    /// joining its queue: it loses to a user action and degrades silently.
+    #[test]
+    fn a_persisted_restore_loses_every_race_and_degrades_silently() {
+        assert_eq!(
+            room_open_outcome(&persisted("team-blue"), None, true),
+            RoomOpenOutcome::Open("team-blue".into()),
+        );
+        // A user opened something first — theirs wins.
+        assert_eq!(
+            room_open_outcome(&persisted("team-blue"), Some("other"), true),
+            RoomOpenOutcome::Drop,
+        );
+        // The room is gone from the list: nothing happens, and nothing is said.
+        assert_eq!(
+            room_open_outcome(&persisted("team-blue"), None, false),
+            RoomOpenOutcome::Drop,
+        );
+        // Even its own key already open is a race it does not need to win.
+        assert_eq!(
+            room_open_outcome(&persisted("team-blue"), Some("team-blue"), true),
+            RoomOpenOutcome::Drop,
+        );
+    }
+
+    /// A deep link is a person asking out loud, so it switches away from a
+    /// room already open — and when the key names nothing, it says so instead
+    /// of appearing to do nothing.
+    #[test]
+    fn a_deep_link_wins_the_race_and_reports_an_unknown_key() {
+        assert_eq!(
+            room_open_outcome(&deep_link("team-blue"), None, true),
+            RoomOpenOutcome::Open("team-blue".into()),
+        );
+        assert_eq!(
+            room_open_outcome(&deep_link("team-blue"), Some("other"), true),
+            RoomOpenOutcome::Open("team-blue".into()),
+        );
+        assert_eq!(
+            room_open_outcome(&deep_link("team-blue"), None, false),
+            RoomOpenOutcome::Unknown("team-blue".into()),
+        );
+        assert_eq!(
+            room_open_outcome(&deep_link("team-blue"), Some("other"), false),
+            RoomOpenOutcome::Unknown("team-blue".into()),
+        );
+    }
+
+    /// Re-opening the room already on screen would throw away a hydrated
+    /// transcript to show the same thing.
+    #[test]
+    fn a_deep_link_to_the_open_room_is_a_no_op() {
+        assert_eq!(
+            room_open_outcome(&deep_link("team-blue"), Some("team-blue"), true),
+            RoomOpenOutcome::Drop,
+        );
+    }
+
+    /// A persisted restore answers as soon as any list has loaded, because it
+    /// answers silently. A deep link waits for a list fetched AFTER it was
+    /// queued, because it answers out loud.
+    #[test]
+    fn only_a_deep_link_waits_for_a_list_fetched_after_it_was_queued() {
+        // Persisted: `rooms_loaded` is the whole gate, settle count ignored.
+        assert!(!room_open_is_ready(&persisted("team-blue"), false, 0));
+        assert!(room_open_is_ready(&persisted("team-blue"), true, 0));
+        assert!(room_open_is_ready(&persisted("team-blue"), true, 99));
+
+        // Deep link queued at settle 7: `rooms_loaded` alone is not enough.
+        // This is the regression — a remounted workspace and a failed first
+        // load both leave `rooms_loaded` true over a list that cannot answer.
+        let link = deep_link("team-blue");
+        assert!(!room_open_is_ready(&link, true, 7));
+        assert!(room_open_is_ready(&link, true, 8));
+        // And it is released even if `rooms_loaded` were somehow still false:
+        // the counter only moves when a fetch settles, which sets that flag.
+        assert!(room_open_is_ready(&link, false, 8));
+    }
+
+    /// The counter wraps at `u64::MAX`; the readiness test must survive that
+    /// rather than becoming permanently true or permanently false.
+    #[test]
+    fn readiness_survives_the_settle_counter_wrapping() {
+        let link = PendingRoomOpen::deep_link("team-blue".into(), u64::MAX);
+        assert!(!room_open_is_ready(&link, true, u64::MAX));
+        assert!(room_open_is_ready(&link, true, u64::MAX.wrapping_add(1)));
+    }
+
+    /// "This room does not exist" and "I could not find out" are different
+    /// facts, and the second must never be reported as the first.
+    #[test]
+    fn an_unreachable_room_list_says_so_instead_of_denying_the_room() {
+        let unreachable = unreachable_deep_link_room_status("team-blue");
+        let unknown = unknown_deep_link_room_status("team-blue");
+        assert_ne!(unreachable, unknown);
+        assert!(
+            unreachable.starts_with("rooms "),
+            "{unreachable} must reach the room-list lane too",
+        );
+        assert!(unreachable.contains("team-blue"));
+        assert!(
+            !unreachable.contains("no room named"),
+            "{unreachable} must not deny a room it could not look up",
+        );
+    }
+
+    /// The unknown-key line must land in the room-list lane, because there is
+    /// no open transcript to put it under. `rooms ` is the prefix that lane
+    /// selects on (and the transcript lane deselects on).
+    #[test]
+    fn the_unknown_room_status_routes_to_the_room_list_lane() {
+        let status = unknown_deep_link_room_status("team-blue");
+        assert!(
+            status.starts_with("rooms "),
+            "{status} must start with the room-list lane's prefix",
+        );
+        assert!(!status.starts_with("create "));
+        assert!(
+            status.contains("team-blue"),
+            "{status} must name the key that failed, or it explains nothing",
+        );
     }
 }
