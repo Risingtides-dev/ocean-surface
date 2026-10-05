@@ -3070,7 +3070,15 @@ pub fn App() -> impl IntoView {
                                     <span class="ocean-model-settings__effort">{move || thinking_level.get().unwrap_or_else(|| "default".into())}</span>
                                     <span class="ocean-model-settings__caret"><crate::icons::ChevronDown /></span>
                                 </summary>
-                                <div class="ocean-model-settings__menu">
+                                <div class="ocean-model-settings__menu"
+                                    on:keydown=move |ev: ev::KeyboardEvent| {
+                                        // Panel inputs must never implicitly submit the enclosing composer.
+                                        if ev.key() == "Enter" {
+                                            ev.prevent_default();
+                                            ev.stop_propagation();
+                                        }
+                                    }
+                                >
                                     <input class="ocean-model-settings__search" type="search"
                                         aria-label="Search models" placeholder="Search models" autocomplete="off"
                                         node_ref=model_search_ref prop:value=move || model_search.get()

@@ -7558,3 +7558,13 @@ area:      [review]
 
 Addressed fresh review on 3d247c7: the auto-focused model search now has a 16px floor on compact widths and coarse-pointer devices, preserving pinch zoom and matching existing composer behavior. All seven required checks, 1,416 UI tests and release build pass. Built preview at 375x667 reports focused search at computed 16px and a panel bounded within x=26..305, y=186..603; this is rendered CSS evidence, not physical iPhone Safari acceptance. Root interaction contract updated; ownership and child indexes unchanged. Fresh hosted review and exact committed detached build follow.
 _________________________________________________________________________________ 15:54 codex/ocean-ui-model-effort-20261005
+
+time:      [16:04] [05-10-26]
+date-order: DD-MM-YY
+agent:     [codex], [gpt-6]
+worktree:  codex/ocean-ui-model-effort-20261005
+type:      [bug report]: Prevent model-panel implicit composer submission
+area:      [review]
+
+Fresh review on a7f79a5 found Enter in the nested search could submit a staged composer draft. The panel consumes Enter for its search and native radio controls while summary activation, Space radio selection and composer submission retain their own behavior. All seven required checks, 1,416 UI tests and release build pass. Built browser confirms a staged draft remains exact and status remains new session after search Enter, model-radio Enter and effort-radio Enter; summary Enter opens, Space selects, and Escape dismisses. Test draft and overrides are cleaned up. Root interaction contract updated; ownership/indexes unchanged. Exact committed detached validation and fresh review follow; no installed-live claim.
+_________________________________________________________________________________ 16:04 codex/ocean-ui-model-effort-20261005

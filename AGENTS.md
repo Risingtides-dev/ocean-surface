@@ -133,6 +133,8 @@ All visual work on the Leptos web surface follows
   Legacy compact select sizing must not constrain the model list or effort rail.
   Keep compact/touch controls inside that disclosure. Its auto-focused search
   uses at least 16px text on phone widths and coarse-pointer devices to prevent Safari form-control zoom.
+  Enter inside the model panel never submits the composer; summary keyboard
+  toggling and composer submission retain their own native behavior.
   Persist bounded effort tokens across reloads; validate model support against
   the daemon catalogue rather than a static client vocabulary.
 - Rooms creation and invite redemption share one collapsed native disclosure in
