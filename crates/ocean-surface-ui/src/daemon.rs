@@ -2088,6 +2088,8 @@ pub struct Daemon {
     /// Current model id, learned from TurnStarted (and GET /v1/models). Shown
     /// live in the header so a mid-session swap is visible.
     pub model: RwSignal<Option<String>>,
+    /// Authoritative daemon default from GET /v1/models.current; never a turn override.
+    pub default_model: RwSignal<Option<String>>,
     /// The catalogue of selectable models from GET /v1/models.
     pub models: RwSignal<Vec<ModelInfo>>,
     /// The selected project id, sent as `project_id` on every turn so the daemon
@@ -2598,6 +2600,7 @@ impl Daemon {
             last_turn_tokens: RwSignal::new(None),
             session_tokens: RwSignal::new(TokenStats::default()),
             model: RwSignal::new(None),
+            default_model: RwSignal::new(None),
             models: RwSignal::new(Vec::new()),
             // Restore the last-selected project from localStorage so the choice
             // survives a reload.
@@ -2684,6 +2687,7 @@ impl Daemon {
             last_turn_tokens: RwSignal::new(None),
             session_tokens: RwSignal::new(TokenStats::default()),
             model: RwSignal::new(None),
+            default_model: RwSignal::new(None),
             models: RwSignal::new(Vec::new()),
             project: RwSignal::new(None),
             projects: RwSignal::new(Vec::new()),
@@ -4198,6 +4202,7 @@ impl Daemon {
         let url = self.url.get_untracked();
         let models = self.models;
         let model = self.model;
+        let default_model = self.default_model;
         // The catalogue belongs to one machine; a reply that lands after a
         // switch describes the machine we left.
         let epoch = self.device_epoch;
@@ -4223,10 +4228,10 @@ impl Daemon {
                             log::debug!("model catalogue from a machine we left; dropped");
                             return;
                         }
-                        if let Some(cur) = r.current {
-                            if !cur.model.is_empty() {
-                                model.set(Some(cur.model));
-                            }
+                        let current = r.current.map(|cur| cur.model).filter(|id| !id.is_empty());
+                        default_model.set(current.clone());
+                        if let Some(current) = current {
+                            model.set(Some(current));
                         }
                         models.set(r.models);
                     }
@@ -5224,6 +5229,7 @@ impl Daemon {
             // in flight against it be dropped rather than land on top of the
             // new machine's.
             daemon.device_epoch.update(|e| *e = e.wrapping_add(1));
+            daemon.default_model.set(None);
             daemon.models.set(Vec::new());
             daemon.projects.set(Vec::new());
             daemon.status.set("switching device".into());
@@ -8535,6 +8541,26 @@ mod tests {
             daemon.activity_revision,
             daemon.session_title,
             daemon.cwd,
+        );
+    }
+
+    #[test]
+    fn turn_started_does_not_replace_authoritative_default_model() {
+        let daemon = Daemon::dummy();
+        daemon.session_id.set(Some("test-session".into()));
+        daemon.default_model.set(Some("default-a".into()));
+        apply_test_event(
+            &daemon,
+            AgentEvent::TurnStarted {
+                session_id: "test-session".into(),
+                turn_id: "test-turn".into(),
+                model: Some("override-b".into()),
+            },
+        );
+        assert_eq!(daemon.model.get_untracked().as_deref(), Some("override-b"));
+        assert_eq!(
+            daemon.default_model.get_untracked().as_deref(),
+            Some("default-a")
         );
     }
 

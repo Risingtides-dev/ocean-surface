@@ -3201,7 +3201,8 @@
   overflow-y: auto;
 }
 
-.rooms-workspace__right.rooms-workspace__right--visible {
+.rooms-workspace__right.rooms-workspace__right--visible,
+.rooms-workspace--thread-open .rooms-workspace__right.rooms-workspace__right--visible {
   display: flex;
   position: absolute;
   top: 0;

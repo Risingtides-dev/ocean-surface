@@ -7538,3 +7538,13 @@ area:      [frontend]
 
 Replaced the composer disclosure's two selects with one searchable model radio list and integrated effort radio rail, preserving daemon capabilities, default inheritance, unavailable credential signals and unresolved pins. Search matches label, model ID and provider across all query terms. Shared SVG selection mark; native keyboard radios, search focus on open and Escape focus return. Browser evidence confirms search, model/effort changes, keyboard activation, empty results, 375px fit and 320x360 bounded scrolling without sending a provider turn. Corrected list flex sizing and narrow-screen anchoring found during visual verification. All 1414 UI tests and seven required gates pass; release build passes after final CSS fixes. Root contract updated; no child indexes or ownership boundaries changed. Exact committed detached verification and fresh hosted review follow; installed UI remains unchanged.
 _________________________________________________________________________________ 15:38 codex/ocean-ui-model-effort-20261005
+
+time:      [15:45] [05-10-26]
+date-order: DD-MM-YY
+agent:     [codex], [gpt-6]
+worktree:  codex/ocean-ui-model-effort-20261005
+type:      [bug report]: Default route and compact panel review fixes
+area:      [review]
+
+Track /v1/models.current separately from the last turn/session model. Picker summary, effort validation and /thinking choices use the authoritative default after clearing a turn override; machine changes retire the default alongside its catalogue. Regressions exercise actual TurnStarted admission and differing default/override effort capabilities. Scope legacy compact selector sizing to native selects so the list and wrapped effort rail retain panel sizing. Higher-specificity thread-open drawer positioning now anchors to the workspace. All 1,416 UI tests and seven required checks pass; final release build passes. Browser measurements confirm a 280px mobile model list, complete 73px effort rail, and bounded 220px panel at 320x360. Production-CSS thread-open fixture drawer/workspace right edges match at 1280 and 1440px; this is geometry evidence, not live federated-thread acceptance. Root interaction contract updated; child indexes and ownership unchanged. Canonical ledger historical errors are preserved; candidate ledger is checked. Installed app remains unchanged pending review/CI/landing.
+_________________________________________________________________________________ 15:45 codex/ocean-ui-model-effort-20261005

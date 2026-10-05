@@ -1464,7 +1464,10 @@ fn filtered_model_choices(
 }
 
 fn available_effort_choices(daemon: &Daemon) -> Vec<String> {
-    let selected = daemon.model_override.get().or_else(|| daemon.model.get());
+    let selected = daemon
+        .model_override
+        .get()
+        .or_else(|| daemon.default_model.get());
     daemon
         .models
         .with(|catalog| model_effort_choices(catalog, selected.as_deref()))
@@ -1575,7 +1578,7 @@ pub fn App() -> impl IntoView {
     let voice_ready = daemon.voice_ready;
     let last_turn_tokens = daemon.last_turn_tokens;
     let session_tokens = daemon.session_tokens;
-    let model = daemon.model;
+    let default_model = daemon.default_model;
     let models = daemon.models;
     // Browser-control indicator (OCEAN-92): lit while the agent is driving the
     // browser (set from the daemon's `browser_activity` SSE event), with the
@@ -1599,7 +1602,7 @@ pub fn App() -> impl IntoView {
     Effect::new(move |_| {
         let current = thinking_level.get();
         if let Some(current) = current {
-            let selected = model_override.get().or_else(|| model.get());
+            let selected = model_override.get().or_else(|| default_model.get());
             let unsupported = models.with(|catalog| {
                 catalog
                     .iter()
@@ -3058,7 +3061,7 @@ pub fn App() -> impl IntoView {
                             >
                                 <summary class="ocean-model-settings__trigger" aria-label="Model and reasoning effort">
                                     <span class="ocean-model-settings__name">{move || {
-                                        let id = model_override.get().or_else(|| model.get());
+                                        let id = model_override.get().or_else(|| default_model.get());
                                         id.and_then(|id| models.get().iter().find(|m| m.id == id)
                                             .map(|m| if m.label.is_empty() { id.clone() } else { m.label.clone() })
                                             .or(Some(id)))
@@ -3616,11 +3619,11 @@ pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_dictation, competing_reveal_open, composer_height_px, composer_overflow_y,
-        council_open_visibility, daemon_status_admit, effort_override_unsupported,
-        execute_planner_workflow, filtered_model_choices, initial_planner_context,
-        island_open_visibility, model_effort_choices, parse_deep_link, planner_candidates,
-        selected_planner_context, should_submit_composer_key, topmost_reveal,
+        append_dictation, available_effort_choices, competing_reveal_open, composer_height_px,
+        composer_overflow_y, council_open_visibility, daemon_status_admit,
+        effort_override_unsupported, execute_planner_workflow, filtered_model_choices,
+        initial_planner_context, island_open_visibility, model_effort_choices, parse_deep_link,
+        planner_candidates, selected_planner_context, should_submit_composer_key, topmost_reveal,
         window_escape_should_handle, DeepLinkAction, PlannerAction, PlannerContext,
         PlannerWorkflowFailureStage, PlannerWorkflowOps, PlannerWorkflowRequest, RevealSurface,
         RevealVisibility, COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX,
@@ -3646,6 +3649,26 @@ mod tests {
         assert_eq!(filtered_model_choices(&catalog, "OPUS")[0].id, "opus");
         assert!(filtered_model_choices(&catalog, "gpt opus").is_empty());
         assert_eq!(filtered_model_choices(&catalog, "  ").len(), 2);
+    }
+
+    #[test]
+    fn clearing_override_uses_default_capabilities_instead_of_last_turn() {
+        use leptos::prelude::*;
+        let daemon = crate::daemon::Daemon::dummy();
+        daemon.models.set(
+            serde_json::from_value(serde_json::json!([
+                {"id":"default-a","reasoning_efforts":["low","high"]},
+                {"id":"override-b","reasoning_efforts":["max"]}
+            ]))
+            .unwrap(),
+        );
+        daemon.default_model.set(Some("default-a".into()));
+        daemon.model.set(Some("override-b".into()));
+        daemon.model_override.set(Some("override-b".into()));
+        assert_eq!(available_effort_choices(&daemon), ["max"]);
+        daemon.model_override.set(None);
+        assert_eq!(available_effort_choices(&daemon), ["low", "high"]);
+        assert_eq!(daemon.model.get_untracked().as_deref(), Some("override-b"));
     }
 
     #[test]
