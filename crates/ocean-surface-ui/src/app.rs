@@ -3003,11 +3003,12 @@ pub fn App() -> impl IntoView {
                             <details class="ocean-turn-controls ocean-model-settings" node_ref=model_settings_ref
                                 on:keydown=move |ev: ev::KeyboardEvent| {
                                     if ev.key() == "Escape" {
-                                        ev.prevent_default();
-                                        ev.stop_propagation();
                                         if let Some(details) = ev.current_target()
                                             .and_then(|target| target.dyn_into::<web_sys::HtmlElement>().ok())
+                                            .filter(|details| details.has_attribute("open"))
                                         {
+                                            ev.prevent_default();
+                                            ev.stop_propagation();
                                             let _ = details.remove_attribute("open");
                                             let _ = details.query_selector("summary").ok().flatten()
                                                 .and_then(|node| node.dyn_into::<web_sys::HtmlElement>().ok())
@@ -3025,6 +3026,7 @@ pub fn App() -> impl IntoView {
                                             .unwrap_or_else(|| "Default model".into())
                                     }}</span>
                                     <span class="ocean-model-settings__effort">{move || thinking_level.get().unwrap_or_else(|| "default".into())}</span>
+                                    <span class="ocean-model-settings__caret"><crate::icons::ChevronDown /></span>
                                 </summary>
                                 <div class="ocean-model-settings__menu">
                                 <select

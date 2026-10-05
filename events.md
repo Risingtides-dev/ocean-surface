@@ -7458,3 +7458,13 @@ area:      [frontend] [testing]
 Browser verification exposed the unified picker occupying the full desktop grid cell: the popup opened far from its trigger despite staying on screen. Shrunk the disclosure to its trigger with constrained intrinsic width. Rebuilt the production bundle and verified popup/trigger right-edge alignment and viewport containment at 320/375/430/768/1200px; Escape closes it and restores summary focus. Root interaction contract updated; child ownership/indexes remain unchanged. Earlier hosted Surface gates all passed. Runtime candidate 41f3812f full local repository gate now passes; real Max GPT acceptance remains four models passed. Claude reauthentication was requested because its OAuth remains expired. Fresh review, current-head hosted checks and installed-live delivery remain open.
 
 _________________________________________________________________________________ 14:15 codex/ocean-ui-model-effort-20261005
+
+time:      [14:20] [05-10-26]
+date-order: DD-MM-YY
+agent:     [codex], [gpt-6]
+worktree:  codex/ocean-ui-model-effort-20261005
+type:      [bug report]: Independent review corrections
+area:      [review]
+
+Addressed both independent PR #236 findings: consume Escape only when the model disclosure is open, so closed-trigger focus permits topmost-panel dismissal; replace the text caret with the shared ChevronDown SVG. Updated the existing interaction contract; ownership and child indexes remain unchanged. Release bundle and host/WASM checks are rerunning.
+_________________________________________________________________________________ 14:20 codex/ocean-ui-model-effort-20261005

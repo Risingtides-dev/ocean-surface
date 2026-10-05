@@ -642,7 +642,8 @@
   color: var(--fg-2); font-size: 12px;
 }
 .ocean-model-settings__trigger::-webkit-details-marker { display: none; }
-.ocean-model-settings__trigger::after { content: "⌄"; color: var(--fg-3); }
+.ocean-model-settings__caret { display: flex; color: var(--fg-3); flex-shrink: 0; }
+.ocean-model-settings__caret svg { width: 14px; height: 14px; }
 .ocean-model-settings__trigger:hover,
 .ocean-model-settings[open] .ocean-model-settings__trigger { background: var(--bg-elevated); color: var(--fg); }
 .ocean-model-settings__trigger:focus-visible { outline: none; box-shadow: var(--focus-ring); }

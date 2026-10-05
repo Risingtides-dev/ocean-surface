@@ -113,7 +113,9 @@ All visual work on the Leptos web surface follows
   reflects the selected override or daemon model; its controls retain separate
   persisted turn overrides and consume the daemon catalogue. Unknown persisted
   selections stay visible while the catalogue loads. Escape closes the disclosure
-  and restores summary focus; outside clicks dismiss it. The disclosure shrinks
+  and restores summary focus only when open; a closed disclosure lets Escape reach
+  the topmost surface. Outside clicks dismiss it. Its caret uses shared ChevronDown.
+  The disclosure shrinks
   to its trigger so the popup stays anchored instead of spanning the composer.
   Daemon-provided effort
   capabilities constrain available choices; legacy daemons retain the fallback
