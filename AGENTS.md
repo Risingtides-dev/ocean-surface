@@ -113,7 +113,13 @@ All visual work on the Leptos web surface follows
   reflects the selected override or daemon model; its controls retain separate
   persisted turn overrides and consume the daemon catalogue. Unknown persisted
   selections stay visible while the catalogue loads. Escape closes the disclosure
-  and restores summary focus. Keep compact/touch controls inside that disclosure.
+  and restores summary focus; outside clicks dismiss it. Daemon-provided effort
+  capabilities constrain available choices; legacy daemons retain the fallback
+  list. Keep compact/touch controls inside that disclosure.
+- Rooms creation and invite redemption share one collapsed native disclosure in
+  the room-list footer. Preserve every existing trigger and join action inside it.
+- Product chrome uses the shared SVG icon family; no emoji or AI sparkle icons.
+  Participant media-state icons carry an accessible state label.
 - Control density is a design defect: conditional rendering over permanent
   chrome, one header overflow (`⋯`) for secondary actions, ghost triggers for
   idle features (dialer, join call), reveal-on-intent for power knobs.

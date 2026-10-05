@@ -854,7 +854,6 @@ impl SoundingsLandingEngine {
         u1f!("uT", t);
         u1f!("uEn", en);
         u4fv!("uEvt", evt_arr);
-        u2f!("uSrc", src[0], src[1]);
         u1f!("uKick", kick);
         u1f!("uLineScale", LINE_SCALE);
         u1f!("uLineExp", LINE_EXP);

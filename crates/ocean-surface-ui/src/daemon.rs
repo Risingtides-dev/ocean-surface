@@ -2271,6 +2271,9 @@ pub struct ModelInfo {
     /// blank the picker. Formatted by [`credential_source_hint`].
     #[serde(default)]
     pub credential_source: Option<Value>,
+    /// Absent on older daemons; present values are the daemon-owned effort contract.
+    #[serde(default)]
+    pub reasoning_efforts: Option<Vec<String>>,
 }
 
 impl ModelInfo {

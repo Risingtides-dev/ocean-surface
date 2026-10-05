@@ -3407,6 +3407,8 @@ pub fn RoomsWorkspace(
                     }
                 }}
 
+                <details class="rooms-workspace__room-actions">
+                    <summary>"New or join room"</summary>
                 // Create input at bottom of left rail
                 <div class="rooms-workspace__left-create">
                     <input
@@ -3509,6 +3511,7 @@ pub fn RoomsWorkspace(
                 // is precisely the state this rail is the only thing visible
                 // in.
                 <crate::room_redeem::RoomRedeem rooms=rooms state=redeem />
+                </details>
             </div>
 
             // ═══ CENTER RAIL — header + transcript + composer ═══════════
@@ -3522,9 +3525,6 @@ pub fn RoomsWorkspace(
                                 <div class="rooms-workspace__join">
                                     <div class="rooms-workspace__join-title">
                                         "Select a room"
-                                    </div>
-                                    <div class="rooms-workspace__join-desc">
-                                        "Choose a room from the sidebar to start collaborating."
                                     </div>
                                 </div>
                             }.into_any()

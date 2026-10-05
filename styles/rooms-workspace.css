@@ -370,7 +370,7 @@
 .rooms-workspace__room.is-active {
   background: var(--bg-hover);
   color: var(--fg);
-  box-shadow: inset 2px 0 0 var(--accent);
+  box-shadow: inset 1px 0 0 var(--accent);
 }
 
 .rooms-workspace__room-hash {
@@ -2896,7 +2896,7 @@
 }
 
 .rooms-workspace__room.is-active {
-  box-shadow: inset 2px 0 0 var(--accent);
+  box-shadow: inset 1px 0 0 var(--accent);
 }
 
 .rooms-workspace__left-create {
@@ -5278,4 +5278,23 @@ a.rooms-workspace__compute-ports-row-url:hover {
   .rooms-workspace__authority-policies {
     grid-template-columns: 1fr;
   }
+}
+
+/* Secondary room entry actions stay behind one keyboard-native disclosure. */
+.rooms-workspace__room-actions {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border-subtle);
+}
+.rooms-workspace__room-actions > summary {
+  padding: 12px 14px;
+  cursor: pointer;
+  color: var(--fg-2);
+  font-size: 12px;
+}
+.rooms-workspace__room-actions > summary:hover {
+  background: var(--bg-hover);
+}
+.rooms-workspace__room-actions > summary:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -3px;
 }

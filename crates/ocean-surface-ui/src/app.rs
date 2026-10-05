@@ -1550,6 +1550,53 @@ pub fn App() -> impl IntoView {
     // next turn's request; `None` leaves the daemon defaults untouched.
     let thinking_level = daemon.thinking_level;
     let model_override = daemon.model_override;
+    let effort_choices = Memo::new(move |_| {
+        let selected = model_override.get().or_else(|| model.get());
+        models
+            .with(|catalog| {
+                catalog
+                    .iter()
+                    .find(|entry| Some(&entry.id) == selected.as_ref())
+                    .and_then(|entry| entry.reasoning_efforts.clone())
+            })
+            .unwrap_or_else(|| {
+                ["off", "minimal", "low", "medium", "high", "xhigh"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            })
+    });
+    let effort_daemon = daemon.clone();
+    Effect::new(move |_| {
+        let current = thinking_level.get();
+        if let Some(current) = current {
+            let selected = model_override.get().or_else(|| model.get());
+            let unsupported = models.with(|catalog| {
+                catalog
+                    .iter()
+                    .find(|entry| Some(&entry.id) == selected.as_ref())
+                    .and_then(|entry| entry.reasoning_efforts.as_ref())
+                    .map(|levels| !levels.contains(&current))
+                    .unwrap_or(false)
+            });
+            if unsupported {
+                effort_daemon.set_thinking_level(None);
+            }
+        }
+    });
+    let model_settings_ref = NodeRef::<leptos::html::Details>::new();
+    let _model_settings_dismiss = window_event_listener(ev::click, move |event: ev::MouseEvent| {
+        if let Some(details) = model_settings_ref.get_untracked() {
+            if event
+                .target()
+                .and_then(|target| target.dyn_into::<web_sys::Node>().ok())
+                .is_some_and(|target| !details.contains(Some(&target)))
+            {
+                let _ = details.remove_attribute("open");
+            }
+        }
+    });
+
     // Predicates pulled out of the view! macro: a bare `>` inside an attribute
     // expression would be parsed as the element's closing bracket.
     let has_tokens = move || session_tokens.get().total() > 0;
@@ -2953,9 +3000,11 @@ pub fn App() -> impl IntoView {
                                 <VoiceOrb on_transcript=on_transcript on_status=on_voice_status muted=muted on_dictate=on_dictate on_plan=on_plan />
                             </Show>
                             // One disclosure owns model and effort; both retain session-scoped overrides.
-                            <details class="ocean-turn-controls ocean-model-settings"
+                            <details class="ocean-turn-controls ocean-model-settings" node_ref=model_settings_ref
                                 on:keydown=move |ev: ev::KeyboardEvent| {
                                     if ev.key() == "Escape" {
+                                        ev.prevent_default();
+                                        ev.stop_propagation();
                                         if let Some(details) = ev.current_target()
                                             .and_then(|target| target.dyn_into::<web_sys::HtmlElement>().ok())
                                         {
@@ -2990,45 +3039,21 @@ pub fn App() -> impl IntoView {
                                         });
                                     }
                                 >
-                                    // Values map 1:1 to ocean_protocol::ThinkingLevel
-                                    // (serde lowercase): off | minimal | low | medium
-                                    // | high | xhigh. Empty = no override (daemon
-                                    // default). These are the exact levels the daemon
-                                    // accepts — anything else round-trips to a serde
-                                    // error. (OCEAN-202)
-                                    <option value="" prop:selected=move || thinking_level.get().is_none()>
-                                        "think: default"
+                                    <option value="" selected=move || thinking_level.get().is_none()>
+                                        "Effort: default"
                                     </option>
-                                    <option value="off" prop:selected=move || thinking_level.get().as_deref() == Some("off")>
-                                        "think: off"
-                                    </option>
-                                    <option value="minimal" prop:selected=move || thinking_level.get().as_deref() == Some("minimal")>
-                                        "think: minimal"
-                                    </option>
-                                    <option value="low" prop:selected=move || thinking_level.get().as_deref() == Some("low")>
-                                        "think: low"
-                                    </option>
-                                    <option value="medium" prop:selected=move || thinking_level.get().as_deref() == Some("medium")>
-                                        "think: medium"
-                                    </option>
-                                    <option value="high" prop:selected=move || thinking_level.get().as_deref() == Some("high")>
-                                        "think: high"
-                                    </option>
-                                    <option value="xhigh" prop:selected=move || thinking_level.get().as_deref() == Some("xhigh")>
-                                        "think: xhigh"
-                                    </option>
-                                    // Unknown persisted value (stale pref, daemon
-                                    // drift): still render it selected — the same
-                                    // guard the model select has. Without this the
-                                    // controlled select desyncs and renders BLANK.
-                                    <Show when=move || {
-                                        matches!(
-                                            thinking_level.get().as_deref(),
-                                            Some(v) if !matches!(v, "off" | "minimal" | "low" | "medium" | "high" | "xhigh")
-                                        )
-                                    }>
-                                        <option prop:value=move || thinking_level.get().unwrap_or_default() prop:selected=true>
-                                            {move || format!("think: {}", thinking_level.get().unwrap_or_default())}
+                                    <For each=move || effort_choices.get() key=|level| level.clone()
+                                        children=move |level| {
+                                            let selected = level.clone();
+                                            let label = format!("Effort: {level}");
+                                            view! {
+                                                <option value=level selected=move || thinking_level.get().as_ref() == Some(&selected)>{label}</option>
+                                            }
+                                        }
+                                    />
+                                    <Show when=move || thinking_level.get().is_some_and(|current| !effort_choices.get().contains(&current))>
+                                        <option value=move || thinking_level.get().unwrap_or_default() selected=true>
+                                            {move || format!("Effort: {}", thinking_level.get().unwrap_or_default())}
                                         </option>
                                     </Show>
                                 </select>
@@ -3047,8 +3072,8 @@ pub fn App() -> impl IntoView {
                                         });
                                     }
                                 >
-                                    <option prop:value="" prop:selected=move || model_override.get().is_none()>
-                                        "model: default"
+                                    <option value="" selected=move || model_override.get().is_none()>
+                                        "Default model"
                                     </option>
                                     // If a persisted override isn't in the
                                     // catalogue yet, still show it selected.
@@ -3057,7 +3082,7 @@ pub fn App() -> impl IntoView {
                                         cur.is_some()
                                             && !models.get().iter().any(|m| Some(&m.id) == cur.as_ref())
                                     }>
-                                        <option prop:value=move || model_override.get().unwrap_or_default() prop:selected=true>
+                                        <option value=move || model_override.get().unwrap_or_default() selected=true>
                                             {move || model_override.get().unwrap_or_default()}
                                         </option>
                                     </Show>
@@ -3079,8 +3104,8 @@ pub fn App() -> impl IntoView {
                                             };
                                             view! {
                                                 <option
-                                                    prop:value=id.clone()
-                                                    prop:selected=move || model_override.get().as_deref() == Some(id_sel.as_str())
+                                                    value=id.clone()
+                                                    selected=move || model_override.get().as_deref() == Some(id_sel.as_str())
                                                 >
                                                     {label}
                                                 </option>
