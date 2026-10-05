@@ -7518,3 +7518,13 @@ area:      [review]
 
 Resolved model entries without effort capabilities now validate persisted overrides against the legacy fallback list; unsupported Max/future values clear instead of repeatedly causing older-daemon turn rejection. Unresolved catalogue entries still retain overrides during loading. The control list and validation share one fallback constant. A regression covers legacy rejection, supported legacy values, current Max and empty capabilities. All 1,412 UI tests, both denied-warning Clippy paths, WASM/proxy checks, WASM test compilation, formatting and release Trunk build pass. Root contract updated; child indexes unchanged. Exact committed detached verification and fresh review follow.
 _________________________________________________________________________________ 15:20 codex/ocean-ui-model-effort-20261005
+
+time:      [15:26] [05-10-26]
+date-order: DD-MM-YY
+agent:     [codex], [gpt-6]
+worktree:  codex/ocean-ui-model-effort-20261005
+type:      [bug report]: Unified command effort capabilities
+area:      [frontend]
+
+Surface /thinking and its command hint now use the same selected-model capability choices as the composer picker. Current Max/future levels are accepted when advertised; unsupported choices stay rejected on legacy routes. A model-switch regression covers modern, non-thinking and legacy choices. All 1,413 UI tests, native/WASM strict Clippy, WASM test compilation and release build pass. Built-browser checks against the installed legacy daemon accept High, reflect it in the summary, reject Max without changing High, and dispatch no provider turn. Root contract updated; ownership and child indexes unchanged. Operator requests a more cohesive harness panel; the current two-select visual treatment remains pending refinement.
+_________________________________________________________________________________ 15:26 codex/ocean-ui-model-effort-20261005

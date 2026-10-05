@@ -123,6 +123,8 @@ All visual work on the Leptos web surface follows
   capabilities constrain available choices; legacy daemons retain the fallback
   list. Once a model entry resolves, validate its effort against capabilities or
   that legacy list; unknown values survive only while the entry is unresolved.
+  The `/thinking` command and command hint consume the same selected-model
+  capability choices as the picker, including Max and future daemon levels.
   Keep compact/touch controls inside that disclosure.
   Persist bounded effort tokens across reloads; validate model support against
   the daemon catalogue rather than a static client vocabulary.

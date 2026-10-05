@@ -559,24 +559,19 @@ fn run_slash(id: &str, args: &str, daemon: &Daemon, registry: &CommandRegistry) 
             }
             true
         }
-        "thinking" => match args {
-            "" | "default" => {
+        "thinking" => {
+            let choices = available_effort_choices(daemon);
+            if args.is_empty() || args == "default" {
                 daemon.set_thinking_level(None);
                 daemon.status.set("thinking \u{2192} default".into());
-                true
-            }
-            "off" | "minimal" | "low" | "medium" | "high" | "xhigh" => {
+            } else if choices.iter().any(|level| level == args) {
                 daemon.set_thinking_level(Some(args.into()));
                 daemon.status.set(format!("thinking \u{2192} {args}"));
-                true
+            } else {
+                daemon.status.set(format!("unsupported effort: {args}"));
             }
-            _ => {
-                daemon.status.set(format!(
-                    "unknown level: {args} (off|minimal|low|medium|high|xhigh|default)"
-                ));
-                true
-            }
-        },
+            true
+        }
         // `/clear`, `/help`, new-session, toggle-*, workspace-toggle,
         // open-council — all route through the registry callback so there is
         // exactly one execution path (the slash popover pick and the ⌘K palette
@@ -1436,6 +1431,29 @@ fn producer_decide(intent: Option<(String, u64)>, in_tauri: bool) -> PreviewProd
 
 const LEGACY_EFFORT_CHOICES: [&str; 6] = ["off", "minimal", "low", "medium", "high", "xhigh"];
 
+fn model_effort_choices(
+    catalog: &[crate::daemon::ModelInfo],
+    selected: Option<&str>,
+) -> Vec<String> {
+    catalog
+        .iter()
+        .find(|entry| Some(entry.id.as_str()) == selected)
+        .and_then(|entry| entry.reasoning_efforts.clone())
+        .unwrap_or_else(|| {
+            LEGACY_EFFORT_CHOICES
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        })
+}
+
+fn available_effort_choices(daemon: &Daemon) -> Vec<String> {
+    let selected = daemon.model_override.get().or_else(|| daemon.model.get());
+    daemon
+        .models
+        .with(|catalog| model_effort_choices(catalog, selected.as_deref()))
+}
+
 fn effort_override_unsupported(current: &str, capabilities: Option<&[String]>) -> bool {
     capabilities.map_or_else(
         || !LEGACY_EFFORT_CHOICES.contains(&current),
@@ -1559,22 +1577,8 @@ pub fn App() -> impl IntoView {
     // next turn's request; `None` leaves the daemon defaults untouched.
     let thinking_level = daemon.thinking_level;
     let model_override = daemon.model_override;
-    let effort_choices = Memo::new(move |_| {
-        let selected = model_override.get().or_else(|| model.get());
-        models
-            .with(|catalog| {
-                catalog
-                    .iter()
-                    .find(|entry| Some(&entry.id) == selected.as_ref())
-                    .and_then(|entry| entry.reasoning_efforts.clone())
-            })
-            .unwrap_or_else(|| {
-                LEGACY_EFFORT_CHOICES
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect()
-            })
-    });
+    let choices_daemon = daemon.clone();
+    let effort_choices = Memo::new(move |_| available_effort_choices(&choices_daemon));
     let effort_daemon = daemon.clone();
     Effect::new(move |_| {
         let current = thinking_level.get();
@@ -2017,9 +2021,10 @@ pub fn App() -> impl IntoView {
             slash: Some("/thinking"),
             enabled: always,
             run: Callback::new(move |_| {
-                daemon_thinking
-                    .status
-                    .set("use /thinking off|minimal|low|medium|high|xhigh|default".into());
+                daemon_thinking.status.set(format!(
+                    "use /thinking {}|default",
+                    available_effort_choices(&daemon_thinking).join("|")
+                ));
             }),
         });
         let daemon_help = daemon.clone();
@@ -3607,16 +3612,38 @@ mod tests {
     use super::{
         append_dictation, competing_reveal_open, composer_height_px, composer_overflow_y,
         council_open_visibility, daemon_status_admit, effort_override_unsupported,
-        execute_planner_workflow, initial_planner_context, island_open_visibility, parse_deep_link,
-        planner_candidates, selected_planner_context, should_submit_composer_key, topmost_reveal,
-        window_escape_should_handle, DeepLinkAction, PlannerAction, PlannerContext,
-        PlannerWorkflowFailureStage, PlannerWorkflowOps, PlannerWorkflowRequest, RevealSurface,
-        RevealVisibility, COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX,
+        execute_planner_workflow, initial_planner_context, island_open_visibility,
+        model_effort_choices, parse_deep_link, planner_candidates, selected_planner_context,
+        should_submit_composer_key, topmost_reveal, window_escape_should_handle, DeepLinkAction,
+        PlannerAction, PlannerContext, PlannerWorkflowFailureStage, PlannerWorkflowOps,
+        PlannerWorkflowRequest, RevealSurface, RevealVisibility, COMPOSER_MAX_HEIGHT_PX,
+        COMPOSER_MIN_HEIGHT_PX,
     };
     use crate::daemon::{ProjectInfo, WorktreeInfo};
     use crate::host::DaemonStatus;
     use futures_util::future::LocalBoxFuture;
     use futures_util::FutureExt;
+
+    #[test]
+    fn command_and_picker_choices_follow_selected_catalog_model() {
+        let modern = serde_json::from_value(
+            serde_json::json!({"id":"modern","reasoning_efforts":["high","max","future"]}),
+        )
+        .unwrap();
+        let nonthinking =
+            serde_json::from_value(serde_json::json!({"id":"plain","reasoning_efforts":[]}))
+                .unwrap();
+        let legacy = serde_json::from_value(serde_json::json!({"id":"legacy"})).unwrap();
+        let catalog = [modern, nonthinking, legacy];
+        assert_eq!(
+            model_effort_choices(&catalog, Some("modern")),
+            ["high", "max", "future"]
+        );
+        assert!(model_effort_choices(&catalog, Some("plain")).is_empty());
+        assert!(!model_effort_choices(&catalog, Some("legacy"))
+            .iter()
+            .any(|level| level == "max"));
+    }
 
     #[test]
     fn resolved_legacy_efforts_reject_future_values_but_capable_models_accept_them() {
