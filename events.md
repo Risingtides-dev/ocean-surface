@@ -23,7 +23,8 @@ agent, worktree (branch when not on main), type, area, then one plain-prose
 paragraph on what changed and why."
 
 ```text
-  time:      [HH:MM] [MM-DD-YY]        24-hour clock, America/New_York
+  time:      [HH:MM] [DD-MM-YY]        24-hour clock, America/New_York
+  date-order: DD-MM-YY                explicit entry-scoped date format
   agent:     [claude] [opus 5]
   worktree:  [branch-name]             omit only on the main checkout
   type:      infra                     bug-report | feature-request | refactor |
@@ -7431,3 +7432,17 @@ area:      [frontend] [testing]
 Prepared the tested combined model/effort picker and quieter Rooms controls for draft upstream review. Candidate preserves separate persisted overrides, catalog capability constraints, outside-click dismissal and Escape focus return; mobile widths and native select defaults were verified in the built candidate. SVG media state icons replace rendered emoji. Final source gates passed in prior candidate validation; exact committed WASM/proxy checks also passed. Root AGENTS.md already owns the new interaction contracts; no child ownership or index changes. The installed daemon still serves the old model catalog. Provider refresh PR #532 overlaps runtime work but does not yet expose reasoning_efforts; its macOS extension cleanup timing gate failed. No merge, operator-live promotion or full provider acceptance is claimed. This entry uses the operator-required day-first date; ledger order parsing remains a separate known issue, and historical entries are preserved.
 
 _________________________________________________________________________________ 13:48 codex/ocean-ui-model-effort-20261005
+
+date-order: DD-MM-YY
+
+
+time:      [13:55] [05-10-26]
+date-order: DD-MM-YY
+agent:     [Codex desktop], [GPT-6]
+worktree:  [codex/ocean-ui-model-effort-20261005]
+type:      [workflow]
+area:      [testing]
+
+Published combined picker and UI cleanup as draft PR #236. Hosted ledger order gate exposed the operator day-first date being interpreted month-first. Added explicit entry-scoped date-order metadata to the parser, preserving legacy inference and all historical headers; clarified this task's immutable entry by append only. Twenty ledger-order tests pass, including a real backdate and no metadata leakage between entries; closure and order checks now pass on the candidate. Updated root devlog and the branch ledger template, whose schema block explicitly permits edits. Child ownership/indexes are unchanged. Runtime capability follow-up provider/daemon tests, docs and strict lint also passed in its separate branch. Review, full hosted checks, model max effort, auth acceptance and operator-live delivery remain open.
+
+_________________________________________________________________________________ 13:55 codex/ocean-ui-model-effort-20261005

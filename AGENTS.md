@@ -514,6 +514,11 @@ parallel append keeps all four rules and fuses nothing, but it reproduces the
 merge in a scratch repo and never reads THIS file, so CI's `guards` job running
 it proves the driver, not the ledger.
 
+New entries follow the operator's DD-MM-YY dates and include an explicit
+`date-order: DD-MM-YY` field. The order checker honors this entry-scoped field;
+legacy entries retain their historical inference. To clarify an immutable header,
+append its date-order field after its closing rule before the next entry begins.
+
 **Run `node scripts/check-ledger-order.mjs events.md` beside it.** The checker
 never reads a `time:` header past the word, so five entries sat at the top of
 this ledger newest-first for months and it called the file clean. The order
