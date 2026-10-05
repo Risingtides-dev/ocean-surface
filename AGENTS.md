@@ -109,6 +109,42 @@ All visual work on the Leptos web surface follows
   float, in cascade order). Colors live ONLY in `styles/tokens.css`.
   `extension/sidepanel.html` and `scripts/build-extension.sh` enumerate the
   same files — adding a stylesheet touches all three places.
+- Composer model and reasoning effort share one native disclosure. Its summary
+  reflects the selected override or authoritative `/v1/models.current` default; its controls retain separate
+  persisted turn overrides and consume the daemon catalogue. Keep the default
+  separate from the last turn/session model so clearing an override validates and
+  displays the actual next-turn route. Unknown persisted
+  selections stay visible while the catalogue loads. Escape closes the disclosure
+  and restores summary focus only when open; a closed disclosure lets Escape reach
+  the topmost surface. Outside clicks dismiss it. Its caret uses shared ChevronDown.
+  The disclosure shrinks
+  to its trigger so the popup stays anchored instead of spanning the composer.
+  The menu explicitly uses `display: none` while closed and flex only while open.
+  Its stacking level stays above slash suggestions so both model controls remain reachable.
+  Daemon-provided effort
+  capabilities constrain available choices; legacy daemons retain the fallback
+  list. Once a model entry resolves, validate its effort against capabilities or
+  that legacy list; unknown values survive only while the entry is unresolved.
+  The `/thinking` command and command hint consume the same selected-model
+  capability choices as the picker, including Max and future daemon levels.
+  Opening the disclosure reveals one searchable model radio list and a compact
+  native effort radio rail. Preserve default inheritance, unavailable credential
+  signals and unresolved pinned values; both controls share one panel, never nested selects.
+  Legacy compact select sizing must not constrain the model list or effort rail.
+  Keep compact/touch controls inside that disclosure. Its auto-focused search
+  uses at least 16px text on phone widths and coarse-pointer devices to prevent Safari form-control zoom.
+  Enter inside the model panel never submits the composer; summary keyboard
+  toggling and composer submission retain their own native behavior.
+  Persist bounded effort tokens across reloads; validate model support against
+  the daemon catalogue rather than a static client vocabulary.
+- Rooms creation and invite redemption share one collapsed native disclosure in
+  the room-list footer. Preserve every existing trigger and join action inside it.
+  Expanded actions stay within 70% of the rail and scroll on short viewports.
+- Product chrome uses the shared SVG icon family; no emoji or AI sparkle icons.
+  Participant media-state icons carry an accessible state label.
+- The room Details drawer anchors to the positioned Rooms workspace, including capped ultrawide shells and mid-width thread-open layouts.
+- Grouped message clocks and confirmed ledger marks stack inside the avatar
+  gutter; neither may overlap the aligned message body.
 - Control density is a design defect: conditional rendering over permanent
   chrome, one header overflow (`⋯`) for secondary actions, ghost triggers for
   idle features (dialer, join call), reveal-on-intent for power knobs.
@@ -502,6 +538,11 @@ below applies to it. `scripts/events-merge-driver.test.mjs` proves a three-way
 parallel append keeps all four rules and fuses nothing, but it reproduces the
 merge in a scratch repo and never reads THIS file, so CI's `guards` job running
 it proves the driver, not the ledger.
+
+New entries follow the operator's DD-MM-YY dates and include an explicit
+`date-order: DD-MM-YY` field. The order checker honors this entry-scoped field;
+legacy entries retain their historical inference. To clarify an immutable header,
+append its date-order field after its closing rule before the next entry begins.
 
 **Run `node scripts/check-ledger-order.mjs events.md` beside it.** The checker
 never reads a `time:` header past the word, so five entries sat at the top of

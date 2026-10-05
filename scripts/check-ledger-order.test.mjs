@@ -239,3 +239,20 @@ test('an equal-length run with a lower newest stamp is kept, so a valid entry is
   const misplaced = misplacedEntries(readStamps(text));
   assert.deepEqual(misplaced.map((e) => e.header.replace(/\s+/g, ' ')), ['time: [10:00] [09-03-26]'], 'only Sep 3 is out of place; Sep 2 heads the run the Sep 1s can join');
 });
+
+
+test('explicit day-first metadata clarifies an append without rewriting its header', () => {
+  const old = entry('12:00', '09-08-26');
+  const current = entry('13:48', '05-10-26') + 'date-order: DD-MM-YY\n';
+  const text = old + current + entry('14:00', '10-05-26');
+  const rows = readStamps(text);
+  assert.equal(rows[1].stamp, Date.UTC(2026, 9, 5, 13, 48) / 60000);
+  assert.equal(rows[2].stamp, Date.UTC(2026, 9, 5, 14, 0) / 60000, 'metadata stays in its own entry');
+  assert.deepEqual(misplacedEntries(rows), []);
+});
+
+test('explicit day-first order still rejects a real backdated append', () => {
+  const text = entry('12:00', '10-05-26') + entry('13:00', '01-10-26') + 'date-order: DD-MM-YY\n';
+  assert.equal(misplacedEntries(readStamps(text)).length, 1);
+  assert.equal(parseStamp('time: [13:00] [13-01-26]', null, 'MM-DD-YY'), null);
+});

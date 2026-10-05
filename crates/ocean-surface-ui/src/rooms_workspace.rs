@@ -1222,16 +1222,15 @@ fn store_thread_view_mode(mode: ThreadViewMode) {
 
 // ── Members drawer + thread panel header helpers ───────────────────────────
 
-/// Whether the members rail currently renders as an overlay drawer rather
-/// than an inline column. Must mirror the members-reachability media blocks
-/// in `styles/rooms-workspace.css`: the inline rail is gone at 1080px and
-/// below always, and up to 1440px while the thread panel occupies the row.
-fn members_drawer_is_overlay(width: f64, thread_open: bool) -> bool {
-    width <= 1080.0 || (thread_open && width <= 1440.0)
+/// Room details are always an overlay drawer. Keeping secondary room context
+/// off the main row preserves the conversation as the workspace's primary
+/// surface at every desktop width.
+fn members_drawer_is_overlay(_width: f64, _thread_open: bool) -> bool {
+    true
 }
 
-/// Escape owned by the members drawer: only an actually-overlaying drawer
-/// consumes the key; otherwise it bubbles to the drawer/app hierarchy below.
+/// Escape owned by the room-details drawer: only an open drawer consumes the
+/// key; otherwise it bubbles to the drawer/app hierarchy below.
 fn members_escape_closes(
     drawer_is_overlay: bool,
     members_open: bool,
@@ -1829,9 +1828,9 @@ pub(crate) fn unreachable_deep_link_room_status(key: &str) -> String {
 /// - **Left:** room list with active highlight, new-room create input.
 /// - **Center:** selected room header, message timeline, composer form,
 ///   status bar.
-/// - **Right:** participant / member roster with kind, role, and presence
-///   badges; reachable as a drawer (header chip) wherever the inline rail
-///   is hidden.
+/// - **Details drawer:** participant roster plus room summary, artifacts,
+///   files, repo, workspace, and policy. Secondary context stays off-canvas
+///   until explicitly opened so the conversation keeps the working area.
 /// - **Thread panel:** a dedicated conversation column for the selected
 ///   thread root, with its own pinned reply composer.
 ///
@@ -3408,6 +3407,8 @@ pub fn RoomsWorkspace(
                     }
                 }}
 
+                <details class="rooms-workspace__room-actions">
+                    <summary>"New or join room"</summary>
                 // Create input at bottom of left rail
                 <div class="rooms-workspace__left-create">
                     <input
@@ -3510,6 +3511,7 @@ pub fn RoomsWorkspace(
                 // is precisely the state this rail is the only thing visible
                 // in.
                 <crate::room_redeem::RoomRedeem rooms=rooms state=redeem />
+                </details>
             </div>
 
             // ═══ CENTER RAIL — header + transcript + composer ═══════════
@@ -3523,9 +3525,6 @@ pub fn RoomsWorkspace(
                                 <div class="rooms-workspace__join">
                                     <div class="rooms-workspace__join-title">
                                         "Select a room"
-                                    </div>
-                                    <div class="rooms-workspace__join-desc">
-                                        "Choose a room from the sidebar to start collaborating."
                                     </div>
                                 </div>
                             }.into_any()
@@ -3542,14 +3541,15 @@ pub fn RoomsWorkspace(
                                         {room_name.clone()}
                                     </h1>
                                     <div class="rooms-workspace__center-actions">
-                                        // Members chip: reopens the roster as a drawer
-                                        // wherever the inline rail is hidden (CSS shows
-                                        // the chip only in exactly those layouts).
+                                        // One quiet trigger for all secondary room
+                                        // context. The details drawer never competes
+                                        // with the conversation for inline width.
                                         <button
                                             class="rooms-workspace__members-chip"
                                             type="button"
                                             node_ref=members_chip_ref
-                                            aria-label="Toggle members"
+                                            aria-label="Toggle room details"
+                                            title="Room details"
                                             aria-controls="rooms-workspace-members"
                                             aria-expanded=move || show_members.get().to_string()
                                             on:click=move |_| {
@@ -3563,6 +3563,8 @@ pub fn RoomsWorkspace(
                                                 <path d="M1.5 13.5c0-2.5 2-4 4.5-4s4.5 1.5 4.5 4"/>
                                                 <path d="M11 3.5a2.5 2.5 0 0 1 0 4.6M12 9.8c1.5 0.6 2.5 1.9 2.5 3.7"/>
                                             </svg>
+                                            <span class="rooms-workspace__members-chip-label">"Details"</span>
+                                            <span class="rooms-workspace__members-chip-count">
                                             {move || {
                                                 let count = match rooms.access.get() {
                                                     Some(access)
@@ -3578,6 +3580,7 @@ pub fn RoomsWorkspace(
                                                 };
                                                 count.to_string()
                                             }}
+                                            </span>
                                         </button>
                                         {if joined {
                                             view! {
@@ -4304,13 +4307,13 @@ pub fn RoomsWorkspace(
                 class:rooms-workspace__right--visible=move || show_members.get()
             >
                 <div class="rooms-workspace__right-head">
-                    <h3 class="rooms-workspace__right-title">"Members"</h3>
+                    <h3 class="rooms-workspace__right-title">"Room details"</h3>
                     // Drawer dismiss: CSS reveals it only in the overlay
                     // layouts the members chip serves.
                     <button
                         class="rooms-workspace__right-close"
                         type="button"
-                        aria-label="Close members"
+                        aria-label="Close room details"
                         on:click=move |_| {
                             show_members.set(false);
                             if let Some(chip) = members_chip_ref.get() {
@@ -4327,6 +4330,7 @@ pub fn RoomsWorkspace(
                 </div>
 
                 <div class="rooms-workspace__right-list">
+                    <div class="rooms-workspace__right-section-title">"Members"</div>
                     {move || {
                         match rooms.access.get() {
                                 None => {
@@ -8408,17 +8412,16 @@ mod tests {
         );
     }
 
-    /// Members reachability: everywhere the inline rail is hidden the chip
-    /// and drawer rules must exist, and the drawer override must follow the
-    /// hide rules so it wins the cascade.
+    /// Room details stay off-canvas at every width: the header trigger is
+    /// always present and the visible drawer override follows the hidden base.
     #[test]
     fn members_drawer_overrides_follow_the_rail_hide_rules() {
         let css = include_str!("../../../styles/rooms-workspace.css");
         let stripped = strip_css_comments(css);
         let normalized = css_without_whitespace(&stripped);
         assert!(
-            normalized.contains(".rooms-workspace__members-chip{display:none;"),
-            "members chip needs a hidden base rule"
+            normalized.contains(".rooms-workspace__members-chip{display:inline-flex;"),
+            "room-details trigger must be visible at every width"
         );
         let chip_1080 = css_media_blocks(&stripped, "@media (max-width: 1080px)")
             .iter()
@@ -8454,23 +8457,17 @@ mod tests {
 
     #[test]
     fn members_drawer_overlay_matches_the_css_breakpoints() {
-        // ≤1080: always an overlay, threads or not.
-        assert!(members_drawer_is_overlay(1080.0, false));
-        assert!(members_drawer_is_overlay(1080.0, true));
+        // Secondary room context never competes with the conversation for width.
         assert!(members_drawer_is_overlay(650.0, false));
-        // 1081-1440: overlay only while the thread panel occupies the row.
-        assert!(!members_drawer_is_overlay(1081.0, false));
-        assert!(members_drawer_is_overlay(1081.0, true));
-        assert!(members_drawer_is_overlay(1440.0, true));
-        // >1440: the inline rail is always present; never an overlay.
-        assert!(!members_drawer_is_overlay(1441.0, true));
-        assert!(!members_drawer_is_overlay(1441.0, false));
+        assert!(members_drawer_is_overlay(1080.0, true));
+        assert!(members_drawer_is_overlay(1441.0, false));
+        assert!(members_drawer_is_overlay(1920.0, true));
     }
 
     #[test]
     fn members_escape_consumes_only_an_open_unhandled_overlay() {
         assert!(members_escape_closes(true, true, false));
-        // Inline rail: Escape bubbles to the drawer/app hierarchy.
+        // A defensive non-overlay state still bubbles.
         assert!(!members_escape_closes(false, true, false));
         // Closed drawer: bubbles.
         assert!(!members_escape_closes(true, false, false));

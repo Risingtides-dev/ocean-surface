@@ -541,9 +541,13 @@ pub fn LiveKitPanel(daemon: Daemon, open: RwSignal<bool>) -> impl IntoView {
                                         }
                                     >
                                         <span class="ocean-livekit__participant-name">{label}</span>
-                                        <span class="ocean-livekit__participant-state">
-                                            {if p.mic { "🎤" } else { "🔇" }}
-                                            {if p.camera { " 📹" } else { "" }}
+                                        <span class="ocean-livekit__participant-state" role="img"
+                                            aria-label=format!("{}, camera {}",
+                                                if p.mic { "Microphone on" } else { "Microphone off" },
+                                                if p.camera { "on" } else { "off" })>
+                                            {if p.mic { view! { <crate::icons::Mic /> }.into_any() }
+                                             else { view! { <crate::icons::MicOff /> }.into_any() }}
+                                            {p.camera.then(|| view! { <crate::icons::Capture /> })}
                                         </span>
                                     </li>
                                 }

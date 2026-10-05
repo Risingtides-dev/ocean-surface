@@ -925,6 +925,7 @@ mod tests {
             // baseline every existing expectation below is written against.
             ready: None,
             credential_source: None,
+            reasoning_efforts: None,
         }
     }
 

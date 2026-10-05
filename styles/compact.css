@@ -60,14 +60,14 @@
 }
 /* Header controls and per-turn selectors use compact control height. */
   .ocean-surface--extension .ocean-sessions-trigger,
-  .ocean-surface--extension .ocean-thinking,
-  .ocean-surface--extension .ocean-model-override {
+  .ocean-surface--extension select.ocean-thinking,
+  .ocean-surface--extension select.ocean-model-override {
     min-height: var(--ctl-h-sm);
     height: var(--ctl-h-sm);
   }
 
-.ocean-surface--extension .ocean-thinking,
-.ocean-surface--extension .ocean-model-override {
+.ocean-surface--extension select.ocean-thinking,
+.ocean-surface--extension select.ocean-model-override {
   max-width: 46vw;
 }
 
@@ -207,14 +207,14 @@
 
   /* Controls: compact height, capped chip widths ---------------------- */
   .ocean-surface .ocean-sessions-trigger,
-  .ocean-surface .ocean-thinking,
-  .ocean-surface .ocean-model-override {
+  .ocean-surface select.ocean-thinking,
+  .ocean-surface select.ocean-model-override {
     min-height: var(--ctl-h-sm);
     height: var(--ctl-h-sm);
   }
 
-  .ocean-surface .ocean-thinking,
-  .ocean-surface .ocean-model-override {
+  .ocean-surface select.ocean-thinking,
+  .ocean-surface select.ocean-model-override {
     max-width: 46vw;
   }
 
@@ -696,4 +696,12 @@
     width: 100%;
     min-height: 44px;
   }
+}
+
+/* Expanded model settings retain full-width touch targets in compact hosts. */
+.ocean-surface .ocean-model-settings__menu select.ocean-thinking,
+.ocean-surface .ocean-model-settings__menu select.ocean-model-override {
+  max-width: none;
+  min-height: 44px;
+  height: 44px;
 }

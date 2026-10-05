@@ -293,6 +293,9 @@
 }
 
 .ocean-livekit__participant-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   flex: 0 0 auto;
   color: var(--fg-3);
   font-size: 12px;

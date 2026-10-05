@@ -109,7 +109,7 @@ function parseTime(text) {
 
 // `previous` is the stamp of the entry above, in minutes, or null. It settles
 // only the ambiguous dates; a field over twelve settles itself.
-export function parseStamp(header, previous = null) {
+export function parseStamp(header, previous = null, dateOrder = null) {
   const m = header.match(HEADER);
   if (!m) return null;
   const time = parseTime(m[1]);
@@ -121,6 +121,8 @@ export function parseStamp(header, previous = null) {
   const valid = (month, day) => month >= 1 && month <= 12 && day >= 1 && day <= 31;
   const monthFirst = valid(a, b) ? minutes(year, a, b, time.hour, time.minute) : null;
   const dayFirst = valid(b, a) ? minutes(year, b, a, time.hour, time.minute) : null;
+  if (dateOrder === "DD-MM-YY") return dayFirst;
+  if (dateOrder === "MM-DD-YY") return monthFirst;
   if (monthFirst === null) return dayFirst;
   if (dayFirst === null || a === b) return monthFirst;
   const inEra = monthFirst <= DAY_FIRST_ERA_ENDS && dayFirst <= DAY_FIRST_ERA_ENDS;
@@ -139,7 +141,14 @@ export function readStamps(text) {
   lines.forEach((raw, index) => {
     if (!ENTRY_HEADER.test(raw)) return;
     const header = raw.trim();
-    const stamp = parseStamp(header, previous);
+    // Explicit entry metadata wins over the legacy era heuristic. It may be
+    // appended after the closing rule to clarify an immutable existing entry.
+    let dateOrder = null;
+    for (let next = index + 1; next < lines.length && !ENTRY_HEADER.test(lines[next]); next++) {
+      const marker = lines[next].match(/^date-order:\s*(DD-MM-YY|MM-DD-YY)\s*$/);
+      if (marker) dateOrder = marker[1];
+    }
+    const stamp = parseStamp(header, previous, dateOrder);
     if (stamp !== null) previous = stamp;
     entries.push({ line: index + 1, header, stamp });
   });

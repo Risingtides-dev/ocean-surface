@@ -23,7 +23,8 @@ agent, worktree (branch when not on main), type, area, then one plain-prose
 paragraph on what changed and why."
 
 ```text
-  time:      [HH:MM] [MM-DD-YY]        24-hour clock, America/New_York
+  time:      [HH:MM] [DD-MM-YY]        24-hour clock, America/New_York
+  date-order: DD-MM-YY                explicit entry-scoped date format
   agent:     [claude] [opus 5]
   worktree:  [branch-name]             omit only on the main checkout
   type:      infra                     bug-report | feature-request | refactor |
@@ -7420,3 +7421,150 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+
+
+time:      [13:48] [05-10-26]
+agent:     [Codex desktop], [GPT-6]
+worktree:  [codex/ocean-ui-model-effort-20261005]
+type:      [workflow]
+area:      [frontend] [testing]
+
+Prepared the tested combined model/effort picker and quieter Rooms controls for draft upstream review. Candidate preserves separate persisted overrides, catalog capability constraints, outside-click dismissal and Escape focus return; mobile widths and native select defaults were verified in the built candidate. SVG media state icons replace rendered emoji. Final source gates passed in prior candidate validation; exact committed WASM/proxy checks also passed. Root AGENTS.md already owns the new interaction contracts; no child ownership or index changes. The installed daemon still serves the old model catalog. Provider refresh PR #532 overlaps runtime work but does not yet expose reasoning_efforts; its macOS extension cleanup timing gate failed. No merge, operator-live promotion or full provider acceptance is claimed. This entry uses the operator-required day-first date; ledger order parsing remains a separate known issue, and historical entries are preserved.
+
+_________________________________________________________________________________ 13:48 codex/ocean-ui-model-effort-20261005
+
+date-order: DD-MM-YY
+
+
+time:      [13:55] [05-10-26]
+date-order: DD-MM-YY
+agent:     [Codex desktop], [GPT-6]
+worktree:  [codex/ocean-ui-model-effort-20261005]
+type:      [workflow]
+area:      [testing]
+
+Published combined picker and UI cleanup as draft PR #236. Hosted ledger order gate exposed the operator day-first date being interpreted month-first. Added explicit entry-scoped date-order metadata to the parser, preserving legacy inference and all historical headers; clarified this task's immutable entry by append only. Twenty ledger-order tests pass, including a real backdate and no metadata leakage between entries; closure and order checks now pass on the candidate. Updated root devlog and the branch ledger template, whose schema block explicitly permits edits. Child ownership/indexes are unchanged. Runtime capability follow-up provider/daemon tests, docs and strict lint also passed in its separate branch. Review, full hosted checks, model max effort, auth acceptance and operator-live delivery remain open.
+
+_________________________________________________________________________________ 13:55 codex/ocean-ui-model-effort-20261005
+
+
+time:      [14:15] [05-10-26]
+date-order: DD-MM-YY
+agent:     [Codex desktop], [GPT-6]
+worktree:  [codex/ocean-ui-model-effort-20261005]
+type:      [bug report]
+area:      [frontend] [testing]
+
+Browser verification exposed the unified picker occupying the full desktop grid cell: the popup opened far from its trigger despite staying on screen. Shrunk the disclosure to its trigger with constrained intrinsic width. Rebuilt the production bundle and verified popup/trigger right-edge alignment and viewport containment at 320/375/430/768/1200px; Escape closes it and restores summary focus. Root interaction contract updated; child ownership/indexes remain unchanged. Earlier hosted Surface gates all passed. Runtime candidate 41f3812f full local repository gate now passes; real Max GPT acceptance remains four models passed. Claude reauthentication was requested because its OAuth remains expired. Fresh review, current-head hosted checks and installed-live delivery remain open.
+
+_________________________________________________________________________________ 14:15 codex/ocean-ui-model-effort-20261005
+
+time:      [14:20] [05-10-26]
+date-order: DD-MM-YY
+agent:     [codex], [gpt-6]
+worktree:  codex/ocean-ui-model-effort-20261005
+type:      [bug report]: Independent review corrections
+area:      [review]
+
+Addressed both independent PR #236 findings: consume Escape only when the model disclosure is open, so closed-trigger focus permits topmost-panel dismissal; replace the text caret with the shared ChevronDown SVG. Updated the existing interaction contract; ownership and child indexes remain unchanged. Release bundle and host/WASM checks are rerunning.
+_________________________________________________________________________________ 14:20 codex/ocean-ui-model-effort-20261005
+
+time:      [14:29] [05-10-26]
+date-order: DD-MM-YY
+agent:     [codex], [gpt-6]
+worktree:  codex/ocean-ui-model-effort-20261005
+type:      [workflow]: Reconcile reviewed candidate
+area:      [testing]
+
+Made model-menu hiding explicit after independent review: closed disclosure uses display none; only open disclosure uses flex. The previous built browser hid the closed popup but retained a flex layout box, so the explicit rule removes engine dependence. Updated the owning interaction contract; parent ownership and child indexes are unchanged. Earlier review fixes passed 1,411 UI tests, both Clippy targets, required compile checks, release build, and detached-tree verification.
+_________________________________________________________________________________ 14:29 codex/ocean-ui-model-effort-20261005
+
+time:      [14:43] [05-10-26]
+date-order: DD-MM-YY
+agent:     [codex], [gpt-6]
+worktree:  codex/ocean-ui-model-effort-20261005
+type:      [bug report]: Review fixes and attributed live proof
+area:      [testing]
+
+Addressed latest independent review: restore bounded catalogue-defined effort tokens instead of filtering a static six-level vocabulary; cap expanded room entry actions at 70 percent of the rail with vertical scrolling. Max/future tokens and malformed input are covered by restore tests. All 1,411 UI tests, host/WASM strict Clippy, WASM test compilation and release Trunk build pass. Built-browser checks confirm a selected effort survives reload and the join control remains reachable by scrolling at 640x360. Root interaction contracts updated; ownership and child indexes unchanged.
+_________________________________________________________________________________ 14:43 codex/ocean-ui-model-effort-20261005
+
+time:      [14:58] [05-10-26]
+date-order: DD-MM-YY
+agent:     [codex], [gpt-6]
+worktree:  codex/ocean-ui-model-effort-20261005
+type:      [bug report]: Fresh review corrections
+area:      [review]
+
+Addressed fresh PR #236 grouped-message finding: clock and confirmed ledger mark stack vertically within the 32px avatar gutter, leaving the aligned body uncovered. Release Trunk build passes. Browser fixture uses production markup/CSS and verifies separated bounds at desktop and 320px widths; this is layout evidence, not a live federated-room acceptance claim. Root grouped-message contract updated; child ownership/indexes unchanged. Previous source head passed all four hosted gates; the corrected head requires fresh checks/review.
+_________________________________________________________________________________ 14:58 codex/ocean-ui-model-effort-20261005
+
+time:      [15:10] [05-10-26]
+date-order: DD-MM-YY
+agent:     [codex], [gpt-6]
+worktree:  codex/ocean-ui-model-effort-20261005
+type:      [bug report]: Overlay review corrections
+area:      [frontend]
+
+Raised combined model settings above concurrent slash suggestions; browser hit testing confirms the model select remains uncovered with both menus visible. Anchored the Details drawer absolutely to the positioned Rooms workspace; browser geometry matches the shell right edge at 2560px and 375px widths. Release Trunk build passes. No turn, join, or room mutation submitted. Root contract updated; child indexes unchanged because ownership stays the same. Prior 7bc55dc hosted checks all passed; fresh committed-tree verification and review follow.
+_________________________________________________________________________________ 15:10 codex/ocean-ui-model-effort-20261005
+
+time:      [15:20] [05-10-26]
+date-order: DD-MM-YY
+agent:     [codex], [gpt-6]
+worktree:  codex/ocean-ui-model-effort-20261005
+type:      [bug report]: Resolved legacy effort validation
+area:      [review]
+
+Resolved model entries without effort capabilities now validate persisted overrides against the legacy fallback list; unsupported Max/future values clear instead of repeatedly causing older-daemon turn rejection. Unresolved catalogue entries still retain overrides during loading. The control list and validation share one fallback constant. A regression covers legacy rejection, supported legacy values, current Max and empty capabilities. All 1,412 UI tests, both denied-warning Clippy paths, WASM/proxy checks, WASM test compilation, formatting and release Trunk build pass. Root contract updated; child indexes unchanged. Exact committed detached verification and fresh review follow.
+_________________________________________________________________________________ 15:20 codex/ocean-ui-model-effort-20261005
+
+time:      [15:26] [05-10-26]
+date-order: DD-MM-YY
+agent:     [codex], [gpt-6]
+worktree:  codex/ocean-ui-model-effort-20261005
+type:      [bug report]: Unified command effort capabilities
+area:      [frontend]
+
+Surface /thinking and its command hint now use the same selected-model capability choices as the composer picker. Current Max/future levels are accepted when advertised; unsupported choices stay rejected on legacy routes. A model-switch regression covers modern, non-thinking and legacy choices. All 1,413 UI tests, native/WASM strict Clippy, WASM test compilation and release build pass. Built-browser checks against the installed legacy daemon accept High, reflect it in the summary, reject Max without changing High, and dispatch no provider turn. Root contract updated; ownership and child indexes unchanged. Operator requests a more cohesive harness panel; the current two-select visual treatment remains pending refinement.
+_________________________________________________________________________________ 15:26 codex/ocean-ui-model-effort-20261005
+
+time:      [15:38] [05-10-26]
+date-order: DD-MM-YY
+agent:     [codex], [gpt-6]
+worktree:  codex/ocean-ui-model-effort-20261005
+type:      [refactor]: Unified harness model panel
+area:      [frontend]
+
+Replaced the composer disclosure's two selects with one searchable model radio list and integrated effort radio rail, preserving daemon capabilities, default inheritance, unavailable credential signals and unresolved pins. Search matches label, model ID and provider across all query terms. Shared SVG selection mark; native keyboard radios, search focus on open and Escape focus return. Browser evidence confirms search, model/effort changes, keyboard activation, empty results, 375px fit and 320x360 bounded scrolling without sending a provider turn. Corrected list flex sizing and narrow-screen anchoring found during visual verification. All 1414 UI tests and seven required gates pass; release build passes after final CSS fixes. Root contract updated; no child indexes or ownership boundaries changed. Exact committed detached verification and fresh hosted review follow; installed UI remains unchanged.
+_________________________________________________________________________________ 15:38 codex/ocean-ui-model-effort-20261005
+
+time:      [15:45] [05-10-26]
+date-order: DD-MM-YY
+agent:     [codex], [gpt-6]
+worktree:  codex/ocean-ui-model-effort-20261005
+type:      [bug report]: Default route and compact panel review fixes
+area:      [review]
+
+Track /v1/models.current separately from the last turn/session model. Picker summary, effort validation and /thinking choices use the authoritative default after clearing a turn override; machine changes retire the default alongside its catalogue. Regressions exercise actual TurnStarted admission and differing default/override effort capabilities. Scope legacy compact selector sizing to native selects so the list and wrapped effort rail retain panel sizing. Higher-specificity thread-open drawer positioning now anchors to the workspace. All 1,416 UI tests and seven required checks pass; final release build passes. Browser measurements confirm a 280px mobile model list, complete 73px effort rail, and bounded 220px panel at 320x360. Production-CSS thread-open fixture drawer/workspace right edges match at 1280 and 1440px; this is geometry evidence, not live federated-thread acceptance. Root interaction contract updated; child indexes and ownership unchanged. Canonical ledger historical errors are preserved; candidate ledger is checked. Installed app remains unchanged pending review/CI/landing.
+_________________________________________________________________________________ 15:45 codex/ocean-ui-model-effort-20261005
+
+time:      [15:54] [05-10-26]
+date-order: DD-MM-YY
+agent:     [codex], [gpt-6]
+worktree:  codex/ocean-ui-model-effort-20261005
+type:      [bug report]: Mobile model-search focus stability
+area:      [review]
+
+Addressed fresh review on 3d247c7: the auto-focused model search now has a 16px floor on compact widths and coarse-pointer devices, preserving pinch zoom and matching existing composer behavior. All seven required checks, 1,416 UI tests and release build pass. Built preview at 375x667 reports focused search at computed 16px and a panel bounded within x=26..305, y=186..603; this is rendered CSS evidence, not physical iPhone Safari acceptance. Root interaction contract updated; ownership and child indexes unchanged. Fresh hosted review and exact committed detached build follow.
+_________________________________________________________________________________ 15:54 codex/ocean-ui-model-effort-20261005
+
+time:      [16:04] [05-10-26]
+date-order: DD-MM-YY
+agent:     [codex], [gpt-6]
+worktree:  codex/ocean-ui-model-effort-20261005
+type:      [bug report]: Prevent model-panel implicit composer submission
+area:      [review]
+
+Fresh review on a7f79a5 found Enter in the nested search could submit a staged composer draft. The panel consumes Enter for its search and native radio controls while summary activation, Space radio selection and composer submission retain their own behavior. All seven required checks, 1,416 UI tests and release build pass. Built browser confirms a staged draft remains exact and status remains new session after search Enter, model-radio Enter and effort-radio Enter; summary Enter opens, Space selects, and Escape dismisses. Test draft and overrides are cleaned up. Root interaction contract updated; ownership/indexes unchanged. Exact committed detached validation and fresh review follow; no installed-live claim.
+_________________________________________________________________________________ 16:04 codex/ocean-ui-model-effort-20261005
