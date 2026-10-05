@@ -121,7 +121,9 @@ All visual work on the Leptos web surface follows
   Its stacking level stays above slash suggestions so both model controls remain reachable.
   Daemon-provided effort
   capabilities constrain available choices; legacy daemons retain the fallback
-  list. Keep compact/touch controls inside that disclosure.
+  list. Once a model entry resolves, validate its effort against capabilities or
+  that legacy list; unknown values survive only while the entry is unresolved.
+  Keep compact/touch controls inside that disclosure.
   Persist bounded effort tokens across reloads; validate model support against
   the daemon catalogue rather than a static client vocabulary.
 - Rooms creation and invite redemption share one collapsed native disclosure in

@@ -1434,6 +1434,15 @@ fn producer_decide(intent: Option<(String, u64)>, in_tauri: bool) -> PreviewProd
     }
 }
 
+const LEGACY_EFFORT_CHOICES: [&str; 6] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+
+fn effort_override_unsupported(current: &str, capabilities: Option<&[String]>) -> bool {
+    capabilities.map_or_else(
+        || !LEGACY_EFFORT_CHOICES.contains(&current),
+        |levels| !levels.iter().any(|level| level == current),
+    )
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     let daemon = Daemon::new(daemon_url_from_env());
@@ -1560,7 +1569,7 @@ pub fn App() -> impl IntoView {
                     .and_then(|entry| entry.reasoning_efforts.clone())
             })
             .unwrap_or_else(|| {
-                ["off", "minimal", "low", "medium", "high", "xhigh"]
+                LEGACY_EFFORT_CHOICES
                     .into_iter()
                     .map(str::to_string)
                     .collect()
@@ -1575,8 +1584,9 @@ pub fn App() -> impl IntoView {
                 catalog
                     .iter()
                     .find(|entry| Some(&entry.id) == selected.as_ref())
-                    .and_then(|entry| entry.reasoning_efforts.as_ref())
-                    .map(|levels| !levels.contains(&current))
+                    .map(|entry| {
+                        effort_override_unsupported(&current, entry.reasoning_efforts.as_deref())
+                    })
                     .unwrap_or(false)
             });
             if unsupported {
@@ -3596,9 +3606,9 @@ pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
 mod tests {
     use super::{
         append_dictation, competing_reveal_open, composer_height_px, composer_overflow_y,
-        council_open_visibility, daemon_status_admit, execute_planner_workflow,
-        initial_planner_context, island_open_visibility, parse_deep_link, planner_candidates,
-        selected_planner_context, should_submit_composer_key, topmost_reveal,
+        council_open_visibility, daemon_status_admit, effort_override_unsupported,
+        execute_planner_workflow, initial_planner_context, island_open_visibility, parse_deep_link,
+        planner_candidates, selected_planner_context, should_submit_composer_key, topmost_reveal,
         window_escape_should_handle, DeepLinkAction, PlannerAction, PlannerContext,
         PlannerWorkflowFailureStage, PlannerWorkflowOps, PlannerWorkflowRequest, RevealSurface,
         RevealVisibility, COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX,
@@ -3607,6 +3617,14 @@ mod tests {
     use crate::host::DaemonStatus;
     use futures_util::future::LocalBoxFuture;
     use futures_util::FutureExt;
+
+    #[test]
+    fn resolved_legacy_efforts_reject_future_values_but_capable_models_accept_them() {
+        assert!(effort_override_unsupported("max", None));
+        assert!(!effort_override_unsupported("high", None));
+        assert!(!effort_override_unsupported("max", Some(&["max".into()])));
+        assert!(effort_override_unsupported("high", Some(&[])));
+    }
 
     fn shell_status(state: &str, revision: u64) -> DaemonStatus {
         DaemonStatus {

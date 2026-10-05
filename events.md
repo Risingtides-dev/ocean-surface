@@ -7508,3 +7508,13 @@ area:      [frontend]
 
 Raised combined model settings above concurrent slash suggestions; browser hit testing confirms the model select remains uncovered with both menus visible. Anchored the Details drawer absolutely to the positioned Rooms workspace; browser geometry matches the shell right edge at 2560px and 375px widths. Release Trunk build passes. No turn, join, or room mutation submitted. Root contract updated; child indexes unchanged because ownership stays the same. Prior 7bc55dc hosted checks all passed; fresh committed-tree verification and review follow.
 _________________________________________________________________________________ 15:10 codex/ocean-ui-model-effort-20261005
+
+time:      [15:20] [05-10-26]
+date-order: DD-MM-YY
+agent:     [codex], [gpt-6]
+worktree:  codex/ocean-ui-model-effort-20261005
+type:      [bug report]: Resolved legacy effort validation
+area:      [review]
+
+Resolved model entries without effort capabilities now validate persisted overrides against the legacy fallback list; unsupported Max/future values clear instead of repeatedly causing older-daemon turn rejection. Unresolved catalogue entries still retain overrides during loading. The control list and validation share one fallback constant. A regression covers legacy rejection, supported legacy values, current Max and empty capabilities. All 1,412 UI tests, both denied-warning Clippy paths, WASM/proxy checks, WASM test compilation, formatting and release Trunk build pass. Root contract updated; child indexes unchanged. Exact committed detached verification and fresh review follow.
+_________________________________________________________________________________ 15:20 codex/ocean-ui-model-effort-20261005
