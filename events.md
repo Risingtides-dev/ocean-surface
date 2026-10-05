@@ -7420,3 +7420,51 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+
+
+time: [11:00] [05-10-26]
+agent: [codex]
+worktree: [codex/ocean-ui-model-effort-20261005] [ui-model-effort-20261005]
+type: [refactor]
+area: [frontend]
+
+Started Ocean UI/model integration work in isolated Surface checkout, preserving dirty canonical Surface and Ocean OS trees. Composer model and reasoning effort now share one native disclosure with selected-value summary, Escape focus restoration, and compact touch targets. Updated Surface root contract; no child index changes because ownership is unchanged. WASM check, strict WASM Clippy, formatting and diff checks pass; proxy/test compilation and native tests pending. Running daemon catalog inspected: newer GPT entries missing and Claude entries report unavailable. No deployment or model execution acceptance claimed.
+
+
+time: [11:02] [05-10-26]
+agent: [codex]
+worktree: [codex/ocean-ui-model-effort-20261005]
+type: [workflow]
+area: [testing]
+
+Unified model/effort disclosure passes native Surface suite (1077 tests), WASM test compilation, WASM check, denied-warning WASM Clippy, proxy check, formatting and diff checks. Browser acceptance, broader UI polish, current model routing/auth verification, independent review and upstream delivery remain open. Isolated Ocean OS branch codex/ocean-current-models-20261005 created at 591772cc; no runtime source changes yet.
+
+
+time:      [11:32] [05-10-26]
+agent:     [codex], [unknown-model]
+worktree:  [codex/ocean-ui-model-effort-20261005]
+type:      [feature-request]
+area:      [frontend]
+
+Extended the combined model/effort disclosure with daemon capability metadata, outside-click dismissal and Escape focus restoration. Collapsed room creation and invite redemption into one native disclosure while preserving existing controls, removed redundant empty-room instructions, and corrected a vec2 write to the vec4 splash shader uniform. Native UI suites and strict native Clippy passed; rebuilt bundle and browser Escape/room-disclosure checks passed on private loopback proxy :18847. Updated root contract; child ownership/index unchanged. Remaining: current WASM gates, mobile visual acceptance, independent review, upstream landing and operator-live delivery.
+___ 11:32 codex/ocean-ui-model-effort-20261005
+
+
+time:      [11:43] [05-10-26]
+agent:     [codex], [unknown-model]
+worktree:  [codex/ocean-ui-model-effort-20261005]
+type:      [feature-request]
+area:      [frontend]
+
+Phone browser acceptance exposed popup overflow and a native select default cleared as options arrived. Right-aligned the popup, constrained its phone width, and changed option values/selections to native attributes; selected default verified in the rebuilt bundle. Added SVG participant media states with accessible labels to remove the remaining rendered emoji indicators. Current Surface gates passed before the final SVG and width delta; those deltas are compiling and await final browser acceptance. Root contract updated; no child-index ownership change.
+___ 11:43 codex/ocean-ui-model-effort-20261005
+
+
+time:      [11:46] [05-10-26]
+agent:     [codex], [unknown-model]
+worktree:  [codex/ocean-ui-model-effort-20261005]
+type:      [feature-request]
+area:      [frontend]
+
+Committed UI slice as 1e1db4610624bb61673463bef3743951d8561945. Final fmt, strict WASM/native Clippy, WASM test compilation, native UI suites and proxy check passed. Rebuilt candidate browser picker stayed inside the viewport at widths 320/375/430/1200 with 44px controls and selected defaults; outside click dismissed it. Root contract owns the behavior; no child ownership/index changes. No upstream push, merge or operator-live promotion yet. Browser artifacts remain untracked and private.
+___ 11:46 codex/ocean-ui-model-effort-20261005
