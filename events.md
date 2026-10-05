@@ -7498,3 +7498,13 @@ area:      [review]
 
 Addressed fresh PR #236 grouped-message finding: clock and confirmed ledger mark stack vertically within the 32px avatar gutter, leaving the aligned body uncovered. Release Trunk build passes. Browser fixture uses production markup/CSS and verifies separated bounds at desktop and 320px widths; this is layout evidence, not a live federated-room acceptance claim. Root grouped-message contract updated; child ownership/indexes unchanged. Previous source head passed all four hosted gates; the corrected head requires fresh checks/review.
 _________________________________________________________________________________ 14:58 codex/ocean-ui-model-effort-20261005
+
+time:      [15:10] [05-10-26]
+date-order: DD-MM-YY
+agent:     [codex], [gpt-6]
+worktree:  codex/ocean-ui-model-effort-20261005
+type:      [bug report]: Overlay review corrections
+area:      [frontend]
+
+Raised combined model settings above concurrent slash suggestions; browser hit testing confirms the model select remains uncovered with both menus visible. Anchored the Details drawer absolutely to the positioned Rooms workspace; browser geometry matches the shell right edge at 2560px and 375px widths. Release Trunk build passes. No turn, join, or room mutation submitted. Root contract updated; child indexes unchanged because ownership stays the same. Prior 7bc55dc hosted checks all passed; fresh committed-tree verification and review follow.
+_________________________________________________________________________________ 15:10 codex/ocean-ui-model-effort-20261005

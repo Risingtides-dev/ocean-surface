@@ -118,6 +118,7 @@ All visual work on the Leptos web surface follows
   The disclosure shrinks
   to its trigger so the popup stays anchored instead of spanning the composer.
   The menu explicitly uses `display: none` while closed and flex only while open.
+  Its stacking level stays above slash suggestions so both model controls remain reachable.
   Daemon-provided effort
   capabilities constrain available choices; legacy daemons retain the fallback
   list. Keep compact/touch controls inside that disclosure.
@@ -128,6 +129,7 @@ All visual work on the Leptos web surface follows
   Expanded actions stay within 70% of the rail and scroll on short viewports.
 - Product chrome uses the shared SVG icon family; no emoji or AI sparkle icons.
   Participant media-state icons carry an accessible state label.
+- The room Details drawer anchors to the positioned Rooms workspace, including capped ultrawide shells.
 - Grouped message clocks and confirmed ledger marks stack inside the avatar
   gutter; neither may overlap the aligned message body.
 - Control density is a design defect: conditional rendering over permanent

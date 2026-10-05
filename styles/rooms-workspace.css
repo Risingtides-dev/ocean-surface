@@ -116,6 +116,7 @@
 /* ── Shell ─────────────────────────────────────────────────────────── */
 
 .rooms-workspace {
+  position: relative;
   /* Persistent flex child inside the app shell — NOT an overlay.
      The parent flex container sets the available height; we fill it. */
   flex: 1;
@@ -3202,7 +3203,7 @@
 
 .rooms-workspace__right.rooms-workspace__right--visible {
   display: flex;
-  position: fixed;
+  position: absolute;
   top: 0;
   right: 0;
   bottom: 0;
