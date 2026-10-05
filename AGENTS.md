@@ -113,7 +113,9 @@ All visual work on the Leptos web surface follows
   reflects the selected override or daemon model; its controls retain separate
   persisted turn overrides and consume the daemon catalogue. Unknown persisted
   selections stay visible while the catalogue loads. Escape closes the disclosure
-  and restores summary focus; outside clicks dismiss it. Daemon-provided effort
+  and restores summary focus; outside clicks dismiss it. The disclosure shrinks
+  to its trigger so the popup stays anchored instead of spanning the composer.
+  Daemon-provided effort
   capabilities constrain available choices; legacy daemons retain the fallback
   list. Keep compact/touch controls inside that disclosure.
 - Rooms creation and invite redemption share one collapsed native disclosure in

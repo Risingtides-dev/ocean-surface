@@ -7446,3 +7446,15 @@ area:      [testing]
 Published combined picker and UI cleanup as draft PR #236. Hosted ledger order gate exposed the operator day-first date being interpreted month-first. Added explicit entry-scoped date-order metadata to the parser, preserving legacy inference and all historical headers; clarified this task's immutable entry by append only. Twenty ledger-order tests pass, including a real backdate and no metadata leakage between entries; closure and order checks now pass on the candidate. Updated root devlog and the branch ledger template, whose schema block explicitly permits edits. Child ownership/indexes are unchanged. Runtime capability follow-up provider/daemon tests, docs and strict lint also passed in its separate branch. Review, full hosted checks, model max effort, auth acceptance and operator-live delivery remain open.
 
 _________________________________________________________________________________ 13:55 codex/ocean-ui-model-effort-20261005
+
+
+time:      [14:15] [05-10-26]
+date-order: DD-MM-YY
+agent:     [Codex desktop], [GPT-6]
+worktree:  [codex/ocean-ui-model-effort-20261005]
+type:      [bug report]
+area:      [frontend] [testing]
+
+Browser verification exposed the unified picker occupying the full desktop grid cell: the popup opened far from its trigger despite staying on screen. Shrunk the disclosure to its trigger with constrained intrinsic width. Rebuilt the production bundle and verified popup/trigger right-edge alignment and viewport containment at 320/375/430/768/1200px; Escape closes it and restores summary focus. Root interaction contract updated; child ownership/indexes remain unchanged. Earlier hosted Surface gates all passed. Runtime candidate 41f3812f full local repository gate now passes; real Max GPT acceptance remains four models passed. Claude reauthentication was requested because its OAuth remains expired. Fresh review, current-head hosted checks and installed-live delivery remain open.
+
+_________________________________________________________________________________ 14:15 codex/ocean-ui-model-effort-20261005

@@ -631,7 +631,10 @@
 
 /* One compact disclosure for session model + effort. Native details keeps
    keyboard and touch activation consistent across every shell. */
-.ocean-model-settings { position: relative; display: block; }
+.ocean-model-settings {
+  position: relative; display: block; justify-self: start;
+  width: max-content; max-width: 100%;
+}
 .ocean-model-settings__trigger {
   display: flex; align-items: center; gap: 8px;
   height: 34px; max-width: 280px; padding: 0 8px;
