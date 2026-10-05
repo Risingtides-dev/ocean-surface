@@ -131,7 +131,8 @@ All visual work on the Leptos web surface follows
   native effort radio rail. Preserve default inheritance, unavailable credential
   signals and unresolved pinned values; both controls share one panel, never nested selects.
   Legacy compact select sizing must not constrain the model list or effort rail.
-  Keep compact/touch controls inside that disclosure.
+  Keep compact/touch controls inside that disclosure. Its auto-focused search
+  uses at least 16px text on phone widths and coarse-pointer devices to prevent Safari form-control zoom.
   Persist bounded effort tokens across reloads; validate model support against
   the daemon catalogue rather than a static client vocabulary.
 - Rooms creation and invite redemption share one collapsed native disclosure in

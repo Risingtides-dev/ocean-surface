@@ -7548,3 +7548,13 @@ area:      [review]
 
 Track /v1/models.current separately from the last turn/session model. Picker summary, effort validation and /thinking choices use the authoritative default after clearing a turn override; machine changes retire the default alongside its catalogue. Regressions exercise actual TurnStarted admission and differing default/override effort capabilities. Scope legacy compact selector sizing to native selects so the list and wrapped effort rail retain panel sizing. Higher-specificity thread-open drawer positioning now anchors to the workspace. All 1,416 UI tests and seven required checks pass; final release build passes. Browser measurements confirm a 280px mobile model list, complete 73px effort rail, and bounded 220px panel at 320x360. Production-CSS thread-open fixture drawer/workspace right edges match at 1280 and 1440px; this is geometry evidence, not live federated-thread acceptance. Root interaction contract updated; child indexes and ownership unchanged. Canonical ledger historical errors are preserved; candidate ledger is checked. Installed app remains unchanged pending review/CI/landing.
 _________________________________________________________________________________ 15:45 codex/ocean-ui-model-effort-20261005
+
+time:      [15:54] [05-10-26]
+date-order: DD-MM-YY
+agent:     [codex], [gpt-6]
+worktree:  codex/ocean-ui-model-effort-20261005
+type:      [bug report]: Mobile model-search focus stability
+area:      [review]
+
+Addressed fresh review on 3d247c7: the auto-focused model search now has a 16px floor on compact widths and coarse-pointer devices, preserving pinch zoom and matching existing composer behavior. All seven required checks, 1,416 UI tests and release build pass. Built preview at 375x667 reports focused search at computed 16px and a panel bounded within x=26..305, y=186..603; this is rendered CSS evidence, not physical iPhone Safari acceptance. Root interaction contract updated; ownership and child indexes unchanged. Fresh hosted review and exact committed detached build follow.
+_________________________________________________________________________________ 15:54 codex/ocean-ui-model-effort-20261005
