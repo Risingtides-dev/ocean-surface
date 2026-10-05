@@ -7528,3 +7528,13 @@ area:      [frontend]
 
 Surface /thinking and its command hint now use the same selected-model capability choices as the composer picker. Current Max/future levels are accepted when advertised; unsupported choices stay rejected on legacy routes. A model-switch regression covers modern, non-thinking and legacy choices. All 1,413 UI tests, native/WASM strict Clippy, WASM test compilation and release build pass. Built-browser checks against the installed legacy daemon accept High, reflect it in the summary, reject Max without changing High, and dispatch no provider turn. Root contract updated; ownership and child indexes unchanged. Operator requests a more cohesive harness panel; the current two-select visual treatment remains pending refinement.
 _________________________________________________________________________________ 15:26 codex/ocean-ui-model-effort-20261005
+
+time:      [15:38] [05-10-26]
+date-order: DD-MM-YY
+agent:     [codex], [gpt-6]
+worktree:  codex/ocean-ui-model-effort-20261005
+type:      [refactor]: Unified harness model panel
+area:      [frontend]
+
+Replaced the composer disclosure's two selects with one searchable model radio list and integrated effort radio rail, preserving daemon capabilities, default inheritance, unavailable credential signals and unresolved pins. Search matches label, model ID and provider across all query terms. Shared SVG selection mark; native keyboard radios, search focus on open and Escape focus return. Browser evidence confirms search, model/effort changes, keyboard activation, empty results, 375px fit and 320x360 bounded scrolling without sending a provider turn. Corrected list flex sizing and narrow-screen anchoring found during visual verification. All 1414 UI tests and seven required gates pass; release build passes after final CSS fixes. Root contract updated; no child indexes or ownership boundaries changed. Exact committed detached verification and fresh hosted review follow; installed UI remains unchanged.
+_________________________________________________________________________________ 15:38 codex/ocean-ui-model-effort-20261005

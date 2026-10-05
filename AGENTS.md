@@ -125,6 +125,9 @@ All visual work on the Leptos web surface follows
   that legacy list; unknown values survive only while the entry is unresolved.
   The `/thinking` command and command hint consume the same selected-model
   capability choices as the picker, including Max and future daemon levels.
+  Opening the disclosure reveals one searchable model radio list and a compact
+  native effort radio rail. Preserve default inheritance, unavailable credential
+  signals and unresolved pinned values; both controls share one panel, never nested selects.
   Keep compact/touch controls inside that disclosure.
   Persist bounded effort tokens across reloads; validate model support against
   the daemon catalogue rather than a static client vocabulary.

@@ -707,6 +707,16 @@ pub fn Paperclip() -> impl IntoView {
     }
 }
 
+#[component]
+pub fn Check() -> impl IntoView {
+    view! {
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="m5 12 4 4 10-10" />
+        </svg>
+    }
+}
+
 /// Up-arrow — the composer Send action (submit). Stroke family.
 #[component]
 pub fn Send() -> impl IntoView {

@@ -1447,6 +1447,22 @@ fn model_effort_choices(
         })
 }
 
+fn filtered_model_choices(
+    catalog: &[crate::daemon::ModelInfo],
+    query: &str,
+) -> Vec<crate::daemon::ModelInfo> {
+    let terms: Vec<_> = query.split_whitespace().map(str::to_lowercase).collect();
+    catalog
+        .iter()
+        .filter(|entry| {
+            let searchable =
+                format!("{} {} {}", entry.id, entry.label, entry.provider).to_lowercase();
+            terms.iter().all(|term| searchable.contains(term))
+        })
+        .cloned()
+        .collect()
+}
+
 fn available_effort_choices(daemon: &Daemon) -> Vec<String> {
     let selected = daemon.model_override.get().or_else(|| daemon.model.get());
     daemon
@@ -1599,6 +1615,8 @@ pub fn App() -> impl IntoView {
         }
     });
     let model_settings_ref = NodeRef::<leptos::html::Details>::new();
+    let model_search = RwSignal::new(String::new());
+    let model_search_ref = NodeRef::<leptos::html::Input>::new();
     let _model_settings_dismiss = window_event_listener(ev::click, move |event: ev::MouseEvent| {
         if let Some(details) = model_settings_ref.get_untracked() {
             if event
@@ -2021,10 +2039,11 @@ pub fn App() -> impl IntoView {
             slash: Some("/thinking"),
             enabled: always,
             run: Callback::new(move |_| {
-                daemon_thinking.status.set(format!(
-                    "use /thinking {}|default",
-                    available_effort_choices(&daemon_thinking).join("|")
-                ));
+                let mut choices = available_effort_choices(&daemon_thinking);
+                choices.push("default".into());
+                daemon_thinking
+                    .status
+                    .set(format!("use /thinking {}", choices.join("|")));
             }),
         });
         let daemon_help = daemon.clone();
@@ -3016,6 +3035,11 @@ pub fn App() -> impl IntoView {
                             </Show>
                             // One disclosure owns model and effort; both retain session-scoped overrides.
                             <details class="ocean-turn-controls ocean-model-settings" node_ref=model_settings_ref
+                                on:toggle=move |_| {
+                                    if model_settings_ref.get().is_some_and(|details| details.has_attribute("open")) {
+                                        if let Some(input) = model_search_ref.get() { let _ = input.focus(); }
+                                    } else { model_search.set(String::new()); }
+                                }
                                 on:keydown=move |ev: ev::KeyboardEvent| {
                                     if ev.key() == "Escape" {
                                         if let Some(details) = ev.current_target()
@@ -3044,92 +3068,74 @@ pub fn App() -> impl IntoView {
                                     <span class="ocean-model-settings__caret"><crate::icons::ChevronDown /></span>
                                 </summary>
                                 <div class="ocean-model-settings__menu">
-                                <select
-                                    class="ocean-thinking"
-                                    aria-label="reasoning effort"
-                                    title="Reasoning effort (this turn onward)"
-                                    prop:value=move || thinking_level.get().unwrap_or_default()
-                                    on:change=move |ev| {
-                                        let v = event_target_value(&ev);
-                                        daemon_thinking.with_value(|d| {
-                                            d.set_thinking_level((!v.is_empty()).then_some(v))
-                                        });
-                                    }
-                                >
-                                    <option value="" selected=move || thinking_level.get().is_none()>
-                                        "Effort: default"
-                                    </option>
-                                    <For each=move || effort_choices.get() key=|level| level.clone()
-                                        children=move |level| {
-                                            let selected = level.clone();
-                                            let label = format!("Effort: {level}");
-                                            view! {
-                                                <option value=level selected=move || thinking_level.get().as_ref() == Some(&selected)>{label}</option>
-                                            }
-                                        }
-                                    />
-                                    <Show when=move || thinking_level.get().is_some_and(|current| !effort_choices.get().contains(&current))>
-                                        <option value=move || thinking_level.get().unwrap_or_default() selected=true>
-                                            {move || format!("Effort: {}", thinking_level.get().unwrap_or_default())}
-                                        </option>
+                                    <input class="ocean-model-settings__search" type="search"
+                                        aria-label="Search models" placeholder="Search models" autocomplete="off"
+                                        node_ref=model_search_ref prop:value=move || model_search.get()
+                                        on:input=move |ev| model_search.set(event_target_value(&ev)) />
+                                    <div class="ocean-model-override ocean-model-settings__models" role="radiogroup" aria-label="Model">
+                                        <label class="ocean-model-settings__row">
+                                            <input type="radio" name="ocean-turn-model" value="" prop:checked=move || model_override.get().is_none()
+                                                on:change=move |_| daemon_model_override.with_value(|d| d.set_model_override(None)) />
+                                            <span>"Default"</span>
+                                            <span class="ocean-model-settings__selection" aria-hidden="true"><crate::icons::Check /></span>
+                                        </label>
+                                        <Show when=move || model_override.get().is_some_and(|current| !models.get().iter().any(|m| m.id == current))>
+                                            <label class="ocean-model-settings__row">
+                                                <input type="radio" name="ocean-turn-model" prop:value=move || model_override.get().unwrap_or_default() prop:checked=true />
+                                                <span>{move || model_override.get().unwrap_or_default()}</span>
+                                                <span class="ocean-model-settings__selection" aria-hidden="true"><crate::icons::Check /></span>
+                                            </label>
+                                        </Show>
+                                        <For each=move || filtered_model_choices(&models.get(), &model_search.get()) key=|m| m.id.clone()
+                                            children=move |m| {
+                                                let id = m.id.clone();
+                                                let selected = id.clone();
+                                                let label = if m.label.is_empty() { m.id.clone() } else { m.label.clone() };
+                                                let reason = m.unready_reason();
+                                                let accessible = reason.as_ref().map(|reason| format!("{label}, {reason}")).unwrap_or_else(|| label.clone());
+                                                view! {
+                                                    <label class="ocean-model-settings__row" title=reason.clone().unwrap_or_default()>
+                                                        <input type="radio" name="ocean-turn-model" value=id.clone() aria-label=accessible
+                                                            prop:checked=move || model_override.get().as_deref() == Some(selected.as_str())
+                                                            on:change=move |_| daemon_model_override.with_value(|d| d.set_model_override(Some(id.clone()))) />
+                                                        <span class="ocean-model-settings__label">{label}</span>
+                                                        <span class="ocean-model-settings__provider">{m.provider}</span>
+                                                        {reason.clone().map(|_| view! { <span class="ocean-model-settings__unready" aria-hidden="true"></span> })}
+                                                        <span class="ocean-model-settings__selection" aria-hidden="true"><crate::icons::Check /></span>
+                                                    </label>
+                                                }
+                                            } />
+                                        <Show when=move || !model_search.get().trim().is_empty() && filtered_model_choices(&models.get(), &model_search.get()).is_empty()>
+                                            <div class="ocean-model-settings__empty" role="status">"No matching models"</div>
+                                        </Show>
+                                    </div>
+                                    <Show when=move || !effort_choices.get().is_empty()>
+                                        <div class="ocean-thinking ocean-model-settings__levels" role="radiogroup" aria-label="Reasoning effort">
+                                            <label class="ocean-model-settings__level">
+                                                <input type="radio" name="ocean-turn-effort" value="" prop:checked=move || thinking_level.get().is_none()
+                                                    on:change=move |_| daemon_thinking.with_value(|d| d.set_thinking_level(None)) />
+                                                <span>"Default"</span>
+                                            </label>
+                                            <For each=move || effort_choices.get() key=|level| level.clone() children=move |level| {
+                                                let selected = level.clone();
+                                                let chosen = level.clone();
+                                                view! {
+                                                    <label class="ocean-model-settings__level" title=level.clone()>
+                                                        <input type="radio" name="ocean-turn-effort" value=level.clone() aria-label=format!("Effort {level}")
+                                                            prop:checked=move || thinking_level.get().as_ref() == Some(&selected)
+                                                            on:change=move |_| daemon_thinking.with_value(|d| d.set_thinking_level(Some(chosen.clone()))) />
+                                                        <span>{level.clone()}</span>
+                                                    </label>
+                                                }
+                                            } />
+                                            <Show when=move || thinking_level.get().is_some_and(|current| !effort_choices.get().contains(&current))>
+                                                <label class="ocean-model-settings__level">
+                                                    <input type="radio" name="ocean-turn-effort" prop:value=move || thinking_level.get().unwrap_or_default() prop:checked=true />
+                                                    <span>{move || thinking_level.get().unwrap_or_default()}</span>
+                                                </label>
+                                            </Show>
+                                        </div>
                                     </Show>
-                                </select>
-                                // Per-turn model override (distinct from the
-                                // header picker's global swap). Drawn from the
-                                // same /v1/models catalogue.
-                                <select
-                                    class="ocean-model-override"
-                                    aria-label="model override"
-                                    title="Model for this turn (overrides daemon default)"
-                                    prop:value=move || model_override.get().unwrap_or_default()
-                                    on:change=move |ev| {
-                                        let id = event_target_value(&ev);
-                                        daemon_model_override.with_value(|d| {
-                                            d.set_model_override((!id.is_empty()).then_some(id))
-                                        });
-                                    }
-                                >
-                                    <option value="" selected=move || model_override.get().is_none()>
-                                        "Default model"
-                                    </option>
-                                    // If a persisted override isn't in the
-                                    // catalogue yet, still show it selected.
-                                    <Show when=move || {
-                                        let cur = model_override.get();
-                                        cur.is_some()
-                                            && !models.get().iter().any(|m| Some(&m.id) == cur.as_ref())
-                                    }>
-                                        <option value=move || model_override.get().unwrap_or_default() selected=true>
-                                            {move || model_override.get().unwrap_or_default()}
-                                        </option>
-                                    </Show>
-                                    <For
-                                        each=move || models.get()
-                                        key=|m| m.id.clone()
-                                        children=move |m| {
-                                            let id = m.id.clone();
-                                            let id_sel = m.id.clone();
-                                            let label = if m.label.is_empty() { m.id.clone() } else { m.label.clone() };
-                                            // Unready per the daemon (no credential
-                                            // in ITS env): still offered — readiness
-                                            // is configuration truth, not liveness —
-                                            // but say so instead of letting the pick
-                                            // fail at turn time.
-                                            let label = match m.unready_reason() {
-                                                Some(reason) => format!("{label} — {reason}"),
-                                                None => label,
-                                            };
-                                            view! {
-                                                <option
-                                                    value=id.clone()
-                                                    selected=move || model_override.get().as_deref() == Some(id_sel.as_str())
-                                                >
-                                                    {label}
-                                                </option>
-                                            }
-                                        }
-                                    />
-                                </select>
                                 </div>
                             </details>
                             {move || {
@@ -3612,17 +3618,35 @@ mod tests {
     use super::{
         append_dictation, competing_reveal_open, composer_height_px, composer_overflow_y,
         council_open_visibility, daemon_status_admit, effort_override_unsupported,
-        execute_planner_workflow, initial_planner_context, island_open_visibility,
-        model_effort_choices, parse_deep_link, planner_candidates, selected_planner_context,
-        should_submit_composer_key, topmost_reveal, window_escape_should_handle, DeepLinkAction,
-        PlannerAction, PlannerContext, PlannerWorkflowFailureStage, PlannerWorkflowOps,
-        PlannerWorkflowRequest, RevealSurface, RevealVisibility, COMPOSER_MAX_HEIGHT_PX,
-        COMPOSER_MIN_HEIGHT_PX,
+        execute_planner_workflow, filtered_model_choices, initial_planner_context,
+        island_open_visibility, model_effort_choices, parse_deep_link, planner_candidates,
+        selected_planner_context, should_submit_composer_key, topmost_reveal,
+        window_escape_should_handle, DeepLinkAction, PlannerAction, PlannerContext,
+        PlannerWorkflowFailureStage, PlannerWorkflowOps, PlannerWorkflowRequest, RevealSurface,
+        RevealVisibility, COMPOSER_MAX_HEIGHT_PX, COMPOSER_MIN_HEIGHT_PX,
     };
     use crate::daemon::{ProjectInfo, WorktreeInfo};
     use crate::host::DaemonStatus;
     use futures_util::future::LocalBoxFuture;
     use futures_util::FutureExt;
+
+    #[test]
+    fn model_search_matches_label_provider_and_all_query_terms() {
+        let catalog = [
+            serde_json::from_value(
+                serde_json::json!({"id":"sol","label":"GPT Sol","provider":"openai-codex"}),
+            )
+            .unwrap(),
+            serde_json::from_value(
+                serde_json::json!({"id":"opus","label":"Claude Opus","provider":"claude-code"}),
+            )
+            .unwrap(),
+        ];
+        assert_eq!(filtered_model_choices(&catalog, " GPT CODEX ")[0].id, "sol");
+        assert_eq!(filtered_model_choices(&catalog, "OPUS")[0].id, "opus");
+        assert!(filtered_model_choices(&catalog, "gpt opus").is_empty());
+        assert_eq!(filtered_model_choices(&catalog, "  ").len(), 2);
+    }
 
     #[test]
     fn command_and_picker_choices_follow_selected_catalog_model() {
