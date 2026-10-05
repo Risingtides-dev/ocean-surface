@@ -121,8 +121,11 @@ All visual work on the Leptos web surface follows
   Daemon-provided effort
   capabilities constrain available choices; legacy daemons retain the fallback
   list. Keep compact/touch controls inside that disclosure.
+  Persist bounded effort tokens across reloads; validate model support against
+  the daemon catalogue rather than a static client vocabulary.
 - Rooms creation and invite redemption share one collapsed native disclosure in
   the room-list footer. Preserve every existing trigger and join action inside it.
+  Expanded actions stay within 70% of the rail and scroll on short viewports.
 - Product chrome uses the shared SVG icon family; no emoji or AI sparkle icons.
   Participant media-state icons carry an accessible state label.
 - Control density is a design defect: conditional rendering over permanent

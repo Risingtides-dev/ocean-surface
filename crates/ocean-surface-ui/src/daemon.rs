@@ -8051,20 +8051,22 @@ fn clear_persisted_project() {
 const THINKING_LEVEL_STORAGE_KEY: &str = "ocean.thinking_level";
 const MODEL_OVERRIDE_STORAGE_KEY: &str = "ocean.model_override";
 
-/// Valid serialized `ThinkingLevel` values the daemon accepts. We restrict the
-/// persisted value to these so a stale/garbage localStorage entry can't ship a
-/// bad `thinking_level` the daemon would reject. MUST stay in lockstep with
-/// `ocean_protocol::ThinkingLevel` (serde lowercase) and with the composer's
-/// dropdown in `app.rs` — otherwise a level the dropdown offers gets silently
-/// dropped on reload by this restore filter. (OCEAN-202 added minimal + xhigh.)
-const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh"];
+// Capabilities belong to the daemon. Preserve bounded tokens until its catalog
+// arrives rather than rejecting a newer daemon's effort vocabulary locally.
+fn persisted_effort_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
 
 /// The persisted per-turn thinking level, restored on construction. Filtered to
-/// known values so only a valid `ThinkingLevel` string is ever loaded.
+/// bounded tokens; the model catalog validates support once it loads.
 fn load_persisted_thinking_level() -> Option<String> {
     local_storage()
         .and_then(|s| s.get_item(THINKING_LEVEL_STORAGE_KEY).ok().flatten())
-        .filter(|v| THINKING_LEVELS.contains(&v.as_str()))
+        .filter(|v| persisted_effort_token(v))
 }
 
 fn persist_thinking_level(level: &str) {
@@ -10094,35 +10096,26 @@ mod tests {
     }
 
     #[test]
-    fn thinking_level_values_match_daemon_serialization() {
-        // These are the exact lowercase strings the daemon's `ThinkingLevel`
-        // serde enum deserializes (off/minimal/low/medium/high/xhigh). The
-        // composer's selector emits these and they flow straight onto
-        // `AgentTurnRequest::thinking_level`; this same list also gates which
-        // persisted value survives a reload (see load_persisted_thinking_level).
-        assert_eq!(
-            THINKING_LEVELS,
-            &["off", "minimal", "low", "medium", "high", "xhigh"],
-        );
+    fn thinking_level_restore_preserves_new_catalog_tokens() {
+        for level in [
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "future-effort",
+        ] {
+            assert!(persisted_effort_token(level), "{level}");
+        }
     }
 
     #[test]
-    fn thinking_level_restore_filter_accepts_all_offered_levels() {
-        // Every level the composer dropdown offers must pass the restore filter,
-        // or selecting it then reloading silently drops it back to the daemon
-        // default. Regression guard for the OCEAN-202 minimal/xhigh additions:
-        // the filter is `THINKING_LEVELS.contains(&v)`, so assert each offered
-        // value is contained. (The dropdown's empty "" = no override is not a
-        // stored level and is intentionally absent.)
-        for level in ["off", "minimal", "low", "medium", "high", "xhigh"] {
-            assert!(
-                THINKING_LEVELS.contains(&level),
-                "thinking level `{level}` is offered by the composer but would be \
-                 filtered out of localStorage on reload",
-            );
+    fn thinking_level_restore_rejects_malformed_tokens() {
+        for garbage in ["", " Max", "max ", "<script>", "a\nb", "é", &"a".repeat(65)] {
+            assert!(!persisted_effort_token(garbage), "{garbage:?}");
         }
-        // And a garbage value is still rejected by the same filter.
-        assert!(!THINKING_LEVELS.contains(&"turbo"));
     }
 
     /// TASK-76: the surface must NEVER put page-controlled browser data in
