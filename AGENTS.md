@@ -109,6 +109,11 @@ All visual work on the Leptos web surface follows
   float, in cascade order). Colors live ONLY in `styles/tokens.css`.
   `extension/sidepanel.html` and `scripts/build-extension.sh` enumerate the
   same files — adding a stylesheet touches all three places.
+- Composer model and reasoning effort share one native disclosure. Its summary
+  reflects the selected override or daemon model; its controls retain separate
+  persisted turn overrides and consume the daemon catalogue. Unknown persisted
+  selections stay visible while the catalogue loads. Escape closes the disclosure
+  and restores summary focus. Keep compact/touch controls inside that disclosure.
 - Control density is a design defect: conditional rendering over permanent
   chrome, one header overflow (`⋯`) for secondary actions, ghost triggers for
   idle features (dialer, join call), reveal-on-intent for power knobs.

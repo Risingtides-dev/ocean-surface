@@ -1532,9 +1532,7 @@ pub fn App() -> impl IntoView {
     let voice_ready = daemon.voice_ready;
     let last_turn_tokens = daemon.last_turn_tokens;
     let session_tokens = daemon.session_tokens;
-    // `daemon.model` (the live global model signal) is no longer bound here —
-    // its only consumer, the header model picker, was removed in OCEAN-202. The
-    // composer's per-turn `model_override` is the surface's model control now.
+    let model = daemon.model;
     let models = daemon.models;
     // Browser-control indicator (OCEAN-92): lit while the agent is driving the
     // browser (set from the daemon's `browser_activity` SSE event), with the
@@ -2954,11 +2952,32 @@ pub fn App() -> impl IntoView {
                             >
                                 <VoiceOrb on_transcript=on_transcript on_status=on_voice_status muted=muted on_dictate=on_dictate on_plan=on_plan />
                             </Show>
-                            // Per-turn overrides (OCEAN-79): reasoning effort +
-                            // model. Compact pills next to the composer. Both
-                            // default to "daemon default" so an untouched control
-                            // sends no override and preserves prior behavior.
-                            <div class="ocean-turn-controls">
+                            // One disclosure owns model and effort; both retain session-scoped overrides.
+                            <details class="ocean-turn-controls ocean-model-settings"
+                                on:keydown=move |ev: ev::KeyboardEvent| {
+                                    if ev.key() == "Escape" {
+                                        if let Some(details) = ev.current_target()
+                                            .and_then(|target| target.dyn_into::<web_sys::HtmlElement>().ok())
+                                        {
+                                            let _ = details.remove_attribute("open");
+                                            let _ = details.query_selector("summary").ok().flatten()
+                                                .and_then(|node| node.dyn_into::<web_sys::HtmlElement>().ok())
+                                                .map(|summary| summary.focus());
+                                        }
+                                    }
+                                }
+                            >
+                                <summary class="ocean-model-settings__trigger" aria-label="Model and reasoning effort">
+                                    <span class="ocean-model-settings__name">{move || {
+                                        let id = model_override.get().or_else(|| model.get());
+                                        id.and_then(|id| models.get().iter().find(|m| m.id == id)
+                                            .map(|m| if m.label.is_empty() { id.clone() } else { m.label.clone() })
+                                            .or(Some(id)))
+                                            .unwrap_or_else(|| "Default model".into())
+                                    }}</span>
+                                    <span class="ocean-model-settings__effort">{move || thinking_level.get().unwrap_or_else(|| "default".into())}</span>
+                                </summary>
+                                <div class="ocean-model-settings__menu">
                                 <select
                                     class="ocean-thinking"
                                     aria-label="reasoning effort"
@@ -3069,7 +3088,8 @@ pub fn App() -> impl IntoView {
                                         }
                                     />
                                 </select>
-                            </div>
+                                </div>
+                            </details>
                             {move || {
                                 // Reactive (not `<Show>`) so the plain Vec<usize
                                 // props re-evaluate every keystroke: the list

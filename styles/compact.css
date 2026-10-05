@@ -697,3 +697,11 @@
     min-height: 44px;
   }
 }
+
+/* Expanded model settings retain full-width touch targets in compact hosts. */
+.ocean-surface .ocean-model-settings__menu .ocean-thinking,
+.ocean-surface .ocean-model-settings__menu .ocean-model-override {
+  max-width: none;
+  min-height: 44px;
+  height: 44px;
+}

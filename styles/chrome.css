@@ -628,3 +628,36 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* One compact disclosure for session model + effort. Native details keeps
+   keyboard and touch activation consistent across every shell. */
+.ocean-model-settings { position: relative; display: block; }
+.ocean-model-settings__trigger {
+  display: flex; align-items: center; gap: 8px;
+  height: 34px; max-width: 280px; padding: 0 8px;
+  border-radius: var(--radius); cursor: pointer; list-style: none;
+  color: var(--fg-2); font-size: 12px;
+}
+.ocean-model-settings__trigger::-webkit-details-marker { display: none; }
+.ocean-model-settings__trigger::after { content: "⌄"; color: var(--fg-3); }
+.ocean-model-settings__trigger:hover,
+.ocean-model-settings[open] .ocean-model-settings__trigger { background: var(--bg-elevated); color: var(--fg); }
+.ocean-model-settings__trigger:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.ocean-model-settings__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ocean-model-settings__effort { color: var(--fg-3); font-size: 11px; flex-shrink: 0; }
+.ocean-model-settings__menu {
+  position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 40;
+  display: flex; flex-direction: column; gap: 4px;
+  width: min(300px, calc(100vw - 48px)); padding: 8px;
+  background: var(--bg-raised); border-radius: var(--radius);
+  box-shadow: var(--elev-3);
+}
+.ocean-model-settings__menu .ocean-thinking,
+.ocean-model-settings__menu .ocean-model-override {
+  width: 100%; max-width: none; height: 40px; font-size: 13px;
+  color: var(--fg); flex: none;
+}
+.ocean-model-settings__menu .ocean-model-override { order: -1; }
+@media (max-width: 600px) {
+  .ocean-model-settings__trigger { max-width: 180px; }
+}
