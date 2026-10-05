@@ -29,11 +29,14 @@
 }
 
 .rooms-workspace__msg--grouped .rooms-workspace__msg-author {
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
   position: absolute;
   top: 5px;
   left: 10px;
   width: 32px;
-  height: 16px;
+  height: auto;
   margin: 0;
   overflow: visible;
 }

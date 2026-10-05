@@ -128,6 +128,8 @@ All visual work on the Leptos web surface follows
   Expanded actions stay within 70% of the rail and scroll on short viewports.
 - Product chrome uses the shared SVG icon family; no emoji or AI sparkle icons.
   Participant media-state icons carry an accessible state label.
+- Grouped message clocks and confirmed ledger marks stack inside the avatar
+  gutter; neither may overlap the aligned message body.
 - Control density is a design defect: conditional rendering over permanent
   chrome, one header overflow (`⋯`) for secondary actions, ghost triggers for
   idle features (dialer, join call), reveal-on-intent for power knobs.

@@ -7488,3 +7488,13 @@ area:      [testing]
 
 Addressed latest independent review: restore bounded catalogue-defined effort tokens instead of filtering a static six-level vocabulary; cap expanded room entry actions at 70 percent of the rail with vertical scrolling. Max/future tokens and malformed input are covered by restore tests. All 1,411 UI tests, host/WASM strict Clippy, WASM test compilation and release Trunk build pass. Built-browser checks confirm a selected effort survives reload and the join control remains reachable by scrolling at 640x360. Root interaction contracts updated; ownership and child indexes unchanged.
 _________________________________________________________________________________ 14:43 codex/ocean-ui-model-effort-20261005
+
+time:      [14:58] [05-10-26]
+date-order: DD-MM-YY
+agent:     [codex], [gpt-6]
+worktree:  codex/ocean-ui-model-effort-20261005
+type:      [bug report]: Fresh review corrections
+area:      [review]
+
+Addressed fresh PR #236 grouped-message finding: clock and confirmed ledger mark stack vertically within the 32px avatar gutter, leaving the aligned body uncovered. Release Trunk build passes. Browser fixture uses production markup/CSS and verifies separated bounds at desktop and 320px widths; this is layout evidence, not a live federated-room acceptance claim. Root grouped-message contract updated; child ownership/indexes unchanged. Previous source head passed all four hosted gates; the corrected head requires fresh checks/review.
+_________________________________________________________________________________ 14:58 codex/ocean-ui-model-effort-20261005
