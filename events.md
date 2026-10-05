@@ -7468,3 +7468,13 @@ area:      [review]
 
 Addressed both independent PR #236 findings: consume Escape only when the model disclosure is open, so closed-trigger focus permits topmost-panel dismissal; replace the text caret with the shared ChevronDown SVG. Updated the existing interaction contract; ownership and child indexes remain unchanged. Release bundle and host/WASM checks are rerunning.
 _________________________________________________________________________________ 14:20 codex/ocean-ui-model-effort-20261005
+
+time:      [14:29] [05-10-26]
+date-order: DD-MM-YY
+agent:     [codex], [gpt-6]
+worktree:  codex/ocean-ui-model-effort-20261005
+type:      [workflow]: Reconcile reviewed candidate
+area:      [testing]
+
+Made model-menu hiding explicit after independent review: closed disclosure uses display none; only open disclosure uses flex. The previous built browser hid the closed popup but retained a flex layout box, so the explicit rule removes engine dependence. Updated the owning interaction contract; parent ownership and child indexes are unchanged. Earlier review fixes passed 1,411 UI tests, both Clippy targets, required compile checks, release build, and detached-tree verification.
+_________________________________________________________________________________ 14:29 codex/ocean-ui-model-effort-20261005

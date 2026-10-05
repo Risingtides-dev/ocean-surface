@@ -117,6 +117,7 @@ All visual work on the Leptos web surface follows
   the topmost surface. Outside clicks dismiss it. Its caret uses shared ChevronDown.
   The disclosure shrinks
   to its trigger so the popup stays anchored instead of spanning the composer.
+  The menu explicitly uses `display: none` while closed and flex only while open.
   Daemon-provided effort
   capabilities constrain available choices; legacy daemons retain the fallback
   list. Keep compact/touch controls inside that disclosure.
