@@ -7420,3 +7420,14 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+
+
+time:      [13:48] [05-10-26]
+agent:     [Codex desktop], [GPT-6]
+worktree:  [codex/ocean-ui-model-effort-20261005]
+type:      [workflow]
+area:      [frontend] [testing]
+
+Prepared the tested combined model/effort picker and quieter Rooms controls for draft upstream review. Candidate preserves separate persisted overrides, catalog capability constraints, outside-click dismissal and Escape focus return; mobile widths and native select defaults were verified in the built candidate. SVG media state icons replace rendered emoji. Final source gates passed in prior candidate validation; exact committed WASM/proxy checks also passed. Root AGENTS.md already owns the new interaction contracts; no child ownership or index changes. The installed daemon still serves the old model catalog. Provider refresh PR #532 overlaps runtime work but does not yet expose reasoning_efforts; its macOS extension cleanup timing gate failed. No merge, operator-live promotion or full provider acceptance is claimed. This entry uses the operator-required day-first date; ledger order parsing remains a separate known issue, and historical entries are preserved.
+
+_________________________________________________________________________________ 13:48 codex/ocean-ui-model-effort-20261005
