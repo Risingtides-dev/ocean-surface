@@ -2890,7 +2890,10 @@ pub fn RoomWorkspacePanel(rooms: Rooms, state: RoomWorkspacePanelState) -> impl 
     // publish, tearing down the open panel and its poll loop with it.
     let visible = Memo::new(move |_| {
         room_is_federated(rooms.access.get().as_ref())
-            && !matches!(state.view.get(), Some(WorkspaceView::NotFederated))
+            && !matches!(
+                state.view.get(),
+                Some(WorkspaceView::NotFederated | WorkspaceView::Unavailable)
+            )
     });
 
     view! {
@@ -2935,11 +2938,6 @@ pub fn RoomWorkspacePanel(rooms: Rooms, state: RoomWorkspacePanelState) -> impl 
                             }.into_any();
                         }
                         match state.view.get() {
-                            Some(WorkspaceView::Unavailable) => view! {
-                                <div class="rooms-workspace__compute-note">
-                                    "Workspace status isn't available on this deployment yet."
-                                </div>
-                            }.into_any(),
                             Some(view_state) => glance_line(&view_state)
                                 .map(|line| view! {
                                     <div class="rooms-workspace__compute-line">{line}</div>

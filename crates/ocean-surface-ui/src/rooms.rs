@@ -1998,8 +1998,11 @@ impl Rooms {
                 .json(&body)
             {
                 Ok(req) => match req.send().await {
+                    // 409: this id is already on the roster (the daemon refuses
+                    // re-joins that would rewrite the record), so we are joined.
+                    Ok(resp) if resp.status() == 409 => Ok(None),
                     Ok(resp) => match resp.json::<RoomMutateResponse>().await {
-                        Ok(r) if r.ok => Ok(r.room),
+                        Ok(r) if r.ok => Ok(Some(r.room)),
                         Ok(r) => Err(format!(
                             "join failed: {}",
                             r.error.unwrap_or_else(|| "unknown error".into())
@@ -2017,11 +2020,13 @@ impl Rooms {
                 return;
             }
             match result {
-                Ok(room) => {
+                Ok(Some(room)) => {
                     me.open_room.set(room);
                     me.status.set("joined".into());
                     me.refresh_open_transcript(&key, generation_id, me.resume_seq.get_untracked());
                 }
+                // Reload roster + access so the stale "Join room" state clears.
+                Ok(None) => me.open_room(key),
                 Err(error) => me.status.set(error),
             }
         });

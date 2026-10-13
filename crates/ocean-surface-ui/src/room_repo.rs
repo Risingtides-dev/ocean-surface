@@ -1452,7 +1452,10 @@ pub fn RoomRepo(rooms: Rooms, state: RoomRepoState, writes_allowed: Signal<bool>
     // actually changes.
     let visible = Memo::new(move |_| {
         room_is_federated(rooms.access.get().as_ref())
-            && !matches!(state.view.get(), Some(RepoView::NotFederated))
+            && !matches!(
+                state.view.get(),
+                Some(RepoView::NotFederated | RepoView::Unavailable)
+            )
     });
 
     view! {
@@ -1502,11 +1505,6 @@ pub fn RoomRepo(rooms: Rooms, state: RoomRepoState, writes_allowed: Signal<bool>
                             }.into_any();
                         }
                         match state.view.get() {
-                            Some(RepoView::Unavailable) => view! {
-                                <div class="rooms-workspace__repo-note">
-                                    "Repo binding isn't available on this deployment yet."
-                                </div>
-                            }.into_any(),
                             Some(view_state) => rail_line(&view_state)
                                 .map(|line| view! {
                                     <div class="rooms-workspace__repo-line">{line}</div>

@@ -381,12 +381,6 @@ fn workspace_binding_section(rooms: Rooms, access: Option<&RoomAccessProjection>
     let in_flight = move || rooms.workspace_update_in_flight.get();
     view! {
         <div class="rooms-workspace__workspace-binding">
-            {move || unbound().then(|| view! {
-                <div class="rooms-workspace__workspace-unbound" role="note">
-                    "No workspace folder is bound. Agents in this room cannot run \
-                     until one is — every turn is refused before it starts."
-                </div>
-            })}
             {move || bound_to().map(|root| view! {
                 <div class="rooms-workspace__workspace-bound">
                     <span class="rooms-workspace__workspace-bound-label">"Workspace"</span>
@@ -423,20 +417,18 @@ fn workspace_binding_section(rooms: Rooms, access: Option<&RoomAccessProjection>
                     >
                         "Bind"
                     </button>
-                    <button
-                        class="rooms-workspace__workspace-unbind"
-                        type="button"
-                        disabled=move || in_flight() || unbound()
-                        on:click=move |_| rooms.set_open_room_workspace(None)
-                    >
-                        "Unbind"
-                    </button>
+                    {move || (!unbound()).then(|| view! {
+                        <button
+                            class="rooms-workspace__workspace-unbind"
+                            type="button"
+                            disabled=in_flight
+                            on:click=move |_| rooms.set_open_room_workspace(None)
+                        >
+                            "Unbind"
+                        </button>
+                    })}
                 </div>
             })}
-            <span class="rooms-workspace__workspace-help">
-                "The folder is resolved on the machine running the daemon, not in \
-                 this browser. It must be an absolute path that already exists there."
-            </span>
             {move || rooms.workspace_update_status.get().map(|status| view! {
                 <div class="rooms-workspace__workspace-error" role="alert">
                     {status.message()}
@@ -3469,17 +3461,12 @@ pub fn RoomsWorkspace(
                     // agent that then fails closed on the daemon with
                     // `workspace_unavailable`. The path is resolved on the
                     // DAEMON's host — the browser cannot see that filesystem,
-                    // so nothing here validates it and the helper text says
-                    // whose machine it means.
+                    // so nothing here validates it.
                     <label class="rooms-workspace__create-workspace">
-                        <span class="rooms-workspace__create-workspace-label">
-                            "Workspace folder on the daemon host"
-                        </span>
                         <input
                             class="rooms-workspace__left-input"
                             type="text"
                             aria-label="Workspace folder on the daemon host"
-                            aria-describedby="rooms-create-workspace-help"
                             placeholder="/absolute/path/to/project"
                             prop:value=move || create_workspace.get()
                             on:input=move |ev| create_workspace.set(event_target_value(&ev))
@@ -3491,14 +3478,6 @@ pub fn RoomsWorkspace(
                             }
                             disabled=move || pending_create.get()
                         />
-                        <span
-                            class="rooms-workspace__create-workspace-help"
-                            id="rooms-create-workspace-help"
-                        >
-                            "An absolute path that must already exist on the machine \
-                             running the daemon. Leave it empty to create the room \
-                             unbound — its agents cannot run until a folder is bound."
-                        </span>
                     </label>
                 </div>
 
