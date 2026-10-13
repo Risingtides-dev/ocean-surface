@@ -175,6 +175,15 @@ ops/add-device.sh ecfromthedc studio http://100.64.0.12:4780 \
 launchctl kickstart -k gui/$(id -u)/dev.risingtides.ocean-surface-proxy
 ```
 
+A new person is created with their first device in one step — never without
+one, since an entry with no devices falls back to the proxy's own
+`OCEAN_DAEMON_URL` (the host's daemon):
+
+```bash
+ops/add-user.sh jay air http://100.93.55.63:4780   # prints a generated password once
+launchctl kickstart -k gui/$(id -u)/dev.risingtides.ocean-surface-proxy
+```
+
 `ops/add-device.sh` rewrites `users.json` atomically with 0600 preserved and
 **refuses a `daemon_url` that is not on the tailnet** (Tailscale's `100.64/10`
 CGNAT range, a `*.ts.net` name, or loopback) unless `--allow-public` is passed.
