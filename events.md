@@ -7420,3 +7420,13 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+
+time:      [23:47] [19-10-26]
+date-order: DD-MM-YY
+agent:     [ocean-subagent], [rooms-directory-restack-implementer]
+worktree:  pm/rooms-directory-restack-20261020
+type:      [feature]: Rooms focus-first layout + daemon-catalogue working-directory picker
+area:      [frontend]
+
+Restacked onto origin/main 1b88f86: cherry-picked ce855dd (details drawer replaces the permanent right rail, readable transcript measure, docked composer) clean, then ported ONLY the working-directory picker from e686359 (new `working_directory.rs`, `Rooms::projects` sharing `Daemon::projects`, picker CSS on existing tokens). The picker replaces the free-text folder field in the create form and the open-room Bind panel; choices are daemon-registered project and worktree roots plus an explicit absolute-path fallback, with no browser filesystem API. The binding contract is untouched: create and PATCH still send `workspace_root` through the same routes and guarded dispatcher, the path is a folder on the daemon's host, and an unbound room still cannot execute agent turns (every turn is refused before it starts). e686359's softened "resource grants may still supply" / "No room default" copy, its renamed Bind/Unbind buttons and its unrelated `thread_display_name` hunks were deliberately NOT ported. `tests/directory_selection.rs` guard was rewritten to require the truthful unbound refusal and daemon-host copy and to ban the softened wording.
+_________________________________________________________________________________ 23:47 pm/rooms-directory-restack-20261020

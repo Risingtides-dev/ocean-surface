@@ -836,6 +836,10 @@ pub struct Rooms {
     /// whose model picker must offer the daemon's own list rather than a
     /// hardcoded one. Sharing the handle means zero extra requests.
     pub models: RwSignal<Vec<crate::daemon::ModelInfo>>,
+    /// The daemon's project/worktree catalogue, shared with `Daemon::projects`.
+    /// Working-directory controls consume this handle directly so opening Rooms
+    /// never starts a second catalogue request.
+    pub projects: RwSignal<Vec<crate::daemon::ProjectInfo>>,
     /// All persistent rooms (from `GET /v1/rooms/persistent`).
     pub list: RwSignal<Vec<Room>>,
     /// Where the rail's NEXT page of rooms starts, or `None` when the rooms on
@@ -1130,6 +1134,7 @@ impl Rooms {
         let rooms = Self {
             url: daemon.url,
             models: daemon.models,
+            projects: daemon.projects,
             list: RwSignal::new(Vec::new()),
             rooms_next_cursor: RwSignal::new(None),
             rooms_more_in_flight: RwSignal::new(false),

@@ -21,6 +21,7 @@ use crate::rooms::{
 };
 
 use crate::rooms::{create_workspace_root, room_is_unbound, workspace_draft_should_reseed};
+use crate::working_directory::WorkingDirectoryPicker;
 
 // ── Production helpers (testable directly, called from Effects) ─
 
@@ -400,15 +401,15 @@ fn workspace_binding_section(rooms: Rooms, access: Option<&RoomAccessProjection>
             // keeps whatever access state it had.
             {move || (access_writable && !rooms.closed.get()).then(|| view! {
                 <div class="rooms-workspace__workspace-controls">
-                    <input
-                        class="rooms-workspace__workspace-input"
-                        type="text"
-                        aria-label="Workspace folder on the daemon host"
-                        placeholder="/absolute/path/to/project"
-                        prop:value=move || draft.get()
-                        on:input=move |ev| draft.set(event_target_value(&ev))
-                        disabled=in_flight
+                    <WorkingDirectoryPicker
+                        projects=rooms.projects
+                        value=draft
+                        disabled=Signal::derive(in_flight)
+                        label="Workspace folder on the daemon host"
+                        help="Choose a project or worktree registered on the daemon's machine, or enter an absolute path there."
+                        allow_empty=false
                     />
+                    <div class="rooms-workspace__workspace-actions">
                     <button
                         class="rooms-workspace__workspace-bind"
                         type="button"
@@ -431,6 +432,7 @@ fn workspace_binding_section(rooms: Rooms, access: Option<&RoomAccessProjection>
                     >
                         "Unbind"
                     </button>
+                    </div>
                 </div>
             })}
             <span class="rooms-workspace__workspace-help">
@@ -3470,35 +3472,18 @@ pub fn RoomsWorkspace(
                     // DAEMON's host — the browser cannot see that filesystem,
                     // so nothing here validates it and the helper text says
                     // whose machine it means.
-                    <label class="rooms-workspace__create-workspace">
-                        <span class="rooms-workspace__create-workspace-label">
-                            "Workspace folder on the daemon host"
-                        </span>
-                        <input
-                            class="rooms-workspace__left-input"
-                            type="text"
-                            aria-label="Workspace folder on the daemon host"
-                            aria-describedby="rooms-create-workspace-help"
-                            placeholder="/absolute/path/to/project"
-                            prop:value=move || create_workspace.get()
-                            on:input=move |ev| create_workspace.set(event_target_value(&ev))
-                            on:keydown=move |ev| {
-                                if ev.key() == "Enter" {
-                                    ev.prevent_default();
-                                    create_room();
-                                }
-                            }
-                            disabled=move || pending_create.get()
-                        />
-                        <span
-                            class="rooms-workspace__create-workspace-help"
-                            id="rooms-create-workspace-help"
-                        >
-                            "An absolute path that must already exist on the machine \
-                             running the daemon. Leave it empty to create the room \
-                             unbound — its agents cannot run until a folder is bound."
-                        </span>
-                    </label>
+                    // Paths are folders on the DAEMON's host; the catalogue comes
+                    // from `daemon.projects`, never a browser filesystem API, and
+                    // only the daemon validates what is typed.
+                    <WorkingDirectoryPicker
+                        projects=rooms.projects
+                        value=create_workspace
+                        disabled=Signal::derive(move || pending_create.get())
+                        label="Workspace folder on the daemon host"
+                        help="Choose a project or worktree registered on the daemon's machine, or enter an absolute path that already exists there. Leave it unbound to create the room without a folder — its agents cannot run until a folder is bound."
+                        allow_empty=true
+                        on_enter=Callback::new(move |_| create_room())
+                    />
                 </div>
 
                 // The other way into a room: a code someone else minted. A

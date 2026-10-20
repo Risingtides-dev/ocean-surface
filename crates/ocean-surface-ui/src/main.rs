@@ -50,6 +50,7 @@ mod transcript_media;
 mod tts;
 mod voice;
 mod widget;
+mod working_directory;
 mod workspace;
 mod workspace_browser;
 
