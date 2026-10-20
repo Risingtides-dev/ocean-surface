@@ -34,18 +34,18 @@ fn strip_css_comments(input: &str) -> String {
     out
 }
 
-/// Bodies of every `@media (pointer: coarse)` block, brace-matched so nested
-/// rules are captured whole. Braces are single-byte ASCII, so byte scanning is
-/// safe even though comments/content carry multi-byte characters.
-fn coarse_pointer_blocks(css: &str) -> Vec<String> {
-    let css = strip_css_comments(css);
+/// Byte ranges (body only, braces excluded) of every `@media (pointer: coarse)`
+/// block in comment-stripped CSS, brace-matched so nested rules are captured
+/// whole. Braces are single-byte ASCII, so byte scanning is safe even though
+/// content carries multi-byte characters.
+fn coarse_pointer_ranges(stripped: &str) -> Vec<std::ops::Range<usize>> {
     let needle = "@media (pointer: coarse)";
-    let bytes = css.as_bytes();
-    let mut blocks = Vec::new();
+    let bytes = stripped.as_bytes();
+    let mut ranges = Vec::new();
     let mut from = 0usize;
-    while let Some(rel) = css[from..].find(needle) {
+    while let Some(rel) = stripped[from..].find(needle) {
         let at = from + rel;
-        let Some(brace_rel) = css[at..].find('{') else {
+        let Some(brace_rel) = stripped[at..].find('{') else {
             break;
         };
         let open = at + brace_rel;
@@ -68,13 +68,63 @@ fn coarse_pointer_blocks(css: &str) -> Vec<String> {
         }
         match end {
             Some(e) => {
-                blocks.push(css[open + 1..e].to_string());
+                ranges.push(open + 1..e);
                 from = e + 1;
             }
             None => break,
         }
     }
-    blocks
+    ranges
+}
+
+/// Bodies of every `@media (pointer: coarse)` block.
+fn coarse_pointer_blocks(css: &str) -> Vec<String> {
+    let css = strip_css_comments(css);
+    coarse_pointer_ranges(&css)
+        .into_iter()
+        .map(|range| css[range].to_string())
+        .collect()
+}
+
+/// Does the coarse-pointer `font-size` for `.class` come AFTER the last base
+/// rule that sets a `font-size` on it? Equal specificity means the later rule
+/// wins, so a floor written above a later `font-size: 12px` is dead on a phone
+/// while a presence-only check still reads it as green.
+fn coarse_floor_wins_the_cascade(css: &str, class: &str) -> bool {
+    let css = strip_css_comments(css);
+    let selector = format!(".{class}");
+    let ranges = coarse_pointer_ranges(&css);
+    let in_coarse = |pos: usize| ranges.iter().any(|r| r.contains(&pos));
+    let sets_font_size = |pos: usize| {
+        let tail = &css[pos..];
+        let body = &tail[..tail.find('}').unwrap_or(tail.len())];
+        body.contains("font-size")
+    };
+    let mut last_base = None;
+    let mut last_coarse = None;
+    let mut from = 0usize;
+    while let Some(rel) = css[from..].find(&selector) {
+        let at = from + rel;
+        let end = at + selector.len();
+        // `.class-suffix` is a different class.
+        let boundary = css[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        if boundary && sets_font_size(at) {
+            if in_coarse(at) {
+                last_coarse = Some(at);
+            } else {
+                last_base = Some(at);
+            }
+        }
+        from = end;
+    }
+    match (last_base, last_coarse) {
+        (_, None) => false,
+        (None, Some(_)) => true,
+        (Some(base), Some(coarse)) => coarse > base,
+    }
 }
 
 /// The `font-size` px value applied to `selector` inside any coarse-pointer
@@ -206,7 +256,7 @@ fn viewport_meta_declares_interactive_widget_resizes_content() {
     );
 }
 
-/// Every `rooms-workspace__*` class on a text-entry element in the shipped
+/// Every `rooms-workspace__*` / `working-directory__*` class on a text-entry element in the shipped
 /// view source, paired with whether it opens a keyboard.
 ///
 /// The attribute region is bounded by tracking `(){}[]` depth, because a
@@ -256,7 +306,14 @@ fn rooms_text_entry_classes() -> Vec<String> {
                     // A file picker opens a chooser, never the keyboard, so it
                     // cannot trigger the focus zoom this floor exists for.
                     if !attrs.contains("type=\"file\"") {
-                        if let Some(c) = attrs.find("rooms-workspace__") {
+                        // `working-directory__` is the shared picker the rooms
+                        // create form and bind panel mount; it is rooms
+                        // surface text entry the same as `rooms-workspace__*`.
+                        let at_class = ["rooms-workspace__", "working-directory__"]
+                            .iter()
+                            .filter_map(|prefix| attrs.find(prefix))
+                            .min();
+                        if let Some(c) = at_class {
                             let class: String = attrs[c..]
                                 .chars()
                                 .take_while(|ch| {
@@ -295,6 +352,13 @@ fn every_rooms_text_entry_control_is_in_the_anti_zoom_floor() {
          stopped matching the markup rather than that the surface shrank: {classes:?}",
         classes.len(),
     );
+    for picker in ["working-directory__select", "working-directory__input"] {
+        assert!(
+            classes.iter().any(|class| class == picker),
+            "the scanner must see the shared picker's `{picker}`; it stopped \
+             matching `working-directory__*` markup: {classes:?}",
+        );
+    }
     let css = read_style("rooms-workspace.css");
     let missing: Vec<_> = classes
         .iter()
@@ -306,4 +370,37 @@ fn every_rooms_text_entry_control_is_in_the_anti_zoom_floor() {
          coarse-pointer floor in styles/rooms-workspace.css, so focusing one \
          force-zooms the page: {missing:?}",
     );
+}
+
+/// A 16px floor that exists but loses the cascade protects nothing: the picker's
+/// base `font-size: 12px` is declared late in the stylesheet, so a floor in the
+/// earlier shared coarse-pointer block was dead until it moved after the base.
+#[test]
+fn the_picker_anti_zoom_floor_wins_the_cascade() {
+    let css = read_style("rooms-workspace.css");
+    for class in ["working-directory__select", "working-directory__input"] {
+        assert!(
+            coarse_floor_wins_the_cascade(&css, class),
+            "`.{class}` needs a coarse-pointer font-size that comes AFTER its \
+             base font-size rule, or the base wins and iOS zooms on focus",
+        );
+    }
+}
+
+/// The cascade check must actually detect the failure it exists for.
+#[test]
+fn the_cascade_check_rejects_a_floor_written_before_the_base_rule() {
+    let floor_first =
+        "@media (pointer: coarse) { .a { font-size: 16px; } }\n.a { font-size: 12px; }";
+    let floor_last =
+        ".a { font-size: 12px; }\n@media (pointer: coarse) { .a { font-size: 16px; } }";
+    let no_floor = ".a { font-size: 12px; }";
+    assert!(!coarse_floor_wins_the_cascade(floor_first, "a"));
+    assert!(coarse_floor_wins_the_cascade(floor_last, "a"));
+    assert!(!coarse_floor_wins_the_cascade(no_floor, "a"));
+    // A longer class sharing the prefix is not the same class.
+    assert!(!coarse_floor_wins_the_cascade(
+        ".ab { font-size: 12px; }\n@media (pointer: coarse) { .ab { font-size: 16px; } }",
+        "a"
+    ));
 }

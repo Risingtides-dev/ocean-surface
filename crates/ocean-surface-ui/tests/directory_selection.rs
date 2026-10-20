@@ -69,7 +69,8 @@ fn picker_offers_registered_roots_and_an_explicit_manual_path() {
         "a manual absolute-path fallback must remain available without a browser filesystem API",
     );
     assert!(
-        picker.contains("!directory_is_registered(&projects.get(),&value.get())"),
+        picker.contains("DirectoryChoice::Manual")
+            && picker.contains("elseifdirectory_is_registered(projects,value){"),
         "a stored room binding absent from the catalogue must remain visible and editable",
     );
     assert!(
@@ -111,23 +112,104 @@ fn unbound_copy_stays_truthful_about_refusal_and_the_daemon_host() {
         flat.contains(&without_whitespace("registered on the daemon's machine")),
         "picker help must name the daemon's machine as the owner of the path",
     );
+    // Normalised on both sides — lowercase, whitespace and string-continuation
+    // backslashes gone — so a banned phrase cannot hide behind a line wrap, a
+    // `\` continuation or different capitalisation.
+    let sources = [
+        ("rooms_workspace.rs", normalize(&workspace)),
+        (
+            "working_directory.rs",
+            normalize(&view_source("working_directory.rs")),
+        ),
+        ("rooms.rs", normalize(&view_source("rooms.rs"))),
+    ];
     for banned in [
         "resource grants may still supply",
         "resource grants may supply",
+        "grants may still supply",
+        "may still supply a working directory",
         "No room default",
         "Use as room default",
         "Clear default",
+        "explicit room default",
+    ] {
+        let needle = normalize(banned);
+        for (file, text) in &sources {
+            assert!(
+                !text.contains(&needle),
+                "`{banned}` in {file} softens or rewrites the unbound-room contract",
+            );
+        }
+    }
+    assert!(
+        !sources[1].1.contains(&normalize("resource grants")),
+        "the picker must not describe a resource-grant fallback for an unbound room",
+    );
+}
+
+fn normalize(source: &str) -> String {
+    without_whitespace(source).replace('\\', "").to_lowercase()
+}
+
+/// The browser cannot see the daemon's filesystem, so nothing in the picker
+/// judges a path: no absoluteness, existence or canonical-form check. The
+/// daemon's `400 invalid_workspace_root` is the only verdict.
+#[test]
+fn the_picker_never_prevalidates_a_path_in_the_browser() {
+    // Code only: the module docs may NAME the daemon's canonicalisation.
+    let picker: String = view_source("working_directory.rs")
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for forbidden in [
+        "starts_with(",
+        "is_absolute",
+        "Path::",
+        "PathBuf",
+        "canonicalize",
+        "exists(",
+        "invalid_workspace_root",
+        "type=\"file\"",
     ] {
         assert!(
-            !workspace.contains(banned),
-            "`{banned}` softens or rewrites the unbound-room contract",
+            !picker.contains(forbidden),
+            "`{forbidden}` in working_directory.rs would judge a daemon-host path \
+             in the browser; only the daemon validates it",
         );
     }
+}
 
-    let picker = view_source("working_directory.rs");
+/// Help text is linked to both controls by a stable id, and the two mounted
+/// pickers never share one; manual mode is reset with the draft it belongs to.
+#[test]
+fn picker_links_help_and_resets_with_its_draft() {
+    let picker = without_whitespace(&view_source("working_directory.rs"));
+    assert!(picker.contains("aria-describedby=help_id.clone()"));
+    assert!(picker.contains("aria-describedby=help_id_input.clone()"));
+    assert!(picker.contains("id=help_id>"));
     assert!(
-        !picker.contains("No room default") && !picker.contains("resource grants"),
-        "the picker must not describe an unbound room as having a default or a grant fallback",
+        picker.contains("aria-label=\"Otherabsolutepathonthedaemonhost\"")
+            || picker.contains("aria-label=\"Other absolute path on the daemon host\""),
+        "the manual field's accessible name must say the path is on the daemon host",
+    );
+    assert!(
+        !picker.contains("connectedmachine"),
+        "the manual field must not call the daemon host a vague connected machine",
+    );
+
+    let workspace = without_whitespace(&view_source("rooms_workspace.rs"));
+    assert!(workspace.contains("id_base=\"rooms-create-workspace\""));
+    assert!(workspace.contains("id_base=\"rooms-details-workspace\""));
+    assert!(workspace.contains("reset=create_workspace_reset"));
+    assert!(workspace.contains("reset=picker_reset"));
+    assert!(
+        workspace.contains("create_workspace.set(String::new());create_workspace_reset.update("),
+        "a successful create must clear the draft AND reset the picker's manual mode",
+    );
+    assert!(
+        workspace.contains("seeded_for.set(id);picker_reset.update("),
+        "reseeding the bind draft for another room must reset the picker's manual mode",
     );
 }
 

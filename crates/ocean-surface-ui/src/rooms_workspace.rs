@@ -357,6 +357,9 @@ fn workspace_binding_section(rooms: Rooms, access: Option<&RoomAccessProjection>
     // re-seeding on each one would wipe a path mid-type when an unrelated
     // PATCH lands.
     let seeded_for: RwSignal<Option<String>> = RwSignal::new(None);
+    // Bumped on every reseed so the picker drops manual mode with the draft it
+    // belonged to (a different room may be bound to a catalogue row).
+    let picker_reset = RwSignal::new(0u32);
     // Seeded from the stored binding so the field opens showing what it will
     // change, and a rebind is an edit rather than a retype.
     Effect::new(move |_: Option<()>| {
@@ -370,6 +373,7 @@ fn workspace_binding_section(rooms: Rooms, access: Option<&RoomAccessProjection>
                 .unwrap_or_default(),
         );
         seeded_for.set(id);
+        picker_reset.update(|n| *n = n.wrapping_add(1));
     });
     let unbound = move || rooms.open_room.get().as_ref().is_some_and(room_is_unbound);
     let bound_to = move || {
@@ -405,6 +409,8 @@ fn workspace_binding_section(rooms: Rooms, access: Option<&RoomAccessProjection>
                         projects=rooms.projects
                         value=draft
                         disabled=Signal::derive(in_flight)
+                        reset=picker_reset
+                        id_base="rooms-details-workspace"
                         label="Workspace folder on the daemon host"
                         help="Choose a project or worktree registered on the daemon's machine, or enter an absolute path there."
                         allow_empty=false
@@ -2484,6 +2490,8 @@ pub fn RoomsWorkspace(
     // leaves the room unbound — which is what every room this form made used
     // to be, and an unbound room's agent turns all fail closed.
     let create_workspace = RwSignal::new(String::new());
+    // Bumped when the create draft is cleared so the picker leaves manual mode.
+    let create_workspace_reset = RwSignal::new(0u32);
     let create_room = move || {
         // Prevent concurrent dispatch: if a create is already in flight,
         // ignore the keypress. The Effect clears pending_create when the
@@ -2545,6 +2553,7 @@ pub fn RoomsWorkspace(
                 // Same rule for the workspace field: it was part of this
                 // draft, and the next room chooses its own folder.
                 create_workspace.set(String::new());
+                create_workspace_reset.update(|n| *n = n.wrapping_add(1));
                 pending_create.set(false);
             }
             CreateResolution::KeepDraft => {
@@ -3479,6 +3488,8 @@ pub fn RoomsWorkspace(
                         projects=rooms.projects
                         value=create_workspace
                         disabled=Signal::derive(move || pending_create.get())
+                        reset=create_workspace_reset
+                        id_base="rooms-create-workspace"
                         label="Workspace folder on the daemon host"
                         help="Choose a project or worktree registered on the daemon's machine, or enter an absolute path that already exists there. Leave it unbound to create the room without a folder — its agents cannot run until a folder is bound."
                         allow_empty=true

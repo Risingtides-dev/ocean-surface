@@ -1376,23 +1376,6 @@
   gap: 4px;
 }
 
-.rooms-workspace__workspace-input {
-  flex: 1 1 140px;
-  min-width: 0;
-  padding: 4px 6px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 4px;
-  background: var(--bg-elevated);
-  color: var(--fg);
-  font-size: 11px;
-  outline: none;
-}
-
-.rooms-workspace__workspace-input:focus:not(:disabled) {
-  border-color: var(--accent);
-  box-shadow: var(--focus-ring);
-}
-
 .rooms-workspace__workspace-bind,
 .rooms-workspace__workspace-unbind {
   flex: 0 0 auto;
@@ -1417,8 +1400,7 @@
   cursor: default;
 }
 
-.rooms-workspace__workspace-help,
-.rooms-workspace__create-workspace-help {
+.rooms-workspace__workspace-help {
   color: var(--fg-3);
   font-size: 10px;
   line-height: 1.45;
@@ -1428,22 +1410,6 @@
   font-size: 11px;
   line-height: 1.45;
   color: var(--err);
-}
-
-/* The create form's half of the same binding, under the trigger checkboxes. */
-.rooms-workspace__create-workspace {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  margin-top: 6px;
-}
-
-.rooms-workspace__create-workspace-label {
-  font-size: 10px;
-  font-weight: 600;
-  color: var(--fg-3);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
 }
 
 /* ── Room summary (rail row + reading panel) ──────────────────────── */
@@ -3291,7 +3257,6 @@
      were covered while the right rail's eight — invite, repo, artifacts,
      authorization and the compute panel — sat at 11-13px and zoomed. */
 .rooms-workspace__left-input,
-.rooms-workspace__workspace-input,
 .rooms-workspace__composer-input,
   .rooms-workspace__addagent-select,
   .rooms-workspace__agentbuilder-input,
@@ -5313,7 +5278,7 @@ a.rooms-workspace__compute-ports-row-url:hover {
   width: 100%;
   min-width: 0;
   height: var(--ctl-h);
-  padding: 0 30px 0 9px;
+  padding: 0 9px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background-color: var(--bg-raised);
@@ -5322,15 +5287,7 @@ a.rooms-workspace__compute-ports-row-url:hover {
   font-size: 12px;
 }
 
-.working-directory__select {
-  appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='m3 4.5 3 3 3-3' fill='none' stroke='%23909098' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 10px center;
-}
-
 .working-directory__input {
-  padding-right: 9px;
   font-family: var(--mono);
 }
 
@@ -5361,4 +5318,15 @@ a.rooms-workspace__compute-ports-row-url:hover {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+}
+
+/* iOS zooms the page when a focused control computes below 16px. This floor
+   sits AFTER the picker's base rules on purpose: the equal-specificity
+   `font-size: 12px` above would otherwise win the cascade and the floor in
+   the earlier coarse-pointer block would never apply to these two. */
+@media (pointer: coarse) {
+  .working-directory__select,
+  .working-directory__input {
+    font-size: 16px;
+  }
 }
