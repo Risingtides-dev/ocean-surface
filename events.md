@@ -7449,4 +7449,4 @@ Chrome against a local release build opened a room on page two from a cold
 link. A page-two failure performed no snapshot read for that room. A delayed
 page-two response left the newer manual room selection open.
 
-________________________________________________________________________________  22:42 codex/browser-room-history-20261104
+_________________________________________________________________________________ 22:42 codex/browser-room-history-20261104

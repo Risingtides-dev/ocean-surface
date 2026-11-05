@@ -84,8 +84,15 @@ fn the_rail_offers_the_next_page_and_fires_the_read() {
         workspace.contains("class=\"rooms-workspace__load-more-rooms\""),
         "the class the stylesheet dresses",
     );
+    let button = workspace
+        .split_once("class=\"rooms-workspace__load-more-rooms\"")
+        .expect("load-more button class")
+        .1
+        .split_once("</button>")
+        .expect("load-more button end")
+        .0;
     assert!(
-        workspace.contains("rooms.load_more_rooms();"),
+        button.contains("on:click=move|_|{rooms.load_more_rooms();}"),
         "the button must fire the read; a control that renders the state \
          without acting on it is the same unreachable rooms with extra steps",
     );
@@ -157,15 +164,13 @@ fn the_press_is_one_page_and_keeps_the_guards_a_press_needs() {
          cursor as an encoded query value",
     );
     assert!(
-        body.contains("ifme.rooms_next_cursor.get_untracked().as_deref()!=Some(cursor.as_str()){"),
-        "the page lands after an await, and an interactive refresh during one \
-         re-parks the rail on its own first-page cursor — appending page N \
-         onto a rail that has gone back to page one lists rooms that refresh \
-         deliberately dropped",
+        body.contains("if!list_request_is_current(ticket,me.list_request_ticket.get_untracked())||me.rooms_next_cursor.get_untracked().as_deref()!=Some(cursor.as_str()){"),
+        "a refresh can reuse the first-page cursor, so both the list ticket \
+         and the cursor must still match before appending a page",
     );
     assert!(
         body.contains(
-            "me.rooms_next_cursor.set(rooms_next_page_cursor(grew,success.next_cursor));"
+            "me.rooms_next_cursor.set(rooms_next_page_cursor(advanced,success.next_cursor));"
         ),
         "and the cursor the press leaves behind must go through the helper \
          that refuses to park one for a page that added nothing: the daemon \
@@ -202,11 +207,10 @@ fn the_unread_poll_reads_one_page_and_keeps_the_pages_it_did_not_read() {
 
     assert!(
         rooms.contains(
-            "letretain_paged_tail=mode!=RoomsFetchMode::Interactive&&me.rooms_paged_beyond_first.get_untracked();"
+            "letretain_paged_tail=mode==RoomsFetchMode::Silent&&me.rooms_paged_beyond_first.get_untracked();"
         ),
-        "the silent poll and browser link keep previously loaded pages; an \
-         interactive read starts over, and a rail that never paged has only \
-         the first page to replace",
+        "the silent poll keeps previously loaded pages. An interactive read \
+         starts over, and a browser link requires fresh pages",
     );
     assert!(
         rooms.contains(
