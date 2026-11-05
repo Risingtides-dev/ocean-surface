@@ -243,6 +243,9 @@ Web surface session UI:
 
 ## Rooms Contract
 
+- Browser room selections use `#room/<key>` for shareable links and history.
+  Resolve fragment keys through the existing authorized room-list lookup.
+  Returning to the room list clears pending opens.
 - Browser-hosted Rooms treat `/api/config` as the current-user authority and
   keep join/post unavailable until that identity resolves; never act under a
   previous tenant's browser storage. Explicit single-operator and direct

@@ -16,8 +16,8 @@ use crate::room_messages;
 use crate::rooms::{
     CreateResolution, FederatedActorType, FederatedRoomMemberProjection, FederatedRoomRole,
     MemberPresence, OutboxItemState, Room, RoomAccessProjection, RoomAccessState, RoomAgentOwner,
-    RoomMessage, RoomMessageKind, RoomParticipant, RoomParticipantKind, RoomReadCursorProjection,
-    RoomTriggerPolicy, Rooms,
+    RoomMessage, RoomMessageKind, RoomNavigation, RoomParticipant, RoomParticipantKind,
+    RoomReadCursorProjection, RoomTriggerPolicy, Rooms,
 };
 
 use crate::rooms::{create_workspace_root, room_is_unbound, workspace_draft_should_reseed};
@@ -2388,13 +2388,32 @@ pub fn RoomsWorkspace(
     // list fetched after the link arrived rather than from whatever the handle
     // was carrying — see `room_open_is_ready`.
     Effect::new(move |_| {
-        let Some(key) = rooms.deep_link_room.get() else {
+        let Some(navigation) = rooms.deep_link_room.get() else {
             return;
         };
         rooms.deep_link_room.set(None);
-        let settled_at = rooms.list_settled.get_untracked();
-        pending_room_restore.set(Some(PendingRoomOpen::deep_link(key, settled_at)));
+        match navigation {
+            RoomNavigation::Open(key) => {
+                let settled_at = rooms.list_settled.get_untracked();
+                pending_room_restore.set(Some(PendingRoomOpen::deep_link(key, settled_at)));
+            }
+            RoomNavigation::List => {
+                pending_room_restore.set(None);
+                pending_thread_restore.set(None);
+                rooms.close_room_from_navigation();
+            }
+        }
     });
+
+    let browser_history = crate::host::browser_window().is_some();
+    let close_room = move || {
+        if browser_history {
+            rooms.deep_link_room.set(None);
+            pending_room_restore.set(None);
+            pending_thread_restore.set(None);
+        }
+        rooms.close_room();
+    };
 
     // Resolve the queued open once the fetched list confirms what exists.
     // One-shot either way: a persisted restore loses to a user action and
@@ -2423,7 +2442,7 @@ pub fn RoomsWorkspace(
             .iter()
             .any(|room| room.id == pending.key);
         match room_open_outcome(&pending, open_key.as_deref(), key_is_known) {
-            RoomOpenOutcome::Open(key) => rooms.open_room(key),
+            RoomOpenOutcome::Open(key) => rooms.open_room_from_navigation(key),
             RoomOpenOutcome::Drop => {}
             RoomOpenOutcome::Unknown(key) => {
                 rooms.status.set(unknown_deep_link_room_status(&key));
@@ -3183,7 +3202,7 @@ pub fn RoomsWorkspace(
                         on:click={
                             let close = on_close;
                             move |_| {
-                                rooms.close_room();
+                                close_room();
                                 if let Some(ref cb) = close { cb.run(()); }
                             }
                         }
@@ -3343,6 +3362,10 @@ pub fn RoomsWorkspace(
                                                         // resolve without prompting, so this does
                                                         // not nag on every open.
                                                         crate::host::prime_notification_permission();
+                                                        if browser_history {
+                                                            rooms.deep_link_room.set(None);
+                                                            pending_room_restore.set(None);
+                                                        }
                                                         rooms.open_room(key2.clone());
                                                         show_left_rail.set(false);
                                                     }
@@ -3605,7 +3628,7 @@ pub fn RoomsWorkspace(
                                             type="button"
                                             title="Back to room list"
                                             aria-label="Close current room"
-                                            on:click=move |_| rooms.close_room()
+                                            on:click=move |_| close_room()
                                         >
                                             <svg viewBox="0 0 16 16" width="14" height="14"
                                                 fill="none" stroke="currentColor" stroke-width="1.6"

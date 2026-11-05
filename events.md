@@ -7420,3 +7420,17 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+
+time:      [20:34] [11-04-26]
+agent:     [codex desktop]
+worktree:  [codex/browser-room-history-20261104]
+type:      bug-report
+area:      frontend
+
+Browser room selections now record a shareable fragment. Back and Forward
+restore the room through the authorized room list, and a return to the list
+clears queued opens. Chrome on a private fixture confirmed a cold link with
+the pre-bootstrap address blocked, both directions between rooms, and Back
+to an earlier page anchor.
+
+_________________________________________________________________________________ 20:34 codex/browser-room-history-20261104

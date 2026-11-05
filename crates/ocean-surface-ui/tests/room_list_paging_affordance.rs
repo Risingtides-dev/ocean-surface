@@ -202,11 +202,11 @@ fn the_unread_poll_reads_one_page_and_keeps_the_pages_it_did_not_read() {
 
     assert!(
         rooms.contains(
-            "letretain_paged_tail=matches!(mode,RoomsFetchMode::Silent)&&me.rooms_paged_beyond_first.get_untracked();"
+            "letretain_paged_tail=mode!=RoomsFetchMode::Interactive&&me.rooms_paged_beyond_first.get_untracked();"
         ),
-        "only the silent poll retains, and only on a rail that has actually \
-         paged: an interactive read is a fresh start and a rail that never \
-         paged IS one page, so a fresh page is the whole truth about it",
+        "the silent poll and browser link keep previously loaded pages; an \
+         interactive read starts over, and a rail that never paged has only \
+         the first page to replace",
     );
     assert!(
         rooms.contains(

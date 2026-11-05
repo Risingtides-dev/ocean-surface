@@ -18,7 +18,7 @@ use crate::host::DaemonStatus;
 use crate::island_dynamic::{DynamicIsland, IslandMode};
 use crate::model::{Block, Role, Turn};
 use crate::palette::{Command, CommandRegistry, CommandScope, PaletteView};
-use crate::rooms::Rooms;
+use crate::rooms::{RoomNavigation, Rooms};
 use crate::rooms_workspace::RoomsWorkspace;
 use crate::sessions::SessionsPanel;
 use crate::slash_menu::{
@@ -2155,6 +2155,54 @@ pub fn App() -> impl IntoView {
         });
     });
 
+    if let Some(window) = crate::host::browser_window() {
+        let navigation = RwSignal::new(
+            window
+                .location()
+                .hash()
+                .ok()
+                .and_then(|fragment| browser_room_navigation("", &fragment)),
+        );
+        let browser_identity = daemon.adopted_user_id;
+        Effect::new(move |_| {
+            if browser_identity.get().is_empty() {
+                return;
+            }
+            let Some(request) = navigation.get() else {
+                return;
+            };
+            navigation.set(None);
+            let Ok(fragment) = window.location().hash() else {
+                return;
+            };
+            // A selection made after this request replaces its URL first.
+            let current = match &request {
+                RoomNavigation::Open(key) => browser_room_key(&fragment) == Some(key.as_str()),
+                RoomNavigation::List => !fragment.starts_with(ROOM_FRAGMENT_PREFIX),
+            };
+            if !current {
+                return;
+            }
+            show_sessions.set(false);
+            show_rooms.set(true);
+            match request {
+                RoomNavigation::Open(key) => rooms.request_browser_room(key),
+                RoomNavigation::List => rooms.deep_link_room.set(Some(RoomNavigation::List)),
+            }
+        });
+        let listener = window_event_listener_untyped("hashchange", move |event| {
+            if let Some(event) = event.dyn_ref::<web_sys::HashChangeEvent>() {
+                let previous = event.old_url();
+                let current = event.new_url();
+                navigation.set(browser_room_navigation(
+                    location_fragment(&previous),
+                    location_fragment(&current),
+                ));
+            }
+        });
+        on_cleanup(move || listener.remove());
+    }
+
     // Rooms visibility, mirrored onto the Rooms handle. The handle is
     // App-scope, so `open_key` and the room-scoped tail both outlive the
     // workspace unmounting when the reader switches to Direct messages —
@@ -3504,6 +3552,61 @@ fn is_valid_room_key(key: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~'))
 }
 
+const ROOM_FRAGMENT_PREFIX: &str = "#room/";
+
+fn location_fragment(url: &str) -> &str {
+    url.find('#').map_or("", |index| &url[index..])
+}
+
+fn browser_room_key(fragment: &str) -> Option<&str> {
+    fragment
+        .strip_prefix(ROOM_FRAGMENT_PREFIX)
+        .filter(|key| is_valid_room_key(key))
+}
+
+fn browser_room_navigation(previous: &str, current: &str) -> Option<RoomNavigation> {
+    if let Some(key) = browser_room_key(current) {
+        return Some(RoomNavigation::Open(key.to_owned()));
+    }
+    (!current.starts_with(ROOM_FRAGMENT_PREFIX) && browser_room_key(previous).is_some())
+        .then_some(RoomNavigation::List)
+}
+
+pub(crate) fn record_browser_room_selection(previous: Option<&str>, next: Option<&str>) {
+    let Some(window) = crate::host::browser_window() else {
+        return;
+    };
+    let location = window.location();
+    let (Ok(fragment), Ok(history)) = (location.hash(), window.history()) else {
+        return;
+    };
+    let linked_room = browser_room_key(&fragment);
+    if next.is_some_and(|key| !is_valid_room_key(key)) {
+        return;
+    }
+    if linked_room == next {
+        return;
+    }
+    let state = wasm_bindgen::JsValue::NULL;
+    // Seed the room restored from local storage so the first Back restores it.
+    if fragment.is_empty() {
+        if let Some(key) = previous.filter(|key| is_valid_room_key(key)) {
+            let url = format!("{ROOM_FRAGMENT_PREFIX}{key}");
+            let _ = history.replace_state_with_url(&state, "", Some(&url));
+        }
+    }
+    let url = match next {
+        Some(key) => format!("{ROOM_FRAGMENT_PREFIX}{key}"),
+        None => {
+            let (Ok(path), Ok(search)) = (location.pathname(), location.search()) else {
+                return;
+            };
+            format!("{path}{search}")
+        }
+    };
+    let _ = history.push_state_with_url(&state, "", Some(&url));
+}
+
 pub(crate) fn parse_deep_link(raw: &str) -> Option<DeepLinkAction> {
     // Drop any query ("?…") / fragment ("#…") so `ocean://session/abc?ref=x`
     // resolves to the same action as the bare URL.
@@ -3560,6 +3663,33 @@ mod tests {
     use crate::host::DaemonStatus;
     use futures_util::future::LocalBoxFuture;
     use futures_util::FutureExt;
+
+    #[test]
+    fn browser_room_navigation_distinguishes_rooms_list_and_unrelated_fragments() {
+        use super::browser_room_navigation;
+        use crate::rooms::RoomNavigation;
+
+        assert_eq!(
+            browser_room_navigation("", "#room/team.blue"),
+            Some(RoomNavigation::Open("team.blue".into()))
+        );
+        assert_eq!(
+            browser_room_navigation("#room/other", "#room/team.blue"),
+            Some(RoomNavigation::Open("team.blue".into()))
+        );
+        assert_eq!(
+            browser_room_navigation("#room/team.blue", ""),
+            Some(RoomNavigation::List)
+        );
+        assert_eq!(
+            browser_room_navigation("#room/team.blue", "#help"),
+            Some(RoomNavigation::List)
+        );
+        for malformed in ["#room/", "#room/..", "#room/team%2fblue"] {
+            assert_eq!(browser_room_navigation("#room/team.blue", malformed), None);
+        }
+        assert_eq!(browser_room_navigation("#help", ""), None);
+    }
 
     fn shell_status(state: &str, revision: u64) -> DaemonStatus {
         DaemonStatus {
