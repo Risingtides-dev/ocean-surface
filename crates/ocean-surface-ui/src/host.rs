@@ -76,6 +76,13 @@ pub fn running_in_tauri() -> bool {
     crate::daemon::running_as_tauri()
 }
 
+pub(crate) fn browser_window() -> Option<web_sys::Window> {
+    if running_in_tauri() || crate::daemon::running_as_extension() {
+        return None;
+    }
+    web_sys::window()
+}
+
 fn room_authority_mutations_for_host(is_tauri: bool, is_extension: bool) -> bool {
     match (is_tauri, is_extension) {
         // The Chrome extension is a browser page with no shell behind it and

@@ -824,6 +824,12 @@ impl CasAdmission {
 /// Reactive handle for the rooms panel. Holds the room list, the open room +
 /// its transcript, status text, and the SSE-tail generation counter. Cloned
 /// freely (all fields are `Copy` signal handles), like [`crate::daemon::Daemon`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RoomNavigation {
+    Open(String),
+    List,
+}
+
 #[derive(Clone, Copy)]
 pub struct Rooms {
     /// Daemon base URL signal, shared with `Daemon::url` so requests follow the
@@ -877,13 +883,13 @@ pub struct Rooms {
     /// link, which reports an unknown key out loud — records this counter and
     /// waits for it to move.
     pub list_settled: RwSignal<u64>,
-    /// A room key an `ocean://room/<key>` deep link asked the surface to open,
+    /// A room navigation requested by a native link or browser history,
     /// held until the Rooms workspace consumes it. It lives on this handle
     /// rather than in the workspace because the deep-link listener is mounted
     /// in `App`, above the workspace, and may fire before the workspace exists
     /// at all — a cold launch from the OS. `None` once consumed; the workspace
     /// clears it in the same pass that queues the open.
-    pub deep_link_room: RwSignal<Option<String>>,
+    pub(crate) deep_link_room: RwSignal<Option<RoomNavigation>>,
     /// Whether the Rooms workspace is actually ON SCREEN, mirrored from
     /// `app.rs`'s `show_rooms`.
     ///
@@ -1098,6 +1104,7 @@ pub fn create_workspace_root(draft: &str) -> Option<String> {
 enum RoomsFetchMode {
     Interactive,
     Silent,
+    BrowserLink,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1310,14 +1317,17 @@ impl Rooms {
     }
 
     fn fetch_rooms_with_mode(&self, mode: RoomsFetchMode) {
-        if should_skip_rooms_fetch(mode, self.rooms_loading.get_untracked()) {
+        if should_skip_rooms_fetch(
+            mode,
+            self.rooms_loading.get_untracked() || self.rooms_more_in_flight.get_untracked(),
+        ) {
             return;
         }
         let base = self.base();
         let me = *self;
         let ticket = self.list_request_ticket.get_untracked().wrapping_add(1);
         self.list_request_ticket.set(ticket);
-        if matches!(mode, RoomsFetchMode::Interactive) {
+        if mode != RoomsFetchMode::Silent {
             self.rooms_loading.set(true);
             self.rooms_error.set(None);
         }
@@ -1338,12 +1348,9 @@ impl Rooms {
             }
             match result {
                 Ok(success) => {
-                    // An INTERACTIVE read is a fresh start: it replaces the rail
-                    // with the daemon's first page and forgets where the last
-                    // paging session had got to. The 8-second SILENT poll is the
-                    // one that must not, because it reads ONE page and a paged
-                    // rail holds several — see `rooms_after_first_page`.
-                    let retain_paged_tail = matches!(mode, RoomsFetchMode::Silent)
+                    // Only the silent poll keeps previously loaded pages.
+                    // A browser link must resolve from a fresh room list.
+                    let retain_paged_tail = mode == RoomsFetchMode::Silent
                         && me.rooms_paged_beyond_first.get_untracked();
                     let rooms = rooms_after_first_page(
                         &me.list.get_untracked(),
@@ -1374,7 +1381,7 @@ impl Rooms {
                     me.rooms_error.set(None);
                 }
                 Err(error) => {
-                    if matches!(mode, RoomsFetchMode::Interactive) {
+                    if mode != RoomsFetchMode::Silent {
                         me.status.set(error.clone());
                         me.rooms_error.set(Some(error));
                     }
@@ -1420,16 +1427,16 @@ impl Rooms {
         };
         let base = self.base();
         let me = *self;
+        let ticket = self.list_request_ticket.get_untracked();
         self.rooms_more_in_flight.set(true);
         spawn_local(async move {
             let url = rooms_list_url(&base, Some(&cursor));
             let result = fetch_rooms_page(&url).await;
-            // The page landed after an await, and an interactive refresh during
-            // one re-parks the rail on its own first-page cursor. Appending page
-            // N onto a rail that has gone back to page one would list rooms the
-            // operator's refresh deliberately dropped, so the read is discarded
-            // unless the rail is still parked exactly where this request read.
-            if me.rooms_next_cursor.get_untracked().as_deref() != Some(cursor.as_str()) {
+            // A refresh can re-park the rail on the same cursor. A page from
+            // before that refresh cannot extend the new list.
+            if !list_request_is_current(ticket, me.list_request_ticket.get_untracked())
+                || me.rooms_next_cursor.get_untracked().as_deref() != Some(cursor.as_str())
+            {
                 me.rooms_more_in_flight.set(false);
                 return;
             }
@@ -1446,9 +1453,12 @@ impl Rooms {
                     if grew {
                         me.rooms_paged_beyond_first.set(true);
                     }
+                    let advanced = grew && success.next_cursor.as_deref() != Some(cursor.as_str());
+                    let stalled = success.next_cursor.is_some() && !advanced;
                     me.rooms_next_cursor
-                        .set(rooms_next_page_cursor(grew, success.next_cursor));
-                    me.rooms_error.set(None);
+                        .set(rooms_next_page_cursor(advanced, success.next_cursor));
+                    me.rooms_error
+                        .set(stalled.then(|| "rooms list could not advance".into()));
                 }
                 Err(error) => {
                     // The cursor is left exactly where it was: the affordance
@@ -1668,8 +1678,14 @@ impl Rooms {
     /// after the link arrived. Silent mode, so an in-flight fetch is not
     /// duplicated — its settle advances the same counter.
     pub fn request_deep_link_room(&self, key: String) {
-        self.deep_link_room.set(Some(key));
+        self.deep_link_room.set(Some(RoomNavigation::Open(key)));
         self.fetch_rooms_silent();
+    }
+
+    pub(crate) fn request_browser_room(&self, key: String) {
+        self.deep_link_room.set(Some(RoomNavigation::Open(key)));
+        // Supersede a mount read that started before the proxy chose its URL.
+        self.fetch_rooms_with_mode(RoomsFetchMode::BrowserLink);
     }
 
     /// Open a room: load its record + the first transcript page, bump the
@@ -1699,6 +1715,15 @@ impl Rooms {
     /// reason on screen, so the audit view reads as frozen rather than as a
     /// live room that silently refuses every write.
     pub fn open_room(&self, key: String) {
+        crate::app::record_browser_room_selection(
+            self.open_key.get_untracked().as_deref(),
+            Some(&key),
+        );
+        self.open_room_from_navigation(key);
+    }
+
+    /// Open the room already selected by a link, history, or saved view.
+    pub(crate) fn open_room_from_navigation(&self, key: String) {
         let base = self.base();
         let me = *self;
         let generation_id = self.generation.get_untracked().wrapping_add(1);
@@ -1783,6 +1808,11 @@ impl Rooms {
     }
     /// Close the open room and stop its live loops.
     pub fn close_room(&self) {
+        crate::app::record_browser_room_selection(self.open_key.get_untracked().as_deref(), None);
+        self.close_room_from_navigation();
+    }
+
+    pub(crate) fn close_room_from_navigation(&self) {
         self.generation.update(|g| *g = g.wrapping_add(1));
         self.open_key.set(None);
         self.reset_room_state();
@@ -3855,7 +3885,7 @@ fn finish_rooms_fetch(
     // by a fetch that could not answer, or a daemon that is down leaves it
     // pending forever. What the failure means is `rooms_error`'s job.
     list_settled.update(|n| *n = n.wrapping_add(1));
-    if matches!(mode, RoomsFetchMode::Interactive) {
+    if mode != RoomsFetchMode::Silent {
         rooms_loading.set(false);
     }
 }
@@ -6854,6 +6884,7 @@ mod tests {
         assert!(should_skip_rooms_fetch(RoomsFetchMode::Silent, true));
         assert!(!should_skip_rooms_fetch(RoomsFetchMode::Silent, false));
         assert!(!should_skip_rooms_fetch(RoomsFetchMode::Interactive, true));
+        assert!(!should_skip_rooms_fetch(RoomsFetchMode::BrowserLink, true));
 
         let rooms_loaded = RwSignal::new(false);
         let rooms_loading = RwSignal::new(true);
@@ -6891,10 +6922,14 @@ mod tests {
         let rooms_loaded = RwSignal::new(false);
         let rooms_loading = RwSignal::new(false);
         let list_settled = RwSignal::new(0u64);
-        for mode in [RoomsFetchMode::Silent, RoomsFetchMode::Interactive] {
+        for mode in [
+            RoomsFetchMode::Silent,
+            RoomsFetchMode::Interactive,
+            RoomsFetchMode::BrowserLink,
+        ] {
             finish_rooms_fetch(&rooms_loaded, &rooms_loading, &list_settled, mode, true);
         }
-        assert_eq!(list_settled.get_untracked(), 2);
+        assert_eq!(list_settled.get_untracked(), 3);
         // Silent mode leaves `rooms_loading` alone; it still counts as settled.
         assert!(rooms_loaded.get_untracked());
     }
