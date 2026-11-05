@@ -2415,9 +2415,8 @@ pub fn RoomsWorkspace(
         rooms.close_room();
     };
 
-    // Resolve the queued open once the fetched list confirms what exists.
-    // One-shot either way: a persisted restore loses to a user action and
-    // degrades silently, a deep link wins and reports an unknown key.
+    // Resolve the queued open against the fresh list. A browser link can
+    // continue paging before declaring a key absent.
     Effect::new(move |_| {
         let Some(pending) = pending_room_restore.get() else {
             return;
@@ -2425,11 +2424,16 @@ pub fn RoomsWorkspace(
         if !room_open_is_ready(&pending, rooms.rooms_loaded.get(), rooms.list_settled.get()) {
             return;
         }
-        pending_room_restore.set(None);
+        let browser_link = browser_history && pending.awaiting_settle.is_some();
+        if browser_link && !crate::app::browser_room_selection_matches(&pending.key) {
+            pending_room_restore.set(None);
+            return;
+        }
         // A settle that could not answer must not be read as an answer: a
         // deep link waited for THIS fetch, and if it failed the list it would
         // be checked against is the stale or empty one the failure left.
-        if pending.awaiting_settle.is_some() && rooms.rooms_error.get_untracked().is_some() {
+        if pending.awaiting_settle.is_some() && rooms.rooms_error.get().is_some() {
+            pending_room_restore.set(None);
             rooms
                 .status
                 .set(unreachable_deep_link_room_status(&pending.key));
@@ -2438,9 +2442,18 @@ pub fn RoomsWorkspace(
         let open_key = rooms.open_key.get_untracked();
         let key_is_known = rooms
             .list
-            .get_untracked()
-            .iter()
-            .any(|room| room.id == pending.key);
+            .with(|listed| listed.iter().any(|room| room.id == pending.key));
+        if browser_link
+            && open_key.as_deref() != Some(pending.key.as_str())
+            && !key_is_known
+            && rooms.more_rooms_available()
+        {
+            if !rooms.more_rooms_in_flight() {
+                rooms.load_more_rooms();
+            }
+            return;
+        }
+        pending_room_restore.set(None);
         match room_open_outcome(&pending, open_key.as_deref(), key_is_known) {
             RoomOpenOutcome::Open(key) => rooms.open_room_from_navigation(key),
             RoomOpenOutcome::Drop => {}

@@ -3564,6 +3564,12 @@ fn browser_room_key(fragment: &str) -> Option<&str> {
         .filter(|key| is_valid_room_key(key))
 }
 
+pub(crate) fn browser_room_selection_matches(key: &str) -> bool {
+    crate::host::browser_window()
+        .and_then(|window| window.location().hash().ok())
+        .is_some_and(|fragment| browser_room_key(&fragment) == Some(key))
+}
+
 fn browser_room_navigation(previous: &str, current: &str) -> Option<RoomNavigation> {
     if let Some(key) = browser_room_key(current) {
         return Some(RoomNavigation::Open(key.to_owned()));

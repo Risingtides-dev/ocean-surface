@@ -1317,7 +1317,10 @@ impl Rooms {
     }
 
     fn fetch_rooms_with_mode(&self, mode: RoomsFetchMode) {
-        if should_skip_rooms_fetch(mode, self.rooms_loading.get_untracked()) {
+        if should_skip_rooms_fetch(
+            mode,
+            self.rooms_loading.get_untracked() || self.rooms_more_in_flight.get_untracked(),
+        ) {
             return;
         }
         let base = self.base();
@@ -1345,11 +1348,9 @@ impl Rooms {
             }
             match result {
                 Ok(success) => {
-                    // An INTERACTIVE read is a fresh start: it replaces the rail
-                    // with the daemon's first page and forgets where the last
-                    // paging session had got to. The silent poll and browser
-                    // link read one page while a paged rail holds several.
-                    let retain_paged_tail = mode != RoomsFetchMode::Interactive
+                    // Only the silent poll keeps previously loaded pages.
+                    // A browser link must resolve from a fresh room list.
+                    let retain_paged_tail = mode == RoomsFetchMode::Silent
                         && me.rooms_paged_beyond_first.get_untracked();
                     let rooms = rooms_after_first_page(
                         &me.list.get_untracked(),
@@ -1426,16 +1427,16 @@ impl Rooms {
         };
         let base = self.base();
         let me = *self;
+        let ticket = self.list_request_ticket.get_untracked();
         self.rooms_more_in_flight.set(true);
         spawn_local(async move {
             let url = rooms_list_url(&base, Some(&cursor));
             let result = fetch_rooms_page(&url).await;
-            // The page landed after an await, and an interactive refresh during
-            // one re-parks the rail on its own first-page cursor. Appending page
-            // N onto a rail that has gone back to page one would list rooms the
-            // operator's refresh deliberately dropped, so the read is discarded
-            // unless the rail is still parked exactly where this request read.
-            if me.rooms_next_cursor.get_untracked().as_deref() != Some(cursor.as_str()) {
+            // A refresh can re-park the rail on the same cursor. A page from
+            // before that refresh cannot extend the new list.
+            if !list_request_is_current(ticket, me.list_request_ticket.get_untracked())
+                || me.rooms_next_cursor.get_untracked().as_deref() != Some(cursor.as_str())
+            {
                 me.rooms_more_in_flight.set(false);
                 return;
             }
@@ -1452,9 +1453,12 @@ impl Rooms {
                     if grew {
                         me.rooms_paged_beyond_first.set(true);
                     }
+                    let advanced = grew && success.next_cursor.as_deref() != Some(cursor.as_str());
+                    let stalled = success.next_cursor.is_some() && !advanced;
                     me.rooms_next_cursor
-                        .set(rooms_next_page_cursor(grew, success.next_cursor));
-                    me.rooms_error.set(None);
+                        .set(rooms_next_page_cursor(advanced, success.next_cursor));
+                    me.rooms_error
+                        .set(stalled.then(|| "rooms list could not advance".into()));
                 }
                 Err(error) => {
                     // The cursor is left exactly where it was: the affordance

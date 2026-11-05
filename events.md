@@ -7434,3 +7434,19 @@ the pre-bootstrap address blocked, both directions between rooms, and Back
 to an earlier page anchor.
 
 _________________________________________________________________________________ 20:34 codex/browser-room-history-20261104
+
+time:      [22:42] [11-04-26]
+agent:     [codex desktop]
+worktree:  [codex/browser-room-history-20261104]
+type:      bug-report
+area:      frontend
+
+Browser room links follow fresh room-list cursors until the requested room
+appears or the list ends. A failed or stalled page reports an unavailable
+list, and a newer browser selection takes precedence over the pending link.
+
+Chrome against a local release build opened a room on page two from a cold
+link. A page-two failure performed no snapshot read for that room. A delayed
+page-two response left the newer manual room selection open.
+
+________________________________________________________________________________  22:42 codex/browser-room-history-20261104
