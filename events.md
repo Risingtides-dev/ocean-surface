@@ -7420,3 +7420,11 @@ build failed with ENOSPC until space drifted back, and pruning other lanes'
 caches was declined by the auto-mode classifier — that is smaths' call.
 
 _________________________________________________________________________________ 17:45 fix/desktop-live-sync
+time:      [14:47] [11-07-26]
+agent:     [Codex desktop] [gpt-6]
+worktree:  codex/agent-event-resume-20261107
+type:      bug-report
+area:      backend
+
+The browser proxy now forwards Last-Event-ID on a session-scoped agent event reconnect while preserving the selected daemon and query. A focused authenticated proxy test sends a session cursor and confirms the upstream daemon receives both fields and returns the replay frame. This repairs the missing cursor path without changing daemon event authority or using a global product stream. Local verification is source and test evidence only; no merge or deployment occurred.
+_________________________________________________________________________________ 14:47 codex/agent-event-resume-20261107

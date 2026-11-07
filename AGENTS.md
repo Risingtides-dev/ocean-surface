@@ -150,6 +150,8 @@ POST /v1/agent/turns { session_id, prompt, cwd, project_id?, client_type }
 Rules:
 
 - Never open a product transcript on the global `/v1/agent/events` stream.
+- The browser proxy preserves the session query and `Last-Event-ID` on
+  `/v1/agent/events` reconnects so the daemon can replay from that cursor.
 - Never adopt the active session from `SessionCreated` or `TurnStarted` on a
   global stream.
 - Cross-surface sharing is explicit: two surfaces attach to the same

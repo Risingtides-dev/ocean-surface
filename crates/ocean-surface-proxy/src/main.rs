@@ -3402,7 +3402,13 @@ async fn proxy_events(State(state): State<Arc<AppState>>, req: Request) -> impl 
         .map(|q| format!("?{q}"))
         .unwrap_or_default();
     let url = format!("{}/v1/agent/events{q}", daemon.base());
-    match state.http.get(&url).send().await {
+    let mut upstream = state.http.get(&url);
+    if let Some(last_event_id) = req.headers().get("last-event-id") {
+        if let Ok(last_event_id) = last_event_id.to_str() {
+            upstream = upstream.header("Last-Event-ID", last_event_id);
+        }
+    }
+    match upstream.send().await {
         Ok(resp) => sse_stream_response(resp, stream_ends_on_switch(&state, &daemon)),
         Err(err) => device_unreachable(&daemon, &err),
     }
@@ -6795,6 +6801,70 @@ mod tests {
             Body::from(format!(r#"{{"name":"{name}"}}"#)),
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn agent_events_forward_session_and_last_event_id_for_replay() {
+        let daemon = Router::new().route(
+            "/v1/agent/events",
+            get(|headers: HeaderMap, uri: axum::http::Uri| async move {
+                let cursor = headers
+                    .get("last-event-id")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("missing");
+                (
+                    [(header::CONTENT_TYPE, "text/event-stream")],
+                    format!(
+                        "id: next\nevent: replay\ndata: {}|{cursor}\n\n",
+                        uri.query().unwrap_or("missing")
+                    ),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stub daemon");
+        let daemon_url = format!("http://{}", listener.local_addr().expect("stub addr"));
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, daemon).await;
+        });
+        let (mini_url, mini_server) = spawn_named_daemon("mini").await;
+
+        let dist = tempfile::tempdir().expect("tempdir");
+        let mut state = multi_user_state();
+        Arc::get_mut(&mut state).expect("sole owner").users[1].devices = vec![
+            device("mini", &mini_url),
+            ProxyDevice {
+                is_default: false,
+                ..device("studio", &daemon_url)
+            },
+        ];
+        let app = build_app(state, dist.path());
+        assert_eq!(
+            select(&app, "tok-eric", "desk", "studio").await.status(),
+            StatusCode::OK
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/agent/events?session_id=session-7")
+                    .header(
+                        header::COOKIE,
+                        format!("{SESSION_COOKIE}=tok-eric; {BROWSER_COOKIE}=desk"),
+                    )
+                    .header("Last-Event-ID", "cursor-17")
+                    .body(Body::empty())
+                    .expect("event request"),
+            )
+            .await
+            .expect("proxy reply");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            body_text(response).await,
+            "id: next\nevent: replay\ndata: session_id=session-7|cursor-17\n\n"
+        );
+        server.abort();
+        mini_server.abort();
     }
 
     #[tokio::test]
